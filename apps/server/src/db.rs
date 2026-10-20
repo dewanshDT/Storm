@@ -388,6 +388,17 @@ impl Db {
         Ok(seq)
     }
 
+    /// Sets a row's version directly, to stand for an index the pre-128d
+    /// identity bug left behind.
+    #[cfg(test)]
+    pub fn set_version_for_test(&mut self, id: &str, version: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notes SET version = ?2 WHERE id = ?1",
+            params![id, version],
+        )?;
+        Ok(())
+    }
+
     pub fn delete_note(&mut self, id: &str, at: &str) -> Result<i64> {
         let tx = self.conn.transaction()?;
         let version: i64 = tx

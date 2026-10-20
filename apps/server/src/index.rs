@@ -513,6 +513,16 @@ impl Indexer {
         Ok(self.db.remove_attachment(rel_path)?)
     }
 
+    pub fn refresh_paths(&mut self, rels: &[String]) -> Result<Vec<i64>> {
+        let mut seqs = Vec::new();
+        for rel in rels {
+            if let Some(seq) = self.refresh_path(rel)? {
+                seqs.push(seq);
+            }
+        }
+        Ok(seqs)
+    }
+
     /// Re-reads one file after the watcher saw it change externally.
     ///
     /// Returns the new change seq, or `None` if the content was unchanged
@@ -621,6 +631,223 @@ mod tests {
         let vault = Vault::new(dir.path()).unwrap();
         let db = Db::open_in_memory().unwrap();
         (dir, Indexer::new(vault, db))
+    }
+
+    // ---- note identity on disk (decision 128d) ------------------------
+
+    fn root(ix: &Indexer) -> std::path::PathBuf {
+        ix.vault.root().to_path_buf()
+    }
+
+    fn body_of(content: &str) -> String {
+        content[frontmatter::parse(content).body_start..].to_string()
+    }
+
+    /// A note saved to `version` with bodies "v1\n", "v2\n", … .
+    fn note_at_version(ix: &mut Indexer, path: &str, version: i64) -> String {
+        let id = ix.create_note(path, "v1\n").unwrap().note.id;
+        for v in 2..=version {
+            ix.put_note(&id, v - 1, &format!("v{v}\n"), None).unwrap();
+        }
+        id
+    }
+
+    fn last_kind(ix: &Indexer) -> String {
+        let seq = ix.db.latest_seq().unwrap();
+        ix.db.changes_since(seq - 1, 1).unwrap()[0].kind.clone()
+    }
+
+    fn paths(rels: &[&str]) -> Vec<String> {
+        rels.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn a_note_moved_outside_storm_keeps_its_identity_and_history() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 4);
+        std::fs::rename(root(&ix).join("A.md"), root(&ix).join("B.md")).unwrap();
+        // inotify reports the old path first; the batch must still read a move.
+        ix.refresh_paths(&paths(&["A.md", "B.md"])).unwrap();
+
+        let row = ix.db.get_note(&id).unwrap().expect("still indexed");
+        assert_eq!(row.path, "B.md");
+        assert_eq!(row.version, 5);
+        assert_eq!(last_kind(&ix), db::KIND_MOVED);
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 1).unwrap().unwrap()),
+            "v1\n"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 4).unwrap().unwrap()),
+            "v4\n"
+        );
+    }
+
+    #[test]
+    fn a_copied_note_gets_its_own_identity() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 2);
+        std::fs::copy(root(&ix).join("A.md"), root(&ix).join("A copy.md")).unwrap();
+        ix.refresh_paths(&paths(&["A copy.md"])).unwrap();
+
+        let original = ix.db.get_note(&id).unwrap().unwrap();
+        assert_eq!(original.path, "A.md");
+        assert_eq!(original.version, 2);
+        let copy = ix
+            .db
+            .get_note_by_path("A copy.md")
+            .unwrap()
+            .expect("copy indexed");
+        assert_ne!(copy.id, id);
+        let on_disk = ix.vault.read("A copy.md").unwrap();
+        let fm = frontmatter::parse(&on_disk).frontmatter.unwrap();
+        assert_eq!(
+            frontmatter::get_scalar(&fm.raw, "id").as_deref(),
+            Some(copy.id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_restored_note_continues_its_version_and_keeps_its_history() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 3);
+        let content = ix.vault.read("A.md").unwrap();
+        ix.delete_note(&id).unwrap();
+        ix.vault.write("A.md", &content).unwrap();
+        ix.refresh_paths(&paths(&["A.md"])).unwrap();
+
+        let row = ix.db.get_note(&id).unwrap().expect("restored under its id");
+        assert_eq!(row.version, 4);
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 1).unwrap().unwrap()),
+            "v1\n"
+        );
+    }
+
+    #[test]
+    fn history_is_append_only_even_on_an_index_the_old_bug_damaged() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 3);
+        ix.db.set_version_for_test(&id, 1).unwrap();
+        let saved = ix.put_note(&id, 1, "v-new\n", None).unwrap();
+
+        assert_eq!(
+            saved.note.version, 4,
+            "continues past the history, never reuses 2"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 2).unwrap().unwrap()),
+            "v2\n"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 3).unwrap().unwrap()),
+            "v3\n"
+        );
+    }
+
+    #[test]
+    fn reconcile_gives_a_duplicated_id_to_the_copy_not_the_original() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "B.md", 2);
+        std::fs::copy(root(&ix).join("B.md"), root(&ix).join("A.md")).unwrap();
+        ix.reconcile(false).unwrap();
+
+        let original = ix.db.get_note(&id).unwrap().unwrap();
+        assert_eq!(original.path, "B.md", "the indexed path keeps the id");
+        assert_eq!(original.version, 2);
+        let copy = ix
+            .db
+            .get_note_by_path("A.md")
+            .unwrap()
+            .expect("copy indexed");
+        assert_ne!(copy.id, id);
+
+        let seq = ix.db.latest_seq().unwrap();
+        ix.reconcile(false).unwrap();
+        assert_eq!(
+            ix.db.latest_seq().unwrap(),
+            seq,
+            "a second reconcile changes nothing"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_not_tombstoned() {
+        let (_d, mut ix) = indexer();
+        let id = ix.create_note("L.md", "hello\n").unwrap().note.id;
+        let mut bytes = ix.vault.read("L.md").unwrap().into_bytes();
+        bytes.push(0xff);
+        std::fs::write(root(&ix).join("L.md"), bytes).unwrap();
+        let report = ix.reconcile(false).unwrap();
+
+        assert_eq!(report.removed, 0);
+        assert!(ix.db.get_note(&id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_vault_that_scans_empty_is_not_pruned() {
+        // An unmounted share or a directory emptied by a sync tool reads as
+        // "every note deleted"; tombstoning them all would empty every client.
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("A.md", "a\n").unwrap().note.id;
+        let b = ix.create_note("B.md", "b\n").unwrap().note.id;
+        std::fs::remove_file(root(&ix).join("A.md")).unwrap();
+        std::fs::remove_file(root(&ix).join("B.md")).unwrap();
+        let report = ix.reconcile(false).unwrap();
+
+        assert_eq!(report.removed, 0);
+        assert!(ix.db.get_note(&a).unwrap().is_some());
+        assert!(ix.db.get_note(&b).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_folder_renamed_outside_storm_moves_its_notes() {
+        let (_d, mut ix) = indexer();
+        let a = note_at_version(&mut ix, "Old/A.md", 2);
+        let b = note_at_version(&mut ix, "Old/Sub/B.md", 3);
+        std::fs::rename(root(&ix).join("Old"), root(&ix).join("New")).unwrap();
+        ix.refresh_paths(&paths(&["Old", "New"])).unwrap();
+
+        let a_row = ix.db.get_note(&a).unwrap().expect("A kept");
+        let b_row = ix.db.get_note(&b).unwrap().expect("B kept");
+        assert_eq!(a_row.path, "New/A.md");
+        assert_eq!(b_row.path, "New/Sub/B.md");
+        assert_eq!((a_row.version, b_row.version), (3, 4));
+    }
+
+    #[test]
+    fn a_folder_deleted_outside_storm_tombstones_its_notes() {
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("Gone/A.md", "a\n").unwrap().note.id;
+        let kept = ix.create_note("Kept.md", "k\n").unwrap().note.id;
+        std::fs::remove_dir_all(root(&ix).join("Gone")).unwrap();
+        ix.refresh_paths(&paths(&["Gone"])).unwrap();
+
+        assert!(ix.db.get_note(&a).unwrap().is_none());
+        assert!(ix.db.get_note(&kept).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_attachment_changed_outside_storm_is_indexed() {
+        let (_d, mut ix) = indexer();
+        std::fs::create_dir_all(root(&ix).join("img")).unwrap();
+        std::fs::write(root(&ix).join("img/a.png"), [1u8, 2, 3]).unwrap();
+        ix.refresh_paths(&paths(&["img/a.png"])).unwrap();
+        let listed = ix.db.list_attachments().unwrap();
+        assert!(
+            listed.iter().any(|a| a.path == "img/a.png" && a.size == 3),
+            "{listed:?}"
+        );
+
+        std::fs::remove_file(root(&ix).join("img/a.png")).unwrap();
+        ix.refresh_paths(&paths(&["img/a.png"])).unwrap();
+        assert!(
+            ix.db
+                .list_attachments()
+                .unwrap()
+                .iter()
+                .all(|a| a.path != "img/a.png")
+        );
     }
 
     #[test]
