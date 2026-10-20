@@ -2539,66 +2539,25 @@ struct VaultNameBody {
 async fn create_vault(
     State(state): State<Shared>,
     Json(body): Json<VaultNameBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .create(&body.name, &crate::index::now_rfc3339())
-        .map_err(|e| bad_request(e.to_string()))?;
-    vaults.registry.save(&state.state_dir)?;
-
-    let vault = Vault::new(vaults.registry.path_of(&entry))?;
-    let db = Db::open(&state.state_dir.join(&entry.id).join("index.db"), &entry.id)?;
-    vaults.open.insert(
-        entry.id.clone(),
-        Arc::new(VaultHandle {
-            indexer: Mutex::new(Indexer::new(vault, db)),
-        }),
-    );
-
-    Ok(Json(serde_json::json!({
-        "id": entry.id, "name": entry.name, "dir": entry.dir,
-    })))
+) -> ApiResult<Json<crate::ops::CreatedVault>> {
+    Ok(Json(crate::ops::create_vault(&state, &body.name).await?))
 }
 
 async fn rename_vault(
     State(state): State<Shared>,
     Path(vault): Path<String>,
     Json(body): Json<VaultNameBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .rename(&vault, &body.name)
-        .map_err(|e| bad_request(e.to_string()))?;
-    // Nothing to do to the open handle: it holds only the index, and the name
-    // lives in the registry, which is what every reader consults.
-    vaults.registry.save(&state.state_dir)?;
-
+) -> ApiResult<Json<crate::ops::RenamedVault>> {
     Ok(Json(
-        serde_json::json!({ "id": entry.id, "name": entry.name }),
+        crate::ops::rename_vault(&state, &vault, &body.name).await?,
     ))
 }
 
-/// Unregisters a vault. **Never deletes files.**
 async fn remove_vault(
     State(state): State<Shared>,
     Path(vault): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .remove(&vault)
-        .map_err(|e| not_found(e.to_string()))?;
-    vaults.registry.save(&state.state_dir)?;
-    vaults.open.remove(&vault);
-
-    Ok(Json(serde_json::json!({
-        "removed": entry.id,
-        "name": entry.name,
-        // Said explicitly so no caller has to guess.
-        "files_kept_at": vaults.registry.root.join(&entry.dir).display().to_string(),
-    })))
+) -> ApiResult<Json<crate::ops::RemovedVault>> {
+    Ok(Json(crate::ops::remove_vault(&state, &vault).await?))
 }
 
 // ---- server configuration ----------------------------------------------
@@ -2894,30 +2853,12 @@ async fn recents(
     Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
-#[derive(Serialize)]
-struct TreeResponse {
-    notes: Vec<crate::db::NoteRow>,
-    folders: Vec<String>,
-    seq: i64,
-}
-
 async fn tree(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
-) -> ApiResult<Json<TreeResponse>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let notes = ix.db.list_notes()?;
-    // Derived from note paths, union the ones created explicitly — only the
-    // union makes an empty folder visible.
-    let folders = ix.all_folders()?;
-    let seq = ix.db.latest_seq()?;
-    Ok(Json(TreeResponse {
-        notes,
-        folders,
-        seq,
-    }))
+) -> ApiResult<Json<crate::ops::Tree>> {
+    Ok(Json(crate::ops::tree(&state, &actor, &vault).await?))
 }
 
 #[derive(Deserialize)]
@@ -2932,23 +2873,15 @@ fn default_limit() -> i64 {
     500
 }
 
-#[derive(Serialize)]
-struct SyncResponse {
-    changes: Vec<Change>,
-    seq: i64,
-}
-
 async fn sync(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Query(q): Query<SyncQuery>,
-) -> ApiResult<Json<SyncResponse>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let changes = ix.db.changes_since(q.since, q.limit.clamp(1, 5000))?;
-    let seq = ix.db.latest_seq()?;
-    Ok(Json(SyncResponse { changes, seq }))
+) -> ApiResult<Json<crate::ops::SyncPage>> {
+    Ok(Json(
+        crate::ops::sync(&state, &actor, &vault, q.since, q.limit).await?,
+    ))
 }
 
 async fn get_note(
@@ -2985,22 +2918,13 @@ async fn note_version(
     ))
 }
 
-/// Records that a note was opened, feeding the cross-vault recents list.
-///
-/// Fire-and-forget from the client and deliberately outside the change log:
-/// opening a note is not an edit, must not bump `version`, and must not wake
-/// every other device.
+/// Fire-and-forget from the client.
 async fn mark_opened(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    if ix.db.get_note(&id)?.is_none() {
-        return Err(not_found("no such note"));
-    }
-    ix.db.touch_note_access(&id, &crate::index::now_rfc3339())?;
+    crate::ops::mark_opened(&state, &actor, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -3061,11 +2985,9 @@ async fn move_note(
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix.move_note(&id, &body.new_path)?;
-    crate::ops::broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+    Ok(Json(
+        crate::ops::move_note(&state, &actor, &vault, &id, &body.new_path).await?,
+    ))
 }
 
 async fn delete_note(
@@ -3090,9 +3012,7 @@ async fn create_folder(
     Path(vault): Path<String>,
     Json(body): Json<FolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.create_folder(&body.path)?;
+    crate::ops::create_folder(&state, &actor, &vault, &body.path).await?;
     Ok(Json(serde_json::json!({ "path": body.path })))
 }
 
@@ -3101,11 +3021,7 @@ async fn delete_folder(
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    // Refused rather than recursive: deleting someone's notes because they
-    // tapped "delete folder" is not something to do quietly.
-    ix.delete_folder(&path)?;
+    crate::ops::delete_folder(&state, &actor, &vault, &path).await?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
@@ -3121,18 +3037,11 @@ async fn rename_folder(
     Path(vault): Path<String>,
     Json(body): Json<RenameFolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let seqs = ix.rename_folder(&body.from, &body.to)?;
-    // One `moved` per contained note, so every client follows the rename
-    // rather than discovering it at the next full tree fetch.
-    for seq in &seqs {
-        crate::ops::broadcast_latest(&state, &ix, *seq);
-    }
+    let moved = crate::ops::rename_folder(&state, &actor, &vault, &body.from, &body.to).await?;
     Ok(Json(serde_json::json!({
         "from": body.from,
         "to": body.to,
-        "moved": seqs.len(),
+        "moved": moved,
     })))
 }
 
@@ -3182,11 +3091,8 @@ async fn notes_by_tag(
     Extension(actor): Extension<Actor>,
     Path((vault, tag)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    Ok(Json(
-        serde_json::json!({ "notes": ix.db.notes_with_tag(&tag)? }),
-    ))
+    let notes = crate::ops::notes_by_tag(&state, &actor, &vault, &tag).await?;
+    Ok(Json(serde_json::json!({ "notes": notes })))
 }
 
 // ---- attachments -------------------------------------------------------
@@ -3196,11 +3102,8 @@ async fn list_attachments(
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    Ok(Json(
-        serde_json::json!({ "attachments": ix.db.list_attachments()? }),
-    ))
+    let attachments = crate::ops::list_attachments(&state, &actor, &vault).await?;
+    Ok(Json(serde_json::json!({ "attachments": attachments })))
 }
 
 async fn get_attachment(
@@ -3209,17 +3112,12 @@ async fn get_attachment(
     Path((vault, path)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let file = handle.indexer.lock().await.attachment_file(&path)?;
-    // Up to 64 MiB read and hashed: off the runtime, and after the lock is
-    // released, so a download never stalls the vault's note operations.
+    let bytes = crate::ops::read_attachment(&state, &actor, &vault, &path).await?;
+    // Hashing up to 64 MiB for the ETag stays off the runtime too.
     let content_type = content_type_for(&path);
-    tokio::task::spawn_blocking(move || {
-        let bytes = crate::vault::read_file(&file).map_err(crate::index::IndexError::from)?;
-        Ok(ranged(bytes, content_type, &headers))
-    })
-    .await
-    .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)))?
+    tokio::task::spawn_blocking(move || ranged(bytes, content_type, &headers))
+        .await
+        .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)).into())
 }
 
 /// A whole attachment, or the single range a resuming client asked for
@@ -3309,12 +3207,7 @@ async fn put_attachment(
     Path((vault, path)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.is_empty() {
-        return Err(bad_request("empty upload"));
-    }
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.put_attachment(&path, &body)?;
+    crate::ops::put_attachment(&state, &actor, &vault, &path, &body).await?;
     Ok(Json(
         serde_json::json!({ "path": path, "size": body.len() }),
     ))
@@ -3325,9 +3218,7 @@ async fn delete_attachment(
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.delete_attachment(&path)?;
+    crate::ops::delete_attachment(&state, &actor, &vault, &path).await?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
