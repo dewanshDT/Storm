@@ -10454,4 +10454,193 @@ pub(crate) mod tests {
         assert!(!debug.contains("CANARY"), "{debug}");
         assert!(serde_json::to_string(&pulled).unwrap().contains(CANARY));
     }
+
+    /// Decision 128a: a 404 must mean only "no such note". The client's
+    /// outbox drops a queued edit on 404, so any other failure reported as one
+    /// loses the user's work.
+    mod index_errors {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt;
+
+        struct Fixture {
+            _dir: tempdir::TempDir,
+            app: Router,
+            bearer: String,
+            vault: String,
+            vault_dir: std::path::PathBuf,
+        }
+
+        async fn fixture() -> Fixture {
+            let dir = tempdir::TempDir::new("storm-index-errors").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            let (_, bearer) = owner_bearer(&state).await;
+            let (status, body) = send(
+                &app,
+                post_json_with_auth("/v1/vaults", serde_json::json!({"name": "notes"}), &bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let vault = body["id"].as_str().unwrap().to_string();
+            let vault_dir = dir.path().join("vaults").join("notes");
+            Fixture {
+                _dir: dir,
+                app,
+                bearer,
+                vault,
+                vault_dir,
+            }
+        }
+
+        impl Fixture {
+            async fn create(&self, path: &str) -> (StatusCode, serde_json::Value) {
+                send(
+                    &self.app,
+                    post_json_with_auth(
+                        &format!("/v1/vaults/{}/notes", self.vault),
+                        serde_json::json!({"path": path, "content": "# Body\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await
+            }
+
+            async fn note_id(&self, path: &str) -> String {
+                let (status, body) = self.create(path).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["note"]["id"].as_str().unwrap().to_string()
+            }
+
+            async fn put(&self, id: &str, base_version: i64) -> StatusCode {
+                send(
+                    &self.app,
+                    put_json_with_auth(
+                        &format!("/v1/vaults/{}/notes/{id}", self.vault),
+                        serde_json::json!({"base_version": base_version, "content": "edited\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await
+                .0
+            }
+
+            async fn attachment(&self, method: &str, path: &str) -> StatusCode {
+                let request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/v1/vaults/{}/attachments/{path}", self.vault))
+                    .header("authorization", &self.bearer)
+                    .body(axum::body::Body::from("clobbered"))
+                    .unwrap();
+                send(&self.app, request).await.0
+            }
+
+            fn read_only(&self, on: bool) {
+                let mode = if on { 0o555 } else { 0o755 };
+                std::fs::set_permissions(&self.vault_dir, std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            }
+        }
+
+        #[tokio::test]
+        async fn a_save_that_cannot_be_written_is_a_500_not_a_404() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.read_only(true);
+            let status = f.put(&id, 1).await;
+            f.read_only(false);
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        #[tokio::test]
+        async fn a_delete_that_cannot_be_written_is_a_500_not_a_404() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.read_only(true);
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/notes/{id}", f.vault), &f.bearer),
+            )
+            .await;
+            f.read_only(false);
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        #[tokio::test]
+        async fn only_an_unknown_note_is_a_404() {
+            let f = fixture().await;
+            assert_eq!(f.put("no-such-note", 1).await, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn a_note_path_must_end_in_md() {
+            let f = fixture().await;
+            assert_eq!(f.create("Ideas").await.0, StatusCode::BAD_REQUEST);
+            assert_eq!(f.create("Ideas.txt").await.0, StatusCode::BAD_REQUEST);
+            let id = f.note_id("A.md").await;
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/notes/{id}/move", f.vault),
+                    serde_json::json!({"new_path": "A.txt"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(f.vault_dir.join("A.md").is_file(), "the refused move left the note alone");
+        }
+
+        #[tokio::test]
+        async fn creating_onto_an_existing_path_is_a_conflict() {
+            let f = fixture().await;
+            f.note_id("A.md").await;
+            assert_eq!(f.create("A.md").await.0, StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn moving_onto_an_existing_note_is_a_conflict() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.note_id("B.md").await;
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/notes/{id}/move", f.vault),
+                    serde_json::json!({"new_path": "B.md"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn the_attachment_routes_cannot_reach_a_note() {
+            let f = fixture().await;
+            f.note_id("N.md").await;
+            let before = std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap();
+            assert_eq!(f.attachment("PUT", "N.md").await, StatusCode::BAD_REQUEST);
+            assert_eq!(f.attachment("DELETE", "N.md").await, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap(),
+                before
+            );
+        }
+
+        #[tokio::test]
+        async fn a_missing_attachment_is_a_404() {
+            let f = fixture().await;
+            assert_eq!(f.attachment("GET", "nope.png").await, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn deleting_a_folder_that_does_not_exist_is_a_404() {
+            let f = fixture().await;
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/folders/Nope", f.vault), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
 }
