@@ -41,6 +41,16 @@ pub struct Vault {
     root: PathBuf,
 }
 
+/// What a scan found, including what it could not read.
+///
+/// A file that cannot be read is not a file that is gone (decision 128d):
+/// reconcile keeps its index row, and an I/O error other than bad UTF-8 means
+/// the scan itself cannot be trusted to say what was deleted.
+pub struct ScanReport {
+    pub files: Vec<ScannedFile>,
+    pub unreadable: Vec<(String, std::io::ErrorKind)>,
+}
+
 /// One markdown file found on disk.
 pub struct ScannedFile {
     /// Vault-relative, forward-slashed, e.g. `Daily/2026-08-05.md`.
@@ -349,8 +359,15 @@ impl Vault {
     ///
     /// Skips dotted directories so `.obsidian/`, `.git/` and `.trash/` never
     /// enter the index — Obsidian vaults routinely contain all three.
+    #[cfg(test)]
     pub fn scan(&self) -> Result<Vec<ScannedFile>> {
+        Ok(self.scan_report()?.files)
+    }
+
+    /// [`Vault::scan`], with the files it could not read.
+    pub fn scan_report(&self) -> Result<ScanReport> {
         let mut out = Vec::new();
+        let mut unreadable = Vec::new();
 
         for entry in WalkDir::new(&self.root)
             .follow_links(false)
@@ -381,13 +398,52 @@ impl Vault {
                     rel_path: rel,
                     content,
                 }),
-                // A note we can't decode as UTF-8 is skipped rather than
-                // aborting the whole scan.
-                Err(e) => tracing::warn!(path = %rel, error = %e, "skipping unreadable file"),
+                // A note we can't read is skipped rather than aborting the
+                // whole scan, and reported so reconcile keeps its row.
+                Err(e) => {
+                    tracing::warn!(path = %rel, error = %e, "skipping unreadable file");
+                    unreadable.push((rel, e.kind()));
+                }
             }
         }
 
         out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        Ok(ScanReport {
+            files: out,
+            unreadable,
+        })
+    }
+
+    /// Every file under the vault-relative directory `rel`, as vault-relative
+    /// paths, skipping dotted directories and Storm's temp files — what the
+    /// watcher refreshes when a whole directory appears (decision 128d).
+    pub fn files_under(&self, rel: &str) -> Result<Vec<String>> {
+        let dir = self.resolve(rel)?;
+        let mut out = Vec::new();
+        for entry in WalkDir::new(&dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                !e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with('.') && e.depth() > 0)
+                    .unwrap_or(false)
+            })
+        {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(&self.root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !path.contains("storm-tmp") {
+                out.push(path);
+            }
+        }
+        out.sort();
         Ok(out)
     }
 }

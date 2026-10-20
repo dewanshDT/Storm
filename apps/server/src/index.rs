@@ -108,6 +108,9 @@ pub struct ReconcileReport {
     pub attachments: usize,
     /// Paths that would get `id` frontmatter, populated only on a dry run.
     pub would_assign: Vec<String>,
+    /// Paths carrying an id another file already holds, which get a fresh one
+    /// (decision 128d). On a dry run, what would be reassigned.
+    pub reassigned: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,40 +136,68 @@ impl Indexer {
     /// makes it safe to point at a real vault for the first time.
     pub fn reconcile(&mut self, dry_run: bool) -> Result<ReconcileReport> {
         let mut report = ReconcileReport::default();
-        let files = self.vault.scan()?;
-        report.scanned = files.len();
+        let scan = self.vault.scan_report()?;
+        report.scanned = scan.files.len();
 
-        let mut seen_ids = Vec::new();
-
-        for file in files {
-            let parsed = frontmatter::parse(&file.content);
-            let existing_id = parsed
-                .frontmatter
-                .as_ref()
-                .and_then(|fm| frontmatter::get_scalar(&fm.raw, "id"))
-                .filter(|s| !s.is_empty());
-
-            let (id, content) = match existing_id {
-                Some(id) => (id, file.content.clone()),
+        // Pass 1: which file keeps each id. Two files with one id are a copy
+        // (a Finder duplicate, an Obsidian copy): the file at the path the
+        // index already has keeps it, else the first by path, and every other
+        // gets a fresh id (decision 128d). Without this the row flipped
+        // between the two files on every reconcile.
+        let ids: Vec<Option<String>> = scan.files.iter().map(|f| id_of(&f.content)).collect();
+        let mut keeper: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        for (i, id) in ids.iter().enumerate() {
+            let Some(id) = id.as_deref() else { continue };
+            let indexed = self.db.get_note(id)?.map(|n| n.path);
+            match keeper.get(id) {
                 None => {
-                    report.ids_assigned += 1;
+                    keeper.insert(id, i);
+                }
+                Some(&k)
+                    if indexed.as_deref() == Some(scan.files[i].rel_path.as_str())
+                        && indexed.as_deref() != Some(scan.files[k].rel_path.as_str()) =>
+                {
+                    keeper.insert(id, i);
+                }
+                Some(_) => {}
+            }
+        }
+
+        let mut seen_ids = std::collections::HashSet::new();
+
+        for (i, file) in scan.files.iter().enumerate() {
+            let kept = ids[i].as_deref().filter(|id| keeper.get(id) == Some(&i));
+            let (id, content) = match kept {
+                Some(id) => (id.to_string(), file.content.clone()),
+                None => {
+                    let duplicate = ids[i].is_some();
+                    if duplicate {
+                        report.reassigned.push(file.rel_path.clone());
+                    } else {
+                        report.ids_assigned += 1;
+                    }
                     if dry_run {
-                        report.would_assign.push(file.rel_path.clone());
-                        seen_ids.push(Uuid::new_v4().to_string());
+                        if !duplicate {
+                            report.would_assign.push(file.rel_path.clone());
+                        }
                         continue;
                     }
                     let id = Uuid::new_v4().to_string();
                     let now = now_rfc3339();
-                    let stamped = frontmatter::set_scalars(
-                        &file.content,
-                        &[("id", &id), ("created", &now), ("modified", &now)],
-                    );
+                    let stamped = if duplicate {
+                        frontmatter::set_scalars(&file.content, &[("id", &id), ("modified", &now)])
+                    } else {
+                        frontmatter::set_scalars(
+                            &file.content,
+                            &[("id", &id), ("created", &now), ("modified", &now)],
+                        )
+                    };
                     self.vault.write(&file.rel_path, &stamped)?;
                     (id, stamped)
                 }
             };
 
-            seen_ids.push(id.clone());
+            seen_ids.insert(id.clone());
             if dry_run {
                 continue;
             }
@@ -182,11 +213,10 @@ impl Indexer {
                 continue;
             }
 
-            let version = existing.as_ref().map(|p| p.version + 1).unwrap_or(1);
-            let kind = if existing.is_some() {
-                db::KIND_UPDATED
-            } else {
-                db::KIND_CREATED
+            let kind = match &existing {
+                Some(p) if p.path != file.rel_path => db::KIND_MOVED,
+                Some(_) => db::KIND_UPDATED,
+                None => db::KIND_CREATED,
             };
             if existing.is_some() {
                 report.updated += 1;
@@ -194,6 +224,7 @@ impl Indexer {
                 report.indexed += 1;
             }
 
+            let version = self.db.next_version(&id)?;
             let row = self.row_for(&id, &file.rel_path, &content, version, existing.as_ref());
             let extracted = parse::extract(&content);
             self.db
@@ -215,16 +246,55 @@ impl Indexer {
                 }
             }
 
-            // Anything indexed but no longer on disk was deleted externally.
-            for note in self.db.list_notes()? {
-                if !seen_ids.contains(&note.id) {
-                    self.db.delete_note(&note.id, &now_rfc3339())?;
-                    report.removed += 1;
-                }
-            }
+            self.remove_vanished(&scan, &seen_ids, &mut report)?;
         }
 
         Ok(report)
+    }
+
+    /// Tombstones what is indexed but no longer on disk — only when the scan
+    /// can be trusted to say so (decision 128d).
+    ///
+    /// A file that could not be read is not gone: its row stays. An I/O error
+    /// other than bad UTF-8 (an NFS hiccup, a permission change) means the scan
+    /// may have missed anything, so nothing is removed. A vault that scans
+    /// empty while its index holds several notes is an unmounted share or an
+    /// emptied directory far more often than a deliberate wipe, and
+    /// tombstoning every note would empty every client's cache, so nothing is
+    /// removed then either. Deleting a vault's last note outside Storm still
+    /// propagates, and while the server runs the watcher tombstones deletions
+    /// one by one as they happen; this guard is for the boot-time reconcile.
+    fn remove_vanished(
+        &mut self,
+        scan: &vault::ScanReport,
+        seen_ids: &std::collections::HashSet<String>,
+        report: &mut ReconcileReport,
+    ) -> Result<()> {
+        if let Some((path, kind)) = scan
+            .unreadable
+            .iter()
+            .find(|(_, k)| *k != std::io::ErrorKind::InvalidData)
+        {
+            tracing::error!(%path, ?kind, "scan hit an I/O error; not removing anything this time");
+            return Ok(());
+        }
+        let indexed = self.db.list_notes()?;
+        if scan.files.is_empty() && scan.unreadable.is_empty() && indexed.len() > 1 {
+            tracing::error!(
+                notes = indexed.len(),
+                "the vault scanned empty while its index holds notes; not removing them"
+            );
+            return Ok(());
+        }
+        let unreadable: std::collections::HashSet<&str> =
+            scan.unreadable.iter().map(|(p, _)| p.as_str()).collect();
+        for note in indexed {
+            if !seen_ids.contains(&note.id) && !unreadable.contains(note.path.as_str()) {
+                self.db.delete_note(&note.id, &now_rfc3339())?;
+                report.removed += 1;
+            }
+        }
+        Ok(())
     }
 
     /// Builds an index row, carrying `created` forward from any previous one.
@@ -304,11 +374,11 @@ impl Indexer {
         device_id: Option<&str>,
     ) -> IndexResult<WriteResult> {
         let current = self.db.get_note(id)?.ok_or_else(|| no_note(id))?;
-        let server_content = self.vault.read(&current.path)?;
 
         let outcome = if base_version == current.version {
             merge::Outcome::FastForward(client_content.to_string())
         } else {
+            let server_content = self.vault.read(&current.path)?;
             // Normalise the volatile timestamp on all three sides so it never
             // participates in the merge.
             let ours = normalise(client_content);
@@ -324,7 +394,7 @@ impl Indexer {
             merge::reconcile(&base, &theirs, &ours)
         };
 
-        let version = current.version + 1;
+        let version = self.db.next_version(id)?;
         let now = now_rfc3339();
         let final_content =
             frontmatter::set_scalars(outcome.text(), &[("id", id), ("modified", &now)]);
@@ -369,7 +439,8 @@ impl Indexer {
             .rename(&current.path, new_path, &self.protected_folders())?;
 
         let content = self.vault.read(new_path)?;
-        let row = self.row_for(id, new_path, &content, current.version + 1, Some(&current));
+        let version = self.db.next_version(id)?;
+        let row = self.row_for(id, new_path, &content, version, Some(&current));
         let extracted = parse::extract(&content);
         let seq = self
             .db
@@ -452,7 +523,8 @@ impl Indexer {
         for note in notes {
             let new_path = format!("{to}{}", &note.path[from.len()..]);
             let content = self.vault.read(&new_path)?;
-            let row = self.row_for(&note.id, &new_path, &content, note.version + 1, Some(&note));
+            let version = self.db.next_version(&note.id)?;
+            let row = self.row_for(&note.id, &new_path, &content, version, Some(&note));
             let extracted = parse::extract(&content);
             seqs.push(
                 self.db
@@ -513,10 +585,90 @@ impl Indexer {
         Ok(self.db.remove_attachment(rel_path)?)
     }
 
-    /// Re-reads one file after the watcher saw it change externally.
+    /// Applies one debounced batch of paths the watcher saw change (decision
+    /// 128d), returning the change seqs it recorded.
+    ///
+    /// A directory is expanded to the files under it, and a missing path to
+    /// the notes and attachments that were under it — a folder renamed or
+    /// deleted outside Storm arrives as one event for the folder, never one per
+    /// note. Paths that exist are applied **before** paths that are gone, so a
+    /// rename is read as a move (the new path, carrying a known id, finds its
+    /// old path missing) rather than a delete followed by a create.
+    pub fn refresh_paths(&mut self, rels: &[String]) -> Result<Vec<i64>> {
+        let mut present = Vec::new();
+        let mut missing = Vec::new();
+        for rel in rels {
+            let Ok(abs) = self.vault.resolve(rel) else {
+                continue;
+            };
+            if abs.is_dir() {
+                present.extend(self.vault.files_under(rel)?);
+            } else if abs.is_file() {
+                present.push(rel.clone());
+            } else {
+                missing.push(rel.clone());
+                missing.extend(self.db.notes_under(rel)?.into_iter().map(|n| n.path));
+                let prefix = format!("{rel}/");
+                missing.extend(
+                    self.db
+                        .list_attachments()?
+                        .into_iter()
+                        .map(|a| a.path)
+                        .filter(|p| p.starts_with(&prefix)),
+                );
+            }
+        }
+
+        let mut seqs = Vec::new();
+        let mut done = std::collections::HashSet::new();
+        for rel in present.into_iter().chain(missing) {
+            if !done.insert(rel.clone()) {
+                continue;
+            }
+            if is_markdown(&rel) {
+                if let Some(seq) = self.refresh_path(&rel)? {
+                    seqs.push(seq);
+                }
+            } else {
+                self.refresh_attachment(&rel)?;
+            }
+        }
+        Ok(seqs)
+    }
+
+    /// Brings one attachment's row in line with the file. Attachments carry no
+    /// change-log entry; the row is what `GET …/attachments` lists.
+    fn refresh_attachment(&mut self, rel: &str) -> Result<()> {
+        if self.vault.exists(rel) {
+            let bytes = self.vault.read_bytes(rel)?;
+            let hash = blake3::hash(&bytes).to_hex().to_string();
+            let current = self
+                .db
+                .list_attachments()?
+                .into_iter()
+                .find(|a| a.path == rel);
+            if current.is_none_or(|a| a.hash != hash) {
+                self.db
+                    .record_attachment(rel, &hash, bytes.len() as i64, &now_rfc3339())?;
+            }
+        } else {
+            self.db.remove_attachment(rel)?;
+        }
+        Ok(())
+    }
+
+    /// Re-reads one note after the watcher saw it change externally.
     ///
     /// Returns the new change seq, or `None` if the content was unchanged
     /// (which is how the server's own writes are filtered out).
+    ///
+    /// A file at a new path whose `id` is already indexed is one of three
+    /// things (decision 128d): a **move** when the indexed path is gone — the
+    /// note keeps its id, row and history; a **copy** when it is still there —
+    /// the copy gets a fresh id written into its frontmatter, and the original
+    /// is untouched; a **restore** when the id has history but no row — it is
+    /// indexed again under its id. In every case the version continues from the
+    /// note's history; before 128d it restarted at 1 and overwrote it.
     pub fn refresh_path(&mut self, rel_path: &str) -> Result<Option<i64>> {
         if !self.vault.exists(rel_path) {
             if let Some(note) = self.db.get_note_by_path(rel_path)? {
@@ -532,13 +684,8 @@ impl Indexer {
             if existing.content_hash == hash {
                 return Ok(None);
             }
-            let row = self.row_for(
-                &existing.id,
-                rel_path,
-                &content,
-                existing.version + 1,
-                Some(&existing),
-            );
+            let version = self.db.next_version(&existing.id)?;
+            let row = self.row_for(&existing.id, rel_path, &content, version, Some(&existing));
             let extracted = parse::extract(&content);
             return self
                 .db
@@ -546,27 +693,53 @@ impl Indexer {
                 .map(Some);
         }
 
-        // A file that appeared from outside — give it an id and index it.
-        let parsed = frontmatter::parse(&content);
-        let id = parsed
-            .frontmatter
-            .as_ref()
-            .and_then(|fm| frontmatter::get_scalar(&fm.raw, "id"))
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let claimed = id_of(&content);
+        let known = match &claimed {
+            Some(id) => self.db.get_note(id)?,
+            None => None,
+        };
 
+        // A move: the id's indexed file is gone, so this is that note.
+        if let (Some(id), Some(row)) = (&claimed, &known)
+            && !self.vault.exists(&row.path)
+        {
+            let version = self.db.next_version(id)?;
+            let new_row = self.row_for(id, rel_path, &content, version, Some(row));
+            let extracted = parse::extract(&content);
+            return self
+                .db
+                .record_note(&new_row, &content, &extracted, db::KIND_MOVED, None)
+                .map(Some);
+        }
+
+        // A copy (its id belongs to a file still on disk) or a file with no
+        // id gets a fresh one; a restore keeps the id it carries.
+        let id = match (&claimed, &known) {
+            (Some(id), None) => id.clone(),
+            _ => Uuid::new_v4().to_string(),
+        };
         let now = now_rfc3339();
         let stamped = frontmatter::set_scalars(&content, &[("id", &id), ("modified", &now)]);
         if stamped != content {
             self.vault.write(rel_path, &stamped)?;
         }
 
-        let row = self.row_for(&id, rel_path, &stamped, 1, None);
+        let version = self.db.next_version(&id)?;
+        let row = self.row_for(&id, rel_path, &stamped, version, None);
         let extracted = parse::extract(&stamped);
         self.db
             .record_note(&row, &stamped, &extracted, db::KIND_CREATED, None)
             .map(Some)
     }
+}
+
+/// The non-empty `id` a note's frontmatter carries, if any.
+fn id_of(content: &str) -> Option<String> {
+    frontmatter::parse(content)
+        .frontmatter
+        .as_ref()
+        .and_then(|fm| frontmatter::get_scalar(&fm.raw, "id"))
+        .filter(|s| !s.is_empty())
 }
 
 /// Blanks the server-owned `modified` field so it can't cause a conflict.
@@ -621,6 +794,225 @@ mod tests {
         let vault = Vault::new(dir.path()).unwrap();
         let db = Db::open_in_memory().unwrap();
         (dir, Indexer::new(vault, db))
+    }
+
+    // ---- note identity on disk (decision 128d) ------------------------
+
+    fn root(ix: &Indexer) -> std::path::PathBuf {
+        ix.vault.root().to_path_buf()
+    }
+
+    fn body_of(content: &str) -> String {
+        content[frontmatter::parse(content).body_start..]
+            .trim_start_matches('\n')
+            .to_string()
+    }
+
+    /// A note saved to `version` with bodies "v1\n", "v2\n", … .
+    fn note_at_version(ix: &mut Indexer, path: &str, version: i64) -> String {
+        let id = ix.create_note(path, "v1\n").unwrap().note.id;
+        for v in 2..=version {
+            ix.put_note(&id, v - 1, &format!("v{v}\n"), None).unwrap();
+        }
+        id
+    }
+
+    fn last_kind(ix: &Indexer) -> String {
+        let seq = ix.db.latest_seq().unwrap();
+        ix.db.changes_since(seq - 1, 1).unwrap()[0].kind.clone()
+    }
+
+    fn paths(rels: &[&str]) -> Vec<String> {
+        rels.iter().map(|r| r.to_string()).collect()
+    }
+
+    #[test]
+    fn a_note_moved_outside_storm_keeps_its_identity_and_history() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 4);
+        std::fs::rename(root(&ix).join("A.md"), root(&ix).join("B.md")).unwrap();
+        // inotify reports the old path first; the batch must still read a move.
+        ix.refresh_paths(&paths(&["A.md", "B.md"])).unwrap();
+
+        let row = ix.db.get_note(&id).unwrap().expect("still indexed");
+        assert_eq!(row.path, "B.md");
+        assert_eq!(row.version, 5);
+        assert_eq!(last_kind(&ix), db::KIND_MOVED);
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 1).unwrap().unwrap()),
+            "v1\n"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 4).unwrap().unwrap()),
+            "v4\n"
+        );
+    }
+
+    #[test]
+    fn a_copied_note_gets_its_own_identity() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 2);
+        std::fs::copy(root(&ix).join("A.md"), root(&ix).join("A copy.md")).unwrap();
+        ix.refresh_paths(&paths(&["A copy.md"])).unwrap();
+
+        let original = ix.db.get_note(&id).unwrap().unwrap();
+        assert_eq!(original.path, "A.md");
+        assert_eq!(original.version, 2);
+        let copy = ix
+            .db
+            .get_note_by_path("A copy.md")
+            .unwrap()
+            .expect("copy indexed");
+        assert_ne!(copy.id, id);
+        let on_disk = ix.vault.read("A copy.md").unwrap();
+        let fm = frontmatter::parse(&on_disk).frontmatter.unwrap();
+        assert_eq!(
+            frontmatter::get_scalar(&fm.raw, "id").as_deref(),
+            Some(copy.id.as_str())
+        );
+    }
+
+    #[test]
+    fn a_restored_note_continues_its_version_and_keeps_its_history() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 3);
+        let content = ix.vault.read("A.md").unwrap();
+        ix.delete_note(&id).unwrap();
+        ix.vault.write("A.md", &content).unwrap();
+        ix.refresh_paths(&paths(&["A.md"])).unwrap();
+
+        let row = ix.db.get_note(&id).unwrap().expect("restored under its id");
+        assert_eq!(row.version, 4);
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 1).unwrap().unwrap()),
+            "v1\n"
+        );
+    }
+
+    #[test]
+    fn history_is_append_only_even_on_an_index_the_old_bug_damaged() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "A.md", 3);
+        ix.db.set_version_for_test(&id, 1).unwrap();
+        let saved = ix.put_note(&id, 1, "v-new\n", None).unwrap();
+
+        assert_eq!(
+            saved.note.version, 4,
+            "continues past the history, never reuses 2"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 2).unwrap().unwrap()),
+            "v2\n"
+        );
+        assert_eq!(
+            body_of(&ix.db.version_content(&id, 3).unwrap().unwrap()),
+            "v3\n"
+        );
+    }
+
+    #[test]
+    fn reconcile_gives_a_duplicated_id_to_the_copy_not_the_original() {
+        let (_d, mut ix) = indexer();
+        let id = note_at_version(&mut ix, "B.md", 2);
+        std::fs::copy(root(&ix).join("B.md"), root(&ix).join("A.md")).unwrap();
+        ix.reconcile(false).unwrap();
+
+        let original = ix.db.get_note(&id).unwrap().unwrap();
+        assert_eq!(original.path, "B.md", "the indexed path keeps the id");
+        assert_eq!(original.version, 2);
+        let copy = ix
+            .db
+            .get_note_by_path("A.md")
+            .unwrap()
+            .expect("copy indexed");
+        assert_ne!(copy.id, id);
+
+        let seq = ix.db.latest_seq().unwrap();
+        ix.reconcile(false).unwrap();
+        assert_eq!(
+            ix.db.latest_seq().unwrap(),
+            seq,
+            "a second reconcile changes nothing"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_file_is_not_tombstoned() {
+        let (_d, mut ix) = indexer();
+        let id = ix.create_note("L.md", "hello\n").unwrap().note.id;
+        let mut bytes = ix.vault.read("L.md").unwrap().into_bytes();
+        bytes.push(0xff);
+        std::fs::write(root(&ix).join("L.md"), bytes).unwrap();
+        let report = ix.reconcile(false).unwrap();
+
+        assert_eq!(report.removed, 0);
+        assert!(ix.db.get_note(&id).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_vault_that_scans_empty_is_not_pruned() {
+        // An unmounted share or a directory emptied by a sync tool reads as
+        // "every note deleted"; tombstoning them all would empty every client.
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("A.md", "a\n").unwrap().note.id;
+        let b = ix.create_note("B.md", "b\n").unwrap().note.id;
+        std::fs::remove_file(root(&ix).join("A.md")).unwrap();
+        std::fs::remove_file(root(&ix).join("B.md")).unwrap();
+        let report = ix.reconcile(false).unwrap();
+
+        assert_eq!(report.removed, 0);
+        assert!(ix.db.get_note(&a).unwrap().is_some());
+        assert!(ix.db.get_note(&b).unwrap().is_some());
+    }
+
+    #[test]
+    fn a_folder_renamed_outside_storm_moves_its_notes() {
+        let (_d, mut ix) = indexer();
+        let a = note_at_version(&mut ix, "Old/A.md", 2);
+        let b = note_at_version(&mut ix, "Old/Sub/B.md", 3);
+        std::fs::rename(root(&ix).join("Old"), root(&ix).join("New")).unwrap();
+        ix.refresh_paths(&paths(&["Old", "New"])).unwrap();
+
+        let a_row = ix.db.get_note(&a).unwrap().expect("A kept");
+        let b_row = ix.db.get_note(&b).unwrap().expect("B kept");
+        assert_eq!(a_row.path, "New/A.md");
+        assert_eq!(b_row.path, "New/Sub/B.md");
+        assert_eq!((a_row.version, b_row.version), (3, 4));
+    }
+
+    #[test]
+    fn a_folder_deleted_outside_storm_tombstones_its_notes() {
+        let (_d, mut ix) = indexer();
+        let a = ix.create_note("Gone/A.md", "a\n").unwrap().note.id;
+        let kept = ix.create_note("Kept.md", "k\n").unwrap().note.id;
+        std::fs::remove_dir_all(root(&ix).join("Gone")).unwrap();
+        ix.refresh_paths(&paths(&["Gone"])).unwrap();
+
+        assert!(ix.db.get_note(&a).unwrap().is_none());
+        assert!(ix.db.get_note(&kept).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_attachment_changed_outside_storm_is_indexed() {
+        let (_d, mut ix) = indexer();
+        std::fs::create_dir_all(root(&ix).join("img")).unwrap();
+        std::fs::write(root(&ix).join("img/a.png"), [1u8, 2, 3]).unwrap();
+        ix.refresh_paths(&paths(&["img/a.png"])).unwrap();
+        let listed = ix.db.list_attachments().unwrap();
+        assert!(
+            listed.iter().any(|a| a.path == "img/a.png" && a.size == 3),
+            "{listed:?}"
+        );
+
+        std::fs::remove_file(root(&ix).join("img/a.png")).unwrap();
+        ix.refresh_paths(&paths(&["img/a.png"])).unwrap();
+        assert!(
+            ix.db
+                .list_attachments()
+                .unwrap()
+                .iter()
+                .all(|a| a.path != "img/a.png")
+        );
     }
 
     #[test]

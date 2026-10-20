@@ -351,7 +351,11 @@ impl Db {
         )?;
 
         tx.execute(
-            "INSERT OR REPLACE INTO note_versions (note_id, version, content, created_at, device_id)
+            // Never `OR REPLACE`: history is append-only (decision 128d). A
+            // collision is a caller that did not ask `next_version`, and must
+            // fail loudly rather than overwrite a version a client may merge
+            // against.
+            "INSERT INTO note_versions (note_id, version, content, created_at, device_id)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![note.id, note.version, content, note.modified, device_id],
         )?;
@@ -386,6 +390,34 @@ impl Db {
 
         tx.commit()?;
         Ok(seq)
+    }
+
+    /// The version a new write of `id` must take: one past everything its
+    /// history and its row have used (decision 128d).
+    ///
+    /// Reading the history, not only the row, is what keeps a note that was
+    /// deleted and restored, or one whose row an older build reset, from
+    /// reusing a version — `note_versions` is the base every merge reads.
+    pub fn next_version(&self, id: &str) -> Result<i64> {
+        Ok(self.conn.query_row(
+            "SELECT COALESCE(MAX(v), 0) + 1 FROM (
+                 SELECT version AS v FROM note_versions WHERE note_id = ?1
+                 UNION ALL SELECT version FROM notes WHERE id = ?1
+             )",
+            params![id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Sets a row's version directly, to stand for an index the pre-128d
+    /// identity bug left behind.
+    #[cfg(test)]
+    pub fn set_version_for_test(&mut self, id: &str, version: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE notes SET version = ?2 WHERE id = ?1",
+            params![id, version],
+        )?;
+        Ok(())
     }
 
     pub fn delete_note(&mut self, id: &str, at: &str) -> Result<i64> {
