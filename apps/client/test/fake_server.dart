@@ -208,6 +208,9 @@ class FakeServer {
   Completer<void>? syncGate;
   Completer<void>? noteGate;
 
+  /// Holds a note `PUT` until completed, so a test can act mid-save.
+  Completer<void>? saveGate;
+
   http.Client get client => MockClient((request) async {
     requests++;
     if (unreachable) {
@@ -618,6 +621,7 @@ class FakeServer {
     }
 
     if (request.method == 'PUT') {
+      await saveGate?.future;
       final note = vaultNotes[id];
       if (note == null) {
         return http.Response('{"error":"no such note"}', 404, headers: j(''));

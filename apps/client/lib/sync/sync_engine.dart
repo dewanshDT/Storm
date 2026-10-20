@@ -398,6 +398,13 @@ class SyncEngine extends ChangeNotifier {
       }
       return SaveOutcome(SaveStatus.saved, version: result.meta.version);
     } on StormApiException catch (e) {
+      if (e.statusCode >= 500) {
+        // The server could not complete the write — a disk or storage
+        // failure, not a refusal of this edit. Keep it and retry (128b).
+        final queued = await _queue(id, baseVersion, content);
+        _scheduleOutboxRetry('a save got ${e.statusCode}');
+        return queued;
+      }
       // The server answered and refused. Retrying identically won't help, so
       // don't queue it — surface it instead.
       return SaveOutcome(SaveStatus.failed, error: e.message);
@@ -409,6 +416,17 @@ class SyncEngine extends ChangeNotifier {
       }
       return queued;
     }
+  }
+
+  /// Keeps an edit the server refused in the outbox, so leaving the note
+  /// cannot lose it (decision 128b). The outbox retries a refusal on every
+  /// drain and never drops one; only a 404 means the note is gone.
+  Future<void> keepUnsent({
+    required String id,
+    required int baseVersion,
+    required String content,
+  }) async {
+    await _queue(id, baseVersion, content);
   }
 
   Future<SaveOutcome> _queue(String id, int baseVersion, String content) async {

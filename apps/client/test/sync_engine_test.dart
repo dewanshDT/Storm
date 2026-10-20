@@ -55,6 +55,39 @@ void main() {
     await engine.openNote(id);
   }
 
+  group('a server error on save (decision 128b)', () {
+    test('is queued, not failed, and the next drain sends it', () async {
+      await seed('n1', 'original\n');
+      server.failWith = 500;
+      final out = await engine.save(
+        id: 'n1',
+        baseVersion: 1,
+        content: 'edited\n',
+      );
+      expect(out.status, SaveStatus.queued);
+      expect(
+        (await cache.outboxFor(FakeServer.primaryVault, 'n1'))?.content,
+        'edited\n',
+      );
+
+      server.failWith = null;
+      await engine.sync();
+      expect(server.notes['n1']!.content, 'edited\n');
+      expect(await cache.outboxFor(FakeServer.primaryVault, 'n1'), isNull);
+    });
+
+    test('a refusal (4xx) still fails, so the editor can say so', () async {
+      await seed('n1', 'original\n');
+      server.failWith = 403;
+      final out = await engine.save(
+        id: 'n1',
+        baseVersion: 1,
+        content: 'edited\n',
+      );
+      expect(out.status, SaveStatus.failed);
+    });
+  });
+
   group('online', () {
     test('save goes straight to the server', () async {
       await seed('n1', 'original\n');
