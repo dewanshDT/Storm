@@ -209,6 +209,11 @@ disappear. `NoteSession` (`lib/state/note_session.dart`) owns it:
    flight, and an edit the server refused is put in the outbox rather than
    left in a buffer the next note replaces, with a message saying so.
 
+**A note deleted elsewhere while this device holds an unsynced edit** keeps
+the edit as a new note at the note's path, or `Name (recovered).md` when that
+is taken, and says so (decision 128c). A remote delete or a 404 on open leaves
+the cached copy of a queued edit alone, and `evict()` never drops one.
+
 Conflicts arrive as text with git-style markers, with the client's own edit on
 the `ours` side. A banner explains it; you resolve by deleting the markers.
 

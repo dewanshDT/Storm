@@ -543,9 +543,10 @@ class FakeServer {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       final newPath = body['path'] as String;
       if (vaultNotes.values.any((n) => n.path == newPath)) {
+        // 409, as the server answers since decision 128a.
         return http.Response(
           '{"error":"a note already exists"}',
-          400,
+          409,
           headers: j(''),
         );
       }

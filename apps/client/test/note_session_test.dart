@@ -342,4 +342,27 @@ void main() {
       },
     );
   });
+
+  test(
+    'a recovered edit takes the open session with it (decision 128c)',
+    () async {
+      await open();
+      server.notes['kept'] = ServerNote(
+        id: 'kept',
+        path: 'A (recovered).md',
+        content: 'my edit\n',
+        version: 1,
+      );
+      await session.followRecovered(
+        const RecoveredNote(
+          oldId: 'n1',
+          newId: 'kept',
+          path: 'A (recovered).md',
+        ),
+      );
+      expect(session.noteId, 'kept');
+      expect(session.buffer, 'my edit\n');
+      expect(session.notice, contains('A (recovered).md'));
+    },
+  );
 }

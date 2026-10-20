@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -597,6 +598,114 @@ void main() {
       expect(await cache.pendingCount(FakeServer.primaryVault), 0);
       expect(server.notes['n1']!.path, 'Renamed.md');
       expect(server.notes['n1']!.content, 'edited offline\n');
+    });
+  });
+
+  group('an edit the server no longer has a note for (decision 128c)', () {
+    Future<void> queueOffline(String id, String content) async {
+      server.unreachable = true;
+      final out = await engine.save(id: id, baseVersion: 1, content: content);
+      expect(out.status, SaveStatus.queued);
+      server.unreachable = false;
+    }
+
+    void deleteOnServer(String id) {
+      server.notes.remove(id);
+      server.pushChange(id, 'deleted', 2);
+    }
+
+    test('is recreated as a new note at the same path, and reported', () async {
+      await seed('n1', 'original\n');
+      final recovered = <RecoveredNote>[];
+      final sub = engine.recovered.listen(recovered.add);
+      addTearDown(sub.cancel);
+
+      await queueOffline('n1', 'my unsynced edit\n');
+      deleteOnServer('n1');
+      await engine.sync();
+      await Future<void>.delayed(Duration.zero);
+
+      final kept = server.notes.values.where(
+        (n) => n.content.contains('my unsynced edit'),
+      );
+      expect(kept, hasLength(1), reason: 'the edit is on the server again');
+      expect(kept.single.path, 'n1.md');
+      expect(kept.single.id, isNot('n1'));
+      expect(await cache.outboxFor(FakeServer.primaryVault, 'n1'), isNull);
+      expect(
+        await cache.note(FakeServer.primaryVault, kept.single.id),
+        isNotNull,
+      );
+      expect(recovered, hasLength(1));
+      expect(recovered.single.oldId, 'n1');
+      expect(recovered.single.newId, kept.single.id);
+      expect(recovered.single.path, 'n1.md');
+    });
+
+    test('goes to "(recovered)" when its path has been taken', () async {
+      await seed('n1', 'original\n');
+      await queueOffline('n1', 'my unsynced edit\n');
+      deleteOnServer('n1');
+      server.notes['other'] = ServerNote(
+        id: 'other',
+        path: 'n1.md',
+        content: 'someone else\n',
+        version: 1,
+      );
+      await engine.sync();
+
+      final kept = server.notes.values.singleWhere(
+        (n) => n.content.contains('my unsynced edit'),
+      );
+      expect(kept.path, 'n1 (recovered).md');
+      expect(server.notes['other']!.content, 'someone else\n');
+    });
+
+    test(
+      'a remote delete does not drop the cached copy of a queued edit',
+      () async {
+        await seed('n1', 'original\n');
+        await queueOffline('n1', 'my unsynced edit\n');
+        deleteOnServer('n1');
+        // A pull without the drain: the delete arrives first.
+        server.unreachable = false;
+        final opened = await engine.openNote('n1');
+        expect(opened, isNotNull, reason: 'the queued edit is still here');
+        expect(opened!.content, contains('my unsynced edit'));
+      },
+    );
+  });
+
+  test('recovered paths keep the extension and count up', () {
+    expect(recoveredPath('Ideas.md', 1), 'Ideas (recovered).md');
+    expect(recoveredPath('Daily/Today.md', 2), 'Daily/Today (recovered 2).md');
+    expect(recoveredPath('NoExtension', 1), 'NoExtension (recovered)');
+  });
+
+  group('eviction and queued edits (decision 128c)', () {
+    test('a queued edit survives eviction even as the oldest note', () async {
+      final v = FakeServer.primaryVault;
+      await cache.enqueue(
+        vaultId: v,
+        noteId: 'old',
+        baseVersion: 1,
+        content: 'queued',
+      );
+      await cache.putNote(
+        CachedNotesCompanion.insert(
+          vaultId: Value(v),
+          id: 'old',
+          path: 'old.md',
+          version: 1,
+          content: 'queued',
+          cachedAt: DateTime(2000),
+        ),
+      );
+      for (var i = 0; i < 3; i++) {
+        await seed('n$i', 'x\n');
+      }
+      await cache.evict(v, keep: 1);
+      expect(await cache.note(v, 'old'), isNotNull);
     });
   });
 
