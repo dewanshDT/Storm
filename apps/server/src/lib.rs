@@ -679,6 +679,16 @@ fn run_dry_run(args: VaultArgs) -> Result<()> {
         if report.ids_assigned > 10 {
             println!("          … and {} more", report.ids_assigned - 10);
         }
+        if !report.reassigned.is_empty() {
+            // Copies that kept their original's id (decision 128d).
+            println!(
+                "      would give a fresh `id` to (duplicated ids) : {}",
+                report.reassigned.len()
+            );
+            for path in report.reassigned.iter().take(10) {
+                println!("          {path}");
+            }
+        }
     }
     println!("\nRun again without dry-run to apply.");
     Ok(())

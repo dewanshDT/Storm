@@ -192,6 +192,16 @@ data quietly.
   saved again so the server's diff3 merges it.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
+- **An id seen at a new path is a move or a copy, never a version reset**
+  (decision 128d). Outside Storm, a file whose `id` is indexed at a path that
+  is gone is a move (same row, history kept); one whose indexed file still
+  exists is a copy and gets a fresh id. Every write takes
+  `Db::next_version` — past the note's whole history — and `note_versions` is
+  append-only (plain `INSERT`). Before 128d an external rename restarted the
+  note at version 1 and overwrote its history.
+- **Unreadable is not deleted** (128d). Reconcile keeps the row of a file it
+  cannot read, removes nothing after an I/O error, and does not prune a vault
+  that scans empty while its index holds several notes.
 
 From M9/M10 (`docs/storm-multi-vault.md`):
 

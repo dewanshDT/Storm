@@ -117,8 +117,17 @@ fn watch_once(
             if pending.is_empty() {
                 continue;
             }
+            // One batch per vault, so a rename's two halves are judged
+            // together (decision 128d).
+            let mut by_vault: Vec<(String, Vec<String>)> = Vec::new();
             for hit in std::mem::take(&mut pending) {
-                apply(&state, &hit).await;
+                match by_vault.iter_mut().find(|(dir, _)| *dir == hit.dir) {
+                    Some((_, rels)) => rels.push(hit.rel),
+                    None => by_vault.push((hit.dir, vec![hit.rel])),
+                }
+            }
+            for (dir, rels) in by_vault {
+                apply(&state, &dir, &rels).await;
             }
         }
     });
@@ -126,8 +135,8 @@ fn watch_once(
     Ok(())
 }
 
-/// Reindexes one path and pushes the resulting change, if any.
-async fn apply(state: &Shared, hit: &Attributed) {
+/// Reindexes one vault's batch of paths and pushes the resulting changes.
+async fn apply(state: &Shared, dir: &str, rels: &[String]) {
     let handle = {
         let vaults = state.vaults.read().await;
         // An event under a directory that is not a registered vault is dropped
@@ -140,7 +149,7 @@ async fn apply(state: &Shared, hit: &Attributed) {
         // refuse. Routing it through the boundary would also change its
         // semantics — an unregistered directory is silently ignored here,
         // where `vault_of` answers 404.
-        match vaults.registry.by_dir(&hit.dir) {
+        match vaults.registry.by_dir(dir) {
             Some(entry) => vaults.get(&entry.id),
             None => None,
         }
@@ -150,22 +159,23 @@ async fn apply(state: &Shared, hit: &Attributed) {
     };
 
     let mut ix = handle.indexer.lock().await;
-    match ix.refresh_path(&hit.rel) {
-        // `None` means the content hash was unchanged — almost always our own
-        // write coming back to us.
-        Ok(None) => {}
-        Ok(Some(seq)) => {
-            tracing::info!(vault = %hit.dir, path = %hit.rel, seq, "external change indexed");
-            if let Ok(Some(change)) = ix
-                .db
-                .changes_since(seq - 1, 1)
-                .map(|c| c.into_iter().next())
-            {
-                let _ = state.events.send(change);
+    match ix.refresh_paths(rels) {
+        // An empty list means every hash was unchanged — almost always our
+        // own writes coming back to us.
+        Ok(seqs) => {
+            for seq in seqs {
+                tracing::info!(vault = %dir, seq, "external change indexed");
+                if let Ok(Some(change)) = ix
+                    .db
+                    .changes_since(seq - 1, 1)
+                    .map(|c| c.into_iter().next())
+                {
+                    let _ = state.events.send(change);
+                }
             }
         }
         Err(e) => {
-            tracing::warn!(vault = %hit.dir, path = %hit.rel, error = %e, "failed to index external change")
+            tracing::warn!(vault = %dir, error = %e, "failed to index external changes")
         }
     }
 }
@@ -173,9 +183,11 @@ async fn apply(state: &Shared, hit: &Attributed) {
 /// Splits an absolute path under the storage root into its vault directory and
 /// the note path inside it.
 ///
-/// Filters out non-markdown files, dotted directories, the temp files our own
-/// atomic writes create, and anything sitting directly under the root — a
-/// loose `README.md` beside the vault directories belongs to no vault.
+/// Filters out dotted directories, the temp files our own atomic writes
+/// create, and anything sitting directly under the root — a loose `README.md`
+/// beside the vault directories belongs to no vault. Directories and
+/// attachments pass: a folder renamed outside Storm arrives as one event for
+/// the folder, and `Indexer::refresh_paths` expands it (decision 128d).
 fn attribute(root: &Path, path: &Path) -> Option<Attributed> {
     let rel = path.strip_prefix(root).ok()?;
     let rel_str = rel.to_string_lossy().replace('\\', "/");
@@ -184,9 +196,6 @@ fn attribute(root: &Path, path: &Path) -> Option<Attributed> {
         return None;
     }
     if rel_str.split('/').any(|seg| seg.starts_with('.')) {
-        return None;
-    }
-    if !rel_str.ends_with(".md") {
         return None;
     }
 
@@ -264,10 +273,23 @@ mod tests {
     }
 
     #[test]
-    fn ignores_non_markdown() {
+    fn attributes_attachments_and_directories_too() {
+        // Decision 128d: a folder renamed outside Storm arrives as one event
+        // for the folder, and an attachment's row must follow its file; both
+        // used to be dropped here.
         assert_eq!(
             attribute(&root(), Path::new("/vaults/personal/attachments/img.png")),
-            None
+            Some(Attributed {
+                dir: "personal".into(),
+                rel: "attachments/img.png".into(),
+            })
+        );
+        assert_eq!(
+            attribute(&root(), Path::new("/vaults/personal/Projects")),
+            Some(Attributed {
+                dir: "personal".into(),
+                rel: "Projects".into(),
+            })
         );
     }
 
