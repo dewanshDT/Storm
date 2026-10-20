@@ -39,3 +39,15 @@ code() { grep -v '^[[:space:]]*#' "$PS1"; }
 @test "install.ps1 fails with throw, never exit" {
   ! code | grep -Eq '(^|[^A-Za-z$-])exit([^A-Za-z]|$)'
 }
+
+@test "install.ps1: the app installs per user, beside the MCP connector, never over it" {
+  code | grep -q "\$appDir = Join-Path \$env:LOCALAPPDATA 'Programs\\\\Storm\\\\App'"
+  code | grep -q "\$mcpDir = Join-Path \$env:LOCALAPPDATA 'Programs\\\\Storm'"
+  [ "$(code | grep -c 'Remove-Item -Recurse -Force \$appDir')" -ge 1 ]
+  ! code | grep -q 'Remove-Item[^#]*\$mcpDir'
+}
+
+@test "install.ps1: a running Storm is asked to close, never killed" {
+  code | grep -q 'CloseMainWindow()'
+  ! code | grep -Eiq 'Stop-Process|taskkill|\.Kill\('
+}
