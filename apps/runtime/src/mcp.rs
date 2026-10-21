@@ -264,13 +264,12 @@ pub fn with_opening_prompt(
     provider: &str,
     context: bool,
 ) -> LaunchExtras {
+    use crate::profile::Prompt;
     if context {
-        match provider {
-            "claude-code" => extras.args.push(OPENING_PROMPT.into()),
-            "opencode" => extras
-                .args
-                .extend(["--prompt".into(), OPENING_PROMPT.into()]),
-            _ => {}
+        match crate::profile::get(provider).and_then(|p| p.prompt) {
+            Some(Prompt::Positional) => extras.args.push(OPENING_PROMPT.into()),
+            Some(Prompt::Flag(flag)) => extras.args.extend([flag.into(), OPENING_PROMPT.into()]),
+            None => {}
         }
     }
     extras

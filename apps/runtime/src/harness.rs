@@ -32,9 +32,6 @@ use crate::provider::LaunchExtras;
 
 pub const HANDLE_ENV: &str = "STORM_HARNESS_HANDLE";
 
-/// The providers whose conversations can be resumed.
-pub const PROVIDERS: [&str; 2] = ["claude-code", "opencode"];
-
 /// One line from `harness-session` on the daemon socket.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HarnessLine {
@@ -43,24 +40,10 @@ pub struct HarnessLine {
 }
 
 /// Whether `id` is a session id `provider` could have made. It becomes an
-/// argument, so nothing else is ever accepted.
+/// argument, so nothing else is ever accepted. The shapes are the profiles'
+/// (decision 130).
 pub fn valid_id(provider: &str, id: &str) -> bool {
-    match provider {
-        "claude-code" => is_uuid(id),
-        "opencode" => id.strip_prefix("ses_").is_some_and(|rest| {
-            (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
-        }),
-        _ => false,
-    }
-}
-
-fn is_uuid(id: &str) -> bool {
-    let b = id.as_bytes();
-    b.len() == 36
-        && b.iter().enumerate().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
-        })
+    crate::profile::valid_id(provider, id)
 }
 
 fn new_uuid() -> String {

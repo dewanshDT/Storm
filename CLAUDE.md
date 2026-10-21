@@ -601,6 +601,13 @@ Specification*; the slices are decisions 81 and 81a onward):
   `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
+- **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
+  its safe launch args, prompt form, MCP writer, resume id shape and title
+  policy. **An agent Storm cannot hold to its own MCP servers gets none**
+  (130a): the host reports `mcp: false` for it in `hello` and the server
+  grants nothing (`McpOutcome::Unsupported`) — Cursor and Command Code today;
+  Command Code loads a repository's `.mcp.json` with no approval. No profile
+  passes a flag that turns an agent's own permission prompts off.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

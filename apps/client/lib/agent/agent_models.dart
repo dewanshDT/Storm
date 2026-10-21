@@ -6,17 +6,32 @@ import 'claude_login_api.dart' show claudeCredentialNotice;
 
 /// A provider a host offers.
 class ProviderCap {
-  ProviderCap({required this.id, required this.kind, required this.available});
+  ProviderCap({
+    required this.id,
+    required this.kind,
+    required this.available,
+    this.mcp,
+  });
 
   final String id;
   final String kind;
   final bool available;
 
+  /// The host can give its sessions Storm's MCP (decision 130a); null from a
+  /// host too old to say, or for an agent it has no adapter for.
+  final bool? mcp;
+
   factory ProviderCap.fromJson(Map<String, dynamic> j) => ProviderCap(
     id: j['id'] as String,
     kind: j['kind'] as String? ?? 'cli',
     available: j['available'] as bool? ?? false,
+    mcp: j['mcp'] as bool?,
   );
+
+  /// Its sessions can read your vaults and use your integrations: what the
+  /// server grants, so `shell` never, and an agent the host cannot keep to
+  /// its own MCP servers never (130a).
+  bool get reachesStorm => mcp ?? id != 'shell';
 
   /// How a person reads the id.
   String get label => providerLabel(id);
@@ -26,6 +41,8 @@ class ProviderCap {
 String providerLabel(String id) => switch (id) {
   'claude-code' => 'Claude Code',
   'opencode' => 'OpenCode',
+  'cursor' => 'Cursor',
+  'command-code' => 'Command Code',
   'shell' => 'Shell',
   'fake' => 'Fake (test)',
   _ => id,

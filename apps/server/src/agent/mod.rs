@@ -216,6 +216,11 @@ pub struct ProviderCap {
     #[serde(default)]
     pub interactions: Vec<String>,
     pub available: bool,
+    /// Whether the host can give this provider's sessions their own MCP
+    /// servers (decision 130a). `None` from an older host, or for an id it
+    /// has no adapter for: granted as before.
+    #[serde(default)]
+    pub mcp: Option<bool>,
 }
 
 /// One session in a host's `hello`.
@@ -311,6 +316,9 @@ pub enum McpOutcome {
     Granted(Vec<McpGrant>),
     /// The `shell` provider gets none (G-D9).
     Shell,
+    /// The host has no adapter that keeps a repository's own MCP servers
+    /// out of this provider, so it gets none (decision 130a).
+    Unsupported,
     /// The host has no `mcp_bridge`; the caller announces it.
     OldHost,
 }
@@ -938,11 +946,14 @@ impl AgentManager {
             harness_session: resume.as_ref().map(|(_, id)| id.clone()),
             resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
         };
-        // The grants (spec §6): none for `shell` (G-D9), none for a host
+        // The grants (spec §6): none for `shell` (G-D9), none for a provider
+        // the host cannot confine to its own servers (130a), none for a host
         // that cannot bridge, and otherwise everything the caller offered.
         // Written before `start` goes out.
         let outcome = if provider.id == "shell" {
             McpOutcome::Shell
+        } else if provider.mcp == Some(false) {
+            McpOutcome::Unsupported
         } else if !caps.mcp_bridge {
             McpOutcome::OldHost
         } else {
@@ -1582,6 +1593,7 @@ mod tests {
                     kind: if *id == "fake" { "fake" } else { "cli" }.into(),
                     interactions: vec!["terminal".into()],
                     available: *available,
+                    mcp: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -2177,6 +2189,31 @@ mod tests {
         // Token sync (decision 124): nothing deliverable, nothing named.
         assert!(wire.get("provider_credential").is_none(), "{wire}");
         assert_eq!(m.requested_credential(&r.id), None);
+    }
+
+    #[test]
+    fn a_provider_the_host_cannot_confine_gets_no_grants() {
+        // Decision 130a: a host that says a provider cannot have Storm's MCP
+        // (Cursor, Command Code) is believed: no grants, no write vault, and
+        // nothing in `start`. One that does not say keeps the old rule.
+        let (m, _d) = manager();
+        let mut c = caps(&[("cursor", true), ("my-agent", true)]);
+        c.providers[0].mcp = Some(false);
+        let mut rx = online(&m, "hst_A", c);
+        let meta = LaunchMeta {
+            write_vault_id: Some("vlt_A".into()),
+            ..LaunchMeta::default()
+        };
+        let (r, launch, outcome) = launch_meta(&m, Some("cursor"), offered(), meta).unwrap();
+        assert_eq!(outcome, McpOutcome::Unsupported);
+        assert!(m.grants_of(&r.id).unwrap().is_empty());
+        assert_eq!(launch.write_vault_id, None);
+        let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
+        assert!(wire.get("mcp").is_none(), "{wire}");
+
+        let (r, outcome) = launch_with(&m, Some("my-agent"), offered()).unwrap();
+        assert!(matches!(outcome, McpOutcome::Granted(_)), "{outcome:?}");
+        assert!(!m.grants_of(&r.id).unwrap().is_empty());
     }
 
     fn launch_synced(
