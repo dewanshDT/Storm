@@ -22,6 +22,12 @@ pub enum Mcp {
     OpenCode,
     /// A per-session profile in Storm's own `CODEX_HOME` (130b).
     Codex,
+    /// The bridges as a `--plugin-dir` plugin, every other server on Cursor's
+    /// own disabled list (131j).
+    Cursor,
+    /// The workspace's local `mcp.json`: the bridges, and a disabled stub
+    /// under every other server's name (131k).
+    CommandCode,
 }
 
 /// How the opening prompt of a session started from a note is passed.
