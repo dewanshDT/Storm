@@ -33,7 +33,15 @@
 //!   so a plugin Storm cannot inspect (an account-synced one) never loads;
 //!   every listed plugin gets an explicit `enabled`. Which plugins Storm
 //!   turned off is remembered beside the config, so one that drops its hooks
-//!   comes back, and one the account turned off stays off.
+//!   comes back, and one the account turned off stays off;
+//! - **no plugin's remote MCP server** (decision 131i): Codex would sign it
+//!   in on the host, and a remote server reaches a session only through the
+//!   gateway; a plugin's stdio servers load as Codex loads them, unless the
+//!   host's `plugin_mcp` is off;
+//! - **no ChatGPT apps** (131l): `features.apps = false`, as Claude Code's
+//!   strict mode drops claude.ai connectors.
+//!
+//! Each launch returns what the session will not have, by name (131a).
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -42,6 +50,7 @@ use anyhow::{Context, Result};
 use toml::{Table, Value};
 
 use crate::mcp::{McpGrant, private_dir};
+use crate::plugins::{Plan, Skipped};
 use crate::provider::LaunchExtras;
 
 pub const HOME_ENV: &str = "CODEX_HOME";
@@ -77,8 +86,14 @@ fn profile_path(home: &Path, session: &str) -> PathBuf {
 
 /// What every Codex session gains, grants or not: its home, with Storm's
 /// keys written for `workspace`, and the hook that reports the conversation
-/// id by running `exe harness-session`.
-pub fn baseline(home: &Path, workspace: &Path, exe: &Path) -> Result<LaunchExtras> {
+/// id by running `exe harness-session`; and the plan of what the session
+/// gets from plugins and what it will not have (decision 131).
+pub fn baseline(
+    home: &Path,
+    workspace: &Path,
+    exe: &Path,
+    allow_local: bool,
+) -> Result<(LaunchExtras, Plan)> {
     private_dir(home.parent().context("the Codex home has a parent")?)?;
     private_dir(home)?;
     let path = home.join("config.toml");
@@ -93,6 +108,12 @@ pub fn baseline(home: &Path, workspace: &Path, exe: &Path) -> Result<LaunchExtra
         tracing::warn!(path = %path.display(), error = %e, "replacing an unreadable Codex config");
         Table::new()
     });
+    // Names only: the values go with the rest of the key.
+    let own: Vec<String> = table
+        .get("mcp_servers")
+        .and_then(Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
     let mut table = owned_config(table, workspace, exe);
     let off_path = home.join(PLUGINS_OFF);
     let was_off: Vec<String> = std::fs::read(&off_path)
@@ -100,9 +121,9 @@ pub fn baseline(home: &Path, workspace: &Path, exe: &Path) -> Result<LaunchExtra
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
         .unwrap_or_default();
     let off = switch_plugins(&mut table, home, &was_off);
-    if !off.is_empty() {
-        tracing::warn!(plugins = ?off, "Codex plugins with hooks are off in Storm sessions (130f)");
-    }
+    let mut plan = Plan::default();
+    switch_plugin_servers(&mut table, home, allow_local, &mut plan);
+    name_the_rest(&mut plan, &off, &own, home, workspace);
     crate::fsutil::write_atomic(
         &path,
         toml::to_string(&table)?.as_bytes(),
@@ -115,10 +136,112 @@ pub fn baseline(home: &Path, workspace: &Path, exe: &Path) -> Result<LaunchExtra
         crate::fsutil::Access::Private,
     )
     .with_context(|| format!("writing {}", off_path.display()))?;
-    Ok(LaunchExtras {
-        env: vec![(HOME_ENV.into(), home.as_os_str().to_owned())],
-        ..Default::default()
-    })
+    Ok((
+        LaunchExtras {
+            env: vec![(HOME_ENV.into(), home.as_os_str().to_owned())],
+            ..Default::default()
+        },
+        plan,
+    ))
+}
+
+/// 131i: every remote server of an enabled plugin is off; its stdio servers
+/// are on unless `allow_local` is false. Storm owns each plugin server's
+/// `enabled`; a server's other policy keys are kept.
+fn switch_plugin_servers(table: &mut Table, home: &Path, allow_local: bool, plan: &mut Plan) {
+    let plugins = sub_table(table, "plugins");
+    for (id, entry) in plugins.iter_mut() {
+        let Value::Table(entry) = entry else { continue };
+        if id == "_default" || entry.get("enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let name = id.rsplit_once('@').map_or(id.as_str(), |(n, _)| n);
+        let source = format!("Codex plugin {name}");
+        let Some(servers) = installed_servers(home, id) else {
+            plan.skipped.push(Skipped {
+                name: name.into(),
+                source,
+                reason: crate::plugins::UNREADABLE,
+            });
+            entry.insert("enabled".into(), Value::Boolean(false));
+            continue;
+        };
+        let overlay = sub_table(entry, "mcp_servers");
+        for (server, declared) in servers {
+            let remote = declared.as_object().is_none_or(crate::plugins::is_remote);
+            let on = !remote && allow_local;
+            sub_table(overlay, &server).insert("enabled".into(), Value::Boolean(on));
+            let reason = if remote {
+                crate::plugins::REMOTE
+            } else if !allow_local {
+                crate::plugins::OFF
+            } else {
+                plan.native.push(server);
+                continue;
+            };
+            plan.skipped.push(Skipped {
+                name: server,
+                source: source.clone(),
+                reason,
+            });
+        }
+    }
+}
+
+/// The servers every installed version of plugin `id` declares, the first
+/// declaration of a name winning; `None` when one cannot be read.
+fn installed_servers(home: &Path, id: &str) -> Option<Vec<(String, serde_json::Value)>> {
+    let base = plugin_base(home, id)?;
+    let mut out: Vec<(String, serde_json::Value)> = Vec::new();
+    for version in std::fs::read_dir(base).ok()? {
+        for (name, declared) in crate::plugins::declared(&version.ok()?.path())? {
+            if !out.iter().any(|(n, _)| *n == name) {
+                out.push((name, declared));
+            }
+        }
+    }
+    Some(out)
+}
+
+/// 131a: the plugins 130f turned off, the account's own servers this launch
+/// removed, the workspace's `.codex/` servers (never loaded: it is pinned
+/// untrusted) and ChatGPT apps when the home has a ChatGPT login.
+fn name_the_rest(plan: &mut Plan, off: &[String], own: &[String], home: &Path, workspace: &Path) {
+    for id in off {
+        let name = id.rsplit_once('@').map_or(id.as_str(), |(n, _)| n);
+        plan.skipped.push(Skipped {
+            name: name.into(),
+            source: format!("Codex plugin {id}"),
+            reason: crate::plugins::HOOKED,
+        });
+    }
+    for name in own {
+        plan.skipped.push(Skipped {
+            name: name.clone(),
+            source: "your own".into(),
+            reason: crate::plugins::REMOVED,
+        });
+    }
+    let repo = std::fs::read_to_string(workspace.join(".codex").join("config.toml"))
+        .ok()
+        .and_then(|t| t.parse::<Table>().ok());
+    if let Some(Value::Table(servers)) = repo.as_ref().and_then(|t| t.get("mcp_servers")) {
+        for name in servers.keys() {
+            plan.skipped.push(Skipped {
+                name: name.clone(),
+                source: "this workspace's .codex/config.toml".into(),
+                reason: crate::plugins::PROJECT,
+            });
+        }
+    }
+    let auth = crate::plugins::read_json(&home.join("auth.json"));
+    if !auth["tokens"].is_null() {
+        plan.skipped.push(Skipped {
+            name: "ChatGPT apps".into(),
+            source: "your ChatGPT login".into(),
+            reason: crate::plugins::APPS,
+        });
+    }
 }
 
 /// `table` with Storm's keys set (see the module docs).
@@ -130,6 +253,7 @@ pub fn owned_config(mut table: Table, workspace: &Path, exe: &Path) -> Table {
 
     let features = sub_table(&mut table, "features");
     features.insert("daemon_auto_start".into(), Value::Boolean(false));
+    features.insert("apps".into(), Value::Boolean(false));
 
     let tui = sub_table(&mut table, "tui");
     tui.insert(
@@ -189,19 +313,9 @@ pub fn switch_plugins(table: &mut Table, home: &Path, was_off: &[String]) -> Vec
 /// declares hooks: a `hooks` entry beside its manifest, or a `hooks` key in
 /// any manifest Codex might read. Anything Storm cannot read counts as yes.
 fn plugin_may_have_hooks(home: &Path, id: &str) -> bool {
-    let Some((name, marketplace)) = id.rsplit_once('@') else {
+    let Some(base) = plugin_base(home, id) else {
         return true;
     };
-    let segment_ok =
-        |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0']);
-    if !segment_ok(name) || !segment_ok(marketplace) {
-        return true;
-    }
-    let base = home
-        .join("plugins")
-        .join("cache")
-        .join(marketplace)
-        .join(name);
     let Ok(versions) = std::fs::read_dir(&base) else {
         return true;
     };
@@ -214,6 +328,24 @@ fn plugin_may_have_hooks(home: &Path, id: &str) -> bool {
         }
     }
     !any
+}
+
+/// `plugins/cache/<marketplace>/<name>` for `<name>@<marketplace>`, split on
+/// the last `@` as Codex's `PluginId::parse` does; `None` for an id whose
+/// parts could leave the cache.
+fn plugin_base(home: &Path, id: &str) -> Option<PathBuf> {
+    let (name, marketplace) = id.rsplit_once('@')?;
+    let segment_ok =
+        |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0']);
+    if !segment_ok(name) || !segment_ok(marketplace) {
+        return None;
+    }
+    Some(
+        home.join("plugins")
+            .join("cache")
+            .join(marketplace)
+            .join(name),
+    )
 }
 
 fn version_may_have_hooks(root: &Path) -> bool {
@@ -378,7 +510,13 @@ screen_reader_detection_done = true
 "#,
         )
         .unwrap();
-        let extras = baseline(&home, ws.path(), Path::new("/opt/storm/storm-runtime")).unwrap();
+        let (extras, _) = baseline(
+            &home,
+            ws.path(),
+            Path::new("/opt/storm/storm-runtime"),
+            true,
+        )
+        .unwrap();
         assert_eq!(extras.env, [(HOME_ENV.into(), home.as_os_str().to_owned())]);
         let t = read(&home.join("config.toml"));
         assert_eq!(t["model"].as_str(), Some("gpt-6"), "Codex's own key kept");
@@ -391,6 +529,7 @@ screen_reader_detection_done = true
         assert!(t.get("profile").is_none());
         assert_eq!(t["check_for_update_on_startup"].as_bool(), Some(false));
         assert_eq!(t["features"]["daemon_auto_start"].as_bool(), Some(false));
+        assert_eq!(t["features"]["apps"].as_bool(), Some(false));
         let projects = t["projects"].as_table().unwrap();
         assert_eq!(
             projects["/somewhere/else"]["trust_level"].as_str(),
@@ -483,7 +622,7 @@ enabled = true
 "#,
         )
         .unwrap();
-        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        baseline(&home, ws.path(), Path::new("/x"), true).unwrap();
         let t = read(&home.join("config.toml"));
         let p = t["plugins"].as_table().unwrap();
         let on = |id: &str| p[id]["enabled"].as_bool().unwrap();
@@ -520,6 +659,78 @@ enabled = true
 
     /// A plugin Storm turned off comes back once it has no hooks; one the
     /// account turned off does not.
+    /// 131i, 131l, 131a: a plugin's remote server is off and named, its
+    /// stdio server stays on; ChatGPT apps are off; the account's removed
+    /// servers, the workspace's `.codex/` servers, a hooked plugin and the
+    /// ChatGPT login are named.
+    #[test]
+    fn plugin_servers_are_switched_and_the_rest_named() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = home(state.path());
+        install(
+            &home,
+            "slack@m",
+            &[(
+                ".mcp.json",
+                r#"{"mcpServers":{"local":{"command":"x"},"remote":{"type":"http","url":"https://mcp.slack.com/mcp"}}}"#,
+            )],
+        );
+        install(&home, "hooked@m", &[("hooks/hooks.json", "{}")]);
+        std::fs::create_dir_all(ws.path().join(".codex")).unwrap();
+        std::fs::write(
+            ws.path().join(".codex/config.toml"),
+            "[mcp_servers.repo_srv]\ncommand = \"evil\"\n",
+        )
+        .unwrap();
+        std::fs::write(home.join("auth.json"), r#"{"tokens":{"id_token":"x"}}"#).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "[plugins.\"slack@m\"]\nenabled = true\n[plugins.\"slack@m\".mcp_servers.local]\nenabled_tools = [\"a\"]\n[plugins.\"hooked@m\"]\nenabled = true\n[mcp_servers.mine]\ncommand = \"/bin/mine\"\n",
+        )
+        .unwrap();
+        let (_, plan) = baseline(&home, ws.path(), Path::new("/x"), true).unwrap();
+        let t = read(&home.join("config.toml"));
+        let servers = &t["plugins"]["slack@m"]["mcp_servers"];
+        assert_eq!(servers["remote"]["enabled"].as_bool(), Some(false));
+        assert_eq!(servers["local"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            servers["local"]["enabled_tools"][0].as_str(),
+            Some("a"),
+            "kept"
+        );
+        assert_eq!(t["features"]["apps"].as_bool(), Some(false));
+        assert_eq!(plan.native, ["local"]);
+        let named: Vec<_> = plan
+            .skipped
+            .iter()
+            .map(|s| (s.name.as_str(), s.reason))
+            .collect();
+        for want in [
+            ("remote", crate::plugins::REMOTE),
+            ("hooked", crate::plugins::HOOKED),
+            ("mine", crate::plugins::REMOVED),
+            ("repo_srv", crate::plugins::PROJECT),
+            ("ChatGPT apps", crate::plugins::APPS),
+        ] {
+            assert!(named.contains(&want), "{want:?} in {named:?}");
+        }
+        assert!(plan.local.is_empty(), "Codex loads its plugins itself");
+
+        let (_, off) = baseline(&home, ws.path(), Path::new("/x"), false).unwrap();
+        let t = read(&home.join("config.toml"));
+        assert_eq!(
+            t["plugins"]["slack@m"]["mcp_servers"]["local"]["enabled"].as_bool(),
+            Some(false)
+        );
+        assert!(off.native.is_empty());
+        assert!(
+            off.skipped
+                .iter()
+                .any(|s| s.name == "local" && s.reason == crate::plugins::OFF)
+        );
+    }
+
     #[test]
     fn a_plugin_storm_turned_off_comes_back_without_hooks() {
         let state = tempfile::tempdir().unwrap();
@@ -531,14 +742,14 @@ enabled = true
             "[plugins.\"p@m\"]\nenabled = true\n",
         )
         .unwrap();
-        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        baseline(&home, ws.path(), Path::new("/x"), true).unwrap();
         assert_eq!(
             read(&home.join("config.toml"))["plugins"]["p@m"]["enabled"].as_bool(),
             Some(false)
         );
 
         std::fs::remove_dir_all(home.join("plugins/cache/m/p/1.0.0/hooks")).unwrap();
-        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        baseline(&home, ws.path(), Path::new("/x"), true).unwrap();
         assert_eq!(
             read(&home.join("config.toml"))["plugins"]["p@m"]["enabled"].as_bool(),
             Some(true)
@@ -556,7 +767,7 @@ enabled = true
         let home = home(state.path());
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(home.join("config.toml"), "[[[ not toml").unwrap();
-        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        baseline(&home, ws.path(), Path::new("/x"), true).unwrap();
         let t = read(&home.join("config.toml"));
         assert_eq!(t["check_for_update_on_startup"].as_bool(), Some(false));
     }

@@ -50,13 +50,13 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   chosen at launch. It is never offered `delete_note`.
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
-- **Claude Code plugins:** a plugin's local MCP servers run in the session,
-  under the same names Claude Code gives them, unless the host sets
+- **Claude Code and Codex plugins:** a plugin's local MCP servers run in the
+  session, under the same names the agent gives them, unless the host sets
   `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
   [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
   Neither do the MCP servers in your own `~/.claude.json` or a repository's
-  `.mcp.json`. When a session starts, Claude Code shows what Storm skipped and
-  why.
+  `.mcp.json` (or `.codex/config.toml`), nor Codex's ChatGPT apps. When a
+  session starts, the agent shows what Storm skipped and why.
 - **Cursor and Command Code run as terminals only:** no notes, no
   integrations, no write vault, and no Resume yet. Storm gives an agent its
   tools only through a configuration that keeps a repository's own MCP

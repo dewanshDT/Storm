@@ -902,16 +902,23 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
-        if let Err(e) = self.codex_baseline(&provider_id, &dir).map(|extras| {
-            launch.args.extend(extras.args);
-            launch.env.extend(extras.env);
-        }) {
-            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the Codex config");
-            return self.post_start_failure(&id).await;
-        }
-        // A Claude Code session's plugins (decision 131): their local servers
-        // join its `mcp.json`, and everything it will not have is named.
-        let plugin_plan = if !mcp.is_empty()
+        let codex_plan = match self.codex_baseline(&provider_id, &dir) {
+            Ok((extras, plan)) => {
+                launch.args.extend(extras.args);
+                launch.env.extend(extras.env);
+                plan
+            }
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the Codex config");
+                return self.post_start_failure(&id).await;
+            }
+        };
+        // A session's plugins (decision 131): a Claude Code session's local
+        // servers join its `mcp.json` (Codex's are switched in its home,
+        // above), and everything it will not have is named.
+        let plugin_plan = if codex_plan.is_some() {
+            codex_plan
+        } else if !mcp.is_empty()
             && crate::profile::get(&provider_id).and_then(|p| p.mcp)
                 == Some(crate::profile::Mcp::ClaudeCode)
         {
@@ -1285,13 +1292,21 @@ impl Host {
     }
 
     /// What every Codex session gains, grants or not (decision 130b): Storm's
-    /// home, with its own keys written for this workspace.
-    fn codex_baseline(&self, provider: &str, workspace: &Path) -> Result<crate::mcp::LaunchExtras> {
+    /// home, with its own keys written for this workspace, and its plugin
+    /// plan (decision 131i). Nothing for any other provider.
+    fn codex_baseline(
+        &self,
+        provider: &str,
+        workspace: &Path,
+    ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         if crate::profile::get(provider).and_then(|p| p.mcp) != Some(crate::profile::Mcp::Codex) {
             return Ok(Default::default());
         }
         let exe = std::env::current_exe().context("finding this binary for the hook")?;
-        crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe)
+        let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
+        let (extras, plan) =
+            crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe, allow)?;
+        Ok((extras, Some(plan)))
     }
 
     /// What a session's launch gains so the agent's own session id reaches

@@ -14,7 +14,7 @@ scrollback_bytes = 4194304
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
-# A Claude Code session's enabled plugins: their local (stdio) MCP servers
+# A Claude Code or Codex session's enabled plugins: their local (stdio) MCP servers
 # load unless this is "off" (decision 131b). A plugin's remote servers never
 # load on a host; add them as integrations, where Storm keeps the sign-in.
 # plugin_mcp = "allow"

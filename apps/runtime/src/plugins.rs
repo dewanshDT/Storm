@@ -53,19 +53,25 @@ pub struct Skipped {
     pub reason: &'static str,
 }
 
-const REMOTE: &str = "remote: add it in Settings ▸ Integrations";
-const OFF: &str = "plugin servers are off on this host";
+pub(crate) const REMOTE: &str = "remote: add it in Settings ▸ Integrations";
+pub(crate) const OFF: &str = "plugin servers are off on this host";
 const UNRESOLVED: &str = "needs plugin options Storm can't read";
-const UNREADABLE: &str = "its plugin's MCP config could not be read";
+pub(crate) const UNREADABLE: &str = "its plugin's MCP config could not be read";
 const UNLISTED: &str = "Storm couldn't list this host's plugins";
 const OWN: &str = "your own MCP servers don't load in Storm sessions";
-const PROJECT: &str = "project MCP servers don't load in Storm sessions";
+pub(crate) const PROJECT: &str = "project MCP servers don't load in Storm sessions";
+pub(crate) const HOOKED: &str = "turned off: it has hooks, or Storm couldn't read it";
+pub(crate) const REMOVED: &str =
+    "removed from Storm's Codex home: your own MCP servers don't load in Storm sessions";
+pub(crate) const APPS: &str = "ChatGPT apps don't load in Storm sessions";
 
 /// What a session gets from its plugins, and what it does not.
 #[derive(Debug, Default, PartialEq)]
 pub struct Plan {
     /// `mcp.json` entries, by server key.
     pub local: Map<String, Value>,
+    /// Plugin servers the agent loads itself (Codex), by name.
+    pub native: Vec<String>,
     pub skipped: Vec<Skipped>,
 }
 
@@ -75,7 +81,7 @@ impl Plan {
     pub fn report(&self) -> Value {
         json!({
             "mcp_skipped": self.skipped,
-            "mcp_plugin_local": self.local.keys().collect::<Vec<_>>(),
+            "mcp_plugin_local": self.local.keys().chain(&self.native).collect::<Vec<_>>(),
         })
     }
 
@@ -303,10 +309,23 @@ fn plugin(plan: &mut Plan, p: &Listed, allow_local: bool, data_root: &Path, work
     }
 }
 
+/// Where a plugin's manifest may be, Claude Code's first (Codex also reads
+/// Claude- and Cursor-format plugins).
+const MANIFESTS: [&str; 4] = [
+    ".claude-plugin/plugin.json",
+    ".codex-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+    "plugin.json",
+];
+
 /// The servers a plugin declares: its `.mcp.json`, or `mcpServers` in its
 /// manifest — an object, a path to such a file, or a list of either.
-fn declared(root: &Path) -> Option<Vec<(String, Value)>> {
-    let manifest = read_json(&root.join(".claude-plugin/plugin.json"));
+pub(crate) fn declared(root: &Path) -> Option<Vec<(String, Value)>> {
+    let manifest = MANIFESTS
+        .iter()
+        .map(|m| read_json(&root.join(m)))
+        .find(|v| !v.is_null())
+        .unwrap_or(Value::Null);
     let mut out = Vec::new();
     let mut sources = Vec::new();
     match manifest.get("mcpServers") {
@@ -359,7 +378,7 @@ fn unwrap_servers(v: Value) -> Option<Vec<(String, Value)>> {
     Some(map.into_iter().collect())
 }
 
-fn is_remote(entry: &Map<String, Value>) -> bool {
+pub(crate) fn is_remote(entry: &Map<String, Value>) -> bool {
     entry.contains_key("url")
         || matches!(
             entry.get("type").and_then(Value::as_str),
@@ -423,14 +442,14 @@ fn data_dir_name(id: &str) -> String {
         .collect()
 }
 
-fn read_json(path: &Path) -> Value {
+pub(crate) fn read_json(path: &Path) -> Value {
     std::fs::read(path)
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or(Value::Null)
 }
 
-fn server_names(v: &Value) -> Vec<String> {
+pub(crate) fn server_names(v: &Value) -> Vec<String> {
     v.get("mcpServers")
         .and_then(Value::as_object)
         .map(|m| m.keys().cloned().collect())

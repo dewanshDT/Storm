@@ -621,7 +621,13 @@ Specification*; the slices are decisions 81 and 81a onward):
   plugin whose installed versions have a `hooks` entry or manifest key — or
   that Storm cannot read — is `enabled = false`, and `plugins._default` is
   off so an account-synced plugin never loads; `storm-plugins-off.json`
-  remembers what Storm turned off. `--no-daemon` always: a shared daemon holds a
+  remembers what Storm turned off. **No plugin's remote MCP server and no
+  ChatGPT apps** (131i, 131l): each remote server of an enabled plugin gets
+  `[plugins."<id>".mcp_servers."<name>"] enabled = false` (Codex would sign
+  it in on the host), its stdio servers follow `plugin_mcp`, and
+  `features.apps = false`; what was turned off, the account's removed
+  `mcp_servers` and the workspace's `.codex/` servers are named in the
+  session's notice, which Codex shows at the first message. `--no-daemon` always: a shared daemon holds a
   conversation's writer lock. **No Codex sandbox** (130c): it needs user
   namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
   forbids, and relaxing the unit would weaken every agent.
