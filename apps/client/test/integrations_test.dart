@@ -569,6 +569,7 @@ void main() {
         'capabilities': {
           'providers': [
             {'id': 'claude-code', 'kind': 'cli', 'available': true},
+            {'id': 'cursor', 'kind': 'cli', 'available': true, 'mcp': false},
             {'id': 'shell', 'kind': 'cli', 'available': true},
           ],
           'workspaces': ['storm'],
@@ -694,6 +695,40 @@ void main() {
       expect(find.byKey(const Key('launcher-writes')), findsNothing);
       expect(find.textContaining('A shell has no access'), findsOneWidget);
       expect(find.textContaining('can use your integrations'), findsNothing);
+    });
+
+    testWidgets('an agent the host cannot confine gets no write field and '
+        'says why (decision 130a)', (tester) async {
+      final (client, seen) = agentServer();
+      await tester.pumpWidget(launcher(client));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('launcher-agent')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cursor').last);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('launcher-writes')), findsNothing);
+      expect(
+        find.textContaining('Cursor runs without access to your vaults'),
+        findsOneWidget,
+      );
+      expect(find.textContaining('can use your integrations'), findsNothing);
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      final launch =
+          jsonDecode(seen.firstWhere((r) => r.method == 'POST').body) as Map;
+      expect(launch['provider'], 'cursor');
+      expect(launch.containsKey('write_vault_id'), isFalse);
+    });
+
+    test('a provider says whether it reaches Storm (decision 130a)', () {
+      ProviderCap cap(Map<String, dynamic> j) =>
+          ProviderCap.fromJson({'kind': 'cli', 'available': true, ...j});
+      expect(cap({'id': 'claude-code', 'mcp': true}).reachesStorm, isTrue);
+      expect(cap({'id': 'cursor', 'mcp': false}).reachesStorm, isFalse);
+      // An older host says nothing: only shell is left out, as before.
+      expect(cap({'id': 'claude-code'}).reachesStorm, isTrue);
+      expect(cap({'id': 'shell'}).reachesStorm, isFalse);
+      expect(providerLabel('command-code'), 'Command Code');
     });
 
     test('an old host is announced on the launch answer', () {

@@ -182,13 +182,18 @@ struct Events {
     ended: Mutex<Option<SessionEnd>>,
     wake: Notify,
     title: Mutex<TitleObserver>,
+    /// The agent's terminal title names its conversation (decision 130);
+    /// otherwise the session keeps its launch name.
+    titles: bool,
     /// The agent's own session id, as last reported (decision 89).
     harness: Mutex<Option<String>>,
 }
 
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
-        self.title.lock().unwrap().feed(bytes);
+        if self.titles {
+            self.title.lock().unwrap().feed(bytes);
+        }
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
     }
@@ -343,12 +348,19 @@ impl Host {
             .providers
             .iter()
             .map(|p| {
-                json!({
+                let mut cap = json!({
                     "id": p.id().as_str(),
                     "kind": p.kind().as_str(),
                     "interactions": p.interactions().iter().map(|i| i.as_str()).collect::<Vec<_>>(),
                     "available": p.available() == Availability::Available,
-                })
+                });
+                // Whether a session can have Storm's MCP (decision 130a). Said
+                // only for a built-in: the server keeps its older behaviour
+                // for an id this host knows nothing about.
+                if let Some(mcp) = crate::profile::supports_mcp(p.id().as_str()) {
+                    cap["mcp"] = json!(mcp);
+                }
+                cap
             })
             .collect();
         json!({
@@ -379,7 +391,7 @@ impl Host {
                 .providers
                 .iter()
                 .map(|p| p.id().as_str())
-                .filter(|id| crate::harness::PROVIDERS.contains(id))
+                .filter(|id| crate::profile::resumable(id))
                 .collect::<Vec<_>>(),
             // It pulls a synced login for a session whose `start` names one,
             // and fails the start if it cannot (AM69).
@@ -901,6 +913,7 @@ impl Host {
             ended: Mutex::new(None),
             wake: Notify::new(),
             title: Mutex::new(TitleObserver::default()),
+            titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             harness: Mutex::new(None),
         });
         let pins = synced.as_ref().map(|(pins, _)| pins);
@@ -1208,7 +1221,7 @@ impl Host {
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<crate::mcp::LaunchExtras> {
-        if !crate::harness::PROVIDERS.contains(&provider) {
+        if !crate::profile::resumable(provider) {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
@@ -1887,6 +1900,63 @@ mod tests {
         assert_eq!(hello["sessions"][0]["harness_session"], cleared);
         assert_eq!(hello["resume"], json!(["claude-code", "opencode"]));
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 130a: the hello says which providers can have Storm's MCP —
+    /// for built-ins only, whatever command runs them — and only those with
+    /// conversations are offered for Resume.
+    #[test]
+    fn the_hello_says_which_providers_can_have_mcp() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: "https://127.0.0.1:1".into(),
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let mut toml = format!(
+            "workspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for id in [
+            "claude-code",
+            "opencode",
+            "cursor",
+            "command-code",
+            "shell",
+            "my-agent",
+        ] {
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = \"/bin/true\"\n"
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        let caps = host.capabilities();
+        let mcp: Vec<(String, serde_json::Value)> = caps["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["id"].as_str().unwrap().to_string(), p["mcp"].clone()))
+            .collect();
+        assert_eq!(
+            mcp,
+            [
+                ("claude-code".to_string(), json!(true)),
+                ("opencode".to_string(), json!(true)),
+                ("cursor".to_string(), json!(false)),
+                ("command-code".to_string(), json!(false)),
+                ("shell".to_string(), json!(false)),
+                ("my-agent".to_string(), serde_json::Value::Null),
+            ]
+        );
+        assert_eq!(caps["resume"], json!(["claude-code", "opencode"]));
     }
 
     /// A resume names the conversation and skips the opening prompt; an id

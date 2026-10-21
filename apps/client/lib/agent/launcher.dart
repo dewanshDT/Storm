@@ -194,7 +194,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         cols: (size.width / 9).clamp(40, 240).floor(),
         rows: (size.height / 20).clamp(12, 80).floor(),
         context: _context,
-        writeVaultId: writes && _provider != 'shell' ? writeVault : null,
+        writeVaultId: writes && _reachesStorm ? writeVault : null,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -213,11 +213,21 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     }
   }
 
+  /// The chosen agent's sessions can read your vaults and use your
+  /// integrations (decision 130a). An older host says nothing, so only
+  /// `shell` is left out.
+  bool get _reachesStorm =>
+      _host?.providers
+          .where((p) => p.id == _provider)
+          .firstOrNull
+          ?.reachesStorm ??
+      _provider != 'shell';
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final host = _host;
-    final shell = _provider == 'shell';
+    final shell = !_reachesStorm;
     final allowed = ref.watch(agentWritesSettingProvider).value == true;
     final vaults = [
       for (final v in ref.watch(vaultsProvider).value ?? const <VaultInfo>[])
@@ -375,9 +385,14 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           borderRadius: BorderRadius.circular(t.rControl),
         ),
         child: Text(
-          shell
+          _provider == 'shell'
               ? 'Network: inherits $hostName’s policy. A shell has no access to '
                     'your vaults or integrations.'
+              : shell
+              ? 'Network: inherits $hostName’s policy. '
+                    '${providerLabel(_provider ?? '')} runs without access to your '
+                    'vaults or integrations: Storm can’t keep a repository’s '
+                    'own MCP servers out of it.'
               : integrations.isEmpty
               ? 'Network: inherits $hostName’s policy. This session can use '
                     'your integrations and read your vaults, with that network '

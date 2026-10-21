@@ -112,19 +112,26 @@ impl CliProvider {
         self
     }
 
-    /// Claude Code, the default provider. The permission mode is always passed:
-    /// gate Q6 found the operator's own CLI settings starting it in another
-    /// mode. Never `--dangerously-skip-permissions`.
-    pub fn claude_code() -> Self {
+    /// A built-in agent as its profile launches it (decision 130). `shell`
+    /// is the platform's own shell instead.
+    pub fn built_in(profile: &crate::profile::Profile) -> Self {
+        if profile.id == "shell" {
+            return Self::shell();
+        }
         Self::new(
-            id("claude-code"),
-            "claude",
-            ["--permission-mode", "default"],
+            id(profile.id),
+            profile.command,
+            profile.args.iter().copied(),
         )
     }
 
+    /// Claude Code, the default provider.
+    pub fn claude_code() -> Self {
+        Self::built_in(crate::profile::get("claude-code").expect("a built-in"))
+    }
+
     pub fn opencode() -> Self {
-        Self::new(id("opencode"), "opencode", Vec::<OsString>::new())
+        Self::built_in(crate::profile::get("opencode").expect("a built-in"))
     }
 
     /// A login shell in the workspace, as the runtime's own user. Not the

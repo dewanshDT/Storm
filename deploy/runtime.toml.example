@@ -14,8 +14,12 @@ scrollback_bytes = 4194304
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
-# Omit [[providers]] entirely to offer the three built-ins: claude-code
-# (the default), opencode and shell. To choose, list them:
+# Omit [[providers]] entirely to offer every built-in (decision 130):
+# claude-code (the default), opencode, cursor, command-code and shell. One
+# that is not installed is offered as not installed. claude-code and
+# opencode get your integrations and Resume; cursor (`cursor-agent`) and
+# command-code are terminals only: Storm cannot keep a repository's own MCP
+# servers out of them, so they get no integrations. To choose, list them:
 #
 # [[providers]]
 # id = "claude-code"
