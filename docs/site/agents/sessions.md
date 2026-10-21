@@ -1,11 +1,11 @@
 ---
 title: Agent sessions
-description: Run Claude Code, OpenCode, Cursor, Command Code or a shell on your own machines, from any of your devices.
+description: Run Claude Code, OpenCode, Codex, Cursor, Command Code or a shell on your own machines, from any of your devices.
 ---
 
 A **session** is one agent running in a workspace on a
-[Runtime Host](/docs/agents/hosts/): Claude Code, OpenCode, Cursor, Command
-Code or a shell. You
+[Runtime Host](/docs/agents/hosts/): Claude Code, OpenCode, Codex, Cursor,
+Command Code or a shell. You
 start it from Storm and drive its terminal from any of your devices — a
 session started on the laptop can be picked up on the phone.
 
@@ -18,7 +18,7 @@ launcher asks for:
 |---|---|
 | **Host** | Which Runtime Host runs it. |
 | **Workspace** | A folder on that host — usually a project checkout. |
-| **Agent** | Claude Code (the default), OpenCode, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
+| **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 
@@ -40,7 +40,7 @@ agent wrote says so on its version line, linking back to the session.
 
 ## When it ends
 
-An ended Claude Code or OpenCode session can be **resumed**: it reopens the
+An ended Claude Code, OpenCode or Codex session can be **resumed**: it reopens the
 agent's own conversation on the same host and workspace. **Run again** starts
 a fresh session with the same choices; **Dismiss** clears it from the list.
 

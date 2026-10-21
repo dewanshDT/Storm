@@ -20,6 +20,8 @@ pub enum Mcp {
     ClaudeCode,
     /// A session `XDG_CONFIG_HOME` with `"<slug>_*": "ask"` (AM32, AM66).
     OpenCode,
+    /// A per-session profile in Storm's own `CODEX_HOME` (130b).
+    Codex,
 }
 
 /// How the opening prompt of a session started from a note is passed.
@@ -60,7 +62,7 @@ pub struct Profile {
 
 /// The built-ins, in the order a host offers them when `runtime.toml` lists
 /// none.
-pub const BUILT_IN: [Profile; 5] = [
+pub const BUILT_IN: [Profile; 6] = [
     Profile {
         id: "claude-code",
         command: "claude",
@@ -79,6 +81,30 @@ pub const BUILT_IN: [Profile; 5] = [
         mcp: Some(Mcp::OpenCode),
         prompt: Some(Prompt::Flag("--prompt")),
         resume: Some(IdShape::OpenCode),
+        titles: true,
+    },
+    Profile {
+        id: "codex",
+        command: "codex",
+        // A session owns its process: 0.163 otherwise attaches to a shared
+        // daemon, which holds a conversation's writer lock. No Codex
+        // sandbox: it needs user namespaces, which the Runtime Host's unit
+        // forbids (`RestrictNamespaces=true`), and the host's account is the
+        // boundary for every agent (130c). Approvals stay on, and gateway
+        // tools always ask (`codex.rs`). The hook bypass reaches only
+        // Storm's own `CODEX_HOME`, whose only hook is Storm's; an untrusted
+        // workspace's hooks never load (130b).
+        args: &[
+            "--no-daemon",
+            "--sandbox",
+            "danger-full-access",
+            "--ask-for-approval",
+            "on-request",
+            "--dangerously-bypass-hook-trust",
+        ],
+        mcp: Some(Mcp::Codex),
+        prompt: Some(Prompt::Positional),
+        resume: Some(IdShape::Uuid),
         titles: true,
     },
     Profile {

@@ -62,7 +62,20 @@ sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```sh
 sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
+sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
+  codex login --device-auth
 ```
+
+**Codex** keeps its login and its conversations in Storm's own Codex home,
+`agents/codex` under the host's state directory, not in `~/.codex`: Storm
+writes the settings there that keep each session to its own servers, so log
+it in with `CODEX_HOME` set as above (or `codex login --with-api-key`). Each
+launch opens on Codex's *Folder access* screen: press Enter for **Open
+restricted**. That keeps a repository's own `.codex/` settings, hooks and MCP
+servers out of the session. Codex sessions run **without Codex's own
+sandbox**: it needs user namespaces, which this unit forbids, so the
+`storm-runtime` account is the boundary, as it is for every agent. Codex
+still asks before the commands it is unsure of and before every Storm tool.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
 [Claude login sync](/docs/agents/claude-login/) (optional, for your own

@@ -522,7 +522,14 @@ mod tests {
             .collect();
         assert_eq!(
             defaults,
-            ["claude-code", "opencode", "cursor", "command-code", "shell"]
+            [
+                "claude-code",
+                "opencode",
+                "codex",
+                "cursor",
+                "command-code",
+                "shell"
+            ]
         );
         assert!(
             toml::from_str::<RuntimeConfig>("bogus = 1").is_err(),

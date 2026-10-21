@@ -287,6 +287,7 @@ impl Host {
         // Every session directory belongs to a session that died with the
         // previous process: its handle is gone, so its bridge config is too.
         let _ = std::fs::remove_dir_all(state_dir.join(crate::mcp::SESSIONS_DIR));
+        crate::codex::forget_all(&crate::codex::home(state_dir));
         // Every session the table lists died with the previous process.
         let died = read_table(state_dir).sessions;
         if !died.is_empty() {
@@ -898,6 +899,13 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
+        if let Err(e) = self.codex_baseline(&provider_id, &dir).map(|extras| {
+            launch.args.extend(extras.args);
+            launch.env.extend(extras.env);
+        }) {
+            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the Codex config");
+            return self.post_start_failure(&id).await;
+        }
         match self.mcp_launch(&id, &provider_id, &mcp) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
@@ -1196,19 +1204,50 @@ impl Host {
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the bridge")?;
-        let extras = crate::mcp::write_provider_config(
-            provider,
-            &crate::mcp::session_dir(&self.state_dir, session),
-            grants,
-            &handle,
-            &self.socket_address(),
-            &exe,
-            self.opencode_settings.as_ref(),
-        )?;
+        let extras = if crate::profile::get(provider).and_then(|p| p.mcp)
+            == Some(crate::profile::Mcp::Codex)
+        {
+            let grants: Vec<_> = grants
+                .iter()
+                .filter(|g| crate::mcp::slug_ok(&g.slug))
+                .collect();
+            if grants.is_empty() {
+                Default::default()
+            } else {
+                crate::codex::write_profile(
+                    &crate::codex::home(&self.state_dir),
+                    session,
+                    &grants,
+                    &handle,
+                    &self.socket_address(),
+                    &exe,
+                )?
+            }
+        } else {
+            crate::mcp::write_provider_config(
+                provider,
+                &crate::mcp::session_dir(&self.state_dir, session),
+                grants,
+                &handle,
+                &self.socket_address(),
+                &exe,
+                self.opencode_settings.as_ref(),
+            )?
+        };
         if extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
         Ok(extras)
+    }
+
+    /// What every Codex session gains, grants or not (decision 130b): Storm's
+    /// home, with its own keys written for this workspace.
+    fn codex_baseline(&self, provider: &str, workspace: &Path) -> Result<crate::mcp::LaunchExtras> {
+        if crate::profile::get(provider).and_then(|p| p.mcp) != Some(crate::profile::Mcp::Codex) {
+            return Ok(Default::default());
+        }
+        let exe = std::env::current_exe().context("finding this binary for the hook")?;
+        crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe)
     }
 
     /// What a session's launch gains so the agent's own session id reaches
@@ -1366,6 +1405,7 @@ impl Host {
             .unwrap()
             .retain(|(s, _), _| s != session);
         let _ = std::fs::remove_dir_all(crate::mcp::session_dir(&self.state_dir, session));
+        crate::codex::forget(&crate::codex::home(&self.state_dir), session);
     }
 
     /// `run/mcp.sock`, in a `0700` directory (a named pipe on Windows,
@@ -1786,7 +1826,7 @@ mod tests {
             "workspace_roots = [{:?}]\n",
             roots.path().display().to_string()
         );
-        for id in ["claude-code", "opencode"] {
+        for id in ["claude-code", "opencode", "codex"] {
             toml.push_str(&format!(
                 "[[providers]]\nid = {id:?}\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n"
             ));
@@ -1898,7 +1938,7 @@ mod tests {
             .map(|(_, b)| b.clone())
             .unwrap();
         assert_eq!(hello["sessions"][0]["harness_session"], cleared);
-        assert_eq!(hello["resume"], json!(["claude-code", "opencode"]));
+        assert_eq!(hello["resume"], json!(["claude-code", "opencode", "codex"]));
         host.shutdown(Duration::from_millis(200)).await;
     }
 
@@ -2009,6 +2049,105 @@ mod tests {
                 .iter()
                 .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
         );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 130b: a Codex session runs in Storm's own home, with its
+    /// servers in its own profile that asks for each tool, the prompt last,
+    /// and the profile gone when the session ends; a resume names the
+    /// conversation and has no prompt.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_codex_session_gets_its_own_profile_in_storms_home() {
+        let (host, seen, state, _roots) =
+            harness_host(r#"echo "ARGS $0 $*"; echo "HOME=$CODEX_HOME"; exec sleep 1000"#).await;
+        let output = |session: &str| -> String {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with(&format!("/{session}/terminal/output")))
+                .map(|(_, b)| {
+                    String::from_utf8_lossy(
+                        &BASE64
+                            .decode(b["data"].as_str().unwrap().as_bytes())
+                            .unwrap(),
+                    )
+                    .into_owned()
+                })
+                .collect()
+        };
+        let home = crate::codex::home(state.path());
+        let mut start = harness_start("ags_CDX", "codex", None, true);
+        if let Command::Start { mcp, .. } = &mut start {
+            *mcp = vec![
+                crate::mcp::McpGrant {
+                    id: "mcc_storm".into(),
+                    slug: "storm".into(),
+                },
+                crate::mcp::McpGrant {
+                    id: "mcc_bad".into(),
+                    slug: "Bad Slug".into(),
+                },
+            ];
+        }
+        host.clone().handle(start).await;
+        wait_for("the arguments", || output("ags_cdx").contains("HOME=")).await;
+        let out = output("ags_cdx");
+        assert!(out.contains("-p storm-ags_CDX"), "{out}");
+        assert!(
+            out.contains(&format!("-p storm-ags_CDX {}", crate::mcp::OPENING_PROMPT)),
+            "the prompt comes last: {out}"
+        );
+        assert!(out.contains(&format!("HOME={}", home.display())), "{out}");
+        let profile: toml::Table = std::fs::read_to_string(home.join("storm-ags_CDX.config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let servers = profile["mcp_servers"].as_table().unwrap();
+        assert_eq!(
+            servers.keys().collect::<Vec<_>>(),
+            ["storm"],
+            "a bad slug is dropped"
+        );
+        assert_eq!(
+            servers["storm"]["default_tools_approval_mode"].as_str(),
+            Some("prompt")
+        );
+        let config: toml::Table = std::fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(config.get("mcp_servers").is_none());
+        assert!(
+            config["projects"]
+                .as_table()
+                .unwrap()
+                .values()
+                .all(|p| p["trust_level"].as_str() == Some("untrusted"))
+        );
+
+        host.clone()
+            .handle(Command::End {
+                session: "ags_CDX".into(),
+            })
+            .await;
+        wait_for("the profile to go", || {
+            !home.join("storm-ags_CDX.config.toml").exists()
+        })
+        .await;
+
+        let id = "01a15d7b-580b-7e12-87d8-0ba9ab803093";
+        host.clone()
+            .handle(harness_start("ags_CDR", "codex", Some(id), true))
+            .await;
+        wait_for("the resume", || output("ags_cdr").contains("HOME=")).await;
+        let out = output("ags_cdr");
+        assert!(out.contains(&format!("resume {id}")), "{out}");
+        assert!(!out.contains(crate::mcp::OPENING_PROMPT), "{out}");
+        wait_for("the resumed id", || {
+            harness_posts(&seen, "ags_cdr").contains(&id.to_string())
+        })
+        .await;
         host.shutdown(Duration::from_millis(200)).await;
     }
 

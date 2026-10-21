@@ -64,6 +64,7 @@
 pub mod bridge;
 pub mod cli;
 pub mod client;
+pub mod codex;
 pub mod config;
 pub mod connection;
 pub mod credential;
