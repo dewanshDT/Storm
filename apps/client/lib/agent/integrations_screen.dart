@@ -66,6 +66,7 @@ class IntegrationsScreen extends ConsumerStatefulWidget {
 class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   List<Integration>? _items;
   List<AgentHost>? _hosts;
+  List<PluginSuggestion> _suggestions = const [];
   String? _error;
   bool _loading = false;
 
@@ -113,6 +114,11 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     try {
       final items = await api.list();
       if (mounted) setState(() => _items = items);
+      // Quietly: suggestions are a convenience, and an older server has none.
+      try {
+        final suggestions = await api.suggestions();
+        if (mounted) setState(() => _suggestions = suggestions);
+      } catch (_) {}
     } catch (e) {
       if (mounted) setState(() => _error = describeFailure(e));
     } finally {
@@ -204,6 +210,38 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
       }
     });
   }
+
+  /// Adds a plugin's remote server (131g): the add dialog, filled in from
+  /// the suggestion; it keeps its plugin origin and the hosts that reported
+  /// it.
+  Future<void> _addSuggestion(PluginSuggestion s) async {
+    final draft = await showDialog<_Draft>(
+      context: context,
+      builder: (_) => _AddDialog(
+        oauthSupported: ref.read(oauthSupportedProvider),
+        suggestion: s,
+      ),
+    );
+    if (draft == null || !mounted) return;
+    await _with((api) async {
+      final created = await api.create(
+        displayName: draft.name,
+        url: draft.url,
+        authKind: draft.kind,
+        header: draft.header,
+        value: draft.value,
+        suggestion: s,
+      );
+      if (draft.kind == 'oauth') {
+        await _signInOrAskForApp(api, created.id, created.displayName);
+      } else {
+        _reportCheck(await api.test(created.id));
+      }
+    });
+  }
+
+  Future<void> _dismissSuggestion(PluginSuggestion s) =>
+      _with((api) => api.dismissSuggestion(s));
 
   Future<IntegrationCheck> _signIn(
     IntegrationsApi api,
@@ -379,8 +417,111 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
               onPressed: _loading ? null : _add,
             ),
           ),
+          if (_suggestions.isNotEmpty) ...[
+            GroupLabel('From your plugins', top: context.tokens.sp * 1.5),
+            const SettingsNote(
+              "Your agents' plugins use these servers. A session reaches one "
+              'only once it is an integration.',
+              small: true,
+            ),
+            SizedBox(height: context.tokens.sp * 0.5),
+            for (final s in _suggestions)
+              _SuggestionTile(
+                suggestion: s,
+                hosts: [for (final h in s.hosts) names[h] ?? h],
+                busy: _loading,
+                onAdd: () => _addSuggestion(s),
+                onDismiss: () => _dismissSuggestion(s),
+              ),
+          ],
         ],
       ],
+    );
+  }
+}
+
+/// A plugin's remote server, offered as an integration (131g).
+class _SuggestionTile extends StatelessWidget {
+  const _SuggestionTile({
+    required this.suggestion,
+    required this.hosts,
+    required this.busy,
+    required this.onAdd,
+    required this.onDismiss,
+  });
+
+  final PluginSuggestion suggestion;
+
+  /// The reporting hosts, by name.
+  final List<String> hosts;
+  final bool busy;
+  final VoidCallback onAdd;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = suggestion;
+    final from = [
+      'Plugin ${s.plugin}',
+      if (hosts.isNotEmpty) 'on ${hosts.join(', ')}',
+    ].join(' ');
+    return Padding(
+      key: Key('suggestion-${s.plugin}-${s.server}'),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  s.displayName,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize,
+                    fontWeight: FontWeight.w500,
+                    color: t.text,
+                  ),
+                ),
+                Text(
+                  s.templated ? 'Needs its address: ${s.url}' : s.url,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: t.text3,
+                  ),
+                ),
+                SettingsNote(from, small: true),
+                if (s.vendorClient)
+                  const SettingsNote(
+                    "This plugin's own sign-in is registered to its vendor's "
+                    'app; Storm signs in with its own registration or yours.',
+                    small: true,
+                  ),
+              ],
+            ),
+          ),
+          RowActions(
+            children: [
+              TextAction(
+                key: Key('add-suggestion-${s.plugin}-${s.server}'),
+                label: 'Add',
+                accent: true,
+                onTap: busy ? null : onAdd,
+              ),
+              TextAction(
+                key: Key('dismiss-suggestion-${s.plugin}-${s.server}'),
+                label: 'Dismiss',
+                onTap: busy ? null : onDismiss,
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -644,9 +785,12 @@ class _Draft {
 }
 
 class _AddDialog extends StatefulWidget {
-  const _AddDialog({required this.oauthSupported});
+  const _AddDialog({required this.oauthSupported, this.suggestion});
 
   final bool oauthSupported;
+
+  /// Fills the dialog in from a plugin's server (131g).
+  final PluginSuggestion? suggestion;
 
   @override
   State<_AddDialog> createState() => _AddDialogState();
@@ -688,11 +832,23 @@ bool isLanHttp(String url) {
 }
 
 class _AddDialogState extends State<_AddDialog> {
-  final _name = TextEditingController();
-  final _url = TextEditingController();
-  final _header = TextEditingController(text: 'Authorization');
+  late final _name = TextEditingController(
+    text: widget.suggestion?.displayName,
+  );
+  // A templated address is the owner's to give: the template is shown, not
+  // filled in.
+  late final _url = TextEditingController(
+    text: widget.suggestion?.templated == false ? widget.suggestion!.url : '',
+  );
+  late final _header = TextEditingController(
+    text: widget.suggestion?.tokenHeader ?? 'Authorization',
+  );
   final _token = TextEditingController();
-  late String _kind = widget.oauthSupported ? 'oauth' : 'static';
+  late String _kind = widget.suggestion?.tokenHeader != null
+      ? 'static'
+      : widget.oauthSupported
+      ? 'oauth'
+      : 'static';
   String? _problem;
 
   @override
@@ -752,9 +908,14 @@ class _AddDialogState extends State<_AddDialog> {
               key: const Key('integration-url'),
               controller: _url,
               keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'MCP server address',
                 hintText: 'https://mcp.notion.com/mcp',
+                helperText: widget.suggestion?.templated == true
+                    ? 'The plugin builds it from its host: '
+                          '${widget.suggestion!.url}'
+                    : null,
+                helperMaxLines: 3,
               ),
             ),
             // Shown as soon as the address is plain http on the LAN, before

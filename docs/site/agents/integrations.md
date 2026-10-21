@@ -23,6 +23,17 @@ service's **MCP server address**, then choose how Storm signs in:
   GitHub, use a fine-grained token.
 - **No sign-in** — for public servers that need no credential.
 
+### From your plugins
+
+When your agents' plugins use remote MCP servers — the Slack plugin, for
+one — they appear under **From your plugins**, with the plugin and the hosts
+that use it. A session reaches such a server only once it is an integration:
+**Add** fills in the name and address (asking for the address when the
+plugin builds it from its host's settings), keeps its tools under the
+plugin's own names in Claude Code, and starts it on the hosts that reported
+it. **Dismiss** hides it. Hosts report only a server's address and, at most,
+the *name* of a header it needs — never a value.
+
 ### Services that need your own app
 
 Most services let Storm register itself when you sign in. Some, such as

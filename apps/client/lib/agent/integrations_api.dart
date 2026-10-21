@@ -206,6 +206,70 @@ class OwnClient {
   };
 }
 
+/// A remote MCP server one of your agents' plugins declares (131g), as the
+/// server suggests it. Nothing in it is a secret.
+class PluginSuggestion {
+  const PluginSuggestion({
+    required this.plugin,
+    required this.server,
+    required this.url,
+    this.templated = false,
+    this.authHint,
+    this.agents = const [],
+    this.hosts = const [],
+  });
+
+  final String plugin;
+  final String server;
+  final String url;
+
+  /// The URL needs a value from the host's environment: you give the address.
+  final bool templated;
+
+  /// `header:<Name>`, or `vendor_client`.
+  final String? authHint;
+  final List<String> agents;
+  final List<String> hosts;
+
+  factory PluginSuggestion.fromJson(Map<String, dynamic> j) => PluginSuggestion(
+    plugin: j['plugin'] as String,
+    server: j['server'] as String,
+    url: j['url'] as String,
+    templated: j['templated'] as bool? ?? false,
+    authHint: j['auth_hint'] as String?,
+    agents: [for (final a in j['agents'] as List? ?? const []) '$a'],
+    hosts: [for (final h in j['hosts'] as List? ?? const []) '$h'],
+  );
+
+  /// The header a token goes in, when the plugin fills one from the host's
+  /// environment.
+  String? get tokenHeader => authHint != null && authHint!.startsWith('header:')
+      ? authHint!.substring('header:'.length)
+      : null;
+
+  /// The plugin carries its vendor's own sign-in app, which Storm does not
+  /// use.
+  bool get vendorClient => authHint == 'vendor_client';
+
+  /// The server's name, in words: `google-drive` is "Google Drive".
+  String get displayName => server
+      .split(RegExp(r'[-_.\s]+'))
+      .where((w) => w.isNotEmpty)
+      .map((w) => w[0].toUpperCase() + w.substring(1))
+      .join(' ');
+
+  /// The server's name as a slug, or null when nothing of it is left.
+  String? get slug {
+    final s = server
+        .toLowerCase()
+        .replaceAll(RegExp('[^a-z0-9-]+'), '-')
+        .replaceAll(RegExp('-+'), '-')
+        .replaceAll(RegExp(r'^-|-$'), '');
+    if (s.isEmpty || s == 'storm') return null;
+    return s.length > 32 ? s.substring(0, 32).replaceAll(RegExp(r'-$'), '') : s;
+  }
+}
+
 /// A refusal from `/v1/integrations/*`, with its stable code (spec §12).
 class IntegrationRefusal extends StormApiException {
   IntegrationRefusal(super.statusCode, super.message, this.code);
@@ -266,12 +330,16 @@ class IntegrationsApi {
 
   /// A `static` integration carries its header and value; `oauth` and `none`
   /// carry nothing. The value is sent once and never comes back.
+  /// [suggestion] is the plugin server it is added from (131g, 131h): the
+  /// connection keeps its origin and starts scoped to the hosts that
+  /// reported it.
   Future<Integration> create({
     required String displayName,
     required String url,
     required String authKind,
     String? header,
     String? value,
+    PluginSuggestion? suggestion,
   }) async => Integration.fromJson(
     _decode(
           await _client.post(
@@ -283,10 +351,40 @@ class IntegrationsApi {
               'auth_kind': authKind,
               if (value != null)
                 'credential': {'header': ?header, 'value': value},
+              if (suggestion != null) ...{
+                'slug': ?suggestion.slug,
+                'plugin_origin': {
+                  'plugin': suggestion.plugin,
+                  'server': suggestion.server,
+                },
+                if (suggestion.hosts.isNotEmpty) 'hosts': suggestion.hosts,
+              },
             }),
           ),
         )
         as Map<String, dynamic>,
+  );
+
+  /// Remote servers your agents' plugins declare that are not integrations
+  /// yet (131g). Empty from a server too old to say.
+  Future<List<PluginSuggestion>> suggestions() async {
+    final r = await _client.get(
+      _uri('/v1/integrations/suggestions'),
+      headers: _headers,
+    );
+    if (r.statusCode == 404) return const [];
+    return [
+      for (final s in _decode(r) as List)
+        PluginSuggestion.fromJson(s as Map<String, dynamic>),
+    ];
+  }
+
+  Future<void> dismissSuggestion(PluginSuggestion s) async => _decode(
+    await _client.post(
+      _uri('/v1/integrations/suggestions/dismiss'),
+      headers: _headers,
+      body: jsonEncode({'plugin': s.plugin, 'server': s.server, 'url': s.url}),
+    ),
   );
 
   Future<Integration> update(
