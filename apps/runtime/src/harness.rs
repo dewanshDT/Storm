@@ -32,9 +32,6 @@ use crate::provider::LaunchExtras;
 
 pub const HANDLE_ENV: &str = "STORM_HARNESS_HANDLE";
 
-/// The providers whose conversations can be resumed.
-pub const PROVIDERS: [&str; 2] = ["claude-code", "opencode"];
-
 /// One line from `harness-session` on the daemon socket.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HarnessLine {
@@ -43,24 +40,10 @@ pub struct HarnessLine {
 }
 
 /// Whether `id` is a session id `provider` could have made. It becomes an
-/// argument, so nothing else is ever accepted.
+/// argument, so nothing else is ever accepted. The shapes are the profiles'
+/// (decision 130).
 pub fn valid_id(provider: &str, id: &str) -> bool {
-    match provider {
-        "claude-code" => is_uuid(id),
-        "opencode" => id.strip_prefix("ses_").is_some_and(|rest| {
-            (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
-        }),
-        _ => false,
-    }
-}
-
-fn is_uuid(id: &str) -> bool {
-    let b = id.as_bytes();
-    b.len() == 36
-        && b.iter().enumerate().all(|(i, c)| match i {
-            8 | 13 | 18 | 23 => *c == b'-',
-            _ => c.is_ascii_hexdigit() && !c.is_ascii_uppercase(),
-        })
+    crate::profile::valid_id(provider, id)
 }
 
 fn new_uuid() -> String {
@@ -159,6 +142,23 @@ pub fn launch(
                 resume.map(str::to_string),
             ))
         }
+        // Codex's hook is in Storm's own `CODEX_HOME` (`codex.rs`), the same
+        // for every session; this session's handle reaches it through the
+        // environment it inherits.
+        "codex" => {
+            let args = match resume {
+                Some(id) => vec!["resume".into(), id.into()],
+                None => Vec::new(),
+            };
+            Ok((
+                LaunchExtras {
+                    args,
+                    env,
+                    ..Default::default()
+                },
+                resume.map(str::to_string),
+            ))
+        }
         _ => Ok((LaunchExtras::default(), None)),
     }
 }
@@ -199,28 +199,51 @@ export const StormHarness = async () => {{
 }
 
 /// `storm-runtime harness-session [ID]`: sends the id, or the `session_id`
-/// of the hook input on stdin, to the daemon. Silent and always successful:
-/// a hook's output reaches the agent, and a failure here must never get in
-/// its way.
+/// of the hook input on stdin, to the daemon. Always successful: a failure
+/// here must never get in the agent's way. It prints nothing but, when Claude
+/// Code starts or resumes a session whose launch skipped MCP servers, a
+/// `systemMessage` naming them (decision 131a), which Claude Code shows the
+/// person; a hook's plain output would reach the agent instead.
 pub fn report(id: Option<String>) {
-    let _ = try_report(id);
+    let hook = match id {
+        Some(_) => None,
+        None => read_hook_input(),
+    };
+    let id = id.or_else(|| Some(hook.as_ref()?["session_id"].as_str()?.to_string()));
+    if let Some(id) = id {
+        let _ = try_report(id);
+    }
+    let notice_file = std::env::var_os(crate::plugins::NOTICE_ENV).map(std::path::PathBuf::from);
+    if let Some(text) = hook
+        .as_ref()
+        .and_then(|h| notice(h, notice_file.as_deref()))
+    {
+        println!("{}", json!({ "systemMessage": text }));
+    }
 }
 
-fn try_report(id: Option<String>) -> Result<()> {
+fn read_hook_input() -> Option<serde_json::Value> {
+    let mut input = String::new();
+    std::io::stdin()
+        .take(1 << 20)
+        .read_to_string(&mut input)
+        .ok()?;
+    serde_json::from_str(&input).ok()
+}
+
+/// The session's notice, on a fresh start or a resume only: `/clear` and a
+/// compaction fire the same hook and would repeat it.
+fn notice(hook: &serde_json::Value, file: Option<&Path>) -> Option<String> {
+    if !matches!(hook["source"].as_str(), Some("startup" | "resume")) {
+        return None;
+    }
+    let text = std::fs::read_to_string(file?).ok()?;
+    (!text.trim().is_empty()).then_some(text)
+}
+
+fn try_report(id: String) -> Result<()> {
     let handle = std::env::var(HANDLE_ENV)?;
     let socket = std::env::var_os(crate::mcp::SOCKET_ENV).ok_or(anyhow::anyhow!("no socket"))?;
-    let id = match id {
-        Some(id) => id,
-        None => {
-            let mut input = String::new();
-            std::io::stdin().take(1 << 20).read_to_string(&mut input)?;
-            let hook: serde_json::Value = serde_json::from_str(&input)?;
-            hook["session_id"]
-                .as_str()
-                .ok_or(anyhow::anyhow!("no session_id"))?
-                .to_string()
-        }
-    };
     send(&socket, handle, id)
 }
 
@@ -254,6 +277,30 @@ mod tests {
                 assert_eq!(valid_id(provider, id), want, "{provider} {id:?}");
             }
         }
+    }
+
+    /// Decision 131a: the notice on a start or a resume, never on `/clear`
+    /// or a compaction, and nothing without one.
+    #[test]
+    fn the_notice_is_for_a_start_or_a_resume() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("mcp-notice.txt");
+        std::fs::write(&file, "Storm skipped 1 MCP server").unwrap();
+        let hook = |source: &str| json!({"session_id": "x", "source": source});
+        for source in ["startup", "resume"] {
+            assert_eq!(
+                notice(&hook(source), Some(&file)).as_deref(),
+                Some("Storm skipped 1 MCP server")
+            );
+        }
+        for source in ["clear", "compact"] {
+            assert_eq!(notice(&hook(source), Some(&file)), None);
+        }
+        assert_eq!(notice(&hook("startup"), None), None);
+        assert_eq!(
+            notice(&hook("startup"), Some(&dir.path().join("none"))),
+            None
+        );
     }
 
     #[test]

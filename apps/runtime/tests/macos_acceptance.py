@@ -680,8 +680,11 @@ def main():
         rec = try_wait(lambda: (lambda r: r if r.get("status") == "failed" else None)(owner.session(sid)), timeout=60) or {}
         check("M5", "its session is failed (host_restart), and nothing restarted it",
               (rec.get("status"), rec.get("end_reason")) == ("failed", "host_restart"), rec)
-        procs = account_processes()
-        check("M5", "after the restart the account runs only the host", [p for p in procs if p[0] != daemon_pid()] == [], procs)
+        # The host's own `claude plugin list` (131) may still be running: it
+        # has 5 s, and takes whatever it started with it.
+        extra = lambda: [p for p in account_processes() if p[0] != daemon_pid()]
+        only_host = try_wait(lambda: not extra(), timeout=20)
+        check("M5", "after the restart the account runs only the host", only_host, extra())
         last_exit = (launchd() or {}).get("last exit code", "")
         check("M5", "the stopped host exited cleanly (0)", last_exit.startswith("0"), last_exit)
         del runs_before

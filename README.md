@@ -4,8 +4,8 @@ Self-hosted, Markdown-native knowledge system. A Rust sync server owns the
 canonical vaults on infrastructure you control; Flutter clients on macOS,
 Windows, Linux, Android and the web keep pace, offline included. The same knowledge is available
 to AI agents through MCP, and an optional runtime host runs coding agents —
-Claude Code, OpenCode, a shell — in a workspace with a terminal you drive from
-the app. An optional relay reaches the server from outside your network
+Claude Code, Codex, OpenCode, Cursor, Command Code, a shell — in a workspace
+with a terminal you drive from the app. An optional relay reaches the server from outside your network
 without opening a port.
 
 > **Your knowledge. On your infrastructure.**
@@ -31,7 +31,7 @@ Releases: [GitHub Releases](https://github.com/dewanshDT/Storm/releases)
 └──────┬───────────────────┬───────┴──────────┬─────────┘
   vaults/*.md           state/          storm-runtime
   plain markdown        registry ·       PTY · workspaces
-                        indexes ·        claude-code ·
+                        indexes ·        claude-code · codex ·
                         auth.db ·        opencode · shell
                         agent.db
 ```
@@ -160,11 +160,17 @@ sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```
 
-Providers are `claude-code` (default), `opencode` and `shell`; workspaces and
-limits live in `/etc/storm-runtime/runtime.toml`, and a root outside
-`/var/lib/storm-runtime` needs a `ReadWritePaths` drop-in on the unit. Log the
-agent CLIs in once as `storm-runtime` (`claude`, `opencode auth login`) — the
-unit's `HOME` is its own, not yours. Setup and the package's guarantees:
+Providers are `claude-code` (default), `opencode`, `codex`, `cursor`,
+`command-code` and `shell`; Cursor and Command Code run as terminals, with no
+notes or integrations yet. Workspaces and limits live in
+`/etc/storm-runtime/runtime.toml`, and a root outside `/var/lib/storm-runtime`
+needs a `ReadWritePaths` drop-in on the unit. Log the agent CLIs in once as
+`storm-runtime` (`claude`, `opencode auth login`, and Codex into Storm's own
+Codex home: `env CODEX_HOME=/var/lib/storm-runtime/agents/codex codex login
+--device-auth`) — the unit's `HOME` is its own, not yours. An agent's plugins
+keep their local MCP servers in a session; their remote ones are offered as
+integrations ([Plugins](https://storm.dewansh.space/docs/agents/plugins/)).
+Setup and the package's guarantees:
 [`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
 Host connects to its server directly; the app reaches agent sessions through
 the relay like everything else.
@@ -301,9 +307,11 @@ M0–M16 and M18–M28 are done; the newest release is on
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
 covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
-Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions in a
-terminal you can resume; the MCP Gateway's integrations, each scoped to the
-hosts you choose; a Claude login you set once in the app and share with the
+Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions
+(Claude Code, Codex, OpenCode) in a terminal you can resume, plugins' MCP
+servers included; the MCP Gateway's integrations, each scoped to the
+hosts you choose and signed in with your own app where a service needs one;
+a Claude login you set once in the app and share with the
 hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity rail; the interactive installer; and the
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
 testing). The website and its docs are at

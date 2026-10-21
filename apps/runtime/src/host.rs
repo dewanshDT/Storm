@@ -182,13 +182,18 @@ struct Events {
     ended: Mutex<Option<SessionEnd>>,
     wake: Notify,
     title: Mutex<TitleObserver>,
+    /// The agent's terminal title names its conversation (decision 130);
+    /// otherwise the session keeps its launch name.
+    titles: bool,
     /// The agent's own session id, as last reported (decision 89).
     harness: Mutex<Option<String>>,
 }
 
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
-        self.title.lock().unwrap().feed(bytes);
+        if self.titles {
+            self.title.lock().unwrap().feed(bytes);
+        }
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
     }
@@ -207,6 +212,9 @@ struct HostSession {
     sent: Mutex<u64>,
     /// `running`, posted once.
     running_sent: AtomicBool,
+    /// Extra fields of that `running` report: the MCP servers the session
+    /// skipped, and its plugins' local ones (decision 131a).
+    start_report: serde_json::Value,
     /// The title last acknowledged by the server, and when it was posted.
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// The agent's session id last acknowledged by the server.
@@ -256,7 +264,15 @@ pub struct Host {
     /// Sessions whose start is in flight, with the commands that arrived for
     /// them meanwhile, in order. They are applied once the session exists.
     starting: Mutex<HashMap<String, Vec<Command>>>,
+    /// The remote servers this host's agents' plugins declare (131g): the
+    /// account-wide listing, refreshed in the background so a `hello` never
+    /// waits on it, and what launches found (project-enabled plugins).
+    plugin_inventory: Arc<Mutex<Vec<serde_json::Value>>>,
+    launch_remote: Mutex<Vec<serde_json::Value>>,
 }
+
+/// At most this many remote plugin servers in one inventory.
+const PLUGIN_REMOTE_MAX: usize = 200;
 
 /// How long a shutdown waits for its sessions beyond their two graces (the
 /// group's, then any stragglers' in the session): output drains and the
@@ -282,6 +298,7 @@ impl Host {
         // Every session directory belongs to a session that died with the
         // previous process: its handle is gone, so its bridge config is too.
         let _ = std::fs::remove_dir_all(state_dir.join(crate::mcp::SESSIONS_DIR));
+        crate::codex::forget_all(&crate::codex::home(state_dir));
         // Every session the table lists died with the previous process.
         let died = read_table(state_dir).sessions;
         if !died.is_empty() {
@@ -309,6 +326,8 @@ impl Host {
             opencode_settings,
             shutting_down: AtomicBool::new(false),
             starting: Mutex::new(HashMap::new()),
+            plugin_inventory: Arc::new(Mutex::new(Vec::new())),
+            launch_remote: Mutex::new(Vec::new()),
         }))
     }
 
@@ -343,12 +362,19 @@ impl Host {
             .providers
             .iter()
             .map(|p| {
-                json!({
+                let mut cap = json!({
                     "id": p.id().as_str(),
                     "kind": p.kind().as_str(),
                     "interactions": p.interactions().iter().map(|i| i.as_str()).collect::<Vec<_>>(),
                     "available": p.available() == Availability::Available,
-                })
+                });
+                // Whether a session can have Storm's MCP (decision 130a). Said
+                // only for a built-in: the server keeps its older behaviour
+                // for an id this host knows nothing about.
+                if let Some(mcp) = crate::profile::supports_mcp(p.id().as_str()) {
+                    cap["mcp"] = json!(mcp);
+                }
+                cap
             })
             .collect();
         json!({
@@ -379,12 +405,68 @@ impl Host {
                 .providers
                 .iter()
                 .map(|p| p.id().as_str())
-                .filter(|id| crate::harness::PROVIDERS.contains(id))
+                .filter(|id| crate::profile::resumable(id))
                 .collect::<Vec<_>>(),
             // It pulls a synced login for a session whose `start` names one,
             // and fails the start if it cannot (AM69).
             "provider_credentials": [crate::credential::KIND],
+            // Remote servers its agents' plugins declare, for the app's
+            // suggestions (131g); never a header or env value.
+            "plugin_mcp_remote": self.plugin_remote(),
         })
+    }
+
+    fn plugin_remote(&self) -> Vec<serde_json::Value> {
+        let listed = self.plugin_inventory.lock().unwrap().clone();
+        let launched = self.launch_remote.lock().unwrap().clone();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for e in listed.into_iter().chain(launched) {
+            let same = |o: &serde_json::Value| {
+                ["agent", "plugin", "server", "url"]
+                    .iter()
+                    .all(|k| o[k] == e[k])
+            };
+            if out.len() < PLUGIN_REMOTE_MAX && !out.iter().any(same) {
+                out.push(e);
+            }
+        }
+        out
+    }
+
+    /// Lists the account's plugins again in the background; the next
+    /// inventory carries the result.
+    fn refresh_plugin_inventory(&self) {
+        use crate::profile::Mcp;
+        let mcp_of =
+            |p: &Arc<dyn Provider>| crate::profile::get(p.id().as_str()).and_then(|p| p.mcp);
+        let claude: Vec<_> = self
+            .providers
+            .iter()
+            .filter(|p| {
+                mcp_of(p) == Some(Mcp::ClaudeCode) && p.available() == Availability::Available
+            })
+            .filter_map(|p| p.helper_command())
+            .collect();
+        let codex = self
+            .providers
+            .iter()
+            .any(|p| mcp_of(p) == Some(Mcp::Codex))
+            .then(|| crate::codex::home(&self.state_dir));
+        if claude.is_empty() && codex.is_none() {
+            return;
+        }
+        let dir = self.state_dir.clone();
+        let slot = self.plugin_inventory.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for helper in claude {
+                out.extend(crate::plugins::inventory(helper, &dir));
+            }
+            if let Some(home) = codex {
+                out.extend(crate::codex::remote_inventory(&home));
+            }
+            *slot.lock().unwrap() = out;
+        });
     }
 
     fn write_table(&self) {
@@ -596,6 +678,7 @@ impl Host {
     }
 
     async fn hello(&self) -> Result<()> {
+        self.refresh_plugin_inventory();
         let mut sessions = Vec::new();
         for s in self.sessions.lock().unwrap().values() {
             let end = *s.events.ended.lock().unwrap();
@@ -731,6 +814,7 @@ impl Host {
                 .await
             }
             Command::Refresh => {
+                self.refresh_plugin_inventory();
                 let _ = self
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
@@ -886,21 +970,83 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
-        match self.mcp_launch(&id, &provider_id, &mcp) {
-            Ok(extras) => {
+        let codex_plan = match self.codex_baseline(&provider_id, &dir) {
+            Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
+                plan
+            }
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the Codex config");
+                return self.post_start_failure(&id).await;
+            }
+        };
+        // A session's plugins (decision 131): a Claude Code session's local
+        // servers join its `mcp.json` (Codex's are switched in its home,
+        // above), and everything it will not have is named.
+        let plugin_plan = if codex_plan.is_some() {
+            codex_plan
+        } else if !mcp.is_empty()
+            && crate::profile::get(&provider_id).and_then(|p| p.mcp)
+                == Some(crate::profile::Mcp::ClaudeCode)
+        {
+            let helper = provider.helper_command();
+            let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
+            let workspace = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::session_plan(helper, allow, &workspace)
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let plugin_servers = plugin_plan
+            .as_ref()
+            .map(|p| p.local.clone())
+            .unwrap_or_default();
+        let plugin_plan = match self.mcp_launch(&id, &provider_id, &dir, &mcp, &plugin_servers) {
+            Ok((extras, plan)) => {
+                launch.args.extend(extras.args);
+                launch.env.extend(extras.env);
+                plugin_plan.or(plan)
             }
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
             }
-        }
+        };
+        let start_report = match &plugin_plan {
+            Some(plan) => {
+                {
+                    let mut found = self.launch_remote.lock().unwrap();
+                    for e in &plan.remote {
+                        if !found.contains(e) && found.len() < PLUGIN_REMOTE_MAX {
+                            found.push(e.clone());
+                        }
+                    }
+                }
+                if let Some(text) = plan.notice() {
+                    let path = session_dir.join(crate::plugins::NOTICE_FILE);
+                    match crate::mcp::write_private(&path, text.as_bytes()) {
+                        Ok(()) => launch
+                            .env
+                            .push((crate::plugins::NOTICE_ENV.into(), path.into_os_string())),
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP notice")
+                        }
+                    }
+                }
+                plan.report()
+            }
+            None => serde_json::Value::Null,
+        };
         let events = Arc::new(Events {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
             wake: Notify::new(),
             title: Mutex::new(TitleObserver::default()),
+            titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             harness: Mutex::new(None),
         });
         let pins = synced.as_ref().map(|(pins, _)| pins);
@@ -977,6 +1123,7 @@ impl Host {
             events,
             sent: Mutex::new(0),
             running_sent: AtomicBool::new(false),
+            start_report,
             title_sent: Mutex::new((Title::default(), None)),
             harness_sent: Mutex::new(None),
             input,
@@ -1056,7 +1203,7 @@ impl Host {
                 match self
                     .post(
                         &format!("/v1/runtime/sessions/{}/status", s.id),
-                        &json!({"status": "running"}),
+                        &running_report(&s.start_report),
                     )
                     .await
                 {
@@ -1176,26 +1323,95 @@ impl Host {
         &self,
         session: &str,
         provider: &str,
+        workspace: &Path,
         grants: &[crate::mcp::McpGrant],
-    ) -> Result<crate::mcp::LaunchExtras> {
+        plugin_servers: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
+        use crate::profile::Mcp;
         if grants.is_empty() {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the bridge")?;
-        let extras = crate::mcp::write_provider_config(
-            provider,
-            &crate::mcp::session_dir(&self.state_dir, session),
-            grants,
-            &handle,
-            &self.socket_address(),
-            &exe,
-            self.opencode_settings.as_ref(),
-        )?;
+        let socket = self.socket_address();
+        let mcp = crate::profile::get(provider).and_then(|p| p.mcp);
+        let (extras, plan) = if matches!(mcp, Some(Mcp::Codex | Mcp::Cursor | Mcp::CommandCode)) {
+            let grants: Vec<_> = grants
+                .iter()
+                .filter(|g| crate::mcp::slug_ok(&g.slug))
+                .collect();
+            match mcp {
+                _ if grants.is_empty() => Default::default(),
+                Some(Mcp::Codex) => (
+                    crate::codex::write_profile(
+                        &crate::codex::home(&self.state_dir),
+                        session,
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                    )?,
+                    None,
+                ),
+                Some(Mcp::Cursor) => {
+                    let home = account_home()?;
+                    let (extras, plan) = crate::cursor::write_session(
+                        &crate::mcp::session_dir(&self.state_dir, session),
+                        workspace,
+                        &home,
+                        &crate::cursor::data_dir(&home),
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                    )?;
+                    (extras, Some(plan))
+                }
+                _ => {
+                    let home = account_home()?;
+                    let (extras, plan) = crate::command_code::write_session(
+                        workspace, &home, &grants, &handle, &socket, &exe,
+                    )?;
+                    (extras, Some(plan))
+                }
+            }
+        } else {
+            (
+                crate::mcp::write_provider_config(
+                    provider,
+                    &crate::mcp::session_dir(&self.state_dir, session),
+                    grants,
+                    &handle,
+                    &socket,
+                    &exe,
+                    self.opencode_settings.as_ref(),
+                    plugin_servers,
+                )?,
+                None,
+            )
+        };
         if extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
-        Ok(extras)
+        Ok((extras, plan))
+    }
+
+    /// What every Codex session gains, grants or not (decision 130b): Storm's
+    /// home, with its own keys written for this workspace, and its plugin
+    /// plan (decision 131i). Nothing for any other provider.
+    fn codex_baseline(
+        &self,
+        provider: &str,
+        workspace: &Path,
+    ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
+        if crate::profile::get(provider).and_then(|p| p.mcp) != Some(crate::profile::Mcp::Codex) {
+            return Ok(Default::default());
+        }
+        let exe = std::env::current_exe().context("finding this binary for the hook")?;
+        let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
+        let (extras, plan) =
+            crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe, allow)?;
+        Ok((extras, Some(plan)))
     }
 
     /// What a session's launch gains so the agent's own session id reaches
@@ -1208,7 +1424,7 @@ impl Host {
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<crate::mcp::LaunchExtras> {
-        if !crate::harness::PROVIDERS.contains(&provider) {
+        if !crate::profile::resumable(provider) {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
@@ -1353,6 +1569,7 @@ impl Host {
             .unwrap()
             .retain(|(s, _), _| s != session);
         let _ = std::fs::remove_dir_all(crate::mcp::session_dir(&self.state_dir, session));
+        crate::codex::forget(&crate::codex::home(&self.state_dir), session);
     }
 
     /// `run/mcp.sock`, in a `0700` directory (a named pipe on Windows,
@@ -1480,6 +1697,15 @@ impl Host {
 }
 
 /// The wire form of a session's status: running, or how it ended.
+/// The host account's home, where Cursor and Command Code keep their own
+/// config.
+fn account_home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
+
 fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
     match end {
         None => json!({ "status": "running" }),
@@ -1517,6 +1743,17 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
     let path = dir.join(name);
     std::fs::rename(&tmp, &path)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// The first `running` report, with the session's start report merged in.
+fn running_report(extra: &serde_json::Value) -> serde_json::Value {
+    let mut body = json!({"status": "running"});
+    if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            body.insert(k.clone(), v.clone());
+        }
+    }
+    body
 }
 
 /// A status body with the agent's own session id, once there is one.
@@ -1773,7 +2010,7 @@ mod tests {
             "workspace_roots = [{:?}]\n",
             roots.path().display().to_string()
         );
-        for id in ["claude-code", "opencode"] {
+        for id in ["claude-code", "opencode", "codex"] {
             toml.push_str(&format!(
                 "[[providers]]\nid = {id:?}\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n"
             ));
@@ -1885,8 +2122,125 @@ mod tests {
             .map(|(_, b)| b.clone())
             .unwrap();
         assert_eq!(hello["sessions"][0]["harness_session"], cleared);
-        assert_eq!(hello["resume"], json!(["claude-code", "opencode"]));
+        assert_eq!(hello["resume"], json!(["claude-code", "opencode", "codex"]));
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 130a: the hello says which providers can have Storm's MCP —
+    /// for built-ins only, whatever command runs them — and only those with
+    /// conversations are offered for Resume.
+    #[test]
+    fn the_hello_says_which_providers_can_have_mcp() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: "https://127.0.0.1:1".into(),
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let mut toml = format!(
+            "workspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for id in [
+            "claude-code",
+            "opencode",
+            "cursor",
+            "command-code",
+            "shell",
+            "my-agent",
+        ] {
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = \"/bin/true\"\n"
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        let caps = host.capabilities();
+        let mcp: Vec<(String, serde_json::Value)> = caps["providers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (p["id"].as_str().unwrap().to_string(), p["mcp"].clone()))
+            .collect();
+        assert_eq!(
+            mcp,
+            [
+                ("claude-code".to_string(), json!(true)),
+                ("opencode".to_string(), json!(true)),
+                ("cursor".to_string(), json!(false)),
+                ("command-code".to_string(), json!(false)),
+                ("shell".to_string(), json!(false)),
+                ("my-agent".to_string(), serde_json::Value::Null),
+            ]
+        );
+        assert_eq!(caps["resume"], json!(["claude-code", "opencode"]));
+    }
+
+    /// 131g: the inventory lists the account's plugins in the background
+    /// with the provider's own program, and reports their remote servers
+    /// once each, beside what launches found.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_inventory_reports_plugins_remote_servers() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: "https://127.0.0.1:1".into(),
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let bin = state.path().join("fake-claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+[ "$1 $2 $3" = "plugin list --json" ] || exit 1
+echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0","mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp","oauth":{"clientId":"SECRET-ID"}}}},{"id":"proj@m","enabled":false,"projectEnabled":true,"installPath":"/nowhere","mcpServers":{"p":{"url":"https://p.example.com/mcp"}}}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let toml = format!(
+            "[[providers]]\nid = \"claude-code\"\ncommand = {:?}\n",
+            bin.display().to_string()
+        );
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        assert_eq!(host.capabilities()["plugin_mcp_remote"], json!([]));
+        host.refresh_plugin_inventory();
+        let mut remote = json!([]);
+        for _ in 0..200 {
+            remote = host.capabilities()["plugin_mcp_remote"].clone();
+            if remote.as_array().is_some_and(|r| !r.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let list = remote.as_array().unwrap();
+        assert_eq!(list.len(), 1, "only the account's own plugins: {remote}");
+        assert_eq!(list[0]["plugin"], "slack");
+        assert_eq!(list[0]["plugin_version"], "1.0.0");
+        assert_eq!(list[0]["auth_hint"], "vendor_client");
+        assert!(!remote.to_string().contains("SECRET-ID"));
+        host.launch_remote.lock().unwrap().extend([list[0].clone(), json!({"agent": "claude-code", "plugin": "proj", "server": "p", "url": "https://p.example.com/mcp"})]);
+        assert_eq!(
+            host.capabilities()["plugin_mcp_remote"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     /// A resume names the conversation and skips the opening prompt; an id
@@ -1939,6 +2293,107 @@ mod tests {
                 .iter()
                 .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
         );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 130b: a Codex session runs in Storm's own home, with its
+    /// servers in its own profile that asks for each tool, the prompt last,
+    /// and the profile gone when the session ends; a resume names the
+    /// conversation and has no prompt.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_codex_session_gets_its_own_profile_in_storms_home() {
+        let (host, seen, state, _roots) =
+            harness_host(r#"echo "ARGS $0 $*"; echo "HOME=$CODEX_HOME"; exec sleep 1000"#).await;
+        let output = |session: &str| -> String {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with(&format!("/{session}/terminal/output")))
+                .map(|(_, b)| {
+                    String::from_utf8_lossy(
+                        &BASE64
+                            .decode(b["data"].as_str().unwrap().as_bytes())
+                            .unwrap(),
+                    )
+                    .into_owned()
+                })
+                .collect()
+        };
+        let home = crate::codex::home(state.path());
+        let mut start = harness_start("ags_CDX", "codex", None, true);
+        if let Command::Start { mcp, .. } = &mut start {
+            *mcp = vec![
+                crate::mcp::McpGrant {
+                    id: "mcc_storm".into(),
+                    slug: "storm".into(),
+                    plugin_origin: None,
+                },
+                crate::mcp::McpGrant {
+                    id: "mcc_bad".into(),
+                    slug: "Bad Slug".into(),
+                    plugin_origin: None,
+                },
+            ];
+        }
+        host.clone().handle(start).await;
+        wait_for("the arguments", || output("ags_cdx").contains("HOME=")).await;
+        let out = output("ags_cdx");
+        assert!(out.contains("-p storm-ags_CDX"), "{out}");
+        assert!(
+            out.contains(&format!("-p storm-ags_CDX {}", crate::mcp::OPENING_PROMPT)),
+            "the prompt comes last: {out}"
+        );
+        assert!(out.contains(&format!("HOME={}", home.display())), "{out}");
+        let profile: toml::Table = std::fs::read_to_string(home.join("storm-ags_CDX.config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        let servers = profile["mcp_servers"].as_table().unwrap();
+        assert_eq!(
+            servers.keys().collect::<Vec<_>>(),
+            ["storm"],
+            "a bad slug is dropped"
+        );
+        assert_eq!(
+            servers["storm"]["default_tools_approval_mode"].as_str(),
+            Some("prompt")
+        );
+        let config: toml::Table = std::fs::read_to_string(home.join("config.toml"))
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(config.get("mcp_servers").is_none());
+        assert!(
+            config["projects"]
+                .as_table()
+                .unwrap()
+                .values()
+                .all(|p| p["trust_level"].as_str() == Some("untrusted"))
+        );
+
+        host.clone()
+            .handle(Command::End {
+                session: "ags_CDX".into(),
+            })
+            .await;
+        wait_for("the profile to go", || {
+            !home.join("storm-ags_CDX.config.toml").exists()
+        })
+        .await;
+
+        let id = "01a15d7b-580b-7e12-87d8-0ba9ab803093";
+        host.clone()
+            .handle(harness_start("ags_CDR", "codex", Some(id), true))
+            .await;
+        wait_for("the resume", || output("ags_cdr").contains("HOME=")).await;
+        let out = output("ags_cdr");
+        assert!(out.contains(&format!("resume {id}")), "{out}");
+        assert!(!out.contains(crate::mcp::OPENING_PROMPT), "{out}");
+        wait_for("the resumed id", || {
+            harness_posts(&seen, "ags_cdr").contains(&id.to_string())
+        })
+        .await;
         host.shutdown(Duration::from_millis(200)).await;
     }
 
@@ -2773,6 +3228,21 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         assert!(matches!(env.command, Command::Input { .. }));
         let env: Envelope = serde_json::from_str(r#"{"cmd_seq":5,"type":"refresh"}"#).unwrap();
         assert!(matches!(env.command, Command::Refresh));
+    }
+
+    /// Decision 131a: the first `running` report carries what the session
+    /// skipped; a session with nothing to report sends the plain one.
+    #[test]
+    fn the_running_report_carries_the_start_report() {
+        assert_eq!(
+            running_report(&serde_json::Value::Null),
+            json!({"status": "running"})
+        );
+        let extra = json!({"mcp_skipped": [{"name": "slack"}], "mcp_plugin_local": []});
+        let body = running_report(&extra);
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["mcp_skipped"][0]["name"], "slack");
+        assert_eq!(body["mcp_plugin_local"], json!([]));
     }
 
     #[test]

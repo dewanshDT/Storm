@@ -62,7 +62,28 @@ sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```sh
 sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
+sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
+  codex login --device-auth
 ```
+
+**Codex** keeps its login and its conversations in Storm's own Codex home,
+`agents/codex` under the host's state directory, not in `~/.codex`: Storm
+writes the settings there that keep each session to its own servers, so log
+it in with `CODEX_HOME` set as above (or `codex login --with-api-key`). Each
+launch opens on Codex's *Folder access* screen: press Enter for **Open
+restricted**. That keeps a repository's own `.codex/` settings, hooks and MCP
+servers out of the session. Codex sessions run **without Codex's own
+sandbox**: it needs user namespaces, which this unit forbids, so the
+`storm-runtime` account is the boundary, as it is for every agent. Codex
+still asks before the commands it is unsure of and before every Storm tool.
+A **Codex plugin that has hooks is turned off** in Storm sessions: Storm
+starts Codex so that its own hook runs without review, and Codex would run a
+plugin's hooks the same way. Plugins without hooks work as usual; a plugin
+Storm cannot inspect, such as one synced from your ChatGPT account, stays
+off. A plugin's **remote** MCP servers are off too (add them as
+[integrations](/docs/agents/integrations/) instead, where Storm keeps the
+sign-in), and so are **ChatGPT apps**. Codex shows what Storm turned off when
+the conversation starts, with your first message.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
 [Claude login sync](/docs/agents/claude-login/) (optional, for your own

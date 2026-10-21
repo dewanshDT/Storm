@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -65,6 +66,7 @@ class IntegrationsScreen extends ConsumerStatefulWidget {
 class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
   List<Integration>? _items;
   List<AgentHost>? _hosts;
+  List<PluginSuggestion> _suggestions = const [];
   String? _error;
   bool _loading = false;
 
@@ -112,6 +114,11 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     try {
       final items = await api.list();
       if (mounted) setState(() => _items = items);
+      // Quietly: suggestions are a convenience, and an older server has none.
+      try {
+        final suggestions = await api.suggestions();
+        if (mounted) setState(() => _suggestions = suggestions);
+      } catch (_) {}
     } catch (e) {
       if (mounted) setState(() => _error = describeFailure(e));
     } finally {
@@ -197,17 +204,93 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
         value: draft.value,
       );
       if (draft.kind == 'oauth') {
-        _reportCheck(await _signIn(api, created.id));
+        await _signInOrAskForApp(api, created.id, created.displayName);
       } else {
         _reportCheck(await api.test(created.id));
       }
     });
   }
 
-  Future<IntegrationCheck> _signIn(IntegrationsApi api, String id) {
-    _say('Finish signing in in your browser.');
-    return signIn(api, id, openBrowser: ref.read(openBrowserProvider));
+  /// Adds a plugin's remote server (131g): the add dialog, filled in from
+  /// the suggestion; it keeps its plugin origin and the hosts that reported
+  /// it.
+  Future<void> _addSuggestion(PluginSuggestion s) async {
+    final draft = await showDialog<_Draft>(
+      context: context,
+      builder: (_) => _AddDialog(
+        oauthSupported: ref.read(oauthSupportedProvider),
+        suggestion: s,
+      ),
+    );
+    if (draft == null || !mounted) return;
+    await _with((api) async {
+      final created = await api.create(
+        displayName: draft.name,
+        url: draft.url,
+        authKind: draft.kind,
+        header: draft.header,
+        value: draft.value,
+        suggestion: s,
+      );
+      if (draft.kind == 'oauth') {
+        await _signInOrAskForApp(api, created.id, created.displayName);
+      } else {
+        _reportCheck(await api.test(created.id));
+      }
+    });
   }
+
+  Future<void> _dismissSuggestion(PluginSuggestion s) =>
+      _with((api) => api.dismissSuggestion(s));
+
+  Future<IntegrationCheck> _signIn(
+    IntegrationsApi api,
+    String id, {
+    OwnClient? client,
+  }) {
+    _say('Finish signing in in your browser.');
+    return signIn(
+      api,
+      id,
+      openBrowser: ref.read(openBrowserProvider),
+      client: client,
+    );
+  }
+
+  /// Signs in, and when the service offers Storm no registration of its own
+  /// (Slack, for one), asks for the owner's own app and signs in with it
+  /// (decision 131e).
+  Future<void> _signInOrAskForApp(
+    IntegrationsApi api,
+    String id,
+    String name,
+  ) async {
+    try {
+      _reportCheck(await _signIn(api, id));
+    } on IntegrationRefusal catch (e) {
+      if (e.code != 'oauth_client_required') rethrow;
+      await _signInWithOwnApp(api, id, name, needed: true);
+    }
+  }
+
+  Future<void> _signInWithOwnApp(
+    IntegrationsApi api,
+    String id,
+    String name, {
+    bool needed = false,
+  }) async {
+    if (!mounted) return;
+    final client = await showDialog<OwnClient>(
+      context: context,
+      builder: (_) =>
+          OwnAppDialog(name: name, redirect: ownAppRedirect, needed: needed),
+    );
+    if (client == null) return;
+    _reportCheck(await _signIn(api, id, client: client));
+  }
+
+  Future<void> _useOwnApp(Integration i) =>
+      _with((api) => _signInWithOwnApp(api, i.id, i.displayName));
 
   Future<void> _reconnect(Integration i) async {
     if (i.authKind == 'oauth' && !ref.read(oauthSupportedProvider)) {
@@ -215,7 +298,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
       return;
     }
     if (i.authKind == 'oauth') {
-      await _with((api) async => _reportCheck(await _signIn(api, i.id)));
+      await _with((api) => _signInOrAskForApp(api, i.id, i.displayName));
       return;
     }
     final credential = await showDialog<(String, String)>(
@@ -322,6 +405,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
               onTools: () => _tools(i),
               onHosts: () => _chooseHosts(i),
               onReconnect: () => _reconnect(i),
+              onOwnApp: () => _useOwnApp(i),
               onToggle: () =>
                   _with((api) => api.update(i.id, enabled: i.disabled)),
               onDisconnect: () => _disconnect(i),
@@ -333,8 +417,111 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
               onPressed: _loading ? null : _add,
             ),
           ),
+          if (_suggestions.isNotEmpty) ...[
+            GroupLabel('From your plugins', top: context.tokens.sp * 1.5),
+            const SettingsNote(
+              "Your agents' plugins use these servers. A session reaches one "
+              'only once it is an integration.',
+              small: true,
+            ),
+            SizedBox(height: context.tokens.sp * 0.5),
+            for (final s in _suggestions)
+              _SuggestionTile(
+                suggestion: s,
+                hosts: [for (final h in s.hosts) names[h] ?? h],
+                busy: _loading,
+                onAdd: () => _addSuggestion(s),
+                onDismiss: () => _dismissSuggestion(s),
+              ),
+          ],
         ],
       ],
+    );
+  }
+}
+
+/// A plugin's remote server, offered as an integration (131g).
+class _SuggestionTile extends StatelessWidget {
+  const _SuggestionTile({
+    required this.suggestion,
+    required this.hosts,
+    required this.busy,
+    required this.onAdd,
+    required this.onDismiss,
+  });
+
+  final PluginSuggestion suggestion;
+
+  /// The reporting hosts, by name.
+  final List<String> hosts;
+  final bool busy;
+  final VoidCallback onAdd;
+  final VoidCallback onDismiss;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = suggestion;
+    final from = [
+      'Plugin ${s.plugin}',
+      if (hosts.isNotEmpty) 'on ${hosts.join(', ')}',
+    ].join(' ');
+    return Padding(
+      key: Key('suggestion-${s.plugin}-${s.server}'),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  s.displayName,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize,
+                    fontWeight: FontWeight.w500,
+                    color: t.text,
+                  ),
+                ),
+                Text(
+                  s.templated ? 'Needs its address: ${s.url}' : s.url,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: t.text3,
+                  ),
+                ),
+                SettingsNote(from, small: true),
+                if (s.vendorClient)
+                  const SettingsNote(
+                    "This plugin's own sign-in is registered to its vendor's "
+                    'app; Storm signs in with its own registration or yours.',
+                    small: true,
+                  ),
+              ],
+            ),
+          ),
+          RowActions(
+            children: [
+              TextAction(
+                key: Key('add-suggestion-${s.plugin}-${s.server}'),
+                label: 'Add',
+                accent: true,
+                onTap: busy ? null : onAdd,
+              ),
+              TextAction(
+                key: Key('dismiss-suggestion-${s.plugin}-${s.server}'),
+                label: 'Dismiss',
+                onTap: busy ? null : onDismiss,
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }
@@ -349,6 +536,7 @@ class _IntegrationTile extends StatelessWidget {
     required this.onTools,
     required this.onHosts,
     required this.onReconnect,
+    required this.onOwnApp,
     required this.onToggle,
     required this.onDisconnect,
   });
@@ -365,6 +553,9 @@ class _IntegrationTile extends StatelessWidget {
   final VoidCallback onTools;
   final VoidCallback onHosts;
   final VoidCallback onReconnect;
+
+  /// Signs in with an app the owner registered with the service (131e).
+  final VoidCallback onOwnApp;
   final VoidCallback onToggle;
   final VoidCallback onDisconnect;
 
@@ -513,6 +704,8 @@ class _IntegrationTile extends StatelessWidget {
                     onHosts();
                   case 'reconnect':
                     onReconnect();
+                  case 'own-app':
+                    onOwnApp();
                   case 'toggle':
                     onToggle();
                   default:
@@ -542,6 +735,11 @@ class _IntegrationTile extends StatelessWidget {
                         : 'Sign in again from a Storm app',
                   ),
                 ),
+                if (i.authKind == 'oauth' && canSignIn)
+                  const PopupMenuItem(
+                    value: 'own-app',
+                    child: Text('Use your own app'),
+                  ),
                 PopupMenuItem(
                   value: 'toggle',
                   child: Text(i.disabled ? 'Enable' : 'Disable'),
@@ -587,9 +785,12 @@ class _Draft {
 }
 
 class _AddDialog extends StatefulWidget {
-  const _AddDialog({required this.oauthSupported});
+  const _AddDialog({required this.oauthSupported, this.suggestion});
 
   final bool oauthSupported;
+
+  /// Fills the dialog in from a plugin's server (131g).
+  final PluginSuggestion? suggestion;
 
   @override
   State<_AddDialog> createState() => _AddDialogState();
@@ -631,11 +832,23 @@ bool isLanHttp(String url) {
 }
 
 class _AddDialogState extends State<_AddDialog> {
-  final _name = TextEditingController();
-  final _url = TextEditingController();
-  final _header = TextEditingController(text: 'Authorization');
+  late final _name = TextEditingController(
+    text: widget.suggestion?.displayName,
+  );
+  // A templated address is the owner's to give: the template is shown, not
+  // filled in.
+  late final _url = TextEditingController(
+    text: widget.suggestion?.templated == false ? widget.suggestion!.url : '',
+  );
+  late final _header = TextEditingController(
+    text: widget.suggestion?.tokenHeader ?? 'Authorization',
+  );
   final _token = TextEditingController();
-  late String _kind = widget.oauthSupported ? 'oauth' : 'static';
+  late String _kind = widget.suggestion?.tokenHeader != null
+      ? 'static'
+      : widget.oauthSupported
+      ? 'oauth'
+      : 'static';
   String? _problem;
 
   @override
@@ -695,9 +908,14 @@ class _AddDialogState extends State<_AddDialog> {
               key: const Key('integration-url'),
               controller: _url,
               keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: 'MCP server address',
                 hintText: 'https://mcp.notion.com/mcp',
+                helperText: widget.suggestion?.templated == true
+                    ? 'The plugin builds it from its host: '
+                          '${widget.suggestion!.url}'
+                    : null,
+                helperMaxLines: 3,
               ),
             ),
             // Shown as soon as the address is plain http on the LAN, before
@@ -853,6 +1071,136 @@ class _AddDialogState extends State<_AddDialog> {
           key: const Key('integration-connect'),
           onPressed: _submit,
           child: const Text('Connect'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The owner's own OAuth app for a service (decision 131e): its client id,
+/// an optional secret and scopes, and the redirect to register in it.
+class OwnAppDialog extends StatefulWidget {
+  const OwnAppDialog({
+    super.key,
+    required this.name,
+    required this.redirect,
+    this.needed = false,
+  });
+
+  final String name;
+  final String redirect;
+
+  /// The service offered Storm no registration of its own.
+  final bool needed;
+
+  @override
+  State<OwnAppDialog> createState() => _OwnAppDialogState();
+}
+
+class _OwnAppDialogState extends State<OwnAppDialog> {
+  final _id = TextEditingController();
+  final _secret = TextEditingController();
+  final _scopes = TextEditingController();
+
+  @override
+  void dispose() {
+    _id.dispose();
+    _secret.dispose();
+    _scopes.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final id = _id.text.trim();
+    if (id.isEmpty) return;
+    final secret = _secret.text.trim();
+    Navigator.of(context).pop(
+      OwnClient(
+        clientId: id,
+        clientSecret: secret.isEmpty ? null : secret,
+        scopes: _scopes.text
+            .split(RegExp(r'[\s,]+'))
+            .where((s) => s.isNotEmpty)
+            .toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return AlertDialog(
+      title: Text('Sign in to ${widget.name} with your own app'),
+      content: SizedBox(
+        width: 440,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text(
+              widget.needed
+                  ? '${widget.name} does not let Storm register itself. Create '
+                        'an app in its developer settings, add this redirect '
+                        'to it, then paste its client id here.'
+                  : 'Create an app in the service\'s developer settings, add '
+                        'this redirect to it, then paste its client id here.',
+              style: TextStyle(fontSize: t.labelSize, color: t.text3),
+            ),
+            SizedBox(height: t.sp * 0.5),
+            Row(
+              children: [
+                Expanded(
+                  child: SelectableText(
+                    widget.redirect,
+                    key: const Key('own-app-redirect'),
+                    style: TextStyle(fontSize: t.labelSize, color: t.text2),
+                  ),
+                ),
+                TextButton(
+                  key: const Key('own-app-copy'),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: widget.redirect));
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      const SnackBar(content: Text('Redirect copied.')),
+                    );
+                  },
+                  child: const Text('Copy'),
+                ),
+              ],
+            ),
+            TextField(
+              key: const Key('own-app-id'),
+              controller: _id,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Client ID'),
+            ),
+            TextField(
+              key: const Key('own-app-secret'),
+              controller: _secret,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Client secret (if it has one)',
+              ),
+            ),
+            TextField(
+              key: const Key('own-app-scopes'),
+              controller: _scopes,
+              decoration: const InputDecoration(
+                labelText: 'Scopes (optional)',
+                helperText: "Leave empty for the service's own.",
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('own-app-sign-in'),
+          onPressed: _submit,
+          child: const Text('Sign in'),
         ),
       ],
     );

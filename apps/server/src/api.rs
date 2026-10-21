@@ -528,6 +528,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/integrations/oauth/callback",
             post(integrations_callback),
         )
+        // Remote servers the owner's agents' plugins declare (decision 131g).
+        .route(
+            "/v1/integrations/suggestions",
+            get(integrations_suggestions),
+        )
+        .route(
+            "/v1/integrations/suggestions/dismiss",
+            post(integrations_dismiss_suggestion),
+        )
         // Token sync (decision 124n): owner only, session tier. No route here
         // returns the token.
         .route(
@@ -1545,6 +1554,22 @@ async fn integrations_create(
 ) -> ApiResult<(StatusCode, Json<crate::ops::IntegrationView>)> {
     let view = crate::ops::create_integration(&state, &actor, body).await?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn integrations_suggestions(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::PluginSuggestion>>> {
+    Ok(Json(crate::ops::plugin_suggestions(&state, &actor).await?))
+}
+
+async fn integrations_dismiss_suggestion(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::DismissSuggestion>,
+) -> ApiResult<StatusCode> {
+    crate::ops::dismiss_suggestion(&state, &actor, body).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn integrations_get(
@@ -7397,6 +7422,269 @@ pub(crate) mod tests {
         body
     }
 
+    /// `GET /v1/integrations/suggestions`, answering the host's `refresh`
+    /// with `caps`: the route asks for a fresh inventory before it lists.
+    async fn suggestions(f: &mut GatewayFixture, caps: &serde_json::Value) -> serde_json::Value {
+        let GatewayFixture {
+            app,
+            state,
+            owner_bearer,
+            host_id,
+            link,
+            ..
+        } = f;
+        let get = send(
+            app,
+            get_with_auth("/v1/integrations/suggestions", owner_bearer),
+        );
+        let answer = async {
+            while let Some(envelope) = link.recv().await {
+                if serde_json::to_value(&envelope).unwrap()["type"] == "refresh" {
+                    state
+                        .agent
+                        .inventory(host_id, serde_json::from_value(caps.clone()).unwrap())
+                        .unwrap();
+                    break;
+                }
+            }
+        };
+        let ((status, body), ()) = tokio::join!(get, answer);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    fn suggested(list: &serde_json::Value) -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["plugin"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// 131g, 131h: a host's remote plugin servers are suggested once per URL,
+    /// minus what the owner added or dismissed and anything malformed; one
+    /// added from a suggestion keeps its plugin origin and its reporting
+    /// host, and its grant carries the origin down to the host.
+    #[tokio::test]
+    async fn remote_plugin_servers_are_suggested_and_one_added_keeps_its_origin() {
+        let dir = tempdir::TempDir::new("storm-plugin-suggestions").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, mock) = f.get(&format!("{CONNECTIONS}/{}", f.connection)).await;
+        let remote = |agent: &str, plugin: &str, server: &str, url: &str, hint: Option<&str>| {
+            serde_json::json!({"agent": agent, "plugin": plugin, "server": server,
+                "transport": "http", "url": url, "templated": url.contains("${"), "auth_hint": hint})
+        };
+        let mut caps = host_caps(true);
+        caps["plugin_mcp_remote"] = serde_json::json!([
+            remote(
+                "claude-code",
+                "slack",
+                "slack",
+                "https://mcp.slack.com/mcp",
+                Some("vendor_client")
+            ),
+            remote(
+                "codex",
+                "slack",
+                "slack",
+                "https://MCP.slack.com/mcp/",
+                None
+            ),
+            remote(
+                "claude-code",
+                "linear",
+                "linear",
+                "https://mcp.linear.app/mcp",
+                Some("header:Bad Name")
+            ),
+            remote(
+                "claude-code",
+                "jfrog",
+                "jfrog",
+                "${JFROG_URL}/mcp",
+                Some("header:Authorization")
+            ),
+            remote(
+                "claude-code",
+                "mine",
+                "mine",
+                mock["url"].as_str().unwrap(),
+                None
+            ),
+            remote(
+                "claude-code",
+                "bad name",
+                "x",
+                "https://bad.example.com/mcp",
+                None
+            ),
+            remote(
+                "claude-code",
+                "plain",
+                "plain",
+                "http://203.0.113.9/mcp",
+                None
+            ),
+        ]);
+        f.state.gateway.set_allow_http_upstreams(false);
+
+        let list = suggestions(&mut f, &caps).await;
+        assert_eq!(suggested(&list), ["jfrog", "linear", "slack"], "{list}");
+        let slack = &list[2];
+        assert_eq!(slack["url"], "https://mcp.slack.com/mcp");
+        assert_eq!(slack["agents"], serde_json::json!(["claude-code", "codex"]));
+        assert_eq!(slack["hosts"], serde_json::json!([f.host_id]));
+        assert_eq!(slack["auth_hint"], "vendor_client");
+        assert_eq!(list[0]["templated"], true);
+        assert_eq!(list[0]["auth_hint"], "header:Authorization");
+        assert_eq!(
+            list[1]["auth_hint"],
+            serde_json::Value::Null,
+            "a bad hint is dropped"
+        );
+
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/integrations/suggestions/dismiss",
+                serde_json::json!({"plugin": "linear", "server": "linear", "url": "https://mcp.linear.app/mcp/"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            suggested(&suggestions(&mut f, &caps).await),
+            ["jfrog", "slack"]
+        );
+
+        let (status, added) = send(
+            &f.app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Slack", "url": "https://mcp.slack.com/mcp",
+                    "auth_kind": "none", "plugin_origin": {"plugin": "slack", "server": "slack"},
+                    "hosts": [f.host_id]}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{added}");
+        assert_eq!(
+            added["plugin_origin"],
+            serde_json::json!({"plugin": "slack", "server": "slack"})
+        );
+        assert_eq!(added["hosts"], serde_json::json!([f.host_id]));
+        let slack_id = added["id"].as_str().unwrap().to_string();
+        let (_, again) = f.get(&format!("{CONNECTIONS}/{slack_id}")).await;
+        assert_eq!(again["plugin_origin"]["plugin"], "slack");
+        assert_eq!(suggested(&suggestions(&mut f, &caps).await), ["jfrog"]);
+
+        f.launch("claude-code", false).await;
+        let start = loop {
+            let envelope = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+            if envelope["type"] == "start" {
+                break envelope;
+            }
+        };
+        let grant = start["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == slack_id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            grant["plugin_origin"],
+            serde_json::json!({"plugin": "slack", "server": "slack"})
+        );
+        let mock_grant = start["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == f.connection.as_str())
+            .unwrap()
+            .clone();
+        assert!(mock_grant.get("plugin_origin").is_none(), "{mock_grant}");
+
+        for bad in [
+            serde_json::json!({"plugin": "a b", "server": "x"}),
+            serde_json::json!({"plugin": "", "server": "x"}),
+        ] {
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    CONNECTIONS,
+                    serde_json::json!({"display_name": "Odd", "url": "https://odd.example.com/mcp",
+                        "auth_kind": "none", "plugin_origin": bad}),
+                    &f.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Nowhere", "url": "https://nowhere.example.com/mcp",
+                    "auth_kind": "none", "hosts": ["rh_missing"]}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a create's hosts are checked"
+        );
+    }
+
+    /// 131a: the first `running` report's skipped servers stay with the
+    /// session, bounded, and a later report never replaces them.
+    #[tokio::test]
+    async fn a_sessions_skipped_servers_are_kept_from_its_first_report() {
+        let dir = tempdir::TempDir::new("storm-mcp-notice").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let launched = f.launch("claude-code", false).await;
+        let id = launched["id"].as_str().unwrap().to_string();
+        let (_, before) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+        assert!(before.get("mcp_skipped").is_none(), "{before}");
+        let long = "r".repeat(1000);
+        for (skipped, local) in [
+            (
+                serde_json::json!([{"name": "slack", "source": "plugin slack", "reason": long}]),
+                serde_json::json!(["plugin_pw_playwright"]),
+            ),
+            (
+                serde_json::json!([{"name": "later", "source": "x", "reason": "y"}]),
+                serde_json::json!([]),
+            ),
+        ] {
+            let (code, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{id}/status"),
+                    serde_json::json!({"status": "running", "mcp_skipped": skipped, "mcp_plugin_local": local}),
+                    &f.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+        assert_eq!(view["mcp_skipped"][0]["name"], "slack", "{view}");
+        assert_eq!(view["mcp_skipped"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            view["mcp_skipped"][0]["reason"].as_str().unwrap().len(),
+            256
+        );
+        assert_eq!(
+            view["mcp_plugin_local"],
+            serde_json::json!(["plugin_pw_playwright"])
+        );
+    }
+
     #[tokio::test]
     async fn a_launch_grants_only_the_integrations_scoped_to_its_host() {
         let dir = tempdir::TempDir::new("storm-host-scope-launch").unwrap();
@@ -9080,6 +9368,14 @@ pub(crate) mod tests {
         token_requests: std::sync::Mutex<Vec<HashMap<String, String>>>,
         revoked: std::sync::Mutex<Vec<String>>,
         hits: std::sync::atomic::AtomicUsize,
+        /// `token_endpoint_auth_methods_supported`, when it says.
+        auth_methods: Option<Vec<&'static str>>,
+        /// No `registration_endpoint` (Slack's shape).
+        no_registration: bool,
+        /// Registration hands out a client secret.
+        confidential: bool,
+        /// The protected resource's `scopes_supported`.
+        resource_scopes: Option<Vec<&'static str>>,
     }
 
     impl MockAs {
@@ -9106,8 +9402,12 @@ pub(crate) mod tests {
     }
 
     async fn serve_oauth_upstream(tools: &[&str]) -> (String, Arc<MockAs>) {
+        serve_oauth_as(tools, MockAs::default()).await
+    }
+
+    async fn serve_oauth_as(tools: &[&str], mock: MockAs) -> (String, Arc<MockAs>) {
         use axum::response::IntoResponse;
-        let mock = Arc::new(MockAs::default());
+        let mock = Arc::new(mock);
         mock.expires_in
             .store(3600, std::sync::atomic::Ordering::SeqCst);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9151,17 +9451,22 @@ pub(crate) mod tests {
         let prm = move || {
             let b = b.clone();
             m.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let scopes = m.resource_scopes.clone();
             async move {
-                Json(
-                    serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]}),
-                )
+                let mut prm = serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]});
+                if let Some(scopes) = scopes {
+                    prm["scopes_supported"] = serde_json::json!(scopes);
+                }
+                Json(prm)
             }
         };
         let b = base.clone();
+        let m = mock.clone();
         let asm = move || {
             let b = b.clone();
+            let m = m.clone();
             async move {
-                Json(serde_json::json!({
+                let mut meta = serde_json::json!({
                     "issuer": b,
                     "authorization_endpoint": format!("{b}/authorize"),
                     "token_endpoint": format!("{b}/token"),
@@ -9170,7 +9475,16 @@ pub(crate) mod tests {
                     "response_types_supported": ["code"],
                     "code_challenge_methods_supported": ["S256"],
                     "grant_types_supported": ["authorization_code", "refresh_token"],
-                }))
+                });
+                if m.no_registration {
+                    meta.as_object_mut()
+                        .unwrap()
+                        .remove("registration_endpoint");
+                }
+                if let Some(methods) = &m.auth_methods {
+                    meta["token_endpoint_auth_methods_supported"] = serde_json::json!(methods);
+                }
+                Json(meta)
             }
         };
         let m = mock.clone();
@@ -9178,46 +9492,58 @@ pub(crate) mod tests {
             let m = m.clone();
             async move {
                 m.registrations.lock().unwrap().push(body.clone());
-                (
-                    StatusCode::CREATED,
-                    Json(
-                        serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]}),
-                    ),
-                )
+                let mut reply = serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]});
+                if m.confidential {
+                    reply["client_secret"] = serde_json::json!("upstream-canary-dcr-secret");
+                }
+                (StatusCode::CREATED, Json(reply))
             }
         };
         let m = mock.clone();
-        let token =
-            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
-                let m = m.clone();
-                async move {
-                    m.token_requests.lock().unwrap().push(form.clone());
-                    let bad = || {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({"error": "invalid_grant"})),
-                        )
-                            .into_response()
-                    };
-                    match form.get("grant_type").map(String::as_str) {
-                        Some("authorization_code")
-                            if form.get("code").map(String::as_str) == Some("good-code")
-                                && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
-                                && form.contains_key("resource") =>
-                        {
-                            Json(m.issue()).into_response()
-                        }
-                        Some("refresh_token")
-                            if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
-                                && form.get("refresh_token")
-                                    == Some(&m.refresh.lock().unwrap().clone()) =>
-                        {
-                            Json(m.issue()).into_response()
-                        }
-                        _ => bad(),
-                    }
+        let token = move |headers: axum::http::HeaderMap,
+                          axum::extract::Form(mut form): axum::extract::Form<
+            HashMap<String, String>,
+        >| {
+            let m = m.clone();
+            async move {
+                // How the client authenticated, for the tests to read.
+                if let Some(basic) = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Basic "))
+                {
+                    let decoded = data_encoding::BASE64
+                        .decode(basic.as_bytes())
+                        .unwrap_or_default();
+                    form.insert("_basic".into(), String::from_utf8_lossy(&decoded).into());
                 }
-            };
+                m.token_requests.lock().unwrap().push(form.clone());
+                let bad = || {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid_grant"})),
+                    )
+                        .into_response()
+                };
+                match form.get("grant_type").map(String::as_str) {
+                    Some("authorization_code")
+                        if form.get("code").map(String::as_str) == Some("good-code")
+                            && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
+                            && form.contains_key("resource") =>
+                    {
+                        Json(m.issue()).into_response()
+                    }
+                    Some("refresh_token")
+                        if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
+                            && form.get("refresh_token")
+                                == Some(&m.refresh.lock().unwrap().clone()) =>
+                    {
+                        Json(m.issue()).into_response()
+                    }
+                    _ => bad(),
+                }
+            }
+        };
         let m = mock.clone();
         let revoke =
             move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
@@ -9585,6 +9911,194 @@ pub(crate) mod tests {
             .filter(|r| r.get("grant_type").map(String::as_str) == Some("authorization_code"))
             .count();
         assert_eq!(exchanges, 1, "a flow was spent twice");
+    }
+
+    /// Every byte of the gateway's database files under `dir`, WAL included.
+    fn gateway_db_bytes(dir: &FsPath) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("gateway.db"))
+                {
+                    out.extend(std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        out
+    }
+
+    async fn oauth_connection(app: &Router, owner: &str, base: &str) -> String {
+        let (status, created) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Slack", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    /// 131e: a server with no registration and `client_secret_post` only (the
+    /// Slack shape) is signed in with a pasted client: its secret goes in the
+    /// token request's body, never in the clear at rest, and with no scopes
+    /// given the resource's own are asked for.
+    #[tokio::test]
+    async fn a_slack_shaped_server_signs_in_with_a_pasted_client() {
+        let dir = tempdir::TempDir::new("storm-oauth-pasted").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_as(
+            &["search"],
+            MockAs {
+                no_registration: true,
+                auth_methods: Some(vec!["client_secret_post"]),
+                resource_scopes: Some(vec!["chat:write", "search:read"]),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = oauth_connection(&app, &owner, &base).await;
+
+        let (status, refused) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused["error"], "oauth_client_required", "{refused}");
+
+        let secret = "upstream-canary-pasted-secret";
+        let (status, started) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://127.0.0.1:53682/callback",
+                    "client_id": "pasted-id", "client_secret": secret}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let url = started["authorization_url"].as_str().unwrap();
+        assert_eq!(query_param(url, "client_id").as_deref(), Some("pasted-id"));
+        assert_eq!(
+            query_param(url, "scope").as_deref(),
+            Some("chat:write search:read"),
+            "MCP's scope rule, with none given"
+        );
+        let flow = query_param(url, "state").unwrap();
+        let (status, test) = callback(&app, &owner, &flow, "good-code").await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["integration"]["status"], "connected", "{test}");
+        let exchange = mock.token_requests.lock().unwrap()[0].clone();
+        assert_eq!(
+            exchange.get("client_secret").map(String::as_str),
+            Some(secret)
+        );
+        assert!(!exchange.contains_key("_basic"), "{exchange:?}");
+        assert!(mock.registrations.lock().unwrap().is_empty());
+        let bytes = gateway_db_bytes(dir.path());
+        assert!(!bytes.is_empty());
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "a pasted secret is sealed"
+        );
+
+        for bad in [
+            serde_json::json!({"client_id": "x", "client_secret": ""}),
+            serde_json::json!({"client_id": "x", "scopes": ["two words"]}),
+        ] {
+            let mut body = bad.clone();
+            body["redirect_uri"] = serde_json::json!("http://127.0.0.1:53682/callback");
+            let (status, _) = send(
+                &app,
+                post_json_with_auth(&format!("{CONNECTIONS}/{id}/authorize"), body, &owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    /// 131f: a server that offers no public registration registers Storm as a
+    /// confidential client with the method its token client will use, and the
+    /// secret it hands out is sealed and used.
+    #[tokio::test]
+    async fn a_server_without_public_registration_gets_a_confidential_client() {
+        for (methods, want) in [
+            (
+                vec!["client_secret_basic", "client_secret_post"],
+                "client_secret_basic",
+            ),
+            (vec!["client_secret_post"], "client_secret_post"),
+        ] {
+            let dir = tempdir::TempDir::new("storm-oauth-confidential").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            state.gateway.set_allow_http_upstreams(true);
+            let (_, owner) = owner_bearer(&state).await;
+            let (base, mock) = serve_oauth_as(
+                &["search"],
+                MockAs {
+                    auth_methods: Some(methods.clone()),
+                    confidential: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let id = oauth_connection(&app, &owner, &base).await;
+            let (status, started) = authorize(&app, &owner, &id).await;
+            assert_eq!(status, StatusCode::OK, "{started}");
+            let reg = mock.registrations.lock().unwrap().clone();
+            assert_eq!(reg.len(), 1);
+            assert_eq!(reg[0]["token_endpoint_auth_method"], want, "{methods:?}");
+            let url = started["authorization_url"].as_str().unwrap();
+            assert_eq!(query_param(url, "client_id").as_deref(), Some("dcr-client"));
+            let flow = query_param(url, "state").unwrap();
+            let (status, test) = callback(&app, &owner, &flow, "good-code").await;
+            assert_eq!(status, StatusCode::OK, "{test}");
+            assert_eq!(test["integration"]["status"], "connected", "{test}");
+            let exchange = mock.token_requests.lock().unwrap()[0].clone();
+            let secret = "upstream-canary-dcr-secret";
+            match want {
+                "client_secret_basic" => assert_eq!(
+                    exchange.get("_basic").map(String::as_str),
+                    Some(format!("dcr-client:{secret}").as_str())
+                ),
+                _ => assert_eq!(
+                    exchange.get("client_secret").map(String::as_str),
+                    Some(secret)
+                ),
+            }
+            let bytes = gateway_db_bytes(dir.path());
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        }
+    }
+
+    /// 131f: a registration that comes back without a secret is a failure,
+    /// never a public client by accident.
+    #[tokio::test]
+    async fn a_confidential_registration_without_a_secret_fails() {
+        let dir = tempdir::TempDir::new("storm-oauth-no-secret").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, _) = serve_oauth_as(
+            &["search"],
+            MockAs {
+                auth_methods: Some(vec!["client_secret_post"]),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = oauth_connection(&app, &owner, &base).await;
+        let (status, refused) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(refused["error"], "oauth_registration_failed", "{refused}");
     }
 
     #[tokio::test]

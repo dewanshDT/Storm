@@ -287,4 +287,120 @@ void main() {
       expect(links.orphans.value, isEmpty);
     });
   });
+
+  group("the owner's own app (131e)", () {
+    (MockClient, List<Map<String, dynamic>>) recording() {
+      final bodies = <Map<String, dynamic>>[];
+      final client = MockClient((req) async {
+        if (req.url.path.endsWith('/authorize')) {
+          bodies.add(jsonDecode(req.body) as Map<String, dynamic>);
+          return http.Response(
+            jsonEncode({'authorization_url': 'https://as.example/a?state=s1'}),
+            200,
+          );
+        }
+        if (req.url.path == '/v1/integrations/oauth/callback') {
+          return http.Response(jsonEncode(checked()), 200);
+        }
+        return http.Response('', 404);
+      });
+      return (client, bodies);
+    }
+
+    Future<int> freePort() async {
+      final probe = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      final port = probe.port;
+      await probe.close();
+      return port;
+    }
+
+    test('signs in on its fixed port and sends its client', () async {
+      final (client, bodies) = recording();
+      final api = IntegrationsApi(
+        baseUrl: 'http://s',
+        token: 't',
+        client: client,
+      );
+      final port = await freePort();
+      final result = await signIn(
+        api,
+        'mcc_S',
+        appScheme: false,
+        loopbackPort: port,
+        client: const OwnClient(
+          clientId: 'mine',
+          clientSecret: 'shh',
+          scopes: ['chat:write', 'search:read'],
+        ),
+        // A raw socket: once a group has initialised the test binding,
+        // HttpClient answers 400 without connecting.
+        openBrowser: (_) async {
+          final socket = await Socket.connect(
+            InternetAddress.loopbackIPv4,
+            port,
+          );
+          socket.write(
+            'GET /oauth/callback?state=s1&code=c1 HTTP/1.1\r\n'
+            'Host: 127.0.0.1\r\nConnection: close\r\n\r\n',
+          );
+          await socket.flush();
+          await socket.drain<void>();
+          socket.destroy();
+          return true;
+        },
+      );
+      expect(result.ok, isTrue);
+      expect(bodies.single, {
+        'redirect_uri': 'http://127.0.0.1:$port/oauth/callback',
+        'client_id': 'mine',
+        'client_secret': 'shh',
+        'scopes': ['chat:write', 'search:read'],
+      });
+    });
+
+    test('a busy port says so, and nothing is authorized', () async {
+      final (client, bodies) = recording();
+      final api = IntegrationsApi(
+        baseUrl: 'http://s',
+        token: 't',
+        client: client,
+      );
+      final squatter = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+      addTearDown(squatter.close);
+      await expectLater(
+        signIn(
+          api,
+          'mcc_S',
+          appScheme: false,
+          loopbackPort: squatter.port,
+          client: const OwnClient(clientId: 'mine'),
+          openBrowser: (_) async => true,
+        ),
+        throwsA(
+          isA<StateError>().having(
+            (e) => e.message,
+            'message',
+            contains('in use'),
+          ),
+        ),
+      );
+      expect(bodies, isEmpty);
+    });
+
+    test('without one, only the redirect is sent', () async {
+      final (client, bodies) = recording();
+      final api = IntegrationsApi(
+        baseUrl: 'http://s',
+        token: 't',
+        client: client,
+      );
+      await api.authorize('mcc_S', redirectUri: appRedirect);
+      expect(bodies.single, {'redirect_uri': appRedirect});
+      expect(
+        ownAppPort,
+        lessThan(32768),
+        reason: 'below every ephemeral range',
+      );
+    });
+  });
 }

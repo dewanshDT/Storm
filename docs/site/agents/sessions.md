@@ -1,10 +1,11 @@
 ---
 title: Agent sessions
-description: Run Claude Code, OpenCode or a shell on your own machines, from any of your devices.
+description: Run Claude Code, OpenCode, Codex, Cursor, Command Code or a shell on your own machines, from any of your devices.
 ---
 
 A **session** is one agent running in a workspace on a
-[Runtime Host](/docs/agents/hosts/): Claude Code, OpenCode or a shell. You
+[Runtime Host](/docs/agents/hosts/): Claude Code, OpenCode, Codex, Cursor,
+Command Code or a shell. You
 start it from Storm and drive its terminal from any of your devices — a
 session started on the laptop can be picked up on the phone.
 
@@ -17,9 +18,9 @@ launcher asks for:
 |---|---|
 | **Host** | Which Runtime Host runs it. |
 | **Workspace** | A folder on that host — usually a project checkout. |
-| **Agent** | Claude Code (the default), OpenCode or a shell. |
+| **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
-| **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell. |
+| **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 
 The session takes its name from the agent's own terminal title, and its row
 shows the agent's logo and whether it is working or idle.
@@ -39,7 +40,7 @@ agent wrote says so on its version line, linking back to the session.
 
 ## When it ends
 
-An ended Claude Code or OpenCode session can be **resumed**: it reopens the
+An ended Claude Code, OpenCode or Codex session can be **resumed**: it reopens the
 agent's own conversation on the same host and workspace. **Run again** starts
 a fresh session with the same choices; **Dismiss** clears it from the list.
 
@@ -49,6 +50,21 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   chosen at launch. It is never offered `delete_note`.
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
+- **Claude Code and Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
+  session, under the same names the agent gives them, unless the host sets
+  `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
+  [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
+  Neither do the MCP servers in your own `~/.claude.json` or a repository's
+  `.mcp.json` (or `.codex/config.toml`), nor Codex's ChatGPT apps. When a
+  session starts, the agent shows what Storm skipped and why, and the
+  session's **Details** list it too, with the plugin servers that run on the
+  host and **Add to Integrations** for a remote one.
+- **Cursor and Command Code run as terminals only:** no notes, no
+  integrations, no write vault, and no Resume yet. Storm gives an agent its
+  tools only through a configuration that keeps a repository's own MCP
+  servers out, and neither CLI can be held to one yet (Command Code loads a
+  repository's `.mcp.json` with no approval at all). Their sessions keep the
+  name they launched with.
 - Storm enforces those limits on its tools. The agent is also a process with
   its host account's file access, which is why a Runtime Host must
   [never share an account with the vaults](/docs/agents/hosts/#never-share-an-account-with-the-vaults).

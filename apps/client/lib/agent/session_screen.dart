@@ -15,6 +15,7 @@ import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
 import '../ui/panels.dart';
 import '../ui/session_status.dart';
+import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
@@ -1238,8 +1239,45 @@ List<(String, String)> aboutRows(
         ? 'None'
         : '${integrations.join(', ')}. Fixed when the session started.',
   ),
+  if (s.mcpPluginLocal.isNotEmpty)
+    (
+      'Plugin servers',
+      '${s.mcpPluginLocal.join(', ')}. They run on $host, outside Storm’s '
+          'integrations.',
+    ),
+  if (s.mcpSkipped.isNotEmpty)
+    (
+      'Not loaded',
+      [
+        for (final x in s.mcpSkipped) '${x.name} (${x.source}): ${x.reason}',
+      ].join('\n'),
+    ),
   ('Network', 'Inherits $host’s policy'),
 ];
+
+/// Under About when a plugin's remote server was skipped: it reaches a
+/// session only as an integration (131a, 131g).
+class AddSkippedToIntegrations extends StatelessWidget {
+  const AddSkippedToIntegrations({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!session.mcpSkipped.any((x) => x.remote)) {
+      return const SizedBox.shrink();
+    }
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: TextAction(
+        key: const Key('add-skipped-to-integrations'),
+        label: 'Add to Integrations',
+        accent: true,
+        onTap: () => context.go(Routes.integrations),
+      ),
+    );
+  }
+}
 
 /// What the session was granted at launch (launch history); from a server
 /// that does not say, the account's connections now.
@@ -1258,17 +1296,23 @@ class _About extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-    return KeyValueList(
-      key: const Key('session-about'),
-      rows: aboutRows(
-        session,
-        host: host,
-        writeVault: vaults
-            .where((v) => v.id == session.writeVaultId)
-            .firstOrNull
-            ?.name,
-        integrations: sessionIntegrations(ref, session),
-      ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        KeyValueList(
+          key: const Key('session-about'),
+          rows: aboutRows(
+            session,
+            host: host,
+            writeVault: vaults
+                .where((v) => v.id == session.writeVaultId)
+                .firstOrNull
+                ?.name,
+            integrations: sessionIntegrations(ref, session),
+          ),
+        ),
+        AddSkippedToIntegrations(session: session),
+      ],
     );
   }
 }
@@ -1450,6 +1494,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
         ],
       ),
       KeyValueList(rows: rows),
+      AddSkippedToIntegrations(session: s),
       if (!s.ended) ...[
         if (_confirm) ...[
           Text(

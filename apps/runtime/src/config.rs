@@ -40,6 +40,19 @@ pub struct RuntimeConfig {
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
     pub forbidden_roots: Vec<PathBuf>,
+    /// Whether a Claude Code or Codex session gets its enabled plugins' local
+    /// (stdio) MCP servers (decision 131b). A plugin's remote servers never load on
+    /// a host; they reach a session only through the gateway.
+    #[serde(default)]
+    pub plugin_mcp: PluginMcp,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginMcp {
+    #[default]
+    Allow,
+    Off,
 }
 
 fn default_max_sessions() -> u32 {
@@ -68,6 +81,7 @@ impl Default for RuntimeConfig {
             scrollback_bytes: default_scrollback(),
             path: None,
             forbidden_roots: default_forbidden(),
+            plugin_mcp: PluginMcp::default(),
         }
     }
 }
@@ -194,12 +208,13 @@ impl RuntimeConfig {
             Some(path) => p.with_path(path.clone()),
             None => p,
         };
+        // With no list, every built-in (decision 130): one that is not
+        // installed is offered as such, and the launcher says so.
         let Some(entries) = &self.providers else {
-            return Ok(vec![
-                Arc::new(on_path(CliProvider::claude_code())),
-                Arc::new(on_path(CliProvider::opencode())),
-                Arc::new(on_path(CliProvider::shell())),
-            ]);
+            return Ok(crate::profile::BUILT_IN
+                .iter()
+                .map(|p| Arc::new(on_path(CliProvider::built_in(p))) as Arc<dyn Provider>)
+                .collect());
         };
         let mut out: Vec<Arc<dyn Provider>> = Vec::new();
         for entry in entries {
@@ -210,10 +225,10 @@ impl RuntimeConfig {
                 "cli" => {
                     let base = match (entry.command.as_deref(), id.as_str()) {
                         (Some(cmd), _) => CliProvider::new(id.clone(), cmd, &entry.args),
-                        (None, "claude-code") => CliProvider::claude_code(),
-                        (None, "opencode") => CliProvider::opencode(),
-                        (None, "shell") => CliProvider::shell(),
-                        (None, other) => bail!("provider `{other}` needs a command"),
+                        (None, built_in) => match crate::profile::get(built_in) {
+                            Some(p) => CliProvider::built_in(p),
+                            None => bail!("provider `{built_in}` needs a command"),
+                        },
                     };
                     let base = on_path(base);
                     Arc::new(match &entry.env_file {
@@ -511,12 +526,38 @@ mod tests {
             .map(|p| p.id().as_str().to_string())
             .collect();
         assert_eq!(ids, ["fake", "claude-code"]);
-        let defaults = RuntimeConfig::default().providers().unwrap();
-        assert_eq!(defaults.len(), 3);
+        // With no list, every built-in, in the profile table's order
+        // (decision 130).
+        let defaults: Vec<String> = RuntimeConfig::default()
+            .providers()
+            .unwrap()
+            .iter()
+            .map(|p| p.id().as_str().to_string())
+            .collect();
+        assert_eq!(
+            defaults,
+            [
+                "claude-code",
+                "opencode",
+                "codex",
+                "cursor",
+                "command-code",
+                "shell"
+            ]
+        );
         assert!(
             toml::from_str::<RuntimeConfig>("bogus = 1").is_err(),
             "unknown keys refused"
         );
+    }
+
+    /// Decision 131b: plugin servers are allowed unless the host says off.
+    #[test]
+    fn plugin_mcp_defaults_to_allow() {
+        assert_eq!(RuntimeConfig::default().plugin_mcp, PluginMcp::Allow);
+        let off: RuntimeConfig = toml::from_str("plugin_mcp = \"off\"").unwrap();
+        assert_eq!(off.plugin_mcp, PluginMcp::Off);
+        assert!(toml::from_str::<RuntimeConfig>("plugin_mcp = \"maybe\"").is_err());
     }
 
     /// AM54: a workspace name is never a path on Windows either, whichever

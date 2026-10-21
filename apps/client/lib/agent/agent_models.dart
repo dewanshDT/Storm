@@ -6,17 +6,32 @@ import 'claude_login_api.dart' show claudeCredentialNotice;
 
 /// A provider a host offers.
 class ProviderCap {
-  ProviderCap({required this.id, required this.kind, required this.available});
+  ProviderCap({
+    required this.id,
+    required this.kind,
+    required this.available,
+    this.mcp,
+  });
 
   final String id;
   final String kind;
   final bool available;
 
+  /// The host can give its sessions Storm's MCP (decision 130a); null from a
+  /// host too old to say, or for an agent it has no adapter for.
+  final bool? mcp;
+
   factory ProviderCap.fromJson(Map<String, dynamic> j) => ProviderCap(
     id: j['id'] as String,
     kind: j['kind'] as String? ?? 'cli',
     available: j['available'] as bool? ?? false,
+    mcp: j['mcp'] as bool?,
   );
+
+  /// Its sessions can read your vaults and use your integrations: what the
+  /// server grants, so `shell` never, and an agent the host cannot keep to
+  /// its own MCP servers never (130a).
+  bool get reachesStorm => mcp ?? id != 'shell';
 
   /// How a person reads the id.
   String get label => providerLabel(id);
@@ -26,6 +41,9 @@ class ProviderCap {
 String providerLabel(String id) => switch (id) {
   'claude-code' => 'Claude Code',
   'opencode' => 'OpenCode',
+  'codex' => 'Codex',
+  'cursor' => 'Cursor',
+  'command-code' => 'Command Code',
   'shell' => 'Shell',
   'fake' => 'Fake (test)',
   _ => id,
@@ -154,6 +172,29 @@ class SessionContext {
 
 /// An agent session (freeze §7.1), with what it was launched with
 /// (decision 82, slice 5).
+/// An MCP server a session did not get, and why (decision 131a): by name
+/// only.
+class SkippedServer {
+  const SkippedServer({
+    required this.name,
+    required this.source,
+    required this.reason,
+  });
+
+  final String name;
+  final String source;
+  final String reason;
+
+  /// A plugin's remote server: it reaches a session only as an integration.
+  bool get remote => reason.startsWith('remote');
+
+  factory SkippedServer.fromJson(Map<String, dynamic> j) => SkippedServer(
+    name: '${j['name'] ?? ''}',
+    source: '${j['source'] ?? ''}',
+    reason: '${j['reason'] ?? ''}',
+  );
+}
+
 class AgentSession {
   AgentSession({
     required this.id,
@@ -181,6 +222,8 @@ class AgentSession {
     this.activity,
     this.harnessSession,
     this.resumedFrom,
+    this.mcpSkipped = const [],
+    this.mcpPluginLocal = const [],
   }) : name = name ?? workspace;
 
   final String id;
@@ -223,10 +266,17 @@ class AgentSession {
   /// The session whose conversation this one reopened.
   final String? resumedFrom;
 
+  /// The MCP servers its host said it would not have (131a).
+  final List<SkippedServer> mcpSkipped;
+
+  /// Its plugins' local MCP servers, which run on the host outside Storm's
+  /// integrations (131a).
+  final List<String> mcpPluginLocal;
+
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
-      (provider == 'claude-code' || provider == 'opencode');
+      const {'claude-code', 'opencode', 'codex'}.contains(provider);
   final SessionContext? context;
 
   /// The one vault it may write to; null is read only.
@@ -302,6 +352,8 @@ class AgentSession {
           activity: live.activity,
           harnessSession: live.harnessSession ?? harnessSession,
           resumedFrom: resumedFrom,
+          mcpSkipped: mcpSkipped,
+          mcpPluginLocal: mcpPluginLocal,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -341,6 +393,13 @@ class AgentSession {
     activity: j['activity'] as String?,
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
+    mcpSkipped: [
+      for (final s in j['mcp_skipped'] as List? ?? const [])
+        if (s is Map<String, dynamic>) SkippedServer.fromJson(s),
+    ],
+    mcpPluginLocal: [
+      for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
+    ],
   );
 }
 

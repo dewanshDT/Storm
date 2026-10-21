@@ -601,16 +601,92 @@ Specification*; the slices are decisions 81 and 81a onward):
   `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
+- **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
+  its safe launch args, prompt form, MCP writer, resume id shape and title
+  policy. **An agent Storm cannot hold to its own MCP servers gets none**
+  (130a): the host reports `mcp: false` for it in `hello` and the server
+  grants nothing (`McpOutcome::Unsupported`) — Cursor and Command Code today;
+  Command Code loads a repository's `.mcp.json` with no approval. Their
+  writers exist (131j `cursor.rs`: bridges as a `--plugin-dir` plugin, every
+  other server on Cursor's own `mcp-disabled.json`; 131k `command_code.rs`:
+  the workspace's local `mcp.json`, a disabled stub under every other name
+  and no handle in it) but the profiles stay `mcp: None` until G-C1/G-CC1
+  pass on a signed-in account. Both slugs are the CLIs' own — Command Code's
+  is `@sindresorhus/slugify`, and a non-ASCII path fails the start rather
+  than guess; `tests/cursor_command_code_gate.rs` checks them against the
+  real binaries. No profile passes a flag that turns an agent's own
+  permission prompts off.
+- **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
+  `<state>/agents/codex`, shared by its sessions so Resume finds a
+  conversation; a session's servers are in its own `-p` profile (`0600`,
+  removed at the end), each `default_tools_approval_mode = "prompt"`. Before
+  every launch Storm rewrites the keys it owns in that `config.toml`: no
+  `mcp_servers`/`profiles`, only Storm's `SessionStart` hook (matcher
+  `startup|clear`: Codex starts a resume's hook without feeding it), every
+  workspace `untrusted` (a trusted one would load the repository's
+  `.codex/` servers and hooks). **No plugin with hooks** (130f): Storm's
+  `--dangerously-bypass-hook-trust` reaches a plugin's hooks too, so any
+  plugin whose installed versions have a `hooks` entry or manifest key — or
+  that Storm cannot read — is `enabled = false`, and `plugins._default` is
+  off so an account-synced plugin never loads; `storm-plugins-off.json`
+  remembers what Storm turned off. **No plugin's remote MCP server and no
+  ChatGPT apps** (131i, 131l): each remote server of an enabled plugin gets
+  `[plugins."<id>".mcp_servers."<name>"] enabled = false` (Codex would sign
+  it in on the host), its stdio servers follow `plugin_mcp`, and
+  `features.apps = false`; what was turned off, the account's removed
+  `mcp_servers` and the workspace's `.codex/` servers are named in the
+  session's notice, which Codex shows at the first message. `--no-daemon` always: a shared daemon holds a
+  conversation's writer lock. **No Codex sandbox** (130c): it needs user
+  namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
+  forbids, and relaxing the unit would weaken every agent.
+  `tests/codex_gate.rs` proves all of it against a real `codex` when
+  `STORM_CODEX_BIN` is set.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,
   and by the server before storing. `docs/harness-session-vectors.json`
-  keeps the two crates in agreement. The `SessionStart` hook prints nothing:
-  its stdout reaches the agent.
+  keeps the two crates in agreement. The `SessionStart` hook prints nothing
+  but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
+  a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
+  positive control.
+- **A Claude Code session's plugins' local MCP servers are written into its
+  `mcp.json` by Storm, and strict stays** (decision 131, `plugins.rs`). The
+  host lists the enabled plugins with the provider's own `claude plugin list
+  --json`; a stdio server is keyed `plugin_<plugin>_<server>` (Claude Code's
+  own tool prefix; no slug has `_`) with `${CLAUDE_PLUGIN_ROOT}`/`DATA` filled
+  in and also set in its `env`, and one needing `${user_config.…}` is
+  skipped. A remote server never loads on a host. Everything skipped —
+  remote, unresolved, the account's and the workspace's own servers, by name
+  only — goes in the session's `mcp-notice.txt`, which `harness-session`
+  prints on a start or a resume, and in the first `running` report.
+  `runtime.toml` `plugin_mcp = "off"` keeps every plugin server out.
+- **A plugin's remote server reaches a session only as an integration, and a
+  host reports it without a secret** (131g, 131h). `capabilities`
+  `plugin_mcp_remote` (refreshed in the background, so `hello` never waits
+  on `claude plugin list`) carries the URL as declared and at most a
+  header's *name* (`auth_hint`), never a header or env value or a vendor's
+  client id; the server keeps it with the host's in-memory capabilities and
+  `GET /v1/integrations/suggestions` asks every live host for a fresh one
+  first. A connection added from one records `connection_plugin_origin` at
+  creation only, and its grant carries it so the `claude-code` writer names
+  that bridge `plugin_<plugin>_<server>` (the slug on a clash; the bridge is
+  still addressed by slug). The first `running` report's `mcp_skipped` is
+  kept, bounded, in `agent.db` `session_mcp_notice` and never replaced.
+  `gateway_e2e.py` plants a header canary in a plugin and scans for it.
 - **OAuth discovery never reaches a private address** (81g, §10). rmcp's
   OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
   every URL and redirect hop resolved and refused unless all its addresses
   are public, then connected to exactly those addresses.
+- **A pasted or confidentially registered OAuth client's secret is sealed
+  like a credential** (131e, 131f; `oauth_clients`, kind `client_secret`).
+  With no scopes given the server asks for MCP's (rmcp `select_scopes`).
+  An authorization server that does not offer `none` gets a confidential
+  RFC 7591 registration of Storm's own (`oauth::register_confidential`,
+  through `SsrfHttp`, no redirects), with the auth method rmcp's token client
+  will use — `client_secret_basic` when offered, else `client_secret_post` —
+  and a reply without a secret is a failure. A pasted client on Linux and
+  Windows returns to the fixed loopback port `ownAppPort` (27181), since a
+  hand-registered app lists its redirects.
 - **An OAuth flow is single use by SQL, not by code order**: loading it
   claims it with one `UPDATE … WHERE used_at IS NULL`. The state is stored
   only as a hash; the redirect URI is loopback or `storm://oauth`, never LAN.

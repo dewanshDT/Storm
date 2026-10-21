@@ -135,7 +135,7 @@ fn the_example_config_parses_and_points_inside_the_sandbox() {
     );
     assert_eq!(
         config.providers().unwrap().len(),
-        3,
+        storm_runtime::profile::BUILT_IN.len(),
         "the built-ins by default"
     );
 }
