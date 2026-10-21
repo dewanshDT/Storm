@@ -26,7 +26,14 @@
 //! - `check_for_update_on_startup = false`, `features.daemon_auto_start =
 //!   false` (a session owns its process; a shared daemon would hold a
 //!   conversation's writer lock), and a title of the activity and the
-//!   conversation's name.
+//!   conversation's name;
+//! - **no plugin with hooks** (130f): Codex applies
+//!   `--dangerously-bypass-hook-trust` to a plugin's hooks as well as to
+//!   Storm's, so a plugin that declares any is off. `plugins._default` is off,
+//!   so a plugin Storm cannot inspect (an account-synced one) never loads;
+//!   every listed plugin gets an explicit `enabled`. Which plugins Storm
+//!   turned off is remembered beside the config, so one that drops its hooks
+//!   comes back, and one the account turned off stays off.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -40,6 +47,16 @@ use crate::provider::LaunchExtras;
 pub const HOME_ENV: &str = "CODEX_HOME";
 const PROFILE_PREFIX: &str = "storm-";
 const PROFILE_SUFFIX: &str = ".config.toml";
+/// The plugins Storm turned off for their hooks, as a JSON list of ids.
+const PLUGINS_OFF: &str = "storm-plugins-off.json";
+/// Where Codex may find a plugin's manifest (0.163's
+/// `DISCOVERABLE_PLUGIN_MANIFEST_PATHS`, and the root `plugin.json`).
+const MANIFESTS: [&str; 4] = [
+    "plugin.json",
+    ".codex-plugin/plugin.json",
+    ".claude-plugin/plugin.json",
+    ".cursor-plugin/plugin.json",
+];
 
 /// One launch at a time rewrites `config.toml`; Codex itself may write it
 /// too, which a rename-into-place keeps from tearing.
@@ -76,13 +93,28 @@ pub fn baseline(home: &Path, workspace: &Path, exe: &Path) -> Result<LaunchExtra
         tracing::warn!(path = %path.display(), error = %e, "replacing an unreadable Codex config");
         Table::new()
     });
-    let table = owned_config(table, workspace, exe);
+    let mut table = owned_config(table, workspace, exe);
+    let off_path = home.join(PLUGINS_OFF);
+    let was_off: Vec<String> = std::fs::read(&off_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let off = switch_plugins(&mut table, home, &was_off);
+    if !off.is_empty() {
+        tracing::warn!(plugins = ?off, "Codex plugins with hooks are off in Storm sessions (130f)");
+    }
     crate::fsutil::write_atomic(
         &path,
         toml::to_string(&table)?.as_bytes(),
         crate::fsutil::Access::Private,
     )
     .with_context(|| format!("writing {}", path.display()))?;
+    crate::fsutil::write_atomic(
+        &off_path,
+        &serde_json::to_vec(&off)?,
+        crate::fsutil::Access::Private,
+    )
+    .with_context(|| format!("writing {}", off_path.display()))?;
     Ok(LaunchExtras {
         env: vec![(HOME_ENV.into(), home.as_os_str().to_owned())],
         ..Default::default()
@@ -119,6 +151,81 @@ pub fn owned_config(mut table: Table, workspace: &Path, exe: &Path) -> Table {
 
     table.insert("hooks".into(), Value::Table(hooks(exe)));
     table
+}
+
+/// Turns off every plugin in `table` that has hooks, or that Storm cannot
+/// inspect, and returns their ids. `was_off` is what Storm turned off last
+/// time: those count as wanted, so a plugin that no longer has hooks comes
+/// back. A plugin the account itself turned off stays off.
+pub fn switch_plugins(table: &mut Table, home: &Path, was_off: &[String]) -> Vec<String> {
+    let plugins = sub_table(table, "plugins");
+    let mut off = Vec::new();
+    for (id, entry) in plugins.iter_mut() {
+        let Value::Table(entry) = entry else { continue };
+        if id == "_default" {
+            continue;
+        }
+        let wanted = was_off.contains(id)
+            || entry
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+        if !wanted {
+            continue;
+        }
+        let hooked = plugin_may_have_hooks(home, id);
+        entry.insert("enabled".into(), Value::Boolean(!hooked));
+        if hooked {
+            off.push(id.clone());
+        }
+    }
+    let mut default = Table::new();
+    default.insert("enabled".into(), Value::Boolean(false));
+    plugins.insert("_default".into(), Value::Table(default));
+    off
+}
+
+/// Whether any installed version of plugin `id` (`<name>@<marketplace>`)
+/// declares hooks: a `hooks` entry beside its manifest, or a `hooks` key in
+/// any manifest Codex might read. Anything Storm cannot read counts as yes.
+fn plugin_may_have_hooks(home: &Path, id: &str) -> bool {
+    let Some((name, marketplace)) = id.rsplit_once('@') else {
+        return true;
+    };
+    let segment_ok =
+        |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\', '\0']);
+    if !segment_ok(name) || !segment_ok(marketplace) {
+        return true;
+    }
+    let base = home
+        .join("plugins")
+        .join("cache")
+        .join(marketplace)
+        .join(name);
+    let Ok(versions) = std::fs::read_dir(&base) else {
+        return true;
+    };
+    let mut any = false;
+    for version in versions {
+        let Ok(version) = version else { return true };
+        any = true;
+        if version_may_have_hooks(&version.path()) {
+            return true;
+        }
+    }
+    !any
+}
+
+fn version_may_have_hooks(root: &Path) -> bool {
+    if std::fs::symlink_metadata(root.join("hooks")).is_ok() {
+        return true;
+    }
+    MANIFESTS.iter().any(|m| match std::fs::read(root.join(m)) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map(|v| v.get("hooks").is_some())
+            .unwrap_or(true),
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    })
 }
 
 /// Storm's `SessionStart` hook and nothing else. It fires on a fresh start
@@ -303,6 +410,143 @@ screen_reader_detection_done = true
         );
         assert!(t["hooks"].as_table().unwrap().len() == 1);
         assert!(crate::platform::is_private(&home.join("config.toml")).unwrap());
+    }
+
+    fn install(home: &Path, id: &str, files: &[(&str, &str)]) {
+        let (name, marketplace) = id.rsplit_once('@').unwrap();
+        let root = home
+            .join("plugins/cache")
+            .join(marketplace)
+            .join(name)
+            .join("1.0.0");
+        for (path, body) in files {
+            let path = root.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, body).unwrap();
+        }
+    }
+
+    /// 130f: a plugin whose hooks Codex would run under Storm's trust bypass
+    /// is off, and so is anything Storm cannot inspect; a plain plugin and
+    /// the account's own choice are kept.
+    #[test]
+    fn a_plugin_with_hooks_or_unknown_is_off() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = home(state.path());
+        let manifest = r#"{"name":"x","version":"1.0.0"}"#;
+        install(
+            &home,
+            "plain@m",
+            &[(".codex-plugin/plugin.json", manifest), (".mcp.json", "{}")],
+        );
+        install(
+            &home,
+            "hookfile@m",
+            &[
+                (".claude-plugin/plugin.json", manifest),
+                ("hooks/hooks.json", "{}"),
+            ],
+        );
+        install(
+            &home,
+            "hookkey@m",
+            &[(
+                ".claude-plugin/plugin.json",
+                r#"{"name":"x","hooks":"./h.json"}"#,
+            )],
+        );
+        install(
+            &home,
+            "garbled@m",
+            &[(".codex-plugin/plugin.json", "{ not json")],
+        );
+        install(&home, "mine@m", &[("hooks/hooks.json", "{}")]);
+        std::fs::write(
+            home.join("config.toml"),
+            r#"
+[plugins."plain@m"]
+enabled = true
+[plugins."hookfile@m"]
+enabled = true
+[plugins."hookkey@m"]
+[plugins."garbled@m"]
+enabled = true
+[plugins."missing@m"]
+enabled = true
+[plugins."../../etc@m"]
+enabled = true
+[plugins."mine@m"]
+enabled = false
+[plugins._default]
+enabled = true
+"#,
+        )
+        .unwrap();
+        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        let t = read(&home.join("config.toml"));
+        let p = t["plugins"].as_table().unwrap();
+        let on = |id: &str| p[id]["enabled"].as_bool().unwrap();
+        assert!(on("plain@m"), "a plugin without hooks is kept");
+        for id in [
+            "hookfile@m",
+            "hookkey@m",
+            "garbled@m",
+            "missing@m",
+            "../../etc@m",
+        ] {
+            assert!(!on(id), "{id} should be off");
+        }
+        assert!(!on("mine@m"), "the account's own choice is kept");
+        assert!(
+            !p["_default"]["enabled"].as_bool().unwrap(),
+            "unlisted plugins never load"
+        );
+        let mut off: Vec<String> =
+            serde_json::from_slice(&std::fs::read(home.join(PLUGINS_OFF)).unwrap()).unwrap();
+        off.sort();
+        assert_eq!(
+            off,
+            [
+                "../../etc@m",
+                "garbled@m",
+                "hookfile@m",
+                "hookkey@m",
+                "missing@m"
+            ]
+        );
+        assert!(crate::platform::is_private(&home.join(PLUGINS_OFF)).unwrap());
+    }
+
+    /// A plugin Storm turned off comes back once it has no hooks; one the
+    /// account turned off does not.
+    #[test]
+    fn a_plugin_storm_turned_off_comes_back_without_hooks() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = home(state.path());
+        install(&home, "p@m", &[("hooks/hooks.json", "{}")]);
+        std::fs::write(
+            home.join("config.toml"),
+            "[plugins.\"p@m\"]\nenabled = true\n",
+        )
+        .unwrap();
+        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        assert_eq!(
+            read(&home.join("config.toml"))["plugins"]["p@m"]["enabled"].as_bool(),
+            Some(false)
+        );
+
+        std::fs::remove_dir_all(home.join("plugins/cache/m/p/1.0.0/hooks")).unwrap();
+        baseline(&home, ws.path(), Path::new("/x")).unwrap();
+        assert_eq!(
+            read(&home.join("config.toml"))["plugins"]["p@m"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join(PLUGINS_OFF)).unwrap(),
+            "[]"
+        );
     }
 
     #[test]
