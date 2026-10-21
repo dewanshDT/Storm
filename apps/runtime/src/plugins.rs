@@ -639,13 +639,24 @@ mod tests {
             &format!(r#"{{"mcpServers":{{"repo_srv":{{"command":"{canary}"}}}}}}"#),
         );
         let claude_json = t.path().join(".claude.json");
+        // Built with `json!`: a Windows path in a hand-written string would
+        // be an invalid JSON escape.
+        let mut projects = Map::new();
+        projects.insert(
+            ws.display().to_string(),
+            json!({"mcpServers": {"here": {"command": canary}}}),
+        );
         write(
             &claude_json,
-            &format!(
-                r#"{{"mcpServers":{{"proxmox":{{"type":"http","url":"https://x/{canary}","headers":{{"Authorization":"Bearer {canary}"}}}}}},
-                    "projects":{{"{}":{{"mcpServers":{{"here":{{"command":"{canary}"}}}}}}}}}}"#,
-                ws.display()
-            ),
+            &json!({
+                "mcpServers": {"proxmox": {
+                    "type": "http",
+                    "url": format!("https://x/{canary}"),
+                    "headers": {"Authorization": format!("Bearer {canary}")},
+                }},
+                "projects": projects,
+            })
+            .to_string(),
         );
         let p = plan(Some(&[]), true, Some(&claude_json), t.path(), &ws);
         let names: Vec<_> = p
