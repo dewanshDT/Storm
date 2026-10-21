@@ -73,6 +73,8 @@ void main() {
       'unclosed fence': '```\nstill inside',
       'frontmatter': '---\nid: abc\ntags: [a, b]\n---\n\n# Title',
       'unterminated frontmatter': '---\nid: abc',
+      'bom before frontmatter': '\uFEFF---\nid: abc\n---\n\n# Title',
+      'bom without frontmatter': '\uFEFFjust text',
       'unmatched asterisk': 'a * b * c ** d',
       'unmatched bracket': 'text [[ unclosed',
       'unmatched backtick': 'a ` b',
@@ -103,6 +105,13 @@ void main() {
         expect(await render(tester, note), equals(note));
       }
     });
+  });
+
+  test('a BOM before the opening fence still opens frontmatter (128e)', () {
+    final first = tokenizeLine('\uFEFF---', 0, const BlockContext(), 0);
+    expect(first.tokens.single.kind, TokenKind.frontmatter);
+    expect(first.tokens.single.end, '\uFEFF---'.length);
+    expect(first.nextContext.inFrontmatter, isTrue);
   });
 
   group('tokens tile each line without gaps or overlaps', () {

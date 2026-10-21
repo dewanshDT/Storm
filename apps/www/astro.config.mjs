@@ -74,7 +74,12 @@ export default defineConfig({
         },
         {
           label: "Agents",
-          items: ["docs/agents/sessions", "docs/agents/hosts", "docs/agents/integrations"],
+          items: [
+            "docs/agents/sessions",
+            "docs/agents/hosts",
+            "docs/agents/integrations",
+            "docs/agents/claude-login",
+          ],
         },
         { label: "MCP", items: ["docs/mcp/connect"] },
         {

@@ -95,6 +95,10 @@ pub enum Command {
         /// The agent's own session to resume (decision 89).
         #[serde(default)]
         resume: Option<String>,
+        /// Token sync (AM69): the credential kind to pull before starting,
+        /// never its value.
+        #[serde(default)]
+        provider_credential: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -377,6 +381,9 @@ impl Host {
                 .map(|p| p.id().as_str())
                 .filter(|id| crate::harness::PROVIDERS.contains(id))
                 .collect::<Vec<_>>(),
+            // It pulls a synced login for a session whose `start` names one,
+            // and fails the start if it cannot (AM69).
+            "provider_credentials": [crate::credential::KIND],
         })
     }
 
@@ -385,9 +392,11 @@ impl Host {
             sessions: self.sessions.lock().unwrap().keys().cloned().collect(),
         };
         let path = self.state_dir.join(SESSIONS_FILE);
-        let tmp = path.with_extension("json.tmp");
-        let result = std::fs::write(&tmp, serde_json::to_vec(&table).unwrap_or_default())
-            .and_then(|_| std::fs::rename(&tmp, &path));
+        let result = crate::fsutil::write_atomic(
+            &path,
+            &serde_json::to_vec(&table).unwrap_or_default(),
+            crate::fsutil::Access::Default,
+        );
         if let Err(e) = result {
             tracing::error!(error = %e, "could not write {}", path.display());
         }
@@ -706,6 +715,7 @@ impl Host {
                 mcp,
                 context,
                 resume,
+                provider_credential,
             } => {
                 self.start(
                     session,
@@ -716,6 +726,7 @@ impl Host {
                     mcp,
                     context,
                     resume,
+                    provider_credential,
                 )
                 .await
             }
@@ -814,6 +825,7 @@ impl Host {
         mcp: Vec<crate::mcp::McpGrant>,
         context: bool,
         resume: Option<String>,
+        provider_credential: Option<String>,
     ) {
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
@@ -849,17 +861,41 @@ impl Host {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
         }
-        // The provider's MCP config (AM32). Written before the agent starts;
-        // a session whose config cannot be written does not start, rather
-        // than start without `--strict-mcp-config` and load the host's own
-        // MCP servers (G-D12).
-        let mut launch = match self.mcp_launch(&id, &provider_id, &mcp) {
+        // Token sync (AM71): pulled before anything is written; any failure
+        // ends the launch, never a fallback to this host's own login.
+        let synced = match provider_credential.as_deref() {
+            None => None,
+            Some(kind) => match self.synced_login(&id, kind, &provider_id).await {
+                Ok(synced) => Some(synced),
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %e, "start refused");
+                    return self.post_start_failure(&id).await;
+                }
+            },
+        };
+        let is_synced = synced.is_some();
+        // What the provider gets with or without grants (AM66), then its MCP
+        // config (AM32). Written before the agent starts; a session whose
+        // config cannot be written does not start, rather than start without
+        // `--strict-mcp-config` and load the host's own MCP servers (G-D12).
+        let session_dir = crate::mcp::session_dir(&self.state_dir, &id);
+        let mut launch = match crate::mcp::provider_baseline(&provider_id, &session_dir, &dir) {
             Ok(extras) => extras,
+            Err(e) => {
+                tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the instructions config");
+                return self.post_start_failure(&id).await;
+            }
+        };
+        match self.mcp_launch(&id, &provider_id, &mcp) {
+            Ok(extras) => {
+                launch.args.extend(extras.args);
+                launch.env.extend(extras.env);
+            }
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
             }
-        };
+        }
         let events = Arc::new(Events {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
@@ -867,19 +903,29 @@ impl Host {
             title: Mutex::new(TitleObserver::default()),
             harness: Mutex::new(None),
         });
-        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events) {
+        let pins = synced.as_ref().map(|(pins, _)| pins);
+        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
             }
             // A session that cannot report its id still runs; it only cannot
-            // be resumed. A resume still names its conversation.
+            // be resumed. A resume still names its conversation, and a synced
+            // session's pins live in the same file.
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
-                if resume.is_some() {
+                if resume.is_some() || is_synced {
                     return self.post_start_failure(&id).await;
                 }
             }
+        }
+        if let Some((_, token)) = synced {
+            launch
+                .env_remove
+                .extend(crate::credential::ENV_REMOVE.map(Into::into));
+            launch
+                .secret_env
+                .push((crate::credential::TOKEN_ENV.into(), token));
         }
         // A resumed conversation has read its note already.
         let launch =
@@ -890,7 +936,7 @@ impl Host {
             interaction: InteractionSpec::Terminal(size),
             launch,
         };
-        tracing::info!(session = %id, provider = %provider_id, %workspace, "starting");
+        tracing::info!(session = %id, provider = %provider_id, %workspace, synced = is_synced, "starting");
         let begun = std::time::Instant::now();
         let mut provider_start = {
             let events: Arc<dyn SessionEvents> = events.clone();
@@ -1160,6 +1206,7 @@ impl Host {
         provider: &str,
         resume: Option<&str>,
         events: &Arc<Events>,
+        synced: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<crate::mcp::LaunchExtras> {
         if !crate::harness::PROVIDERS.contains(&provider) {
             return Ok(Default::default());
@@ -1173,6 +1220,7 @@ impl Host {
             &self.socket_address(),
             &exe,
             resume,
+            synced,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -1180,6 +1228,40 @@ impl Host {
             (session.to_string(), provider.to_string(), events.clone()),
         );
         Ok(extras)
+    }
+
+    /// A synced session's settings pins and its token, pulled for this one
+    /// launch while the session is `starting` (AM71).
+    async fn synced_login(
+        &self,
+        session: &str,
+        kind: &str,
+        provider: &str,
+    ) -> Result<
+        (
+            serde_json::Map<String, serde_json::Value>,
+            crate::credential::SecretOsString,
+        ),
+        crate::credential::SyncError,
+    > {
+        use crate::credential::{SyncError, check_launch, managed_dir, pull, settings};
+        check_launch(kind, provider, &managed_dir())?;
+        let pins = settings(|name| std::env::var_os(name))?;
+        let token = self
+            .token
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| SyncError::Unreachable("no host token yet".into()))?;
+        let value = pull(
+            self.client.http(),
+            self.client.base(),
+            &token,
+            session,
+            || self.reauth.notify_one(),
+        )
+        .await?;
+        Ok((pins, value))
     }
 
     /// A session ended: its handle stops working and its directory goes.
@@ -1608,6 +1690,7 @@ mod tests {
                 mcp: Vec::new(),
                 context: false,
                 resume: None,
+                provider_credential: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -1722,6 +1805,7 @@ mod tests {
             mcp: Vec::new(),
             context,
             resume: resume.map(str::to_string),
+            provider_credential: None,
         }
     }
 
@@ -1901,6 +1985,7 @@ mod tests {
                 mcp: Vec::new(),
                 context: false,
                 resume: None,
+                provider_credential: None,
             })
             .await;
 
@@ -1992,6 +2077,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 mcp: Vec::new(),
                 context: false,
                 resume: None,
+                provider_credential: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -2103,6 +2189,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             mcp: Vec::new(),
             context: false,
             resume: None,
+            provider_credential: None,
         }
     }
 
@@ -2348,6 +2435,289 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         assert!(!slow.stopped.load(Ordering::SeqCst));
     }
 
+    /// A host whose `claude-code` and `opencode` are `/bin/sh` recording
+    /// their environment and arguments under `out`, with a provider env file
+    /// holding competing credentials, on a server that answers the pull
+    /// route with `answers`.
+    #[cfg(unix)]
+    async fn synced_host(
+        answers: &[(u16, String)],
+    ) -> (
+        Arc<Host>,
+        crate::credential::tests::Seen,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) =
+            crate::credential::tests::stub_server(Arc::new(Mutex::new(answers.to_vec()))).await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let env_file = roots.path().join("claude.env");
+        std::fs::write(
+            &env_file,
+            "ANTHROPIC_API_KEY=sk-ant-api03-ENVFILE\nCLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-ENVFILE\n\
+             ANTHROPIC_BASE_URL=http://127.0.0.1:9\nCLAUDE_CODE_USE_BEDROCK=1\nDISABLE_TELEMETRY=1\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let out = roots.path().join("out");
+        std::fs::create_dir(&out).unwrap();
+        let script = format!(
+            "env > {o}/env.$STORM_RUNTIME_SESSION; printf '%s\\n' \"$@\" > {o}/args.$STORM_RUNTIME_SESSION; exec sleep 1000",
+            o = out.display()
+        );
+        let mut toml = format!(
+            "workspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for id in ["claude-code", "opencode"] {
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\nenv_file = {:?}\n",
+                env_file.display().to_string()
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    #[cfg(unix)]
+    fn synced_start(session: &str, provider: &str, kind: Option<&str>) -> Command {
+        Command::Start {
+            session: session.into(),
+            workspace: "w".into(),
+            provider: provider.into(),
+            interaction: Some("terminal".into()),
+            terminal: Size { cols: 80, rows: 24 },
+            mcp: Vec::new(),
+            context: false,
+            resume: None,
+            provider_credential: kind.map(str::to_string),
+        }
+    }
+
+    #[cfg(unix)]
+    fn recorded(roots: &Path, what: &str, session: &str) -> Option<String> {
+        std::fs::read_to_string(roots.join("out").join(format!("{what}.{session}"))).ok()
+    }
+
+    #[cfg(unix)]
+    fn start_failed(seen: &crate::credential::tests::Seen, session: &str) -> bool {
+        seen.lock().unwrap().iter().any(|(m, p, _, b)| {
+            m == "POST" && p.ends_with(&format!("/{session}/status")) && b.contains("start_failure")
+        })
+    }
+
+    #[cfg(unix)]
+    fn files_holding(dir: &Path, needle: &str) -> Vec<PathBuf> {
+        let mut hits = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if std::fs::read(&path)
+                    .is_ok_and(|b| String::from_utf8_lossy(&b).contains(needle))
+                {
+                    hits.push(path);
+                }
+            }
+        }
+        hits
+    }
+
+    /// AC-TS7, AC-TS11, AC-TS18 (runtime half): a synced start pulls the
+    /// token on the host token, gives it to the CLI as its env only, strips
+    /// the competing credentials, pins the settings, and writes it nowhere.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_synced_start_runs_on_the_pulled_token_and_nothing_else() {
+        use crate::credential::tests::{CANARY, ok_body};
+        let (host, seen, state, roots) = synced_host(&[(200, ok_body(CANARY))]).await;
+        assert_eq!(
+            host.capabilities()["provider_credentials"],
+            serde_json::json!([crate::credential::KIND])
+        );
+        host.clone()
+            .handle(synced_start(
+                "ags_SYNC",
+                "claude-code",
+                Some(crate::credential::KIND),
+            ))
+            .await;
+        wait_for("the CLI's env", || {
+            recorded(roots.path(), "args", "ags_SYNC").is_some_and(|a| a.contains("--settings"))
+        })
+        .await;
+        let env = recorded(roots.path(), "env", "ags_SYNC").unwrap();
+        let lines: Vec<&str> = env.lines().collect();
+        assert!(lines.contains(&format!("CLAUDE_CODE_OAUTH_TOKEN={CANARY}").as_str()));
+        assert!(
+            lines.contains(&"DISABLE_TELEMETRY=1"),
+            "non-credential env-file values stay"
+        );
+        for name in crate::credential::ENV_REMOVE {
+            assert!(
+                !lines.iter().any(|l| l.starts_with(&format!("{name}="))),
+                "{name} reached the CLI"
+            );
+        }
+        assert!(!env.contains("ENVFILE"));
+
+        let pull: Vec<_> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(m, ..)| m == "GET")
+            .cloned()
+            .collect();
+        assert_eq!(pull.len(), 1);
+        assert_eq!(
+            pull[0].1,
+            "/v1/runtime/sessions/ags_SYNC/provider-credential"
+        );
+        assert_eq!(pull[0].2, "bearer sht_test");
+
+        let args = recorded(roots.path(), "args", "ags_SYNC").unwrap();
+        assert!(!args.contains(CANARY), "never argv");
+        let lines: Vec<&str> = args.lines().collect();
+        let at = lines.iter().position(|l| *l == "--settings").unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap();
+        assert_eq!(settings["apiKeyHelper"], "");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.anthropic.com"
+        );
+        assert_eq!(settings["env"]["ANTHROPIC_API_KEY"], "");
+        assert!(settings["hooks"]["SessionStart"].is_array());
+
+        assert_eq!(
+            files_holding(state.path(), "STORMCANARY"),
+            Vec::<PathBuf>::new()
+        );
+        let session_dir = crate::mcp::session_dir(state.path(), "ags_SYNC");
+        host.handle_now(Command::End {
+            session: "ags_SYNC".into(),
+        });
+        wait_for("the session's directory to go", || !session_dir.exists()).await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// AM70: a start that names no credential is the native path,
+    /// byte-for-byte as before.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn an_unsynced_start_keeps_the_env_file_and_pulls_nothing() {
+        let (host, seen, _state, roots) = synced_host(&[(500, "{}".into())]).await;
+        host.clone()
+            .handle(synced_start("ags_NATIVE", "claude-code", None))
+            .await;
+        wait_for("the CLI's env", || {
+            recorded(roots.path(), "args", "ags_NATIVE").is_some_and(|a| a.contains("--settings"))
+        })
+        .await;
+        let env = recorded(roots.path(), "env", "ags_NATIVE").unwrap();
+        assert!(env.contains("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-ENVFILE"));
+        assert!(env.contains("ANTHROPIC_API_KEY=sk-ant-api03-ENVFILE"));
+        assert!(!seen.lock().unwrap().iter().any(|(m, ..)| m == "GET"));
+        let args = recorded(roots.path(), "args", "ags_NATIVE").unwrap();
+        let lines: Vec<&str> = args.lines().collect();
+        let at = lines.iter().position(|l| *l == "--settings").unwrap();
+        let settings: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap();
+        assert!(settings.get("env").is_none() && settings.get("apiKeyHelper").is_none());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// AC-TS11, AC-TS17: a synced start that cannot get its token, names a
+    /// kind or provider it cannot sync, or cannot write its pins, fails and
+    /// never spawns the CLI on the host's own login.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_synced_start_fails_closed() {
+        use crate::credential::KIND;
+        for (status, code) in [
+            (403, "host_not_in_scope"),
+            (404, "no_credential"),
+            (409, "session_not_starting"),
+            (503, "unavailable"),
+        ] {
+            let body = serde_json::json!({ "error": code }).to_string();
+            let (host, seen, state, roots) = synced_host(&[(status, body)]).await;
+            host.clone()
+                .handle(synced_start("ags_FAIL", "claude-code", Some(KIND)))
+                .await;
+            assert!(host.session("ags_FAIL").is_none(), "{code}");
+            assert!(start_failed(&seen, "ags_FAIL"), "{code}");
+            assert_eq!(
+                recorded(roots.path(), "env", "ags_FAIL"),
+                None,
+                "{code}: spawned"
+            );
+            assert!(!crate::mcp::session_dir(state.path(), "ags_FAIL").exists());
+            host.shutdown(Duration::from_millis(200)).await;
+        }
+
+        let (host, seen, state, roots) = synced_host(&[(
+            200,
+            crate::credential::tests::ok_body(crate::credential::tests::CANARY),
+        )])
+        .await;
+        for (session, provider, kind) in [
+            ("ags_KIND", "claude-code", "openai_token"),
+            ("ags_PROV", "opencode", KIND),
+        ] {
+            host.clone()
+                .handle(synced_start(session, provider, Some(kind)))
+                .await;
+            assert!(host.session(session).is_none(), "{session}");
+            assert!(start_failed(&seen, session), "{session}");
+            assert_eq!(recorded(roots.path(), "env", session), None, "{session}");
+        }
+        assert!(
+            !seen.lock().unwrap().iter().any(|(m, ..)| m == "GET"),
+            "nothing is pulled for a launch that cannot use it"
+        );
+
+        // The settings file cannot be written: fatal when synced only.
+        for session in ["ags_SETS", "ags_SETN"] {
+            std::fs::create_dir_all(
+                crate::mcp::session_dir(state.path(), session).join("claude-settings.json"),
+            )
+            .unwrap();
+        }
+        host.clone()
+            .handle(synced_start("ags_SETS", "claude-code", Some(KIND)))
+            .await;
+        assert!(host.session("ags_SETS").is_none());
+        assert!(start_failed(&seen, "ags_SETS"));
+        assert_eq!(recorded(roots.path(), "env", "ags_SETS"), None);
+        host.clone()
+            .handle(synced_start("ags_SETN", "claude-code", None))
+            .await;
+        assert!(host.session("ags_SETN").is_some(), "unsynced still runs");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     #[test]
     fn sse_events_split_at_blank_lines_and_keepalives_carry_no_data() {
         let buf = b": keepalive\n\ndata: {\"a\":1}\n\ndata: partial";
@@ -2373,6 +2743,29 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         )
         .unwrap();
         assert!(matches!(env.command, Command::Start { context: true, .. }));
+        assert!(matches!(
+            env.command,
+            Command::Start {
+                provider_credential: None,
+                ..
+            }
+        ));
+        let env: Envelope = serde_json::from_str(
+            r#"{"cmd_seq":3,"type":"start","session":"ags_X","workspace":"w","provider":"claude-code","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#,
+        )
+        .unwrap();
+        let Command::Start {
+            provider_credential,
+            ..
+        } = &env.command
+        else {
+            panic!("a start");
+        };
+        assert_eq!(
+            provider_credential.as_deref(),
+            Some("claude_subscription_token")
+        );
+        assert!(!format!("{:?}", env.command).contains("sk-ant-"));
         let env: Envelope = serde_json::from_str(
             r#"{"cmd_seq":4,"type":"terminal.input","session":"s","data":"aGk="}"#,
         )

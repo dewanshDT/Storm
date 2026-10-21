@@ -73,7 +73,7 @@ Practical consequences worth knowing before you start:
 | `apps/relay-cf/` | The same relay on Cloudflare Workers + Durable Objects (decision 108b). TypeScript; nothing in it may live only in memory, since hibernation evicts it. |
 | `apps/server/src/gateway/` | The MCP Gateway's store, data key and upstream client (M21, decision 81). Policy stays in `ops.rs`. |
 | `apps/runtime/` | `storm-runtime` — the Agent Runtime's Runtime Host (M20, decision 77). Standalone crate; never depends on `apps/server`. |
-| `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
+| `apps/client/` | Flutter app — macOS, Windows, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `apps/www/` | The marketing site and the docs (Astro + Starlight). See `apps/www/README.md`. |
 | `docs/site/` | **The docs' pages** (`/docs`), markdown next to the code. A user-facing change updates its page here in the same PR. |
@@ -171,7 +171,9 @@ data quietly.
   passes every other byte through. Running a user's YAML through a serializer
   reorders keys and drops comments, dirtying the whole vault. There are two
   writers and both obey this: `frontmatter.rs` `set_scalars` on the server, and
-  `lib/editor/frontmatter_edit.dart` on the client.
+  `lib/editor/frontmatter_edit.dart` on the client. **A leading UTF-8 BOM is
+  part of no block and always stays at byte 0** (decision 128e): both sides
+  look past it for the opening fence, and a new block is written after it.
 - **A value that spans lines is spliced as a range, never as one line.** The
   server's writer replaces a key's single line, which is right for stamping
   `id` and wrong for anything else: aimed at a `tags:` block list it orphans
@@ -184,8 +186,28 @@ data quietly.
   overlap silently corrupts rendered text and every caret offset after it.
 - **A `merged` or `conflict` response means the client adopts the server's
   text.** Keeping local text makes the next save race a version it never had.
+  **What was typed while that save was in flight is never dropped** (decision
+  128b): it is replayed onto the server's text (`replayEdit`), or, where its
+  place cannot be found exactly once, kept on the base it was edited from and
+  saved again so the server's diff3 merges it.
+- **An unsynced edit outlives its note's deletion** (decision 128c). When the
+  outbox's write gets a 404 because the note was deleted elsewhere, the edit
+  is kept as a new note at the note's path (`Name (recovered).md` if taken),
+  and the user is told; a remote delete or a 404 on open never drops the
+  cached copy of a queued edit. A recovery create whose answer never came is
+  not resent blind (SRP §8.5): the next attempt looks for it first.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
+- **An id seen at a new path is a move or a copy, never a version reset**
+  (decision 128d). Outside Storm, a file whose `id` is indexed at a path that
+  is gone is a move (same row, history kept); one whose indexed file still
+  exists is a copy and gets a fresh id. Every write takes
+  `Db::next_version` — past the note's whole history — and `note_versions` is
+  append-only (plain `INSERT`). Before 128d an external rename restarted the
+  note at version 1 and overwrote its history.
+- **Unreadable is not deleted** (128d). Reconcile keeps the row of a file it
+  cannot read, removes nothing after an I/O error, and does not prune a vault
+  that scans empty while its index holds several notes.
 
 From M9/M10 (`docs/storm-multi-vault.md`):
 
@@ -402,6 +424,12 @@ cited in code are that note's. ADRs R1–R14 are in *Storm Remote Decisions*):
   what a peer has read, so a `PONG` lost on a full queue reads as a stalled
   reader. storm-server queues them on its `Control` lane, outside the
   bounded queue.
+- **Every SRP socket is bounded at 16 MiB a message** (SRP §3, decision
+  128f): storm-relay's upgrade sets `max_message_size`, the Worker refuses a
+  larger message, and storm-server's and storm-runtime's clients pass a
+  `WebSocketConfig` with the same ceiling. A frame limit alone is not enough:
+  tungstenite's message default is 64 MiB, and a message split into
+  continuation frames was buffered whole for any unauthenticated client.
 - **Control before bulk** (SRP §5.2, decision 116b). Every sender — storm-server,
   storm-runtime's client, the Dart trunk, storm-relay — writes `PING`, `PONG`,
   `STREAM_ACK`, `CLOSE` and stream `ERROR` ahead of queued body frames and
@@ -564,12 +592,15 @@ Specification*; the slices are decisions 81 and 81a onward):
   `retry` and `no_cancel` mutations against the real build. A late answer to
   an elicitation is dropped, and elicitation ids are unique per upstream
   session so one can never answer another.
-- **A session's MCP config is AM32 exactly**: `claude-code` gets
+- **A session's MCP config is AM32 as amended by AM66**: every `opencode`
+  session gets `OPENCODE_DISABLE_PROJECT_CONFIG=1`, grants or not, and its
+  workspace's own `AGENTS.md` (else `CLAUDE.md`, else `CONTEXT.md`) back by
+  absolute path through `OPENCODE_CONFIG` (`mcp::provider_baseline`; a path
+  with a glob character is not restored). With grants, `claude-code` gets
   `--mcp-config … --strict-mcp-config`; `opencode` gets its own
-  `XDG_CONFIG_HOME`, `OPENCODE_DISABLE_PROJECT_CONFIG=1` and `"<slug>_*":
-  "ask"`; everything else gets nothing. A config that cannot be written fails
-  the start rather than launching unconfined. It holds a handle and a socket
-  path, never a credential.
+  `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
+  config that cannot be written fails the start rather than launching
+  unconfined. It holds a handle and a socket path, never a credential.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,
@@ -603,8 +634,9 @@ Specification*; the slices are decisions 81 and 81a onward):
     deep linking is off on Android, so the link never becomes a page route.
   - The macOS Release app no longer grants `network.server`, and the
     entitlements test holds that.
-  - PR CI never compiles the native projects; push to `acceptance/*` and
-    the acceptance workflow does.
+  - PR CI never compiles the Android or macOS projects; push to
+    `acceptance/*` and the acceptance workflow does. The Windows and Linux
+    runners are built on every client change (decision 125).
 
   **"Can write to" is off by default and absent for `shell`.**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
@@ -629,6 +661,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   whose hosts are all revoked reaches nothing and never widens back to all.
   The per-call check (`host_not_in_scope`) is what makes narrowing cut off a
   live session — grants alone are fixed at launch. `storm` is never scoped.
+- **A synced Claude login reaches the CLI only as `CLAUDE_CODE_OAUTH_TOKEN`
+  in its process environment** (decision 124, AM71; `apps/runtime/src/credential.rs`).
+  Never argv, `--settings`, a file or a log: it is a `SecretOsString`, pulled
+  per launch and dropped once the CLI is spawned. Its pins live in the one
+  `claude-settings.json`, and an invalid `--settings` file is ignored by the
+  CLI with only a warning, so every value is a string (`"apiKeyHelper": ""`,
+  never `null`) and the file is re-read before launch. Any failure ends the
+  start; a synced session never falls back to the host's own login.
 
 From M26 (Windows — the vault's *Agent Runtime/Windows Runtime Host*, D16,
 and *Installer/Windows Server*; decision 99):
@@ -656,6 +696,26 @@ and *Installer/Windows Server*; decision 99):
 - **`storm-server` is a library with two binaries.** `storm-serverw` is the
   same program for the Windows GUI subsystem, which the logon task runs so no
   console opens; it logs only through `--log-file`.
+
+From M28 (desktop clients — the vault's *Desktop Clients — decision 125*):
+
+- **One Storm per user on a desktop** (125b). Two instances would open one
+  drift cache and replay one outbox. Windows takes the named mutex
+  `Local\dev.storm.storm` in `main.cpp` before the engine starts; Linux keeps
+  GApplication's uniqueness on, so a second launch is an `activate` in the
+  running process, which raises the window and never builds a second engine.
+- **The data directory is named by the runner, so its names are frozen.**
+  `path_provider` builds it from `Runner.rc`'s `CompanyName`/`ProductName` on
+  Windows and from `APPLICATION_ID` on Linux; the drift cache, prefs and
+  secure store live there. The runner tests guard all three.
+- **A desktop package carries what the machine may lack.** The Windows zip
+  has the MSVC runtime beside `storm.exe` (`tool/package_windows.sh` fails
+  without it). The Linux packages are built on Ubuntu 22.04 and refused if
+  the bundle needs a glibc newer than `STORM_MAX_GLIBC` (2.35): the runner
+  and plugins link against the build machine's glibc, and a newer build
+  does not start on Debian 12.
+- **The installers never kill a running Storm**: `install.ps1` asks it to
+  close (it saves as you type) and stops if it does not.
 
 ## Style
 

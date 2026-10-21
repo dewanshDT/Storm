@@ -23,15 +23,66 @@ fn storage_root(state: &Path) -> std::process::Output {
 }
 
 fn write_registry(state: &Path, root: &Path) {
+    write_registry_with(state, root, &[]);
+}
+
+/// A registry listing `dirs` as vaults under `root`, written the way the
+/// server writes it (pretty, one key per line).
+fn write_registry_with(state: &Path, root: &Path, dirs: &[&str]) {
     fs::create_dir_all(state).unwrap();
+    let vaults: Vec<_> = dirs
+        .iter()
+        .enumerate()
+        .map(|(i, dir)| {
+            serde_json::json!({
+                "id": format!("00000000-0000-4000-8000-{i:012}"),
+                "name": dir,
+                "dir": dir,
+                "created": "2026-10-20T00:00:00Z",
+            })
+        })
+        .collect();
+    let registry = serde_json::json!({ "root": root.display().to_string(), "vaults": vaults });
     fs::write(
         state.join("vaults.json"),
-        format!(
-            "{{\n  \"root\": {},\n  \"vaults\": []\n}}\n",
-            serde_json::to_string(&root.display().to_string()).unwrap()
-        ),
+        serde_json::to_string_pretty(&registry).unwrap() + "\n",
     )
     .unwrap();
+}
+
+#[cfg(unix)]
+fn run_script(vault_root: &Path, state: &Path, dest: &Path) -> std::process::Output {
+    Command::new("bash")
+        .arg(SCRIPT)
+        .env("STORM_VAULT_ROOT", vault_root)
+        .env("STORM_STATE", state)
+        .env("STORM_BACKUP_DEST", dest)
+        .env("STORM_SERVER_BIN", BIN)
+        .output()
+        .expect("running storm-backup.sh")
+}
+
+fn run_native(vault_root: &Path, state: &Path, dest: &Path) -> std::process::Output {
+    Command::new(BIN)
+        .arg("backup")
+        .arg("--vault-root")
+        .arg(vault_root)
+        .arg("--state")
+        .arg(state)
+        .arg("--dest")
+        .arg(dest)
+        .output()
+        .expect("running storm-server backup")
+}
+
+#[cfg(unix)]
+fn only_day(dest: &Path) -> std::path::PathBuf {
+    let days: Vec<_> = fs::read_dir(dest)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(days.len(), 1, "{days:?}");
+    days.into_iter().next().unwrap()
 }
 
 #[test]
@@ -145,4 +196,109 @@ fn the_native_backup_copies_the_stored_root_when_the_flag_disagrees() {
         "the backup must hold the notes the server serves"
     );
     assert!(day.join("index").is_dir());
+}
+
+/// DP1 (decision 128j): each night is a full copy, so unchanged notes must be
+/// hard links into the night before, not thirty full copies of the vault.
+#[cfg(unix)]
+#[test]
+fn a_second_night_links_unchanged_files_to_the_first() {
+    use std::os::unix::fs::MetadataExt;
+
+    let tmp = tempdir::TempDir::new("storm-backup-link").unwrap();
+    let root = tmp.path().join("vaults");
+    let state = tmp.path().join("state");
+    let dest = tmp.path().join("backups");
+    fs::create_dir_all(root.join("personal")).unwrap();
+    fs::write(root.join("personal/Same.md"), "# same\n").unwrap();
+    fs::write(root.join("personal/Edited.md"), "# before\n").unwrap();
+    write_registry_with(&state, &root, &["personal"]);
+
+    let out = run_script(&root, &state, &dest);
+    assert!(out.status.success(), "{out:?}");
+    // Last night's copy, under a date that cannot be today's.
+    let yesterday = dest.join("2000-01-01");
+    fs::rename(only_day(&dest), &yesterday).unwrap();
+
+    fs::write(root.join("personal/Edited.md"), "# after\n").unwrap();
+    let out = run_script(&root, &state, &dest);
+    assert!(out.status.success(), "{out:?}");
+    let today = fs::read_dir(&dest)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| *p != yesterday)
+        .unwrap();
+
+    let ino = |p: &Path| fs::metadata(p).unwrap().ino();
+    assert_eq!(
+        ino(&yesterday.join("vaults/personal/Same.md")),
+        ino(&today.join("vaults/personal/Same.md")),
+        "an unchanged note is a hard link to last night's copy"
+    );
+    assert_eq!(
+        fs::read_to_string(today.join("vaults/personal/Edited.md")).unwrap(),
+        "# after\n"
+    );
+    assert_eq!(
+        fs::read_to_string(yesterday.join("vaults/personal/Edited.md")).unwrap(),
+        "# before\n",
+        "an edit never reaches back into an older night"
+    );
+}
+
+/// DP1: an unmounted share is an empty directory. Mirroring it would write a
+/// night that verifies and holds nothing, and the pruning would then age out
+/// every good one; the registry listing vaults is what says it is wrong.
+#[cfg(unix)]
+#[test]
+fn the_script_refuses_an_empty_root_the_registry_says_has_vaults() {
+    let tmp = tempdir::TempDir::new("storm-backup-empty").unwrap();
+    let root = tmp.path().join("nas");
+    let state = tmp.path().join("state");
+    let dest = tmp.path().join("backups");
+    fs::create_dir_all(root.join("personal")).unwrap();
+    write_registry_with(&state, &root, &["personal"]);
+
+    let out = run_script(&root, &state, &dest);
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(err.contains("ERROR"), "{err}");
+    assert!(
+        !dest.exists() || fs::read_dir(&dest).unwrap().next().is_none(),
+        "nothing is written for a refused night"
+    );
+}
+
+#[test]
+fn the_native_backup_refuses_an_empty_root_the_registry_says_has_vaults() {
+    let tmp = tempdir::TempDir::new("storm-backup-empty-native").unwrap();
+    let root = tmp.path().join("nas");
+    let state = tmp.path().join("state");
+    let dest = tmp.path().join("backups");
+    fs::create_dir_all(root.join("personal")).unwrap();
+    write_registry_with(&state, &root, &["personal"]);
+
+    let out = run_native(&root, &state, &dest);
+    assert!(!out.status.success(), "{out:?}");
+    assert!(
+        !dest.exists() || fs::read_dir(&dest).unwrap().next().is_none(),
+        "nothing is written for a refused night"
+    );
+}
+
+/// A fresh install has no vaults and no files, and that is a fine backup.
+#[cfg(unix)]
+#[test]
+fn an_empty_root_with_no_vaults_still_backs_up() {
+    let tmp = tempdir::TempDir::new("storm-backup-fresh").unwrap();
+    let root = tmp.path().join("vaults");
+    let state = tmp.path().join("state");
+    let dest = tmp.path().join("backups");
+    fs::create_dir_all(&root).unwrap();
+    write_registry(&state, &root);
+
+    let out = run_script(&root, &state, &dest);
+    assert!(out.status.success(), "{out:?}");
+    let out = run_native(&root, &state, &tmp.path().join("native"));
+    assert!(out.status.success(), "{out:?}");
 }

@@ -133,6 +133,22 @@ Everything note-shaped is scoped to a vault:
 A vault id that was never registered is a `404`; one whose directory has gone
 is a `409`, and stays in the registry rather than disappearing.
 
+**A `404` means only that the note, folder or attachment does not exist**
+(decision 128a). The client's outbox discards a queued edit on `404`, so every
+other failure answers something else: a path that is taken is `409`, a path
+that is invalid or a note path not ending in `.md` is `400`, and a write the
+server could not complete (a full disk, a permission error, an NFS failure) is
+`500`, which the client keeps queued and retries. The attachment routes refuse
+`.md` paths: a note is written only through the note routes, with their merge.
+
+**Request bodies are capped per route** (decision 128g): an attachment upload
+at 64 MiB, a note's create or save at 16 MiB, and everything else at axum's
+2 MiB default; anything larger is `413`. An attachment is served with
+`X-Content-Type-Options: nosniff` and `Content-Security-Policy: sandbox`, so an
+uploaded HTML or SVG file never runs as the app, and it is read after the
+vault's lock is released, so a download never stalls note operations. A rename
+that changes only a name's case works on case-insensitive disks too.
+
 ### Server identity
 
 On first boot the server mints itself an identity and keeps it in

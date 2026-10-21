@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:cryptography/cryptography.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -528,6 +529,39 @@ void main() {
       await settle(tester);
       expect(find.byKey(const Key('lan-setup-required')), findsOneWidget);
       await tester.pumpWidget(const SizedBox());
+    });
+
+    // A desktop has no camera, so a fresh server is set up with the pasted
+    // link instead (decision 125).
+    testWidgets('setup_required on a desktop says to paste the link', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      try {
+        await pump(tester, pairStatus: 409, pairError: 'setup_required');
+        browser.emit([advertised()]);
+        await tester.pump();
+        await tester.tap(find.text("Dewansh's Storm"));
+        await settle(tester);
+        await tester.enterText(
+          find.descendant(
+            of: find.byKey(const Key('lan-password')),
+            matching: find.byType(EditableText),
+          ),
+          password,
+        );
+        await tester.tap(find.byKey(const Key('lan-pair')));
+        await settle(tester);
+        expect(find.byKey(const Key('lan-setup-required')), findsOneWidget);
+        expect(
+          find.textContaining('paste the storm://pair link'),
+          findsOneWidget,
+        );
+        expect(find.text('Scan QR code'), findsNothing);
+        await tester.pumpWidget(const SizedBox());
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
     });
   });
 

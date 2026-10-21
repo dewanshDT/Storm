@@ -35,6 +35,7 @@ mod db;
 mod discovery;
 mod firewall;
 mod frontmatter;
+mod fsutil;
 mod gateway;
 mod index;
 mod install;
@@ -679,6 +680,16 @@ fn run_dry_run(args: VaultArgs) -> Result<()> {
         if report.ids_assigned > 10 {
             println!("          … and {} more", report.ids_assigned - 10);
         }
+        if !report.reassigned.is_empty() {
+            // Copies that kept their original's id (decision 128d).
+            println!(
+                "      would give a fresh `id` to (duplicated ids) : {}",
+                report.reassigned.len()
+            );
+            for path in report.reassigned.iter().take(10) {
+                println!("          {path}");
+            }
+        }
     }
     println!("\nRun again without dry-run to apply.");
     Ok(())
@@ -1093,7 +1104,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
 
     // Bootstrap pairing: before setup (no account), create a pairing session and log
     // the QR URI so the operator can scan it with a Storm Client.
-    let bootstrap_nonce = {
+    {
         let now = crate::index::now_rfc3339();
         if !auth_db.has_account()? {
             let (nonce, session) = crate::auth::pairing::create(
@@ -1117,11 +1128,8 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 uri = %qr.to_uri(),
                 "bootstrap pairing QR — scan with Storm Client to create the first user"
             );
-            Some(nonce)
-        } else {
-            None
         }
-    };
+    }
 
     // The Agent Manager (decision 77c). Opening it marks every session that
     // had not ended `unknown` until its host reports in.
@@ -1164,7 +1172,6 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         agent_writes: std::sync::atomic::AtomicBool::new(agent_writes),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-        bootstrap_nonce,
         listen_addr,
         vault_policy: Arc::new(crate::auth::authz::StormPolicy),
         // One hasher for the process, so the semaphore actually bounds

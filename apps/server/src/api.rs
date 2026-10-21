@@ -79,12 +79,6 @@ pub struct AppState {
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
-    /// Bootstrap pairing nonce (plaintext), if one was created at boot when
-    /// the user table was empty. Needed to reconstruct the QR payload for
-    /// the console log. Not read after boot — the field exists so a future
-    /// CLI or settings surface can regenerate the QR without restarting.
-    #[allow(dead_code)]
-    pub bootstrap_nonce: Option<String>,
     /// The server's listen address, used as the `addr` hint in QR payloads.
     pub listen_addr: String,
     /// Decides whether an actor may reach a vault.
@@ -188,6 +182,10 @@ pub fn open_vaults(registry: &Registry, state_dir: &FsPath) -> anyhow::Result<Va
 /// request can't take down a 4 GB VM.
 pub const MAX_ATTACHMENT_BYTES: usize = 64 * 1024 * 1024;
 
+/// A note's body ceiling (128-D8). Every other route keeps axum's 2 MiB
+/// default; a router-wide attachment limit once gave all of them 64 MiB.
+pub const MAX_NOTE_BYTES: usize = 16 * 1024 * 1024;
+
 /// Errors rendered as JSON rather than bare status codes, so the Flutter
 /// client can show something useful.
 pub struct ApiError(pub StatusCode, pub String);
@@ -201,6 +199,29 @@ impl IntoResponse for ApiError {
 impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    }
+}
+
+/// The one place a vault operation's failure becomes a status (decision 128a).
+///
+/// A 404 is reserved for a note or folder that does not exist: the client's
+/// outbox discards a queued edit on 404, so a write that failed for any other
+/// reason answers 500, which it keeps queued and retries.
+impl From<crate::index::IndexError> for ApiError {
+    fn from(e: crate::index::IndexError) -> Self {
+        use crate::index::IndexError as E;
+        match e {
+            E::NotFound(m) => not_found(m),
+            E::Exists(m) | E::Conflict(m) => conflict(m),
+            E::Invalid(m) => bad_request(m),
+            E::Other(e) => {
+                tracing::error!(error = format!("{e:#}"), "a vault operation failed");
+                ApiError(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "the server could not complete that change".into(),
+                )
+            }
+        }
     }
 }
 
@@ -248,6 +269,8 @@ pub async fn vault_of(
     if let Decision::Deny(reason) = state.vault_policy.decide(actor, id, access) {
         tracing::info!(
             actor = actor.describe(),
+            key = actor.key_id(),
+            host = actor.host_id(),
             vault = id,
             ?access,
             reason,
@@ -357,6 +380,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/sessions/{id}/mcp/{connection}",
             post(runtime_mcp),
         )
+        // Token sync (decision 124): the synced login for a starting session.
+        .route(
+            "/v1/runtime/sessions/{id}/provider-credential",
+            get(runtime_provider_credential),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -392,9 +420,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/recents", get(recents))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
-        .route("/v1/vaults/{vault}/notes", post(create_note))
+        .route(
+            "/v1/vaults/{vault}/notes",
+            post(create_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", get(get_note))
-        .route("/v1/vaults/{vault}/notes/{id}", put(put_note))
+        .route(
+            "/v1/vaults/{vault}/notes/{id}",
+            put(put_note).layer(axum::extract::DefaultBodyLimit::max(MAX_NOTE_BYTES)),
+        )
         .route("/v1/vaults/{vault}/notes/{id}", delete(delete_note))
         .route("/v1/vaults/{vault}/notes/{id}/move", post(move_note))
         .route("/v1/vaults/{vault}/notes/{id}/opened", post(mark_opened))
@@ -416,9 +450,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/vaults/{vault}/attachments/{*path}",
             get(get_attachment)
                 .put(put_attachment)
-                .delete(delete_attachment),
+                .delete(delete_attachment)
+                .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES)),
         )
-        .layer(axum::extract::DefaultBodyLimit::max(MAX_ATTACHMENT_BYTES))
         .route("/v1/auth/logout", post(logout_handler))
         .route("/v1/auth/sessions", get(list_sessions_handler))
         .route("/v1/auth/sessions/{id}", delete(revoke_session_handler))
@@ -493,6 +527,21 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route(
             "/v1/integrations/oauth/callback",
             post(integrations_callback),
+        )
+        // Token sync (decision 124n): owner only, session tier. No route here
+        // returns the token.
+        .route(
+            "/v1/provider-credentials/claude-subscription",
+            get(provider_credential_get)
+                .put(provider_credential_put)
+                .delete(provider_credential_delete)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    crate::gateway::provider::MAX_BODY_BYTES,
+                )),
+        )
+        .route(
+            "/v1/provider-credentials/claude-subscription/hosts",
+            patch(provider_credential_hosts).layer(axum::extract::DefaultBodyLimit::max(64 * 1024)),
         )
         .route("/v1/pairings", post(issue_pairing_handler))
         .route("/v1/stream", get(stream))
@@ -1569,6 +1618,48 @@ async fn integrations_delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+// ---- Token sync (decision 124n) — owner only, in ops ------------------------
+
+type ProviderCredentialResult =
+    Result<Json<crate::gateway::provider::ProviderCredentialView>, crate::gateway::provider::Code>;
+
+async fn provider_credential_get(State(state): State<Shared>) -> ProviderCredentialResult {
+    Ok(Json(crate::ops::provider_credential_status(&state).await?))
+}
+
+/// The body is read as bytes and parsed into a redacting `Secret` by hand, so
+/// no extractor rejection can quote it.
+async fn provider_credential_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    body: axum::body::Bytes,
+) -> ProviderCredentialResult {
+    let body = crate::gateway::provider::PutBody::parse(&body)?;
+    Ok(Json(
+        crate::ops::put_provider_credential(&state, &actor, body.token, body.minted_at).await?,
+    ))
+}
+
+async fn provider_credential_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> Result<StatusCode, crate::gateway::provider::Code> {
+    crate::ops::delete_provider_credential(&state, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn provider_credential_hosts(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    body: axum::body::Bytes,
+) -> ProviderCredentialResult {
+    let body: crate::gateway::provider::HostsBody = serde_json::from_slice(&body)
+        .map_err(|_| crate::gateway::provider::Code::bad_request("bad_request_body"))?;
+    Ok(Json(
+        crate::ops::set_provider_credential_hosts(&state, &actor, body.hosts).await?,
+    ))
+}
+
 // ---- Agent Runtime: the host link and the agent routes (decision 77c) ------
 
 /// Marks the host offline when its link stream ends — dropped by the
@@ -1793,6 +1884,19 @@ async fn runtime_image(
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))
 }
 
+async fn runtime_provider_credential(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+) -> ApiResult<Response> {
+    let pulled = crate::ops::runtime_provider_credential(&state, &auth.host, &id).await?;
+    Ok((
+        [(axum::http::header::CACHE_CONTROL, "no-store")],
+        Json(pulled),
+    )
+        .into_response())
+}
+
 #[derive(Deserialize)]
 struct StagedReport {
     #[serde(default)]
@@ -1821,12 +1925,8 @@ async fn runtime_image_staged(
 struct ResizeRequest {
     cols: u16,
     rows: u16,
-    /// Whether this client just took focus. The PTY follows the most recently
-    /// active client either way (freeze §11.4); the flag is the client saying
-    /// "that is me now" without typing.
-    #[serde(default)]
-    #[allow(dead_code)]
-    focus: bool,
+    // Clients also send `focus` (freeze §11.4). Every resize is applied, so
+    // the PTY follows the most recently active client without reading it.
 }
 
 async fn agent_resize(
@@ -1986,28 +2086,6 @@ pub enum RequiredTier {
 #[derive(Clone)]
 pub struct HostAuth {
     pub host: crate::auth::hosts::Host,
-}
-
-/// A device that has proven it is paired with this server.
-///
-/// Set as a request extension by `require_auth` on device-tier and session-tier
-/// routes when the credential is a `StormDevice` header.
-#[derive(Clone)]
-pub struct DeviceAuth {
-    #[allow(dead_code)]
-    pub device: crate::auth::devices::Device,
-}
-
-/// A caller holding a valid MCP key (A14).
-///
-/// Set on `Mcp`-tier routes when the credential is `Bearer stk_…`. The
-/// authorization-facing identity is the `Actor::Key` inserted beside it; this
-/// carries the record itself, for handlers and audit rows that want the key's
-/// name or owner without a second lookup.
-#[derive(Clone)]
-pub struct KeyAuth {
-    #[allow(dead_code)] // Read by audit/logging work, not by the boundary.
-    pub authed: crate::auth::keys::AuthenticatedKey,
 }
 
 /// A caller that has proven who it is (user + device + session).
@@ -2177,7 +2255,6 @@ async fn require_auth(
         if device.is_revoked() {
             return tier_error("device_revoked", StatusCode::UNAUTHORIZED);
         }
-        request.extensions_mut().insert(DeviceAuth { device });
         return next.run(request).await;
     }
 
@@ -2277,7 +2354,6 @@ async fn require_auth(
                 key_id: authed.key.id.clone(),
                 user_id: authed.account.id.clone(),
             });
-            request.extensions_mut().insert(KeyAuth { authed });
             return next.run(request).await;
         }
 
@@ -2431,66 +2507,25 @@ struct VaultNameBody {
 async fn create_vault(
     State(state): State<Shared>,
     Json(body): Json<VaultNameBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .create(&body.name, &crate::index::now_rfc3339())
-        .map_err(|e| bad_request(e.to_string()))?;
-    vaults.registry.save(&state.state_dir)?;
-
-    let vault = Vault::new(vaults.registry.path_of(&entry))?;
-    let db = Db::open(&state.state_dir.join(&entry.id).join("index.db"), &entry.id)?;
-    vaults.open.insert(
-        entry.id.clone(),
-        Arc::new(VaultHandle {
-            indexer: Mutex::new(Indexer::new(vault, db)),
-        }),
-    );
-
-    Ok(Json(serde_json::json!({
-        "id": entry.id, "name": entry.name, "dir": entry.dir,
-    })))
+) -> ApiResult<Json<crate::ops::CreatedVault>> {
+    Ok(Json(crate::ops::create_vault(&state, &body.name).await?))
 }
 
 async fn rename_vault(
     State(state): State<Shared>,
     Path(vault): Path<String>,
     Json(body): Json<VaultNameBody>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .rename(&vault, &body.name)
-        .map_err(|e| bad_request(e.to_string()))?;
-    // Nothing to do to the open handle: it holds only the index, and the name
-    // lives in the registry, which is what every reader consults.
-    vaults.registry.save(&state.state_dir)?;
-
+) -> ApiResult<Json<crate::ops::RenamedVault>> {
     Ok(Json(
-        serde_json::json!({ "id": entry.id, "name": entry.name }),
+        crate::ops::rename_vault(&state, &vault, &body.name).await?,
     ))
 }
 
-/// Unregisters a vault. **Never deletes files.**
 async fn remove_vault(
     State(state): State<Shared>,
     Path(vault): Path<String>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let mut vaults = state.vaults.write().await;
-    let entry = vaults
-        .registry
-        .remove(&vault)
-        .map_err(|e| not_found(e.to_string()))?;
-    vaults.registry.save(&state.state_dir)?;
-    vaults.open.remove(&vault);
-
-    Ok(Json(serde_json::json!({
-        "removed": entry.id,
-        "name": entry.name,
-        // Said explicitly so no caller has to guess.
-        "files_kept_at": vaults.registry.root.join(&entry.dir).display().to_string(),
-    })))
+) -> ApiResult<Json<crate::ops::RemovedVault>> {
+    Ok(Json(crate::ops::remove_vault(&state, &vault).await?))
 }
 
 // ---- server configuration ----------------------------------------------
@@ -2786,30 +2821,12 @@ async fn recents(
     Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
-#[derive(Serialize)]
-struct TreeResponse {
-    notes: Vec<crate::db::NoteRow>,
-    folders: Vec<String>,
-    seq: i64,
-}
-
 async fn tree(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
-) -> ApiResult<Json<TreeResponse>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let notes = ix.db.list_notes()?;
-    // Derived from note paths, union the ones created explicitly — only the
-    // union makes an empty folder visible.
-    let folders = ix.all_folders()?;
-    let seq = ix.db.latest_seq()?;
-    Ok(Json(TreeResponse {
-        notes,
-        folders,
-        seq,
-    }))
+) -> ApiResult<Json<crate::ops::Tree>> {
+    Ok(Json(crate::ops::tree(&state, &actor, &vault).await?))
 }
 
 #[derive(Deserialize)]
@@ -2824,23 +2841,15 @@ fn default_limit() -> i64 {
     500
 }
 
-#[derive(Serialize)]
-struct SyncResponse {
-    changes: Vec<Change>,
-    seq: i64,
-}
-
 async fn sync(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
     Query(q): Query<SyncQuery>,
-) -> ApiResult<Json<SyncResponse>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let changes = ix.db.changes_since(q.since, q.limit.clamp(1, 5000))?;
-    let seq = ix.db.latest_seq()?;
-    Ok(Json(SyncResponse { changes, seq }))
+) -> ApiResult<Json<crate::ops::SyncPage>> {
+    Ok(Json(
+        crate::ops::sync(&state, &actor, &vault, q.since, q.limit).await?,
+    ))
 }
 
 async fn get_note(
@@ -2877,22 +2886,13 @@ async fn note_version(
     ))
 }
 
-/// Records that a note was opened, feeding the cross-vault recents list.
-///
-/// Fire-and-forget from the client and deliberately outside the change log:
-/// opening a note is not an edit, must not bump `version`, and must not wake
-/// every other device.
+/// Fire-and-forget from the client.
 async fn mark_opened(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    if ix.db.get_note(&id)?.is_none() {
-        return Err(not_found("no such note"));
-    }
-    ix.db.touch_note_access(&id, &crate::index::now_rfc3339())?;
+    crate::ops::mark_opened(&state, &actor, &vault, &id).await?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -2953,13 +2953,9 @@ async fn move_note(
     Path((vault, id)): Path<(String, String)>,
     Json(body): Json<MoveBody>,
 ) -> ApiResult<Json<crate::index::WriteResult>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .move_note(&id, &body.new_path)
-        .map_err(|e| bad_request(e.to_string()))?;
-    crate::ops::broadcast_latest(&state, &ix, result.seq);
-    Ok(Json(result))
+    Ok(Json(
+        crate::ops::move_note(&state, &actor, &vault, &id, &body.new_path).await?,
+    ))
 }
 
 async fn delete_note(
@@ -2984,10 +2980,7 @@ async fn create_folder(
     Path(vault): Path<String>,
     Json(body): Json<FolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.create_folder(&body.path)
-        .map_err(|e| bad_request(e.to_string()))?;
+    crate::ops::create_folder(&state, &actor, &vault, &body.path).await?;
     Ok(Json(serde_json::json!({ "path": body.path })))
 }
 
@@ -2996,12 +2989,7 @@ async fn delete_folder(
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    // Refused rather than recursive: deleting someone's notes because they
-    // tapped "delete folder" is not something to do quietly.
-    ix.delete_folder(&path)
-        .map_err(|e| conflict(e.to_string()))?;
+    crate::ops::delete_folder(&state, &actor, &vault, &path).await?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
@@ -3017,20 +3005,11 @@ async fn rename_folder(
     Path(vault): Path<String>,
     Json(body): Json<RenameFolderBody>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    let seqs = ix
-        .rename_folder(&body.from, &body.to)
-        .map_err(|e| bad_request(e.to_string()))?;
-    // One `moved` per contained note, so every client follows the rename
-    // rather than discovering it at the next full tree fetch.
-    for seq in &seqs {
-        crate::ops::broadcast_latest(&state, &ix, *seq);
-    }
+    let moved = crate::ops::rename_folder(&state, &actor, &vault, &body.from, &body.to).await?;
     Ok(Json(serde_json::json!({
         "from": body.from,
         "to": body.to,
-        "moved": seqs.len(),
+        "moved": moved,
     })))
 }
 
@@ -3080,11 +3059,8 @@ async fn notes_by_tag(
     Extension(actor): Extension<Actor>,
     Path((vault, tag)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    Ok(Json(
-        serde_json::json!({ "notes": ix.db.notes_with_tag(&tag)? }),
-    ))
+    let notes = crate::ops::notes_by_tag(&state, &actor, &vault, &tag).await?;
+    Ok(Json(serde_json::json!({ "notes": notes })))
 }
 
 // ---- attachments -------------------------------------------------------
@@ -3094,11 +3070,8 @@ async fn list_attachments(
     Extension(actor): Extension<Actor>,
     Path(vault): Path<String>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    Ok(Json(
-        serde_json::json!({ "attachments": ix.db.list_attachments()? }),
-    ))
+    let attachments = crate::ops::list_attachments(&state, &actor, &vault).await?;
+    Ok(Json(serde_json::json!({ "attachments": attachments })))
 }
 
 async fn get_attachment(
@@ -3107,11 +3080,12 @@ async fn get_attachment(
     Path((vault, path)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> ApiResult<Response> {
-    let handle = vault_of(&state, &actor, Access::Read, &vault).await?;
-    let ix = handle.indexer.lock().await;
-    let bytes = ix.attachment(&path).map_err(|e| not_found(e.to_string()))?;
-    drop(ix);
-    Ok(ranged(bytes, content_type_for(&path), &headers))
+    let bytes = crate::ops::read_attachment(&state, &actor, &vault, &path).await?;
+    // Hashing up to 64 MiB for the ETag stays off the runtime too.
+    let content_type = content_type_for(&path);
+    tokio::task::spawn_blocking(move || ranged(bytes, content_type, &headers))
+        .await
+        .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)).into())
 }
 
 /// A whole attachment, or the single range a resuming client asked for
@@ -3133,10 +3107,15 @@ fn ranged(bytes: Vec<u8>, content_type: &'static str, headers: &HeaderMap) -> Re
         .filter(|_| fresh)
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_byte_range(v, len));
+    // An attachment is whatever was uploaded, served from the app's own
+    // origin: never sniffed into HTML, and sandboxed if a browser renders it
+    // (decision 128g, H1).
     let common = [
         (header::CONTENT_TYPE, content_type.to_string()),
         (header::ACCEPT_RANGES, "bytes".to_string()),
         (header::ETAG, etag),
+        (header::X_CONTENT_TYPE_OPTIONS, "nosniff".to_string()),
+        (header::CONTENT_SECURITY_POLICY, "sandbox".to_string()),
     ];
     match range {
         None => (common, bytes).into_response(),
@@ -3196,13 +3175,7 @@ async fn put_attachment(
     Path((vault, path)): Path<(String, String)>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<serde_json::Value>> {
-    if body.is_empty() {
-        return Err(bad_request("empty upload"));
-    }
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.put_attachment(&path, &body)
-        .map_err(|e| bad_request(e.to_string()))?;
+    crate::ops::put_attachment(&state, &actor, &vault, &path, &body).await?;
     Ok(Json(
         serde_json::json!({ "path": path, "size": body.len() }),
     ))
@@ -3213,10 +3186,7 @@ async fn delete_attachment(
     Extension(actor): Extension<Actor>,
     Path((vault, path)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let handle = vault_of(&state, &actor, Access::Write, &vault).await?;
-    let mut ix = handle.indexer.lock().await;
-    ix.delete_attachment(&path)
-        .map_err(|e| not_found(e.to_string()))?;
+    crate::ops::delete_attachment(&state, &actor, &vault, &path).await?;
     Ok(Json(serde_json::json!({ "deleted": path })))
 }
 
@@ -3611,7 +3581,6 @@ pub(crate) mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            bootstrap_nonce: None,
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
@@ -6691,7 +6660,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
+    async fn a_public_http_upstream_needs_the_test_only_flag_and_a_disabled_one_is_not_probed() {
         let dir = tempdir::TempDir::new("storm-integrations-http").unwrap();
         let (app, _, state) = test_router_with_state(dir.path());
         let (_, owner) = owner_bearer(&state).await;
@@ -6699,12 +6668,16 @@ pub(crate) mod tests {
             &app,
             post_json_with_auth(
                 CONNECTIONS,
-                serde_json::json!({"display_name": "Plain", "url": "http://127.0.0.1:9/mcp", "auth_kind": "none"}),
+                serde_json::json!({"display_name": "Plain", "url": "http://mcp.example.com/mcp", "auth_kind": "none"}),
                 &owner,
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "http must need the flag");
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "http to a public host must need the flag"
+        );
 
         let id = create_github(&app, &owner, "ghp_x").await["id"]
             .as_str()
@@ -8493,6 +8466,606 @@ pub(crate) mod tests {
         assert_eq!(f.upstream_calls(), 1);
     }
 
+    // ---- Token sync: the owner's routes (decision 124n) ---------------------
+
+    const CLAUDE_SUB: &str = "/v1/provider-credentials/claude-subscription";
+    const CLAUDE_SUB_HOSTS: &str = "/v1/provider-credentials/claude-subscription/hosts";
+    const SUB_CANARY: &str = "sk-ant-oat01-CANARY_124n-route-0123456789abcdef";
+
+    fn put_raw_with_auth(
+        path: &str,
+        body: &str,
+        auth: &str,
+    ) -> axum::http::Request<axum::body::Body> {
+        axum::http::Request::builder()
+            .method("PUT")
+            .uri(path)
+            .header("content-type", "application/json")
+            .header("authorization", auth)
+            .body(axum::body::Body::from(body.to_string()))
+            .unwrap()
+    }
+
+    async fn sync_token(app: &Router, bearer: &str, token: &str) -> serde_json::Value {
+        let (status, body) = send(
+            app,
+            put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": token}), bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    async fn security_events(state: &Shared) -> Vec<(String, String)> {
+        state.auth_db.lock().await.all_events().unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_owner_syncs_scopes_replaces_and_removes_the_token_and_never_reads_it_back() {
+        let dir = tempdir::TempDir::new("storm-pc-flow").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        let mut seen = Vec::new();
+
+        let (status, absent) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            absent,
+            serde_json::json!({"kind": "claude_subscription_token", "present": false, "hosts": []})
+        );
+
+        // Pasted from a terminal: bracketed-paste markers and a newline.
+        let pasted = format!("\u{1b}[200~{SUB_CANARY}\r\n\u{1b}[201~");
+        let first = sync_token(&app, &owner, &pasted).await;
+        assert_eq!(first["present"], true);
+        assert_eq!(first["status"], "active");
+        assert_eq!(first["days_left"], 365);
+        assert_eq!(first["warn"], serde_json::Value::Null);
+        assert_eq!(first["fingerprint"].as_str().unwrap().len(), 8);
+        // Default none (AC-TS3): nothing is scoped by syncing.
+        assert_eq!(first["hosts"], serde_json::json!([]));
+        seen.push(first.clone());
+
+        let (status, scoped) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host, host]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(scoped["hosts"], serde_json::json!([host]));
+        seen.push(scoped);
+
+        let (status, replaced) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": format!("{SUB_CANARY}-two"), "minted_at": "2026-01-01"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{replaced}");
+        assert_ne!(replaced["fingerprint"], first["fingerprint"]);
+        assert_eq!(replaced["minted_at"], "2026-01-01T00:00:00Z");
+        assert_eq!(replaced["expires_at"], "2027-01-01T00:00:00Z");
+        assert_eq!(
+            replaced["hosts"],
+            serde_json::json!([host]),
+            "a replace keeps the scope"
+        );
+        seen.push(replaced);
+        seen.push(send(&app, get_with_auth(CLAUDE_SUB, &owner)).await.1);
+
+        let (status, _) = send(&app, delete_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, gone) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(gone["present"], false);
+        assert_eq!(
+            gone["hosts"],
+            serde_json::json!([]),
+            "a delete takes the scope too"
+        );
+        seen.push(gone);
+
+        for body in &seen {
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        let events = security_events(&state).await;
+        for kind in [
+            "provider_credential_set",
+            "provider_credential_hosts_changed",
+            "provider_credential_replaced",
+            "provider_credential_removed",
+        ] {
+            let detail = &events
+                .iter()
+                .find(|(k, _)| k == kind)
+                .unwrap_or_else(|| panic!("{kind} missing"))
+                .1;
+            let detail: serde_json::Value = serde_json::from_str(detail).unwrap();
+            assert_eq!(detail["kind"], "claude_subscription_token", "{kind}");
+        }
+        for (kind, detail) in &events {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
+        // The stored row is sealed: no file under state holds the canary.
+        for entry in walk(&state.state_dir) {
+            let bytes = std::fs::read(&entry).unwrap_or_default();
+            assert!(
+                !bytes
+                    .windows(SUB_CANARY.len())
+                    .any(|w| w == SUB_CANARY.as_bytes()),
+                "{} holds the token in the clear",
+                entry.display()
+            );
+        }
+    }
+
+    fn walk(dir: &FsPath) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn a_badly_shaped_token_or_body_is_refused_without_echoing_it() {
+        let dir = tempdir::TempDir::new("storm-pc-shape").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        for token in [
+            "sk-ant-api03-CANARY_not_an_oauth_token_0123456789".to_string(),
+            "sk-ant-oat01-CANARY short".to_string(),
+            "sk-ant-oat01-CANARY".to_string(),
+            format!("sk-ant-oat01-CANARY{}", "a".repeat(400)),
+            format!("Bearer {SUB_CANARY}"),
+        ] {
+            let (status, body) = send(
+                &app,
+                put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": token}), &owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{token}");
+            assert_eq!(body["error"], "bad_token_shape");
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        for raw in [
+            format!("{{\"token\": \"{SUB_CANARY}\",}}"),
+            format!("{{\"token\": [\"{SUB_CANARY}\"]}}"),
+            format!("{{\"token\": \"{SUB_CANARY}\", \"minted_at\": 5}}"),
+        ] {
+            let (status, body) = send(&app, put_raw_with_auth(CLAUDE_SUB, &raw, &owner)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{raw}");
+            assert_eq!(body["error"], "bad_request_body");
+            assert!(!body.to_string().contains("CANARY"), "{body}");
+        }
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": SUB_CANARY, "minted_at": "2999-01-01"}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "bad_minted_at");
+        let huge = format!(
+            "{{\"token\": \"{SUB_CANARY}\", \"pad\": \"{}\"}}",
+            "x".repeat(5000)
+        );
+        let (status, body) = send(&app, put_raw_with_auth(CLAUDE_SUB, &huge, &owner)).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(!body.to_string().contains("CANARY"));
+        let (_, still) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(still["present"], false, "a refused body stored something");
+        for (kind, detail) in &security_events(&state).await {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_scope_takes_only_live_hosts_and_a_revoked_host_leaves_it() {
+        let dir = tempdir::TempDir::new("storm-pc-scope").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (a, _) = enroll_a_host(&app, &owner).await;
+        let (b, _) = enroll_a_host(&app, &owner).await;
+
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": ["hst_nope"]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "unknown_host");
+
+        // Chosen before a token exists, then the token arrives.
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [b, a]}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        sync_token(&app, &owner, SUB_CANARY).await;
+        assert_eq!(
+            crate::ops::deliverable_credential(&state, &a),
+            Some("claude_subscription_token")
+        );
+        assert_eq!(
+            crate::ops::deliverable_credential(&state, "hst_other"),
+            None
+        );
+
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("/v1/agent/hosts/{a}"), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["hosts"], serde_json::json!([b]));
+        assert_eq!(crate::ops::deliverable_credential(&state, &a), None);
+        let (status, body) = send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a revoked host is not a target"
+        );
+        assert_eq!(body["error"], "unknown_host");
+
+        // Narrowing to none.
+        let (status, view) = send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": []}), &owner),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["hosts"], serde_json::json!([]));
+        assert_eq!(crate::ops::deliverable_credential(&state, &b), None);
+        let changes = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_hosts_changed")
+            .count();
+        assert_eq!(changes, 3, "set, revoked, narrowed");
+    }
+
+    #[tokio::test]
+    async fn only_the_owners_session_reaches_the_token_routes() {
+        let dir = tempdir::TempDir::new("storm-pc-tiers").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (_, host_token) = enroll_a_host(&app, &owner).await;
+        let (_, key) = send(
+            &app,
+            post_json_with_auth("/v1/keys", serde_json::json!({"name": "agent"}), &owner),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        let host = format!("Bearer {host_token}");
+        for auth in [
+            key.as_str(),
+            host.as_str(),
+            "Bearer sta_forged",
+            "Bearer nonsense",
+        ] {
+            for request in [
+                get_with_auth(CLAUDE_SUB, auth),
+                put_json_with_auth(CLAUDE_SUB, serde_json::json!({"token": SUB_CANARY}), auth),
+                delete_with_auth(CLAUDE_SUB, auth),
+                patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": []}), auth),
+            ] {
+                let (status, _) = send(&app, request).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{auth}");
+            }
+        }
+        let (status, _) = send(&app, get(CLAUDE_SUB)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["present"], false);
+
+        // Behind the route, `ops` refuses a non-session actor too.
+        let agent = Actor::Key {
+            key_id: "key_x".into(),
+            user_id: "usr_x".into(),
+        };
+        let token = crate::gateway::provider::Secret::new(SUB_CANARY.into());
+        let refused = crate::ops::put_provider_credential(&state, &agent, token, None)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.status, StatusCode::FORBIDDEN);
+        assert!(
+            crate::ops::delete_provider_credential(&state, &agent)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::ops::set_provider_credential_hosts(&state, &agent, Vec::new())
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_lost_key_shows_needs_resync_is_audited_once_and_is_never_delivered() {
+        let dir = tempdir::TempDir::new("storm-pc-lost").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host]}),
+                &owner,
+            ),
+        )
+        .await;
+        let synced = sync_token(&app, &owner, SUB_CANARY).await;
+        // What `Gateway::open` does on finding the key gone (tested there).
+        let stamp = crate::index::now_rfc3339();
+        assert!(
+            crate::ops::gateway_store(&state)
+                .mark_provider_needs_resync(crate::gateway::provider::CREDENTIAL_ID, &stamp)
+                .unwrap()
+        );
+        state
+            .gateway
+            .provider_unreadable
+            .lock()
+            .unwrap()
+            .push(synced["fingerprint"].as_str().unwrap().into());
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["status"], "needs_resync");
+        assert_eq!(crate::ops::deliverable_credential(&state, &host), None);
+        let unreadable: Vec<_> = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_unreadable")
+            .collect();
+        assert_eq!(unreadable.len(), 1);
+        assert!(
+            unreadable[0]
+                .1
+                .contains(synced["fingerprint"].as_str().unwrap())
+        );
+
+        // A re-sync brings it back.
+        let again = sync_token(&app, &owner, SUB_CANARY).await;
+        assert_eq!(again["status"], "active");
+        assert!(crate::ops::deliverable_credential(&state, &host).is_some());
+    }
+
+    #[tokio::test]
+    async fn the_single_user_sweep_drops_a_token_another_account_left() {
+        let dir = tempdir::TempDir::new("storm-pc-sweep").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        sync_token(&app, &owner, SUB_CANARY).await;
+        crate::ops::gateway_store(&state)
+            .conn()
+            .execute(
+                "UPDATE provider_credentials SET owner_user_id = 'usr_gone'",
+                [],
+            )
+            .unwrap();
+        crate::ops::reconcile_single_user(&state).await.unwrap();
+        let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(view["present"], false);
+        assert!(
+            security_events(&state)
+                .await
+                .iter()
+                .any(|(k, d)| k == "provider_credential_removed" && d.contains("single_user"))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_warns_is_audited_once_and_is_not_delivered() {
+        let dir = tempdir::TempDir::new("storm-pc-expired").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (host, _) = enroll_a_host(&app, &owner).await;
+        send(
+            &app,
+            patch_json_with_auth(
+                CLAUDE_SUB_HOSTS,
+                serde_json::json!({"hosts": [host]}),
+                &owner,
+            ),
+        )
+        .await;
+        // Minted 360 days ago: inside the 7-day window.
+        let minted = time::OffsetDateTime::now_utc() - time::Duration::days(360);
+        let (_, view) = send(
+            &app,
+            put_json_with_auth(
+                CLAUDE_SUB,
+                serde_json::json!({"token": SUB_CANARY,
+                                   "minted_at": crate::gateway::provider::format_time(minted)}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(view["warn"], "7d");
+        assert_eq!(view["days_left"], 5);
+        assert!(crate::ops::deliverable_credential(&state, &host).is_some());
+
+        crate::ops::gateway_store(&state)
+            .conn()
+            .execute(
+                "UPDATE provider_credentials SET expires_at = '2026-01-01T00:00:00Z'",
+                [],
+            )
+            .unwrap();
+        for _ in 0..2 {
+            let (_, view) = send(&app, get_with_auth(CLAUDE_SUB, &owner)).await;
+            assert_eq!(view["warn"], "expired");
+            assert_eq!(view["days_left"], 0);
+        }
+        assert_eq!(crate::ops::deliverable_credential(&state, &host), None);
+        assert_eq!(
+            crate::ops::provider_credential_availability(&state, &host),
+            crate::gateway::provider::Availability::Expired
+        );
+        let expired = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, _)| k == "provider_credential_expired")
+            .count();
+        assert_eq!(expired, 1, "provider_credential_expired is written once");
+    }
+
+    #[tokio::test]
+    async fn the_pull_is_the_starting_sessions_own_host_in_scope_and_nothing_else() {
+        let dir = tempdir::TempDir::new("storm-pc-pull").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let (_, owner) = owner_bearer(&state).await;
+        let (a, a_token) = enroll_a_host(&app, &owner).await;
+        let (b, _) = enroll_a_host(&app, &owner).await;
+        let mut links = Vec::new();
+        for host in [&a, &b] {
+            links.push(state.agent.connect_host(host).1);
+            state
+                .agent
+                .hello(host, serde_json::from_value(sync_caps(true)).unwrap())
+                .unwrap();
+        }
+        let launch = |host: String, provider: &'static str| {
+            let app = app.clone();
+            let owner = owner.clone();
+            async move {
+                let (status, body) = send(
+                    &app,
+                    post_json_with_auth(
+                        "/v1/agent/sessions",
+                        serde_json::json!({"host_id": host, "workspace": "storm",
+                                           "provider": provider,
+                                           "terminal": {"cols": 80, "rows": 24}}),
+                        &owner,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["id"].as_str().unwrap().to_string()
+            }
+        };
+        let host_a = state.auth_db.lock().await.host_by_id(&a).unwrap().unwrap();
+        let host_b = state.auth_db.lock().await.host_by_id(&b).unwrap().unwrap();
+        let code = |r: Result<crate::gateway::provider::Secret, crate::gateway::provider::Code>| {
+            r.map(|_| "ok").unwrap_or_else(|c| c.code)
+        };
+
+        let unticked = launch(a.clone(), "claude-code").await;
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &unticked).await),
+            "host_not_in_scope"
+        );
+        send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        sync_token(&app, &owner, SUB_CANARY).await;
+        // Widening reaches only launches told to pull.
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &unticked).await),
+            "host_not_in_scope"
+        );
+        let on_a = launch(a.clone(), "claude-code").await;
+        let shell_on_a = launch(a.clone(), "shell").await;
+        let on_b = launch(b.clone(), "claude-code").await;
+        let pulled = crate::ops::pull_provider_credential(&state, &host_a, &on_a)
+            .await
+            .unwrap();
+        assert_eq!(pulled.expose(), SUB_CANARY);
+        assert!(!format!("{pulled:?}").contains("CANARY"));
+        // Retries while starting are allowed.
+        assert!(
+            crate::ops::pull_provider_credential(&state, &host_a, &on_a)
+                .await
+                .is_ok()
+        );
+
+        for (host, session, want) in [
+            (&host_b, on_a.as_str(), "not_your_session"),
+            (&host_a, on_b.as_str(), "not_your_session"),
+            (&host_a, "ags_nope", "not_your_session"),
+            (&host_a, shell_on_a.as_str(), "wrong_provider"),
+            (&host_b, on_b.as_str(), "host_not_in_scope"),
+        ] {
+            assert_eq!(
+                code(crate::ops::pull_provider_credential(&state, host, session).await),
+                want,
+                "{session}"
+            );
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{on_a}/status"),
+                serde_json::json!({"status": "running"}),
+                &format!("Bearer {a_token}"),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &on_a).await),
+            "session_not_starting"
+        );
+        let pending = launch(a.clone(), "claude-code").await;
+        let (status, _) = send(&app, delete_with_auth(CLAUDE_SUB, &owner)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        send(
+            &app,
+            patch_json_with_auth(CLAUDE_SUB_HOSTS, serde_json::json!({"hosts": [a]}), &owner),
+        )
+        .await;
+        assert_eq!(
+            code(crate::ops::pull_provider_credential(&state, &host_a, &pending).await),
+            "no_credential"
+        );
+
+        let events = security_events(&state).await;
+        let delivered: Vec<_> = events
+            .iter()
+            .filter(|(k, _)| k == "provider_credential_delivered")
+            .collect();
+        assert_eq!(delivered.len(), 2);
+        assert!(delivered[0].1.contains(&on_a) && delivered[0].1.contains(&a));
+        for (kind, detail) in &events {
+            assert!(!detail.contains("CANARY"), "{kind}: {detail}");
+        }
+    }
+
     // ---- MCP Gateway: OAuth (decision 81g) --------------------------------
 
     /// A mock authorization server and protected MCP resource on one port.
@@ -9380,6 +9953,832 @@ pub(crate) mod tests {
             assert!(!detail.contains(LAN_PASSWORD), "{kind}: {detail}");
             assert!(!detail.contains(&secret), "{kind}: {detail}");
             assert!(!detail.contains("argon2"), "{kind}: {detail}");
+        }
+    }
+
+    // ---- token sync: the launch wire and the pull route (decision 124) ---
+
+    const CANARY: &str = "sk-ant-oat01-CANARY-124o-0123456789abcdefghij";
+    const KIND: &str = crate::gateway::provider::KIND;
+
+    struct SyncFixture {
+        app: Router,
+        state: Shared,
+        owner: String,
+        owner_bearer: String,
+        host: String,
+        host_bearer: String,
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+    }
+
+    fn sync_caps(can_sync: bool) -> serde_json::Value {
+        let mut caps = host_caps(true);
+        caps["providers"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"id": "opencode", "kind": "cli", "interactions": ["terminal"], "available": true}));
+        if can_sync {
+            caps["provider_credentials"] = serde_json::json!([KIND]);
+        }
+        caps
+    }
+
+    async fn sync_fixture(dir: &FsPath, can_sync: bool) -> SyncFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, token) = enroll_a_host(&app, &owner_bearer).await;
+        let link = online_host(&state, &host, can_sync);
+        SyncFixture {
+            app,
+            state,
+            owner,
+            owner_bearer,
+            host,
+            host_bearer: format!("Bearer {token}"),
+            link,
+        }
+    }
+
+    fn online_host(
+        state: &Shared,
+        host: &str,
+        can_sync: bool,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope> {
+        let (_, link) = state.agent.connect_host(host);
+        state
+            .agent
+            .hello(host, serde_json::from_value(sync_caps(can_sync)).unwrap())
+            .unwrap();
+        link
+    }
+
+    impl SyncFixture {
+        fn actor(&self) -> Actor {
+            Actor::Session {
+                user_id: self.owner.clone(),
+            }
+        }
+
+        async fn sync(&self, minted_at: Option<&str>) {
+            crate::ops::put_provider_credential(
+                &self.state,
+                &self.actor(),
+                crate::gateway::provider::Secret::new(CANARY.into()),
+                minted_at.map(Into::into),
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn tick(&self, hosts: &[&str]) {
+            crate::ops::set_provider_credential_hosts(
+                &self.state,
+                &self.actor(),
+                hosts.iter().map(|h| h.to_string()).collect(),
+            )
+            .await
+            .unwrap();
+        }
+
+        /// Launches on `host` without reporting it running: the session
+        /// stays `starting`, the only state a pull is allowed in.
+        async fn launch_on(&self, host: &str, provider: &str) -> serde_json::Value {
+            let (status, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/agent/sessions",
+                    serde_json::json!({
+                        "host_id": host, "workspace": "storm", "provider": provider,
+                        "terminal": {"cols": 80, "rows": 24},
+                    }),
+                    &self.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+
+        async fn launch(&self, provider: &str) -> serde_json::Value {
+            self.launch_on(&self.host.clone(), provider).await
+        }
+
+        fn start(&mut self) -> serde_json::Value {
+            let cmd = self.link.try_recv().unwrap();
+            let wire = serde_json::to_value(&cmd).unwrap();
+            assert_eq!(wire["type"], "start", "{wire}");
+            wire
+        }
+
+        async fn pull_as(&self, bearer: &str, session: &str) -> (StatusCode, HeaderMap, String) {
+            let response = self
+                .app
+                .clone()
+                .oneshot(get_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/provider-credential"),
+                    bearer,
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            let headers = response.headers().clone();
+            let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
+        }
+
+        async fn pull(&self, session: &str) -> (StatusCode, HeaderMap, String) {
+            self.pull_as(&self.host_bearer.clone(), session).await
+        }
+
+        async fn report(&self, session: &str, status: &str) {
+            let (code, body) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{session}/status"),
+                    serde_json::json!({"status": status}),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+    }
+
+    fn refusal_code(body: &str) -> String {
+        serde_json::from_str::<serde_json::Value>(body).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn id_of(launched: &serde_json::Value) -> String {
+        launched["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn a_native_launch_sends_the_start_bytes_it_always_did() {
+        let dir = tempdir::TempDir::new("storm-ts-native").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        // A token synced but no host ticked (default none, AC-TS3).
+        f.sync(None).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "native", "{launched}");
+        assert!(launched["credential_notice"].is_null(), "{launched}");
+        let wire = serde_json::to_string(&f.link.try_recv().unwrap()).unwrap();
+        let session = id_of(&launched);
+        let expected = format!(
+            r#"{{"cmd_seq":1,"type":"start","session":"{session}","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{{"cols":80,"rows":24}},"mcp":[{{"id":"storm","slug":"storm"}}]}}"#
+        );
+        assert_eq!(wire, expected);
+        let (status, _, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+    }
+
+    #[tokio::test]
+    async fn a_ticked_host_is_told_the_kind_and_pulls_the_token_while_starting() {
+        let dir = tempdir::TempDir::new("storm-ts-synced").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "synced", "{launched}");
+        assert!(!launched.to_string().contains(CANARY));
+        let wire = f.start();
+        assert_eq!(wire["provider_credential"], KIND, "{wire}");
+        assert!(!wire.to_string().contains(CANARY), "{wire}");
+
+        let session = id_of(&launched);
+        let (status, headers, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(headers["cache-control"], "no-store");
+        let pulled: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(pulled["kind"], KIND);
+        assert_eq!(pulled["value"], CANARY);
+        assert!(pulled["expires_at"].is_string(), "{pulled}");
+        // A retry during `starting` is allowed: a blip must not fail a launch.
+        assert_eq!(f.pull(&session).await.0, StatusCode::OK);
+
+        // Once running, never again.
+        f.report(&session, "running").await;
+        let (status, headers, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refusal_code(&body), "session_not_starting");
+        assert!(!body.contains(CANARY));
+        assert!(headers.get("cache-control").is_none());
+
+        let events = f.state.auth_db.lock().await.all_events().unwrap();
+        let delivered: Vec<_> = events
+            .iter()
+            .filter(|(k, _)| k == "provider_credential_delivered")
+            .collect();
+        assert_eq!(delivered.len(), 2, "{events:?}");
+        assert!(delivered[0].1.contains(&session), "{delivered:?}");
+        assert!(delivered[0].1.contains(KIND), "{delivered:?}");
+        assert!(delivered[0].1.contains("fingerprint"), "{delivered:?}");
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "provider_credential_refused"
+                    && d.contains("session_not_starting")),
+            "{events:?}"
+        );
+        for (kind, detail) in &events {
+            assert!(!detail.contains(CANARY), "{kind}: {detail}");
+            assert!(!detail.contains("CANARY-124o"), "{kind}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_pull_is_refused_for_another_hosts_session_and_unknown_ones() {
+        let dir = tempdir::TempDir::new("storm-ts-other").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let mut other_link = online_host(&f.state, &other, true);
+        f.sync(None).await;
+        // Both ticked, so only ownership can refuse it.
+        f.tick(&[&f.host.clone(), &other]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        f.start();
+        let (status, _, body) = f.pull_as(&format!("Bearer {other_token}"), &session).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "not_your_session");
+        let (status, _, body) = f.pull("ags_NOPE").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "not_your_session");
+
+        // The other host's own session, launched while it was ticked.
+        let theirs = id_of(&f.launch_on(&other, "claude-code").await);
+        let wire = serde_json::to_value(other_link.try_recv().unwrap()).unwrap();
+        assert_eq!(wire["provider_credential"], KIND);
+        assert_eq!(f.pull(&theirs).await.0, StatusCode::NOT_FOUND);
+        assert_eq!(
+            f.pull_as(&format!("Bearer {other_token}"), &theirs).await.0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn narrowing_and_removal_stop_the_pull_and_widening_waits_for_a_new_launch() {
+        let dir = tempdir::TempDir::new("storm-ts-scope").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let host = f.host.clone();
+        f.sync(None).await;
+        f.tick(&[&host]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        assert_eq!(f.start()["provider_credential"], KIND);
+        // Unticked while starting: the in-flight pull is refused (AC-TS5).
+        f.tick(&[]).await;
+        let (status, _, body) = f.pull(&session).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+        // Widening does not reach a launch that was not told to pull.
+        let unsynced = f.launch("claude-code").await;
+        assert_eq!(unsynced["credential"], "native");
+        assert!(f.start().get("provider_credential").is_none());
+        f.tick(&[&host]).await;
+        let (status, _, body) = f.pull(&id_of(&unsynced)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(refusal_code(&body), "host_not_in_scope");
+        // Removed: no field on a new launch, and a pending pull finds nothing
+        // (AC-TS4).
+        let pending = id_of(&f.launch("claude-code").await);
+        assert_eq!(f.start()["provider_credential"], KIND);
+        crate::ops::delete_provider_credential(&f.state, &f.actor())
+            .await
+            .unwrap();
+        f.tick(&[&host]).await;
+        let (status, _, body) = f.pull(&pending).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(refusal_code(&body), "no_credential");
+        let after = f.launch("claude-code").await;
+        assert_eq!(after["credential"], "native");
+        assert!(f.start().get("provider_credential").is_none());
+    }
+
+    #[tokio::test]
+    async fn other_providers_never_get_the_field_or_the_token() {
+        let dir = tempdir::TempDir::new("storm-ts-providers").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        for provider in ["opencode", "shell"] {
+            let launched = f.launch(provider).await;
+            assert_eq!(launched["credential"], "native", "{launched}");
+            assert!(f.start().get("provider_credential").is_none(), "{provider}");
+            let (status, _, body) = f.pull(&id_of(&launched)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{provider}");
+            assert_eq!(refusal_code(&body), "wrong_provider");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_old_host_launches_on_its_own_login_with_a_notice() {
+        let dir = tempdir::TempDir::new("storm-ts-old").unwrap();
+        let mut f = sync_fixture(dir.path(), false).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["status"], "starting", "{launched}");
+        assert_eq!(launched["credential"], "old_host");
+        let notice = launched["credential_notice"].as_str().unwrap();
+        assert!(notice.contains("build-vm"), "{notice}");
+        assert!(notice.contains("update storm-runtime"), "{notice}");
+        assert!(f.start().get("provider_credential").is_none());
+        let (status, _, _) = f.pull(&id_of(&launched)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_is_not_delivered_and_the_launch_says_so() {
+        let dir = tempdir::TempDir::new("storm-ts-expired").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(Some("2020-01-01T00:00:00Z")).await;
+        f.tick(&[&f.host.clone()]).await;
+        let launched = f.launch("claude-code").await;
+        assert_eq!(launched["credential"], "expired", "{launched}");
+        assert!(
+            launched["credential_notice"]
+                .as_str()
+                .unwrap()
+                .contains("re-sync"),
+            "{launched}"
+        );
+        assert!(f.start().get("provider_credential").is_none());
+    }
+
+    #[tokio::test]
+    async fn only_a_host_token_reaches_the_pull_route() {
+        let dir = tempdir::TempDir::new("storm-ts-tiers").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let session = id_of(&f.launch("claude-code").await);
+        f.start();
+        let (status, created) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        let key = format!("Bearer {}", created["secret"].as_str().unwrap());
+        for bearer in [f.owner_bearer.clone(), key, "Bearer nonsense".into()] {
+            let (status, _, body) = f.pull_as(&bearer, &session).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{bearer}: {body}");
+            assert!(!body.contains(CANARY));
+        }
+        assert_eq!(f.pull(&session).await.0, StatusCode::OK);
+    }
+
+    #[test]
+    fn the_pulled_credential_never_debug_prints() {
+        let pulled = crate::ops::provider_wire::PulledCredential {
+            kind: KIND,
+            value: crate::gateway::provider::Secret::new(CANARY.into()),
+            expires_at: None,
+        };
+        let debug = format!("{pulled:?}");
+        assert!(!debug.contains("CANARY"), "{debug}");
+        assert!(serde_json::to_string(&pulled).unwrap().contains(CANARY));
+    }
+
+    /// Decision 128a: a 404 must mean only "no such note". The client's
+    /// outbox drops a queued edit on 404, so any other failure reported as one
+    /// loses the user's work.
+    mod index_errors {
+        use super::*;
+
+        struct Fixture {
+            _dir: tempdir::TempDir,
+            app: Router,
+            bearer: String,
+            vault: String,
+            vault_dir: std::path::PathBuf,
+        }
+
+        async fn fixture() -> Fixture {
+            let dir = tempdir::TempDir::new("storm-index-errors").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            let (_, bearer) = owner_bearer(&state).await;
+            let (status, body) = send(
+                &app,
+                post_json_with_auth("/v1/vaults", serde_json::json!({"name": "notes"}), &bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let vault = body["id"].as_str().unwrap().to_string();
+            let vault_dir = dir.path().join("vaults").join("notes");
+            Fixture {
+                _dir: dir,
+                app,
+                bearer,
+                vault,
+                vault_dir,
+            }
+        }
+
+        impl Fixture {
+            async fn create(&self, path: &str) -> (StatusCode, serde_json::Value) {
+                send(
+                    &self.app,
+                    post_json_with_auth(
+                        &format!("/v1/vaults/{}/notes", self.vault),
+                        serde_json::json!({"path": path, "content": "# Body\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await
+            }
+
+            async fn note_id(&self, path: &str) -> String {
+                let (status, body) = self.create(path).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["note"]["id"].as_str().unwrap().to_string()
+            }
+
+            async fn put(&self, id: &str, base_version: i64) -> StatusCode {
+                send(
+                    &self.app,
+                    put_json_with_auth(
+                        &format!("/v1/vaults/{}/notes/{id}", self.vault),
+                        serde_json::json!({"base_version": base_version, "content": "edited\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await
+                .0
+            }
+
+            async fn attachment(&self, method: &str, path: &str) -> StatusCode {
+                let request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(format!("/v1/vaults/{}/attachments/{path}", self.vault))
+                    .header("authorization", &self.bearer)
+                    .body(axum::body::Body::from("clobbered"))
+                    .unwrap();
+                send(&self.app, request).await.0
+            }
+
+            /// A read-only vault directory is how these tests make a write fail
+            /// at the disk. Unix only: on Windows the directory attribute does
+            /// not stop a file being created in it.
+            #[cfg(unix)]
+            fn read_only(&self, on: bool) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = if on { 0o555 } else { 0o755 };
+                std::fs::set_permissions(&self.vault_dir, std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+            }
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_save_that_cannot_be_written_is_a_500_not_a_404() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.read_only(true);
+            let status = f.put(&id, 1).await;
+            f.read_only(false);
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        #[cfg(unix)]
+        #[tokio::test]
+        async fn a_delete_that_cannot_be_written_is_a_500_not_a_404() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.read_only(true);
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/notes/{id}", f.vault), &f.bearer),
+            )
+            .await;
+            f.read_only(false);
+            assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        #[tokio::test]
+        async fn only_an_unknown_note_is_a_404() {
+            let f = fixture().await;
+            assert_eq!(f.put("no-such-note", 1).await, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn a_note_path_must_end_in_md() {
+            let f = fixture().await;
+            assert_eq!(f.create("Ideas").await.0, StatusCode::BAD_REQUEST);
+            assert_eq!(f.create("Ideas.txt").await.0, StatusCode::BAD_REQUEST);
+            let id = f.note_id("A.md").await;
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/notes/{id}/move", f.vault),
+                    serde_json::json!({"new_path": "A.txt"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert!(
+                f.vault_dir.join("A.md").is_file(),
+                "the refused move left the note alone"
+            );
+        }
+
+        #[tokio::test]
+        async fn creating_onto_an_existing_path_is_a_conflict() {
+            let f = fixture().await;
+            f.note_id("A.md").await;
+            assert_eq!(f.create("A.md").await.0, StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn moving_onto_an_existing_note_is_a_conflict() {
+            let f = fixture().await;
+            let id = f.note_id("A.md").await;
+            f.note_id("B.md").await;
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/notes/{id}/move", f.vault),
+                    serde_json::json!({"new_path": "B.md"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CONFLICT);
+        }
+
+        #[tokio::test]
+        async fn the_attachment_routes_cannot_reach_a_note() {
+            let f = fixture().await;
+            f.note_id("N.md").await;
+            let before = std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap();
+            assert_eq!(f.attachment("PUT", "N.md").await, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                f.attachment("DELETE", "N.md").await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                std::fs::read_to_string(f.vault_dir.join("N.md")).unwrap(),
+                before
+            );
+        }
+
+        #[tokio::test]
+        async fn a_missing_attachment_is_a_404() {
+            let f = fixture().await;
+            assert_eq!(f.attachment("GET", "nope.png").await, StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn deleting_a_folder_that_does_not_exist_is_a_404() {
+            let f = fixture().await;
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/folders/Nope", f.vault), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+    }
+
+    /// Decision 128g: what the HTTP surface accepts and how it serves files.
+    mod http_surface {
+        use super::*;
+
+        const MIB: usize = 1024 * 1024;
+
+        struct Fixture {
+            _dir: tempdir::TempDir,
+            app: Router,
+            bearer: String,
+            vault: String,
+            vault_dir: std::path::PathBuf,
+        }
+
+        async fn fixture() -> Fixture {
+            let dir = tempdir::TempDir::new("storm-http-surface").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            let (_, bearer) = owner_bearer(&state).await;
+            let (status, body) = send(
+                &app,
+                post_json_with_auth("/v1/vaults", serde_json::json!({"name": "notes"}), &bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let vault = body["id"].as_str().unwrap().to_string();
+            let vault_dir = dir.path().join("vaults").join("notes");
+            Fixture {
+                _dir: dir,
+                app,
+                bearer,
+                vault,
+                vault_dir,
+            }
+        }
+
+        impl Fixture {
+            fn notes(&self) -> String {
+                format!("/v1/vaults/{}/notes", self.vault)
+            }
+
+            async fn raw(&self, method: &str, uri: &str, body: Vec<u8>) -> Response {
+                let request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header("authorization", &self.bearer)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(body))
+                    .unwrap();
+                self.app.clone().oneshot(request).await.unwrap()
+            }
+
+            async fn create(&self, path: &str, content: &str) -> StatusCode {
+                let body = serde_json::json!({"path": path, "content": content});
+                self.raw("POST", &self.notes(), body.to_string().into_bytes())
+                    .await
+                    .status()
+            }
+
+            async fn note_id(&self, path: &str) -> String {
+                let (status, body) = send(
+                    &self.app,
+                    post_json_with_auth(
+                        &self.notes(),
+                        serde_json::json!({"path": path, "content": "# A\n"}),
+                        &self.bearer,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body["note"]["id"].as_str().unwrap().to_string()
+            }
+
+            async fn put_note(&self, id: &str, content: &str) -> StatusCode {
+                let body = serde_json::json!({"base_version": 1, "content": content});
+                self.raw(
+                    "PUT",
+                    &format!("{}/{id}", self.notes()),
+                    body.to_string().into_bytes(),
+                )
+                .await
+                .status()
+            }
+
+            fn attachment_uri(&self, path: &str) -> String {
+                format!("/v1/vaults/{}/attachments/{path}", self.vault)
+            }
+        }
+
+        #[tokio::test]
+        async fn a_body_that_is_not_an_attachment_or_a_note_keeps_the_2_mib_default() {
+            let f = fixture().await;
+            let pad = "x".repeat(3 * MIB);
+            let body = format!("{{\"vault_root\": \"/nowhere\", \"pad\": \"{pad}\"}}");
+            let response = f.raw("PUT", "/v1/config", body.into_bytes()).await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        #[tokio::test]
+        async fn a_note_takes_up_to_16_mib() {
+            let f = fixture().await;
+            assert_eq!(
+                f.create("Big.md", &"x".repeat(3 * MIB)).await,
+                StatusCode::OK
+            );
+            assert_eq!(
+                f.create("Huge.md", &"x".repeat(17 * MIB)).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let id = f.note_id("A.md").await;
+            assert_eq!(f.put_note(&id, &"y".repeat(3 * MIB)).await, StatusCode::OK);
+            assert_eq!(
+                f.put_note(&id, &"y".repeat(17 * MIB)).await,
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+        }
+
+        #[tokio::test]
+        async fn an_attachment_still_takes_up_to_64_mib() {
+            let f = fixture().await;
+            let response = f
+                .raw("PUT", &f.attachment_uri("scan.pdf"), vec![7u8; 60 * MIB])
+                .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            let response = f
+                .raw("PUT", &f.attachment_uri("bigger.pdf"), vec![7u8; 65 * MIB])
+                .await;
+            assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        }
+
+        /// H1: an attachment is whatever someone uploaded. Served from the
+        /// server's own origin, an HTML or SVG file would run as the web app.
+        #[tokio::test]
+        async fn an_attachment_is_served_unsniffed_and_sandboxed() {
+            let f = fixture().await;
+            let uri = f.attachment_uri("page.html");
+            let put = f
+                .raw("PUT", &uri, b"<script>alert(1)</script>".to_vec())
+                .await;
+            assert_eq!(put.status(), StatusCode::OK);
+            for range in [None, Some("bytes=0-3")] {
+                let mut request = axum::http::Request::builder()
+                    .uri(&uri)
+                    .header("authorization", &f.bearer);
+                if let Some(range) = range {
+                    request = request.header(header::RANGE, range);
+                }
+                let response = f
+                    .app
+                    .clone()
+                    .oneshot(request.body(axum::body::Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success(), "{range:?}");
+                let headers = response.headers();
+                assert_eq!(headers["x-content-type-options"], "nosniff", "{range:?}");
+                assert_eq!(headers["content-security-policy"], "sandbox", "{range:?}");
+            }
+        }
+
+        /// E3: reading an attachment is file I/O of up to 64 MiB, and it must
+        /// not hold the vault's indexer lock while it happens.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn a_note_op_does_not_wait_for_an_attachment_read() {
+            let f = fixture().await;
+            let uri = f.attachment_uri("held-read.bin");
+            let put = f.raw("PUT", &uri, b"done".to_vec()).await;
+            assert_eq!(put.status(), StatusCode::OK);
+
+            let release = crate::vault::read_gate::hold("held-read.bin");
+            let request = get_with_auth(&uri, &f.bearer);
+            let app = f.app.clone();
+            let download = tokio::spawn(async move { app.oneshot(request).await.unwrap() });
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+            let created =
+                tokio::time::timeout(std::time::Duration::from_secs(5), f.create("B.md", "b\n"))
+                    .await;
+            // Let the read finish whatever happened, so a failure is a failure
+            // and not a hung test.
+            release.send(()).unwrap();
+            let response = download.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(
+                created.expect("a note op waited for an attachment read"),
+                StatusCode::OK
+            );
+        }
+
+        /// B5: on a case-insensitive disk (macOS, Windows) `a.md` *is*
+        /// `A.md`, so "the destination exists" refused every case-only
+        /// rename. Linux runs it too; CI's macOS and Windows jobs are where it
+        /// fails without the fix.
+        #[tokio::test]
+        async fn a_note_can_be_renamed_by_case_alone() {
+            let f = fixture().await;
+            let id = f.note_id("Ideas.md").await;
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("{}/{id}/move", f.notes()),
+                    serde_json::json!({"new_path": "ideas.md"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let names: Vec<String> = std::fs::read_dir(&f.vault_dir)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".md"))
+                .collect();
+            assert_eq!(names, vec!["ideas.md".to_string()]);
+        }
+
+        #[tokio::test]
+        async fn a_folder_can_be_renamed_by_case_alone() {
+            let f = fixture().await;
+            f.note_id("Projects/A.md").await;
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/vaults/{}/folders/rename", f.vault),
+                    serde_json::json!({"from": "Projects", "to": "projects"}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert!(f.vault_dir.join("projects/A.md").exists());
         }
     }
 }

@@ -1,6 +1,7 @@
 # storm (client)
 
-The Flutter client. One Dart codebase for macOS, Linux, Android and web.
+The Flutter client. One Dart codebase for macOS, Windows, Linux, Android and
+web.
 
 Pure Dart — there is no Rust in the client. The PRD proposed a shared Rust core
 so client and server could share merge logic, but in the server-of-record model
@@ -12,7 +13,7 @@ entirely.
 ## Running it
 
 ```sh
-flutter run -d macos        # or: -d linux, -d chrome
+flutter run -d macos        # or: -d windows, -d linux, -d chrome
 ```
 
 On first launch the device pairs with the server (the web client pairs itself
@@ -39,6 +40,52 @@ Two things specific to macOS, both consequences of the app being sandboxed:
   to a LAN address. Refuse it and syncing fails the same way a wrong token
   does; it can be re-enabled under System Settings ▸ Privacy & Security ▸ Local
   Network.
+
+### Installing it on Windows
+
+`flutter build windows --release` needs Visual Studio's C++ tools, so it runs
+on Windows (CI's `client (windows build)` job proves every change compiles).
+The release ships `storm-app-windows-x86_64.zip`, packaged by
+`tool/package_windows.sh`, and `deploy/install.ps1 -App` installs it into
+`%LOCALAPPDATA%\Programs\Storm\App` with a Start-menu shortcut. Three things
+specific to Windows (decision 125):
+
+- **The MSVC runtime travels in the zip.** The runner and its plugins link it
+  dynamically, and a clean Windows does not always have it: without
+  `msvcp140.dll` and the `vcruntime140` DLLs beside `storm.exe` the app stops
+  with a missing-DLL dialog before any Storm code runs. The packaging script
+  fails if they are missing.
+- **`Runner.rc`'s `CompanyName` and `ProductName` name the data directory**
+  (`%APPDATA%\dev.storm\Storm`): the drift cache, the prefs and the secure
+  store live there. Renaming either strands every signed-in PC's data.
+  `test/windows_runner_test.dart` guards both.
+- **One instance per user**: a named mutex, taken before the engine starts,
+  because two instances would share one cache and one outbox. A second launch
+  raises the running window.
+
+### Installing it on Linux
+
+```sh
+make app-linux               # from the repo root: build the release bundle and run it
+```
+
+It needs `clang`, `cmake`, `ninja`, `pkg-config` and the GTK 3 and libsecret
+headers. The release builds on Ubuntu 22.04 and ships
+`storm-app_<v>-1_amd64.deb` and `storm-app-<v>-x86_64-linux.tar.gz`, both made
+by `tool/package_linux.sh`; `deploy/install.sh --app` installs the package
+where apt is and the tarball into `~/.local/share/storm-app` elsewhere.
+
+- **The glibc a bundle needs is the build machine's.** A build on a current
+  distribution needs glibc 2.38 or newer and refuses to start on Debian 12, so
+  releases build on 22.04 and `STORM_MAX_GLIBC=2.35` fails the packaging if
+  anything in the bundle needs more.
+- **The application id, `dev.storm.storm`, names the data directory**
+  (`~/.local/share/dev.storm.storm`) and is the window class the desktop entry
+  matches (`StartupWMClass`). `test/linux_runner_test.dart` guards it.
+- **One instance**: GApplication's own uniqueness. A second launch is an
+  `activate` in the running process, which raises its window.
+- Without a Secret Service (gnome-keyring, KWallet) the sign-in falls back to
+  prefs and Settings › Advanced says so; LAN discovery needs Avahi.
 
 ### Installing it on Android
 
@@ -81,7 +128,9 @@ alpha channel have it reconstructed afterwards in stdlib Python. Regenerating
 icons therefore needs a Mac. Rendering them is the only step that does.
 
 Linux is deliberately switched off in the config: the only thing that handler
-produces is snap packaging, and Storm isn't shipped as a snap.
+produces is snap packaging, and Storm isn't shipped as a snap. The Linux
+packages' icons are `linux/packaging/dev.storm.storm-{256,512}.png`, scaled
+from `storm_icon.png`; the window loads `storm_icon.png` from the bundle.
 
 ## What works
 
@@ -148,9 +197,22 @@ disappear. `NoteSession` (`lib/state/note_session.dart`) owns it:
    Keeping our own text here would make the next save race a version we don't
    have.
 3. If the user typed while a save was in flight, the session stays `dirty`
-   rather than claiming `saved`, so the newer keystrokes aren't lost.
-4. A failed save also stays `dirty`. The edit exists only in this buffer, and
-   marking it `failed` alone would invite losing it.
+   rather than claiming `saved`, so the newer keystrokes aren't lost. That
+   holds for every answer (decision 128b): on `merged` or `conflict` the
+   typing is replayed onto the server's text (`lib/state/replay_edit.dart`),
+   or kept on its old base when its place is ambiguous so the server merges
+   it; on `queued` it is saved again rather than left out of the outbox.
+4. A refused save (a `4xx`) stays `dirty`. The edit exists only in this
+   buffer, and marking it `failed` alone would invite losing it. A `5xx` is
+   the server failing rather than refusing, so it is queued and retried.
+5. Leaving a note goes through `NoteSession.flush()`: it waits for a save in
+   flight, and an edit the server refused is put in the outbox rather than
+   left in a buffer the next note replaces, with a message saying so.
+
+**A note deleted elsewhere while this device holds an unsynced edit** keeps
+the edit as a new note at the note's path, or `Name (recovered).md` when that
+is taken, and says so (decision 128c). A remote delete or a 404 on open leaves
+the cached copy of a queued edit alone, and `evict()` never drops one.
 
 Conflicts arrive as text with git-style markers, with the client's own edit on
 the `ours` side. A banner explains it; you resolve by deleting the markers.

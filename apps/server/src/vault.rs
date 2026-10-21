@@ -20,8 +20,35 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
+/// A request the vault refuses on policy, as opposed to an I/O failure.
+///
+/// Typed so a caller can answer 400 or 409 for these and 500 for anything
+/// else (decision 128a): a client discards a queued edit on 404, so a disk
+/// error must never look like a missing note.
+#[derive(Debug, thiserror::Error)]
+pub enum Refusal {
+    #[error("{0}")]
+    Invalid(String),
+    #[error("{0}")]
+    Exists(String),
+    #[error("{0}")]
+    Missing(String),
+    #[error("{0}")]
+    NotEmpty(String),
+}
+
 pub struct Vault {
     root: PathBuf,
+}
+
+/// What a scan found, including what it could not read.
+///
+/// A file that cannot be read is not a file that is gone (decision 128d):
+/// reconcile keeps its index row, and an I/O error other than bad UTF-8 means
+/// the scan itself cannot be trusted to say what was deleted.
+pub struct ScanReport {
+    pub files: Vec<ScannedFile>,
+    pub unreadable: Vec<(String, std::io::ErrorKind)>,
 }
 
 /// One markdown file found on disk.
@@ -54,11 +81,13 @@ impl Vault {
     /// to create.
     pub fn resolve(&self, rel: &str) -> Result<PathBuf> {
         if rel.is_empty() {
-            bail!("empty path");
+            bail!(Refusal::Invalid("empty path".into()));
         }
         let candidate = Path::new(rel);
         if candidate.is_absolute() {
-            bail!("absolute paths are not allowed: {rel}");
+            bail!(Refusal::Invalid(format!(
+                "absolute paths are not allowed: {rel}"
+            )));
         }
 
         let mut out = self.root.clone();
@@ -67,19 +96,27 @@ impl Vault {
                 Component::Normal(part) => {
                     let s = part.to_string_lossy();
                     if s.starts_with('.') {
-                        bail!("hidden path segments are not allowed: {rel}");
+                        bail!(Refusal::Invalid(format!(
+                            "hidden path segments are not allowed: {rel}"
+                        )));
                     }
                     if cfg!(windows)
                         && let Some(why) = windows_name_problem(&s)
                     {
-                        bail!("{why}, which Windows cannot store: {rel}");
+                        bail!(Refusal::Invalid(format!(
+                            "{why}, which Windows cannot store: {rel}"
+                        )));
                     }
                     out.push(part);
                 }
                 Component::CurDir => {}
-                Component::ParentDir => bail!("path escapes the vault: {rel}"),
+                Component::ParentDir => {
+                    bail!(Refusal::Invalid(format!("path escapes the vault: {rel}")))
+                }
                 Component::RootDir | Component::Prefix(_) => {
-                    bail!("absolute paths are not allowed: {rel}")
+                    bail!(Refusal::Invalid(format!(
+                        "absolute paths are not allowed: {rel}"
+                    )))
                 }
             }
         }
@@ -93,7 +130,9 @@ impl Vault {
                     .canonicalize()
                     .with_context(|| format!("resolving {}", probe.display()))?;
                 if !real.starts_with(&self.root) {
-                    bail!("path escapes the vault via a symlink: {rel}");
+                    bail!(Refusal::Invalid(format!(
+                        "path escapes the vault via a symlink: {rel}"
+                    )));
                 }
                 break;
             }
@@ -108,8 +147,7 @@ impl Vault {
 
     /// Reads a file as raw bytes — attachments are opaque blobs.
     pub fn read_bytes(&self, rel: &str) -> Result<Vec<u8>> {
-        let path = self.resolve(rel)?;
-        fs::read(&path).with_context(|| format!("reading {}", path.display()))
+        read_file(&self.resolve(rel)?)
     }
 
     /// Writes raw bytes atomically, same as [`Vault::write`].
@@ -118,22 +156,7 @@ impl Vault {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
-        let tmp = path.with_extension(format!(
-            "{}.storm-tmp",
-            path.extension()
-                .map(|e| e.to_string_lossy())
-                .unwrap_or_default()
-        ));
-        {
-            use std::io::Write;
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
-            f.write_all(bytes)?;
-            f.sync_all()?;
-        }
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(&path, bytes)
     }
 
     /// Every non-markdown file in the vault — the attachments.
@@ -182,33 +205,14 @@ impl Vault {
         self.resolve(rel).map(|p| p.is_file()).unwrap_or(false)
     }
 
-    /// Writes atomically: temp file in the same directory, fsync, rename.
+    /// Writes atomically ([`crate::fsutil::write_atomic`]).
     pub fn write(&self, rel: &str, content: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
         }
 
-        // Same directory as the target, so the rename stays within one
-        // filesystem and is therefore atomic.
-        let tmp = path.with_extension(format!(
-            "{}.storm-tmp",
-            path.extension()
-                .map(|e| e.to_string_lossy())
-                .unwrap_or_default()
-        ));
-
-        {
-            use std::io::Write;
-            let mut f = fs::File::create(&tmp)
-                .with_context(|| format!("creating temp file {}", tmp.display()))?;
-            f.write_all(content.as_bytes())?;
-            f.sync_all()?;
-        }
-
-        fs::rename(&tmp, &path)
-            .with_context(|| format!("renaming {} to {}", tmp.display(), path.display()))?;
-        Ok(())
+        crate::fsutil::write_atomic(&path, content.as_bytes())
     }
 
     /// Deletes a note, pruning any directories it leaves empty.
@@ -227,8 +231,8 @@ impl Vault {
     pub fn rename(&self, from: &str, to: &str, keep: &HashSet<String>) -> Result<()> {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
-        if dst.exists() {
-            bail!("destination already exists: {to}");
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
+            bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -244,7 +248,7 @@ impl Vault {
     pub fn create_dir(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if path.is_file() {
-            bail!("a file already exists at {rel}");
+            bail!(Refusal::Exists(format!("a file already exists at {rel}")));
         }
         fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
         Ok(())
@@ -254,11 +258,11 @@ impl Vault {
     pub fn remove_dir(&self, rel: &str) -> Result<()> {
         let path = self.resolve(rel)?;
         if !path.is_dir() {
-            bail!("no such folder: {rel}");
+            bail!(Refusal::Missing(format!("no such folder: {rel}")));
         }
         let empty = fs::read_dir(&path)?.next().is_none();
         if !empty {
-            bail!("folder is not empty: {rel}");
+            bail!(Refusal::NotEmpty(format!("folder is not empty: {rel}")));
         }
         fs::remove_dir(&path).with_context(|| format!("removing {}", path.display()))?;
         Ok(())
@@ -269,10 +273,10 @@ impl Vault {
         let src = self.resolve(from)?;
         let dst = self.resolve(to)?;
         if !src.is_dir() {
-            bail!("no such folder: {from}");
+            bail!(Refusal::Missing(format!("no such folder: {from}")));
         }
-        if dst.exists() {
-            bail!("destination already exists: {to}");
+        if dst.exists() && !same_entry_by_case(&src, &dst) {
+            bail!(Refusal::Exists(format!("destination already exists: {to}")));
         }
         if let Some(parent) = dst.parent() {
             fs::create_dir_all(parent)?;
@@ -320,8 +324,15 @@ impl Vault {
     ///
     /// Skips dotted directories so `.obsidian/`, `.git/` and `.trash/` never
     /// enter the index — Obsidian vaults routinely contain all three.
+    #[cfg(test)]
     pub fn scan(&self) -> Result<Vec<ScannedFile>> {
+        Ok(self.scan_report()?.files)
+    }
+
+    /// [`Vault::scan`], with the files it could not read.
+    pub fn scan_report(&self) -> Result<ScanReport> {
         let mut out = Vec::new();
+        let mut unreadable = Vec::new();
 
         for entry in WalkDir::new(&self.root)
             .follow_links(false)
@@ -352,13 +363,52 @@ impl Vault {
                     rel_path: rel,
                     content,
                 }),
-                // A note we can't decode as UTF-8 is skipped rather than
-                // aborting the whole scan.
-                Err(e) => tracing::warn!(path = %rel, error = %e, "skipping unreadable file"),
+                // A note we can't read is skipped rather than aborting the
+                // whole scan, and reported so reconcile keeps its row.
+                Err(e) => {
+                    tracing::warn!(path = %rel, error = %e, "skipping unreadable file");
+                    unreadable.push((rel, e.kind()));
+                }
             }
         }
 
         out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        Ok(ScanReport {
+            files: out,
+            unreadable,
+        })
+    }
+
+    /// Every file under the vault-relative directory `rel`, as vault-relative
+    /// paths, skipping dotted directories and Storm's temp files — what the
+    /// watcher refreshes when a whole directory appears (decision 128d).
+    pub fn files_under(&self, rel: &str) -> Result<Vec<String>> {
+        let dir = self.resolve(rel)?;
+        let mut out = Vec::new();
+        for entry in WalkDir::new(&dir)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| {
+                !e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with('.') && e.depth() > 0)
+                    .unwrap_or(false)
+            })
+        {
+            let entry = entry?;
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let path = entry
+                .path()
+                .strip_prefix(&self.root)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if !path.contains("storm-tmp") {
+                out.push(path);
+            }
+        }
+        out.sort();
         Ok(out)
     }
 }
@@ -403,6 +453,56 @@ pub fn windows_name_problem(name: &str) -> Option<&'static str> {
     reserved.then_some("it is a reserved device name")
 }
 
+/// Whether `dst` exists only because it is `src` spelled in another case:
+/// on a case-insensitive disk (macOS, Windows) `a.md` is `A.md`, and refusing
+/// it made a case-only rename impossible (decision 128g, B5). Where the two
+/// names are two files, it is a real destination and is not this.
+fn same_entry_by_case(src: &Path, dst: &Path) -> bool {
+    src != dst
+        && src.to_string_lossy().to_lowercase() == dst.to_string_lossy().to_lowercase()
+        && same_file::is_same_file(src, dst).unwrap_or(false)
+}
+
+/// Reads a whole file. A free function so an attachment can be read once
+/// the indexer lock is released (decision 128g).
+pub fn read_file(path: &Path) -> Result<Vec<u8>> {
+    #[cfg(test)]
+    read_gate::wait(path);
+    fs::read(path).with_context(|| format!("reading {}", path.display()))
+}
+
+/// Lets a test hold a read of one file open, so "while a read is in
+/// progress" is a state it can observe rather than a race it hopes to win.
+#[cfg(test)]
+pub(crate) mod read_gate {
+    use std::path::Path;
+    use std::sync::{Mutex, mpsc};
+
+    static GATES: Mutex<Vec<(String, mpsc::Receiver<()>)>> = Mutex::new(Vec::new());
+
+    /// Holds the next read of a file named `name` until the sender sends or
+    /// is dropped.
+    pub fn hold(name: &str) -> mpsc::Sender<()> {
+        let (tx, rx) = mpsc::channel();
+        GATES.lock().unwrap().push((name.to_string(), rx));
+        tx
+    }
+
+    pub(super) fn wait(path: &Path) {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            return;
+        };
+        let gate = {
+            let mut gates = GATES.lock().unwrap();
+            let at = gates.iter().position(|(n, _)| n == name);
+            at.map(|i| gates.remove(i).1)
+        };
+        if let Some(rx) = gate {
+            let _ = rx.recv();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,6 +520,47 @@ mod tests {
 
     fn keeping(paths: &[&str]) -> HashSet<String> {
         paths.iter().map(|p| p.to_string()).collect()
+    }
+
+    /// B5 (decision 128g): a case-only rename is a rename, on every disk.
+    #[test]
+    fn a_case_only_rename_is_allowed() {
+        let (_d, v) = temp_vault();
+        v.write("Note.md", "# n\n").unwrap();
+        v.rename("Note.md", "note.md", &nothing()).unwrap();
+        let names: Vec<_> = fs::read_dir(v.root())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["note.md".to_string()]);
+
+        v.write("Projects/A.md", "# a\n").unwrap();
+        v.rename_dir("Projects", "projects").unwrap();
+        assert!(v.root().join("projects/A.md").exists());
+    }
+
+    #[test]
+    fn a_rename_onto_another_file_is_still_refused() {
+        let (_d, v) = temp_vault();
+        v.write("A.md", "a\n").unwrap();
+        v.write("B.md", "b\n").unwrap();
+        assert!(v.rename("A.md", "B.md", &nothing()).is_err());
+        assert_eq!(v.read("B.md").unwrap(), "b\n");
+    }
+
+    /// Where two names differing only by case are two files, the second is a
+    /// real destination and a rename must not clobber it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_case_only_rename_onto_a_distinct_file_is_refused() {
+        let (_d, v) = temp_vault();
+        v.write("Note.md", "upper\n").unwrap();
+        v.write("note.md", "lower\n").unwrap();
+        assert!(v.rename("Note.md", "note.md", &nothing()).is_err());
+        assert_eq!(v.read("note.md").unwrap(), "lower\n");
+        v.write("Dir/x.md", "x\n").unwrap();
+        v.write("dir/y.md", "y\n").unwrap();
+        assert!(v.rename_dir("Dir", "dir").is_err());
     }
 
     #[test]

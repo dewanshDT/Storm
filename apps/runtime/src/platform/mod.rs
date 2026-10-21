@@ -183,9 +183,7 @@ pub fn write_managed_zprofile(home: &std::path::Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => {}
         Err(e) => return Err(e),
     }
-    let tmp = home.join(".zprofile.tmp");
-    std::fs::write(&tmp, ZPROFILE)?;
-    std::fs::rename(&tmp, &path)?;
+    crate::fsutil::write_atomic(&path, ZPROFILE.as_bytes(), crate::fsutil::Access::Default)?;
     Ok(true)
 }
 

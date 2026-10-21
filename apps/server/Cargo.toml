@@ -98,6 +98,7 @@ tokio-tungstenite = { version = "0.29.0", features = ["rustls-tls-webpki-roots"]
 # `aws-lc-rs`, which needs cmake and a C toolchain the musl/zig release build
 # does not have. main.rs installs it as the process default as well.
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+same-file = "1.0.6"
 tower = { version = "0.5.3", features = ["util"] }
 tower-http = { version = "0.7.0", features = ["fs", "cors", "trace", "set-header"] }
 tracing = "0.1.44"

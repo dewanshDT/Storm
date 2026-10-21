@@ -35,8 +35,13 @@ pub struct ParsedNote {
 /// A block only counts when `---` is the very first line, matching Obsidian.
 /// An unterminated block is not frontmatter — treating it as such would
 /// swallow the whole note.
+///
+/// A UTF-8 BOM before that line is part of no block (decision 128e). Windows
+/// editors write one; reading past it is what stops a stamp from prepending a
+/// second block and turning the user's own into body text.
 pub fn parse(content: &str) -> ParsedNote {
-    let Some(rest) = strip_fence_line(content) else {
+    let bom = bom_len(content);
+    let Some(rest) = strip_fence_line(&content[bom..]) else {
         return ParsedNote {
             frontmatter: None,
             body_start: 0,
@@ -52,7 +57,7 @@ pub fn parse(content: &str) -> ParsedNote {
             return ParsedNote {
                 frontmatter: Some(Frontmatter {
                     raw: content[open_len..offset].to_string(),
-                    start: 0,
+                    start: bom,
                     end,
                 }),
                 body_start: end,
@@ -64,6 +69,14 @@ pub fn parse(content: &str) -> ParsedNote {
     ParsedNote {
         frontmatter: None,
         body_start: 0,
+    }
+}
+
+fn bom_len(content: &str) -> usize {
+    if content.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
     }
 }
 
@@ -126,26 +139,13 @@ pub fn get_tags(raw: &str) -> Vec<String> {
 }
 
 /// Finds the (line index, line) of a top-level `key:` in a frontmatter block.
+///
+/// A block scalar's content is always indented, so skipping every indented
+/// line is what keeps a `key:`-looking line inside one from matching.
 fn line_of_key<'a>(raw: &'a str, key: &str) -> Option<(usize, &'a str)> {
-    let mut block_scalar_indent: Option<usize> = None;
-
     for (idx, line) in raw.lines().enumerate() {
-        let indent = line.len() - line.trim_start().len();
-
-        // Inside a block scalar (`key: |`), skip everything more indented.
-        if let Some(base) = block_scalar_indent {
-            if line.trim().is_empty() || indent > base {
-                continue;
-            }
-            block_scalar_indent = None;
-        }
-
-        if indent != 0 {
+        if line.starts_with(char::is_whitespace) {
             continue;
-        }
-        let trimmed = line.trim_end();
-        if trimmed.ends_with('|') || trimmed.ends_with('>') {
-            block_scalar_indent = Some(indent);
         }
         if line
             .strip_prefix(key)
@@ -178,18 +178,20 @@ fn unquote(s: &str) -> &str {
 /// user's YAML through a serializer.
 pub fn set_scalars(content: &str, pairs: &[(&str, &str)]) -> String {
     let parsed = parse(content);
+    let (bom, body) = content.split_at(bom_len(content));
 
     let Some(fm) = parsed.frontmatter else {
-        // No block at all — create one and keep the body verbatim.
-        let mut out = String::from("---\n");
+        // No block at all — create one after any BOM and keep the body
+        // verbatim.
+        let mut out = format!("{bom}---\n");
         for (k, v) in pairs {
             out.push_str(&format!("{k}: {v}\n"));
         }
         out.push_str("---\n");
-        if !content.is_empty() && !content.starts_with('\n') {
+        if !body.is_empty() && !body.starts_with('\n') {
             out.push('\n');
         }
-        out.push_str(content);
+        out.push_str(body);
         return out;
     };
 
@@ -213,6 +215,7 @@ pub fn set_scalars(content: &str, pairs: &[(&str, &str)]) -> String {
     }
 
     let mut out = String::with_capacity(content.len() + 64);
+    out.push_str(bom);
     out.push_str("---\n");
     for line in &lines {
         out.push_str(line);
@@ -362,6 +365,30 @@ mod tests {
             "---\nid: new-id\nmodified: new-time\ntitle: keep me\n---\nbody\n"
         );
         assert!(out.contains("title: keep me"));
+    }
+
+    // ---- a leading BOM (decision 128e) ---------------------------------
+
+    #[test]
+    fn a_bom_before_the_fence_does_not_hide_the_block() {
+        let note = "\u{feff}---\ntitle: Win\n---\nbody\n";
+        let p = parse(note);
+        let fm = p.frontmatter.expect("the block after the BOM");
+        assert_eq!(fm.raw, "title: Win\n");
+        assert_eq!(&note[p.body_start..], "body\n");
+    }
+
+    #[test]
+    fn stamping_a_bom_note_keeps_one_block_and_the_bom_first() {
+        let note = "\u{feff}---\ntitle: Win\n---\nbody\n";
+        let out = set_scalars(note, &[("id", "abc")]);
+        assert_eq!(out, "\u{feff}---\nid: abc\ntitle: Win\n---\nbody\n");
+    }
+
+    #[test]
+    fn a_new_block_goes_after_the_bom() {
+        let out = set_scalars("\u{feff}body\n", &[("id", "abc")]);
+        assert_eq!(out, "\u{feff}---\nid: abc\n---\n\nbody\n");
     }
 
     #[test]

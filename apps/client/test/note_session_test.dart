@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -158,8 +160,10 @@ void main() {
   });
 
   test('a rejected save stays dirty so the edit is not lost', () async {
+    // A refusal is a 4xx. A 5xx is the server failing, which is queued
+    // instead (decision 128b; `sync_engine_test`).
     await open();
-    server.failWith = 500;
+    server.failWith = 403;
 
     session.edit('precious edit\n');
     await session.save();
@@ -223,6 +227,142 @@ void main() {
         'note B\n',
         reason: "A's buffer must never be written to B",
       );
+    },
+  );
+
+  group('typing while a save is in flight (decision 128b)', () {
+    test('a merged answer keeps what was typed, replayed onto it', () async {
+      await open(content: 'alpha\nbeta\n');
+      server.mergeInstead = 'TOP\nalpha\nbeta\ngamma\n';
+
+      session.edit('alpha\nbeta\ngamma\n');
+      final saving = session.save();
+      session.edit('alpha\nbeta\ngamma delta\n');
+      await saving;
+
+      expect(session.buffer, 'TOP\nalpha\nbeta\ngamma delta\n');
+      expect(session.baseVersion, 2);
+      expect(session.saveState, SaveState.dirty);
+      expect(session.notice, isNotNull);
+
+      server.mergeInstead = null;
+      await session.save();
+      expect(server.notes['n1']!.content, 'TOP\nalpha\nbeta\ngamma delta\n');
+      expect(session.saveState, SaveState.saved);
+    });
+
+    test('a conflicted answer keeps what was typed too', () async {
+      await open(content: 'line\n');
+      server.conflictInstead =
+          '<<<<<<< ours\nline\nnew\n=======\nline\nother\n>>>>>>> theirs\n';
+
+      session.edit('line\nnew\n');
+      final saving = session.save();
+      session.edit('line\nnew and more\n');
+      await saving;
+
+      expect(session.buffer, contains('new and more'));
+      expect(session.buffer, contains('<<<<<<<'));
+      expect(session.hasConflict, isTrue);
+      expect(session.saveState, SaveState.dirty);
+    });
+
+    test('when the edit cannot be placed, the buffer is kept and saved '
+        'against the base it came from', () async {
+      await open(version: 3, content: 'same\n');
+      server.mergeInstead = 'same\nsame\n';
+
+      session.edit('same\nx\n');
+      final saving = session.save();
+      session.edit('same\nxy\n');
+      await saving;
+
+      expect(session.buffer, 'same\nxy\n');
+      expect(session.baseVersion, 3, reason: 'the base the buffer came from');
+      expect(session.saveState, SaveState.dirty);
+
+      server.mergeInstead = null;
+      await session.save();
+      expect(server.lastBaseVersion, 3);
+    });
+
+    test(
+      'typing during a save that goes offline is kept for the next save',
+      () async {
+        await open();
+        server.unreachable = true;
+        session.edit('first\n');
+        final saving = session.save();
+        session.edit('first plus more\n');
+        await saving;
+
+        expect(session.saveState, SaveState.dirty);
+        await session.save();
+        final queued = await cache.outboxFor(FakeServer.primaryVault, 'n1');
+        expect(queued?.content, 'first plus more\n');
+      },
+    );
+  });
+
+  group('flush (decision 128b)', () {
+    test('waits for a save already in flight', () async {
+      await open();
+      server.saveGate = Completer<void>();
+      session.edit('edited\n');
+      final saving = session.save();
+
+      var flushed = false;
+      final flushing = session.flush().then((e) {
+        flushed = true;
+        return e;
+      });
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(flushed, isFalse, reason: 'the PUT has not answered yet');
+
+      server.saveGate!.complete();
+      expect(await flushing, isNull);
+      await saving;
+      expect(server.notes['n1']!.content, 'edited\n');
+      expect(session.saveState, SaveState.saved);
+    });
+
+    test(
+      'keeps a refused edit on this device rather than dropping it',
+      () async {
+        await open();
+        server.failWith = 400;
+        session.edit('the server refuses this\n');
+
+        final error = await session.flush();
+
+        expect(error, isNotNull);
+        final queued = await cache.outboxFor(FakeServer.primaryVault, 'n1');
+        expect(queued?.content, 'the server refuses this\n');
+        expect(session.saveState, SaveState.queued);
+      },
+    );
+  });
+
+  test(
+    'a recovered edit takes the open session with it (decision 128c)',
+    () async {
+      await open();
+      server.notes['kept'] = ServerNote(
+        id: 'kept',
+        path: 'A (recovered).md',
+        content: 'my edit\n',
+        version: 1,
+      );
+      await session.followRecovered(
+        const RecoveredNote(
+          oldId: 'n1',
+          newId: 'kept',
+          path: 'A (recovered).md',
+        ),
+      );
+      expect(session.noteId, 'kept');
+      expect(session.buffer, 'my edit\n');
+      expect(session.notice, contains('A (recovered).md'));
     },
   );
 }

@@ -73,6 +73,82 @@ pub async fn list_vaults(state: &Shared, actor: &Actor) -> ApiResult<Vec<VaultIn
     Ok(out)
 }
 
+#[derive(Debug, Serialize)]
+pub struct CreatedVault {
+    pub id: String,
+    pub name: String,
+    pub dir: String,
+}
+
+/// Registers a new vault directory under the storage root and opens its index.
+pub async fn create_vault(state: &Shared, name: &str) -> ApiResult<CreatedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .create(name, &crate::index::now_rfc3339())
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+
+    let vault = crate::vault::Vault::new(vaults.registry.path_of(&entry))?;
+    let db = crate::db::Db::open(&state.state_dir.join(&entry.id).join("index.db"), &entry.id)?;
+    vaults.open.insert(
+        entry.id.clone(),
+        Arc::new(crate::api::VaultHandle {
+            indexer: tokio::sync::Mutex::new(crate::index::Indexer::new(vault, db)),
+        }),
+    );
+    Ok(CreatedVault {
+        id: entry.id,
+        name: entry.name,
+        dir: entry.dir,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RenamedVault {
+    pub id: String,
+    pub name: String,
+}
+
+/// Renames a vault. Nothing to do to the open handle: it holds only the
+/// index, and the name lives in the registry, which every reader consults.
+pub async fn rename_vault(state: &Shared, vault: &str, name: &str) -> ApiResult<RenamedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .rename(vault, name)
+        .map_err(|e| bad_request(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+    Ok(RenamedVault {
+        id: entry.id,
+        name: entry.name,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct RemovedVault {
+    pub removed: String,
+    pub name: String,
+    /// Said explicitly so no caller has to guess.
+    pub files_kept_at: String,
+}
+
+/// Unregisters a vault. **Never deletes files.**
+pub async fn remove_vault(state: &Shared, vault: &str) -> ApiResult<RemovedVault> {
+    let mut vaults = state.vaults.write().await;
+    let entry = vaults
+        .registry
+        .remove(vault)
+        .map_err(|e| not_found(e.to_string()))?;
+    vaults.registry.save(&state.state_dir)?;
+    vaults.open.remove(vault);
+    Ok(RemovedVault {
+        files_kept_at: vaults.registry.root.join(&entry.dir).display().to_string(),
+        removed: entry.id,
+        name: entry.name,
+    })
+}
+
 /// Where a vault keeps its own configuration, as an ordinary note so it syncs
 /// and stays greppable (decision 26).
 const VAULT_CONFIG_PATH: &str = "_storm/vault.md";
@@ -453,9 +529,7 @@ pub async fn create_note(
 ) -> ApiResult<crate::index::WriteResult> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .create_note(path, content)
-        .map_err(|e| crate::api::bad_request(e.to_string()))?;
+    let result = ix.create_note(path, content)?;
     broadcast_latest(state, &ix, result.seq);
     record_agent_write(state, actor, vault, &result.note, "created");
     Ok(result)
@@ -534,9 +608,7 @@ pub async fn update_note(
 ) -> ApiResult<crate::index::WriteResult> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let result = ix
-        .put_note(id, base_version, content, device_id)
-        .map_err(|e| not_found(e.to_string()))?;
+    let result = ix.put_note(id, base_version, content, device_id)?;
     broadcast_latest(state, &ix, result.seq);
     record_agent_write(state, actor, vault, &result.note, "edited");
     Ok(result)
@@ -545,9 +617,201 @@ pub async fn update_note(
 pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<i64> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(id).map_err(|e| not_found(e.to_string()))?;
+    let seq = ix.delete_note(id)?;
     broadcast_latest(state, &ix, seq);
     Ok(seq)
+}
+
+/// Moves a note to a new path. Identity is the id, so this is a metadata
+/// change with a new version, and an agent's move is provenance like its
+/// edits (decision 128h).
+pub async fn move_note(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+    new_path: &str,
+) -> ApiResult<crate::index::WriteResult> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let result = ix.move_note(id, new_path)?;
+    broadcast_latest(state, &ix, result.seq);
+    record_agent_write(state, actor, vault, &result.note, "edited");
+    Ok(result)
+}
+
+/// Records that a note was opened, feeding the cross-vault recents list.
+///
+/// Deliberately outside the change log: opening a note is not an edit, must
+/// not bump `version`, and must not wake every other device.
+pub async fn mark_opened(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let ix = handle.indexer.lock().await;
+    if ix.db.get_note(id)?.is_none() {
+        return Err(not_found("no such note"));
+    }
+    ix.db.touch_note_access(id, &crate::index::now_rfc3339())?;
+    Ok(())
+}
+
+// ---- tree and sync -----------------------------------------------------
+
+#[derive(Debug, Serialize)]
+pub struct Tree {
+    pub notes: Vec<NoteRow>,
+    pub folders: Vec<String>,
+    pub seq: i64,
+}
+
+pub async fn tree(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<Tree> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(Tree {
+        notes: ix.db.list_notes()?,
+        // Derived from note paths, union the ones created explicitly — only
+        // the union makes an empty folder visible.
+        folders: ix.all_folders()?,
+        seq: ix.db.latest_seq()?,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncPage {
+    pub changes: Vec<crate::db::Change>,
+    pub seq: i64,
+}
+
+/// The vault's changes after `since`, at most `limit` (clamped to 1–5000).
+pub async fn sync(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    since: i64,
+    limit: i64,
+) -> ApiResult<SyncPage> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(SyncPage {
+        changes: ix.db.changes_since(since, limit.clamp(1, 5000))?,
+        seq: ix.db.latest_seq()?,
+    })
+}
+
+// ---- folders -----------------------------------------------------------
+
+pub async fn create_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.create_folder(path)?;
+    Ok(())
+}
+
+/// Refused rather than recursive: deleting someone's notes because they
+/// tapped "delete folder" is not something to do quietly.
+pub async fn delete_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.delete_folder(path)?;
+    Ok(())
+}
+
+/// Renames a folder, returning how many notes moved with it.
+pub async fn rename_folder(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    from: &str,
+    to: &str,
+) -> ApiResult<usize> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let seqs = ix.rename_folder(from, to)?;
+    // One `moved` per contained note, so every client follows the rename
+    // rather than discovering it at the next full tree fetch.
+    for seq in &seqs {
+        broadcast_latest(state, &ix, *seq);
+        if matches!(actor, Actor::Agent { .. })
+            && let Some(change) = ix.db.changes_since(seq - 1, 1)?.into_iter().next()
+            && let Some(note) = ix.db.get_note(&change.note_id)?
+        {
+            record_agent_write(state, actor, vault, &note, "edited");
+        }
+    }
+    Ok(seqs.len())
+}
+
+pub async fn notes_by_tag(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    tag: &str,
+) -> ApiResult<Vec<NoteRow>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(ix.db.notes_with_tag(tag)?)
+}
+
+// ---- attachments -------------------------------------------------------
+
+pub async fn list_attachments(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+) -> ApiResult<Vec<crate::db::AttachmentRow>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    Ok(ix.db.list_attachments()?)
+}
+
+/// An attachment's bytes. Up to 64 MiB, so the file is found under the
+/// indexer lock and read off the runtime after it is released: a download
+/// never stalls the vault's note operations (decision 128g).
+pub async fn read_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<Vec<u8>> {
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let file = handle.indexer.lock().await.attachment_file(path)?;
+    tokio::task::spawn_blocking(move || crate::vault::read_file(&file))
+        .await
+        .map_err(|e| crate::index::IndexError::from(anyhow::Error::from(e)))?
+        .map_err(|e| crate::index::IndexError::from(e).into())
+}
+
+pub async fn put_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+    bytes: &[u8],
+) -> ApiResult<()> {
+    if bytes.is_empty() {
+        return Err(bad_request("empty upload"));
+    }
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.put_attachment(path, bytes)?;
+    Ok(())
+}
+
+pub async fn delete_attachment(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    path: &str,
+) -> ApiResult<()> {
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.delete_attachment(path)?;
+    Ok(())
 }
 
 // ---- search and tags ---------------------------------------------------
@@ -828,8 +1092,7 @@ pub async fn create_script(
     if ix.vault.exists(&rel) {
         return Err(conflict(format!("script “{name}” already exists")));
     }
-    ix.put_attachment(&rel, content.as_bytes())
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.put_attachment(&rel, content.as_bytes())?;
     record_agent_script_write(state, actor, &kit, &rel, "script_created");
     Ok(ScriptStored {
         name: name.to_string(),
@@ -853,8 +1116,7 @@ pub async fn update_script(
     if !ix.vault.exists(&rel) {
         return Err(not_found("no such script"));
     }
-    ix.put_attachment(&rel, content.as_bytes())
-        .map_err(|e| bad_request(e.to_string()))?;
+    ix.put_attachment(&rel, content.as_bytes())?;
     record_agent_script_write(state, actor, &kit, &rel, "script_edited");
     Ok(ScriptStored {
         name: name.to_string(),
@@ -1399,6 +1661,7 @@ pub async fn revoke_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     // them itself when it is next refused.
     state.agent.revoke_host(host_id).map_err(internal)?;
     sweep_gateway_sessions(state);
+    forget_provider_credential_host(state, host_id).await;
     Ok(())
 }
 
@@ -1630,6 +1893,11 @@ pub struct LaunchedSession {
     #[serde(flatten)]
     pub session: SessionView,
     pub mcp: LaunchMcp,
+    /// The synced Claude login (decision 124): `synced`, `native`,
+    /// `old_host` or `expired`. Never the token.
+    pub credential: &'static str,
+    /// Said out loud when a ticked host's session runs on its own login.
+    pub credential_notice: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1710,6 +1978,7 @@ pub async fn launch_session(
             .iter()
             .map(|c| (c.id.clone(), c.display_name.clone()))
             .collect(),
+        provider_credential: deliverable_credential(state, &req.host_id),
     };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
@@ -1723,10 +1992,12 @@ pub async fn launch_session(
                 slug: c.slug,
             }),
     );
-    let (session, launch, outcome) = state
+    let (session, launch, outcome, credential) = state
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    let (credential, credential_notice) =
+        provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
         crate::agent::McpOutcome::Granted(g) => (
             g,
@@ -1775,6 +2046,8 @@ pub async fn launch_session(
             allow_vault_writes: launch.write_vault_id.is_some(),
             notice,
         },
+        credential,
+        credential_notice,
     })
 }
 
@@ -3248,6 +3521,7 @@ async fn connect_builtin(
 /// Retires what removed accounts left in `agent.db`/`gateway.db` (decision 82,
 /// invariant I4). Runs on every boot; idempotent.
 pub async fn reconcile_single_user(state: &Shared) -> anyhow::Result<()> {
+    reconcile_provider_credential(state).await?;
     let account = {
         let auth_db = state.auth_db.lock().await;
         auth_db.account()?
@@ -3304,6 +3578,404 @@ pub fn sweep_gateway_sessions(state: &Shared) {
             state.gateway.sessions.close_session(&session);
         }
     }
+}
+
+pub(crate) mod provider_wire;
+pub use provider_wire::runtime_provider_credential;
+
+// ---- Token sync: the synced Claude subscription token (decision 124n) -------
+//
+// Session tier only (spec §0.3), so an `stk_` key or a host token never
+// reaches these. No function here returns the token except
+// `pull_provider_credential`, for the host's own starting session.
+
+use crate::gateway::provider::{
+    self as pc, Availability, CREDENTIAL_ID, Code, HostId, ProviderCredentialView, Secret,
+};
+
+fn pc_owner_only(actor: &Actor) -> Result<(), Code> {
+    match actor {
+        Actor::Session { .. } => Ok(()),
+        _ => Err(Code::new(axum::http::StatusCode::FORBIDDEN, "owner_only")),
+    }
+}
+
+/// One `security_events` row: the kind and the fingerprint, never the token.
+fn pc_event(
+    auth_db: &crate::auth::AuthDb,
+    event: &str,
+    user: Option<&str>,
+    now: &str,
+    mut detail: serde_json::Value,
+) {
+    detail["kind"] = serde_json::json!(pc::KIND);
+    if let Err(e) = auth_db.record_event(event, user, None, now, &detail.to_string()) {
+        tracing::warn!(error = %e, event, "could not record a token-sync security event");
+    }
+}
+
+fn pc_view(state: &Shared, now: time::OffsetDateTime) -> Result<ProviderCredentialView, Code> {
+    let store = gateway_store(state);
+    let row = store
+        .provider_credential(pc::KIND)
+        .map_err(Code::internal)?;
+    let hosts = store
+        .provider_credential_hosts(CREDENTIAL_ID)
+        .map_err(Code::internal)?;
+    Ok(ProviderCredentialView::of(row.as_ref(), hosts, now))
+}
+
+/// Writes `provider_credential_expired` the first time the server sees the
+/// row past its expiry; a marker in `meta`, keyed by the expiry, makes it once
+/// per token across restarts.
+async fn pc_note_expiry(state: &Shared, now: time::OffsetDateTime) {
+    let due = {
+        let store = gateway_store(state);
+        let Ok(Some(row)) = store.provider_credential(pc::KIND) else {
+            return;
+        };
+        let marker = format!("provider_credential_expired:{}", row.id);
+        if !row.is_expired(now)
+            || store.meta(&marker).ok().flatten() == Some(row.expires_at.clone())
+        {
+            return;
+        }
+        if store.set_meta(&marker, &row.expires_at).is_err() {
+            return;
+        }
+        row
+    };
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::EXPIRED,
+        Some(&due.owner_user_id),
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"fingerprint": due.fingerprint, "expires_at": due.expires_at}),
+    );
+}
+
+pub async fn provider_credential_status(state: &Shared) -> Result<ProviderCredentialView, Code> {
+    let now = time::OffsetDateTime::now_utc();
+    pc_note_expiry(state, now).await;
+    pc_view(state, now)
+}
+
+/// Creates or replaces the token in place (§3): the scope is kept, the
+/// status goes back to `active`.
+pub async fn put_provider_credential(
+    state: &Shared,
+    actor: &Actor,
+    token: Secret,
+    minted_at: Option<String>,
+) -> Result<ProviderCredentialView, Code> {
+    pc_owner_only(actor)?;
+    put_provider_credential_at(
+        state,
+        actor,
+        token,
+        minted_at,
+        time::OffsetDateTime::now_utc(),
+    )
+    .await
+}
+
+async fn put_provider_credential_at(
+    state: &Shared,
+    actor: &Actor,
+    token: Secret,
+    minted_at: Option<String>,
+    now: time::OffsetDateTime,
+) -> Result<ProviderCredentialView, Code> {
+    let token = pc::normalize_token(&token)?;
+    let minted = pc::minted_at(minted_at.as_deref(), now)?;
+    let stamp = pc::format_time(now);
+    let sealed = state
+        .gateway
+        .keys
+        .seal(CREDENTIAL_ID, pc::KIND, token.expose().as_bytes())
+        .map_err(Code::internal)?;
+    let row = pc::Row {
+        id: CREDENTIAL_ID.into(),
+        kind: pc::KIND.into(),
+        owner_user_id: actor.user_id().to_string(),
+        sealed,
+        fingerprint: pc::fingerprint(&token),
+        minted_at: pc::format_time(minted),
+        expires_at: pc::format_time(pc::expires_at(minted)),
+        status: pc::status::ACTIVE.into(),
+        created_at: stamp.clone(),
+        updated_at: stamp.clone(),
+    };
+    drop(token);
+    let previous = gateway_store(state)
+        .put_provider_credential(&row)
+        .map_err(Code::internal)?;
+    let auth_db = state.auth_db.lock().await;
+    let (event, detail) = match previous {
+        Some(previous) => (
+            pc::event::REPLACED,
+            serde_json::json!({"fingerprint": row.fingerprint, "previous_fingerprint": previous,
+                               "minted_at": row.minted_at}),
+        ),
+        None => (
+            pc::event::SET,
+            serde_json::json!({"fingerprint": row.fingerprint, "minted_at": row.minted_at}),
+        ),
+    };
+    pc_event(&auth_db, event, Some(actor.user_id()), &stamp, detail);
+    drop(auth_db);
+    pc_view(state, now)
+}
+
+/// Removes the token and its scope (§3). Stops delivery; it does not revoke
+/// the token at Anthropic. Removing nothing is still `204`.
+pub async fn delete_provider_credential(state: &Shared, actor: &Actor) -> Result<(), Code> {
+    pc_owner_only(actor)?;
+    let row = {
+        let store = gateway_store(state);
+        let row = store
+            .provider_credential(pc::KIND)
+            .map_err(Code::internal)?;
+        store
+            .delete_provider_credential(CREDENTIAL_ID)
+            .map_err(Code::internal)?;
+        row
+    };
+    if let Some(row) = row {
+        let auth_db = state.auth_db.lock().await;
+        pc_event(
+            &auth_db,
+            pc::event::REMOVED,
+            Some(actor.user_id()),
+            &crate::index::now_rfc3339(),
+            serde_json::json!({"fingerprint": row.fingerprint}),
+        );
+    }
+    Ok(())
+}
+
+/// Replaces the scope (§4). `[]` is none, the default; each id must be an
+/// enrolled, non-revoked host. Allowed before a token exists.
+pub async fn set_provider_credential_hosts(
+    state: &Shared,
+    actor: &Actor,
+    hosts: Vec<HostId>,
+) -> Result<ProviderCredentialView, Code> {
+    pc_owner_only(actor)?;
+    let mut hosts = hosts;
+    hosts.sort();
+    hosts.dedup();
+    let auth_db = state.auth_db.lock().await;
+    for host in &hosts {
+        match auth_db.host_by_id(host).map_err(Code::internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(Code::bad_request("unknown_host")),
+        }
+    }
+    let now = crate::index::now_rfc3339();
+    let (changed, fingerprint) = {
+        let store = gateway_store(state);
+        let changed = store
+            .set_provider_credential_hosts(CREDENTIAL_ID, &hosts, &now)
+            .map_err(Code::internal)?;
+        let fp = store
+            .provider_credential(pc::KIND)
+            .map_err(Code::internal)?
+            .map(|r| r.fingerprint);
+        (changed, fp)
+    };
+    if changed {
+        pc_event(
+            &auth_db,
+            pc::event::HOSTS_CHANGED,
+            Some(actor.user_id()),
+            &now,
+            serde_json::json!({"fingerprint": fingerprint, "hosts": hosts}),
+        );
+    }
+    drop(auth_db);
+    pc_view(state, time::OffsetDateTime::now_utc())
+}
+
+/// Spec §0.4 rules 2 and 3 for a launch on `host_id`: the kind to name in
+/// `start`, or `None`. Rules 1 (provider) and 4 (capability) are the launch's.
+pub fn deliverable_credential(state: &Shared, host_id: &str) -> Option<&'static str> {
+    (provider_credential_availability(state, host_id) == Availability::Deliverable)
+        .then_some(pc::KIND)
+}
+
+/// Why a host would or would not get the token now, for the launch's
+/// `credential` outcome and notices (`expired` vs `native`). An error reads
+/// as `NotInScope`: fail closed, the session uses the host's own login.
+pub fn provider_credential_availability(state: &Shared, host_id: &str) -> Availability {
+    let store = gateway_store(state);
+    Availability::of(
+        &store,
+        &state.gateway.keys,
+        host_id,
+        time::OffsetDateTime::now_utc(),
+    )
+    .unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "token sync: could not read the scope; not delivering");
+        Availability::NotInScope
+    })
+}
+
+/// The host's pull for its own starting session (§0.4), every check in the
+/// pinned order, each refusal a stable code and an audit row. The only path
+/// that opens the sealed token. Writes `provider_credential_delivered`.
+pub async fn pull_provider_credential(
+    state: &Shared,
+    host: &crate::auth::hosts::Host,
+    session_id: &str,
+) -> Result<Secret, Code> {
+    use axum::http::StatusCode;
+    let now = time::OffsetDateTime::now_utc();
+    let refuse = |status, code: &'static str| async move {
+        let auth_db = state.auth_db.lock().await;
+        pc_event(
+            &auth_db,
+            "provider_credential_refused",
+            None,
+            &crate::index::now_rfc3339(),
+            serde_json::json!({"reason": code, "host_id": host.id, "session_id": session_id}),
+        );
+        Code::new(status, code)
+    };
+    let session = match state.agent.get(session_id) {
+        Ok(s) if s.host_id == host.id => s,
+        _ => return Err(refuse(StatusCode::NOT_FOUND, "not_your_session").await),
+    };
+    if session.status != "starting" {
+        return Err(refuse(StatusCode::CONFLICT, "session_not_starting").await);
+    }
+    if session.provider != "claude-code" {
+        return Err(refuse(StatusCode::CONFLICT, "wrong_provider").await);
+    }
+    // Only a session whose `start` named the kind (AM72), so widening the
+    // scope never reaches a launch that was not told to pull.
+    if state.agent.requested_credential(session_id) != Some(pc::KIND) {
+        return Err(refuse(StatusCode::FORBIDDEN, "host_not_in_scope").await);
+    }
+    match provider_credential_availability(state, &host.id) {
+        Availability::NotInScope => {
+            return Err(refuse(StatusCode::FORBIDDEN, "host_not_in_scope").await);
+        }
+        Availability::Deliverable => {}
+        Availability::Expired => {
+            pc_note_expiry(state, now).await;
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+        Availability::Absent | Availability::NeedsResync => {
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+    }
+    let row = gateway_store(state)
+        .provider_credential(pc::KIND)
+        .map_err(Code::internal)?
+        .ok_or_else(|| Code::new(StatusCode::NOT_FOUND, "no_credential"))?;
+    let opened = state.gateway.keys.open(&row.id, &row.kind, &row.sealed);
+    let token = match opened
+        .ok()
+        .and_then(|p| String::from_utf8(p.expose().to_vec()).ok())
+    {
+        Some(t) => Secret::new(t),
+        None => {
+            // A row that no longer authenticates is never retried as if it
+            // might: it waits for a re-sync, like a lost key.
+            let stamp = crate::index::now_rfc3339();
+            let _ = gateway_store(state).mark_provider_needs_resync(&row.id, &stamp);
+            let auth_db = state.auth_db.lock().await;
+            pc_event(
+                &auth_db,
+                pc::event::UNREADABLE,
+                Some(&row.owner_user_id),
+                &stamp,
+                serde_json::json!({"fingerprint": row.fingerprint}),
+            );
+            drop(auth_db);
+            return Err(refuse(StatusCode::NOT_FOUND, "no_credential").await);
+        }
+    };
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::DELIVERED,
+        Some(&session.owner_user_id),
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"fingerprint": row.fingerprint, "host_id": host.id,
+                           "session_id": session_id}),
+    );
+    Ok(token)
+}
+
+/// At boot, from `reconcile_single_user`: audits what `Gateway::open` found
+/// unreadable, and drops a token some other account left (decision 82).
+async fn reconcile_provider_credential(state: &Shared) -> anyhow::Result<()> {
+    let unreadable = std::mem::take(&mut *state.gateway.provider_unreadable.lock().unwrap());
+    let now = crate::index::now_rfc3339();
+    let auth_db = state.auth_db.lock().await;
+    for fingerprint in unreadable {
+        pc_event(
+            &auth_db,
+            pc::event::UNREADABLE,
+            None,
+            &now,
+            serde_json::json!({"fingerprint": fingerprint, "reason": "data_key_missing"}),
+        );
+    }
+    let Some(account) = auth_db.account()? else {
+        return Ok(());
+    };
+    let orphan = {
+        let store = gateway_store(state);
+        match store.provider_credential(pc::KIND)? {
+            Some(row) if row.owner_user_id != account.id => {
+                store.delete_provider_credential(&row.id)?;
+                Some(row)
+            }
+            _ => None,
+        }
+    };
+    if let Some(row) = orphan {
+        pc_event(
+            &auth_db,
+            pc::event::REMOVED,
+            Some(&account.id),
+            &now,
+            serde_json::json!({"fingerprint": row.fingerprint, "former_owner": row.owner_user_id,
+                               "reason": "single_user"}),
+        );
+    }
+    Ok(())
+}
+
+/// A revoked host leaves the token's scope (§4); its row would be inert, but
+/// a stale tick is not left to look like a choice.
+async fn forget_provider_credential_host(state: &Shared, host_id: &str) {
+    let removed = gateway_store(state).remove_provider_credential_host(host_id);
+    let Ok(removed) = removed else {
+        tracing::warn!(
+            host_id,
+            "token sync: could not drop a revoked host from the scope"
+        );
+        return;
+    };
+    if removed.is_empty() {
+        return;
+    }
+    let hosts = gateway_store(state)
+        .provider_credential_hosts(CREDENTIAL_ID)
+        .unwrap_or_default();
+    let auth_db = state.auth_db.lock().await;
+    pc_event(
+        &auth_db,
+        pc::event::HOSTS_CHANGED,
+        None,
+        &crate::index::now_rfc3339(),
+        serde_json::json!({"hosts": hosts, "removed": host_id, "reason": "host_revoked"}),
+    );
 }
 
 // ---- MCP Gateway: OAuth (decision 81g, spec §10) ----------------------------
@@ -3632,7 +4304,6 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
-            bootstrap_nonce: None,
             listen_addr: "127.0.0.1:8484".into(),
             vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),
@@ -3642,6 +4313,182 @@ mod tests {
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
         })
+    }
+
+    // ---- vault operations through `ops` (decision 128h) ------------------
+
+    fn agent_writing_to(vault: &str) -> Actor {
+        Actor::Agent {
+            session_id: "ags_test".into(),
+            host_id: "hst_test".into(),
+            user_id: "usr_test".into(),
+            write_vault: Some(vault.into()),
+        }
+    }
+
+    fn owner() -> Actor {
+        Actor::Session {
+            user_id: "usr_test".into(),
+        }
+    }
+
+    /// Two vaults; the agent may write to `work` only.
+    async fn two_vaults(dir: &std::path::Path) -> (Shared, String, String) {
+        let state = server_state(dir);
+        let work = must(create_vault(&state, "work").await).id;
+        let home = must(create_vault(&state, "home").await).id;
+        (state, work, home)
+    }
+
+    fn refused(result: ApiResult<impl Sized>) -> (axum::http::StatusCode, String) {
+        match result {
+            Ok(_) => panic!("the write was allowed"),
+            Err(ApiError(status, message)) => (status, message),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_moves_a_note_only_in_its_write_vault_and_the_move_is_its_write() {
+        let dir = tempdir::TempDir::new("storm-ops-move").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let mine = must(create_note(&state, &owner(), &work, "A.md", "a\n").await).note;
+        let theirs = must(create_note(&state, &owner(), &home, "B.md", "b\n").await).note;
+
+        let moved = must(move_note(&state, &agent, &work, &mine.id, "Done/A.md").await);
+        assert_eq!(moved.note.path, "Done/A.md");
+        let wrote = state.agent.latest_write(&work, &mine.id).unwrap().unwrap();
+        assert_eq!(wrote.session_id, "ags_test");
+        assert_eq!(wrote.version, Some(moved.note.version));
+
+        let (status, message) = refused(move_note(&state, &agent, &home, &theirs.id, "X.md").await);
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED);
+    }
+
+    #[tokio::test]
+    async fn an_agent_folder_rename_records_every_note_it_moved() {
+        let dir = tempdir::TempDir::new("storm-ops-rename").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let a = must(create_note(&state, &owner(), &work, "Inbox/A.md", "a\n").await).note;
+        let b = must(create_note(&state, &owner(), &work, "Inbox/B.md", "b\n").await).note;
+
+        let moved =
+            must(rename_folder(&state, &agent_writing_to(&work), &work, "Inbox", "Done").await);
+        assert_eq!(moved, 2);
+        for id in [&a.id, &b.id] {
+            assert!(
+                state.agent.latest_write(&work, id).unwrap().is_some(),
+                "{id} has no provenance"
+            );
+        }
+        // An owner's rename is not an agent's write.
+        must(rename_folder(&state, &owner(), &work, "Done", "Archive").await);
+        assert_eq!(state.agent.writes_of("ags_test").unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn every_vault_write_refuses_an_agent_outside_its_write_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-refuse").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let note = must(create_note(&state, &owner(), &home, "N.md", "n\n").await).note;
+        must(create_folder(&state, &owner(), &home, "Keep").await);
+        must(put_attachment(&state, &owner(), &home, "a.png", &[1, 2, 3]).await);
+
+        for (what, result) in [
+            (
+                "create_folder",
+                create_folder(&state, &agent, &home, "New")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "delete_folder",
+                delete_folder(&state, &agent, &home, "Keep")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "rename_folder",
+                rename_folder(&state, &agent, &home, "Keep", "Kept")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "put_attachment",
+                put_attachment(&state, &agent, &home, "b.png", &[4])
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "delete_attachment",
+                delete_attachment(&state, &agent, &home, "a.png")
+                    .await
+                    .map(|_| ()),
+            ),
+            (
+                "mark_opened",
+                mark_opened(&state, &agent, &home, &note.id)
+                    .await
+                    .map(|_| ()),
+            ),
+        ] {
+            let (status, message) = refused(result);
+            assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{what}");
+            assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED, "{what}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_agent_reads_every_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-read").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        must(create_note(&state, &owner(), &home, "Tagged.md", "#idea\n").await);
+        must(put_attachment(&state, &owner(), &home, "a.png", &[9, 9]).await);
+
+        let tree = must(tree(&state, &agent, &home).await);
+        assert_eq!(tree.notes.len(), 1);
+        let page = must(sync(&state, &agent, &home, 0, 100_000).await);
+        assert_eq!(page.seq, tree.seq);
+        assert!(!page.changes.is_empty());
+        assert_eq!(
+            must(notes_by_tag(&state, &agent, &home, "idea").await).len(),
+            1
+        );
+        assert_eq!(must(list_attachments(&state, &agent, &home).await).len(), 1);
+        assert_eq!(
+            must(read_attachment(&state, &agent, &home, "a.png").await),
+            vec![9, 9]
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_upload_is_refused_before_anything_is_written() {
+        let dir = tempdir::TempDir::new("storm-ops-empty").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let (status, _) = refused(put_attachment(&state, &owner(), &work, "a.png", &[]).await);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(must(list_attachments(&state, &owner(), &work).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_removed_vault_keeps_its_files_and_says_where() {
+        let dir = tempdir::TempDir::new("storm-ops-remove").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "Kept.md", "k\n").await);
+        let renamed = must(rename_vault(&state, &work, "Work").await);
+        assert_eq!(renamed.name, "Work");
+        let removed = must(remove_vault(&state, &work).await);
+        assert_eq!(removed.removed, work);
+        assert!(
+            std::path::Path::new(&removed.files_kept_at)
+                .join("Kept.md")
+                .exists()
+        );
+        let (status, _) = refused(tree(&state, &owner(), &work).await);
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

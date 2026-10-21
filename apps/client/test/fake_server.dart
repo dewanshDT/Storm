@@ -208,6 +208,9 @@ class FakeServer {
   Completer<void>? syncGate;
   Completer<void>? noteGate;
 
+  /// Holds a note `PUT` until completed, so a test can act mid-save.
+  Completer<void>? saveGate;
+
   http.Client get client => MockClient((request) async {
     requests++;
     if (unreachable) {
@@ -540,9 +543,10 @@ class FakeServer {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
       final newPath = body['path'] as String;
       if (vaultNotes.values.any((n) => n.path == newPath)) {
+        // 409, as the server answers since decision 128a.
         return http.Response(
           '{"error":"a note already exists"}',
-          400,
+          409,
           headers: j(''),
         );
       }
@@ -618,6 +622,7 @@ class FakeServer {
     }
 
     if (request.method == 'PUT') {
+      await saveGate?.future;
       final note = vaultNotes[id];
       if (note == null) {
         return http.Response('{"error":"no such note"}', 404, headers: j(''));

@@ -192,7 +192,6 @@ impl std::fmt::Debug for IssuedSession {
 pub struct Authenticated {
     pub session: Session,
     pub account: Account,
-    #[allow(dead_code)] // Used by future vault-level access control; tested here.
     pub device: Device,
 }
 
@@ -418,7 +417,6 @@ impl AuthDb {
         Ok(())
     }
 
-    #[allow(dead_code)] // Used only by `consume_ws_ticket`.
     fn purge_expired_ws_tickets(&self, now: &str) -> Result<usize> {
         Ok(self.conn.execute(
             "DELETE FROM ws_tickets WHERE expires <= ?1 OR used IS NOT NULL",
@@ -491,8 +489,8 @@ pub fn authenticate(
         .session_by_access_hash(&token::hash(access_token))?
         .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
 
-    let checked = check(db, &session, now, parse_time(now)?)?;
     let at = parse_time(now)?;
+    let checked = check(db, &session, at)?;
 
     let due = match &session.last_used {
         None => true,
@@ -505,12 +503,11 @@ pub fn authenticate(
     Ok(checked)
 }
 
-/// The four ways a live-looking session is not usable, in one place so
-/// [`authenticate`] and [`refresh`] cannot drift apart on them.
+/// An access token's session: not revoked, not expired, and its principal
+/// still stands.
 fn check(
     db: &AuthDb,
     session: &Session,
-    now: &str,
     at: OffsetDateTime,
 ) -> Result<Authenticated, SessionError> {
     if session.is_revoked() {
@@ -519,27 +516,30 @@ fn check(
     if parse_time(&session.expires)? <= at {
         return Err(SessionError::Refused(AuthFailure::Expired));
     }
+    let (account, device) = check_principal(db, session)?;
+    Ok(Authenticated {
+        session: session.clone(),
+        account,
+        device,
+    })
+}
 
+/// The account and device a session names, in one place so [`authenticate`]
+/// and [`refresh`] cannot drift apart on them (decision 128i).
+fn check_principal(db: &AuthDb, session: &Session) -> Result<(Account, Device), SessionError> {
     // A session naming anything but the account names nobody: the account it
     // belonged to was removed (the single-user migration deletes those rows,
     // so this is the belt to that brace).
     let account = db
         .account_by_id(&session.user_id)?
         .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
-
     let device = db
         .find_device(&session.device_id)?
         .ok_or(SessionError::Refused(AuthFailure::DeviceRevoked))?;
     if device.is_revoked() {
         return Err(SessionError::Refused(AuthFailure::DeviceRevoked));
     }
-
-    let _ = now;
-    Ok(Authenticated {
-        session: session.clone(),
-        account,
-        device,
-    })
+    Ok((account, device))
 }
 
 /// Exchanges a refresh token for a new pair, rotating both.
@@ -586,14 +586,7 @@ pub fn refresh(
         return Err(SessionError::Refused(AuthFailure::Expired));
     }
 
-    db.account_by_id(&session.user_id)?
-        .ok_or(SessionError::Refused(AuthFailure::Unknown))?;
-    let device = db
-        .find_device(&session.device_id)?
-        .ok_or(SessionError::Refused(AuthFailure::DeviceRevoked))?;
-    if device.is_revoked() {
-        return Err(SessionError::Refused(AuthFailure::DeviceRevoked));
-    }
+    check_principal(db, &session)?;
 
     let access_token = token::mint(token::ACCESS_PREFIX);
     let rotated = token::mint(token::REFRESH_PREFIX);
@@ -662,22 +655,6 @@ pub fn revoke_for_device(
             Some(device_id),
             now,
             &format!(r#"{{"scope":"device","count":{closed},"reason":{reason:?}}}"#),
-        )?;
-    }
-    Ok(closed)
-}
-
-/// Revokes every live session belonging to a user, on every device.
-#[allow(dead_code)] // Called by future admin endpoints; tested here.
-pub fn revoke_for_user(db: &mut AuthDb, user_id: &str, reason: &str, now: &str) -> Result<usize> {
-    let closed = db.revoke_sessions_where("user_id", user_id, reason, now)?;
-    if closed > 0 {
-        db.record_event(
-            EVENT_SESSION_REVOKED,
-            Some(user_id),
-            None,
-            now,
-            &format!(r#"{{"scope":"user","count":{closed},"reason":{reason:?}}}"#),
         )?;
     }
     Ok(closed)
@@ -840,7 +817,7 @@ pub fn consume_ws_ticket(
 
     // The shared gate, so a ticket and a session token cannot disagree about
     // what "usable" means — which is exactly what this function was doing.
-    let authenticated = check(db, &session, now, at)?;
+    let authenticated = check(db, &session, at)?;
 
     // Single-use. Marked *after* the session checks, so a ticket presented
     // against a revoked session is not silently burned on the way to being

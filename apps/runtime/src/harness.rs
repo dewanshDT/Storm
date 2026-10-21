@@ -81,7 +81,8 @@ fn new_uuid() -> String {
 
 /// What a session's launch gains so its id reaches the host, and the id when
 /// it is known before the agent starts. `resume` must already be valid for
-/// `provider`. Nothing for any other provider.
+/// `provider`. Nothing for any other provider. `synced` is merged into Claude
+/// Code's settings file and checked there (token sync, AM71).
 pub fn launch(
     provider: &str,
     dir: &Path,
@@ -89,6 +90,7 @@ pub fn launch(
     socket: &Path,
     exe: &Path,
     resume: Option<&str>,
+    synced: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Result<(LaunchExtras, Option<String>)> {
     let env = vec![
         (HANDLE_ENV.into(), handle.into()),
@@ -107,17 +109,33 @@ pub fn launch(
                 "{} harness-session",
                 shell_quote(&exe.display().to_string())
             );
-            let settings = json!({
+            let mut settings = json!({
                 "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}
             });
+            if let Some(pins) = synced {
+                settings
+                    .as_object_mut()
+                    .expect("an object")
+                    .extend(pins.clone());
+            }
             // A file, not inline JSON: npm installs Claude Code on Windows as
             // `claude.cmd`, and a batch file's arguments may hold no `"`
             // (AM53; found by the Windows acceptance run).
             private_dir(dir)?;
             let path = dir.join("claude-settings.json");
             write_private(&path, settings.to_string().as_bytes())?;
+            if let Some(pins) = synced {
+                crate::credential::verify_settings(&std::fs::read(&path)?, pins)?;
+            }
             args.extend(["--settings".into(), path.into_os_string()]);
-            Ok((LaunchExtras { args, env }, Some(id)))
+            Ok((
+                LaunchExtras {
+                    args,
+                    env,
+                    ..Default::default()
+                },
+                Some(id),
+            ))
         }
         "opencode" => {
             let config = dir.join("opencode");
@@ -132,7 +150,14 @@ pub fn launch(
                 Some(id) => vec!["-s".into(), id.into()],
                 None => Vec::new(),
             };
-            Ok((LaunchExtras { args, env }, resume.map(str::to_string)))
+            Ok((
+                LaunchExtras {
+                    args,
+                    env,
+                    ..Default::default()
+                },
+                resume.map(str::to_string),
+            ))
         }
         _ => Ok((LaunchExtras::default(), None)),
     }
@@ -244,8 +269,16 @@ mod tests {
     fn claude_code_starts_with_its_id_and_a_session_start_hook() {
         let dir = tempfile::tempdir().unwrap();
         let exe = Path::new("/opt/it's/storm-runtime");
-        let (extras, id) =
-            launch("claude-code", dir.path(), "h", Path::new("/s"), exe, None).unwrap();
+        let (extras, id) = launch(
+            "claude-code",
+            dir.path(),
+            "h",
+            Path::new("/s"),
+            exe,
+            None,
+            None,
+        )
+        .unwrap();
         let id = id.unwrap();
         let args: Vec<String> = extras
             .args
@@ -262,12 +295,69 @@ mod tests {
             settings["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             r"'/opt/it'\''s/storm-runtime' harness-session"
         );
+        assert!(settings.get("env").is_none(), "unsynced: unchanged");
+        assert!(settings.get("apiKeyHelper").is_none());
         assert!(extras.env.contains(&(HANDLE_ENV.into(), "h".into())));
         assert!(
             extras
                 .env
                 .contains(&(crate::mcp::SOCKET_ENV.into(), "/s".into()))
         );
+    }
+
+    #[test]
+    fn a_synced_session_has_one_settings_file_with_every_pin_and_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let odd = r#"http://u:p"@proxy\lan:3128/ü"#;
+        let pins = crate::credential::settings(|name| {
+            (name == "HTTPS_PROXY" || name == "SSL_CERT_DIR").then(|| odd.into())
+        })
+        .unwrap();
+        let (extras, _) = launch(
+            "claude-code",
+            dir.path(),
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            None,
+            Some(&pins),
+        )
+        .unwrap();
+        let at = extras.args.iter().position(|a| a == "--settings").unwrap();
+        assert_eq!(extras.args.iter().filter(|a| *a == "--settings").count(), 1);
+        let path = Path::new(&extras.args[at + 1]);
+        crate::platform::assert_private(path, 0o600);
+        let bytes = std::fs::read(path).unwrap();
+        let settings: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(settings["apiKeyHelper"], "");
+        assert_eq!(
+            settings["env"]["ANTHROPIC_BASE_URL"],
+            "https://api.anthropic.com"
+        );
+        assert_eq!(settings["env"]["HTTPS_PROXY"], odd);
+        assert_eq!(settings["env"]["SSL_CERT_DIR"], odd);
+        for name in crate::credential::EMPTY_PINS {
+            assert_eq!(settings["env"][name], "", "{name}");
+        }
+        for name in crate::credential::NETWORK_PINS {
+            assert!(settings["env"][name].is_string(), "{name}");
+        }
+        assert!(
+            settings["env"]
+                .as_object()
+                .unwrap()
+                .values()
+                .all(|v| v.is_string())
+        );
+        assert!(
+            settings["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+                .as_str()
+                .unwrap()
+                .ends_with("harness-session")
+        );
+        crate::credential::verify_settings(&bytes, &pins).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("sk-ant-"));
+        assert!(!String::from_utf8_lossy(&bytes).contains(crate::credential::TOKEN_ENV));
     }
 
     #[test]
@@ -282,6 +372,7 @@ mod tests {
             Path::new("/s"),
             exe,
             Some(uuid),
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -291,8 +382,16 @@ mod tests {
         assert_eq!(id.as_deref(), Some(uuid));
 
         let ses = "ses_ed5303b0dffeRnwXZdkDih2uxK";
-        let (oc, id) =
-            launch("opencode", dir.path(), "h", Path::new("/s"), exe, Some(ses)).unwrap();
+        let (oc, id) = launch(
+            "opencode",
+            dir.path(),
+            "h",
+            Path::new("/s"),
+            exe,
+            Some(ses),
+            None,
+        )
+        .unwrap();
         assert_eq!(oc.args, ["-s", ses]);
         assert_eq!(id.as_deref(), Some(ses));
     }
@@ -306,6 +405,7 @@ mod tests {
             "h",
             Path::new("/s"),
             Path::new("/usr/bin/storm-runtime"),
+            None,
             None,
         )
         .unwrap();
@@ -331,6 +431,7 @@ mod tests {
                 "h",
                 Path::new("/s"),
                 Path::new("/x"),
+                None,
                 None,
             )
             .unwrap();

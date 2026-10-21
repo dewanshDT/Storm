@@ -199,7 +199,27 @@ check("file on disk", os.path.exists(f"{VAULT}/Temp/Scratch.md"))
 check("id in frontmatter", "id:" in open(f"{VAULT}/Temp/Scratch.md").read())
 
 st, _ = call("POST", vp("/notes"), {"path": "Temp/Scratch.md", "content": "dupe"})
-check("refuses to clobber an existing path", st == 400)
+check("refuses to clobber an existing path, as a conflict (128a)", st == 409)
+
+for bad in ["Temp/NoExtension", "Temp/Scratch.txt"]:
+    st, _ = call("POST", vp("/notes"), {"path": bad, "content": "# x\n"})
+    check(f"a note path must end in .md: {bad} (128a)", st == 400)
+
+def raw(method, path, data):
+    req = urllib.request.Request(f"{BASE}{path}", data=data, method=method)
+    req.add_header("Authorization", AUTH)
+    try:
+        with urllib.request.urlopen(req) as r:
+            return r.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+before = open(f"{VAULT}/Temp/Scratch.md").read()
+check("the attachment route cannot overwrite a note (128a)",
+      raw("PUT", vp("/attachments/" + enc("Temp/Scratch.md")), b"clobbered") == 400)
+check("nor delete one (128a)",
+      raw("DELETE", vp("/attachments/" + enc("Temp/Scratch.md")), None) == 400)
+check("the note is untouched", open(f"{VAULT}/Temp/Scratch.md").read() == before)
 
 st, _ = call("DELETE", vp(f"/notes/{new_id}"))
 check("deleted", st == 200)

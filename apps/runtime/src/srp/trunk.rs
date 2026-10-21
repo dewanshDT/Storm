@@ -27,6 +27,17 @@ use super::error::SrpError;
 
 type Ws = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
+/// SRP §3: no message is over 16 MiB, header included (decision 128f). The
+/// relay enforces it too; bounding our own socket means a misbehaving relay
+/// cannot make this process buffer tungstenite's 64 MiB default either.
+const MAX_SRP_MESSAGE: usize = 16 * 1024 * 1024;
+
+fn ws_config() -> tokio_tungstenite::tungstenite::protocol::WebSocketConfig {
+    tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_message_size(Some(MAX_SRP_MESSAGE))
+        .max_frame_size(Some(MAX_SRP_MESSAGE))
+}
+
 /// Frames waiting for the socket. Bounded, so an upload waits for a relay
 /// that is not reading instead of buffering the body.
 const OUTBOUND_CAPACITY: usize = 64;
@@ -184,7 +195,7 @@ impl SrpTrunk {
 
         let ws = match tokio::time::timeout(
             config.handshake_timeout,
-            tokio_tungstenite::connect_async_with_config(url.as_str(), None, true),
+            tokio_tungstenite::connect_async_with_config(url.as_str(), Some(ws_config()), true),
         )
         .await
         {
@@ -901,6 +912,13 @@ async fn heartbeat_loop(core: Arc<Core>, config: TrunkConfig) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_trunk_socket_is_bounded_at_srp_s_16_mib() {
+        let config = ws_config();
+        assert_eq!(config.max_message_size, Some(16 * 1024 * 1024));
+        assert_eq!(config.max_frame_size, Some(16 * 1024 * 1024));
+    }
 
     const KEY: &str = "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg";
 

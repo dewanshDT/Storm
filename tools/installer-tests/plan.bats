@@ -26,10 +26,11 @@ dry() {
   [[ "$descs" == *"Enroll this runtime with the server on this machine"* ]]
   [[ "$descs" == *"Start the Runtime Host"* ]]
   [[ "$descs" == *"Check the runtime reaches its server"* ]]
-  [[ "$descs" == *"Show the web client's address"* ]]
+  [[ "$descs" == *"Install the storm-app package"* ]]
   [[ "$descs" == *"Show how to connect your phone or tablet"* ]]
   [[ "$output" == *"sudo storm-server up --data-root $STORM_TEST_SYSROOT/srv/storm --port 8484 --host 0.0.0.0"* ]]
   [[ "$output" == *"apt-get install -y ./storm-server_0.6.0-1_amd64.deb"* ]]
+  [[ "$output" == *"apt-get install -y ./storm-app_0.6.0-1_amd64.deb"* ]]
   [[ "$output" == *"host-enrollment --state $STORM_TEST_SYSROOT/srv/storm/state --url http://127.0.0.1:8484 | sudo -u storm-runtime storm-runtime enroll"* ]]
   [[ "$output" == *"storm-server qr http://10.0.0.5:8484"* ]]
   [[ "$output" == *"storm-server qr https://github.com/dewanshDT/Storm/releases/download/v0.6.0/storm-0.6.0.apk"* ]]
@@ -68,7 +69,7 @@ dry() {
   [[ "$output" == *"Enroll this runtime with your Storm server (paste its enrollment string)"* ]]
   [[ "$output" == *"<the enrollment string> | sudo -u storm-runtime storm-runtime enroll"* ]]
   [[ "$output" != *"storm-server"* ]]
-  [[ "$output" == *"Agent logins need a terminal"* ]]
+  [[ "$output" == *"Agent logins: Claude Code signs in from the Storm app"* ]]
   run assert_sudo_marks_consistent "$output"
   [ "$status" -eq 0 ]
   [ ! -s "$FAKE_LOG" ]
@@ -237,4 +238,40 @@ dry() {
   [[ "$output" == *"--data-root /data/storm --port 9000"* ]]
   [[ "$output" == *"curl -fsS http://127.0.0.1:9000/v1/health"* ]]
   [[ "$output" == *"--state /data/storm/state --addr 10.0.0.5:9000 --qr"* ]]
+}
+
+@test "linux without apt: the app goes into the home directory, no sudo" {
+  os_release fedora
+  dry --app
+  [ "$status" -eq 0 ]
+  descs=$(plan_descs "$output")
+  [[ "$descs" == *"Download and verify storm-app-0.6.0-x86_64-linux.tar.gz"* ]]
+  [[ "$descs" == *"Install the Storm app into $HOME/.local/share/storm-app, with a launcher entry (no root)"* ]]
+  [[ "$output" != *"apt-get"* ]]
+  [ -z "$(plan_steps "$output" | awk '$2=="sudo"')" ]
+  [ ! -s "$FAKE_LOG" ]
+}
+
+@test "linux on arm64: the app is unavailable, with the web client instead" {
+  use_linux aarch64
+  dry --app
+  [[ "$output" == *"Desktop app is unavailable: the Storm app for Linux is built for x86_64"* ]]
+  [[ "$output" != *"storm-app"* ]]
+}
+
+@test "linux: a release without the app says so" {
+  make_assets 0.6.0 server-deb runtime-deb
+  dry --app
+  [[ "$output" == *"Desktop app is unavailable: there's no storm-app_*.deb in $ASSETS"* ]]
+}
+
+@test "agents never ask for a login, interactive or not (decision 124s)" {
+  dry --runtime --agents --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"setup-token"* ]]
+  [[ "$output" != *"auth login"*"sudo"* ]]
+  [[ "$output" != *"claude.env"* ]]
+  descs=$(plan_descs "$output")
+  [[ "$descs" != *"Log "*" in for the host"* ]]
+  [[ "$output" == *"Settings › Claude login"* ]]
 }

@@ -69,6 +69,7 @@ jobs:
               - deploy/runtime.toml.example
             installer:
               - deploy/install.sh
+              - deploy/storm-backup.sh
               - tools/installer-tests/**
             client:
               - *vectors
@@ -382,6 +383,50 @@ jobs:
       - run: dart format --set-exit-if-changed lib test test_live
       - run: flutter analyze
       - run: flutter test
+
+  # The desktop runners are native code the Dart suite never compiles
+  # (decision 125): a template edit or a plugin that lacks Windows support
+  # surfaces only here.
+  client-windows:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
+    name: client (windows build)
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - run: flutter pub get
+      - run: flutter build windows --release
+
+  # The Linux runner, likewise: a template edit or a plugin that lacks Linux
+  # support surfaces only here. 22.04 and the glibc ceiling are the release's: a
+  # bundle built against a newer glibc refuses to start on Debian 12.
+  client-linux:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.client == 'true'
+    name: client (linux build)
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: apps/client
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev libsecret-1-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: 3.44.8
+          cache: true
+      - run: flutter pub get
+      - run: flutter build linux --release
+      - run: STORM_MAX_GLIBC=2.35 tool/package_linux.sh 0.0.0 dist
 
   integration:
     needs: changes

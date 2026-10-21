@@ -241,7 +241,7 @@ class CacheDb extends _$CacheDb {
     final queued = await select(outbox).get();
     // Keyed by (vault, note) so one vault's queued edit cannot protect — or
     // fail to protect — a same-id row in another.
-    final protected = queued.map((o) => '\${o.vaultId}/\${o.noteId}').toSet();
+    final protected = queued.map((o) => '${o.vaultId}/${o.noteId}').toSet();
 
     final candidates =
         await (select(cachedNotes)
@@ -250,7 +250,7 @@ class CacheDb extends _$CacheDb {
             .get();
 
     final victims = candidates
-        .where((n) => !protected.contains('\${n.vaultId}/\${n.id}'))
+        .where((n) => !protected.contains('${n.vaultId}/${n.id}'))
         .skip(keep)
         .map((n) => n.id)
         .toList();

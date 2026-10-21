@@ -137,6 +137,10 @@ void main() {
       lanDiscoverySupportedOn(web: false, platform: TargetPlatform.linux),
       isTrue,
     );
+    expect(
+      lanDiscoverySupportedOn(web: false, platform: TargetPlatform.windows),
+      isTrue,
+    );
   });
 
   test('a fingerprint is four groups of four uppercase hex', () {

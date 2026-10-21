@@ -39,7 +39,7 @@ the vault disagree, the vault is current.
 | Path | What |
 |---|---|
 | `apps/server/` | Rust sync server (axum + rusqlite). See `apps/server/README.md`. |
-| `apps/client/` | Flutter app — macOS, Linux, Android, web. See `apps/client/README.md`. |
+| `apps/client/` | Flutter app — macOS, Windows, Linux, Android, web. See `apps/client/README.md`. |
 | `deploy/` | systemd units, `storm.env` template, nightly backup script. See `deploy/README.md`. |
 | `docs/prd.md` | Original brief. Superseded by the vault; not maintained. |
 | `docs/editor-findings.md` | Why the editor is built the way it is, with measurements. |
@@ -130,7 +130,9 @@ data quietly.
   passes every other byte through. Running a user's YAML through a serializer
   reorders keys and drops comments, dirtying the whole vault. There are two
   writers and both obey this: `frontmatter.rs` `set_scalars` on the server, and
-  `lib/editor/frontmatter_edit.dart` on the client.
+  `lib/editor/frontmatter_edit.dart` on the client. **A leading UTF-8 BOM is
+  part of no block and always stays at byte 0** (decision 128e): both sides
+  look past it for the opening fence, and a new block is written after it.
 - **A value that spans lines is spliced as a range, never as one line.** The
   server's writer replaces a key's single line, which is right for stamping
   `id` and wrong for anything else: aimed at a `tags:` block list it orphans
@@ -143,8 +145,28 @@ data quietly.
   overlap silently corrupts rendered text and every caret offset after it.
 - **A `merged` or `conflict` response means the client adopts the server's
   text.** Keeping local text makes the next save race a version it never had.
+  **What was typed while that save was in flight is never dropped** (decision
+  128b): it is replayed onto the server's text (`replayEdit`), or, where its
+  place cannot be found exactly once, kept on the base it was edited from and
+  saved again so the server's diff3 merges it.
+- **An unsynced edit outlives its note's deletion** (decision 128c). When the
+  outbox's write gets a 404 because the note was deleted elsewhere, the edit
+  is kept as a new note at the note's path (`Name (recovered).md` if taken),
+  and the user is told; a remote delete or a 404 on open never drops the
+  cached copy of a queued edit. A recovery create whose answer never came is
+  not resent blind (SRP §8.5): the next attempt looks for it first.
 - **Notes are tracked by UUID, not path.** Renames and moves are metadata
   updates.
+- **An id seen at a new path is a move or a copy, never a version reset**
+  (decision 128d). Outside Storm, a file whose `id` is indexed at a path that
+  is gone is a move (same row, history kept); one whose indexed file still
+  exists is a copy and gets a fresh id. Every write takes
+  `Db::next_version` — past the note's whole history — and `note_versions` is
+  append-only (plain `INSERT`). Before 128d an external rename restarted the
+  note at version 1 and overwrote its history.
+- **Unreadable is not deleted** (128d). Reconcile keeps the row of a file it
+  cannot read, removes nothing after an I/O error, and does not prune a vault
+  that scans empty while its index holds several notes.
 
 From M9/M10 (`docs/storm-multi-vault.md`):
 
