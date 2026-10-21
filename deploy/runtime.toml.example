@@ -37,8 +37,8 @@ scrollback_bytes = 4194304
 # claude-code (the default), opencode, codex, cursor, command-code and shell.
 # One that is not installed is offered as not installed. claude-code,
 # opencode and codex get your integrations and Resume (codex keeps its login
-# and conversations in <state>/agents/codex; log it in with CODEX_HOME set
-# there); cursor (`cursor-agent`) and
+# and conversations in <state>/agents/codex; log it in from a Shell session
+# with CODEX_HOME set there, after creating it); cursor (`cursor-agent`) and
 # command-code are terminals only: Storm cannot keep a repository's own MCP
 # servers out of them, so they get no integrations. To choose, list them:
 #
