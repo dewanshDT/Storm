@@ -3,6 +3,7 @@
 //!
 //! rmcp's `AuthorizationManager` does the protocol — RFC 9728 → RFC 8414
 //! discovery, RFC 7591 dynamic registration as a public client, PKCE S256,
+//! MCP's scope selection,
 //! `resource` (RFC 8707), the code exchange and the refresh. Everything it
 //! touches goes through pieces of ours:
 //!
@@ -214,6 +215,102 @@ async fn collect(
         body.extend_from_slice(&chunk);
     }
     Ok(builder.body(body)?)
+}
+
+impl SsrfHttp {
+    /// A JSON `POST` under the same rule, following no redirect: Storm's own
+    /// requests (confidential registration, 131f) go through here.
+    async fn post_json(
+        &self,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, Vec<u8>), OAuthHttpClientError> {
+        let url = url::Url::parse(url)?;
+        let (host, addrs) = check_target(&url, self.allow_private).await?;
+        let response = pinned_client(&host, &addrs)?
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(serde_json::to_vec(body)?)
+            .send()
+            .await?;
+        let response = collect(response).await?;
+        Ok((response.status().as_u16(), response.into_body()))
+    }
+}
+
+/// The `token_endpoint_auth_method` Storm registers a confidential client
+/// with (131f), or `None` when the authorization server offers public
+/// registration (or says nothing, which RFC 8414 reads as
+/// `client_secret_basic` only — rmcp's public path is kept for it, as
+/// before). It is the method rmcp's token client will then use —
+/// `client_secret_basic` whenever offered, else `client_secret_post` — so
+/// the registration and the exchange agree.
+pub fn confidential_method(metadata: &AuthorizationMetadata) -> Option<&'static str> {
+    let methods: Vec<&str> = metadata
+        .additional_fields
+        .get("token_endpoint_auth_methods_supported")?
+        .as_array()?
+        .iter()
+        .filter_map(|m| m.as_str())
+        .collect();
+    if methods.contains(&"none") {
+        None
+    } else if methods.contains(&"client_secret_basic") {
+        Some("client_secret_basic")
+    } else if methods.contains(&"client_secret_post") {
+        Some("client_secret_post")
+    } else {
+        None
+    }
+}
+
+/// Registers Storm as a confidential client (RFC 7591; 131f): rmcp's
+/// `register_client` registers public clients only. Returns the client id
+/// and its secret; a response without a secret is a failure, never a public
+/// client by accident.
+pub async fn register_confidential(
+    gateway: &Arc<Gateway>,
+    metadata: &AuthorizationMetadata,
+    redirect_uri: &str,
+    scopes: &[String],
+    method: &str,
+) -> Result<(String, String), OAuthFailure> {
+    let endpoint = metadata
+        .registration_endpoint
+        .as_deref()
+        .ok_or(OAuthFailure::NeedsClient)?;
+    let mut body = serde_json::json!({
+        "client_name": "Storm",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": method,
+    });
+    if !scopes.is_empty() {
+        body["scope"] = serde_json::json!(scopes.join(" "));
+    }
+    let http = SsrfHttp {
+        allow_private: gateway.allow_http_upstreams(),
+    };
+    let (status, bytes) = http
+        .post_json(endpoint, &body)
+        .await
+        .map_err(|_| OAuthFailure::Registration)?;
+    if !(200..300).contains(&status) {
+        return Err(OAuthFailure::Registration);
+    }
+    let reply: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|_| OAuthFailure::Registration)?;
+    let text = |k: &str| {
+        reply[k]
+            .as_str()
+            .filter(|v| !v.is_empty() && v.len() <= 2048)
+            .map(str::to_owned)
+    };
+    match (text("client_id"), text("client_secret")) {
+        (Some(id), Some(secret)) => Ok((id, secret)),
+        _ => Err(OAuthFailure::Registration),
+    }
 }
 
 impl OAuthHttpClient for SsrfHttp {

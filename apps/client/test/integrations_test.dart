@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -328,6 +329,100 @@ void main() {
     await tester.tap(find.text('No sign-in'));
     await tester.pumpAndSettle();
     expect(help(), contains('no credential'));
+  });
+
+  testWidgets("the owner's own app: its redirect to copy, a client id "
+      'required, scopes split (131e)', (tester) async {
+    OwnClient? got;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: StormTheme.light(),
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () async => got = await showDialog<OwnClient>(
+                context: context,
+                builder: (_) => const OwnAppDialog(
+                  name: 'Slack',
+                  redirect: 'http://127.0.0.1:27181/oauth/callback',
+                  needed: true,
+                ),
+              ),
+              child: const Text('open'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('open'));
+    await tester.pumpAndSettle();
+    expect(
+      find.textContaining('does not let Storm register itself'),
+      findsOneWidget,
+    );
+    expect(find.text('http://127.0.0.1:27181/oauth/callback'), findsOneWidget);
+    String? copied;
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == 'Clipboard.setData') {
+          copied = (call.arguments as Map)['text'] as String;
+        }
+        return null;
+      },
+    );
+    await tester.tap(find.byKey(const Key('own-app-copy')));
+    await tester.pump();
+    expect(copied, 'http://127.0.0.1:27181/oauth/callback');
+
+    await tester.tap(find.byKey(const Key('own-app-sign-in')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byType(OwnAppDialog),
+      findsOneWidget,
+      reason: 'an id is required',
+    );
+    await tester.enterText(find.byKey(const Key('own-app-id')), ' 160.1 ');
+    await tester.enterText(
+      find.byKey(const Key('own-app-scopes')),
+      'chat:write, search:read',
+    );
+    await tester.tap(find.byKey(const Key('own-app-sign-in')));
+    await tester.pumpAndSettle();
+    expect(got!.clientId, '160.1');
+    expect(got!.clientSecret, isNull);
+    expect(got!.scopes, ['chat:write', 'search:read']);
+  });
+
+  testWidgets('an OAuth integration offers your own app, a token one does not, '
+      'and the web neither', (tester) async {
+    final slack = {
+      ...github(status: 'pending_auth'),
+      'id': 'mcc_SL',
+      'slug': 'slack',
+      'display_name': 'Slack',
+      'auth_kind': 'oauth',
+    };
+    for (final (oauth, want) in [
+      (true, findsOneWidget),
+      (false, findsNothing),
+    ]) {
+      final (client, _) = server(items: [builtin(), slack, github()]);
+      await tester.pumpWidget(
+        app(const IntegrationsScreen(), client, oauth: oauth),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('menu-mcc_SL')));
+      await tester.pumpAndSettle();
+      expect(find.text('Use your own app'), want);
+      await tester.tapAt(Offset.zero);
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('menu-mcc_GH')));
+      await tester.pumpAndSettle();
+      expect(find.text('Use your own app'), findsNothing);
+      await tester.tapAt(Offset.zero);
+      await tester.pumpAndSettle();
+    }
   });
 
   testWidgets('on the web, an OAuth integration is reconnected from an app, '

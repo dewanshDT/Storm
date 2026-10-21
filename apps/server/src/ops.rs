@@ -4279,6 +4279,23 @@ pub async fn authorize_integration(
     {
         return Err(bad_request("a client id is 1–512 printable characters"));
     }
+    if let Some(secret) = &req.client_secret
+        && (secret.is_empty() || secret.len() > 2048 || secret.chars().any(char::is_control))
+    {
+        return Err(bad_request(
+            "a client secret is 1–2048 printable characters",
+        ));
+    }
+    if req.scopes.len() > 64
+        || req
+            .scopes
+            .iter()
+            .any(|s| s.is_empty() || s.len() > 256 || s.chars().any(|c| c.is_control() || c == ' '))
+    {
+        return Err(bad_request(
+            "scopes are up to 64 words of up to 256 characters",
+        ));
+    }
     let (mut manager, metadata) = oauth::discovered_manager(&state.gateway, &c.url)
         .await
         .map_err(oauth_refusal)?;
@@ -4289,6 +4306,13 @@ pub async fn authorize_integration(
     let now = crate::index::now_rfc3339();
     let metadata_json = serde_json::to_string(&metadata).ok();
 
+    // None given: MCP's rule (131e) — the challenge's scope, else the
+    // resource's `scopes_supported`, else the server's.
+    let scopes: Vec<String> = if req.scopes.is_empty() {
+        manager.select_scopes(None, &[])
+    } else {
+        req.scopes.clone()
+    };
     let existing = gateway_store(state)
         .oauth_client_for(actor.user_id(), &issuer, &req.redirect_uri)
         .map_err(internal)?;
@@ -4326,20 +4350,45 @@ pub async fn authorize_integration(
             if metadata.registration_endpoint.is_none() {
                 return Err(oauth_refusal(OAuthFailure::NeedsClient));
             }
-            let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
-            let registered = manager
-                .register_client("Storm", &req.redirect_uri, &scopes)
-                .await
-                .map_err(|_| oauth_refusal(OAuthFailure::Registration))?;
+            let row_id = crate::auth::identity::random_id("oac_");
+            let (client_id, secret) = match oauth::confidential_method(&metadata) {
+                // 131f: no public registration offered, so a confidential
+                // one, its secret sealed like a pasted one.
+                Some(method) => {
+                    let (client_id, secret) = oauth::register_confidential(
+                        &state.gateway,
+                        &metadata,
+                        &req.redirect_uri,
+                        &scopes,
+                        method,
+                    )
+                    .await
+                    .map_err(oauth_refusal)?;
+                    let sealed = state
+                        .gateway
+                        .keys
+                        .seal(&row_id, "client_secret", secret.as_bytes())
+                        .map_err(internal)?;
+                    (client_id, Some(sealed))
+                }
+                None => {
+                    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
+                    let registered = manager
+                        .register_client("Storm", &req.redirect_uri, &scopes)
+                        .await
+                        .map_err(|_| oauth_refusal(OAuthFailure::Registration))?;
+                    (registered.client_id, None)
+                }
+            };
             crate::gateway::store::OAuthClientRow {
-                id: crate::auth::identity::random_id("oac_"),
+                id: row_id,
                 owner_user_id: actor.user_id().into(),
                 issuer: issuer.clone(),
-                client_id: registered.client_id,
+                client_id,
                 redirect_uri: req.redirect_uri.clone(),
                 registered: true,
                 metadata: metadata_json.clone(),
-                secret: None,
+                secret,
                 created_at: now.clone(),
             }
         }
@@ -4352,7 +4401,7 @@ pub async fn authorize_integration(
         .configure_client(&mut manager, &client)
         .map_err(|_| oauth_refusal(OAuthFailure::Discovery))?;
     manager.set_state_store(oauth::FlowStore::new(&state.gateway, &c, &client));
-    let scopes: Vec<&str> = req.scopes.iter().map(String::as_str).collect();
+    let scopes: Vec<&str> = scopes.iter().map(String::as_str).collect();
     let authorization_url = manager
         .get_authorization_url(&scopes)
         .await

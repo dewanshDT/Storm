@@ -677,6 +677,16 @@ Specification*; the slices are decisions 81 and 81a onward):
   OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
   every URL and redirect hop resolved and refused unless all its addresses
   are public, then connected to exactly those addresses.
+- **A pasted or confidentially registered OAuth client's secret is sealed
+  like a credential** (131e, 131f; `oauth_clients`, kind `client_secret`).
+  With no scopes given the server asks for MCP's (rmcp `select_scopes`).
+  An authorization server that does not offer `none` gets a confidential
+  RFC 7591 registration of Storm's own (`oauth::register_confidential`,
+  through `SsrfHttp`, no redirects), with the auth method rmcp's token client
+  will use — `client_secret_basic` when offered, else `client_secret_post` —
+  and a reply without a secret is a failure. A pasted client on Linux and
+  Windows returns to the fixed loopback port `ownAppPort` (27181), since a
+  hand-registered app lists its redirects.
 - **An OAuth flow is single use by SQL, not by code order**: loading it
   claims it with one `UPDATE … WHERE used_at IS NULL`. The state is stored
   only as a hash; the redirect URI is loopback or `storm://oauth`, never LAN.

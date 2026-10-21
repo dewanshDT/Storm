@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -197,17 +198,61 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
         value: draft.value,
       );
       if (draft.kind == 'oauth') {
-        _reportCheck(await _signIn(api, created.id));
+        await _signInOrAskForApp(api, created.id, created.displayName);
       } else {
         _reportCheck(await api.test(created.id));
       }
     });
   }
 
-  Future<IntegrationCheck> _signIn(IntegrationsApi api, String id) {
+  Future<IntegrationCheck> _signIn(
+    IntegrationsApi api,
+    String id, {
+    OwnClient? client,
+  }) {
     _say('Finish signing in in your browser.');
-    return signIn(api, id, openBrowser: ref.read(openBrowserProvider));
+    return signIn(
+      api,
+      id,
+      openBrowser: ref.read(openBrowserProvider),
+      client: client,
+    );
   }
+
+  /// Signs in, and when the service offers Storm no registration of its own
+  /// (Slack, for one), asks for the owner's own app and signs in with it
+  /// (decision 131e).
+  Future<void> _signInOrAskForApp(
+    IntegrationsApi api,
+    String id,
+    String name,
+  ) async {
+    try {
+      _reportCheck(await _signIn(api, id));
+    } on IntegrationRefusal catch (e) {
+      if (e.code != 'oauth_client_required') rethrow;
+      await _signInWithOwnApp(api, id, name, needed: true);
+    }
+  }
+
+  Future<void> _signInWithOwnApp(
+    IntegrationsApi api,
+    String id,
+    String name, {
+    bool needed = false,
+  }) async {
+    if (!mounted) return;
+    final client = await showDialog<OwnClient>(
+      context: context,
+      builder: (_) =>
+          OwnAppDialog(name: name, redirect: ownAppRedirect, needed: needed),
+    );
+    if (client == null) return;
+    _reportCheck(await _signIn(api, id, client: client));
+  }
+
+  Future<void> _useOwnApp(Integration i) =>
+      _with((api) => _signInWithOwnApp(api, i.id, i.displayName));
 
   Future<void> _reconnect(Integration i) async {
     if (i.authKind == 'oauth' && !ref.read(oauthSupportedProvider)) {
@@ -215,7 +260,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
       return;
     }
     if (i.authKind == 'oauth') {
-      await _with((api) async => _reportCheck(await _signIn(api, i.id)));
+      await _with((api) => _signInOrAskForApp(api, i.id, i.displayName));
       return;
     }
     final credential = await showDialog<(String, String)>(
@@ -322,6 +367,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
               onTools: () => _tools(i),
               onHosts: () => _chooseHosts(i),
               onReconnect: () => _reconnect(i),
+              onOwnApp: () => _useOwnApp(i),
               onToggle: () =>
                   _with((api) => api.update(i.id, enabled: i.disabled)),
               onDisconnect: () => _disconnect(i),
@@ -349,6 +395,7 @@ class _IntegrationTile extends StatelessWidget {
     required this.onTools,
     required this.onHosts,
     required this.onReconnect,
+    required this.onOwnApp,
     required this.onToggle,
     required this.onDisconnect,
   });
@@ -365,6 +412,9 @@ class _IntegrationTile extends StatelessWidget {
   final VoidCallback onTools;
   final VoidCallback onHosts;
   final VoidCallback onReconnect;
+
+  /// Signs in with an app the owner registered with the service (131e).
+  final VoidCallback onOwnApp;
   final VoidCallback onToggle;
   final VoidCallback onDisconnect;
 
@@ -513,6 +563,8 @@ class _IntegrationTile extends StatelessWidget {
                     onHosts();
                   case 'reconnect':
                     onReconnect();
+                  case 'own-app':
+                    onOwnApp();
                   case 'toggle':
                     onToggle();
                   default:
@@ -542,6 +594,11 @@ class _IntegrationTile extends StatelessWidget {
                         : 'Sign in again from a Storm app',
                   ),
                 ),
+                if (i.authKind == 'oauth' && canSignIn)
+                  const PopupMenuItem(
+                    value: 'own-app',
+                    child: Text('Use your own app'),
+                  ),
                 PopupMenuItem(
                   value: 'toggle',
                   child: Text(i.disabled ? 'Enable' : 'Disable'),
@@ -853,6 +910,136 @@ class _AddDialogState extends State<_AddDialog> {
           key: const Key('integration-connect'),
           onPressed: _submit,
           child: const Text('Connect'),
+        ),
+      ],
+    );
+  }
+}
+
+/// The owner's own OAuth app for a service (decision 131e): its client id,
+/// an optional secret and scopes, and the redirect to register in it.
+class OwnAppDialog extends StatefulWidget {
+  const OwnAppDialog({
+    super.key,
+    required this.name,
+    required this.redirect,
+    this.needed = false,
+  });
+
+  final String name;
+  final String redirect;
+
+  /// The service offered Storm no registration of its own.
+  final bool needed;
+
+  @override
+  State<OwnAppDialog> createState() => _OwnAppDialogState();
+}
+
+class _OwnAppDialogState extends State<OwnAppDialog> {
+  final _id = TextEditingController();
+  final _secret = TextEditingController();
+  final _scopes = TextEditingController();
+
+  @override
+  void dispose() {
+    _id.dispose();
+    _secret.dispose();
+    _scopes.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final id = _id.text.trim();
+    if (id.isEmpty) return;
+    final secret = _secret.text.trim();
+    Navigator.of(context).pop(
+      OwnClient(
+        clientId: id,
+        clientSecret: secret.isEmpty ? null : secret,
+        scopes: _scopes.text
+            .split(RegExp(r'[\s,]+'))
+            .where((s) => s.isNotEmpty)
+            .toList(),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return AlertDialog(
+      title: Text('Sign in to ${widget.name} with your own app'),
+      content: SizedBox(
+        width: 440,
+        child: ListView(
+          shrinkWrap: true,
+          children: [
+            Text(
+              widget.needed
+                  ? '${widget.name} does not let Storm register itself. Create '
+                        'an app in its developer settings, add this redirect '
+                        'to it, then paste its client id here.'
+                  : 'Create an app in the service\'s developer settings, add '
+                        'this redirect to it, then paste its client id here.',
+              style: TextStyle(fontSize: t.labelSize, color: t.text3),
+            ),
+            SizedBox(height: t.sp * 0.5),
+            Row(
+              children: [
+                Expanded(
+                  child: SelectableText(
+                    widget.redirect,
+                    key: const Key('own-app-redirect'),
+                    style: TextStyle(fontSize: t.labelSize, color: t.text2),
+                  ),
+                ),
+                TextButton(
+                  key: const Key('own-app-copy'),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: widget.redirect));
+                    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+                      const SnackBar(content: Text('Redirect copied.')),
+                    );
+                  },
+                  child: const Text('Copy'),
+                ),
+              ],
+            ),
+            TextField(
+              key: const Key('own-app-id'),
+              controller: _id,
+              autofocus: true,
+              decoration: const InputDecoration(labelText: 'Client ID'),
+            ),
+            TextField(
+              key: const Key('own-app-secret'),
+              controller: _secret,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: 'Client secret (if it has one)',
+              ),
+            ),
+            TextField(
+              key: const Key('own-app-scopes'),
+              controller: _scopes,
+              decoration: const InputDecoration(
+                labelText: 'Scopes (optional)',
+                helperText: "Leave empty for the service's own.",
+              ),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('own-app-sign-in'),
+          onPressed: _submit,
+          child: const Text('Sign in'),
         ),
       ],
     );
