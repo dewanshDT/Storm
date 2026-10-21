@@ -39,6 +39,10 @@ scrollback_bytes = 4194304
 # Where agent CLIs are looked for, and the PATH every session gets.
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
+# Whether a Claude Code session gets its plugins' local MCP servers. "off"
+# keeps them out; a plugin's remote servers never load on a host either way.
+# plugin_mcp = "allow"
+
 # Omit [[providers]] to offer every built-in: claude-code (the default),
 # opencode, codex, cursor (cursor-agent), command-code and shell. Cursor and
 # Command Code are terminals only: they get no notes or integrations.

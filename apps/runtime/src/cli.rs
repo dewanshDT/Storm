@@ -171,6 +171,16 @@ impl Provider for CliProvider {
         }
     }
 
+    fn helper_command(&self) -> Option<std::process::Command> {
+        let program = pty::resolve(&self.command, self.path.as_deref())?;
+        let mut command = std::process::Command::new(program);
+        command.envs(self.env.iter().map(|(k, v)| (k, v)));
+        if let Some(path) = &self.path {
+            command.env("PATH", path);
+        }
+        Some(command)
+    }
+
     fn start(
         &self,
         spec: SessionSpec,

@@ -165,6 +165,9 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 ///
 /// `opencode_settings` is the `runtime.toml` provider entry's `settings`:
 /// merged in, minus any `mcp` key — a setting can never add an MCP server.
+/// `plugin_servers` are a Claude Code session's plugins' local servers
+/// (decision 131c, `plugins.rs`), keyed `plugin_…`, which no slug can be.
+#[allow(clippy::too_many_arguments)]
 pub fn write_provider_config(
     provider: &str,
     dir: &Path,
@@ -173,6 +176,7 @@ pub fn write_provider_config(
     socket: &Path,
     exe: &Path,
     opencode_settings: Option<&Value>,
+    plugin_servers: &serde_json::Map<String, Value>,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
     if grants.is_empty() {
@@ -192,6 +196,11 @@ pub fn write_provider_config(
                         "env": env,
                     }),
                 );
+            }
+            for (key, entry) in plugin_servers {
+                if !servers.contains_key(key) {
+                    servers.insert(key.clone(), entry.clone());
+                }
             }
             private_dir(dir)?;
             let path = dir.join("mcp.json");
@@ -356,6 +365,37 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_merges_plugin_servers_beside_the_bridges() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("ags_P");
+        let mut plugins = serde_json::Map::new();
+        plugins.insert(
+            "plugin_pw_playwright".into(),
+            json!({"type": "stdio", "command": "npx"}),
+        );
+        plugins.insert("storm".into(), json!({"command": "/evil"}));
+        let extras = write_provider_config(
+            "claude-code",
+            &session,
+            &grants(),
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            None,
+            &plugins,
+        )
+        .unwrap();
+        assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
+        let v: Value =
+            serde_json::from_slice(&std::fs::read(session.join("mcp.json")).unwrap()).unwrap();
+        assert_eq!(v["mcpServers"]["plugin_pw_playwright"]["command"], "npx");
+        assert_eq!(
+            v["mcpServers"]["storm"]["command"], "/x",
+            "a bridge is never replaced"
+        );
+    }
+
+    #[test]
     fn claude_code_gets_a_strict_config_of_bridges_only() {
         let dir = tempfile::tempdir().unwrap();
         let session = dir.path().join("ags_X");
@@ -367,6 +407,7 @@ mod tests {
             Path::new("/var/lib/storm-runtime/run/mcp.sock"),
             Path::new("/usr/bin/storm-runtime"),
             None,
+            &serde_json::Map::new(),
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -408,6 +449,7 @@ mod tests {
             Path::new("/s"),
             Path::new("/usr/bin/storm-runtime"),
             Some(&settings),
+            &serde_json::Map::new(),
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -458,6 +500,7 @@ mod tests {
                     Path::new("/s"),
                     Path::new("/x"),
                     None,
+                    &serde_json::Map::new(),
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -544,6 +587,7 @@ mod tests {
                 Path::new("/s"),
                 Path::new("/x"),
                 None,
+                &serde_json::Map::new(),
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -558,6 +602,7 @@ mod tests {
             Path::new("/s"),
             Path::new("/x"),
             None,
+            &serde_json::Map::new(),
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -577,6 +622,7 @@ mod tests {
                     Path::new("/s"),
                     Path::new("/x"),
                     None,
+                    &serde_json::Map::new(),
                 )
                 .unwrap()
             };

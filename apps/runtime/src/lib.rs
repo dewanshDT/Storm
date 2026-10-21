@@ -76,6 +76,7 @@ pub mod identity;
 pub mod mcp;
 pub mod mcp_connect;
 pub mod platform;
+pub mod plugins;
 pub mod profile;
 pub mod provider;
 mod pty;
