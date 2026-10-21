@@ -50,7 +50,7 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   chosen at launch. It is never offered `delete_note`.
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
-- **Claude Code and Codex plugins:** a plugin's local MCP servers run in the
+- **Claude Code and Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
   session, under the same names the agent gives them, unless the host sets
   `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
   [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.

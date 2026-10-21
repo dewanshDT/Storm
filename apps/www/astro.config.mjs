@@ -78,6 +78,7 @@ export default defineConfig({
             "docs/agents/sessions",
             "docs/agents/hosts",
             "docs/agents/integrations",
+            "docs/agents/plugins",
             "docs/agents/claude-login",
           ],
         },
