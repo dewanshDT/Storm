@@ -9368,6 +9368,14 @@ pub(crate) mod tests {
         token_requests: std::sync::Mutex<Vec<HashMap<String, String>>>,
         revoked: std::sync::Mutex<Vec<String>>,
         hits: std::sync::atomic::AtomicUsize,
+        /// `token_endpoint_auth_methods_supported`, when it says.
+        auth_methods: Option<Vec<&'static str>>,
+        /// No `registration_endpoint` (Slack's shape).
+        no_registration: bool,
+        /// Registration hands out a client secret.
+        confidential: bool,
+        /// The protected resource's `scopes_supported`.
+        resource_scopes: Option<Vec<&'static str>>,
     }
 
     impl MockAs {
@@ -9394,8 +9402,12 @@ pub(crate) mod tests {
     }
 
     async fn serve_oauth_upstream(tools: &[&str]) -> (String, Arc<MockAs>) {
+        serve_oauth_as(tools, MockAs::default()).await
+    }
+
+    async fn serve_oauth_as(tools: &[&str], mock: MockAs) -> (String, Arc<MockAs>) {
         use axum::response::IntoResponse;
-        let mock = Arc::new(MockAs::default());
+        let mock = Arc::new(mock);
         mock.expires_in
             .store(3600, std::sync::atomic::Ordering::SeqCst);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -9439,17 +9451,22 @@ pub(crate) mod tests {
         let prm = move || {
             let b = b.clone();
             m.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let scopes = m.resource_scopes.clone();
             async move {
-                Json(
-                    serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]}),
-                )
+                let mut prm = serde_json::json!({"resource": format!("{b}/mcp"), "authorization_servers": [b]});
+                if let Some(scopes) = scopes {
+                    prm["scopes_supported"] = serde_json::json!(scopes);
+                }
+                Json(prm)
             }
         };
         let b = base.clone();
+        let m = mock.clone();
         let asm = move || {
             let b = b.clone();
+            let m = m.clone();
             async move {
-                Json(serde_json::json!({
+                let mut meta = serde_json::json!({
                     "issuer": b,
                     "authorization_endpoint": format!("{b}/authorize"),
                     "token_endpoint": format!("{b}/token"),
@@ -9458,7 +9475,16 @@ pub(crate) mod tests {
                     "response_types_supported": ["code"],
                     "code_challenge_methods_supported": ["S256"],
                     "grant_types_supported": ["authorization_code", "refresh_token"],
-                }))
+                });
+                if m.no_registration {
+                    meta.as_object_mut()
+                        .unwrap()
+                        .remove("registration_endpoint");
+                }
+                if let Some(methods) = &m.auth_methods {
+                    meta["token_endpoint_auth_methods_supported"] = serde_json::json!(methods);
+                }
+                Json(meta)
             }
         };
         let m = mock.clone();
@@ -9466,46 +9492,58 @@ pub(crate) mod tests {
             let m = m.clone();
             async move {
                 m.registrations.lock().unwrap().push(body.clone());
-                (
-                    StatusCode::CREATED,
-                    Json(
-                        serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]}),
-                    ),
-                )
+                let mut reply = serde_json::json!({"client_id": "dcr-client", "redirect_uris": body["redirect_uris"]});
+                if m.confidential {
+                    reply["client_secret"] = serde_json::json!("upstream-canary-dcr-secret");
+                }
+                (StatusCode::CREATED, Json(reply))
             }
         };
         let m = mock.clone();
-        let token =
-            move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
-                let m = m.clone();
-                async move {
-                    m.token_requests.lock().unwrap().push(form.clone());
-                    let bad = || {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            Json(serde_json::json!({"error": "invalid_grant"})),
-                        )
-                            .into_response()
-                    };
-                    match form.get("grant_type").map(String::as_str) {
-                        Some("authorization_code")
-                            if form.get("code").map(String::as_str) == Some("good-code")
-                                && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
-                                && form.contains_key("resource") =>
-                        {
-                            Json(m.issue()).into_response()
-                        }
-                        Some("refresh_token")
-                            if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
-                                && form.get("refresh_token")
-                                    == Some(&m.refresh.lock().unwrap().clone()) =>
-                        {
-                            Json(m.issue()).into_response()
-                        }
-                        _ => bad(),
-                    }
+        let token = move |headers: axum::http::HeaderMap,
+                          axum::extract::Form(mut form): axum::extract::Form<
+            HashMap<String, String>,
+        >| {
+            let m = m.clone();
+            async move {
+                // How the client authenticated, for the tests to read.
+                if let Some(basic) = headers
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Basic "))
+                {
+                    let decoded = data_encoding::BASE64
+                        .decode(basic.as_bytes())
+                        .unwrap_or_default();
+                    form.insert("_basic".into(), String::from_utf8_lossy(&decoded).into());
                 }
-            };
+                m.token_requests.lock().unwrap().push(form.clone());
+                let bad = || {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": "invalid_grant"})),
+                    )
+                        .into_response()
+                };
+                match form.get("grant_type").map(String::as_str) {
+                    Some("authorization_code")
+                        if form.get("code").map(String::as_str) == Some("good-code")
+                            && form.get("code_verifier").is_some_and(|v| v.len() >= 43)
+                            && form.contains_key("resource") =>
+                    {
+                        Json(m.issue()).into_response()
+                    }
+                    Some("refresh_token")
+                        if !m.reject_refresh.load(std::sync::atomic::Ordering::SeqCst)
+                            && form.get("refresh_token")
+                                == Some(&m.refresh.lock().unwrap().clone()) =>
+                    {
+                        Json(m.issue()).into_response()
+                    }
+                    _ => bad(),
+                }
+            }
+        };
         let m = mock.clone();
         let revoke =
             move |axum::extract::Form(form): axum::extract::Form<HashMap<String, String>>| {
@@ -9873,6 +9911,194 @@ pub(crate) mod tests {
             .filter(|r| r.get("grant_type").map(String::as_str) == Some("authorization_code"))
             .count();
         assert_eq!(exchanges, 1, "a flow was spent twice");
+    }
+
+    /// Every byte of the gateway's database files under `dir`, WAL included.
+    fn gateway_db_bytes(dir: &FsPath) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = e.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path
+                    .file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("gateway.db"))
+                {
+                    out.extend(std::fs::read(&path).unwrap_or_default());
+                }
+            }
+        }
+        out
+    }
+
+    async fn oauth_connection(app: &Router, owner: &str, base: &str) -> String {
+        let (status, created) = send(
+            app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Slack", "url": format!("{base}/mcp"), "auth_kind": "oauth"}),
+                owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{created}");
+        created["id"].as_str().unwrap().to_string()
+    }
+
+    /// 131e: a server with no registration and `client_secret_post` only (the
+    /// Slack shape) is signed in with a pasted client: its secret goes in the
+    /// token request's body, never in the clear at rest, and with no scopes
+    /// given the resource's own are asked for.
+    #[tokio::test]
+    async fn a_slack_shaped_server_signs_in_with_a_pasted_client() {
+        let dir = tempdir::TempDir::new("storm-oauth-pasted").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, mock) = serve_oauth_as(
+            &["search"],
+            MockAs {
+                no_registration: true,
+                auth_methods: Some(vec!["client_secret_post"]),
+                resource_scopes: Some(vec!["chat:write", "search:read"]),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = oauth_connection(&app, &owner, &base).await;
+
+        let (status, refused) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(refused["error"], "oauth_client_required", "{refused}");
+
+        let secret = "upstream-canary-pasted-secret";
+        let (status, started) = send(
+            &app,
+            post_json_with_auth(
+                &format!("{CONNECTIONS}/{id}/authorize"),
+                serde_json::json!({"redirect_uri": "http://127.0.0.1:53682/callback",
+                    "client_id": "pasted-id", "client_secret": secret}),
+                &owner,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        let url = started["authorization_url"].as_str().unwrap();
+        assert_eq!(query_param(url, "client_id").as_deref(), Some("pasted-id"));
+        assert_eq!(
+            query_param(url, "scope").as_deref(),
+            Some("chat:write search:read"),
+            "MCP's scope rule, with none given"
+        );
+        let flow = query_param(url, "state").unwrap();
+        let (status, test) = callback(&app, &owner, &flow, "good-code").await;
+        assert_eq!(status, StatusCode::OK, "{test}");
+        assert_eq!(test["integration"]["status"], "connected", "{test}");
+        let exchange = mock.token_requests.lock().unwrap()[0].clone();
+        assert_eq!(
+            exchange.get("client_secret").map(String::as_str),
+            Some(secret)
+        );
+        assert!(!exchange.contains_key("_basic"), "{exchange:?}");
+        assert!(mock.registrations.lock().unwrap().is_empty());
+        let bytes = gateway_db_bytes(dir.path());
+        assert!(!bytes.is_empty());
+        assert!(
+            !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+            "a pasted secret is sealed"
+        );
+
+        for bad in [
+            serde_json::json!({"client_id": "x", "client_secret": ""}),
+            serde_json::json!({"client_id": "x", "scopes": ["two words"]}),
+        ] {
+            let mut body = bad.clone();
+            body["redirect_uri"] = serde_json::json!("http://127.0.0.1:53682/callback");
+            let (status, _) = send(
+                &app,
+                post_json_with_auth(&format!("{CONNECTIONS}/{id}/authorize"), body, &owner),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}");
+        }
+    }
+
+    /// 131f: a server that offers no public registration registers Storm as a
+    /// confidential client with the method its token client will use, and the
+    /// secret it hands out is sealed and used.
+    #[tokio::test]
+    async fn a_server_without_public_registration_gets_a_confidential_client() {
+        for (methods, want) in [
+            (
+                vec!["client_secret_basic", "client_secret_post"],
+                "client_secret_basic",
+            ),
+            (vec!["client_secret_post"], "client_secret_post"),
+        ] {
+            let dir = tempdir::TempDir::new("storm-oauth-confidential").unwrap();
+            let (app, _, state) = test_router_with_state(dir.path());
+            state.gateway.set_allow_http_upstreams(true);
+            let (_, owner) = owner_bearer(&state).await;
+            let (base, mock) = serve_oauth_as(
+                &["search"],
+                MockAs {
+                    auth_methods: Some(methods.clone()),
+                    confidential: true,
+                    ..Default::default()
+                },
+            )
+            .await;
+            let id = oauth_connection(&app, &owner, &base).await;
+            let (status, started) = authorize(&app, &owner, &id).await;
+            assert_eq!(status, StatusCode::OK, "{started}");
+            let reg = mock.registrations.lock().unwrap().clone();
+            assert_eq!(reg.len(), 1);
+            assert_eq!(reg[0]["token_endpoint_auth_method"], want, "{methods:?}");
+            let url = started["authorization_url"].as_str().unwrap();
+            assert_eq!(query_param(url, "client_id").as_deref(), Some("dcr-client"));
+            let flow = query_param(url, "state").unwrap();
+            let (status, test) = callback(&app, &owner, &flow, "good-code").await;
+            assert_eq!(status, StatusCode::OK, "{test}");
+            assert_eq!(test["integration"]["status"], "connected", "{test}");
+            let exchange = mock.token_requests.lock().unwrap()[0].clone();
+            let secret = "upstream-canary-dcr-secret";
+            match want {
+                "client_secret_basic" => assert_eq!(
+                    exchange.get("_basic").map(String::as_str),
+                    Some(format!("dcr-client:{secret}").as_str())
+                ),
+                _ => assert_eq!(
+                    exchange.get("client_secret").map(String::as_str),
+                    Some(secret)
+                ),
+            }
+            let bytes = gateway_db_bytes(dir.path());
+            assert!(!bytes.windows(secret.len()).any(|w| w == secret.as_bytes()));
+        }
+    }
+
+    /// 131f: a registration that comes back without a secret is a failure,
+    /// never a public client by accident.
+    #[tokio::test]
+    async fn a_confidential_registration_without_a_secret_fails() {
+        let dir = tempdir::TempDir::new("storm-oauth-no-secret").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        state.gateway.set_allow_http_upstreams(true);
+        let (_, owner) = owner_bearer(&state).await;
+        let (base, _) = serve_oauth_as(
+            &["search"],
+            MockAs {
+                auth_methods: Some(vec!["client_secret_post"]),
+                ..Default::default()
+            },
+        )
+        .await;
+        let id = oauth_connection(&app, &owner, &base).await;
+        let (status, refused) = authorize(&app, &owner, &id).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(refused["error"], "oauth_registration_failed", "{refused}");
     }
 
     #[tokio::test]

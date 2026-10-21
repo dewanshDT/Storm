@@ -23,6 +23,25 @@ service's **MCP server address**, then choose how Storm signs in:
   GitHub, use a fine-grained token.
 - **No sign-in** — for public servers that need no credential.
 
+### Services that need your own app
+
+Most services let Storm register itself when you sign in. Some, such as
+Slack, don't: they only accept an app you create in their developer
+settings. Storm then asks for **your own app**, which you can also choose
+from an integration's **⋯ › Use your own app**:
+
+1. Create an app in the service's developer settings.
+2. Add the **redirect** Storm shows to the app's redirect URLs. Use **Copy**:
+   it must match exactly. On macOS and Android it is
+   `storm://oauth/callback`; on Linux and Windows it is
+   `http://127.0.0.1:27181/oauth/callback`, a fixed port that must be free
+   while you sign in.
+3. Paste the app's **client ID**, and its **client secret** if it has one.
+   Leave **scopes** empty to ask for the service's own scopes for MCP.
+
+The secret is stored encrypted on your server, never on a host. Signing in
+again later reuses the same app.
+
 Storm's own vault is a built-in integration: read only, unless a session is
 allowed to write.
 

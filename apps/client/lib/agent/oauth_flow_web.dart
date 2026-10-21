@@ -4,10 +4,14 @@ import 'integrations_api.dart';
 /// integrations with a token.
 const bool oauthSupported = false;
 
+/// No redirect of its own, so no app of the owner's can return here.
+const String ownAppRedirect = '';
+
 Future<IntegrationCheck> signIn(
   IntegrationsApi api,
   String integrationId, {
   required Future<bool> Function(Uri url) openBrowser,
+  OwnClient? client,
 }) => Future.error(
   UnsupportedError('Sign-in is not available in the browser; use a token.'),
 );

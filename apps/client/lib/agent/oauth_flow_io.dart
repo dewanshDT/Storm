@@ -18,19 +18,32 @@ const _deadline = Duration(minutes: 10);
 /// loopback.
 bool get usesAppScheme => Platform.isAndroid || Platform.isMacOS;
 
+/// The loopback port a sign-in with the owner's own app listens on (131e).
+/// An app registered by hand lists its redirects, so this one never changes;
+/// below every OS's ephemeral range, so the OS never hands it out.
+const ownAppPort = 27181;
+
+/// The redirect the owner registers in their own app (131e).
+String get ownAppRedirect =>
+    usesAppScheme ? appRedirect : 'http://127.0.0.1:$ownAppPort/oauth/callback';
+
 /// Runs one sign-in: the authorization URL in the system browser, the one
 /// redirect it sends back, and the relay of `{state, code}` to the server
 /// (G-D13). The client never sees a token: the server exchanges the code.
 ///
 /// `appScheme`, `links` and `resumes` are for tests; the app uses the
 /// platform's own answer, [OAuthLinks.instance] and the app's lifecycle.
+/// [client] is the owner's own app (131e): its loopback redirect is the
+/// fixed [ownAppPort], which the app lists.
 Future<IntegrationCheck> signIn(
   IntegrationsApi api,
   String integrationId, {
   required Future<bool> Function(Uri url) openBrowser,
+  OwnClient? client,
   bool? appScheme,
   OAuthLinks? links,
   Stream<void>? resumes,
+  int? loopbackPort,
 }) {
   if (appScheme ?? usesAppScheme) {
     return _signInWithScheme(
@@ -39,9 +52,16 @@ Future<IntegrationCheck> signIn(
       openBrowser,
       links ?? OAuthLinks.instance,
       resumes ?? _appResumes(),
+      client,
     );
   }
-  return _signInWithLoopback(api, integrationId, openBrowser);
+  return _signInWithLoopback(
+    api,
+    integrationId,
+    openBrowser,
+    client,
+    loopbackPort ?? (client == null ? 0 : ownAppPort),
+  );
 }
 
 /// Android and macOS: the redirect is `storm://oauth/callback`, which the
@@ -58,9 +78,14 @@ Future<IntegrationCheck> _signInWithScheme(
   Future<bool> Function(Uri url) openBrowser,
   OAuthLinks links,
   Stream<void> resumes,
+  OwnClient? client,
 ) async {
   await links.start();
-  final url = await api.authorize(integrationId, redirectUri: appRedirect);
+  final url = await api.authorize(
+    integrationId,
+    redirectUri: appRedirect,
+    client: client,
+  );
   final state = Uri.parse(url).queryParameters['state'];
   if (state == null || state.isEmpty) {
     throw StateError('The service did not start a sign-in.');
@@ -110,8 +135,9 @@ Stream<void> _appResumes() {
   return resumed.stream;
 }
 
-/// Linux and Windows: a loopback listener on `127.0.0.1` with a port the OS
-/// picks, for the one redirect.
+/// Linux and Windows: a loopback listener on `127.0.0.1` for the one
+/// redirect, on a port the OS picks — or, for the owner's own app, the fixed
+/// [ownAppPort] it lists.
 ///
 /// It listens before the browser opens, answers **only** the redirect path,
 /// and closes after the first request that carries a `state`, so it is open
@@ -120,14 +146,29 @@ Future<IntegrationCheck> _signInWithLoopback(
   IntegrationsApi api,
   String integrationId,
   Future<bool> Function(Uri url) openBrowser,
+  OwnClient? client,
+  int port,
 ) async {
-  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+  final HttpServer server;
+  try {
+    server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+  } on SocketException {
+    if (port == 0) rethrow;
+    throw StateError(
+      'Port $port is in use on this computer, and your app can only return '
+      'to it. Close what is using it, then try again.',
+    );
+  }
   // Listening before the browser opens: the redirect can arrive at any
   // moment after, even before `openBrowser` returns.
   final redirected = _awaitRedirect(server);
   try {
     final redirect = 'http://127.0.0.1:${server.port}/oauth/callback';
-    final url = await api.authorize(integrationId, redirectUri: redirect);
+    final url = await api.authorize(
+      integrationId,
+      redirectUri: redirect,
+      client: client,
+    );
     final opened = await openBrowser(Uri.parse(url));
     if (!opened) {
       throw StateError('Could not open the browser.');

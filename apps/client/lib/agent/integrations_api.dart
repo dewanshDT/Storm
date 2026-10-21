@@ -173,13 +173,45 @@ String describeIntegrationError(String? code) => switch (code) {
   'oauth_discovery_failed' => 'Could not find how this service signs in.',
   'oauth_not_offered' => 'This service does not offer sign-in; use a token.',
   'oauth_client_required' =>
-    'This service needs a client id registered by hand, or a token.',
+    'This service needs an app you register with it yourself: use your own '
+        'app, or a token.',
   'oauth_registration_failed' => 'The service refused to register Storm.',
   'oauth_exchange_failed' => 'Signing in did not complete. Try again.',
   'oauth_flow_expired_or_used' => 'That sign-in expired. Start it again.',
   'host_not_in_scope' => "This integration isn't available on this host.",
   _ => code,
 };
+
+/// An OAuth app the owner registered with a service by hand (decision 131e):
+/// for a service that offers Storm no registration of its own, such as
+/// Slack.
+class OwnClient {
+  const OwnClient({
+    required this.clientId,
+    this.clientSecret,
+    this.scopes = const [],
+  });
+
+  final String clientId;
+  final String? clientSecret;
+
+  /// Empty: the service's own scopes for MCP.
+  final List<String> scopes;
+
+  Map<String, Object> toJson() => {
+    'client_id': clientId,
+    if (clientSecret != null && clientSecret!.isNotEmpty)
+      'client_secret': clientSecret!,
+    if (scopes.isNotEmpty) 'scopes': scopes,
+  };
+}
+
+/// A refusal from `/v1/integrations/*`, with its stable code (spec §12).
+class IntegrationRefusal extends StormApiException {
+  IntegrationRefusal(super.statusCode, super.message, this.code);
+
+  final String? code;
+}
 
 /// REST client for `/v1/integrations/*` (owner only; decisions 81c, 81d, 81g).
 class IntegrationsApi {
@@ -210,13 +242,15 @@ class IntegrationsApi {
         403 => 'Integrations are managed by the server owner only.',
         _ => 'HTTP ${r.statusCode}',
       };
+      String? code;
       try {
         final body = jsonDecode(r.body);
         if (body is Map && body['error'] != null && r.statusCode != 403) {
-          message = describeIntegrationError('${body['error']}');
+          code = '${body['error']}';
+          message = describeIntegrationError(code);
         }
       } catch (_) {}
-      throw StormApiException(r.statusCode, message);
+      throw IntegrationRefusal(r.statusCode, message, code);
     }
     if (r.bodyBytes.isEmpty) return null;
     return jsonDecode(utf8.decode(r.bodyBytes));
@@ -310,12 +344,20 @@ class IntegrationsApi {
   }
 
   /// Starts an OAuth authorization: the URL to open in the system browser.
-  Future<String> authorize(String id, {required String redirectUri}) async =>
+  /// [client] is an app the owner registered by hand (131e).
+  Future<String> authorize(
+    String id, {
+    required String redirectUri,
+    OwnClient? client,
+  }) async =>
       (_decode(
                 await _client.post(
                   _uri('${_one(id)}/authorize'),
                   headers: _headers,
-                  body: jsonEncode({'redirect_uri': redirectUri}),
+                  body: jsonEncode({
+                    'redirect_uri': redirectUri,
+                    ...?client?.toJson(),
+                  }),
                 ),
               )
               as Map)['authorization_url']
