@@ -606,8 +606,16 @@ Specification*; the slices are decisions 81 and 81a onward):
   policy. **An agent Storm cannot hold to its own MCP servers gets none**
   (130a): the host reports `mcp: false` for it in `hello` and the server
   grants nothing (`McpOutcome::Unsupported`) — Cursor and Command Code today;
-  Command Code loads a repository's `.mcp.json` with no approval. No profile
-  passes a flag that turns an agent's own permission prompts off.
+  Command Code loads a repository's `.mcp.json` with no approval. Their
+  writers exist (131j `cursor.rs`: bridges as a `--plugin-dir` plugin, every
+  other server on Cursor's own `mcp-disabled.json`; 131k `command_code.rs`:
+  the workspace's local `mcp.json`, a disabled stub under every other name
+  and no handle in it) but the profiles stay `mcp: None` until G-C1/G-CC1
+  pass on a signed-in account. Both slugs are the CLIs' own — Command Code's
+  is `@sindresorhus/slugify`, and a non-ASCII path fails the start rather
+  than guess; `tests/cursor_command_code_gate.rs` checks them against the
+  real binaries. No profile passes a flag that turns an agent's own
+  permission prompts off.
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,

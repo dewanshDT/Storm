@@ -937,16 +937,17 @@ impl Host {
             .as_ref()
             .map(|p| p.local.clone())
             .unwrap_or_default();
-        match self.mcp_launch(&id, &provider_id, &mcp, &plugin_servers) {
-            Ok(extras) => {
+        let plugin_plan = match self.mcp_launch(&id, &provider_id, &dir, &mcp, &plugin_servers) {
+            Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
+                plugin_plan.or(plan)
             }
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP config");
                 return self.post_start_failure(&id).await;
             }
-        }
+        };
         let start_report = match &plugin_plan {
             Some(plan) => {
                 if let Some(text) = plan.notice() {
@@ -1246,49 +1247,77 @@ impl Host {
         &self,
         session: &str,
         provider: &str,
+        workspace: &Path,
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
-    ) -> Result<crate::mcp::LaunchExtras> {
+    ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
+        use crate::profile::Mcp;
         if grants.is_empty() {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the bridge")?;
-        let extras = if crate::profile::get(provider).and_then(|p| p.mcp)
-            == Some(crate::profile::Mcp::Codex)
-        {
+        let socket = self.socket_address();
+        let mcp = crate::profile::get(provider).and_then(|p| p.mcp);
+        let (extras, plan) = if matches!(mcp, Some(Mcp::Codex | Mcp::Cursor | Mcp::CommandCode)) {
             let grants: Vec<_> = grants
                 .iter()
                 .filter(|g| crate::mcp::slug_ok(&g.slug))
                 .collect();
-            if grants.is_empty() {
-                Default::default()
-            } else {
-                crate::codex::write_profile(
-                    &crate::codex::home(&self.state_dir),
-                    session,
-                    &grants,
-                    &handle,
-                    &self.socket_address(),
-                    &exe,
-                )?
+            match mcp {
+                _ if grants.is_empty() => Default::default(),
+                Some(Mcp::Codex) => (
+                    crate::codex::write_profile(
+                        &crate::codex::home(&self.state_dir),
+                        session,
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                    )?,
+                    None,
+                ),
+                Some(Mcp::Cursor) => {
+                    let home = account_home()?;
+                    let (extras, plan) = crate::cursor::write_session(
+                        &crate::mcp::session_dir(&self.state_dir, session),
+                        workspace,
+                        &home,
+                        &crate::cursor::data_dir(&home),
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                    )?;
+                    (extras, Some(plan))
+                }
+                _ => {
+                    let home = account_home()?;
+                    let (extras, plan) = crate::command_code::write_session(
+                        workspace, &home, &grants, &handle, &socket, &exe,
+                    )?;
+                    (extras, Some(plan))
+                }
             }
         } else {
-            crate::mcp::write_provider_config(
-                provider,
-                &crate::mcp::session_dir(&self.state_dir, session),
-                grants,
-                &handle,
-                &self.socket_address(),
-                &exe,
-                self.opencode_settings.as_ref(),
-                plugin_servers,
-            )?
+            (
+                crate::mcp::write_provider_config(
+                    provider,
+                    &crate::mcp::session_dir(&self.state_dir, session),
+                    grants,
+                    &handle,
+                    &socket,
+                    &exe,
+                    self.opencode_settings.as_ref(),
+                    plugin_servers,
+                )?,
+                None,
+            )
         };
         if extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
-        Ok(extras)
+        Ok((extras, plan))
     }
 
     /// What every Codex session gains, grants or not (decision 130b): Storm's
@@ -1592,6 +1621,15 @@ impl Host {
 }
 
 /// The wire form of a session's status: running, or how it ended.
+/// The host account's home, where Cursor and Command Code keep their own
+/// config.
+fn account_home() -> Result<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .context("HOME is not set")
+}
+
 fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
     match end {
         None => json!({ "status": "running" }),
