@@ -172,6 +172,29 @@ class SessionContext {
 
 /// An agent session (freeze §7.1), with what it was launched with
 /// (decision 82, slice 5).
+/// An MCP server a session did not get, and why (decision 131a): by name
+/// only.
+class SkippedServer {
+  const SkippedServer({
+    required this.name,
+    required this.source,
+    required this.reason,
+  });
+
+  final String name;
+  final String source;
+  final String reason;
+
+  /// A plugin's remote server: it reaches a session only as an integration.
+  bool get remote => reason.startsWith('remote');
+
+  factory SkippedServer.fromJson(Map<String, dynamic> j) => SkippedServer(
+    name: '${j['name'] ?? ''}',
+    source: '${j['source'] ?? ''}',
+    reason: '${j['reason'] ?? ''}',
+  );
+}
+
 class AgentSession {
   AgentSession({
     required this.id,
@@ -199,6 +222,8 @@ class AgentSession {
     this.activity,
     this.harnessSession,
     this.resumedFrom,
+    this.mcpSkipped = const [],
+    this.mcpPluginLocal = const [],
   }) : name = name ?? workspace;
 
   final String id;
@@ -240,6 +265,13 @@ class AgentSession {
 
   /// The session whose conversation this one reopened.
   final String? resumedFrom;
+
+  /// The MCP servers its host said it would not have (131a).
+  final List<SkippedServer> mcpSkipped;
+
+  /// Its plugins' local MCP servers, which run on the host outside Storm's
+  /// integrations (131a).
+  final List<String> mcpPluginLocal;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -320,6 +352,8 @@ class AgentSession {
           activity: live.activity,
           harnessSession: live.harnessSession ?? harnessSession,
           resumedFrom: resumedFrom,
+          mcpSkipped: mcpSkipped,
+          mcpPluginLocal: mcpPluginLocal,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -359,6 +393,13 @@ class AgentSession {
     activity: j['activity'] as String?,
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
+    mcpSkipped: [
+      for (final s in j['mcp_skipped'] as List? ?? const [])
+        if (s is Map<String, dynamic>) SkippedServer.fromJson(s),
+    ],
+    mcpPluginLocal: [
+      for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
+    ],
   );
 }
 

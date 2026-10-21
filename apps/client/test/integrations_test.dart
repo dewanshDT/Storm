@@ -72,6 +72,7 @@ void main() {
   (MockClient, List<http.Request>) server({
     int listStatus = 200,
     List<Map<String, dynamic>>? items,
+    List<Map<String, dynamic>>? suggestions,
   }) {
     final seen = <http.Request>[];
     final client = MockClient((req) async {
@@ -82,6 +83,12 @@ void main() {
           return http.Response('{"error":"forbidden"}', listStatus);
         }
         return http.Response(jsonEncode(items ?? [builtin(), github()]), 200);
+      }
+      if (path == '/v1/integrations/suggestions' && suggestions != null) {
+        return http.Response(jsonEncode(suggestions), 200);
+      }
+      if (path == '/v1/integrations/suggestions/dismiss') {
+        return http.Response('', 204);
       }
       if (path == '/v1/agent/hosts') {
         return http.Response(
@@ -210,6 +217,129 @@ void main() {
     expect(seen.any((r) => r.url.path.endsWith('/mcc_GH/test')), isTrue);
     // And the token is not on screen anywhere afterwards.
     expect(find.textContaining('ghp_x'), findsNothing);
+  });
+
+  group('from your plugins (131g)', () {
+    final suggestions = [
+      {
+        'plugin': 'slack',
+        'server': 'slack',
+        'url': 'https://mcp.slack.com/mcp',
+        'templated': false,
+        'auth_hint': 'vendor_client',
+        'agents': ['claude-code', 'codex'],
+        'hosts': ['hst_1'],
+      },
+      {
+        'plugin': 'jfrog',
+        'server': 'jfrog-mcp',
+        'url': r'${JFROG_URL}/mcp',
+        'templated': true,
+        'auth_hint': 'header:Authorization',
+        'agents': ['claude-code'],
+        'hosts': ['hst_1', 'hst_2'],
+      },
+    ];
+
+    testWidgets('each is listed with where it came from', (tester) async {
+      final (client, _) = server(suggestions: suggestions);
+      await tester.pumpWidget(app(const IntegrationsScreen(), client));
+      await tester.pumpAndSettle();
+      expect(find.text('FROM YOUR PLUGINS'), findsOneWidget);
+      expect(find.text('Slack'), findsOneWidget);
+      expect(find.text('Plugin slack on build-vm'), findsOneWidget);
+      expect(
+        find.textContaining("registered to its vendor's app"),
+        findsOneWidget,
+      );
+      expect(find.text('Jfrog Mcp'), findsOneWidget);
+      expect(
+        find.textContaining(r'Needs its address: ${JFROG_URL}/mcp'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('an older server has none, and says nothing', (tester) async {
+      final (client, _) = server();
+      await tester.pumpWidget(app(const IntegrationsScreen(), client));
+      await tester.pumpAndSettle();
+      expect(find.text('FROM YOUR PLUGINS'), findsNothing);
+    });
+
+    testWidgets('Add fills the dialog in, asks for a templated address, and '
+        'keeps the origin and the reporting hosts', (tester) async {
+      final (client, seen) = server(suggestions: suggestions);
+      await tester.pumpWidget(app(const IntegrationsScreen(), client));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('add-suggestion-jfrog-jfrog-mcp')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('add-suggestion-jfrog-jfrog-mcp')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('integration-name')))
+            .controller!
+            .text,
+        'Jfrog Mcp',
+      );
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('integration-url')))
+            .controller!
+            .text,
+        isEmpty,
+      );
+      expect(
+        find.textContaining(r'builds it from its host: ${JFROG_URL}/mcp'),
+        findsOneWidget,
+      );
+      await tester.enterText(
+        find.byKey(const Key('integration-url')),
+        'https://acme.jfrog.io/mcp',
+      );
+      await tester.enterText(
+        find.byKey(const Key('integration-token')),
+        'jf_x',
+      );
+      await tester.tap(find.byKey(const Key('integration-connect')));
+      await tester.pumpAndSettle();
+      final create = seen.firstWhere(
+        (r) =>
+            r.method == 'POST' && r.url.path == '/v1/integrations/connections',
+      );
+      final body = jsonDecode(create.body) as Map<String, dynamic>;
+      expect(body['url'], 'https://acme.jfrog.io/mcp');
+      expect(body['slug'], 'jfrog-mcp');
+      expect(body['plugin_origin'], {'plugin': 'jfrog', 'server': 'jfrog-mcp'});
+      expect(body['hosts'], ['hst_1', 'hst_2']);
+      expect(body['auth_kind'], 'static');
+      expect(body['credential'], {
+        'header': 'Authorization',
+        'value': 'Bearer jf_x',
+      });
+    });
+
+    testWidgets('Dismiss tells the server which one', (tester) async {
+      final (client, seen) = server(suggestions: suggestions);
+      await tester.pumpWidget(app(const IntegrationsScreen(), client));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const Key('dismiss-suggestion-slack-slack')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('dismiss-suggestion-slack-slack')));
+      await tester.pumpAndSettle();
+      final dismiss = seen.firstWhere(
+        (r) => r.url.path == '/v1/integrations/suggestions/dismiss',
+      );
+      expect(jsonDecode(dismiss.body), {
+        'plugin': 'slack',
+        'server': 'slack',
+        'url': 'https://mcp.slack.com/mcp',
+      });
+    });
   });
 
   testWidgets('a plain http address on the internet is refused before '

@@ -56,7 +56,9 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
   Neither do the MCP servers in your own `~/.claude.json` or a repository's
   `.mcp.json` (or `.codex/config.toml`), nor Codex's ChatGPT apps. When a
-  session starts, the agent shows what Storm skipped and why.
+  session starts, the agent shows what Storm skipped and why, and the
+  session's **Details** list it too, with the plugin servers that run on the
+  host and **Add to Integrations** for a remote one.
 - **Cursor and Command Code run as terminals only:** no notes, no
   integrations, no write vault, and no Resume yet. Storm gives an agent its
   tools only through a configuration that keeps a repository's own MCP
