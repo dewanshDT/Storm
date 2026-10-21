@@ -192,6 +192,12 @@ pub trait Provider: Send + Sync {
     /// The interaction kinds a session of this provider offers. V1: terminal.
     fn interactions(&self) -> &[InteractionKind];
     fn available(&self) -> Availability;
+    /// This provider's own program, `PATH` and env file, for a question the
+    /// host asks it outside a session (decision 131: Claude Code's plugin
+    /// list). `None` for one that is not a command.
+    fn helper_command(&self) -> Option<std::process::Command> {
+        None
+    }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.
     fn start(

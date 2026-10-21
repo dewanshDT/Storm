@@ -631,8 +631,21 @@ Specification*; the slices are decisions 81 and 81a onward):
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,
   and by the server before storing. `docs/harness-session-vectors.json`
-  keeps the two crates in agreement. The `SessionStart` hook prints nothing:
-  its stdout reaches the agent.
+  keeps the two crates in agreement. The `SessionStart` hook prints nothing
+  but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
+  a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
+  positive control.
+- **A Claude Code session's plugins' local MCP servers are written into its
+  `mcp.json` by Storm, and strict stays** (decision 131, `plugins.rs`). The
+  host lists the enabled plugins with the provider's own `claude plugin list
+  --json`; a stdio server is keyed `plugin_<plugin>_<server>` (Claude Code's
+  own tool prefix; no slug has `_`) with `${CLAUDE_PLUGIN_ROOT}`/`DATA` filled
+  in and also set in its `env`, and one needing `${user_config.…}` is
+  skipped. A remote server never loads on a host. Everything skipped —
+  remote, unresolved, the account's and the workspace's own servers, by name
+  only — goes in the session's `mcp-notice.txt`, which `harness-session`
+  prints on a start or a resume, and in the first `running` report.
+  `runtime.toml` `plugin_mcp = "off"` keeps every plugin server out.
 - **OAuth discovery never reaches a private address** (81g, §10). rmcp's
   OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
   every URL and redirect hop resolved and refused unless all its addresses

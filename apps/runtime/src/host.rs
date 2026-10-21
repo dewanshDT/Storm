@@ -212,6 +212,9 @@ struct HostSession {
     sent: Mutex<u64>,
     /// `running`, posted once.
     running_sent: AtomicBool,
+    /// Extra fields of that `running` report: the MCP servers the session
+    /// skipped, and its plugins' local ones (decision 131a).
+    start_report: serde_json::Value,
     /// The title last acknowledged by the server, and when it was posted.
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// The agent's session id last acknowledged by the server.
@@ -906,7 +909,28 @@ impl Host {
             tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the Codex config");
             return self.post_start_failure(&id).await;
         }
-        match self.mcp_launch(&id, &provider_id, &mcp) {
+        // A Claude Code session's plugins (decision 131): their local servers
+        // join its `mcp.json`, and everything it will not have is named.
+        let plugin_plan = if !mcp.is_empty()
+            && crate::profile::get(&provider_id).and_then(|p| p.mcp)
+                == Some(crate::profile::Mcp::ClaudeCode)
+        {
+            let helper = provider.helper_command();
+            let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
+            let workspace = dir.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::plugins::session_plan(helper, allow, &workspace)
+            })
+            .await
+            .ok()
+        } else {
+            None
+        };
+        let plugin_servers = plugin_plan
+            .as_ref()
+            .map(|p| p.local.clone())
+            .unwrap_or_default();
+        match self.mcp_launch(&id, &provider_id, &mcp, &plugin_servers) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
@@ -916,6 +940,23 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         }
+        let start_report = match &plugin_plan {
+            Some(plan) => {
+                if let Some(text) = plan.notice() {
+                    let path = session_dir.join(crate::plugins::NOTICE_FILE);
+                    match crate::mcp::write_private(&path, text.as_bytes()) {
+                        Ok(()) => launch
+                            .env
+                            .push((crate::plugins::NOTICE_ENV.into(), path.into_os_string())),
+                        Err(e) => {
+                            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not write the MCP notice")
+                        }
+                    }
+                }
+                plan.report()
+            }
+            None => serde_json::Value::Null,
+        };
         let events = Arc::new(Events {
             ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
             ended: Mutex::new(None),
@@ -998,6 +1039,7 @@ impl Host {
             events,
             sent: Mutex::new(0),
             running_sent: AtomicBool::new(false),
+            start_report,
             title_sent: Mutex::new((Title::default(), None)),
             harness_sent: Mutex::new(None),
             input,
@@ -1077,7 +1119,7 @@ impl Host {
                 match self
                     .post(
                         &format!("/v1/runtime/sessions/{}/status", s.id),
-                        &json!({"status": "running"}),
+                        &running_report(&s.start_report),
                     )
                     .await
                 {
@@ -1198,6 +1240,7 @@ impl Host {
         session: &str,
         provider: &str,
         grants: &[crate::mcp::McpGrant],
+        plugin_servers: &serde_json::Map<String, serde_json::Value>,
     ) -> Result<crate::mcp::LaunchExtras> {
         if grants.is_empty() {
             return Ok(Default::default());
@@ -1232,6 +1275,7 @@ impl Host {
                 &self.socket_address(),
                 &exe,
                 self.opencode_settings.as_ref(),
+                plugin_servers,
             )?
         };
         if extras != crate::mcp::LaunchExtras::default() {
@@ -1570,6 +1614,17 @@ fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
     let path = dir.join(name);
     std::fs::rename(&tmp, &path)?;
     Ok(path.to_string_lossy().into_owned())
+}
+
+/// The first `running` report, with the session's start report merged in.
+fn running_report(extra: &serde_json::Value) -> serde_json::Value {
+    let mut body = json!({"status": "running"});
+    if let (Some(body), Some(extra)) = (body.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            body.insert(k.clone(), v.clone());
+        }
+    }
+    body
 }
 
 /// A status body with the agent's own session id, once there is one.
@@ -2982,6 +3037,21 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         assert!(matches!(env.command, Command::Input { .. }));
         let env: Envelope = serde_json::from_str(r#"{"cmd_seq":5,"type":"refresh"}"#).unwrap();
         assert!(matches!(env.command, Command::Refresh));
+    }
+
+    /// Decision 131a: the first `running` report carries what the session
+    /// skipped; a session with nothing to report sends the plain one.
+    #[test]
+    fn the_running_report_carries_the_start_report() {
+        assert_eq!(
+            running_report(&serde_json::Value::Null),
+            json!({"status": "running"})
+        );
+        let extra = json!({"mcp_skipped": [{"name": "slack"}], "mcp_plugin_local": []});
+        let body = running_report(&extra);
+        assert_eq!(body["status"], "running");
+        assert_eq!(body["mcp_skipped"][0]["name"], "slack");
+        assert_eq!(body["mcp_plugin_local"], json!([]));
     }
 
     #[test]

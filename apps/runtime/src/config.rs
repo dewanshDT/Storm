@@ -40,6 +40,19 @@ pub struct RuntimeConfig {
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
     pub forbidden_roots: Vec<PathBuf>,
+    /// Whether a Claude Code session gets its enabled plugins' local (stdio)
+    /// MCP servers (decision 131b). A plugin's remote servers never load on
+    /// a host; they reach a session only through the gateway.
+    #[serde(default)]
+    pub plugin_mcp: PluginMcp,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PluginMcp {
+    #[default]
+    Allow,
+    Off,
 }
 
 fn default_max_sessions() -> u32 {
@@ -68,6 +81,7 @@ impl Default for RuntimeConfig {
             scrollback_bytes: default_scrollback(),
             path: None,
             forbidden_roots: default_forbidden(),
+            plugin_mcp: PluginMcp::default(),
         }
     }
 }
@@ -535,6 +549,15 @@ mod tests {
             toml::from_str::<RuntimeConfig>("bogus = 1").is_err(),
             "unknown keys refused"
         );
+    }
+
+    /// Decision 131b: plugin servers are allowed unless the host says off.
+    #[test]
+    fn plugin_mcp_defaults_to_allow() {
+        assert_eq!(RuntimeConfig::default().plugin_mcp, PluginMcp::Allow);
+        let off: RuntimeConfig = toml::from_str("plugin_mcp = \"off\"").unwrap();
+        assert_eq!(off.plugin_mcp, PluginMcp::Off);
+        assert!(toml::from_str::<RuntimeConfig>("plugin_mcp = \"maybe\"").is_err());
     }
 
     /// AM54: a workspace name is never a path on Windows either, whichever
