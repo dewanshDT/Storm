@@ -11,7 +11,9 @@
 //! - a session with no profile lists none;
 //! - Storm's `SessionStart` hook reports the conversation id through the
 //!   real `storm-runtime harness-session`, with the session's handle, and a
-//!   repository's own hooks never run.
+//!   repository's own hooks never run;
+//! - a plugin installed from a marketplace runs no hook, and one without
+//!   hooks keeps its server (130f).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader};
@@ -83,6 +85,57 @@ fn storms_codex_config_holds_against_the_real_binary() {
         .unwrap();
     assert!(login.success(), "codex login");
 
+    // 130f: plugins installed the way the account would install them, from a
+    // marketplace. Codex runs a plugin's hooks under Storm's trust bypass, so
+    // the one with a hook must be off; the one without keeps its server.
+    let market = tempfile::tempdir().unwrap();
+    let plugin_canary = ws.path().join("PLUGIN-HOOK-RAN");
+    let write = |path: &str, body: String| {
+        let path = market.path().join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    };
+    write(
+        ".claude-plugin/marketplace.json",
+        r#"{"name":"gate","owner":{"name":"gate"},"plugins":[
+            {"name":"hooked","source":"./hooked"},{"name":"plain","source":"./plain"}]}"#
+            .into(),
+    );
+    for name in ["hooked", "plain"] {
+        write(
+            &format!("{name}/.claude-plugin/plugin.json"),
+            format!(r#"{{"name":"{name}","version":"1.0.0"}}"#),
+        );
+    }
+    write(
+        "hooked/hooks/hooks.json",
+        format!(
+            r#"{{"hooks":{{"SessionStart":[{{"hooks":[{{"type":"command","command":"touch {}"}}]}}]}}}}"#,
+            plugin_canary.display()
+        ),
+    );
+    write(
+        "plain/.mcp.json",
+        r#"{"mcpServers":{"plain_server":{"command":"/bin/cat"}}}"#.into(),
+    );
+    for args in [
+        vec![
+            "plugin",
+            "marketplace",
+            "add",
+            &market.path().to_string_lossy(),
+        ],
+        vec!["plugin", "add", "hooked@gate"],
+        vec!["plugin", "add", "plain@gate"],
+    ] {
+        let out = codex_cmd(&bin, &home, user_home.path(), ws.path())
+            .args(&args)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "codex {args:?}: {out:?}");
+    }
+    codex::baseline(&home, ws.path(), Path::new(RUNTIME)).unwrap();
+
     let socket_dir = tempfile::tempdir().unwrap();
     let socket = socket_dir.path().join("mcp.sock");
     let grant = McpGrant {
@@ -109,6 +162,10 @@ fn storms_codex_config_holds_against_the_real_binary() {
     };
     let with = list(Some(&codex::profile_name("ags_GATE")));
     assert!(with.contains("storm"), "{with}");
+    assert!(
+        with.contains("plain_server"),
+        "a plugin without hooks lost its server: {with}"
+    );
     assert!(
         !with.contains("repo_server"),
         "a repository's server loaded: {with}"
@@ -182,4 +239,8 @@ fn storms_codex_config_holds_against_the_real_binary() {
         "{line}"
     );
     assert!(!canary.exists(), "a repository's hook ran");
+    assert!(
+        !plugin_canary.exists(),
+        "a plugin's hook ran under the trust bypass (130f)"
+    );
 }

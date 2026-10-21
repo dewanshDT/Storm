@@ -76,6 +76,11 @@ servers out of the session. Codex sessions run **without Codex's own
 sandbox**: it needs user namespaces, which this unit forbids, so the
 `storm-runtime` account is the boundary, as it is for every agent. Codex
 still asks before the commands it is unsure of and before every Storm tool.
+A **Codex plugin that has hooks is turned off** in Storm sessions: Storm
+starts Codex so that its own hook runs without review, and Codex would run a
+plugin's hooks the same way. Plugins without hooks work as usual; a plugin
+Storm cannot inspect, such as one synced from your ChatGPT account, stays
+off.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
 [Claude login sync](/docs/agents/claude-login/) (optional, for your own

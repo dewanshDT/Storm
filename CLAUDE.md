@@ -616,7 +616,12 @@ Specification*; the slices are decisions 81 and 81a onward):
   `mcp_servers`/`profiles`, only Storm's `SessionStart` hook (matcher
   `startup|clear`: Codex starts a resume's hook without feeding it), every
   workspace `untrusted` (a trusted one would load the repository's
-  `.codex/` servers and hooks). `--no-daemon` always: a shared daemon holds a
+  `.codex/` servers and hooks). **No plugin with hooks** (130f): Storm's
+  `--dangerously-bypass-hook-trust` reaches a plugin's hooks too, so any
+  plugin whose installed versions have a `hooks` entry or manifest key — or
+  that Storm cannot read — is `enabled = false`, and `plugins._default` is
+  off so an account-synced plugin never loads; `storm-plugins-off.json`
+  remembers what Storm turned off. `--no-daemon` always: a shared daemon holds a
   conversation's writer lock. **No Codex sandbox** (130c): it needs user
   namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
   forbids, and relaxing the unit would weaken every agent.
