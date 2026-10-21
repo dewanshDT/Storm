@@ -729,6 +729,7 @@ void main() {
       expect(cap({'id': 'claude-code'}).reachesStorm, isTrue);
       expect(cap({'id': 'shell'}).reachesStorm, isFalse);
       expect(providerLabel('command-code'), 'Command Code');
+      expect(providerLabel('codex'), 'Codex');
     });
 
     test('an old host is announced on the launch answer', () {

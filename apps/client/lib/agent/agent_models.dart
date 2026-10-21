@@ -41,6 +41,7 @@ class ProviderCap {
 String providerLabel(String id) => switch (id) {
   'claude-code' => 'Claude Code',
   'opencode' => 'OpenCode',
+  'codex' => 'Codex',
   'cursor' => 'Cursor',
   'command-code' => 'Command Code',
   'shell' => 'Shell',
@@ -243,7 +244,7 @@ class AgentSession {
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
-      (provider == 'claude-code' || provider == 'opencode');
+      const {'claude-code', 'opencode', 'codex'}.contains(provider);
   final SessionContext? context;
 
   /// The one vault it may write to; null is read only.

@@ -142,6 +142,23 @@ pub fn launch(
                 resume.map(str::to_string),
             ))
         }
+        // Codex's hook is in Storm's own `CODEX_HOME` (`codex.rs`), the same
+        // for every session; this session's handle reaches it through the
+        // environment it inherits.
+        "codex" => {
+            let args = match resume {
+                Some(id) => vec!["resume".into(), id.into()],
+                None => Vec::new(),
+            };
+            Ok((
+                LaunchExtras {
+                    args,
+                    env,
+                    ..Default::default()
+                },
+                resume.map(str::to_string),
+            ))
+        }
         _ => Ok((LaunchExtras::default(), None)),
     }
 }

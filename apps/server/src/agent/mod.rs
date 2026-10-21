@@ -1546,7 +1546,8 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
 /// (`docs/harness-session-vectors.json` keeps the two in agreement).
 pub fn valid_harness_session(provider: &str, id: &str) -> bool {
     match provider {
-        "claude-code" => {
+        // Codex's conversation ids are UUIDs too (v7; decision 130b).
+        "claude-code" | "codex" => {
             id.len() == 36
                 && id.bytes().enumerate().all(|(i, c)| match i {
                     8 | 13 | 18 | 23 => c == b'-',

@@ -52,7 +52,7 @@ pub fn session_dir(state_dir: &Path, session: &str) -> PathBuf {
 
 /// A slug is `[a-z0-9-]` (the server validates it); refused here too, since
 /// it becomes a config key and an argument.
-fn slug_ok(slug: &str) -> bool {
+pub(crate) fn slug_ok(slug: &str) -> bool {
     (1..=32).contains(&slug.len())
         && slug
             .bytes()

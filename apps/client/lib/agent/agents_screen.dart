@@ -854,7 +854,14 @@ class _AgentCards extends ConsumerWidget {
 
   final AgentOverview overview;
 
-  static const _order = ['claude-code', 'opencode', 'shell'];
+  static const _order = [
+    'claude-code',
+    'opencode',
+    'codex',
+    'cursor',
+    'command-code',
+    'shell',
+  ];
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {

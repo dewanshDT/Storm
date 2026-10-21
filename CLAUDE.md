@@ -608,6 +608,20 @@ Specification*; the slices are decisions 81 and 81a onward):
   grants nothing (`McpOutcome::Unsupported`) — Cursor and Command Code today;
   Command Code loads a repository's `.mcp.json` with no approval. No profile
   passes a flag that turns an agent's own permission prompts off.
+- **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
+  `<state>/agents/codex`, shared by its sessions so Resume finds a
+  conversation; a session's servers are in its own `-p` profile (`0600`,
+  removed at the end), each `default_tools_approval_mode = "prompt"`. Before
+  every launch Storm rewrites the keys it owns in that `config.toml`: no
+  `mcp_servers`/`profiles`, only Storm's `SessionStart` hook (matcher
+  `startup|clear`: Codex starts a resume's hook without feeding it), every
+  workspace `untrusted` (a trusted one would load the repository's
+  `.codex/` servers and hooks). `--no-daemon` always: a shared daemon holds a
+  conversation's writer lock. **No Codex sandbox** (130c): it needs user
+  namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
+  forbids, and relaxing the unit would weaken every agent.
+  `tests/codex_gate.rs` proves all of it against a real `codex` when
+  `STORM_CODEX_BIN` is set.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

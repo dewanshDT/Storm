@@ -373,6 +373,26 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('a Codex conversation resumes on a host that offers it '
+        '(decision 130b)', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [
+          agentHost(
+            providers: const ['claude-code', 'codex', 'shell'],
+            resumes: const ['claude-code', 'codex'],
+          ),
+        ],
+        sessions: [withConversation(provider: 'codex')],
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
+      await tester.tap(find.byKey(const Key('resume-session')));
+      await tester.pumpAndSettle();
+      final body = agents.launches.single;
+      expect(body['resume_of'], 'ags_done');
+      expect(body['provider'], 'codex');
+      await disposeShell(tester, c);
+    });
+
     testWidgets('Resume says why it is not offered', (tester) async {
       for (final (host, why) in [
         (
