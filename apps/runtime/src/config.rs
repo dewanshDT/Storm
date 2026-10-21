@@ -40,8 +40,8 @@ pub struct RuntimeConfig {
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
     pub forbidden_roots: Vec<PathBuf>,
-    /// Whether a Claude Code session gets its enabled plugins' local (stdio)
-    /// MCP servers (decision 131b). A plugin's remote servers never load on
+    /// Whether a Claude Code or Codex session gets its enabled plugins' local
+    /// (stdio) MCP servers (decision 131b). A plugin's remote servers never load on
     /// a host; they reach a session only through the gateway.
     #[serde(default)]
     pub plugin_mcp: PluginMcp,

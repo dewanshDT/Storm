@@ -80,7 +80,10 @@ A **Codex plugin that has hooks is turned off** in Storm sessions: Storm
 starts Codex so that its own hook runs without review, and Codex would run a
 plugin's hooks the same way. Plugins without hooks work as usual; a plugin
 Storm cannot inspect, such as one synced from your ChatGPT account, stays
-off.
+off. A plugin's **remote** MCP servers are off too (add them as
+[integrations](/docs/agents/integrations/) instead, where Storm keeps the
+sign-in), and so are **ChatGPT apps**. Codex shows what Storm turned off when
+the conversation starts, with your first message.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
 [Claude login sync](/docs/agents/claude-login/) (optional, for your own

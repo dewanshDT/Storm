@@ -13,7 +13,7 @@
 //!   real `storm-runtime harness-session`, with the session's handle, and a
 //!   repository's own hooks never run;
 //! - a plugin installed from a marketplace runs no hook, and one without
-//!   hooks keeps its server (130f).
+//!   hooks keeps its server (130f) but not its remote one (131i).
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader};
@@ -68,7 +68,7 @@ fn storms_codex_config_holds_against_the_real_binary() {
     .unwrap();
 
     let home = codex::home(state.path());
-    codex::baseline(&home, ws.path(), Path::new(RUNTIME)).unwrap();
+    codex::baseline(&home, ws.path(), Path::new(RUNTIME), true).unwrap();
     let login = codex_cmd(&bin, &home, user_home.path(), ws.path())
         .args(["login", "--with-api-key"])
         .stdin(Stdio::piped())
@@ -116,7 +116,7 @@ fn storms_codex_config_holds_against_the_real_binary() {
     );
     write(
         "plain/.mcp.json",
-        r#"{"mcpServers":{"plain_server":{"command":"/bin/cat"}}}"#.into(),
+        r#"{"mcpServers":{"plain_server":{"command":"/bin/cat"},"plain_remote":{"type":"http","url":"https://mcp.slack.com/mcp"}}}"#.into(),
     );
     for args in [
         vec![
@@ -134,7 +134,7 @@ fn storms_codex_config_holds_against_the_real_binary() {
             .unwrap();
         assert!(out.status.success(), "codex {args:?}: {out:?}");
     }
-    codex::baseline(&home, ws.path(), Path::new(RUNTIME)).unwrap();
+    codex::baseline(&home, ws.path(), Path::new(RUNTIME), true).unwrap();
 
     let socket_dir = tempfile::tempdir().unwrap();
     let socket = socket_dir.path().join("mcp.sock");
@@ -166,6 +166,12 @@ fn storms_codex_config_holds_against_the_real_binary() {
         with.contains("plain_server"),
         "a plugin without hooks lost its server: {with}"
     );
+    // 131i: its remote server is listed, and off.
+    let remote = with
+        .lines()
+        .find(|l| l.contains("plain_remote"))
+        .unwrap_or_else(|| panic!("no plain_remote in {with}"));
+    assert!(remote.contains("disabled"), "{remote}");
     assert!(
         !with.contains("repo_server"),
         "a repository's server loaded: {with}"
