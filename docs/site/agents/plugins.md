@@ -63,6 +63,10 @@ repository's config files, Storm reads **server names only**, to name them.
 The Slack plugin's server is remote, and Slack does not let other apps
 register themselves, so you add it with **your own Slack app**:
 
+> These steps haven't been tried against Slack's own server yet. If Slack
+> refuses Storm's redirect, or its server refuses your app's sign-in, please
+> [open an issue](https://github.com/dewanshDT/Storm/issues).
+
 1. In **Settings › Integrations**, find Slack under **From your plugins** and
    choose **Add** (or add `https://mcp.slack.com/mcp` yourself), with
    **Sign in**.
