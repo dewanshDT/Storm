@@ -9,6 +9,8 @@ configuration it would give the real CLI (AM32). It:
   (Claude Code), or `$XDG_CONFIG_HOME/opencode/opencode.json` (OpenCode) —
   and starts every stdio server in it, which is `storm-runtime mcp-bridge`;
 - copies every line each bridge writes to `transcript-<slug>.jsonl`;
+- answers `plugin list --json` as Claude Code would, with one plugin that
+  declares a remote server (decision 131);
 - sends whatever the suite drops into `inbox/` (`NNN.json`:
   `{"slug": …, "message": …}`) to that bridge, in order.
 
@@ -79,5 +81,24 @@ def main():
         time.sleep(0.05)
 
 
+# A header value a plugin declares. It must reach no report, log or store.
+PLUGIN_CANARY = "plugin-header-canary-131"
+
+
+def plugin_list():
+    """`claude plugin list --json`, which the host runs to find plugins'
+    MCP servers (decision 131): one enabled plugin with a remote server."""
+    print(json.dumps([{
+        "id": "e2eplug@m", "enabled": True, "projectEnabled": False,
+        "installPath": "/nowhere", "version": "1.0.0",
+        "mcpServers": {"remote": {
+            "type": "http", "url": "https://e2e-remote.example.com/mcp",
+            "headers": {"Authorization": "Bearer ${E2E_TOKEN}", "X-Key": PLUGIN_CANARY}}},
+    }]))
+
+
 if __name__ == "__main__":
+    if sys.argv[1:4] == ["plugin", "list", "--json"]:
+        plugin_list()
+        sys.exit(0)
     main()

@@ -528,6 +528,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/integrations/oauth/callback",
             post(integrations_callback),
         )
+        // Remote servers the owner's agents' plugins declare (decision 131g).
+        .route(
+            "/v1/integrations/suggestions",
+            get(integrations_suggestions),
+        )
+        .route(
+            "/v1/integrations/suggestions/dismiss",
+            post(integrations_dismiss_suggestion),
+        )
         // Token sync (decision 124n): owner only, session tier. No route here
         // returns the token.
         .route(
@@ -1545,6 +1554,22 @@ async fn integrations_create(
 ) -> ApiResult<(StatusCode, Json<crate::ops::IntegrationView>)> {
     let view = crate::ops::create_integration(&state, &actor, body).await?;
     Ok((StatusCode::CREATED, Json(view)))
+}
+
+async fn integrations_suggestions(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::PluginSuggestion>>> {
+    Ok(Json(crate::ops::plugin_suggestions(&state, &actor).await?))
+}
+
+async fn integrations_dismiss_suggestion(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::DismissSuggestion>,
+) -> ApiResult<StatusCode> {
+    crate::ops::dismiss_suggestion(&state, &actor, body).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn integrations_get(
@@ -7395,6 +7420,269 @@ pub(crate) mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         body
+    }
+
+    /// `GET /v1/integrations/suggestions`, answering the host's `refresh`
+    /// with `caps`: the route asks for a fresh inventory before it lists.
+    async fn suggestions(f: &mut GatewayFixture, caps: &serde_json::Value) -> serde_json::Value {
+        let GatewayFixture {
+            app,
+            state,
+            owner_bearer,
+            host_id,
+            link,
+            ..
+        } = f;
+        let get = send(
+            app,
+            get_with_auth("/v1/integrations/suggestions", owner_bearer),
+        );
+        let answer = async {
+            while let Some(envelope) = link.recv().await {
+                if serde_json::to_value(&envelope).unwrap()["type"] == "refresh" {
+                    state
+                        .agent
+                        .inventory(host_id, serde_json::from_value(caps.clone()).unwrap())
+                        .unwrap();
+                    break;
+                }
+            }
+        };
+        let ((status, body), ()) = tokio::join!(get, answer);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        body
+    }
+
+    fn suggested(list: &serde_json::Value) -> Vec<String> {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s["plugin"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// 131g, 131h: a host's remote plugin servers are suggested once per URL,
+    /// minus what the owner added or dismissed and anything malformed; one
+    /// added from a suggestion keeps its plugin origin and its reporting
+    /// host, and its grant carries the origin down to the host.
+    #[tokio::test]
+    async fn remote_plugin_servers_are_suggested_and_one_added_keeps_its_origin() {
+        let dir = tempdir::TempDir::new("storm-plugin-suggestions").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, mock) = f.get(&format!("{CONNECTIONS}/{}", f.connection)).await;
+        let remote = |agent: &str, plugin: &str, server: &str, url: &str, hint: Option<&str>| {
+            serde_json::json!({"agent": agent, "plugin": plugin, "server": server,
+                "transport": "http", "url": url, "templated": url.contains("${"), "auth_hint": hint})
+        };
+        let mut caps = host_caps(true);
+        caps["plugin_mcp_remote"] = serde_json::json!([
+            remote(
+                "claude-code",
+                "slack",
+                "slack",
+                "https://mcp.slack.com/mcp",
+                Some("vendor_client")
+            ),
+            remote(
+                "codex",
+                "slack",
+                "slack",
+                "https://MCP.slack.com/mcp/",
+                None
+            ),
+            remote(
+                "claude-code",
+                "linear",
+                "linear",
+                "https://mcp.linear.app/mcp",
+                Some("header:Bad Name")
+            ),
+            remote(
+                "claude-code",
+                "jfrog",
+                "jfrog",
+                "${JFROG_URL}/mcp",
+                Some("header:Authorization")
+            ),
+            remote(
+                "claude-code",
+                "mine",
+                "mine",
+                mock["url"].as_str().unwrap(),
+                None
+            ),
+            remote(
+                "claude-code",
+                "bad name",
+                "x",
+                "https://bad.example.com/mcp",
+                None
+            ),
+            remote(
+                "claude-code",
+                "plain",
+                "plain",
+                "http://203.0.113.9/mcp",
+                None
+            ),
+        ]);
+        f.state.gateway.set_allow_http_upstreams(false);
+
+        let list = suggestions(&mut f, &caps).await;
+        assert_eq!(suggested(&list), ["jfrog", "linear", "slack"], "{list}");
+        let slack = &list[2];
+        assert_eq!(slack["url"], "https://mcp.slack.com/mcp");
+        assert_eq!(slack["agents"], serde_json::json!(["claude-code", "codex"]));
+        assert_eq!(slack["hosts"], serde_json::json!([f.host_id]));
+        assert_eq!(slack["auth_hint"], "vendor_client");
+        assert_eq!(list[0]["templated"], true);
+        assert_eq!(list[0]["auth_hint"], "header:Authorization");
+        assert_eq!(
+            list[1]["auth_hint"],
+            serde_json::Value::Null,
+            "a bad hint is dropped"
+        );
+
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/integrations/suggestions/dismiss",
+                serde_json::json!({"plugin": "linear", "server": "linear", "url": "https://mcp.linear.app/mcp/"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(
+            suggested(&suggestions(&mut f, &caps).await),
+            ["jfrog", "slack"]
+        );
+
+        let (status, added) = send(
+            &f.app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Slack", "url": "https://mcp.slack.com/mcp",
+                    "auth_kind": "none", "plugin_origin": {"plugin": "slack", "server": "slack"},
+                    "hosts": [f.host_id]}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED, "{added}");
+        assert_eq!(
+            added["plugin_origin"],
+            serde_json::json!({"plugin": "slack", "server": "slack"})
+        );
+        assert_eq!(added["hosts"], serde_json::json!([f.host_id]));
+        let slack_id = added["id"].as_str().unwrap().to_string();
+        let (_, again) = f.get(&format!("{CONNECTIONS}/{slack_id}")).await;
+        assert_eq!(again["plugin_origin"]["plugin"], "slack");
+        assert_eq!(suggested(&suggestions(&mut f, &caps).await), ["jfrog"]);
+
+        f.launch("claude-code", false).await;
+        let start = loop {
+            let envelope = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+            if envelope["type"] == "start" {
+                break envelope;
+            }
+        };
+        let grant = start["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == slack_id.as_str())
+            .unwrap()
+            .clone();
+        assert_eq!(
+            grant["plugin_origin"],
+            serde_json::json!({"plugin": "slack", "server": "slack"})
+        );
+        let mock_grant = start["mcp"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|g| g["id"] == f.connection.as_str())
+            .unwrap()
+            .clone();
+        assert!(mock_grant.get("plugin_origin").is_none(), "{mock_grant}");
+
+        for bad in [
+            serde_json::json!({"plugin": "a b", "server": "x"}),
+            serde_json::json!({"plugin": "", "server": "x"}),
+        ] {
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    CONNECTIONS,
+                    serde_json::json!({"display_name": "Odd", "url": "https://odd.example.com/mcp",
+                        "auth_kind": "none", "plugin_origin": bad}),
+                    &f.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                CONNECTIONS,
+                serde_json::json!({"display_name": "Nowhere", "url": "https://nowhere.example.com/mcp",
+                    "auth_kind": "none", "hosts": ["rh_missing"]}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a create's hosts are checked"
+        );
+    }
+
+    /// 131a: the first `running` report's skipped servers stay with the
+    /// session, bounded, and a later report never replaces them.
+    #[tokio::test]
+    async fn a_sessions_skipped_servers_are_kept_from_its_first_report() {
+        let dir = tempdir::TempDir::new("storm-mcp-notice").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let launched = f.launch("claude-code", false).await;
+        let id = launched["id"].as_str().unwrap().to_string();
+        let (_, before) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+        assert!(before.get("mcp_skipped").is_none(), "{before}");
+        let long = "r".repeat(1000);
+        for (skipped, local) in [
+            (
+                serde_json::json!([{"name": "slack", "source": "plugin slack", "reason": long}]),
+                serde_json::json!(["plugin_pw_playwright"]),
+            ),
+            (
+                serde_json::json!([{"name": "later", "source": "x", "reason": "y"}]),
+                serde_json::json!([]),
+            ),
+        ] {
+            let (code, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{id}/status"),
+                    serde_json::json!({"status": "running", "mcp_skipped": skipped, "mcp_plugin_local": local}),
+                    &f.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success(), "{code} {body}");
+        }
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+        assert_eq!(view["mcp_skipped"][0]["name"], "slack", "{view}");
+        assert_eq!(view["mcp_skipped"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            view["mcp_skipped"][0]["reason"].as_str().unwrap().len(),
+            256
+        );
+        assert_eq!(
+            view["mcp_plugin_local"],
+            serde_json::json!(["plugin_pw_playwright"])
+        );
     }
 
     #[tokio::test]

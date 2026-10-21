@@ -1863,6 +1863,12 @@ pub struct SessionView {
     pub wrote_count: i64,
     /// What it was granted at launch, named as then; Storm itself is not one.
     pub integrations: Vec<crate::agent::store::SessionIntegration>,
+    /// The MCP servers its host said it would not have, and why (131a).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_skipped: Vec<crate::agent::SkippedServer>,
+    /// Its plugins' local servers, which run outside the gateway (131a).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcp_plugin_local: Vec<String>,
 }
 
 fn session_view(
@@ -1872,6 +1878,8 @@ fn session_view(
     let launch = state.agent.launch_of(&session.id).map_err(internal)?;
     let wrote_count = state.agent.write_count(&session.id).map_err(internal)?;
     let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
+    let (mcp_skipped, mcp_plugin_local) =
+        state.agent.mcp_notice_of(&session.id).map_err(internal)?;
     // A session launched before names existed is called by its workspace.
     let (name, context, write_vault_id) = match launch {
         Some(l) => (l.name, l.context, l.write_vault_id),
@@ -1884,6 +1892,8 @@ fn session_view(
         write_vault_id,
         wrote_count,
         integrations,
+        mcp_skipped,
+        mcp_plugin_local,
     })
 }
 
@@ -1959,17 +1969,24 @@ pub async fn launch_session(
     // Every non-disabled connection of the owner scoped to this host, plus
     // `storm` (spec §6, G-D9, decision 121). Snapshotted here; the manager
     // drops them for `shell` and for a host that cannot bridge.
-    let connections = {
+    let (connections, mut origins) = {
         let store = gateway_store(state);
         let mut out = Vec::new();
+        let mut origins = std::collections::HashMap::new();
         for c in store.connections_of(actor.user_id()).map_err(internal)? {
             if c.status != status::DISABLED
                 && store.in_host_scope(&c.id, &req.host_id).map_err(internal)?
             {
+                if let Some((plugin, server)) = store.plugin_origin(&c.id).map_err(internal)? {
+                    origins.insert(
+                        c.id.clone(),
+                        crate::agent::store::PluginOrigin { plugin, server },
+                    );
+                }
                 out.push(c);
             }
         }
-        out
+        (out, origins)
     };
     let meta = crate::agent::LaunchMeta {
         context,
@@ -1983,11 +2000,13 @@ pub async fn launch_session(
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
         slug: BUILTIN_SLUG.into(),
+        plugin_origin: None,
     }];
     offered.extend(
         connections
             .into_iter()
             .map(|c| crate::agent::store::McpGrant {
+                plugin_origin: origins.remove(&c.id),
                 id: c.id,
                 slug: c.slug,
             }),
@@ -2048,6 +2067,8 @@ pub async fn launch_session(
             write_vault_id: launch.write_vault_id.clone(),
             wrote_count: 0,
             integrations,
+            mcp_skipped: Vec::new(),
+            mcp_plugin_local: Vec::new(),
         },
         mcp: LaunchMcp {
             connections,
@@ -2320,6 +2341,9 @@ pub struct IntegrationView {
     pub expose_prompts: bool,
     /// The Runtime Hosts whose sessions may use it (decision 121).
     pub hosts: HostScope,
+    /// The plugin server it was added from (decision 131h).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plugin_origin: Option<crate::agent::store::PluginOrigin>,
     pub upstream_account_label: Option<String>,
     pub last_ok: Option<String>,
     pub last_error_code: Option<String>,
@@ -2393,6 +2417,7 @@ fn builtin_view(state: &Shared) -> IntegrationView {
         expose_resources: false,
         expose_prompts: false,
         hosts: HostScope::all(),
+        plugin_origin: None,
         upstream_account_label: None,
         last_ok: None,
         last_error_code: None,
@@ -2427,6 +2452,7 @@ fn integration_view(
         expose_resources: c.expose_resources,
         expose_prompts: c.expose_prompts,
         hosts,
+        plugin_origin: None,
         upstream_account_label: c.upstream_account_label,
         last_ok: c.last_ok,
         last_error_code: c.last_error_code,
@@ -2437,20 +2463,19 @@ fn integration_view(
 }
 
 fn view_of(state: &Shared, c: Connection) -> ApiResult<IntegrationView> {
-    let (held, new_tools, hosts) = {
+    let (held, new_tools, hosts, origin) = {
         let store = gateway_store(state);
         (
             store.has_credential(&c.id).map_err(internal)?,
             store.new_tools(&c.id).map_err(internal)?,
             store.connection_hosts(&c.id).map_err(internal)?,
+            store.plugin_origin(&c.id).map_err(internal)?,
         )
     };
-    Ok(integration_view(
-        c,
-        held,
-        new_tools,
-        HostScope::from_rows(hosts),
-    ))
+    let mut view = integration_view(c, held, new_tools, HostScope::from_rows(hosts));
+    view.plugin_origin =
+        origin.map(|(plugin, server)| crate::agent::store::PluginOrigin { plugin, server });
+    Ok(view)
 }
 
 /// The gateway's store. A `std::sync::Mutex`: never hold the guard across an
@@ -2545,6 +2570,42 @@ pub struct NewIntegration {
     pub auth_kind: String,
     #[serde(default)]
     pub credential: Option<StaticCredential>,
+    /// The plugin server it is added from (decision 131h): Claude Code then
+    /// names its bridge as the plugin does.
+    #[serde(default)]
+    pub plugin_origin: Option<crate::agent::store::PluginOrigin>,
+    /// Its host scope from the start (decision 121); every host when left
+    /// out. A suggestion is added scoped to the hosts that reported it.
+    #[serde(default)]
+    pub hosts: Option<HostScope>,
+}
+
+/// A plugin's or a plugin server's name as an agent declares it (131g, 131h).
+fn validate_plugin_name(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(format!("not a plugin or server name: {name:?}"))
+    }
+}
+
+/// The scope's host ids, each a live host of this server's; an empty list is
+/// every host (decision 121).
+async fn checked_hosts(state: &Shared, scope: HostScope) -> ApiResult<Vec<String>> {
+    let ids = scope.into_rows().map_err(bad_request)?;
+    let auth_db = state.auth_db.lock().await;
+    for host in &ids {
+        match auth_db.host_by_id(host).map_err(internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(bad_request(format!("no such host: {host}"))),
+        }
+    }
+    Ok(ids)
 }
 
 /// Connects an integration. V1 here takes `static` (a header, G-D24's PAT)
@@ -2582,6 +2643,14 @@ pub async fn create_integration(
         }
         _ => return Err(bad_request("auth_kind is static or none")),
     }
+    if let Some(o) = &req.plugin_origin {
+        validate_plugin_name(&o.plugin).map_err(bad_request)?;
+        validate_plugin_name(&o.server).map_err(bad_request)?;
+    }
+    let hosts = match req.hosts.clone() {
+        Some(scope) => checked_hosts(state, scope).await?,
+        None => Vec::new(),
+    };
 
     let now = crate::index::now_rfc3339();
     let c = Connection {
@@ -2612,7 +2681,14 @@ pub async fn create_integration(
         None => None,
     };
     gateway_store(state)
-        .insert_connection(&c, sealed.as_ref().map(|s| (credential_kind::STATIC, s)))
+        .insert_connection_with(
+            &c,
+            sealed.as_ref().map(|s| (credential_kind::STATIC, s)),
+            req.plugin_origin
+                .as_ref()
+                .map(|o| (o.plugin.as_str(), o.server.as_str())),
+            &hosts,
+        )
         .map_err(|e| match e {
             crate::gateway::store::InsertError::SlugTaken => conflict(e.to_string()),
             crate::gateway::store::InsertError::Other(e) => internal(e),
@@ -2621,12 +2697,182 @@ pub async fn create_integration(
         let auth_db = state.auth_db.lock().await;
         integration_event(&auth_db, "integration_created", actor, &c, &now, None);
     }
-    Ok(integration_view(
-        c,
-        sealed.is_some(),
-        Vec::new(),
-        HostScope::all(),
-    ))
+    let mut view = integration_view(c, sealed.is_some(), Vec::new(), HostScope::from_rows(hosts));
+    view.plugin_origin = req.plugin_origin;
+    Ok(view)
+}
+
+/// A remote server one of the owner's agents' plugins declares, not yet an
+/// integration (decision 131g). Reported by hosts; nothing in it is a secret.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginSuggestion {
+    pub plugin: String,
+    pub server: String,
+    pub url: String,
+    /// The URL needs a value from the host's environment (`${…}`): the owner
+    /// gives the address.
+    pub templated: bool,
+    /// `header:<Name>` (a token header the plugin fills from the
+    /// environment) or `vendor_client` (it carries a vendor's own OAuth
+    /// client, which Storm does not use).
+    pub auth_hint: Option<String>,
+    pub agents: Vec<String>,
+    pub hosts: Vec<String>,
+}
+
+/// How long the suggestions wait for hosts' fresh inventories; a host that
+/// is slower is listed as it last reported.
+const SUGGESTION_REFRESH: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// One spelling per upstream, so a server reported as `https://X.com/mcp/`
+/// is the integration at `https://x.com/mcp`. A URL that does not parse is
+/// its own spelling.
+fn normalized_url(url: &str) -> String {
+    match url::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_fragment(None);
+            let path = u.path().trim_end_matches('/').to_string();
+            u.set_path(&path);
+            u.to_string().trim_end_matches('/').to_string()
+        }
+        Err(_) => url.to_string(),
+    }
+}
+
+fn suggestion_hint(hint: Option<&str>) -> Option<String> {
+    match hint? {
+        "vendor_client" => Some("vendor_client".into()),
+        h => {
+            let name = h.strip_prefix("header:")?;
+            (!name.is_empty()
+                && name.len() <= 128
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .then(|| h.to_string())
+        }
+    }
+}
+
+/// The owner's suggestions (decision 131g): every remote plugin server a live
+/// host reports, one per URL, unless an integration already has that URL or
+/// was added from that plugin server, or the owner dismissed it.
+pub async fn plugin_suggestions(state: &Shared, actor: &Actor) -> ApiResult<Vec<PluginSuggestion>> {
+    let hosts: Vec<String> = {
+        let auth_db = state.auth_db.lock().await;
+        auth_db
+            .list_hosts()
+            .map_err(internal)?
+            .into_iter()
+            .filter(|h| !h.is_revoked())
+            .map(|h| h.id)
+            .collect()
+    };
+    let mut refreshes = tokio::task::JoinSet::new();
+    for id in hosts.iter().filter(|id| state.agent.host_live(id).online) {
+        let (state, id) = (state.clone(), id.clone());
+        refreshes.spawn(async move { state.agent.refresh_and_wait(&id, SUGGESTION_REFRESH).await });
+    }
+    while refreshes.join_next().await.is_some() {}
+
+    let allow_http = state.gateway.allow_http_upstreams();
+    let (added_urls, added_origins, dismissed) = {
+        let store = gateway_store(state);
+        let mut urls = std::collections::HashSet::new();
+        let mut origins = std::collections::HashSet::new();
+        for c in store.connections_of(actor.user_id()).map_err(internal)? {
+            if let Some(origin) = store.plugin_origin(&c.id).map_err(internal)? {
+                origins.insert(origin);
+            }
+            urls.insert(normalized_url(&c.url));
+        }
+        let dismissed: std::collections::HashSet<(String, String, String)> = store
+            .dismissed_suggestions(actor.user_id())
+            .map_err(internal)?
+            .into_iter()
+            .map(|(p, s, u)| (p, s, normalized_url(&u)))
+            .collect();
+        (urls, origins, dismissed)
+    };
+    let mut out: std::collections::BTreeMap<String, PluginSuggestion> = Default::default();
+    for host in &hosts {
+        let Some(caps) = state.agent.host_live(host).capabilities else {
+            continue;
+        };
+        for r in caps.plugin_mcp_remote {
+            let templated = r.url.contains("${");
+            if validate_plugin_name(&r.plugin).is_err()
+                || validate_plugin_name(&r.server).is_err()
+                || r.agent.len() > 32
+                || r.url.len() > 2048
+                || (!templated && conn::validate_url(&r.url, allow_http).is_err())
+            {
+                continue;
+            }
+            let key = normalized_url(&r.url);
+            if added_urls.contains(&key)
+                || added_origins.contains(&(r.plugin.clone(), r.server.clone()))
+                || dismissed.contains(&(r.plugin.clone(), r.server.clone(), key.clone()))
+            {
+                continue;
+            }
+            let s = out.entry(key).or_insert_with(|| PluginSuggestion {
+                plugin: r.plugin.clone(),
+                server: r.server.clone(),
+                url: r.url.clone(),
+                templated,
+                auth_hint: None,
+                agents: Vec::new(),
+                hosts: Vec::new(),
+            });
+            if s.auth_hint.is_none() {
+                s.auth_hint = suggestion_hint(r.auth_hint.as_deref());
+            }
+            if !s.agents.contains(&r.agent) {
+                s.agents.push(r.agent.clone());
+            }
+            if !s.hosts.contains(host) {
+                s.hosts.push(host.clone());
+            }
+        }
+    }
+    let mut list: Vec<PluginSuggestion> = out.into_values().collect();
+    for s in &mut list {
+        s.agents.sort();
+        s.hosts.sort();
+    }
+    list.sort_by(|a, b| (&a.plugin, &a.server, &a.url).cmp(&(&b.plugin, &b.server, &b.url)));
+    Ok(list)
+}
+
+/// The body of `POST /v1/integrations/suggestions/dismiss`.
+#[derive(Deserialize)]
+pub struct DismissSuggestion {
+    pub plugin: String,
+    pub server: String,
+    pub url: String,
+}
+
+/// Hides a suggestion from the owner for good (decision 131g).
+pub async fn dismiss_suggestion(
+    state: &Shared,
+    actor: &Actor,
+    req: DismissSuggestion,
+) -> ApiResult<()> {
+    validate_plugin_name(&req.plugin).map_err(bad_request)?;
+    validate_plugin_name(&req.server).map_err(bad_request)?;
+    if req.url.is_empty() || req.url.len() > 2048 {
+        return Err(bad_request("a suggestion's url is 1 to 2048 characters"));
+    }
+    gateway_store(state)
+        .dismiss_suggestion(
+            actor.user_id(),
+            &req.plugin,
+            &req.server,
+            &req.url,
+            &crate::index::now_rfc3339(),
+        )
+        .map_err(internal)
 }
 
 /// The request body of `PATCH /v1/integrations/connections/{id}`; every
@@ -2662,17 +2908,7 @@ pub async fn update_integration(
     let mut c = own_connection(state, actor, id)?;
     let hosts = match patch.hosts.clone() {
         None => None,
-        Some(scope) => {
-            let ids = scope.into_rows().map_err(bad_request)?;
-            let auth_db = state.auth_db.lock().await;
-            for host in &ids {
-                match auth_db.host_by_id(host).map_err(internal)? {
-                    Some(h) if !h.is_revoked() => {}
-                    _ => return Err(bad_request(format!("no such host: {host}"))),
-                }
-            }
-            Some(ids)
-        }
+        Some(scope) => Some(checked_hosts(state, scope).await?),
     };
     if let Some(name) = &patch.display_name {
         conn::validate_display_name(name).map_err(bad_request)?;

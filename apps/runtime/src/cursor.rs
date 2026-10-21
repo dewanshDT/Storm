@@ -159,6 +159,7 @@ mod tests {
         McpGrant {
             id: format!("mcc_{slug}"),
             slug: slug.into(),
+            plugin_origin: None,
         }
     }
 

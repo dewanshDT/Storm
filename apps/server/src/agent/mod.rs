@@ -188,6 +188,32 @@ pub struct Capabilities {
     /// host says nothing and is never told to pull.
     #[serde(default)]
     pub provider_credentials: Vec<String>,
+    /// The remote servers the host's agents' plugins declare (decision
+    /// 131g), for the owner's suggestions. An old host says nothing.
+    #[serde(default)]
+    pub plugin_mcp_remote: Vec<PluginRemote>,
+}
+
+/// At most this many entries in each of a session's 131a lists.
+const MCP_NOTICE_MAX: usize = 200;
+
+/// A plugin's remote MCP server as a host reports it (131g). The URL as
+/// declared, unexpanded; at most the *name* of a header the plugin fills
+/// from the environment. Never a header value, env value or client id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRemote {
+    pub agent: String,
+    pub plugin: String,
+    #[serde(default)]
+    pub plugin_version: Option<String>,
+    pub server: String,
+    #[serde(default)]
+    pub transport: String,
+    pub url: String,
+    #[serde(default)]
+    pub templated: bool,
+    #[serde(default)]
+    pub auth_hint: Option<String>,
 }
 
 impl Capabilities {
@@ -252,6 +278,21 @@ pub struct StatusReport {
     /// nothing.
     #[serde(default)]
     pub harness_session: Option<String>,
+    /// The MCP servers the session will not have, and why (131a); carried by
+    /// the first `running` report only.
+    #[serde(default)]
+    pub mcp_skipped: Option<Vec<SkippedServer>>,
+    /// The plugins' local servers it runs outside the gateway (131a).
+    #[serde(default)]
+    pub mcp_plugin_local: Option<Vec<String>>,
+}
+
+/// One server a session will not have (131a), by name only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkippedServer {
+    pub name: String,
+    pub source: String,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -829,9 +870,55 @@ impl AgentManager {
             );
         }
         self.store.lock().unwrap().update(&r)?;
+        if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
+            self.record_mcp_notice(session_id, report)?;
+        }
         self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
+    }
+
+    /// The host's word on what the session will not have (131a): bounded, so
+    /// a host cannot grow a session's row without limit.
+    fn record_mcp_notice(&self, session_id: &str, report: &StatusReport) -> AgentResult<()> {
+        let text = |s: &str| s.chars().take(256).collect::<String>();
+        let skipped: Vec<SkippedServer> = report
+            .mcp_skipped
+            .iter()
+            .flatten()
+            .take(MCP_NOTICE_MAX)
+            .map(|s| SkippedServer {
+                name: text(&s.name),
+                source: text(&s.source),
+                reason: text(&s.reason),
+            })
+            .collect();
+        let local: Vec<String> = report
+            .mcp_plugin_local
+            .iter()
+            .flatten()
+            .take(MCP_NOTICE_MAX)
+            .map(|s| text(s))
+            .collect();
+        self.store.lock().unwrap().record_mcp_notice(
+            session_id,
+            &serde_json::to_string(&skipped).map_err(anyhow::Error::from)?,
+            &serde_json::to_string(&local).map_err(anyhow::Error::from)?,
+            &now(),
+        )?;
+        Ok(())
+    }
+
+    /// What the session's host said it would not have, and the plugins'
+    /// local servers it runs (131a); empty for a session from an older host.
+    pub fn mcp_notice_of(&self, session_id: &str) -> Result<(Vec<SkippedServer>, Vec<String>)> {
+        let Some((skipped, local)) = self.store.lock().unwrap().mcp_notice(session_id)? else {
+            return Ok(Default::default());
+        };
+        Ok((
+            serde_json::from_str(&skipped).unwrap_or_default(),
+            serde_json::from_str(&local).unwrap_or_default(),
+        ))
     }
 
     // ---- what clients do -------------------------------------------------
@@ -1605,6 +1692,7 @@ mod tests {
             images: true,
             resume: vec!["claude-code".into(), "opencode".into()],
             provider_credentials: Vec::new(),
+            plugin_mcp_remote: Vec::new(),
         }
     }
 
@@ -1631,10 +1719,12 @@ mod tests {
             McpGrant {
                 id: "storm".into(),
                 slug: "storm".into(),
+                plugin_origin: None,
             },
             McpGrant {
                 id: "mcc_GH".into(),
                 slug: "github".into(),
+                plugin_origin: None,
             },
         ]
     }
@@ -1704,6 +1794,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: Some(harness.into()),
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -1831,6 +1923,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: None,
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -2344,6 +2438,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: None,
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -2359,6 +2455,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: None,
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -2379,6 +2477,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: None,
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -2463,6 +2563,8 @@ mod tests {
                 title: None,
                 activity: None,
                 harness_session: None,
+                mcp_skipped: None,
+                mcp_plugin_local: None,
             },
         )
         .unwrap();
@@ -2583,6 +2685,8 @@ mod tests {
                         title: None,
                         activity: None,
                         harness_session: None,
+                        mcp_skipped: None,
+                        mcp_plugin_local: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -2614,6 +2718,8 @@ mod tests {
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
             harness_session: None,
+            mcp_skipped: None,
+            mcp_plugin_local: None,
             signal: None,
         }
     }
@@ -2914,6 +3020,8 @@ mod tests {
                     title: None,
                     activity: None,
                     harness_session: None,
+                    mcp_skipped: None,
+                    mcp_plugin_local: None,
                 },
             )
             .unwrap();

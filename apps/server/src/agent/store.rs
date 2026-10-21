@@ -57,6 +57,17 @@ impl SessionRecord {
 pub struct McpGrant {
     pub id: String,
     pub slug: String,
+    /// The plugin server this connection was added from (131h). An older
+    /// side leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_origin: Option<PluginOrigin>,
+}
+
+/// A plugin's server, by the plugin's name and the server's (131h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginOrigin {
+    pub plugin: String,
+    pub server: String,
 }
 
 /// An integration a session was granted, as it was named at launch.
@@ -214,6 +225,15 @@ impl Store {
                  slug          TEXT NOT NULL,
                  display_name  TEXT NOT NULL,
                  PRIMARY KEY (session_id, connection_id)
+             );
+
+             -- What a session's host said it would not have (decision 131a),
+             -- from its first `running` report: server names and reasons.
+             CREATE TABLE IF NOT EXISTS session_mcp_notice (
+                 session_id   TEXT PRIMARY KEY,
+                 skipped      TEXT NOT NULL,
+                 plugin_local TEXT NOT NULL,
+                 reported_at  TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -389,6 +409,7 @@ impl Store {
             Ok(McpGrant {
                 id: r.get(0)?,
                 slug: r.get(1)?,
+                plugin_origin: None,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -424,6 +445,34 @@ impl Store {
     /// The integrations a session was granted at launch, revoked ones
     /// included. A session from before names were kept shows its grants'
     /// slugs; `builtin` (Storm itself) is never one.
+    /// Keeps the first notice a session reports (131a), as JSON lists.
+    pub fn record_mcp_notice(
+        &self,
+        session_id: &str,
+        skipped: &str,
+        plugin_local: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO session_mcp_notice
+                 (session_id, skipped, plugin_local, reported_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, skipped, plugin_local, now],
+        )?;
+        Ok(())
+    }
+
+    pub fn mcp_notice(&self, session_id: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT skipped, plugin_local FROM session_mcp_notice WHERE session_id = ?1",
+                params![session_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn integrations_of(
         &self,
         session_id: &str,
