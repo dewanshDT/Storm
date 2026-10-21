@@ -32,9 +32,40 @@ use serde_json::{Value, json};
 pub struct McpGrant {
     pub id: String,
     pub slug: String,
+    /// The plugin server this connection was added from (131h). An older
+    /// side leaves it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_origin: Option<PluginOrigin>,
+}
+
+/// A plugin's server, by the plugin's name and the server's (131h).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginOrigin {
+    pub plugin: String,
+    pub server: String,
 }
 
 pub use crate::provider::LaunchExtras;
+
+/// A bridge's server name in a Claude Code `mcp.json`: the plugin's own
+/// `plugin_<plugin>_<server>` for a connection added from a plugin, so its
+/// commands and hooks match the tools (131h); else, or when that name is
+/// taken or unusable, the slug. The bridge itself is always addressed by
+/// slug.
+fn claude_key(g: &McpGrant, taken: &serde_json::Map<String, Value>) -> String {
+    let usable = |s: &str| !s.is_empty() && s.len() <= 64;
+    match &g.plugin_origin {
+        Some(o) if usable(&o.plugin) && usable(&o.server) => {
+            let key = crate::plugins::server_key(&o.plugin, &o.server);
+            if taken.contains_key(&key) {
+                g.slug.clone()
+            } else {
+                key
+            }
+        }
+        _ => g.slug.clone(),
+    }
+}
 
 pub const SESSIONS_DIR: &str = "sessions";
 pub const RUN_DIR: &str = "run";
@@ -188,7 +219,7 @@ pub fn write_provider_config(
             for g in &grants {
                 let (command, env) = bridge_entry(exe, &g.slug, handle, socket);
                 servers.insert(
-                    g.slug.clone(),
+                    claude_key(g, &servers),
                     json!({
                         "type": "stdio",
                         "command": command[0],
@@ -356,10 +387,12 @@ mod tests {
             McpGrant {
                 id: "storm".into(),
                 slug: "storm".into(),
+                plugin_origin: None,
             },
             McpGrant {
                 id: "mcc_GH".into(),
                 slug: "github".into(),
+                plugin_origin: None,
             },
         ]
     }
@@ -393,6 +426,62 @@ mod tests {
             v["mcpServers"]["storm"]["command"], "/x",
             "a bridge is never replaced"
         );
+    }
+
+    /// 131h: a connection added from a plugin keeps the plugin's server name
+    /// in Claude Code, unless another bridge has it; the bridge is still
+    /// addressed by slug, and a local plugin server never takes its place.
+    #[test]
+    fn a_plugin_connection_keeps_the_plugins_name_in_claude_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("ags_O");
+        let origin = Some(PluginOrigin {
+            plugin: "slack".into(),
+            server: "slack".into(),
+        });
+        let grants = [
+            McpGrant {
+                id: "mcc_A".into(),
+                slug: "slack".into(),
+                plugin_origin: origin.clone(),
+            },
+            McpGrant {
+                id: "mcc_B".into(),
+                slug: "slack-2".into(),
+                plugin_origin: origin,
+            },
+            McpGrant {
+                id: "mcc_C".into(),
+                slug: "odd".into(),
+                plugin_origin: Some(PluginOrigin {
+                    plugin: String::new(),
+                    server: "x".into(),
+                }),
+            },
+        ];
+        let mut plugins = serde_json::Map::new();
+        plugins.insert("plugin_slack_slack".into(), json!({"command": "/evil"}));
+        write_provider_config(
+            "claude-code",
+            &session,
+            &grants,
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            None,
+            &plugins,
+        )
+        .unwrap();
+        let v: Value =
+            serde_json::from_slice(&std::fs::read(session.join("mcp.json")).unwrap()).unwrap();
+        let s = v["mcpServers"].as_object().unwrap();
+        assert_eq!(
+            s["plugin_slack_slack"]["args"],
+            json!(["mcp-bridge", "slack"])
+        );
+        assert_eq!(s["slack-2"]["args"], json!(["mcp-bridge", "slack-2"]));
+        assert_eq!(s["odd"]["args"], json!(["mcp-bridge", "odd"]));
+        assert_eq!(s.len(), 3);
     }
 
     #[test]

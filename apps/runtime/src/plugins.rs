@@ -43,6 +43,9 @@ pub struct Listed {
     /// resolving every form a manifest may use); `None` from one that does
     /// not, and then the plugin's own files are read.
     pub servers: Option<Map<String, Value>>,
+    /// Enabled for the account, not only for the workspace's project.
+    pub enabled: bool,
+    pub version: Option<String>,
 }
 
 /// A server the session will not have.
@@ -73,6 +76,9 @@ pub struct Plan {
     /// Plugin servers the agent loads itself (Codex), by name.
     pub native: Vec<String>,
     pub skipped: Vec<Skipped>,
+    /// The remote servers found, as [`remote_entry`]s for the host's
+    /// inventory (131g).
+    pub remote: Vec<Value>,
 }
 
 impl Plan {
@@ -139,6 +145,87 @@ pub fn session_plan(helper: Option<Command>, allow_local: bool, workspace: &Path
     )
 }
 
+/// The remote servers of the plugins the account has enabled for Claude Code,
+/// listed with `helper` from `dir`, for the host's inventory (131g).
+pub fn inventory(helper: Command, dir: &Path) -> Vec<Value> {
+    let listed = match list(helper, dir) {
+        Ok(listed) => listed,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "could not list Claude Code's plugins");
+            return Vec::new();
+        }
+    };
+    let mut out = Vec::new();
+    for p in listed.iter().filter(|p| p.enabled) {
+        let name = p.id.rsplit_once('@').map_or(p.id.as_str(), |(n, _)| n);
+        let servers = match &p.servers {
+            Some(servers) => Some(servers.clone().into_iter().collect()),
+            None => declared(&p.install_path),
+        };
+        for (server, entry) in servers.into_iter().flatten() {
+            if let Value::Object(entry) = entry
+                && is_remote(&entry)
+            {
+                out.extend(remote_entry(
+                    "claude-code",
+                    name,
+                    p.version.as_deref(),
+                    &server,
+                    &entry,
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// A plugin's remote server as the host reports it (131g): its URL as
+/// declared, unexpanded, and at most the *name* of a header it fills from the
+/// environment — never a header value, an env value or a vendor's client id.
+pub(crate) fn remote_entry(
+    agent: &str,
+    plugin: &str,
+    version: Option<&str>,
+    server: &str,
+    entry: &Map<String, Value>,
+) -> Option<Value> {
+    let url = entry.get("url")?.as_str()?;
+    if url.len() > 2048 || plugin.len() > 128 || server.len() > 128 {
+        return None;
+    }
+    let transport = entry
+        .get("type")
+        .and_then(Value::as_str)
+        .filter(|t| matches!(*t, "sse" | "ws"))
+        .unwrap_or("http");
+    let templated_header = entry
+        .get("headers")
+        .and_then(Value::as_object)
+        .and_then(|h| {
+            h.iter()
+                .find(|(_, v)| v.as_str().is_some_and(|v| v.contains("${")))
+        })
+        .map(|(k, _)| k.as_str())
+        .filter(|k| k.len() <= 128);
+    let auth_hint = match templated_header {
+        Some(name) => Some(format!("header:{name}")),
+        None if entry.get("oauth").and_then(|o| o.get("clientId")).is_some() => {
+            Some("vendor_client".to_string())
+        }
+        None => None,
+    };
+    Some(json!({
+        "agent": agent,
+        "plugin": plugin,
+        "plugin_version": version.filter(|v| v.len() <= 64),
+        "server": server,
+        "transport": transport,
+        "url": url,
+        "templated": url.contains("${"),
+        "auth_hint": auth_hint,
+    }))
+}
+
 /// Runs `claude plugin list --json` in `workspace` (so a project-enabled
 /// plugin counts) and returns the enabled plugins.
 pub fn list(mut command: Command, workspace: &Path) -> Result<Vec<Listed>> {
@@ -185,6 +272,8 @@ fn parse_list(out: &[u8]) -> Result<Vec<Listed>> {
                 id: e["id"].as_str()?.to_string(),
                 install_path: PathBuf::from(e["installPath"].as_str()?),
                 servers: e["mcpServers"].as_object().cloned(),
+                enabled: e["enabled"] == true,
+                version: e["version"].as_str().map(str::to_owned),
             })
         })
         .collect())
@@ -260,6 +349,13 @@ fn plugin(plan: &mut Plan, p: &Listed, allow_local: bool, data_root: &Path, work
         };
         if is_remote(&entry) {
             plan.skipped.push(skip(REMOTE));
+            plan.remote.extend(remote_entry(
+                "claude-code",
+                name,
+                p.version.as_deref(),
+                &server,
+                &entry,
+            ));
             continue;
         }
         if !entry.get("command").is_some_and(Value::is_string) {
@@ -489,6 +585,8 @@ mod tests {
             id: id.into(),
             install_path: root.into(),
             servers: None,
+            enabled: true,
+            version: None,
         }
     }
 
@@ -578,11 +676,53 @@ mod tests {
             .collect();
         assert!(reasons.contains(&("remote", REMOTE)));
         assert!(reasons.contains(&("opts", UNRESOLVED)));
+        assert_eq!(p.remote.len(), 1);
+        assert_eq!(p.remote[0]["agent"], "claude-code");
+        assert_eq!(p.remote[0]["plugin"], "slack");
+        assert_eq!(p.remote[0]["server"], "remote");
         assert!(
             p.notice()
                 .unwrap()
                 .contains("remote (plugin slack) — remote:")
         );
+    }
+
+    /// 131g: a remote entry carries the URL as declared and at most a
+    /// header's name — never a header value, an env value or a client id.
+    #[test]
+    fn a_remote_entry_carries_no_secret() {
+        let canary = "CANARY-131G";
+        let entry = |v: Value| v.as_object().unwrap().clone();
+        let header = remote_entry(
+            "claude-code",
+            "gh",
+            Some("1.2.0"),
+            "github",
+            &entry(json!({"type": "http", "url": "https://api.example.com/mcp",
+                "headers": {"X-Static": canary, "Authorization": "Bearer ${GH_TOKEN}"},
+                "env": {"K": canary}})),
+        )
+        .unwrap();
+        assert_eq!(header["auth_hint"], "header:Authorization");
+        assert_eq!(header["plugin_version"], "1.2.0");
+        assert_eq!(header["templated"], false);
+        let vendor = remote_entry(
+            "codex",
+            "slack",
+            None,
+            "slack",
+            &entry(json!({"type": "sse", "url": "${SLACK_URL}/mcp",
+                "oauth": {"clientId": canary, "callbackPort": 3118}})),
+        )
+        .unwrap();
+        assert_eq!(vendor["auth_hint"], "vendor_client");
+        assert_eq!(vendor["transport"], "sse");
+        assert_eq!(vendor["templated"], true);
+        for e in [&header, &vendor] {
+            assert!(!e.to_string().contains(canary), "{e}");
+            assert!(!e.to_string().contains("Bearer"), "{e}");
+        }
+        assert!(remote_entry("x", "p", None, "s", &entry(json!({"command": "srv"}))).is_none());
     }
 
     #[test]

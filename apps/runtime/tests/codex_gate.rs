@@ -141,6 +141,7 @@ fn storms_codex_config_holds_against_the_real_binary() {
     let grant = McpGrant {
         id: "mcc_storm".into(),
         slug: "storm".into(),
+        plugin_origin: None,
     };
     codex::write_profile(
         &home,

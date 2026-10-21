@@ -189,6 +189,26 @@ const SCHEMA: &str = "
         added_at      TEXT NOT NULL,
         PRIMARY KEY (credential_id, host_id)
     );
+
+    -- The plugin server a connection was added from (decision 131h), so
+    -- Claude Code names its bridge as the plugin does. Written at creation
+    -- only, like the connection's URL and slug.
+    CREATE TABLE IF NOT EXISTS connection_plugin_origin (
+        connection_id TEXT PRIMARY KEY,
+        plugin        TEXT NOT NULL,
+        server        TEXT NOT NULL
+    );
+
+    -- Plugin suggestions the owner dismissed (decision 131g): a plugin's
+    -- remote server, by its names and its URL as the host reported it.
+    CREATE TABLE IF NOT EXISTS plugin_suggestion_dismissals (
+        owner_user_id TEXT NOT NULL,
+        plugin        TEXT NOT NULL,
+        server        TEXT NOT NULL,
+        url           TEXT NOT NULL,
+        dismissed_at  TEXT NOT NULL,
+        PRIMARY KEY (owner_user_id, plugin, server, url)
+    );
 ";
 
 /// One audit row. There is deliberately no field that could carry arguments
@@ -322,10 +342,25 @@ impl GatewayDb {
     /// to land, nor a credential with no row. A live slug clash with the same
     /// owner is [`InsertError::SlugTaken`], decided by the unique index rather
     /// than by a read-then-write that two requests could race.
+    #[cfg(test)]
     pub fn insert_connection(
         &mut self,
         c: &Connection,
         credential: Option<(&str, &Sealed)>,
+    ) -> Result<(), InsertError> {
+        self.insert_connection_with(c, credential, None, &[])
+    }
+
+    /// [`insert_connection`](Self::insert_connection), with the plugin server
+    /// it was added from (131h) and its host scope (decision 121; empty is
+    /// every host) in the same transaction, so a connection added from a
+    /// suggestion is never briefly reachable from every host.
+    pub fn insert_connection_with(
+        &mut self,
+        c: &Connection,
+        credential: Option<(&str, &Sealed)>,
+        origin: Option<(&str, &str)>,
+        hosts: &[String],
     ) -> Result<(), InsertError> {
         let tx = self.conn.transaction().map_err(anyhow::Error::from)?;
         let result = tx.execute(
@@ -370,7 +405,69 @@ impl GatewayDb {
             )
             .map_err(anyhow::Error::from)?;
         }
+        if let Some((plugin, server)) = origin {
+            tx.execute(
+                "INSERT INTO connection_plugin_origin (connection_id, plugin, server)
+                 VALUES (?1, ?2, ?3)",
+                params![c.id, plugin, server],
+            )
+            .map_err(anyhow::Error::from)?;
+        }
+        for host in hosts {
+            tx.execute(
+                "INSERT OR IGNORE INTO connection_hosts (connection_id, host_id, added_at)
+                 VALUES (?1, ?2, ?3)",
+                params![c.id, host, c.created_at],
+            )
+            .map_err(anyhow::Error::from)?;
+        }
         tx.commit().map_err(anyhow::Error::from)?;
+        Ok(())
+    }
+
+    /// The plugin server a connection was added from (131h).
+    pub fn plugin_origin(&self, connection_id: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT plugin, server FROM connection_plugin_origin WHERE connection_id = ?1",
+                params![connection_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
+    }
+
+    // ---- plugin suggestions (decision 131g) --------------------------------
+
+    /// The `(plugin, server, url)` suggestions the owner dismissed.
+    pub fn dismissed_suggestions(
+        &self,
+        owner_user_id: &str,
+    ) -> Result<Vec<(String, String, String)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT plugin, server, url FROM plugin_suggestion_dismissals
+             WHERE owner_user_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![owner_user_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn dismiss_suggestion(
+        &self,
+        owner_user_id: &str,
+        plugin: &str,
+        server: &str,
+        url: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO plugin_suggestion_dismissals
+                 (owner_user_id, plugin, server, url, dismissed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![owner_user_id, plugin, server, url, now],
+        )?;
         Ok(())
     }
 
@@ -591,6 +688,10 @@ impl GatewayDb {
         )?;
         tx.execute(
             "DELETE FROM connection_hosts WHERE connection_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM connection_plugin_origin WHERE connection_id = ?1",
             params![id],
         )?;
         tx.commit()?;
@@ -1073,12 +1174,14 @@ mod tests {
         for t in [
             "calls",
             "connection_hosts",
+            "connection_plugin_origin",
             "connections",
             "credentials",
             "meta",
             "new_tools",
             "oauth_clients",
             "oauth_flows",
+            "plugin_suggestion_dismissals",
             "provider_credential_hosts",
             "provider_credentials",
         ] {

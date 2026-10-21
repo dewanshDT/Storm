@@ -660,6 +660,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   only — goes in the session's `mcp-notice.txt`, which `harness-session`
   prints on a start or a resume, and in the first `running` report.
   `runtime.toml` `plugin_mcp = "off"` keeps every plugin server out.
+- **A plugin's remote server reaches a session only as an integration, and a
+  host reports it without a secret** (131g, 131h). `capabilities`
+  `plugin_mcp_remote` (refreshed in the background, so `hello` never waits
+  on `claude plugin list`) carries the URL as declared and at most a
+  header's *name* (`auth_hint`), never a header or env value or a vendor's
+  client id; the server keeps it with the host's in-memory capabilities and
+  `GET /v1/integrations/suggestions` asks every live host for a fresh one
+  first. A connection added from one records `connection_plugin_origin` at
+  creation only, and its grant carries it so the `claude-code` writer names
+  that bridge `plugin_<plugin>_<server>` (the slug on a clash; the bridge is
+  still addressed by slug). The first `running` report's `mcp_skipped` is
+  kept, bounded, in `agent.db` `session_mcp_notice` and never replaced.
+  `gateway_e2e.py` plants a header canary in a plugin and scans for it.
 - **OAuth discovery never reaches a private address** (81g, §10). rmcp's
   OAuth code gets one HTTP client, `gateway::oauth::SsrfHttp`: https only,
   every URL and redirect hop resolved and refused unless all its addresses

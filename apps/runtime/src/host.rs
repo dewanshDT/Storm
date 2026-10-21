@@ -264,7 +264,15 @@ pub struct Host {
     /// Sessions whose start is in flight, with the commands that arrived for
     /// them meanwhile, in order. They are applied once the session exists.
     starting: Mutex<HashMap<String, Vec<Command>>>,
+    /// The remote servers this host's agents' plugins declare (131g): the
+    /// account-wide listing, refreshed in the background so a `hello` never
+    /// waits on it, and what launches found (project-enabled plugins).
+    plugin_inventory: Arc<Mutex<Vec<serde_json::Value>>>,
+    launch_remote: Mutex<Vec<serde_json::Value>>,
 }
+
+/// At most this many remote plugin servers in one inventory.
+const PLUGIN_REMOTE_MAX: usize = 200;
 
 /// How long a shutdown waits for its sessions beyond their two graces (the
 /// group's, then any stragglers' in the session): output drains and the
@@ -318,6 +326,8 @@ impl Host {
             opencode_settings,
             shutting_down: AtomicBool::new(false),
             starting: Mutex::new(HashMap::new()),
+            plugin_inventory: Arc::new(Mutex::new(Vec::new())),
+            launch_remote: Mutex::new(Vec::new()),
         }))
     }
 
@@ -400,7 +410,63 @@ impl Host {
             // It pulls a synced login for a session whose `start` names one,
             // and fails the start if it cannot (AM69).
             "provider_credentials": [crate::credential::KIND],
+            // Remote servers its agents' plugins declare, for the app's
+            // suggestions (131g); never a header or env value.
+            "plugin_mcp_remote": self.plugin_remote(),
         })
+    }
+
+    fn plugin_remote(&self) -> Vec<serde_json::Value> {
+        let listed = self.plugin_inventory.lock().unwrap().clone();
+        let launched = self.launch_remote.lock().unwrap().clone();
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        for e in listed.into_iter().chain(launched) {
+            let same = |o: &serde_json::Value| {
+                ["agent", "plugin", "server", "url"]
+                    .iter()
+                    .all(|k| o[k] == e[k])
+            };
+            if out.len() < PLUGIN_REMOTE_MAX && !out.iter().any(same) {
+                out.push(e);
+            }
+        }
+        out
+    }
+
+    /// Lists the account's plugins again in the background; the next
+    /// inventory carries the result.
+    fn refresh_plugin_inventory(&self) {
+        use crate::profile::Mcp;
+        let mcp_of =
+            |p: &Arc<dyn Provider>| crate::profile::get(p.id().as_str()).and_then(|p| p.mcp);
+        let claude: Vec<_> = self
+            .providers
+            .iter()
+            .filter(|p| {
+                mcp_of(p) == Some(Mcp::ClaudeCode) && p.available() == Availability::Available
+            })
+            .filter_map(|p| p.helper_command())
+            .collect();
+        let codex = self
+            .providers
+            .iter()
+            .any(|p| mcp_of(p) == Some(Mcp::Codex))
+            .then(|| crate::codex::home(&self.state_dir));
+        if claude.is_empty() && codex.is_none() {
+            return;
+        }
+        let dir = self.state_dir.clone();
+        let slot = self.plugin_inventory.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut out = Vec::new();
+            for helper in claude {
+                out.extend(crate::plugins::inventory(helper, &dir));
+            }
+            if let Some(home) = codex {
+                out.extend(crate::codex::remote_inventory(&home));
+            }
+            *slot.lock().unwrap() = out;
+        });
     }
 
     fn write_table(&self) {
@@ -612,6 +678,7 @@ impl Host {
     }
 
     async fn hello(&self) -> Result<()> {
+        self.refresh_plugin_inventory();
         let mut sessions = Vec::new();
         for s in self.sessions.lock().unwrap().values() {
             let end = *s.events.ended.lock().unwrap();
@@ -747,6 +814,7 @@ impl Host {
                 .await
             }
             Command::Refresh => {
+                self.refresh_plugin_inventory();
                 let _ = self
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
@@ -950,6 +1018,14 @@ impl Host {
         };
         let start_report = match &plugin_plan {
             Some(plan) => {
+                {
+                    let mut found = self.launch_remote.lock().unwrap();
+                    for e in &plan.remote {
+                        if !found.contains(e) && found.len() < PLUGIN_REMOTE_MAX {
+                            found.push(e.clone());
+                        }
+                    }
+                }
                 if let Some(text) = plan.notice() {
                     let path = session_dir.join(crate::plugins::NOTICE_FILE);
                     match crate::mcp::write_private(&path, text.as_bytes()) {
@@ -2107,6 +2183,66 @@ mod tests {
         assert_eq!(caps["resume"], json!(["claude-code", "opencode"]));
     }
 
+    /// 131g: the inventory lists the account's plugins in the background
+    /// with the provider's own program, and reports their remote servers
+    /// once each, beside what launches found.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_inventory_reports_plugins_remote_servers() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: "https://127.0.0.1:1".into(),
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let bin = state.path().join("fake-claude");
+        std::fs::write(
+            &bin,
+            r#"#!/bin/sh
+[ "$1 $2 $3" = "plugin list --json" ] || exit 1
+echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0","mcpServers":{"slack":{"type":"http","url":"https://mcp.slack.com/mcp","oauth":{"clientId":"SECRET-ID"}}}},{"id":"proj@m","enabled":false,"projectEnabled":true,"installPath":"/nowhere","mcpServers":{"p":{"url":"https://p.example.com/mcp"}}}]'
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let toml = format!(
+            "[[providers]]\nid = \"claude-code\"\ncommand = {:?}\n",
+            bin.display().to_string()
+        );
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        assert_eq!(host.capabilities()["plugin_mcp_remote"], json!([]));
+        host.refresh_plugin_inventory();
+        let mut remote = json!([]);
+        for _ in 0..200 {
+            remote = host.capabilities()["plugin_mcp_remote"].clone();
+            if remote.as_array().is_some_and(|r| !r.is_empty()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let list = remote.as_array().unwrap();
+        assert_eq!(list.len(), 1, "only the account's own plugins: {remote}");
+        assert_eq!(list[0]["plugin"], "slack");
+        assert_eq!(list[0]["plugin_version"], "1.0.0");
+        assert_eq!(list[0]["auth_hint"], "vendor_client");
+        assert!(!remote.to_string().contains("SECRET-ID"));
+        host.launch_remote.lock().unwrap().extend([list[0].clone(), json!({"agent": "claude-code", "plugin": "proj", "server": "p", "url": "https://p.example.com/mcp"})]);
+        assert_eq!(
+            host.capabilities()["plugin_mcp_remote"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
     /// A resume names the conversation and skips the opening prompt; an id
     /// the provider could not have made never reaches a command line.
     #[tokio::test(flavor = "multi_thread")]
@@ -2191,10 +2327,12 @@ mod tests {
                 crate::mcp::McpGrant {
                     id: "mcc_storm".into(),
                     slug: "storm".into(),
+                    plugin_origin: None,
                 },
                 crate::mcp::McpGrant {
                     id: "mcc_bad".into(),
                     slug: "Bad Slug".into(),
+                    plugin_origin: None,
                 },
             ];
         }

@@ -226,6 +226,12 @@ def main():
     with open(CANARY_FILE, "w") as f:
         f.write(CANARY)
     agent_py = os.path.join(HERE, "gateway_support", "agent.py")
+    # Claude Code's command with no args of its own, as a real install is:
+    # the host lists plugins with it (decision 131).
+    claude = os.path.join(WORK, "claude")
+    with open(claude, "w") as f:
+        f.write(f'#!/bin/sh\nexec "{sys.executable}" "{agent_py}" "$@"\n')
+    os.chmod(claude, 0o755)
     with open(os.path.join(WORK, "runtime.toml"), "w") as f:
         f.write(f"""workspace_roots = ["{WORKSPACES}"]
 forbidden_roots = ["{STATE}", "{os.path.join(WORK, 'vaults')}"]
@@ -233,8 +239,7 @@ max_sessions = 8
 
 [[providers]]
 id = "claude-code"
-command = "{sys.executable}"
-args = ["{agent_py}"]
+command = "{claude}"
 
 [[providers]]
 id = "opencode"
@@ -290,6 +295,18 @@ args = ["-i"]
             return h if h and h["status"] == "online" and h.get("capabilities") else None
         host = wait(host_online, "the host")
         check("the host reports mcp_bridge", host["capabilities"].get("mcp_bridge") is True, host)
+
+        print("\n=== plugins' remote servers, suggested (decision 131g) ===")
+
+        def suggested():
+            _, sug = call("GET", "/v1/integrations/suggestions", auth=owner)
+            return next((x for x in sug or [] if x["plugin"] == "e2eplug"), None)
+        sug = wait(suggested, "the plugin's remote server suggested")
+        check("the host's plugin remote server is suggested, from this host",
+              sug["url"] == "https://e2e-remote.example.com/mcp" and sug["hosts"] == [host_id]
+              and sug["agents"] == ["claude-code"], sug)
+        check("the suggestion names the header the plugin fills, never its value",
+              sug["auth_hint"] == "header:Authorization" and "canary" not in json.dumps(sug), sug)
         sock = os.path.join(HOST_STATE, "run")
         check("the daemon's socket directory is 0700", oct(os.stat(sock).st_mode & 0o777) == "0o700",
               oct(os.stat(sock).st_mode))
@@ -324,6 +341,14 @@ args = ["-i"]
               all(s["args"][0] == "mcp-bridge" for s in cfg["mcpServers"].values()), cfg)
         check("the session directory is 0700",
               oct(os.stat(os.path.dirname(cfg_path)).st_mode & 0o777) == "0o700")
+        _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
+        check("the session view names the plugin's remote server it skipped (131a)",
+              any(x["name"] == "remote" and x["source"] == "plugin e2eplug" and x["reason"].startswith("remote")
+                  for x in view.get("mcp_skipped", [])), view)
+        status, _ = call("POST", "/v1/integrations/suggestions/dismiss",
+                         {"plugin": "e2eplug", "server": "remote", "url": "https://e2e-remote.example.com/mcp"},
+                         auth=owner)
+        check("a dismissed suggestion is gone", status == 204 and suggested() is None, status)
 
         print("\n=== calls through the bridge ===")
         init = a.initialize(slug, 1)
@@ -701,6 +726,22 @@ args = ["-i"]
               view.get("integrations") == launch_integrations, view)
         _, view = call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)
         check("a shell session lists no integrations", view.get("integrations") == [], view)
+
+        print("\n=== a plugin's header value stays where it was (131g) ===")
+        plugin_canary = b"plugin-header-canary-131"
+        leaks = []
+        for root in (STATE, HOST_STATE):
+            for dirpath, _, files in os.walk(root):
+                for name in files:
+                    try:
+                        if plugin_canary in open(os.path.join(dirpath, name), "rb").read():
+                            leaks.append(os.path.join(dirpath, name))
+                    except OSError:
+                        pass
+        for log in (SERVER_LOG, RUNTIME_LOG):
+            if plugin_canary in open(log, "rb").read():
+                leaks.append(log)
+        check("a plugin's header value is in no store, host file or log", leaks == [], leaks)
 
         print("\n=== the credential boundary (C1, C2, C4, C5, C7) ===")
         spellings = [CANARY, f"Bearer {CANARY}"]

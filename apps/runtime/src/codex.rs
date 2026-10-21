@@ -171,6 +171,11 @@ fn switch_plugin_servers(table: &mut Table, home: &Path, allow_local: bool, plan
             let remote = declared.as_object().is_none_or(crate::plugins::is_remote);
             let on = !remote && allow_local;
             sub_table(overlay, &server).insert("enabled".into(), Value::Boolean(on));
+            if remote && let Some(declared) = declared.as_object() {
+                plan.remote.extend(crate::plugins::remote_entry(
+                    "codex", name, None, &server, declared,
+                ));
+            }
             let reason = if remote {
                 crate::plugins::REMOTE
             } else if !allow_local {
@@ -186,6 +191,37 @@ fn switch_plugin_servers(table: &mut Table, home: &Path, allow_local: bool, plan
             });
         }
     }
+}
+
+/// The remote servers of the plugins enabled in Storm's Codex home, for the
+/// host's inventory (131g). Storm's rewrite already switched them off.
+pub fn remote_inventory(home: &Path) -> Vec<serde_json::Value> {
+    let table: Table = std::fs::read_to_string(home.join("config.toml"))
+        .ok()
+        .and_then(|t| t.parse().ok())
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (id, entry) in table
+        .get("plugins")
+        .and_then(Value::as_table)
+        .into_iter()
+        .flatten()
+    {
+        if id == "_default" || entry.get("enabled").and_then(Value::as_bool) != Some(true) {
+            continue;
+        }
+        let name = id.rsplit_once('@').map_or(id.as_str(), |(n, _)| n);
+        for (server, declared) in installed_servers(home, id).into_iter().flatten() {
+            if let Some(declared) = declared.as_object()
+                && crate::plugins::is_remote(declared)
+            {
+                out.extend(crate::plugins::remote_entry(
+                    "codex", name, None, &server, declared,
+                ));
+            }
+        }
+    }
+    out
 }
 
 /// The servers every installed version of plugin `id` declares, the first
@@ -474,6 +510,7 @@ mod tests {
         McpGrant {
             id: format!("mcc_{slug}"),
             slug: slug.into(),
+            plugin_origin: None,
         }
     }
 
@@ -701,6 +738,14 @@ enabled = true
         );
         assert_eq!(t["features"]["apps"].as_bool(), Some(false));
         assert_eq!(plan.native, ["local"]);
+        assert_eq!(plan.remote.len(), 1);
+        assert_eq!(plan.remote[0]["agent"], "codex");
+        assert_eq!(plan.remote[0]["url"], "https://mcp.slack.com/mcp");
+        assert_eq!(
+            remote_inventory(&home),
+            plan.remote,
+            "the inventory sees it too"
+        );
         let named: Vec<_> = plan
             .skipped
             .iter()

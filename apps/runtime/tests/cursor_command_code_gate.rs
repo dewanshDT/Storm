@@ -38,6 +38,7 @@ fn grant() -> McpGrant {
     McpGrant {
         id: "mcc_storm".into(),
         slug: "storm".into(),
+        plugin_origin: None,
     }
 }
 
