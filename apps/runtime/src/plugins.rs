@@ -235,6 +235,8 @@ pub fn list(mut command: Command, workspace: &Path) -> Result<Vec<Listed>> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command.spawn().context("starting claude plugin list")?;
     let mut stdout = child.stdout.take().context("no stdout")?;
     // Read on a thread: a full pipe would hold the child past the deadline.
@@ -249,18 +251,34 @@ pub fn list(mut command: Command, workspace: &Path) -> Result<Vec<Listed>> {
             break status;
         }
         if Instant::now() >= deadline {
+            end_group(&child);
             let _ = child.kill();
             let _ = child.wait();
             bail!("claude plugin list took longer than {LIST_DEADLINE:?}");
         }
         std::thread::sleep(Duration::from_millis(25));
     };
+    // Whatever it left behind would outlive it as the host's account and
+    // hold the pipe open.
+    end_group(&child);
     let out = reader.join().unwrap_or_default();
     if !status.success() {
         bail!("claude plugin list exited with {status}");
     }
     parse_list(&out)
 }
+
+/// SIGKILL to the listing's process group: on macOS nothing else ends a
+/// child it started.
+#[cfg(unix)]
+fn end_group(child: &std::process::Child) {
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_group(_: &std::process::Child) {}
 
 fn parse_list(out: &[u8]) -> Result<Vec<Listed>> {
     let entries: Vec<Value> = serde_json::from_slice(out).context("parsing claude plugin list")?;
@@ -871,5 +889,61 @@ mod tests {
         let mut bad = Command::new("sh");
         bad.args(["-c", "exit 3", "sh"]);
         assert!(list(bad, t.path()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_the_listing_started_outlives_it() {
+        let t = tempfile::tempdir().unwrap();
+        let alive = |pid: i32| {
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+        };
+        let gone_soon = |pid: i32| {
+            let until = Instant::now() + Duration::from_secs(5);
+            while alive(pid) && Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            !alive(pid)
+        };
+
+        // It exits, leaving a child that ignores HUP and holds stdout.
+        let pidfile = t.path().join("left");
+        let mut leaves = Command::new("sh");
+        leaves.args([
+            "-c",
+            r#"(trap '' HUP; exec sleep 600) & echo $! > "$1"; echo '[]'"#,
+            "sh",
+            pidfile.to_str().unwrap(),
+        ]);
+        let dir = t.path().to_path_buf();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(list(leaves, &dir).map(|l| l.len())));
+        let got = rx
+            .recv_timeout(LIST_DEADLINE)
+            .expect("the listing waited on its child");
+        assert_eq!(got.unwrap(), 0);
+        let left: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(gone_soon(left), "pid {left} outlived the listing");
+
+        // It hangs past the deadline with a child of its own.
+        let pidfile = t.path().join("hung");
+        let mut hangs = Command::new("sh");
+        hangs.args([
+            "-c",
+            r#"(trap '' HUP; exec sleep 600) & echo $! > "$1"; exec sleep 600"#,
+            "sh",
+            pidfile.to_str().unwrap(),
+        ]);
+        assert!(list(hangs, t.path()).is_err());
+        let hung: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(gone_soon(hung), "pid {hung} outlived the deadline");
     }
 }
