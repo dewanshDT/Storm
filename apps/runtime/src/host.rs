@@ -1385,13 +1385,20 @@ impl Host {
                         &handle,
                         &socket,
                         &exe,
+                        own.storm_only,
                     )?;
                     (extras, Some(plan))
                 }
                 _ => {
                     let home = account_home()?;
                     let (extras, plan) = crate::command_code::write_session(
-                        workspace, &home, &grants, &handle, &socket, &exe,
+                        workspace,
+                        &home,
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                        own.storm_only,
                     )?;
                     (extras, Some(plan))
                 }

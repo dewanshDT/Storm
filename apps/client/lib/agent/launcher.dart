@@ -391,8 +391,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               : shell
               ? 'Network: inherits $hostName’s policy. '
                     '${providerLabel(_provider ?? '')} runs without access to your '
-                    'vaults or integrations: Storm can’t keep a repository’s '
-                    'own MCP servers out of it.'
+                    'vaults or integrations until Storm has checked it with a '
+                    'signed-in account.'
               : integrations.isEmpty
               ? 'Network: inherits $hostName’s policy. This session can use '
                     'your integrations and read your vaults, with that network '

@@ -10,7 +10,9 @@
 //!   names): every server from the repository's `.cursor/mcp.json` and the
 //!   account's `~/.cursor/mcp.json` goes there, so none of them loads.
 //!
-//! A person can re-enable a disabled server from inside the session; Storm
+//! The disabled list is written only under `agent_mcp = "storm-only"`;
+//! otherwise every server Cursor loads by itself stays (decision 132d). A
+//! person can re-enable a disabled server from inside the session; Storm
 //! disables it again at the next launch (accepted risk 10). Cursor's profile
 //! keeps `mcp: None` until a real-account gate (G-C1) has shown all of this
 //! in a live session.
@@ -24,9 +26,10 @@ use crate::mcp::LaunchExtras;
 use crate::mcp::{McpGrant, private_dir, write_private};
 use crate::plugins::{Plan, Skipped};
 
-/// Writes `grants` into a plugin in `dir` and disables every other server
-/// Cursor would load for `workspace`. `home` is the account's home and
-/// `data_dir` Cursor's (`CURSOR_DATA_DIR`, else `~/.cursor`).
+/// Writes `grants` into a plugin in `dir` and, under `storm_only`, disables
+/// every other server Cursor would load for `workspace`. `home` is the
+/// account's home and `data_dir` Cursor's (`CURSOR_DATA_DIR`, else
+/// `~/.cursor`).
 #[allow(clippy::too_many_arguments)]
 pub fn write_session(
     dir: &Path,
@@ -37,6 +40,7 @@ pub fn write_session(
     handle: &str,
     socket: &Path,
     exe: &Path,
+    storm_only: bool,
 ) -> Result<(LaunchExtras, Plan)> {
     let plugin = dir.join("cursor-plugin");
     private_dir(dir)?;
@@ -67,7 +71,14 @@ pub fn write_session(
         json!({ "mcpServers": servers }).to_string().as_bytes(),
     )?;
 
+    let extras = LaunchExtras {
+        args: vec!["--plugin-dir".into(), plugin.into_os_string()],
+        ..Default::default()
+    };
     let mut plan = Plan::default();
+    if !storm_only {
+        return Ok((extras, plan));
+    }
     let root = project_root(workspace);
     let mut off: Vec<String> = Vec::new();
     for (path, source, reason) in [
@@ -110,13 +121,7 @@ pub fn write_session(
     std::fs::write(&list, serde_json::to_vec_pretty(&disabled)?)
         .with_context(|| format!("writing {}", list.display()))?;
 
-    Ok((
-        LaunchExtras {
-            args: vec!["--plugin-dir".into(), plugin.into_os_string()],
-            ..Default::default()
-        },
-        plan,
-    ))
+    Ok((extras, plan))
 }
 
 /// Cursor's project: the workspace's git root, else the workspace.
@@ -210,6 +215,7 @@ mod tests {
             "h",
             Path::new("/s"),
             Path::new("/x"),
+            true,
         )
         .unwrap();
         assert_eq!(extras.args[0], "--plugin-dir");
@@ -226,5 +232,33 @@ mod tests {
         assert_eq!(disabled, ["kept", "evil", "mine"], "never the storm bridge");
         let names: Vec<_> = plan.skipped.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, ["evil", "storm", "mine"]);
+    }
+
+    /// Decision 132d: without `storm-only`, Cursor's own disabled list is
+    /// left alone and the bridges are added.
+    #[test]
+    fn without_storm_only_nothing_is_disabled() {
+        let t = tempfile::tempdir().unwrap();
+        let home = t.path().join("home");
+        let ws = t.path().join("repo");
+        std::fs::create_dir_all(ws.join(".cursor")).unwrap();
+        std::fs::write(ws.join(".cursor/mcp.json"), r#"{"mcpServers":{"proj":{}}}"#).unwrap();
+        let data = home.join(".cursor");
+        let storm = grant("storm");
+        let (extras, plan) = write_session(
+            &t.path().join("ags_O"),
+            &ws,
+            &home,
+            &data,
+            &[&storm],
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            false,
+        )
+        .unwrap();
+        assert_eq!(extras.args[0], "--plugin-dir");
+        assert!(plan.skipped.is_empty());
+        assert!(!data.join("projects").exists(), "no disabled list written");
     }
 }

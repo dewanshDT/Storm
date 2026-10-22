@@ -2030,8 +2030,8 @@ pub async fn launch_session(
         crate::agent::McpOutcome::Unsupported => (
             Vec::new(),
             Some(format!(
-                "{} runs without your notes and integrations: Storm can't keep a \
-                 repository's own MCP servers out of it",
+                "{} runs without your notes and integrations until Storm has \
+                 checked it with a signed-in account",
                 session.provider
             )),
         ),

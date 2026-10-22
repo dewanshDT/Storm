@@ -64,11 +64,9 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   alone. When such a session starts, the agent shows what Storm left out and
   why, and the session's **Details** list it too.
 - **Cursor and Command Code run as terminals only:** no notes, no
-  integrations, no write vault, and no Resume yet. Storm gives an agent its
-  tools only through a configuration that keeps a repository's own MCP
-  servers out, and neither CLI can be held to one yet (Command Code loads a
-  repository's `.mcp.json` with no approval at all). Their sessions keep the
-  name they launched with.
+  integrations, no write vault, and no Resume yet, until Storm has checked
+  its integrations in each with a signed-in account. Their own MCP servers
+  work as usual. Their sessions keep the name they launched with.
 - Storm enforces those limits on its tools. The agent is also a process with
   its host account's file access, which is why a Runtime Host must
   [never share an account with the vaults](/docs/agents/hosts/#never-share-an-account-with-the-vaults).
