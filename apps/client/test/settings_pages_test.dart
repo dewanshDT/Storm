@@ -107,6 +107,69 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('Integrations and Claude login say Beta, in the nav and '
+        'on the page, and nothing else does', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'device');
+      final beta = kSettingsPages.where((p) => p.beta).map((p) => p.id);
+      expect(beta, ['integrations', 'claude-login']);
+      for (final p in kSettingsPages) {
+        expect(
+          find.descendant(
+            of: find.byKey(Key('settings-nav-${p.id}')),
+            matching: find.byType(BetaTag),
+          ),
+          p.beta ? findsOneWidget : findsNothing,
+          reason: p.id,
+        );
+      }
+      for (final id in beta) {
+        await open(tester, c, id);
+        expect(
+          find.descendant(
+            of: find.byType(SettingsPage),
+            matching: find.byType(BetaTag),
+          ),
+          findsOneWidget,
+          reason: id,
+        );
+      }
+      await open(tester, c, 'storage');
+      expect(
+        find.descendant(
+          of: find.byType(SettingsPage),
+          matching: find.byType(BetaTag),
+        ),
+        findsNothing,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('phone: the list marks the beta pages', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: phone);
+      c.read(routerProvider).go(Routes.settings);
+      await tester.pumpAndSettle();
+      for (final id in ['integrations', 'claude-login']) {
+        final row = find.byKey(Key('settings-row-$id'));
+        await tester.ensureVisible(row);
+        expect(
+          find.descendant(of: row, matching: find.byType(BetaTag)),
+          findsOneWidget,
+          reason: id,
+        );
+      }
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('settings-row-ai')),
+          matching: find.byType(BetaTag),
+        ),
+        findsNothing,
+      );
+      await disposeShell(tester, c);
+    });
+
     for (final size in [phone, desk]) {
       testWidgets('every page renders its title at ${size.width}', (
         tester,

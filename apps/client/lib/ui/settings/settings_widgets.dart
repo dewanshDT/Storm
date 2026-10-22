@@ -6,6 +6,7 @@ import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
 import '../breakpoints.dart';
+import '../panels.dart' show MonoTag;
 import '../shell/storm_scaffold.dart';
 import '../tokens.dart';
 
@@ -17,11 +18,15 @@ class SettingsPage extends StatelessWidget {
     required this.title,
     required this.intro,
     required this.children,
+    this.beta = false,
   });
 
   final String title;
   final String intro;
   final List<Widget> children;
+
+  /// Shows [BetaTag] beside the title.
+  final bool beta;
 
   @override
   Widget build(BuildContext context) {
@@ -31,15 +36,23 @@ class SettingsPage extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         if (!wide) ...[const _BackToSettings(), SizedBox(height: t.sp * 2)],
-        Text(
-          title,
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.titleSize,
-            fontWeight: FontWeight.w600,
-            color: t.text,
-            height: 1.2,
-          ),
+        Row(
+          spacing: t.sp * 1.25,
+          children: [
+            Flexible(
+              child: Text(
+                title,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.titleSize,
+                  fontWeight: FontWeight.w600,
+                  color: t.text,
+                  height: 1.2,
+                ),
+              ),
+            ),
+            if (beta) const BetaTag(),
+          ],
         ),
         SizedBox(height: t.sp * 1.25),
         Text(
@@ -444,5 +457,18 @@ class _TextDialogState extends State<_TextDialog> {
         child: const Text('OK'),
       ),
     ],
+  );
+}
+
+/// "Beta": a page or feature that still changes, in the small outlined tag
+/// used for vault names.
+class BetaTag extends StatelessWidget {
+  const BetaTag({super.key});
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    label: 'Beta',
+    excludeSemantics: true,
+    child: const MonoTag('Beta'),
   );
 }

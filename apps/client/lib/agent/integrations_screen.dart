@@ -381,6 +381,7 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     final names = {for (final h in _hosts ?? const <AgentHost>[]) h.id: h.name};
     return SettingsPage(
       title: 'Integrations',
+      beta: true,
       intro: 'Services your agents can use, such as Linear or GitHub.',
       children: [
         const InfoBox(
