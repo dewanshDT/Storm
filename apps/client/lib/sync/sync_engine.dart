@@ -298,30 +298,49 @@ class SyncEngine extends ChangeNotifier {
   ///
   /// When online it still refetches in the background; the caller is told via
   /// [changes] if the server's copy differed.
-  Future<CachedNote?> openNote(String id) async {
+  Future<CachedNote?> openNote(String id) async => (await open(id)).note;
+
+  /// [openNote], saying why there is no note when there is none: only the
+  /// server answering "no such note" means it is gone. A relay stream that
+  /// dropped or timed out is not an answer, and is retried once.
+  Future<NoteOpen> open(String id) async {
     final cached = await cache.note(vaultId, id);
 
-    if (!_mayReachServer) return cached;
+    if (!_mayReachServer) {
+      return cached != null ? NoteOpen.found(cached) : const NoteOpen.offline();
+    }
 
-    try {
-      final fresh = await api.note(vaultId, id);
-      _setOnline(true);
-      // Outside the network judgement: see `_cache`.
-      await _cache(() => _store(fresh), 'caching $id');
-      return await cache.note(vaultId, id) ?? _asCached(fresh);
-    } on StormApiException catch (e) {
-      // A definite answer from the server: it is reachable, the note is gone.
-      // Unless an edit to it is queued: then the cached copy is that edit's
-      // only home until the drain keeps it as a new note (decision 128c).
-      if (e.isNotFound) {
-        if (await cache.outboxFor(vaultId, id) != null) return cached;
+    for (var attempt = 0; ; attempt++) {
+      try {
+        final fresh = await api.note(vaultId, id);
+        _setOnline(true);
+        // Outside the network judgement: see `_cache`.
+        await _cache(() => _store(fresh), 'caching $id');
+        return NoteOpen.found(
+          await cache.note(vaultId, id) ?? _asCached(fresh),
+        );
+      } on StormApiException catch (e) {
+        if (!e.isNotFound) rethrow;
+        // "no such vault" is about the vault, not this note: keep the copy.
+        if (e.message != 'no such note') {
+          return cached != null
+              ? NoteOpen.found(cached)
+              : NoteOpen.unavailable(e);
+        }
+        // A definite answer from the server: it is reachable, the note is
+        // gone. Unless an edit to it is queued: then the cached copy is that
+        // edit's only home until the drain keeps it as a new note (128c).
+        if (cached != null && await cache.outboxFor(vaultId, id) != null) {
+          return NoteOpen.found(cached);
+        }
         await cache.removeNote(vaultId, id);
-        return null;
+        return const NoteOpen.gone();
+      } catch (e) {
+        if (attempt == 0 && _streamScoped(e)) continue;
+        _requestFailed(e);
+        if (cached != null) return NoteOpen.found(cached);
+        return isOnline ? NoteOpen.unavailable(e) : const NoteOpen.offline();
       }
-      rethrow;
-    } catch (e) {
-      _requestFailed(e);
-      return cached;
     }
   }
 
@@ -1235,4 +1254,41 @@ String bodyOf(String content) {
   if (!content.startsWith('---\n')) return content.trimLeft();
   final end = content.indexOf('\n---\n', 4);
   return end < 0 ? content.trimLeft() : content.substring(end + 5).trimLeft();
+}
+
+/// What [SyncEngine.open] found.
+class NoteOpen {
+  const NoteOpen.found(CachedNote this.note)
+    : outcome = NoteOpenOutcome.found,
+      error = null;
+  const NoteOpen.gone()
+    : outcome = NoteOpenOutcome.gone,
+      note = null,
+      error = null;
+  const NoteOpen.offline()
+    : outcome = NoteOpenOutcome.offline,
+      note = null,
+      error = null;
+  const NoteOpen.unavailable(Object this.error)
+    : outcome = NoteOpenOutcome.unavailable,
+      note = null;
+
+  final NoteOpenOutcome outcome;
+  final CachedNote? note;
+
+  /// Why an [NoteOpenOutcome.unavailable] note could not be fetched.
+  final Object? error;
+}
+
+enum NoteOpenOutcome {
+  found,
+
+  /// The server answered that there is no such note.
+  gone,
+
+  /// Not cached, and the server can't be reached.
+  offline,
+
+  /// Not cached, and the request failed without an answer about the note.
+  unavailable,
 }
