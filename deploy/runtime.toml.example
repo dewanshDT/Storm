@@ -20,9 +20,8 @@ scrollback_bytes = 4194304
 # (decision 132).
 # agent_mcp = "own"
 
-# With agent_mcp = "storm-only": whether a Claude Code session still gets its
-# enabled plugins' local (stdio) MCP servers (decision 131b). A Codex
-# session's plugins follow it either way, for now.
+# With agent_mcp = "storm-only": whether a Claude Code or Codex session still
+# gets its enabled plugins' local (stdio) MCP servers (decision 131b).
 # plugin_mcp = "allow"
 
 # Omit [[providers]] entirely to offer every built-in (decision 130):

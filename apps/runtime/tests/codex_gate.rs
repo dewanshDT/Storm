@@ -1,4 +1,4 @@
-//! The Codex adapter against a real `codex` binary (decision 130b).
+//! The Codex adapter against a real `codex` binary (decisions 130b, 132c).
 //!
 //! Runs only when `STORM_CODEX_BIN` names one (`npm i @openai/codex` puts it
 //! in `node_modules/.bin/codex`); CI has none, so it passes as a no-op there.
@@ -6,14 +6,15 @@
 //! checked here happens before the model is reached. What it proves, with
 //! the config Storm's own code writes:
 //!
-//! - a session lists exactly its own servers, never the account's home
-//!   config's nor a hostile repository's `.codex/config.toml` (AM32);
-//! - a session with no profile lists none;
-//! - Storm's `SessionStart` hook reports the conversation id through the
-//!   real `storm-runtime harness-session`, with the session's handle, and a
-//!   repository's own hooks never run;
-//! - a plugin installed from a marketplace runs no hook, and one without
-//!   hooks keeps its server (130f) but not its remote one (131i).
+//! - a session lists its own servers **and** the account's (132c), and a
+//!   plugin's, local and remote; never an untrusted repository's;
+//! - Storm's `SessionStart` hook runs **without
+//!   `--dangerously-bypass-hook-trust`**, because Storm wrote its trust
+//!   record, and reports the conversation id through the real
+//!   `storm-runtime harness-session`; a repository's hook and a plugin's,
+//!   unreviewed, never run;
+//! - under `storm-only`, the account's server and a plugin's remote one are
+//!   listed but disabled.
 #![cfg(unix)]
 
 use std::io::{BufRead, BufReader};
@@ -60,15 +61,14 @@ fn storms_codex_config_holds_against_the_real_binary() {
         ),
     )
     .unwrap();
-    std::fs::create_dir_all(user_home.path().join(".codex")).unwrap();
+
+    let home = codex::home(state.path());
+    std::fs::create_dir_all(&home).unwrap();
     std::fs::write(
-        user_home.path().join(".codex/config.toml"),
+        home.join("config.toml"),
         "[mcp_servers.account_server]\ncommand = \"/bin/echo\"\n",
     )
     .unwrap();
-
-    let home = codex::home(state.path());
-    codex::baseline(&home, ws.path(), Path::new(RUNTIME), true).unwrap();
     let login = codex_cmd(&bin, &home, user_home.path(), ws.path())
         .args(["login", "--with-api-key"])
         .stdin(Stdio::piped())
@@ -85,9 +85,8 @@ fn storms_codex_config_holds_against_the_real_binary() {
         .unwrap();
     assert!(login.success(), "codex login");
 
-    // 130f: plugins installed the way the account would install them, from a
-    // marketplace. Codex runs a plugin's hooks under Storm's trust bypass, so
-    // the one with a hook must be off; the one without keeps its server.
+    // Plugins installed the way the account would install them, from a
+    // marketplace: one with a hook, one with a local and a remote server.
     let market = tempfile::tempdir().unwrap();
     let plugin_canary = ws.path().join("PLUGIN-HOOK-RAN");
     let write = |path: &str, body: String| {
@@ -134,7 +133,7 @@ fn storms_codex_config_holds_against_the_real_binary() {
             .unwrap();
         assert!(out.status.success(), "codex {args:?}: {out:?}");
     }
-    codex::baseline(&home, ws.path(), Path::new(RUNTIME), true).unwrap();
+    codex::baseline(&home, ws.path(), Path::new(RUNTIME), true, false).unwrap();
 
     let socket_dir = tempfile::tempdir().unwrap();
     let socket = socket_dir.path().join("mcp.sock");
@@ -150,41 +149,30 @@ fn storms_codex_config_holds_against_the_real_binary() {
         "gate-handle",
         &socket,
         Path::new(RUNTIME),
+        &codex::own_servers(&home),
     )
     .unwrap();
 
-    let list = |profile: Option<&str>| -> String {
+    let list = |extra: &[String]| -> String {
         let mut c = codex_cmd(&bin, &home, user_home.path(), ws.path());
-        if let Some(p) = profile {
-            c.args(["-p", p]);
-        }
+        c.args(["-p", &codex::profile_name("ags_GATE")]).args(extra);
         let out = c.args(["mcp", "list"]).output().unwrap();
         String::from_utf8_lossy(&out.stdout).into_owned()
     };
-    let with = list(Some(&codex::profile_name("ags_GATE")));
-    assert!(with.contains("storm"), "{with}");
+    let line = |listing: &str, name: &str| -> String {
+        listing
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(name))
+            .unwrap_or_else(|| panic!("no {name} in {listing}"))
+            .to_string()
+    };
+    let own = list(&[]);
+    for name in ["storm", "account_server", "plain_server", "plain_remote"] {
+        assert!(line(&own, name).contains("enabled"), "{name}: {own}");
+    }
     assert!(
-        with.contains("plain_server"),
-        "a plugin without hooks lost its server: {with}"
-    );
-    // 131i: its remote server is listed, and off.
-    let remote = with
-        .lines()
-        .find(|l| l.contains("plain_remote"))
-        .unwrap_or_else(|| panic!("no plain_remote in {with}"));
-    assert!(remote.contains("disabled"), "{remote}");
-    assert!(
-        !with.contains("repo_server"),
-        "a repository's server loaded: {with}"
-    );
-    assert!(
-        !with.contains("account_server"),
-        "the account's server loaded: {with}"
-    );
-    let without = list(None);
-    assert!(
-        !without.contains("storm") && !without.contains("repo_server"),
-        "{without}"
+        !own.contains("repo_server"),
+        "an untrusted repository's server loaded: {own}"
     );
 
     // The hook: `codex exec` starts a conversation (and fails at the model,
@@ -206,6 +194,11 @@ fn storms_codex_config_holds_against_the_real_binary() {
         }
     });
     let profile = storm_runtime::profile::get("codex").unwrap();
+    assert!(
+        !profile.args.iter().any(|a| a.contains("bypass")),
+        "{:?}",
+        profile.args
+    );
     let mut exec = codex_cmd(&bin, &home, user_home.path(), ws.path());
     exec.arg("exec");
     // `exec` takes the session flags but not the TUI's daemon or approval
@@ -236,18 +229,27 @@ fn storms_codex_config_holds_against_the_real_binary() {
         .status()
         .unwrap();
     let _ = status; // the model is unreachable; the hook ran before it
-    let line = rx
+    let reported = rx
         .recv_timeout(Duration::from_secs(60))
-        .expect("Storm's hook never reported");
-    let reported: storm_runtime::harness::HarnessLine = serde_json::from_str(&line).unwrap();
+        .expect("Storm's hook never ran: its trust record was not accepted");
+    let reported: storm_runtime::harness::HarnessLine = serde_json::from_str(&reported).unwrap();
     assert_eq!(reported.handle, "gate-handle");
     assert!(
         storm_runtime::harness::valid_id("codex", &reported.harness_session),
-        "{line}"
+        "{reported:?}"
     );
     assert!(!canary.exists(), "a repository's hook ran");
-    assert!(
-        !plugin_canary.exists(),
-        "a plugin's hook ran under the trust bypass (130f)"
-    );
+    assert!(!plugin_canary.exists(), "a plugin's unreviewed hook ran");
+
+    // storm-only: the account's server and a plugin's remote one are off.
+    let (extras, _) = codex::baseline(&home, ws.path(), Path::new(RUNTIME), true, true).unwrap();
+    let extra: Vec<String> = extras
+        .args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect();
+    let only = list(&extra);
+    assert!(line(&only, "storm").contains("enabled"), "{only}");
+    assert!(line(&only, "account_server").contains("disabled"), "{only}");
+    assert!(line(&only, "plain_remote").contains("disabled"), "{only}");
 }

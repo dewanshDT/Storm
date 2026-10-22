@@ -57,15 +57,12 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
 - **OpenCode keeps your global config**, servers included, beside your
   integrations. A repository's own OpenCode config stays off: it could turn
   off the question OpenCode asks before each Storm tool.
-- **Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
-  session, under the same names the agent gives them, unless the host sets
-  `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
-  [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
-  Neither do your own `mcp_servers` or a repository's `.codex/config.toml`,
-  nor Codex's ChatGPT apps. When a
-  session starts, the agent shows what Storm skipped and why, and the
-  session's **Details** list it too, with the plugin servers that run on the
-  host and **Add to Integrations** for a remote one.
+- **Codex keeps its own MCP servers, [plugins](/docs/agents/plugins/) and
+  apps** beside your integrations, and asks its own trust questions about a
+  repository's `.codex/` settings.
+- A host with `agent_mcp = "storm-only"` gives sessions Storm's servers
+  alone. When such a session starts, the agent shows what Storm left out and
+  why, and the session's **Details** list it too.
 - **Cursor and Command Code run as terminals only:** no notes, no
   integrations, no write vault, and no Resume yet. Storm gives an agent its
   tools only through a configuration that keeps a repository's own MCP

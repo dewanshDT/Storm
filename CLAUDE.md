@@ -630,23 +630,25 @@ Specification*; the slices are decisions 81 and 81a onward):
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,
-  removed at the end), each `default_tools_approval_mode = "prompt"`. Before
-  every launch Storm rewrites the keys it owns in that `config.toml`: no
-  `mcp_servers`/`profiles`, only Storm's `SessionStart` hook (matcher
-  `startup|clear`: Codex starts a resume's hook without feeding it), every
-  workspace `untrusted` (a trusted one would load the repository's
-  `.codex/` servers and hooks). **No plugin with hooks** (130f): Storm's
-  `--dangerously-bypass-hook-trust` reaches a plugin's hooks too, so any
-  plugin whose installed versions have a `hooks` entry or manifest key — or
-  that Storm cannot read — is `enabled = false`, and `plugins._default` is
-  off so an account-synced plugin never loads; `storm-plugins-off.json`
-  remembers what Storm turned off. **No plugin's remote MCP server and no
-  ChatGPT apps** (131i, 131l): each remote server of an enabled plugin gets
-  `[plugins."<id>".mcp_servers."<name>"] enabled = false` (Codex would sign
-  it in on the host), its stdio servers follow `plugin_mcp`, and
-  `features.apps = false`; what was turned off, the account's removed
-  `mcp_servers` and the workspace's `.codex/` servers are named in the
-  session's notice, which Codex shows at the first message. `--no-daemon` always: a shared daemon holds a
+  removed at the end), each `default_tools_approval_mode = "prompt"`, named
+  `storm_<slug>` where the account's config uses the slug (a profile merges
+  key by key). **The account's config there is its own** (decision 132c):
+  its servers, profiles, plugins, plugin servers, apps, hooks and folder
+  trust are kept, and Codex asks its own questions. Storm adds only its
+  `SessionStart` hook (matcher `startup|clear`: Codex starts a resume's hook
+  without feeding it), appended, **with its `trusted_hash` under
+  `hooks.state."<config path>:session_start:<i>:0"`** — SHA-256 of the
+  compact key-sorted JSON of the event, matcher and handler with the
+  platform's command (gate G-132c; `the_trust_hash_is_codexs` holds a value
+  Codex 0.163 reported) — so **no `--dangerously-bypass-hook-trust`**: every
+  other hook gets Codex's review. A home with `storm-plugins-off.json` still
+  carries 130f/131's switches and the `untrusted` pins; the first launch
+  undoes them, once. Under `agent_mcp = "storm-only"`: the account's servers
+  withheld with `-c mcp_servers.<name>.enabled=false` (never deleted; `-c
+  mcp_servers={}` merges and does nothing), every workspace `untrusted`, a
+  plugin's remote servers off and its stdio ones per `plugin_mcp` (131i),
+  `features.apps = false` (131l), and what is left out named in the
+  session's notice. `--no-daemon` always: a shared daemon holds a
   conversation's writer lock. **No Codex sandbox** (130c): it needs user
   namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
   forbids, and relaxing the unit would weaken every agent.

@@ -63,9 +63,6 @@ pub(crate) const UNREADABLE: &str = "its plugin's MCP config could not be read";
 const UNLISTED: &str = "Storm couldn't list this host's plugins";
 pub(crate) const OWN: &str = "your own MCP servers don't load in Storm sessions";
 pub(crate) const PROJECT: &str = "project MCP servers don't load in Storm sessions";
-pub(crate) const HOOKED: &str = "turned off: it has hooks, or Storm couldn't read it";
-pub(crate) const REMOVED: &str =
-    "removed from Storm's Codex home: your own MCP servers don't load in Storm sessions";
 pub(crate) const APPS: &str = "ChatGPT apps don't load in Storm sessions";
 
 /// What a session gets from its plugins, and what it does not.
