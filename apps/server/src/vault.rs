@@ -205,6 +205,30 @@ impl Vault {
         self.resolve(rel).map(|p| p.is_file()).unwrap_or(false)
     }
 
+    /// Whether `rel` is certainly not a file: a path that can't be in the
+    /// vault, or one the filesystem says is missing. A stat that fails any
+    /// other way (a stale NFS handle, a permission error) is an error, so a
+    /// caller never takes it for a deletion (decision 132, fix a).
+    pub fn is_gone(&self, rel: &str) -> Result<bool> {
+        let path = match self.resolve(rel) {
+            Ok(path) => path,
+            Err(e) if e.downcast_ref::<Refusal>().is_some() => return Ok(true),
+            Err(e) => return Err(e),
+        };
+        match fs::metadata(&path) {
+            Ok(meta) => Ok(!meta.is_file()),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                Ok(true)
+            }
+            Err(e) => Err(e).with_context(|| format!("checking {}", path.display())),
+        }
+    }
+
     /// Writes atomically ([`crate::fsutil::write_atomic`]).
     pub fn write(&self, rel: &str, content: &str) -> Result<()> {
         let path = self.resolve(rel)?;

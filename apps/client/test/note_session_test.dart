@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'package:storm/api/relay/srp_http_client.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/api/storm_connection.dart';
 import 'package:storm/cache/cache_db.dart';
@@ -365,4 +366,72 @@ void main() {
       expect(session.notice, contains('A (recovered).md'));
     },
   );
+
+  group('a note that does not open (decision 132, fix a)', () {
+    const relayError = SrpTransportException('relay_error');
+
+    test('a dropped relay stream is retried once and the note opens', () async {
+      server.throwNext.add(relayError);
+      await open(content: 'here\n');
+      expect(session.isOpen, isTrue);
+      expect(session.error, isNull);
+    });
+
+    test(
+      'a relay stream that fails twice is not "no longer exists", and Retry opens it',
+      () async {
+        server.throwNext.addAll([relayError, relayError]);
+        await open(content: 'here\n');
+        expect(session.isOpen, isFalse);
+        expect(session.error, isNot(contains('no longer exists')));
+        expect(session.error, contains("Couldn't load this note"));
+        expect(session.canRetry, isTrue);
+
+        await session.retry();
+        expect(session.isOpen, isTrue);
+        expect(session.error, isNull);
+      },
+    );
+
+    test('only "no such note" says the note is gone', () async {
+      await session.open('missing');
+      expect(session.error, 'That note no longer exists.');
+      expect(session.canRetry, isFalse);
+    });
+
+    test('"no such vault" keeps the cached copy', () async {
+      await open(content: 'cached\n');
+      server.byVault.remove(FakeServer.primaryVault);
+      final again = NoteSession(engine);
+      await again.open('n1');
+      expect(again.isOpen, isTrue);
+      expect(again.buffer, 'cached\n');
+      expect(await cache.note(FakeServer.primaryVault, 'n1'), isNotNull);
+      again.dispose();
+    });
+
+    test('a slow open never replaces the note opened after it', () async {
+      server.notes['a'] = ServerNote(
+        id: 'a',
+        path: 'A.md',
+        content: 'A\n',
+        version: 1,
+      );
+      server.notes['b'] = ServerNote(
+        id: 'b',
+        path: 'B.md',
+        content: 'B\n',
+        version: 1,
+      );
+      final gate = server.noteGate = Completer<void>();
+      final slow = session.open('a');
+      await Future<void>.delayed(Duration.zero);
+      server.noteGate = null;
+      await session.open('b');
+      gate.complete();
+      await slow;
+      expect(session.meta?.id, 'b');
+      expect(session.buffer, 'B\n');
+    });
+  });
 }

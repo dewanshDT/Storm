@@ -285,6 +285,8 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
               icon: LucideIcons.circle_alert,
               title: 'This note would not open',
               detail: session.error,
+              action: session.canRetry ? 'Retry' : null,
+              onAction: session.canRetry ? session.retry : null,
             );
     }
 

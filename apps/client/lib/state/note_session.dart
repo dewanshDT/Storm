@@ -98,8 +98,10 @@ class NoteSession extends ChangeNotifier {
 
   /// Loads a note, discarding any unsaved buffer for the previous one.
   Future<void> open(String id) async {
+    final opening = ++_opening;
     _debounce?.cancel();
     _error = null;
+    _failedId = null;
     _notice = null;
     _hasConflict = false;
     _saveState = SaveState.idle;
@@ -107,15 +109,18 @@ class NoteSession extends ChangeNotifier {
     notifyListeners();
 
     try {
-      final cached = await _engine.openNote(id);
-      if (_closed) return;
+      final result = await _engine.open(id);
+      // Closed, or another note was opened while this one loaded.
+      if (_closed || opening != _opening) return;
+      final cached = result.note;
       if (cached == null) {
         _noteId = null;
-        // Only the server can say a note is gone. Offline it simply isn't
-        // here yet, which is a different thing and needs different wording.
-        _error = _engine.isOnline
-            ? 'That note no longer exists.'
-            : "That note isn't available offline yet.";
+        _error = switch (result.outcome) {
+          NoteOpenOutcome.gone => 'That note no longer exists.',
+          NoteOpenOutcome.offline => "That note isn't available offline yet.",
+          _ => _couldNotLoad(result.error!),
+        };
+        if (result.outcome != NoteOpenOutcome.gone) _failedId = id;
         _saveState = SaveState.failed;
         notifyListeners();
         return;
@@ -130,14 +135,35 @@ class NoteSession extends ChangeNotifier {
       );
       _adopt(cached.content, cached.version);
     } catch (e) {
-      if (_closed) return;
-      _error = '$e';
+      if (_closed || opening != _opening) return;
+      _noteId = null;
+      _error = _couldNotLoad(e);
+      _failedId = id;
       _saveState = SaveState.failed;
       notifyListeners();
     }
   }
 
+  static String _couldNotLoad(Object e) => e is StormApiException
+      ? "Couldn't load this note: ${e.message}"
+      : "Couldn't load this note. The server didn't answer; try again.";
+
+  /// Bumped by every [open] and [close], so a slow open that finishes after
+  /// another note was opened is dropped.
+  int _opening = 0;
+
+  /// The note that could not be loaded but may still exist, for [retry].
+  String? _failedId;
+  bool get canRetry => _failedId != null;
+
+  Future<void> retry() async {
+    final id = _failedId;
+    if (id != null) await open(id);
+  }
+
   void close() {
+    _opening++;
+    _failedId = null;
     _debounce?.cancel();
     _noteId = null;
     _meta = null;
