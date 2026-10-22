@@ -401,6 +401,11 @@ args = ["-i"]
         text, _, _ = s.until(lambda e, i, d, t: "abc" in t)
         check("resuming from an offset sends exactly what followed", text == "abc", repr(text))
         s.close()
+        s = Stream(f"/v1/agent/sessions/{sid2}/terminal/stream?offset=0", owner)
+        text, _, closed = s.until(lambda e, i, d, t: e == "live")
+        check("a stream marks where its replay ends (decision 132, fix b)",
+              not closed and text.endswith("abc"), repr(text[-20:]))
+        s.close()
         chunk = "x" * 65536
         for _ in range(70):
             if write(owner, sid2, chunk) != 204:

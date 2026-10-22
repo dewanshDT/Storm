@@ -148,6 +148,10 @@ class FakeServer {
   /// Simulates a reachable server that refuses.
   int? failWith;
 
+  /// Thrown by the next requests, one each: a relay stream that dropped or
+  /// timed out, as the SRP client reports it.
+  final List<Object> throwNext = [];
+
   String? mergeInstead;
   String? conflictInstead;
   int? lastBaseVersion;
@@ -213,6 +217,7 @@ class FakeServer {
 
   http.Client get client => MockClient((request) async {
     requests++;
+    if (throwNext.isNotEmpty) throw throwNext.removeAt(0);
     if (unreachable) {
       throw http.ClientException('Connection refused');
     }

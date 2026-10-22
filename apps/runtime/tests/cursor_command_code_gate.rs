@@ -78,6 +78,7 @@ fn cursor_reads_storms_disabled_list() {
         "h",
         Path::new("/s"),
         Path::new("/x"),
+        true,
     )
     .unwrap();
     let after = listing(&bin, &home, &ws);
@@ -122,6 +123,7 @@ fn command_code_takes_storms_local_file() {
         "h",
         Path::new("/s"),
         Path::new("/bin/cat"),
+        true,
     )
     .unwrap();
     let after = listing(&bin, &home, &ws);

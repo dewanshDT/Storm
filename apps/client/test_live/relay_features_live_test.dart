@@ -114,7 +114,7 @@ void main() {
             statuses.add(session.status);
           case OutputEvent(:final bytes):
             text.write(utf8.decode(bytes));
-          case GapEvent():
+          case GapEvent() || LiveEvent():
             break;
         }
       },

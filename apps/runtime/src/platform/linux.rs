@@ -8,8 +8,6 @@ pub const NAME: &str = "linux";
 pub const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
 pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
 pub const SERVICE_ACCOUNT: &str = "storm-runtime";
-/// `poll` reports a master writable with room to spare; 77c's chunk.
-pub const PTY_WRITE_CHUNK: usize = 256;
 /// The unit's `ProtectHome` already hides `/home`, `/root` and
 /// `/run/user` (77e).
 pub const PROTECTED_ROOTS: &[&str] = &[];
@@ -45,6 +43,13 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
     use rustix::event::{PollFd, PollFlags, poll};
     let mut fds = [PollFd::new(&fd, PollFlags::OUT)];
     Ok(poll(&mut fds, Some(&super::posix::timespec(timeout)))? > 0)
+}
+
+pub fn wait_readable(fd: BorrowedFd<'_>) -> io::Result<()> {
+    use rustix::event::{PollFd, PollFlags, poll};
+    let mut fds = [PollFd::new(&fd, PollFlags::IN)];
+    poll(&mut fds, None)?;
+    Ok(())
 }
 
 /// `/proc/<pid>/stat`: field 6 is the session. The command name (field 2)

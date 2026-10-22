@@ -1984,6 +1984,7 @@ struct TerminalStream {
     last_status: Option<String>,
     rx: tokio::sync::watch::Receiver<u64>,
     done: bool,
+    live_sent: bool,
 }
 
 /// GET …/terminal/stream?offset=N — the terminal as SSE (freeze §11.2).
@@ -1993,6 +1994,11 @@ struct TerminalStream {
 /// explicit `event: gap`. Resume is by offset, never `Last-Event-ID`, so it
 /// is exact and crosses the relay (SRP §5.3). The stream ends once the session
 /// has ended and everything retained has been sent.
+///
+/// `event: live` (data: the offset) marks the first time a stream has sent
+/// everything retained: what came before it is replay, and a client's
+/// terminal must not answer the queries in it again (decision 132, fix b).
+/// Older clients ignore it.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -2011,6 +2017,7 @@ async fn agent_terminal_stream(
         cursor: q.offset,
         last_status: None,
         done: false,
+        live_sent: false,
     };
     let stream = futures_util::stream::unfold(start, |mut st| async move {
         loop {
@@ -2046,6 +2053,11 @@ async fn agent_terminal_stream(
                     return Some((Ok(event), st));
                 }
                 crate::agent::cache::Read::UpToDate | crate::agent::cache::Read::Ahead => {
+                    if !st.live_sent && !record.is_ended() {
+                        st.live_sent = true;
+                        let event = Event::default().event("live").data(st.cursor.to_string());
+                        return Some((Ok(event), st));
+                    }
                     if record.is_ended() {
                         return None;
                     }

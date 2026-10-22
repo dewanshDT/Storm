@@ -677,7 +677,19 @@ impl Indexer {
     /// indexed again under its id. In every case the version continues from the
     /// note's history; before 128d it restarted at 1 and overwrote it.
     pub fn refresh_path(&mut self, rel_path: &str) -> Result<Option<i64>> {
-        if !self.vault.exists(rel_path) {
+        let gone = match self.vault.is_gone(rel_path) {
+            Ok(gone) => gone,
+            Err(e) => {
+                // The next event for the path, or the next start, tries again.
+                tracing::warn!(
+                    path = rel_path,
+                    error = format!("{e:#}"),
+                    "could not tell whether a note was deleted; left indexed"
+                );
+                return Ok(None);
+            }
+        };
+        if gone {
             if let Some(note) = self.db.get_note_by_path(rel_path)? {
                 return self.db.delete_note(&note.id, &now_rfc3339()).map(Some);
             }
@@ -1284,6 +1296,26 @@ mod tests {
 
         assert!(ix.refresh_path("A.md").unwrap().is_some());
         assert!(ix.db.get_note(&created.note.id).unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_stat_is_not_a_deletion() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, mut ix) = indexer();
+        let created = ix.create_note("Dir/A.md", "# A\n").unwrap();
+        let dir = root(&ix).join("Dir");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::metadata(dir.join("A.md")).is_ok() {
+            // Root reads it anyway: no failing stat to test.
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+            return;
+        }
+        let refreshed = ix.refresh_path("Dir/A.md");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert_eq!(refreshed.unwrap(), None);
+        assert!(ix.db.get_note(&created.note.id).unwrap().is_some());
     }
 
     #[test]

@@ -331,8 +331,9 @@ args = ["-i"]
         a = Agent("gw")
         env = wait(a.env, "the agent's record of its launch")
         argv = env["argv"]
-        check("it gets --mcp-config <session>/mcp.json --strict-mcp-config",
-              "--strict-mcp-config" in argv and argv[argv.index("--mcp-config") + 1].endswith(f"{sid}/mcp.json"),
+        check("it gets --mcp-config <session>/mcp.json beside its own servers (132a)",
+              "--strict-mcp-config" not in argv
+              and argv[argv.index("--mcp-config") + 1].endswith(f"{sid}/mcp.json"),
               argv)
         cfg_path = argv[argv.index("--mcp-config") + 1]
         cfg = json.load(open(cfg_path))
@@ -342,9 +343,8 @@ args = ["-i"]
         check("the session directory is 0700",
               oct(os.stat(os.path.dirname(cfg_path)).st_mode & 0o777) == "0o700")
         _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
-        check("the session view names the plugin's remote server it skipped (131a)",
-              any(x["name"] == "remote" and x["source"] == "plugin e2eplug" and x["reason"].startswith("remote")
-                  for x in view.get("mcp_skipped", [])), view)
+        check("nothing is skipped: Claude Code loads its plugins itself (132a)",
+              not view.get("mcp_skipped"), view)
         status, _ = call("POST", "/v1/integrations/suggestions/dismiss",
                          {"plugin": "e2eplug", "server": "remote", "url": "https://e2e-remote.example.com/mcp"},
                          auth=owner)
@@ -515,13 +515,13 @@ args = ["-i"]
         oc = Agent("oc")
         rec = launch("opencode", "oc")
         env = wait(oc.env, "the agent's record of its launch")
-        xdg = env["env"]["XDG_CONFIG_HOME"]
-        check("it gets XDG_CONFIG_HOME=<session>/xdg", xdg and xdg.endswith(f"{rec['id']}/xdg"), env)
+        check("its global config stays: XDG_CONFIG_HOME is not Storm's (132b)",
+              rec["id"] not in (env["env"]["XDG_CONFIG_HOME"] or ""), env)
         check("it gets OPENCODE_DISABLE_PROJECT_CONFIG=1", env["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1")
         instructions = json.load(open(env["env"]["OPENCODE_CONFIG"]))["instructions"]
         check("its OPENCODE_CONFIG names the workspace's AGENTS.md by absolute path",
               instructions == [os.path.realpath(os.path.join(WORKSPACES, "oc", "AGENTS.md"))], instructions)
-        occfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json")))
+        occfg = json.loads(env["env"]["OPENCODE_CONFIG_CONTENT"])
         check("every connection asks before a tool",
               occfg["permission"].get(f"{slug}_*") == "ask" and occfg["permission"].get("storm_*") == "ask", occfg)
         check("the host's settings are merged in", occfg.get("model") == "opencode/big-pickle", occfg)
@@ -553,7 +553,7 @@ args = ["-i"]
         # Decision 89: its conversation id and the hook that reports it, before
         # the prompt and after the MCP config.
         check("and its conversation id, with the hook that reports it",
-              argv.index("--strict-mcp-config") < argv.index("--session-id") < argv.index("--settings")
+              argv.index("--mcp-config") < argv.index("--session-id") < argv.index("--settings")
               and "harness-session" in open(argv[argv.index("--settings") + 1]).read(), argv)
         rec2 = launch("opencode", "ctx2", {"context": {"vault_id": vault, "note_id": other["id"]}})
         c2 = Agent("ctx2")

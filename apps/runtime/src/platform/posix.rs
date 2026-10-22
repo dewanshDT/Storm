@@ -24,18 +24,17 @@ pub fn host_name() -> String {
     }
 }
 
-/// The most a PTY write may carry after [`wait_writable`] said yes, so that
-/// the write itself never blocks. Linux: 256 bytes, what 77c verified. macOS:
-/// one byte, because its "writable" means room for at least one, and a
-/// blocking write of more sleeps until all of it fits — the hang the
-/// deadline exists to prevent (found on a real Mac, decision 83).
-pub(crate) const PTY_WRITE_CHUNK: usize = os::PTY_WRITE_CHUNK;
-
 /// Waits up to `timeout` for `fd` (a PTY master) to accept a write. Returns
 /// whether it can. The bounded input write of decision 77c rests on this:
 /// without it, an agent that stops reading holds its session forever.
 pub(crate) fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> {
     os::wait_writable(fd, timeout)
+}
+
+/// Waits until `fd` (a non-blocking PTY master) has output to read, or has
+/// closed.
+pub(crate) fn wait_readable(fd: BorrowedFd<'_>) -> io::Result<()> {
+    os::wait_readable(fd)
 }
 
 /// Every live (non-zombie) process whose session id is `sid`.

@@ -40,11 +40,16 @@ pub struct RuntimeConfig {
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
     pub forbidden_roots: Vec<PathBuf>,
-    /// Whether a Claude Code or Codex session gets its enabled plugins' local
-    /// (stdio) MCP servers (decision 131b). A plugin's remote servers never load on
-    /// a host; they reach a session only through the gateway.
+    /// Whether a Claude Code or Codex session's enabled plugins' local
+    /// (stdio) MCP servers load under `agent_mcp = "storm-only"` (decision
+    /// 131b); otherwise the agent loads its plugins itself (decision 132).
     #[serde(default)]
     pub plugin_mcp: PluginMcp,
+    /// Whether a session keeps the MCP servers its agent loads by itself —
+    /// the account's, its plugins', a project's — beside Storm's
+    /// integrations (decision 132), or gets Storm's alone.
+    #[serde(default)]
+    pub agent_mcp: AgentMcp,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -53,6 +58,14 @@ pub enum PluginMcp {
     #[default]
     Allow,
     Off,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentMcp {
+    #[default]
+    Own,
+    StormOnly,
 }
 
 fn default_max_sessions() -> u32 {
@@ -82,6 +95,7 @@ impl Default for RuntimeConfig {
             path: None,
             forbidden_roots: default_forbidden(),
             plugin_mcp: PluginMcp::default(),
+            agent_mcp: AgentMcp::default(),
         }
     }
 }
@@ -552,6 +566,14 @@ mod tests {
     }
 
     /// Decision 131b: plugin servers are allowed unless the host says off.
+    #[test]
+    fn agent_mcp_defaults_to_the_agents_own() {
+        assert_eq!(RuntimeConfig::default().agent_mcp, AgentMcp::Own);
+        let only: RuntimeConfig = toml::from_str("agent_mcp = \"storm-only\"").unwrap();
+        assert_eq!(only.agent_mcp, AgentMcp::StormOnly);
+        assert!(toml::from_str::<RuntimeConfig>("agent_mcp = \"strict\"").is_err());
+    }
+
     #[test]
     fn plugin_mcp_defaults_to_allow() {
         assert_eq!(RuntimeConfig::default().plugin_mcp, PluginMcp::Allow);

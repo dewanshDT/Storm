@@ -11,7 +11,7 @@
 
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, Stdio};
@@ -41,9 +41,18 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
     // The parent's copy must go, or the master never sees end-of-file.
     drop(slave);
     let leader = Pid::from_child(&child);
+    // Non-blocking, so an input write takes what fits and never sleeps
+    // until all of it does: macOS's `ptcwrite` would (decision 83), and
+    // writing a byte at a time instead split escape sequences, which Codex
+    // then read as Esc and typed text (decision 132, fix b). The reader
+    // shares the flag and waits for readiness instead.
+    rustix::fs::fcntl_setfl(
+        &master,
+        rustix::fs::fcntl_getfl(&master)? | OFlags::NONBLOCK,
+    )?;
     Ok(Spawned {
         child: Child(child),
-        output: File::from(master.try_clone()?),
+        output: Output(File::from(master.try_clone()?)),
         input: Input {
             writer: File::from(master),
         },
@@ -143,32 +152,57 @@ impl Child {
     }
 }
 
+/// The terminal's output. The master is non-blocking, so a read with
+/// nothing to read waits for some.
+pub(crate) struct Output(File);
+
+impl Read for Output {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.0.read(buf) {
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    crate::platform::wait_readable(self.0.as_fd())?
+                }
+                other => return other,
+            }
+        }
+    }
+}
+
 pub(crate) struct Input {
     writer: File,
 }
 
 impl Input {
-    /// Writes in small chunks, each only once the terminal can take it, until
-    /// `deadline`. Past it the write fails `TimedOut`; a write racing the
-    /// agent's exit fails `BrokenPipe`.
-    pub fn write(&mut self, bytes: &[u8], deadline: Instant) -> io::Result<()> {
-        for chunk in bytes.chunks(crate::platform::PTY_WRITE_CHUNK) {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if !crate::platform::wait_writable(self.writer.as_fd(), left)? {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "the agent is not reading its input",
-                ));
-            }
-            self.writer.write_all(chunk).map_err(|e| {
-                // A write racing the agent's exit fails with EIO; to the caller
-                // it is the same thing as writing after the end.
-                if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) {
-                    io::Error::new(io::ErrorKind::BrokenPipe, "the session has ended")
-                } else {
-                    e
+    /// Writes as much as the terminal takes, waiting for room only when it is
+    /// full, until `deadline`: a keystroke's escape sequence goes in one
+    /// write. Past the deadline the write fails `TimedOut`; a write racing
+    /// the agent's exit fails `BrokenPipe`.
+    pub fn write(&mut self, mut bytes: &[u8], deadline: Instant) -> io::Result<()> {
+        while !bytes.is_empty() {
+            match self.writer.write(bytes) {
+                Ok(n) => bytes = &bytes[n..],
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() || !crate::platform::wait_writable(self.writer.as_fd(), left)?
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "the agent is not reading its input",
+                        ));
+                    }
                 }
-            })?;
+                // A write racing the agent's exit fails with EIO; to the
+                // caller it is the same thing as writing after the end.
+                Err(e) if e.raw_os_error() == Some(rustix::io::Errno::IO.raw_os_error()) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "the session has ended",
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
         }
         Ok(())
     }
@@ -239,5 +273,33 @@ fn signal_each(pids: &[Pid], signal: Signal) {
     for &pid in pids {
         // ESRCH just means it is already gone.
         let _ = rustix::process::kill_process(pid, signal);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Read;
+    use std::time::Duration;
+
+    /// A keystroke's escape sequence is one write (decision 132, fix b): a
+    /// reader waiting on the other end gets `ESC [ A` whole, never a lone
+    /// ESC that Codex would take for the Esc key.
+    #[test]
+    fn an_escape_sequence_reaches_a_waiting_reader_whole() {
+        let (mut reader, writer) = std::io::pipe().unwrap();
+        let read = std::thread::spawn(move || {
+            let mut buf = [0u8; 64];
+            let n = reader.read(&mut buf).unwrap();
+            buf[..n].to_vec()
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        let mut input = Input {
+            writer: File::from(OwnedFd::from(writer)),
+        };
+        input
+            .write(b"\x1b[A", Instant::now() + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(read.join().unwrap(), b"\x1b[A");
     }
 }

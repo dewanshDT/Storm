@@ -597,20 +597,32 @@ Specification*; the slices are decisions 81 and 81a onward):
   workspace's own `AGENTS.md` (else `CLAUDE.md`, else `CONTEXT.md`) back by
   absolute path through `OPENCODE_CONFIG` (`mcp::provider_baseline`; a path
   with a glob character is not restored). With grants, `claude-code` gets
-  `--mcp-config … --strict-mcp-config`; `opencode` gets its own
-  `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
+  `--mcp-config …` beside its own servers (decision 132a; `--strict-mcp-config`
+  too, grants or not, under `runtime.toml` `agent_mcp = "storm-only"`); an
+  integration whose slug the account's `.claude.json` or the workspace's
+  `.mcp.json` already uses is written as `storm_<slug>`, since Claude Code
+  loads `--mcp-config`'s entry and drops theirs (gate G-132a), except the
+  built-in `storm`, which the opening prompt names; `opencode` gets its
+  servers and `"<slug>_*": "ask"` in `OPENCODE_CONFIG_CONTENT`, on top of its
+  global config (132b; a slug the global config uses is `storm_<slug>`), or
+  under `storm-only` its own `XDG_CONFIG_HOME`. **A project's OpenCode config
+  stays off either way** (G-132b): OpenCode evaluates permissions last match
+  first and a merged key keeps its first position, so a project listing
+  `"<slug>_*"` before `"*": "allow"` would turn Storm's asks off; everything
+  else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
-  policy. **An agent Storm cannot hold to its own MCP servers gets none**
-  (130a): the host reports `mcp: false` for it in `hello` and the server
-  grants nothing (`McpOutcome::Unsupported`) — Cursor and Command Code today;
-  Command Code loads a repository's `.mcp.json` with no approval. Their
-  writers exist (131j `cursor.rs`: bridges as a `--plugin-dir` plugin, every
-  other server on Cursor's own `mcp-disabled.json`; 131k `command_code.rs`:
-  the workspace's local `mcp.json`, a disabled stub under every other name
-  and no handle in it) but the profiles stay `mcp: None` until G-C1/G-CC1
+  policy. **An agent whose writer has not passed its real-account gate gets
+  no Storm servers** (130a): the host reports `mcp: false` for it in `hello`
+  and the server grants nothing (`McpOutcome::Unsupported`) — Cursor and
+  Command Code today. Their writers exist (131j `cursor.rs`: bridges as a
+  `--plugin-dir` plugin; 131k `command_code.rs`: the workspace's local
+  `mcp.json`, no handle in it, the account's entries kept and a clashing
+  bridge `storm_<slug>`); only under `storm-only` do they disable every
+  other server (Cursor's own `mcp-disabled.json`; a disabled stub under
+  every other name) (132d). The profiles stay `mcp: None` until G-C1/G-CC1
   pass on a signed-in account. Both slugs are the CLIs' own — Command Code's
   is `@sindresorhus/slugify`, and a non-ASCII path fails the start rather
   than guess; `tests/cursor_command_code_gate.rs` checks them against the
@@ -619,23 +631,25 @@ Specification*; the slices are decisions 81 and 81a onward):
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,
-  removed at the end), each `default_tools_approval_mode = "prompt"`. Before
-  every launch Storm rewrites the keys it owns in that `config.toml`: no
-  `mcp_servers`/`profiles`, only Storm's `SessionStart` hook (matcher
-  `startup|clear`: Codex starts a resume's hook without feeding it), every
-  workspace `untrusted` (a trusted one would load the repository's
-  `.codex/` servers and hooks). **No plugin with hooks** (130f): Storm's
-  `--dangerously-bypass-hook-trust` reaches a plugin's hooks too, so any
-  plugin whose installed versions have a `hooks` entry or manifest key — or
-  that Storm cannot read — is `enabled = false`, and `plugins._default` is
-  off so an account-synced plugin never loads; `storm-plugins-off.json`
-  remembers what Storm turned off. **No plugin's remote MCP server and no
-  ChatGPT apps** (131i, 131l): each remote server of an enabled plugin gets
-  `[plugins."<id>".mcp_servers."<name>"] enabled = false` (Codex would sign
-  it in on the host), its stdio servers follow `plugin_mcp`, and
-  `features.apps = false`; what was turned off, the account's removed
-  `mcp_servers` and the workspace's `.codex/` servers are named in the
-  session's notice, which Codex shows at the first message. `--no-daemon` always: a shared daemon holds a
+  removed at the end), each `default_tools_approval_mode = "prompt"`, named
+  `storm_<slug>` where the account's config uses the slug (a profile merges
+  key by key). **The account's config there is its own** (decision 132c):
+  its servers, profiles, plugins, plugin servers, apps, hooks and folder
+  trust are kept, and Codex asks its own questions. Storm adds only its
+  `SessionStart` hook (matcher `startup|clear`: Codex starts a resume's hook
+  without feeding it), appended, **with its `trusted_hash` under
+  `hooks.state."<config path>:session_start:<i>:0"`** — SHA-256 of the
+  compact key-sorted JSON of the event, matcher and handler with the
+  platform's command (gate G-132c; `the_trust_hash_is_codexs` holds a value
+  Codex 0.163 reported) — so **no `--dangerously-bypass-hook-trust`**: every
+  other hook gets Codex's review. A home with `storm-plugins-off.json` still
+  carries 130f/131's switches and the `untrusted` pins; the first launch
+  undoes them, once. Under `agent_mcp = "storm-only"`: the account's servers
+  withheld with `-c mcp_servers.<name>.enabled=false` (never deleted; `-c
+  mcp_servers={}` merges and does nothing), every workspace `untrusted`, a
+  plugin's remote servers off and its stdio ones per `plugin_mcp` (131i),
+  `features.apps = false` (131l), and what is left out named in the
+  session's notice. `--no-daemon` always: a shared daemon holds a
   conversation's writer lock. **No Codex sandbox** (130c): it needs user
   namespaces, which `storm-runtime.service`'s `RestrictNamespaces=true`
   forbids, and relaxing the unit would weaken every agent.
@@ -649,8 +663,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
   a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
   positive control.
-- **A Claude Code session's plugins' local MCP servers are written into its
-  `mcp.json` by Storm, and strict stays** (decision 131, `plugins.rs`). The
+- **Under `agent_mcp = "storm-only"`, a Claude Code session's plugins' local
+  MCP servers are written into its `mcp.json` by Storm, and strict stays**
+  (decision 131, `plugins.rs`); otherwise Claude Code loads its plugins
+  itself (decision 132). The
   host lists the enabled plugins with the provider's own `claude plugin list
   --json`; a stdio server is keyed `plugin_<plugin>_<server>` (Claude Code's
   own tool prefix; no slug has `_`) with `${CLAUDE_PLUGIN_ROOT}`/`DATA` filled

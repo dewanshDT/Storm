@@ -960,8 +960,8 @@ impl Host {
         let is_synced = synced.is_some();
         // What the provider gets with or without grants (AM66), then its MCP
         // config (AM32). Written before the agent starts; a session whose
-        // config cannot be written does not start, rather than start without
-        // `--strict-mcp-config` and load the host's own MCP servers (G-D12).
+        // config cannot be written does not start rather than start without
+        // its integrations.
         let session_dir = crate::mcp::session_dir(&self.state_dir, &id);
         let mut launch = match crate::mcp::provider_baseline(&provider_id, &session_dir, &dir) {
             Ok(extras) => extras,
@@ -983,13 +983,15 @@ impl Host {
         };
         // A session's plugins (decision 131): a Claude Code session's local
         // servers join its `mcp.json` (Codex's are switched in its home,
-        // above), and everything it will not have is named.
+        // above), and everything it will not have is named. Only when the
+        // host keeps sessions to Storm's servers: otherwise Claude Code loads
+        // its plugins itself (decision 132).
+        let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
+        let is_claude = crate::profile::get(&provider_id).and_then(|p| p.mcp)
+            == Some(crate::profile::Mcp::ClaudeCode);
         let plugin_plan = if codex_plan.is_some() {
             codex_plan
-        } else if !mcp.is_empty()
-            && crate::profile::get(&provider_id).and_then(|p| p.mcp)
-                == Some(crate::profile::Mcp::ClaudeCode)
-        {
+        } else if storm_only && !mcp.is_empty() && is_claude {
             let helper = provider.helper_command();
             let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
             let workspace = dir.clone();
@@ -1005,7 +1007,24 @@ impl Host {
             .as_ref()
             .map(|p| p.local.clone())
             .unwrap_or_default();
-        let plugin_plan = match self.mcp_launch(&id, &provider_id, &dir, &mcp, &plugin_servers) {
+        let taken = match crate::profile::get(&provider_id).and_then(|p| p.mcp) {
+            _ if storm_only => Default::default(),
+            Some(crate::profile::Mcp::ClaudeCode) => crate::plugins::claude_names(&dir),
+            Some(crate::profile::Mcp::OpenCode) => crate::mcp::opencode_names(),
+            _ => Default::default(),
+        };
+        let own = crate::mcp::AgentServers {
+            storm_only,
+            taken: &taken,
+        };
+        let plugin_plan = match self.mcp_launch(
+            &id,
+            &provider_id,
+            &dir,
+            &mcp,
+            &plugin_servers,
+            &own,
+        ) {
             Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
@@ -1326,9 +1345,10 @@ impl Host {
         workspace: &Path,
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
+        own: &crate::mcp::AgentServers,
     ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         use crate::profile::Mcp;
-        if grants.is_empty() {
+        if grants.is_empty() && !own.storm_only {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
@@ -1350,6 +1370,7 @@ impl Host {
                         &handle,
                         &socket,
                         &exe,
+                        &crate::codex::own_servers(&crate::codex::home(&self.state_dir)),
                     )?,
                     None,
                 ),
@@ -1364,13 +1385,20 @@ impl Host {
                         &handle,
                         &socket,
                         &exe,
+                        own.storm_only,
                     )?;
                     (extras, Some(plan))
                 }
                 _ => {
                     let home = account_home()?;
                     let (extras, plan) = crate::command_code::write_session(
-                        workspace, &home, &grants, &handle, &socket, &exe,
+                        workspace,
+                        &home,
+                        &grants,
+                        &handle,
+                        &socket,
+                        &exe,
+                        own.storm_only,
                     )?;
                     (extras, Some(plan))
                 }
@@ -1386,19 +1414,21 @@ impl Host {
                     &exe,
                     self.opencode_settings.as_ref(),
                     plugin_servers,
+                    own,
                 )?,
                 None,
             )
         };
-        if extras != crate::mcp::LaunchExtras::default() {
+        if !grants.is_empty() && extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
         Ok((extras, plan))
     }
 
     /// What every Codex session gains, grants or not (decision 130b): Storm's
-    /// home, with its own keys written for this workspace, and its plugin
-    /// plan (decision 131i). Nothing for any other provider.
+    /// home, with its own keys written for this workspace, and under
+    /// `storm-only` what keeps the account's servers out and its plugin plan
+    /// (decisions 131i, 132c). Nothing for any other provider.
     fn codex_baseline(
         &self,
         provider: &str,
@@ -1409,9 +1439,15 @@ impl Host {
         }
         let exe = std::env::current_exe().context("finding this binary for the hook")?;
         let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
-        let (extras, plan) =
-            crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe, allow)?;
-        Ok((extras, Some(plan)))
+        let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
+        let (extras, plan) = crate::codex::baseline(
+            &crate::codex::home(&self.state_dir),
+            workspace,
+            &exe,
+            allow,
+            storm_only,
+        )?;
+        Ok((extras, storm_only.then_some(plan)))
     }
 
     /// What a session's launch gains so the agent's own session id reaches
@@ -1990,6 +2026,20 @@ mod tests {
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
+        harness_host_with(script, "").await
+    }
+
+    /// [`harness_host`] with `settings` at the top of its `runtime.toml`.
+    #[cfg(unix)]
+    async fn harness_host_with(
+        script: &str,
+        settings: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
         let state = tempfile::tempdir().unwrap();
@@ -2007,7 +2057,7 @@ mod tests {
         .save(state.path())
         .unwrap();
         let mut toml = format!(
-            "workspace_roots = [{:?}]\n",
+            "{settings}\nworkspace_roots = [{:?}]\n",
             roots.path().display().to_string()
         );
         for id in ["claude-code", "opencode", "codex"] {
@@ -2296,6 +2346,64 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// Decision 132: a Claude Code session keeps the agent's own MCP servers
+    /// (no `--strict-mcp-config`) unless the host says `storm-only`, which
+    /// holds even for a session without Storm's servers.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn claude_code_keeps_its_own_servers_unless_the_host_is_storm_only() {
+        let script = r#"echo "ARGS $0 $*"; exec sleep 1000"#;
+        let args_of = |seen: &Arc<Mutex<Vec<(String, serde_json::Value)>>>, session: &str| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with(&format!("/{session}/terminal/output")))
+                .map(|(_, b)| {
+                    String::from_utf8_lossy(
+                        &BASE64
+                            .decode(b["data"].as_str().unwrap().as_bytes())
+                            .unwrap(),
+                    )
+                    .into_owned()
+                })
+                .collect::<String>()
+        };
+        let grant = vec![crate::mcp::McpGrant {
+            id: "storm".into(),
+            slug: "storm".into(),
+            plugin_origin: None,
+        }];
+
+        let (host, seen, _state, _roots) = harness_host(script).await;
+        let mut start = harness_start("ags_OWN", "claude-code", None, false);
+        if let Command::Start { mcp, .. } = &mut start {
+            *mcp = grant.clone();
+        }
+        host.clone().handle(start).await;
+        wait_for("the arguments", || {
+            args_of(&seen, "ags_own").contains("ARGS")
+        })
+        .await;
+        let out = args_of(&seen, "ags_own");
+        assert!(out.contains("--mcp-config"), "{out}");
+        assert!(!out.contains("--strict-mcp-config"), "{out}");
+
+        let (host, seen, _state, _roots) =
+            harness_host_with(script, "agent_mcp = \"storm-only\"").await;
+        host.clone()
+            .handle(harness_start("ags_ONLY", "claude-code", None, false))
+            .await;
+        wait_for("the arguments", || {
+            args_of(&seen, "ags_only").contains("ARGS")
+        })
+        .await;
+        let out = args_of(&seen, "ags_only");
+        assert!(
+            out.contains("--strict-mcp-config"),
+            "no grants, still strict: {out}"
+        );
+    }
+
     /// Decision 130b: a Codex session runs in Storm's own home, with its
     /// servers in its own profile that asks for each tool, the prompt last,
     /// and the profile gone when the session ends; a resume names the
@@ -2363,14 +2471,10 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
             .unwrap()
             .parse()
             .unwrap();
-        assert!(config.get("mcp_servers").is_none());
-        assert!(
-            config["projects"]
-                .as_table()
-                .unwrap()
-                .values()
-                .all(|p| p["trust_level"].as_str() == Some("untrusted"))
-        );
+        // Decision 132c: the workspace's trust is Codex's own question, and
+        // Storm's hook carries its trust record.
+        assert!(config.get("projects").is_none(), "{config}");
+        assert!(!config["hooks"]["state"].as_table().unwrap().is_empty());
 
         host.clone()
             .handle(Command::End {

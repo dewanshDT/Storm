@@ -455,6 +455,80 @@ void main() {
       c.dispose();
     });
 
+    group('the terminal answers only live queries (decision 132, fix b)', () {
+      ({
+        SessionController c,
+        StreamController<TerminalEvent> stream,
+        List<String> sent,
+      })
+      open({bool foreground = true}) {
+        final sent = <String>[];
+        final stream = StreamController<TerminalEvent>();
+        final c = SessionController(
+          api: api(
+            MockClient((req) async {
+              if (req.url.path.endsWith('/terminal/input')) {
+                sent.add(latin1.decode(req.bodyBytes));
+              }
+              return http.Response('', 204);
+            }),
+          ),
+          sessionId: 'ags_1',
+          open: (_) => stream.stream,
+          isForeground: () => foreground,
+        )..start();
+        stream.add(StatusEvent(AgentSession.fromJson(session())));
+        return (c: c, stream: stream, sent: sent);
+      }
+
+      // Device attributes: xterm2 answers `CSI ? … c`.
+      final query = Uint8List.fromList(utf8.encode('\x1b[c'));
+
+      test('a query replayed from history is not answered again', () async {
+        final o = open();
+        o.stream.add(OutputEvent(3, query));
+        o.stream.add(LiveEvent());
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, isEmpty);
+
+        o.stream.add(OutputEvent(6, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, hasLength(1));
+        expect(o.sent.single, startsWith('\x1b[?'));
+        o.c.dispose();
+      });
+
+      test('a device in the background never answers', () async {
+        final o = open(foreground: false);
+        o.stream.add(LiveEvent());
+        o.stream.add(OutputEvent(3, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, isEmpty);
+        o.c.dispose();
+      });
+
+      test('against an older server, a quiet stream counts as live', () async {
+        final o = open();
+        o.stream.add(OutputEvent(3, query));
+        await Future<void>.delayed(
+          SessionController.liveAfterQuiet + const Duration(milliseconds: 100),
+        );
+        expect(o.sent, isEmpty, reason: 'it was replay');
+        o.stream.add(OutputEvent(6, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, hasLength(1));
+        o.c.dispose();
+      });
+
+      test('a keystroke is still sent at once', () async {
+        final o = open();
+        o.c.terminal.typeForTest('x');
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, ['x']);
+        o.c.dispose();
+      });
+    });
+
     group('the PTY follows the device in use (freeze §11.4)', () {
       Map<String, dynamic> sized(int cols, int rows) => {
         ...session(),

@@ -202,6 +202,7 @@ class _ClaudeLoginScreenState extends ConsumerState<ClaudeLoginScreen> {
     final login = _login;
     return SettingsPage(
       title: 'Claude login',
+      beta: true,
       intro:
           'Sign in to Claude once, here, and Claude Code sessions on the hosts '
           'you tick use that login.',

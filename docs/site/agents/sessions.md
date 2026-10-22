@@ -50,21 +50,23 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   chosen at launch. It is never offered `delete_note`.
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
-- **Claude Code and Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
-  session, under the same names the agent gives them, unless the host sets
-  `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
-  [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
-  Neither do the MCP servers in your own `~/.claude.json` or a repository's
-  `.mcp.json` (or `.codex/config.toml`), nor Codex's ChatGPT apps. When a
-  session starts, the agent shows what Storm skipped and why, and the
-  session's **Details** list it too, with the plugin servers that run on the
-  host and **Add to Integrations** for a remote one.
+- **Claude Code keeps its own MCP servers:** the ones in your
+  `~/.claude.json`, its [plugins'](/docs/agents/plugins/), and a
+  repository's `.mcp.json` (after Claude Code asks you) load beside your
+  integrations, unless the host sets `agent_mcp = "storm-only"`.
+- **OpenCode keeps your global config**, servers included, beside your
+  integrations. A repository's own OpenCode config stays off: it could turn
+  off the question OpenCode asks before each Storm tool.
+- **Codex keeps its own MCP servers, [plugins](/docs/agents/plugins/) and
+  apps** beside your integrations, and asks its own trust questions about a
+  repository's `.codex/` settings.
+- A host with `agent_mcp = "storm-only"` gives sessions Storm's servers
+  alone. When such a session starts, the agent shows what Storm left out and
+  why, and the session's **Details** list it too.
 - **Cursor and Command Code run as terminals only:** no notes, no
-  integrations, no write vault, and no Resume yet. Storm gives an agent its
-  tools only through a configuration that keeps a repository's own MCP
-  servers out, and neither CLI can be held to one yet (Command Code loads a
-  repository's `.mcp.json` with no approval at all). Their sessions keep the
-  name they launched with.
+  integrations, no write vault, and no Resume yet, until Storm has checked
+  its integrations in each with a signed-in account. Their own MCP servers
+  work as usual. Their sessions keep the name they launched with.
 - Storm enforces those limits on its tools. The agent is also a process with
   its host account's file access, which is why a Runtime Host must
   [never share an account with the vaults](/docs/agents/hosts/#never-share-an-account-with-the-vaults).

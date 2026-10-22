@@ -4,32 +4,24 @@ description: What an agent's plugins and their MCP servers do in a Storm session
 ---
 
 Agents install **plugins** that bring skills, commands, hooks and often an
-**MCP server** — the Slack plugin, Playwright, a cloud provider's tools. A
-Storm session holds an agent to the MCP servers Storm gives it, so a
-plugin's server reaches a session one of two ways:
+**MCP server**: the Slack plugin, Playwright, a cloud provider's tools. In a
+Storm session a plugin works as it does without Storm: its local servers
+run on the host, and its remote ones sign in the way the agent signs them
+in (decision 132). Storm adds your
+[integrations](/docs/agents/integrations/) beside them.
 
-- A **local** server (one the plugin starts on the host, over stdio) runs in
-  the session as it would without Storm. It is the plugin's own code under
-  the host's account, like the plugin's skills and hooks already are.
-- A **remote** server (an address on the internet) reaches a session only as
-  an [integration](/docs/agents/integrations/), signed in once on your
-  server. **A plugin never signs in on a host**: a token there would be
-  usable by every session on that host, outside Storm's grants, host scope
-  and audit.
-
-Storm shows what it skipped. When a session starts, the agent prints the
-list where it can (Claude Code at once, Codex at the first message), and the
-session's **Details** always show it, with **Add to Integrations** for a
-remote server. Settings › Integrations also lists your plugins' remote
-servers under **From your plugins**.
+A remote server can also be an integration, signed in once on your server
+and given to the hosts you choose, with Storm's audit and its question
+before each tool. Settings › Integrations lists your plugins' remote
+servers under **From your plugins** for that.
 
 ## Agent by agent
 
 | Agent | A plugin's local servers | A plugin's remote servers | Also left out |
 |---|---|---|---|
-| **Claude Code** | Run in the session, under the plugin's own tool names (`mcp__plugin_<plugin>_<server>__…`) | Skipped; suggested as integrations | Your own `~/.claude.json` servers, a repository's `.mcp.json`, claude.ai connectors |
-| **Codex** | Run in the session | Switched off; suggested as integrations | Your own `mcp_servers`, a repository's `.codex/` servers, ChatGPT apps, and any plugin that has hooks |
-| **OpenCode** | — (its plugins are JavaScript, not MCP servers) | — | A repository's own config |
+| **Claude Code** | Run in the session, as they do without Storm | Load as Claude Code loads them; also suggested as integrations | Nothing: your own `~/.claude.json` servers, a repository's `.mcp.json` (after Claude Code asks you) and claude.ai connectors load as usual, beside your integrations |
+| **Codex** | Run in the session | Load as Codex loads them; also suggested as integrations | Nothing: your own `mcp_servers`, ChatGPT apps and plugins load as usual, and a repository's `.codex/` settings once you trust it in Codex |
+| **OpenCode** | — (its plugins are JavaScript, not MCP servers) | — | A repository's own config: it could turn off the question OpenCode asks before each Storm tool. Your global config, and its servers, load as usual |
 | **Cursor**, **Command Code** | — | — | They run as terminals with no Storm tools until Storm has checked them with a signed-in account |
 
 An integration added from a plugin keeps the plugin's tool names in Claude
@@ -37,6 +29,19 @@ Code, so the plugin's commands and hooks still find its tools.
 
 A server that needs one of the plugin's own options (`${user_config.…}`) is
 skipped too: Storm can't read those values.
+
+## Storm's servers only
+
+A host can give its sessions Storm's integrations and nothing else, for a
+machine that runs code you don't trust. In its `runtime.toml`:
+
+```toml
+agent_mcp = "storm-only"
+```
+
+Claude Code and Codex sessions then load only Storm's servers (and, unless
+`plugin_mcp = "off"`, their plugins' local ones), and Codex keeps every
+workspace untrusted.
 
 ## Turning plugin servers off on a host
 
@@ -46,9 +51,9 @@ In the host's `runtime.toml`:
 plugin_mcp = "off"
 ```
 
-Every plugin's local servers are then skipped, in Claude Code and in Codex,
-and each session says so. Remote servers are unaffected: they only ever
-reach a session as integrations.
+It applies with `agent_mcp = "storm-only"`: every plugin's local servers are
+then skipped as well, in Claude Code and in Codex, and each session says
+so.
 
 ## What Storm reads
 
@@ -60,8 +65,10 @@ repository's config files, Storm reads **server names only**, to name them.
 
 ## Adding Slack
 
-The Slack plugin's server is remote, and Slack does not let other apps
-register themselves, so you add it with **your own Slack app**:
+The Slack plugin's server works in a Claude Code session as it does
+without Storm, signed in on that host. To sign in once for every host
+instead, add it as an integration. Slack does not let other apps register
+themselves, so you add it with **your own Slack app**:
 
 > These steps haven't been tried against Slack's own server yet. If Slack
 > refuses Storm's redirect, or its server refuses your app's sign-in, please
