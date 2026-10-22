@@ -15,12 +15,12 @@ mod posix;
 #[cfg(unix)]
 use posix as shared;
 #[cfg(unix)]
-pub(crate) use posix::{PTY_WRITE_CHUNK, wait_writable};
-#[cfg(unix)]
 pub use posix::{
     account_name, check_exclusive_account, exclusive_account_allowed, host_name, session_members,
     sweep_account, sweep_targets, tagged_processes,
 };
+#[cfg(unix)]
+pub(crate) use posix::{wait_readable, wait_writable};
 
 #[cfg(target_os = "linux")]
 mod linux;

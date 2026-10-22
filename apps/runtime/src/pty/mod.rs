@@ -11,7 +11,6 @@
 //!   to the session; terminating the job) and says whether anything is left.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -24,7 +23,7 @@ mod windows;
 #[cfg(windows)]
 use windows as imp;
 
-pub(crate) use imp::{Child, Group, Input, spawn};
+pub(crate) use imp::{Child, Group, Input, Output, spawn};
 
 /// What a session's process is.
 pub(crate) struct Launch {
@@ -49,7 +48,7 @@ pub(crate) struct Launch {
 pub(crate) struct Spawned {
     pub child: Child,
     /// The terminal's output, read until it closes.
-    pub output: File,
+    pub output: Output,
     pub input: Input,
     pub group: Group,
 }

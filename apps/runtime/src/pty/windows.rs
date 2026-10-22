@@ -398,6 +398,9 @@ impl Child {
     }
 }
 
+/// The terminal's output: the ConPTY pipe's read end, which blocks.
+pub(crate) type Output = File;
+
 pub(crate) struct Input {
     pipe: OwnedHandle,
     event: OwnedHandle,

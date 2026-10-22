@@ -9,11 +9,6 @@ pub const NAME: &str = "macos";
 pub const DEFAULT_STATE: &str = super::launchd::STATE;
 pub const DEFAULT_CONFIG: &str = super::launchd::CONFIG;
 pub const SERVICE_ACCOUNT: &str = "_stormruntime";
-/// xnu's `ptcselect` reports a master writable while the slave's input
-/// queue is below `TTYHOG - 2`, which may be room for a single byte, and
-/// `ptcwrite` then sleeps until the whole write fits. One byte per wait
-/// never blocks.
-pub const PTY_WRITE_CHUNK: usize = 1;
 pub const PROTECTED_ROOTS: &[&str] = super::launchd::PROTECTED_ROOTS;
 
 pub use super::macos_service::{install, uninstall};
@@ -62,6 +57,17 @@ pub fn wait_writable(fd: BorrowedFd<'_>, timeout: Duration) -> io::Result<bool> 
     };
     // The set holds one fd, so any readiness is its.
     Ok(ready > 0)
+}
+
+/// `select(2)` for the same reason as [`wait_writable`].
+pub fn wait_readable(fd: BorrowedFd<'_>) -> io::Result<()> {
+    use rustix::event::{fd_set_insert, fd_set_num_elements, select};
+    let raw = fd.as_raw_fd();
+    let mut set = vec![Default::default(); fd_set_num_elements(1, raw + 1)];
+    fd_set_insert(&mut set, raw);
+    // SAFETY: as in `wait_writable`.
+    unsafe { select(raw + 1, Some(&mut set), None, None, None)? };
+    Ok(())
 }
 
 /// `proc_listallpids`, then `getsid` for each. A pid that exited in between

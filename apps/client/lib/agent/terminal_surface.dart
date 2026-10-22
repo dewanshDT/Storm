@@ -26,7 +26,7 @@ class StormTerminal {
     _bytes = const Utf8Decoder(allowMalformed: true).startChunkedConversion(
       StringConversionSink.fromStringSink(_TerminalWriter(_terminal)),
     );
-    _terminal.onOutput = _emit;
+    _terminal.onOutput = (data) => _writingOutput ? _reply(data) : _emit(data);
     _terminal.onResize = (cols, rows, _, _) => onResize?.call(cols, rows);
     _terminal.onTitleChange = (t) => title.value = t;
   }
@@ -44,6 +44,21 @@ class StormTerminal {
 
   /// What the person typed, as the bytes the agent should receive.
   void Function(Uint8List bytes)? onInput;
+
+  /// The terminal's answer to a query in the output it is drawing (device
+  /// attributes, cursor position, colours, keyboard mode). Unset, it goes to
+  /// [onInput]. Kept apart because an answer to a query replayed from
+  /// history reaches the agent as typed text (decision 132, fix b).
+  void Function(Uint8List bytes)? onReply;
+
+  /// True while output is being drawn: whatever the emulator sends then is a
+  /// reply, never a keystroke.
+  bool _writingOutput = false;
+
+  void _reply(String data) {
+    final bytes = Uint8List.fromList(utf8.encode(data));
+    (onReply ?? onInput)?.call(bytes);
+  }
 
   /// The view's size changed.
   void Function(int cols, int rows)? onResize;
@@ -94,7 +109,14 @@ class StormTerminal {
   int get cols => _terminal.viewWidth;
   int get rows => _terminal.viewHeight;
 
-  void write(Uint8List bytes) => _bytes.add(bytes);
+  void write(Uint8List bytes) {
+    _writingOutput = true;
+    try {
+      _bytes.add(bytes);
+    } finally {
+      _writingOutput = false;
+    }
+  }
 
   /// Clears everything, as after a gap at the start of a view (freeze §14).
   void reset() {

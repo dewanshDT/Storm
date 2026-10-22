@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState, WidgetsBinding;
 
 import '../api/models.dart';
 import '../ui/states.dart';
@@ -18,7 +19,12 @@ import 'terminal_surface.dart';
 /// rendered, with backoff, never `Last-Event-ID`. Input is coalesced briefly
 /// and sent as serial POSTs, at most once and never retried (freeze §11.3).
 class SessionController extends ChangeNotifier {
-  SessionController({required this.api, required this.sessionId, this._open});
+  SessionController({
+    required this.api,
+    required this.sessionId,
+    this._open,
+    bool Function()? isForeground,
+  }) : _isForeground = isForeground ?? _appInForeground;
 
   final AgentApi api;
   final String sessionId;
@@ -38,6 +44,28 @@ class SessionController extends ChangeNotifier {
 
   int _offset = 0;
   bool _disposed = false;
+
+  /// Whether this stream has caught up: before it, output is replay, and the
+  /// terminal's replies to queries in it are dropped (decision 132, fix b).
+  bool _live = false;
+
+  /// An older server sends no `live` event; a stream quiet this long has
+  /// caught up all the same, and one this old has too even if an agent
+  /// never stops drawing.
+  static const liveAfterQuiet = Duration(milliseconds: 500);
+  static const liveAfterAtMost = Duration(seconds: 5);
+  Timer? _quiet;
+  Timer? _quietCap;
+
+  /// Only a device in use answers the agent's queries, so two open devices
+  /// never both do.
+  final bool Function() _isForeground;
+
+  static bool _appInForeground() {
+    final state = WidgetsBinding.instance.lifecycleState;
+    return state == null || state == AppLifecycleState.resumed;
+  }
+
   StreamSubscription<TerminalEvent>? _sub;
   Timer? _retry;
   Duration _backoff = const Duration(seconds: 1);
@@ -67,6 +95,7 @@ class SessionController extends ChangeNotifier {
 
   void start() {
     terminal.onInput = _queueInput;
+    terminal.onReply = _queueReply;
     terminal.onImagePaste = () async {
       final image = await readClipboardImage();
       if (image == null) return false;
@@ -84,6 +113,10 @@ class SessionController extends ChangeNotifier {
   void _connect() {
     if (_disposed) return;
     final open = _open ?? (o) => openTerminalStream(api, sessionId, o);
+    _live = false;
+    _armQuiet();
+    _quietCap?.cancel();
+    _quietCap = Timer(liveAfterAtMost, () => _live = true);
     _sub = open(_offset).listen(
       _onEvent,
       onError: (Object e) {
@@ -126,7 +159,12 @@ class SessionController extends ChangeNotifier {
         connected = true;
         streamError = null;
         _backoff = const Duration(seconds: 1);
+      case LiveEvent():
+        _quiet?.cancel();
+        _quietCap?.cancel();
+        _live = true;
       case OutputEvent(:final end, :final bytes):
+        if (!_live) _armQuiet();
         // A resumed stream never repeats bytes, but a reconnect racing a
         // replay could; the offset is what decides.
         final start = end - bytes.length;
@@ -144,6 +182,17 @@ class SessionController extends ChangeNotifier {
         _offset = to;
     }
     _notify();
+  }
+
+  void _armQuiet() {
+    _quiet?.cancel();
+    _quiet = Timer(liveAfterQuiet, () => _live = true);
+  }
+
+  void _queueReply(Uint8List bytes) {
+    if (!_live || !_isForeground() || (session?.ended ?? false)) return;
+    _pending.add(bytes);
+    _flush ??= Timer(coalesce, _send);
   }
 
   void _queueInput(Uint8List bytes) {
@@ -268,6 +317,8 @@ class SessionController extends ChangeNotifier {
     _retry?.cancel();
     _flush?.cancel();
     _resizeTimer?.cancel();
+    _quiet?.cancel();
+    _quietCap?.cancel();
     terminal.dispose();
     super.dispose();
   }
