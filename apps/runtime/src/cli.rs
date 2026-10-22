@@ -43,7 +43,6 @@
 //!   starts is in the job and cannot leave it, so the tag is not searched.
 
 use std::ffi::{OsStr, OsString};
-use std::fs::File;
 use std::io::{self, Read};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -339,7 +338,7 @@ impl Shared {
 
     /// Forwards output until the terminal closes, then reports the ending —
     /// in that order, so nothing is reported after `ended`.
-    fn read_until_closed(&self, mut reader: File, events: Arc<dyn SessionEvents>) {
+    fn read_until_closed(&self, mut reader: impl Read, events: Arc<dyn SessionEvents>) {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
             match reader.read(&mut buf) {

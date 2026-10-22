@@ -20,6 +20,10 @@ class OutputEvent extends TerminalEvent {
   final Uint8List bytes;
 }
 
+/// Everything retained has been sent: what came before was replay
+/// (decision 132, fix b). An older server never sends it.
+class LiveEvent extends TerminalEvent {}
+
 /// `from..to` is no longer retained. Resume from [to].
 class GapEvent extends TerminalEvent {
   GapEvent(this.from, this.to);
@@ -85,6 +89,8 @@ class SseParser {
         final end = int.tryParse(id ?? '');
         if (end == null) return null;
         return OutputEvent(end, base64.decode(data));
+      case 'live':
+        return LiveEvent();
       case 'gap':
         final j = jsonDecode(data) as Map<String, dynamic>;
         return GapEvent((j['from'] as num).toInt(), (j['to'] as num).toInt());

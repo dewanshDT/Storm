@@ -37,6 +37,7 @@ void main() {
     final text = StringBuffer();
     var last = 0;
     final statuses = <String>[];
+    var live = false;
     final done = Completer<void>();
     final sub = openTerminalStream(api, s.id, 0).listen((e) {
       switch (e) {
@@ -45,6 +46,8 @@ void main() {
         case OutputEvent(:final end, :final bytes):
           text.write(utf8.decode(bytes));
           last = end;
+        case LiveEvent():
+          live = true;
         case GapEvent():
           break;
       }
@@ -58,6 +61,8 @@ void main() {
     }
 
     await until(() => text.toString().contains('fake session ${s.id}'));
+    // The server marks where replay ends (decision 132, fix b).
+    await until(() => live);
     await api.input(s.id, Uint8List.fromList(utf8.encode('from dart\r')));
     await until(() => text.toString().contains('from dart'));
     await api.resize(s.id, 100, 30, focus: true);
