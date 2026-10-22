@@ -43,6 +43,8 @@ blake3 = "1.8.7"
 bytes = "1"
 clap = { version = "4.6.7", features = ["derive", "env"] }
 data-encoding = "2.11.1"
+# Codex's hook trust hash (decision 132c); already in the tree under rustls.
+sha2 = "0.11.0"
 ed25519-dalek = "3.0.0"
 futures-util = "0.3.34"
 rand = "0.10.2"

@@ -1370,6 +1370,7 @@ impl Host {
                         &handle,
                         &socket,
                         &exe,
+                        &crate::codex::own_servers(&crate::codex::home(&self.state_dir)),
                     )?,
                     None,
                 ),
@@ -1418,8 +1419,9 @@ impl Host {
     }
 
     /// What every Codex session gains, grants or not (decision 130b): Storm's
-    /// home, with its own keys written for this workspace, and its plugin
-    /// plan (decision 131i). Nothing for any other provider.
+    /// home, with its own keys written for this workspace, and under
+    /// `storm-only` what keeps the account's servers out and its plugin plan
+    /// (decisions 131i, 132c). Nothing for any other provider.
     fn codex_baseline(
         &self,
         provider: &str,
@@ -1430,9 +1432,15 @@ impl Host {
         }
         let exe = std::env::current_exe().context("finding this binary for the hook")?;
         let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
-        let (extras, plan) =
-            crate::codex::baseline(&crate::codex::home(&self.state_dir), workspace, &exe, allow)?;
-        Ok((extras, Some(plan)))
+        let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
+        let (extras, plan) = crate::codex::baseline(
+            &crate::codex::home(&self.state_dir),
+            workspace,
+            &exe,
+            allow,
+            storm_only,
+        )?;
+        Ok((extras, storm_only.then_some(plan)))
     }
 
     /// What a session's launch gains so the agent's own session id reaches
@@ -2456,14 +2464,10 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
             .unwrap()
             .parse()
             .unwrap();
-        assert!(config.get("mcp_servers").is_none());
-        assert!(
-            config["projects"]
-                .as_table()
-                .unwrap()
-                .values()
-                .all(|p| p["trust_level"].as_str() == Some("untrusted"))
-        );
+        // Decision 132c: the workspace's trust is Codex's own question, and
+        // Storm's hook carries its trust record.
+        assert!(config.get("projects").is_none(), "{config}");
+        assert!(!config["hooks"]["state"].as_table().unwrap().is_empty());
 
         host.clone()
             .handle(Command::End {

@@ -40,10 +40,9 @@ pub struct RuntimeConfig {
     /// (D3). The default is the packaged one.
     #[serde(default = "default_forbidden")]
     pub forbidden_roots: Vec<PathBuf>,
-    /// Whether a session's enabled plugins' local (stdio) MCP servers load
-    /// where Storm writes them (decision 131b): a Claude Code session's under
-    /// `agent_mcp = "storm-only"` (otherwise Claude Code loads its plugins
-    /// itself, decision 132), and a Codex session's.
+    /// Whether a Claude Code or Codex session's enabled plugins' local
+    /// (stdio) MCP servers load under `agent_mcp = "storm-only"` (decision
+    /// 131b); otherwise the agent loads its plugins itself (decision 132).
     #[serde(default)]
     pub plugin_mcp: PluginMcp,
     /// Whether a session keeps the MCP servers its agent loads by itself —
