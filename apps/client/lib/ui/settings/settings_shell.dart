@@ -28,11 +28,19 @@ import 'vaults_page.dart';
 
 /// One settings page (handoff §5.1). [storm] pages sit under the STORM label.
 class SettingsPageInfo {
-  const SettingsPageInfo(this.id, this.label, {this.storm = false});
+  const SettingsPageInfo(
+    this.id,
+    this.label, {
+    this.storm = false,
+    this.beta = false,
+  });
 
   final String id;
   final String label;
   final bool storm;
+
+  /// Still settling: the navigation and the page say so.
+  final bool beta;
 }
 
 const kSettingsPages = [
@@ -41,8 +49,8 @@ const kSettingsPages = [
   SettingsPageInfo('access', 'Devices & access'),
   SettingsPageInfo('vaults', 'Vaults', storm: true),
   SettingsPageInfo('ai', 'AI access', storm: true),
-  SettingsPageInfo('integrations', 'Integrations', storm: true),
-  SettingsPageInfo('claude-login', 'Claude login', storm: true),
+  SettingsPageInfo('integrations', 'Integrations', storm: true, beta: true),
+  SettingsPageInfo('claude-login', 'Claude login', storm: true, beta: true),
   SettingsPageInfo('hosts', 'Hosts & default agent', storm: true),
   SettingsPageInfo('storage', 'Storage', storm: true),
   SettingsPageInfo('connection', 'Connection', storm: true),
@@ -187,6 +195,7 @@ class SettingsNav extends StatelessWidget {
                     ),
                   ),
                 ),
+                if (p.beta) ...[const BetaTag(), SizedBox(width: t.sp)],
                 if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
               ],
             ),
@@ -240,6 +249,7 @@ class SettingsListScreen extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         spacing: t.sp,
         children: [
+          if (p.beta) const BetaTag(),
           if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
           Icon(LucideIcons.chevron_right, size: t.uiSize, color: t.text3),
         ],
