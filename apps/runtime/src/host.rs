@@ -1007,13 +1007,14 @@ impl Host {
             .as_ref()
             .map(|p| p.local.clone())
             .unwrap_or_default();
-        let taken = if is_claude && !storm_only {
-            crate::plugins::claude_names(&dir)
-        } else {
-            Default::default()
+        let taken = match crate::profile::get(&provider_id).and_then(|p| p.mcp) {
+            _ if storm_only => Default::default(),
+            Some(crate::profile::Mcp::ClaudeCode) => crate::plugins::claude_names(&dir),
+            Some(crate::profile::Mcp::OpenCode) => crate::mcp::opencode_names(),
+            _ => Default::default(),
         };
-        let claude = crate::mcp::Claude {
-            strict: storm_only,
+        let own = crate::mcp::AgentServers {
+            storm_only,
             taken: &taken,
         };
         let plugin_plan = match self.mcp_launch(
@@ -1022,18 +1023,11 @@ impl Host {
             &dir,
             &mcp,
             &plugin_servers,
-            &claude,
+            &own,
         ) {
             Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
-                // Storm's servers alone, even with none of Storm's.
-                if is_claude
-                    && storm_only
-                    && !launch.args.iter().any(|a| a == "--strict-mcp-config")
-                {
-                    launch.args.push("--strict-mcp-config".into());
-                }
                 plugin_plan.or(plan)
             }
             Err(e) => {
@@ -1351,10 +1345,10 @@ impl Host {
         workspace: &Path,
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
-        claude: &crate::mcp::Claude,
+        own: &crate::mcp::AgentServers,
     ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         use crate::profile::Mcp;
-        if grants.is_empty() {
+        if grants.is_empty() && !own.storm_only {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
@@ -1412,12 +1406,12 @@ impl Host {
                     &exe,
                     self.opencode_settings.as_ref(),
                     plugin_servers,
-                    claude,
+                    own,
                 )?,
                 None,
             )
         };
-        if extras != crate::mcp::LaunchExtras::default() {
+        if !grants.is_empty() && extras != crate::mcp::LaunchExtras::default() {
             self.handles.register(&handle, session, grants);
         }
         Ok((extras, plan))

@@ -52,7 +52,11 @@ pub use crate::provider::LaunchExtras;
 /// commands and hooks match the tools (131h); else, or when that name is
 /// taken or unusable, the slug. The bridge itself is always addressed by
 /// slug.
-fn claude_key(g: &McpGrant, written: &serde_json::Map<String, Value>, claude: &Claude) -> String {
+fn claude_key(
+    g: &McpGrant,
+    written: &serde_json::Map<String, Value>,
+    own: &AgentServers,
+) -> String {
     let usable = |s: &str| !s.is_empty() && s.len() <= 64;
     // A bridge for a plugin's own server keeps the plugin's name, and
     // replaces that server on purpose (131h).
@@ -66,33 +70,62 @@ fn claude_key(g: &McpGrant, written: &serde_json::Map<String, Value>, claude: &C
         }
     }
     // Claude Code loads `--mcp-config`'s entry over the account's or a
-    // project's of the same name and drops theirs (gate G-132a), so Storm's
-    // steps aside instead (decision 132) — except the session's own vault
-    // server, which the opening prompt names.
-    if g.id != STORM_CONNECTION && claude.taken.contains(&g.slug) {
-        format!("storm_{}", g.slug)
-    } else {
-        g.slug.clone()
-    }
+    // project's of the same name and drops theirs (gate G-132a).
+    own.key(g)
 }
 
-/// How a Claude Code session's `mcp.json` sits beside the agent's own
-/// servers (decision 132).
-pub struct Claude<'a> {
-    /// `--strict-mcp-config`: Storm's servers alone (`agent_mcp =
-    /// "storm-only"`).
-    pub strict: bool,
-    /// Names the account's and the workspace's configs already use.
+/// The server names OpenCode's global config already uses (decision 132b):
+/// `opencode.json`, `opencode.jsonc` or `config.json` under
+/// `$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`. A file that is not
+/// plain JSON (a `.jsonc` with comments) gives no names.
+pub fn opencode_names() -> std::collections::HashSet<String> {
+    let dir = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")));
+    let Some(dir) = dir.map(|d| d.join("opencode")) else {
+        return Default::default();
+    };
+    ["opencode.json", "opencode.jsonc", "config.json"]
+        .iter()
+        .filter_map(|f| std::fs::read(dir.join(f)).ok())
+        .filter_map(|b| serde_json::from_slice::<Value>(&b).ok())
+        .filter_map(|v| {
+            v["mcp"]
+                .as_object()
+                .map(|m| m.keys().cloned().collect::<Vec<_>>())
+        })
+        .flatten()
+        .collect()
+}
+
+/// How a session's servers sit beside the agent's own (decision 132).
+pub struct AgentServers<'a> {
+    /// Storm's servers alone (`agent_mcp = "storm-only"`), even when the
+    /// session has none.
+    pub storm_only: bool,
+    /// Server names the agent's own config already uses, so Storm's step
+    /// aside.
     pub taken: &'a std::collections::HashSet<String>,
 }
 
-impl Claude<'_> {
-    pub fn storm_only() -> Claude<'static> {
+impl AgentServers<'_> {
+    pub fn storm_only() -> AgentServers<'static> {
         static NONE: std::sync::LazyLock<std::collections::HashSet<String>> =
             std::sync::LazyLock::new(Default::default);
-        Claude {
-            strict: true,
+        AgentServers {
+            storm_only: true,
             taken: &NONE,
+        }
+    }
+
+    /// The name a grant's server gets: its slug, or `storm_<slug>` when the
+    /// agent's own config has that name — except the built-in `storm`, which
+    /// the opening prompt names.
+    fn key(&self, g: &McpGrant) -> String {
+        if g.id != STORM_CONNECTION && self.taken.contains(&g.slug) {
+            format!("storm_{}", g.slug)
+        } else {
+            g.slug.clone()
         }
     }
 }
@@ -220,11 +253,13 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 /// gains (AM32 as amended by AM66):
 /// - **`claude-code`**: `--mcp-config <dir>/mcp.json`, one stdio server per
 ///   slug, beside the agent's own servers (decision 132); with
-///   [`Claude::strict`], `--strict-mcp-config` too, and only the session's
-///   load.
-/// - **`opencode`**: `XDG_CONFIG_HOME=<dir>/xdg` with the session config in
-///   `<dir>/xdg/opencode/opencode.json`, and `permission: {"<slug>_*": "ask"}`
-///   for every connection. Both are required, with
+///   [`AgentServers::storm_only`], `--strict-mcp-config` too, and only the
+///   session's load.
+/// - **`opencode`**: the session config, with `permission: {"<slug>_*":
+///   "ask"}` for every connection, in `OPENCODE_CONFIG_CONTENT` on top of
+///   OpenCode's global config (decision 132b). With
+///   [`AgentServers::storm_only`], `XDG_CONFIG_HOME=<dir>/xdg` with it in
+///   `<dir>/xdg/opencode/opencode.json` instead. Either needs, with
 ///   [`provider_baseline`]'s `OPENCODE_DISABLE_PROJECT_CONFIG=1`: OpenCode
 ///   merges every other config source with the global one, and runs MCP
 ///   tools without asking by default (G2).
@@ -244,10 +279,10 @@ pub fn write_provider_config(
     exe: &Path,
     opencode_settings: Option<&Value>,
     plugin_servers: &serde_json::Map<String, Value>,
-    claude: &Claude,
+    own: &AgentServers,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
-    if grants.is_empty() {
+    if grants.is_empty() && !own.storm_only {
         return Ok(LaunchExtras::default());
     }
     match provider {
@@ -256,7 +291,7 @@ pub fn write_provider_config(
             for g in &grants {
                 let (command, env) = bridge_entry(exe, &g.slug, handle, socket);
                 servers.insert(
-                    claude_key(g, &servers, claude),
+                    claude_key(g, &servers, own),
                     json!({
                         "type": "stdio",
                         "command": command[0],
@@ -278,7 +313,7 @@ pub fn write_provider_config(
             )?;
             let mut args: Vec<std::ffi::OsString> =
                 vec!["--mcp-config".into(), path.into_os_string()];
-            if claude.strict {
+            if own.storm_only {
                 args.push("--strict-mcp-config".into());
             }
             Ok(LaunchExtras {
@@ -297,19 +332,35 @@ pub fn write_provider_config(
                 .and_then(|p| p.as_object().cloned())
                 .unwrap_or_default();
             for g in &grants {
+                let key = own.key(g);
                 let (command, env) = bridge_entry(exe, &g.slug, handle, socket);
                 mcp.insert(
-                    g.slug.clone(),
+                    key.clone(),
                     json!({ "type": "local", "command": command, "environment": env, "enabled": true }),
                 );
                 // Last, so no setting can relax it.
-                permission.insert(format!("{}_*", g.slug), json!("ask"));
+                permission.insert(format!("{key}_*"), json!("ask"));
             }
             config.insert("$schema".into(), json!("https://opencode.ai/config.json"));
             // Replaces any `mcp` key the settings had: a host setting can
             // never add an MCP server.
             config.insert("mcp".into(), Value::Object(mcp));
             config.insert("permission".into(), Value::Object(permission));
+            if !own.storm_only {
+                // On top of OpenCode's global config, after its keys: its
+                // permissions are evaluated last match first, so Storm's
+                // asks follow everything the global config says (decision
+                // 132b; a project's config stays off, AM66, since its keys
+                // could precede them).
+                return Ok(LaunchExtras {
+                    args: Vec::new(),
+                    env: vec![(
+                        "OPENCODE_CONFIG_CONTENT".into(),
+                        serde_json::to_string(&Value::Object(config))?.into(),
+                    )],
+                    ..Default::default()
+                });
+            }
             let xdg = dir.join("xdg");
             let opencode_dir = xdg.join("opencode");
             private_dir(dir)?;
@@ -454,7 +505,7 @@ mod tests {
             Path::new("/x"),
             None,
             &plugins,
-            &Claude::storm_only(),
+            &AgentServers::storm_only(),
         )
         .unwrap();
         assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -485,8 +536,8 @@ mod tests {
             Path::new("/x"),
             None,
             &Default::default(),
-            &Claude {
-                strict: false,
+            &AgentServers {
+                storm_only: false,
                 taken: &taken,
             },
         )
@@ -507,6 +558,79 @@ mod tests {
             json!(["mcp-bridge", "github"]),
             "still addressed by its slug"
         );
+    }
+
+    /// Decision 132b: OpenCode keeps its global config and gets Storm's
+    /// servers and asks on top of it, in the environment; a slug the global
+    /// config uses steps aside.
+    #[test]
+    fn opencode_gets_storms_servers_on_top_of_its_global_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("ags_OC");
+        let taken: std::collections::HashSet<String> =
+            ["storm".to_string(), "github".to_string()].into();
+        let extras = write_provider_config(
+            "opencode",
+            &session,
+            &grants(),
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            Some(&json!({"mcp": {"evil": {}}, "permission": {"bash": "allow"}})),
+            &Default::default(),
+            &AgentServers {
+                storm_only: false,
+                taken: &taken,
+            },
+        )
+        .unwrap();
+        assert!(
+            !extras.env.iter().any(|(k, _)| k == "XDG_CONFIG_HOME"),
+            "the global config stays"
+        );
+        let content = extras
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .map(|(_, v)| v.to_str().unwrap().to_string())
+            .unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        let keys: Vec<&String> = v["mcp"].as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["storm", "storm_github"], "a setting adds no server");
+        assert_eq!(
+            v["mcp"]["storm_github"]["command"],
+            json!(["/x", "mcp-bridge", "github"])
+        );
+        assert_eq!(v["permission"]["storm_github_*"], "ask");
+        assert_eq!(v["permission"]["storm_*"], "ask");
+        assert_eq!(v["permission"]["bash"], "allow");
+        assert!(!session.exists(), "nothing written to disk");
+    }
+
+    #[test]
+    fn storm_only_holds_even_without_grants() {
+        let dir = tempfile::tempdir().unwrap();
+        for provider in ["claude-code", "opencode"] {
+            let session = dir.path().join(provider);
+            let extras = write_provider_config(
+                provider,
+                &session,
+                &[],
+                "h",
+                Path::new("/s"),
+                Path::new("/x"),
+                None,
+                &Default::default(),
+                &AgentServers::storm_only(),
+            )
+            .unwrap();
+            assert_ne!(extras, LaunchExtras::default(), "{provider}");
+        }
+        let v: Value = serde_json::from_slice(
+            &std::fs::read(dir.path().join("claude-code").join("mcp.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["mcpServers"], json!({}));
     }
 
     /// 131h: a connection added from a plugin keeps the plugin's server name
@@ -551,7 +675,7 @@ mod tests {
             Path::new("/x"),
             None,
             &plugins,
-            &Claude::storm_only(),
+            &AgentServers::storm_only(),
         )
         .unwrap();
         let v: Value =
@@ -579,7 +703,7 @@ mod tests {
             Path::new("/usr/bin/storm-runtime"),
             None,
             &serde_json::Map::new(),
-            &Claude::storm_only(),
+            &AgentServers::storm_only(),
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -622,7 +746,7 @@ mod tests {
             Path::new("/usr/bin/storm-runtime"),
             Some(&settings),
             &serde_json::Map::new(),
-            &Claude::storm_only(),
+            &AgentServers::storm_only(),
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -674,7 +798,7 @@ mod tests {
                     Path::new("/x"),
                     None,
                     &serde_json::Map::new(),
-                    &Claude::storm_only(),
+                    &AgentServers::storm_only(),
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -762,7 +886,7 @@ mod tests {
                 Path::new("/x"),
                 None,
                 &serde_json::Map::new(),
-                &Claude::storm_only(),
+                &AgentServers::storm_only(),
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -778,7 +902,10 @@ mod tests {
             Path::new("/x"),
             None,
             &serde_json::Map::new(),
-            &Claude::storm_only(),
+            &AgentServers {
+                storm_only: false,
+                taken: &Default::default(),
+            },
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -799,7 +926,7 @@ mod tests {
                     Path::new("/x"),
                     None,
                     &serde_json::Map::new(),
-                    &Claude::storm_only(),
+                    &AgentServers::storm_only(),
                 )
                 .unwrap()
             };

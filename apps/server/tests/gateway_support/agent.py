@@ -6,7 +6,8 @@ configuration it would give the real CLI (AM32). It:
 
 - records its argv and the gateway-relevant environment to `agent-env.json`;
 - reads its MCP config the way the real CLI would — `--mcp-config <file>`
-  (Claude Code), or `$XDG_CONFIG_HOME/opencode/opencode.json` (OpenCode) —
+  (Claude Code), or `OPENCODE_CONFIG_CONTENT`, else
+  `$XDG_CONFIG_HOME/opencode/opencode.json` (OpenCode) —
   and starts every stdio server in it, which is `storm-runtime mcp-bridge`;
 - copies every line each bridge writes to `transcript-<slug>.jsonl`;
 - answers `plugin list --json` as Claude Code would, with one plugin that
@@ -30,7 +31,7 @@ os.makedirs(INBOX, exist_ok=True)
 
 def record_env():
     keys = ["XDG_CONFIG_HOME", "OPENCODE_DISABLE_PROJECT_CONFIG", "OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
-            "STORM_HARNESS_HANDLE", "STORM_MCP_SOCK"]
+            "OPENCODE_CONFIG_CONTENT", "STORM_HARNESS_HANDLE", "STORM_MCP_SOCK"]
     with open(os.path.join(HERE, "agent-env.json"), "w") as f:
         json.dump({"argv": sys.argv[1:], "env": {k: os.environ.get(k) for k in keys}}, f)
 
@@ -41,6 +42,10 @@ def servers():
         path = sys.argv[sys.argv.index("--mcp-config") + 1]
         cfg = json.load(open(path))["mcpServers"]
         return {s: ([c["command"], *c["args"]], c.get("env", {})) for s, c in cfg.items()}
+    content = os.environ.get("OPENCODE_CONFIG_CONTENT")
+    if content:
+        cfg = json.loads(content)["mcp"]
+        return {s: (c["command"], c.get("environment", {})) for s, c in cfg.items()}
     xdg = os.environ.get("XDG_CONFIG_HOME")
     if xdg:
         cfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json")))["mcp"]

@@ -29,7 +29,7 @@ servers under **From your plugins**.
 |---|---|---|---|
 | **Claude Code** | Run in the session, as they do without Storm | Load as Claude Code loads them; also suggested as integrations | Nothing: your own `~/.claude.json` servers, a repository's `.mcp.json` (after Claude Code asks you) and claude.ai connectors load as usual, beside your integrations |
 | **Codex** | Run in the session | Switched off; suggested as integrations | Your own `mcp_servers`, a repository's `.codex/` servers, ChatGPT apps, and any plugin that has hooks |
-| **OpenCode** | — (its plugins are JavaScript, not MCP servers) | — | A repository's own config |
+| **OpenCode** | — (its plugins are JavaScript, not MCP servers) | — | A repository's own config: it could turn off the question OpenCode asks before each Storm tool. Your global config, and its servers, load as usual |
 | **Cursor**, **Command Code** | — | — | They run as terminals with no Storm tools until Storm has checked them with a signed-in account |
 
 An integration added from a plugin keeps the plugin's tool names in Claude
