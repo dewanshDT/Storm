@@ -515,13 +515,13 @@ args = ["-i"]
         oc = Agent("oc")
         rec = launch("opencode", "oc")
         env = wait(oc.env, "the agent's record of its launch")
-        xdg = env["env"]["XDG_CONFIG_HOME"]
-        check("it gets XDG_CONFIG_HOME=<session>/xdg", xdg and xdg.endswith(f"{rec['id']}/xdg"), env)
+        check("its global config stays: XDG_CONFIG_HOME is not Storm's (132b)",
+              rec["id"] not in (env["env"]["XDG_CONFIG_HOME"] or ""), env)
         check("it gets OPENCODE_DISABLE_PROJECT_CONFIG=1", env["env"]["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1")
         instructions = json.load(open(env["env"]["OPENCODE_CONFIG"]))["instructions"]
         check("its OPENCODE_CONFIG names the workspace's AGENTS.md by absolute path",
               instructions == [os.path.realpath(os.path.join(WORKSPACES, "oc", "AGENTS.md"))], instructions)
-        occfg = json.load(open(os.path.join(xdg, "opencode", "opencode.json")))
+        occfg = json.loads(env["env"]["OPENCODE_CONFIG_CONTENT"])
         check("every connection asks before a tool",
               occfg["permission"].get(f"{slug}_*") == "ask" and occfg["permission"].get("storm_*") == "ask", occfg)
         check("the host's settings are merged in", occfg.get("model") == "opencode/big-pickle", occfg)

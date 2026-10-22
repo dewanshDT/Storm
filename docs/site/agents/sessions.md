@@ -54,6 +54,9 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   `~/.claude.json`, its [plugins'](/docs/agents/plugins/), and a
   repository's `.mcp.json` (after Claude Code asks you) load beside your
   integrations, unless the host sets `agent_mcp = "storm-only"`.
+- **OpenCode keeps your global config**, servers included, beside your
+  integrations. A repository's own OpenCode config stays off: it could turn
+  off the question OpenCode asks before each Storm tool.
 - **Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
   session, under the same names the agent gives them, unless the host sets
   `plugin_mcp = "off"`. A plugin's remote servers don't: add them as

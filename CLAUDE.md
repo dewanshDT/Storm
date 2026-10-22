@@ -602,8 +602,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   integration whose slug the account's `.claude.json` or the workspace's
   `.mcp.json` already uses is written as `storm_<slug>`, since Claude Code
   loads `--mcp-config`'s entry and drops theirs (gate G-132a), except the
-  built-in `storm`, which the opening prompt names; `opencode` gets its own
-  `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
+  built-in `storm`, which the opening prompt names; `opencode` gets its
+  servers and `"<slug>_*": "ask"` in `OPENCODE_CONFIG_CONTENT`, on top of its
+  global config (132b; a slug the global config uses is `storm_<slug>`), or
+  under `storm-only` its own `XDG_CONFIG_HOME`. **A project's OpenCode config
+  stays off either way** (G-132b): OpenCode evaluates permissions last match
+  first and a merged key keeps its first position, so a project listing
+  `"<slug>_*"` before `"*": "allow"` would turn Storm's asks off; everything
+  else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
