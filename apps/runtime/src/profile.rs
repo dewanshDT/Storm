@@ -118,8 +118,8 @@ pub const BUILT_IN: [Profile; 6] = [
         // first choice also enables the repository's MCP servers. `--trust`
         // trusts the folder and leaves those servers waiting for approval.
         args: &["--trust"],
-        // No grants until a real-account gate shows a session-only config
-        // that keeps a repository's servers out (130d).
+        // No grants until a real-account gate (G-C1) shows Storm's servers
+        // reaching a session through `cursor.rs` (130d, 132d).
         mcp: None,
         prompt: None,
         resume: None,
@@ -135,8 +135,8 @@ pub const BUILT_IN: [Profile; 6] = [
             "--permission-mode",
             "standard",
         ],
-        // A repository's `.mcp.json` loads with no approval and nothing turns
-        // it off: a terminal and nothing more (130e).
+        // No grants until a real-account gate (G-CC1) shows Storm's servers
+        // reaching a session through `command_code.rs` (130e, 132d).
         mcp: None,
         prompt: None,
         resume: None,

@@ -357,8 +357,8 @@ pub enum McpOutcome {
     Granted(Vec<McpGrant>),
     /// The `shell` provider gets none (G-D9).
     Shell,
-    /// The host has no adapter that keeps a repository's own MCP servers
-    /// out of this provider, so it gets none (decision 130a).
+    /// The host gives this provider no Storm servers: its writer has not
+    /// passed a real-account gate (decisions 130a, 132d).
     Unsupported,
     /// The host has no `mcp_bridge`; the caller announces it.
     OldHost,

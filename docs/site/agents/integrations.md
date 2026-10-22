@@ -5,7 +5,10 @@ description: Give agents tools from Notion, Linear, GitHub and other MCP servers
 
 An **integration** is another MCP server — Notion, Linear, GitHub, or any
 service with one — that you connect **once**, in the app. Every agent session
-except a shell can then use it, within the limits you set.
+except a shell can then use it, within the limits you set. Integrations are
+the servers you want everywhere; an agent's own MCP servers, the ones you
+add on a host, still load beside them (unless the host sets
+`agent_mcp = "storm-only"`).
 
 Storm keeps the credential on your server, encrypted, and calls the service
 on the agent's behalf. **An agent never receives the credential**: its host
@@ -27,8 +30,9 @@ service's **MCP server address**, then choose how Storm signs in:
 
 When your agents' plugins use remote MCP servers — the Slack plugin, for
 one — they appear under **From your plugins**, with the plugin and the hosts
-that use it. A session reaches such a server only once it is an integration:
-**Add** fills in the name and address (asking for the address when the
+that use it. The plugin's agent can already sign in to it on each host; as
+an integration it is signed in once, for every host you choose. **Add**
+fills in the name and address (asking for the address when the
 plugin builds it from its host's settings), keeps its tools under the
 plugin's own names in Claude Code, and starts it on the hosts that reported
 it. **Dismiss** hides it. Hosts report only a server's address and, at most,
