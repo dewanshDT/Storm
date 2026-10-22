@@ -27,7 +27,7 @@ servers under **From your plugins**.
 
 | Agent | A plugin's local servers | A plugin's remote servers | Also left out |
 |---|---|---|---|
-| **Claude Code** | Run in the session, under the plugin's own tool names (`mcp__plugin_<plugin>_<server>__…`) | Skipped; suggested as integrations | Your own `~/.claude.json` servers, a repository's `.mcp.json`, claude.ai connectors |
+| **Claude Code** | Run in the session, as they do without Storm | Load as Claude Code loads them; also suggested as integrations | Nothing: your own `~/.claude.json` servers, a repository's `.mcp.json` (after Claude Code asks you) and claude.ai connectors load as usual, beside your integrations |
 | **Codex** | Run in the session | Switched off; suggested as integrations | Your own `mcp_servers`, a repository's `.codex/` servers, ChatGPT apps, and any plugin that has hooks |
 | **OpenCode** | — (its plugins are JavaScript, not MCP servers) | — | A repository's own config |
 | **Cursor**, **Command Code** | — | — | They run as terminals with no Storm tools until Storm has checked them with a signed-in account |
@@ -37,6 +37,18 @@ Code, so the plugin's commands and hooks still find its tools.
 
 A server that needs one of the plugin's own options (`${user_config.…}`) is
 skipped too: Storm can't read those values.
+
+## Storm's servers only
+
+A host can give its sessions Storm's integrations and nothing else, for a
+machine that runs code you don't trust. In its `runtime.toml`:
+
+```toml
+agent_mcp = "storm-only"
+```
+
+Claude Code sessions then load only Storm's servers (and, unless
+`plugin_mcp = "off"`, their plugins' local ones).
 
 ## Turning plugin servers off on a host
 

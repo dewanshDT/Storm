@@ -597,7 +597,12 @@ Specification*; the slices are decisions 81 and 81a onward):
   workspace's own `AGENTS.md` (else `CLAUDE.md`, else `CONTEXT.md`) back by
   absolute path through `OPENCODE_CONFIG` (`mcp::provider_baseline`; a path
   with a glob character is not restored). With grants, `claude-code` gets
-  `--mcp-config … --strict-mcp-config`; `opencode` gets its own
+  `--mcp-config …` beside its own servers (decision 132a; `--strict-mcp-config`
+  too, grants or not, under `runtime.toml` `agent_mcp = "storm-only"`); an
+  integration whose slug the account's `.claude.json` or the workspace's
+  `.mcp.json` already uses is written as `storm_<slug>`, since Claude Code
+  loads `--mcp-config`'s entry and drops theirs (gate G-132a), except the
+  built-in `storm`, which the opening prompt names; `opencode` gets its own
   `XDG_CONFIG_HOME` and `"<slug>_*": "ask"`; everything else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
@@ -649,8 +654,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
   a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
   positive control.
-- **A Claude Code session's plugins' local MCP servers are written into its
-  `mcp.json` by Storm, and strict stays** (decision 131, `plugins.rs`). The
+- **Under `agent_mcp = "storm-only"`, a Claude Code session's plugins' local
+  MCP servers are written into its `mcp.json` by Storm, and strict stays**
+  (decision 131, `plugins.rs`); otherwise Claude Code loads its plugins
+  itself (decision 132). The
   host lists the enabled plugins with the provider's own `claude plugin list
   --json`; a stdio server is keyed `plugin_<plugin>_<server>` (Claude Code's
   own tool prefix; no slug has `_`) with `${CLAUDE_PLUGIN_ROOT}`/`DATA` filled

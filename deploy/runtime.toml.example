@@ -14,9 +14,15 @@ scrollback_bytes = 4194304
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
-# A Claude Code or Codex session's enabled plugins: their local (stdio) MCP servers
-# load unless this is "off" (decision 131b). A plugin's remote servers never
-# load on a host; add them as integrations, where Storm keeps the sign-in.
+# A session gets your integrations beside the MCP servers its agent loads by
+# itself: the ones you added on this host, its plugins', a project's (under
+# the agent's own prompts). "storm-only" gives sessions Storm's servers alone
+# (decision 132).
+# agent_mcp = "own"
+
+# With agent_mcp = "storm-only": whether a Claude Code session still gets its
+# enabled plugins' local (stdio) MCP servers (decision 131b). A Codex
+# session's plugins follow it either way, for now.
 # plugin_mcp = "allow"
 
 # Omit [[providers]] entirely to offer every built-in (decision 130):
