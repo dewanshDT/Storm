@@ -167,9 +167,11 @@ notes or integrations yet. Workspaces and limits live in
 needs a `ReadWritePaths` drop-in on the unit. Log the agent CLIs in once as
 `storm-runtime` (`claude`, `opencode auth login`, and Codex into Storm's own
 Codex home: `env CODEX_HOME=/var/lib/storm-runtime/agents/codex codex login
---device-auth`) — the unit's `HOME` is its own, not yours. An agent's plugins
-keep their local MCP servers in a session; their remote ones are offered as
-integrations ([Plugins](https://storm.dewansh.space/docs/agents/plugins/)).
+--device-auth`) — the unit's `HOME` is its own, not yours. A session gets
+your integrations beside the MCP servers its agent loads by itself: yours,
+its [plugins'](https://storm.dewansh.space/docs/agents/plugins/), a
+project's under the agent's own prompts; `agent_mcp = "storm-only"` in
+`runtime.toml` gives a host Storm's servers alone.
 Setup and the package's guarantees:
 [`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
 Host connects to its server directly; the app reaches agent sessions through
@@ -308,8 +310,8 @@ M0–M16 and M18–M28 are done; the newest release is on
 covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
 Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions
-(Claude Code, Codex, OpenCode) in a terminal you can resume, plugins' MCP
-servers included; the MCP Gateway's integrations, each scoped to the
+(Claude Code, Codex, OpenCode) in a terminal you can resume, each keeping
+its own MCP servers beside your integrations; the MCP Gateway's integrations, each scoped to the
 hosts you choose and signed in with your own app where a service needs one;
 a Claude login you set once in the app and share with the
 hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity rail; the interactive installer; and the
