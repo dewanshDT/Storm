@@ -50,12 +50,16 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   chosen at launch. It is never offered `delete_note`.
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
-- **Claude Code and Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
+- **Claude Code keeps its own MCP servers:** the ones in your
+  `~/.claude.json`, its [plugins'](/docs/agents/plugins/), and a
+  repository's `.mcp.json` (after Claude Code asks you) load beside your
+  integrations, unless the host sets `agent_mcp = "storm-only"`.
+- **Codex [plugins](/docs/agents/plugins/):** a plugin's local MCP servers run in the
   session, under the same names the agent gives them, unless the host sets
   `plugin_mcp = "off"`. A plugin's remote servers don't: add them as
   [integrations](/docs/agents/integrations/), where Storm keeps the sign-in.
-  Neither do the MCP servers in your own `~/.claude.json` or a repository's
-  `.mcp.json` (or `.codex/config.toml`), nor Codex's ChatGPT apps. When a
+  Neither do your own `mcp_servers` or a repository's `.codex/config.toml`,
+  nor Codex's ChatGPT apps. When a
   session starts, the agent shows what Storm skipped and why, and the
   session's **Details** list it too, with the plugin servers that run on the
   host and **Add to Integrations** for a remote one.

@@ -119,19 +119,7 @@ pub fn session_plan(helper: Option<Command>, allow_local: bool, workspace: &Path
             None
         }
     });
-    let (claude_json, config_dir) = match std::env::var_os("CLAUDE_CONFIG_DIR") {
-        Some(dir) => {
-            let dir = PathBuf::from(dir);
-            (Some(dir.join(".claude.json")), Some(dir))
-        }
-        None => match std::env::var_os("HOME") {
-            Some(home) => {
-                let home = PathBuf::from(home);
-                (Some(home.join(".claude.json")), Some(home.join(".claude")))
-            }
-            None => (None, None),
-        },
-    };
+    let (claude_json, config_dir) = claude_paths();
     let data_root = config_dir
         .unwrap_or_else(|| PathBuf::from(".claude"))
         .join("plugins")
@@ -143,6 +131,37 @@ pub fn session_plan(helper: Option<Command>, allow_local: bool, workspace: &Path
         &data_root,
         workspace,
     )
+}
+
+/// The server names a Claude Code session in `workspace` loads by itself:
+/// the account's (`.claude.json`, top level and this project) and the
+/// workspace's `.mcp.json` (decision 132).
+pub fn claude_names(workspace: &Path) -> std::collections::HashSet<String> {
+    let mut names: std::collections::HashSet<String> =
+        server_names(&read_json(&workspace.join(".mcp.json")))
+            .into_iter()
+            .collect();
+    if let (Some(path), _) = claude_paths() {
+        names.extend(own_servers(&path, workspace));
+    }
+    names
+}
+
+/// The account's `.claude.json` and Claude Code's config directory.
+fn claude_paths() -> (Option<PathBuf>, Option<PathBuf>) {
+    match std::env::var_os("CLAUDE_CONFIG_DIR") {
+        Some(dir) => {
+            let dir = PathBuf::from(dir);
+            (Some(dir.join(".claude.json")), Some(dir))
+        }
+        None => match std::env::var_os("HOME") {
+            Some(home) => {
+                let home = PathBuf::from(home);
+                (Some(home.join(".claude.json")), Some(home.join(".claude")))
+            }
+            None => (None, None),
+        },
+    }
 }
 
 /// The remote servers of the plugins the account has enabled for Claude Code,

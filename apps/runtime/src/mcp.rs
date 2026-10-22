@@ -52,20 +52,54 @@ pub use crate::provider::LaunchExtras;
 /// commands and hooks match the tools (131h); else, or when that name is
 /// taken or unusable, the slug. The bridge itself is always addressed by
 /// slug.
-fn claude_key(g: &McpGrant, taken: &serde_json::Map<String, Value>) -> String {
+fn claude_key(g: &McpGrant, written: &serde_json::Map<String, Value>, claude: &Claude) -> String {
     let usable = |s: &str| !s.is_empty() && s.len() <= 64;
-    match &g.plugin_origin {
-        Some(o) if usable(&o.plugin) && usable(&o.server) => {
-            let key = crate::plugins::server_key(&o.plugin, &o.server);
-            if taken.contains_key(&key) {
-                g.slug.clone()
-            } else {
-                key
-            }
+    // A bridge for a plugin's own server keeps the plugin's name, and
+    // replaces that server on purpose (131h).
+    if let Some(o) = &g.plugin_origin
+        && usable(&o.plugin)
+        && usable(&o.server)
+    {
+        let key = crate::plugins::server_key(&o.plugin, &o.server);
+        if !written.contains_key(&key) {
+            return key;
         }
-        _ => g.slug.clone(),
+    }
+    // Claude Code loads `--mcp-config`'s entry over the account's or a
+    // project's of the same name and drops theirs (gate G-132a), so Storm's
+    // steps aside instead (decision 132) — except the session's own vault
+    // server, which the opening prompt names.
+    if g.id != STORM_CONNECTION && claude.taken.contains(&g.slug) {
+        format!("storm_{}", g.slug)
+    } else {
+        g.slug.clone()
     }
 }
+
+/// How a Claude Code session's `mcp.json` sits beside the agent's own
+/// servers (decision 132).
+pub struct Claude<'a> {
+    /// `--strict-mcp-config`: Storm's servers alone (`agent_mcp =
+    /// "storm-only"`).
+    pub strict: bool,
+    /// Names the account's and the workspace's configs already use.
+    pub taken: &'a std::collections::HashSet<String>,
+}
+
+impl Claude<'_> {
+    pub fn storm_only() -> Claude<'static> {
+        static NONE: std::sync::LazyLock<std::collections::HashSet<String>> =
+            std::sync::LazyLock::new(Default::default);
+        Claude {
+            strict: true,
+            taken: &NONE,
+        }
+    }
+}
+
+/// The built-in connection to the session's own Storm (the gateway's
+/// Phase 1 vault server).
+pub const STORM_CONNECTION: &str = "storm";
 
 pub const SESSIONS_DIR: &str = "sessions";
 pub const RUN_DIR: &str = "run";
@@ -184,8 +218,10 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 
 /// Writes the provider's MCP config into `dir` and returns what its launch
 /// gains (AM32 as amended by AM66):
-/// - **`claude-code`**: `--mcp-config <dir>/mcp.json --strict-mcp-config`,
-///   one stdio server per slug. Only the session's servers load.
+/// - **`claude-code`**: `--mcp-config <dir>/mcp.json`, one stdio server per
+///   slug, beside the agent's own servers (decision 132); with
+///   [`Claude::strict`], `--strict-mcp-config` too, and only the session's
+///   load.
 /// - **`opencode`**: `XDG_CONFIG_HOME=<dir>/xdg` with the session config in
 ///   `<dir>/xdg/opencode/opencode.json`, and `permission: {"<slug>_*": "ask"}`
 ///   for every connection. Both are required, with
@@ -208,6 +244,7 @@ pub fn write_provider_config(
     exe: &Path,
     opencode_settings: Option<&Value>,
     plugin_servers: &serde_json::Map<String, Value>,
+    claude: &Claude,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
     if grants.is_empty() {
@@ -219,7 +256,7 @@ pub fn write_provider_config(
             for g in &grants {
                 let (command, env) = bridge_entry(exe, &g.slug, handle, socket);
                 servers.insert(
-                    claude_key(g, &servers),
+                    claude_key(g, &servers, claude),
                     json!({
                         "type": "stdio",
                         "command": command[0],
@@ -239,12 +276,13 @@ pub fn write_provider_config(
                 &path,
                 &serde_json::to_vec_pretty(&json!({ "mcpServers": servers }))?,
             )?;
+            let mut args: Vec<std::ffi::OsString> =
+                vec!["--mcp-config".into(), path.into_os_string()];
+            if claude.strict {
+                args.push("--strict-mcp-config".into());
+            }
             Ok(LaunchExtras {
-                args: vec![
-                    "--mcp-config".into(),
-                    path.into_os_string(),
-                    "--strict-mcp-config".into(),
-                ],
+                args,
                 env: Vec::new(),
                 ..Default::default()
             })
@@ -416,6 +454,7 @@ mod tests {
             Path::new("/x"),
             None,
             &plugins,
+            &Claude::storm_only(),
         )
         .unwrap();
         assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -425,6 +464,48 @@ mod tests {
         assert_eq!(
             v["mcpServers"]["storm"]["command"], "/x",
             "a bridge is never replaced"
+        );
+    }
+
+    /// Decision 132: the agent's own servers load beside Storm's, and where
+    /// one already has a slug's name Storm's steps aside, since Claude Code
+    /// would load `--mcp-config`'s and drop the account's (gate G-132a).
+    #[test]
+    fn claude_code_keeps_its_own_servers_and_storm_steps_aside_on_a_clash() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("ags_N");
+        let taken: std::collections::HashSet<String> =
+            ["storm".to_string(), "github".to_string()].into();
+        let extras = write_provider_config(
+            "claude-code",
+            &session,
+            &grants(),
+            "h",
+            Path::new("/s"),
+            Path::new("/x"),
+            None,
+            &Default::default(),
+            &Claude {
+                strict: false,
+                taken: &taken,
+            },
+        )
+        .unwrap();
+        assert!(!extras.args.contains(&OsString::from("--strict-mcp-config")));
+        assert!(extras.args.contains(&OsString::from("--mcp-config")));
+        let v: Value =
+            serde_json::from_slice(&std::fs::read(session.join("mcp.json")).unwrap()).unwrap();
+        let keys: Vec<&String> = v["mcpServers"].as_object().unwrap().keys().collect();
+        assert!(keys.contains(&&"storm_github".to_string()), "{keys:?}");
+        assert!(!keys.contains(&&"github".to_string()), "{keys:?}");
+        assert!(
+            keys.contains(&&"storm".to_string()),
+            "the opening prompt names it: {keys:?}"
+        );
+        assert_eq!(
+            v["mcpServers"]["storm_github"]["args"],
+            json!(["mcp-bridge", "github"]),
+            "still addressed by its slug"
         );
     }
 
@@ -470,6 +551,7 @@ mod tests {
             Path::new("/x"),
             None,
             &plugins,
+            &Claude::storm_only(),
         )
         .unwrap();
         let v: Value =
@@ -497,6 +579,7 @@ mod tests {
             Path::new("/usr/bin/storm-runtime"),
             None,
             &serde_json::Map::new(),
+            &Claude::storm_only(),
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -539,6 +622,7 @@ mod tests {
             Path::new("/usr/bin/storm-runtime"),
             Some(&settings),
             &serde_json::Map::new(),
+            &Claude::storm_only(),
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -590,6 +674,7 @@ mod tests {
                     Path::new("/x"),
                     None,
                     &serde_json::Map::new(),
+                    &Claude::storm_only(),
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -677,6 +762,7 @@ mod tests {
                 Path::new("/x"),
                 None,
                 &serde_json::Map::new(),
+                &Claude::storm_only(),
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -692,6 +778,7 @@ mod tests {
             Path::new("/x"),
             None,
             &serde_json::Map::new(),
+            &Claude::storm_only(),
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -712,6 +799,7 @@ mod tests {
                     Path::new("/x"),
                     None,
                     &serde_json::Map::new(),
+                    &Claude::storm_only(),
                 )
                 .unwrap()
             };
