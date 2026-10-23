@@ -396,22 +396,18 @@ class ProviderGlyph extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    Widget svg(String name, double side, Color color) => SvgPicture.asset(
+      'assets/agents/$name.svg',
+      width: side,
+      height: side,
+      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+    );
     return switch (provider) {
-      'claude-code' => SvgPicture.asset(
-        'assets/agents/claude-code.svg',
-        width: size,
-        height: size,
-        colorFilter: const ColorFilter.mode(
-          AgentMark.claudeOrange,
-          BlendMode.srcIn,
-        ),
-      ),
-      'opencode' => SvgPicture.asset(
-        'assets/agents/opencode.svg',
-        width: size * 0.8,
-        height: size * 0.8,
-        colorFilter: ColorFilter.mode(t.text, BlendMode.srcIn),
-      ),
+      'claude-code' => svg('claude-code', size, AgentMark.claudeOrange),
+      'opencode' => svg('opencode', size * 0.8, t.text),
+      'codex' => svg('codex', size * 0.9, t.text),
+      'cursor' => svg('cursor', size * 0.9, t.text),
+      'command-code' => svg('command-code', size * 0.8, t.text),
       'shell' => Icon(LucideIcons.square_terminal, size: size, color: t.text2),
       _ => Icon(LucideIcons.bot, size: size, color: t.text2),
     };
