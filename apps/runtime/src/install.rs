@@ -428,16 +428,7 @@ pub async fn run(
 }
 
 fn probe(binary: &Path, path: Option<&OsStr>) -> Option<String> {
-    let mut command = std::process::Command::new(binary);
-    command
-        .arg("--version")
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
-    let out = command.output().ok()?;
-    crate::agents::parse_version(&String::from_utf8_lossy(&out.stdout))
+    crate::agents::parse_version(&crate::agents::run_version(binary, path)?)
 }
 
 /// Claude Code, OpenCode and Cursor: download, check, unpack into
