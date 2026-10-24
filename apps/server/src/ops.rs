@@ -316,10 +316,20 @@ pub async fn vault_agent_writes(
         .collect())
 }
 
-/// What `session_context` gives an agent: its session's context note, read
-/// now, through the same path every client reads.
+/// What `session_context` gives an agent: its session's context note and
+/// launch role (decision 138f), each read now by id, through the same path
+/// every client reads. A note that was set and is gone is `None`, with why
+/// in `missing`.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionContext {
+    pub context: Option<LaunchNote>,
+    pub role: Option<LaunchNote>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub missing: std::collections::BTreeMap<&'static str, &'static str>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LaunchNote {
     pub vault_id: String,
     pub note_id: String,
     pub title: String,
@@ -328,34 +338,56 @@ pub struct SessionContext {
     pub content: String,
 }
 
-/// The calling agent's own context note. Keyed on the actor's session, which
+/// The calling agent's own launch notes. Keyed on the actor's session, which
 /// the gateway has proven is the calling host's and live, so no agent can
 /// name another session's.
 pub async fn session_context(state: &Shared, actor: &Actor) -> ApiResult<SessionContext> {
     let Actor::Agent { session_id, .. } = actor else {
         return Err(bad_request("only an agent session has a context note"));
     };
-    let context = state
-        .agent
-        .launch_of(session_id)
-        .map_err(internal)?
-        .and_then(|l| l.context)
-        .ok_or_else(|| not_found("this session was started without a note"))?;
-    let note = match get_note(state, actor, &context.vault_id, &context.note_id).await {
-        Ok(note) => note,
-        Err(e) if e.0.is_client_error() => {
-            return Err(not_found("the context note no longer exists"));
-        }
-        Err(e) => return Err(e),
-    };
+    let launch = state.agent.launch_of(session_id).map_err(internal)?;
+    let (context, role) = launch.map_or((None, None), |l| (l.context, l.role));
+    if context.is_none() && role.is_none() {
+        return Err(not_found(
+            "this session was started without a note or a role",
+        ));
+    }
+    let mut missing = std::collections::BTreeMap::new();
+    let set = (context.is_some(), role.is_some());
+    let context = read_launch_note(state, actor, context).await?;
+    let role = read_launch_note(state, actor, role).await?;
+    if set.0 && context.is_none() {
+        missing.insert("context", "the context note no longer exists");
+    }
+    if set.1 && role.is_none() {
+        missing.insert("role", "the role note no longer exists");
+    }
     Ok(SessionContext {
-        vault_id: context.vault_id,
-        note_id: note.note.id,
-        title: note.note.title,
-        path: note.note.path,
-        version: note.note.version,
-        content: note.content,
+        context,
+        role,
+        missing,
     })
+}
+
+/// A launch note read now by id; `None` when it has been deleted.
+async fn read_launch_note(
+    state: &Shared,
+    actor: &Actor,
+    c: Option<crate::agent::store::Context>,
+) -> ApiResult<Option<LaunchNote>> {
+    let Some(c) = c else { return Ok(None) };
+    match get_note(state, actor, &c.vault_id, &c.note_id).await {
+        Ok(note) => Ok(Some(LaunchNote {
+            vault_id: c.vault_id,
+            note_id: note.note.id,
+            title: note.note.title,
+            path: note.note.path,
+            version: note.note.version,
+            content: note.content,
+        })),
+        Err(e) if e.0.is_client_error() => Ok(None),
+        Err(e) => Err(e),
+    }
 }
 
 pub struct Backlinks {
@@ -1996,6 +2028,9 @@ pub struct SessionView {
     pub crew: Option<crate::agent::Membership>,
     /// Its role label (138d), named by the note's current title.
     pub role: Option<RoleView>,
+    /// The role it was launched with (138f), titled as it was then. Fixed:
+    /// changing the label never changes it.
+    pub launch_role: Option<crate::agent::store::Context>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -2027,9 +2062,9 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id) = match launch {
-        Some(l) => (l.name, l.context, l.write_vault_id),
-        None => (session.workspace.clone(), None, None),
+    let (name, context, write_vault_id, launch_role) = match launch {
+        Some(l) => (l.name, l.context, l.write_vault_id, l.role),
+        None => (session.workspace.clone(), None, None, None),
     };
     Ok(SessionView {
         session,
@@ -2042,6 +2077,7 @@ fn session_view(
         mcp_plugin_local,
         crew,
         role,
+        launch_role,
     })
 }
 
@@ -2096,19 +2132,24 @@ pub async fn launch_session(
     actor: &Actor,
     mut req: crate::agent::Launch,
 ) -> ApiResult<LaunchedSession> {
-    // A resume is the old session's launch again (decision 89): its note as
-    // it was then, and its write vault, still checked below.
-    let resumed_context = match req.resume_of.clone() {
+    // A resume is the old session's launch again (decision 89): its note and
+    // launch role as they were then, its write vault, still checked below,
+    // its role label, and a place right after it in its crew (138f).
+    let resumed = match req.resume_of.clone() {
         Some(old) => {
             let r = state.agent.get(&old).map_err(agent_error)?;
             let l = state.agent.launch_of(&old).map_err(internal)?;
+            let label = state.agent.role_of(&old).map_err(internal)?;
             req.host_id = r.host_id;
             req.workspace = r.workspace;
             req.provider = Some(r.provider);
             req.context = None;
+            req.role = None;
+            req.crew = None;
             req.allow_vault_writes = false;
             req.write_vault_id = l.as_ref().and_then(|l| l.write_vault_id.clone());
-            Some(l.and_then(|l| l.context))
+            let (context, role) = l.map_or((None, None), |l| (l.context, l.role));
+            Some((context, role, label, old))
         }
         None => None,
     };
@@ -2119,6 +2160,13 @@ pub async fn launch_session(
             Some(h) if !h.is_revoked() => h.name,
             _ => return Err(not_found("no such host")),
         }
+    };
+    let (resumed_context, resumed_role) = match resumed {
+        Some((context, role, label, old)) => (
+            Some(context),
+            Some((role, label, crate::agent::CrewJoin::After(old))),
+        ),
+        None => (None, None),
     };
     let context = match (resumed_context, &req.context) {
         (Some(context), _) => context,
@@ -2131,6 +2179,36 @@ pub async fn launch_session(
             })
         }
         (None, None) => None,
+    };
+    let (role, label, crew) = match resumed_role {
+        Some((role, label, crew)) => (role, label, Some(crew)),
+        None => {
+            // Crews and labels are a person's to set (138d, 138i).
+            if req.role.is_some() || req.crew.is_some() {
+                crews_owner(actor)?;
+            }
+            let role = match &req.role {
+                Some(r) => Some(role_note(state, actor, &r.vault_id, &r.note_id).await?),
+                None => None,
+            };
+            let label = role.as_ref().map(|r| crate::agent::RoleLabel {
+                vault_id: r.vault_id.clone(),
+                note_id: r.note_id.clone(),
+            });
+            let crew = match &req.crew {
+                Some(crate::agent::LaunchCrew::Existing { id }) => {
+                    Some(crate::agent::CrewJoin::Existing(id.clone()))
+                }
+                Some(crate::agent::LaunchCrew::New { new_name }) => {
+                    Some(crate::agent::CrewJoin::New {
+                        name: crew_name(new_name)?,
+                        color: next_crew_color(&state.agent.crews().map_err(internal)?).into(),
+                    })
+                }
+                None => None,
+            };
+            (role, label, crew)
+        }
     };
     if let Some(v) = &req.write_vault_id {
         vault_of(state, actor, Access::Write, v).await?;
@@ -2166,6 +2244,9 @@ pub async fn launch_session(
             .map(|c| (c.id.clone(), c.display_name.clone()))
             .collect(),
         provider_credential: deliverable_credential(state, &req.host_id),
+        role,
+        label,
+        crew,
     };
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
@@ -2229,19 +2310,33 @@ pub async fn launch_session(
         );
     }
     let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
+    let crew = state.agent.membership(&session.id).map_err(internal)?;
+    let role = state
+        .agent
+        .role_of(&session.id)
+        .map_err(internal)?
+        .map(|r| RoleView {
+            vault_id: r.vault_id,
+            note_id: r.note_id,
+            title: None,
+        });
+    let mut view = [SessionView {
+        session,
+        name: launch.name,
+        context: launch.context,
+        write_vault_id: launch.write_vault_id.clone(),
+        wrote_count: 0,
+        integrations,
+        mcp_skipped: Vec::new(),
+        mcp_plugin_local: Vec::new(),
+        crew,
+        role,
+        launch_role: launch.role,
+    }];
+    name_roles(state, &mut view).await?;
+    let [view] = view;
     Ok(LaunchedSession {
-        session: SessionView {
-            session,
-            name: launch.name,
-            context: launch.context,
-            write_vault_id: launch.write_vault_id.clone(),
-            wrote_count: 0,
-            integrations,
-            mcp_skipped: Vec::new(),
-            mcp_plugin_local: Vec::new(),
-            crew: None,
-            role: None,
-        },
+        session: view,
         mcp: LaunchMcp {
             connections,
             allow_vault_writes: launch.write_vault_id.is_some(),
@@ -2594,6 +2689,32 @@ pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote
     Ok(roles)
 }
 
+/// Checks that a note is a role note in Kit now, the one rule for a label and
+/// a launch role, and returns it with its title.
+async fn role_note(
+    state: &Shared,
+    actor: &Actor,
+    vault_id: &str,
+    note_id: &str,
+) -> ApiResult<crate::agent::store::Context> {
+    let refused =
+        || bad_request("a role is a note in Kit's agents/ folder or a project's agents/ folder");
+    let kit = kit_vault_id(state).await?;
+    if vault_id != kit {
+        return Err(refused());
+    }
+    let handle = vault_of(state, actor, Access::Read, &kit).await?;
+    let row = handle.indexer.lock().await.db.get_note(note_id)?;
+    match row {
+        Some(n) if is_role_path(&n.path) => Ok(crate::agent::store::Context {
+            vault_id: kit,
+            note_id: n.id,
+            title: n.title,
+        }),
+        _ => Err(refused()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RoleRef {
     pub vault_id: String,
@@ -2611,14 +2732,7 @@ pub async fn set_session_role(
     crews_owner(actor)?;
     let label = match role {
         Some(r) => {
-            let kit = kit_vault_id(state).await?;
-            let handle = vault_of(state, actor, Access::Read, &kit).await?;
-            let row = handle.indexer.lock().await.db.get_note(&r.note_id)?;
-            if r.vault_id != kit || !row.is_some_and(|n| is_role_path(&n.path)) {
-                return Err(bad_request(
-                    "a role is a note in Kit's agents/ folder or a project's agents/ folder",
-                ));
-            }
+            role_note(state, actor, &r.vault_id, &r.note_id).await?;
             Some(crate::agent::RoleLabel {
                 vault_id: r.vault_id,
                 note_id: r.note_id,
@@ -3701,6 +3815,7 @@ struct Authorized {
     write_vault: Option<String>,
     /// The session was started from a note.
     has_context: bool,
+    has_role: bool,
 }
 
 impl Authorized {
@@ -3834,7 +3949,8 @@ async fn authorize_call(
         connection,
         vault_writes,
         write_vault: write_vault.filter(|_| vault_writes),
-        has_context: launch.is_some_and(|l| l.context.is_some()),
+        has_context: launch.as_ref().is_some_and(|l| l.context.is_some()),
+        has_role: launch.is_some_and(|l| l.role.is_some()),
     })
 }
 
@@ -4226,6 +4342,7 @@ async fn connect_builtin(
         state.clone(),
         authorized.vault_writes,
         authorized.has_context,
+        authorized.has_role,
         actor,
     );
     tokio::spawn(async move {

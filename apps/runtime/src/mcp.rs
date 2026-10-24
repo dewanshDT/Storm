@@ -380,11 +380,12 @@ pub fn write_provider_config(
     }
 }
 
-/// The opening prompt of a session started from a note. A constant with
-/// nothing interpolated: the agent reads the note through `session_context`,
-/// so no note content, title or id is ever on a command line.
+/// The opening prompt of a session started from a note or with a role
+/// (decision 138f). A constant with nothing interpolated: the agent reads
+/// both notes through `session_context`, so no note content, title or id is
+/// ever on a command line.
 pub const OPENING_PROMPT: &str =
-    "Read your context note with the storm session_context tool, then wait for my instructions.";
+    "Read your launch context with the storm session_context tool, then wait for my instructions.";
 
 /// Adds the opening prompt, as each CLI takes one, to a session started from
 /// a note. Nothing for any other provider, `shell` and `fake` included.
@@ -950,6 +951,14 @@ mod tests {
         for c in ['{', '}', '$', '%', '`', '\n'] {
             assert!(!OPENING_PROMPT.contains(c), "{c:?}");
         }
+    }
+
+    #[test]
+    fn the_opening_prompt_asks_for_the_whole_launch_context() {
+        assert_eq!(
+            OPENING_PROMPT,
+            "Read your launch context with the storm session_context tool, then wait for my instructions."
+        );
     }
 
     #[test]

@@ -574,7 +574,10 @@ Specification*; the slices are decisions 81 and 81a onward):
 - **No note data on a command line or in an environment** (slice 5). The
   host's `start` carries `context: true`, never text; the runtime maps it to
   the compile-time `mcp::OPENING_PROMPT`, and the agent reads the note
-  through `session_context`, keyed on its own session.
+  through `session_context`, keyed on its own session. A launch role
+  (decision 138f) rides the same flag and the same tool, which returns
+  `{context, role}`; only a session that reads Storm records one, and every
+  launch with a role gets it as its first label.
 - **A request the gateway did not forward is `session_unknown`, and nothing
   else is.** That is the only answer the bridge may replay `initialize` on.
   Upstream sessions live in memory so a restart produces it; closing one

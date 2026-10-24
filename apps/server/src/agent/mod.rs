@@ -58,8 +58,9 @@ pub enum Command {
         /// anyway, which is why a launch never relies on it (§6, old hosts).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp: Vec<McpGrant>,
-        /// The session was started from a note: the runtime adds its fixed
-        /// opening prompt. A flag, never text, so no note data reaches argv.
+        /// The session was started from a note or with a role (decision
+        /// 138f): the runtime adds its fixed opening prompt. A flag, never
+        /// text, so no note data reaches argv.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         context: bool,
         /// The agent's own session to reopen (decision 89). Omitted on a
@@ -364,12 +365,40 @@ pub struct Launch {
     /// session's, whatever else the request says.
     #[serde(default)]
     pub resume_of: Option<String>,
+    /// The crew the session joins, last, or a new crew it starts (decision
+    /// 138h). A resume ignores it and joins its predecessor's crew.
+    #[serde(default)]
+    pub crew: Option<LaunchCrew>,
+    /// A Kit role note (138f): handed to the agent beside the context note,
+    /// and the session's first role label. A resume ignores it.
+    #[serde(default)]
+    pub role: Option<ContextRef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContextRef {
     pub vault_id: String,
     pub note_id: String,
+}
+
+/// `{id}` joins an existing crew; `{new_name}` starts one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LaunchCrew {
+    Existing { id: String },
+    New { new_name: String },
+}
+
+/// The crew a launch puts its session in, once the caller has resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrewJoin {
+    /// An existing crew, as its last member.
+    Existing(String),
+    /// A new crew holding only this session.
+    New { name: String, color: String },
+    /// A resume: the crew this ended session is in, right after it. Nothing
+    /// when it is in none.
+    After(String),
 }
 
 /// What the launch resolved before the manager runs it.
@@ -382,6 +411,12 @@ pub struct LaunchMeta {
     /// What token sync would deliver to this host (decision 124), before the
     /// provider and the host's capability are known.
     pub provider_credential: Option<&'static str>,
+    /// The launch role (138f). Recorded only when the session reads Storm.
+    pub role: Option<store::Context>,
+    /// The session's first role label, written whatever the agent: the launch
+    /// role, or a resumed session's predecessor's label.
+    pub label: Option<RoleLabel>,
+    pub crew: Option<CrewJoin>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -1234,6 +1269,13 @@ impl AgentManager {
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
         let launch = {
             let mut store = self.store.lock().unwrap();
+            // Checked under the same lock as the writes below, so the crew
+            // cannot be deleted between the check and the join.
+            if let Some(CrewJoin::Existing(id)) = &meta.crew
+                && store.crew(id)?.is_none()
+            {
+                return Err(AgentError::NotFound("no such crew"));
+            }
             let launch = LaunchRecord {
                 session_id: record.id.clone(),
                 name: session_name(
@@ -1242,8 +1284,10 @@ impl AgentManager {
                     &store.live_names()?,
                 ),
                 context: meta.context,
-                // A session that cannot reach Storm has nothing to write with.
+                // A session that cannot reach Storm has nothing to write with,
+                // and cannot read a role note (138g).
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
+                role: meta.role.filter(|_| reads_storm),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -1267,6 +1311,40 @@ impl AgentManager {
                 })
                 .collect();
             store.insert_integrations(&record.id, &integrations)?;
+            if let Some(label) = &meta.label {
+                store.set_role(&record.id, Some(label), &record.created_at)?;
+            }
+            match meta.crew {
+                Some(CrewJoin::Existing(id)) => {
+                    store.move_session(&record.id, Some(&id), None)?;
+                }
+                Some(CrewJoin::New { name, color }) => {
+                    let crew = Crew {
+                        id: crate::auth::identity::random_id("crw_"),
+                        name,
+                        color,
+                        order: 0,
+                    };
+                    store.create_crew(
+                        &crew,
+                        owner,
+                        std::slice::from_ref(&record.id),
+                        &record.created_at,
+                    )?;
+                }
+                Some(CrewJoin::After(old)) => {
+                    if let Some(m) = store.membership(&old)? {
+                        let members = store.members(&m.id)?;
+                        let before = members
+                            .iter()
+                            .position(|s| *s == old)
+                            .and_then(|at| members.get(at + 1))
+                            .cloned();
+                        store.move_session(&record.id, Some(&m.id), before.as_deref())?;
+                    }
+                }
+                None => {}
+            }
             launch
         };
         let mut session_live = SessionLive::new();
@@ -1286,7 +1364,8 @@ impl AgentManager {
                 interaction: "terminal".into(),
                 terminal: req.terminal,
                 mcp: grants,
-                context: reads_storm && launch.context.is_some(),
+                // `launch.role` is only set for a session that reads Storm.
+                context: reads_storm && (launch.context.is_some() || launch.role.is_some()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
             },
@@ -2085,6 +2164,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
             },
             meta,
             grants,
@@ -2105,6 +2186,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: Some(old.id.clone()),
+                crew: None,
+                role: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -2307,6 +2390,107 @@ mod tests {
         );
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert!(wire.get("context").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn a_launch_role_sets_the_start_flag_only_for_a_session_that_reads_storm() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true), ("shell", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let role = store::Context {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+            title: "Storm Reviewer".into(),
+        };
+        let label = RoleLabel {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+        };
+        let with_role = || LaunchMeta {
+            role: Some(role.clone()),
+            label: Some(label.clone()),
+            ..LaunchMeta::default()
+        };
+        let start = |rx: &mut mpsc::UnboundedReceiver<Envelope>| {
+            serde_json::to_value(rx.try_recv().unwrap()).unwrap()
+        };
+
+        // Reads Storm: the role is the launch's, and the host is told.
+        let (r, launch, _) = launch_meta(&m, None, offered(), with_role()).unwrap();
+        assert_eq!(launch.role, Some(role.clone()));
+        assert_eq!(start(&mut rx)["context"], true);
+        assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        assert_eq!(
+            m.launch_of(&r.id).unwrap().unwrap().role,
+            Some(role.clone())
+        );
+
+        // Neither a note nor a role: no flag.
+        launch_meta(&m, None, offered(), LaunchMeta::default()).unwrap();
+        assert!(start(&mut rx).get("context").is_none());
+
+        // Without Storm's connection the role is a label only (138g).
+        for (provider, grants) in [(Some("shell"), offered()), (None, offered()[1..].to_vec())] {
+            let (r, launch, _) = launch_meta(&m, provider, grants, with_role()).unwrap();
+            assert_eq!(launch.role, None, "{provider:?}");
+            let wire = start(&mut rx);
+            assert!(wire.get("context").is_none(), "{wire}");
+            assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        }
+    }
+
+    #[test]
+    fn a_launch_joins_or_starts_its_crew_before_start_and_refuses_an_unknown_one() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let crew = |join: CrewJoin| LaunchMeta {
+            crew: Some(join),
+            ..LaunchMeta::default()
+        };
+        let (a, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::New {
+                name: "Release".into(),
+                color: "sage".into(),
+            }),
+        )
+        .unwrap();
+        let made = m.membership(&a.id).unwrap().unwrap();
+        assert_eq!(m.crews().unwrap()[0].name, "Release");
+        let (b, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing(made.id.clone())),
+        )
+        .unwrap();
+        // A resume's join lands right after its predecessor.
+        let (c, _, _) =
+            launch_meta(&m, None, offered(), crew(CrewJoin::After(a.id.clone()))).unwrap();
+        assert_eq!(
+            m.store.lock().unwrap().members(&made.id).unwrap(),
+            [a.id.clone(), c.id.clone(), b.id.clone()]
+        );
+        while rx.try_recv().is_ok() {}
+
+        let before = m.list().unwrap().len();
+        let refused = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing("crw_NOPE".into())),
+        );
+        assert!(
+            matches!(refused, Err(AgentError::NotFound(_))),
+            "{refused:?}"
+        );
+        assert_eq!(m.list().unwrap().len(), before, "no session is left behind");
+        assert!(rx.try_recv().is_err(), "nothing was sent to the host");
     }
 
     #[test]
@@ -2663,6 +2847,8 @@ mod tests {
                     write_vault_id: None,
                     allow_vault_writes: false,
                     resume_of: None,
+                    crew: None,
+                    role: None,
                 },
                 meta,
                 offered(),
@@ -2861,6 +3047,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -3180,6 +3368,30 @@ mod tests {
         let m = AgentManager::open(d.path()).unwrap();
         let old = m.get("ags_OLD").unwrap();
         assert_eq!((old.status.as_str(), old.title), ("completed", None));
+        drop(m);
+        AgentManager::open(d.path()).unwrap();
+    }
+
+    /// 138f is additive: a launch row from before it reads back with no role.
+    #[test]
+    fn an_old_launch_table_gains_the_role_columns() {
+        let d = tempdir::TempDir::new("storm-agent").unwrap();
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("agent/agent.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_launch (
+                 session_id TEXT PRIMARY KEY, name TEXT NOT NULL, context_vault_id TEXT,
+                 context_note_id TEXT, context_title TEXT, write_vault_id TEXT,
+                 created_at TEXT NOT NULL);
+             INSERT INTO session_launch VALUES ('ags_OLD', 'plan', 'vlt_P', 'note-plan',
+                 'Plan', NULL, '2026-10-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+        let m = AgentManager::open(d.path()).unwrap();
+        let old = m.launch_of("ags_OLD").unwrap().unwrap();
+        assert_eq!(old.role, None);
+        assert_eq!(old.context.unwrap().title, "Plan");
         drop(m);
         AgentManager::open(d.path()).unwrap();
     }

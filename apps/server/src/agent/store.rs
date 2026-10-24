@@ -97,9 +97,14 @@ pub struct LaunchRecord {
     pub name: String,
     pub context: Option<Context>,
     pub write_vault_id: Option<String>,
+    /// The role it was launched with (decision 138f), fixed for its life and
+    /// handed to the agent through `session_context`. Only a session that
+    /// reads Storm has one; for any other the role is a label only (138g).
+    pub role: Option<Context>,
 }
 
-/// The note a session was started from. The title is a snapshot.
+/// The note a session was started from, or its launch role. The title is a
+/// snapshot.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct Context {
     pub vault_id: String,
@@ -295,16 +300,20 @@ impl Store {
         if !has_title {
             conn.execute("ALTER TABLE sessions ADD COLUMN title TEXT", [])?;
         }
-        // Decision 89, additive the same way.
-        for column in ["harness_session", "resumed_from"] {
+        // Decision 89 on `sessions` and 138f on `session_launch`, additive
+        // the same way.
+        for (table, column) in [
+            ("sessions", "harness_session"),
+            ("sessions", "resumed_from"),
+            ("session_launch", "role_vault_id"),
+            ("session_launch", "role_note_id"),
+            ("session_launch", "role_title"),
+        ] {
             let has = conn
-                .prepare("SELECT 1 FROM pragma_table_info('sessions') WHERE name = ?1")?
-                .exists([column])?;
+                .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
+                .exists([table, column])?;
             if !has {
-                conn.execute(
-                    &format!("ALTER TABLE sessions ADD COLUMN {column} TEXT"),
-                    [],
-                )?;
+                conn.execute(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT"), [])?;
             }
         }
         Ok(Self { conn })
@@ -565,14 +574,21 @@ impl Store {
     }
 
     pub fn insert_launch(&self, l: &LaunchRecord, now: &str) -> Result<()> {
-        let (vault, note, title) = match &l.context {
-            Some(c) => (Some(&c.vault_id), Some(&c.note_id), Some(&c.title)),
+        let parts = |c: &Option<Context>| match c {
+            Some(c) => (
+                Some(c.vault_id.clone()),
+                Some(c.note_id.clone()),
+                Some(c.title.clone()),
+            ),
             None => (None, None, None),
         };
+        let (vault, note, title) = parts(&l.context);
+        let (role_vault, role_note, role_title) = parts(&l.role);
         self.conn.execute(
             "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
-                 context_title, write_vault_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 context_title, write_vault_id, created_at, role_vault_id, role_note_id,
+                 role_title)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 l.session_id,
                 l.name,
@@ -580,7 +596,10 @@ impl Store {
                 note,
                 title,
                 l.write_vault_id,
-                now
+                now,
+                role_vault,
+                role_note,
+                role_title
             ],
         )?;
         Ok(())
@@ -591,25 +610,29 @@ impl Store {
             .conn
             .query_row(
                 "SELECT session_id, name, context_vault_id, context_note_id, context_title,
-                     write_vault_id
+                     write_vault_id, role_vault_id, role_note_id, role_title
                  FROM session_launch WHERE session_id = ?1",
                 params![session_id],
                 |r| {
-                    let vault: Option<String> = r.get(2)?;
-                    let note: Option<String> = r.get(3)?;
-                    Ok(LaunchRecord {
-                        session_id: r.get(0)?,
-                        name: r.get(1)?,
-                        context: vault.zip(note).map(|(vault_id, note_id)| Context {
+                    let note = |at: usize| -> rusqlite::Result<Option<Context>> {
+                        let vault: Option<String> = r.get(at)?;
+                        let note: Option<String> = r.get(at + 1)?;
+                        Ok(vault.zip(note).map(|(vault_id, note_id)| Context {
                             vault_id,
                             note_id,
                             title: r
-                                .get::<_, Option<String>>(4)
+                                .get::<_, Option<String>>(at + 2)
                                 .ok()
                                 .flatten()
                                 .unwrap_or_default(),
-                        }),
+                        }))
+                    };
+                    Ok(LaunchRecord {
+                        session_id: r.get(0)?,
+                        name: r.get(1)?,
+                        context: note(2)?,
                         write_vault_id: r.get(5)?,
+                        role: note(6)?,
                     })
                 },
             )

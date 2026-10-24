@@ -300,6 +300,8 @@ pub struct Storm {
     writable: bool,
     /// An agent session started from a note: its instructions say so.
     context: bool,
+    /// An agent session launched with a role note (decision 138f).
+    role: bool,
 }
 
 /// Tools an agent is never offered, whatever its write flags (G-D5).
@@ -379,17 +381,25 @@ impl Storm {
             writable,
             actor,
             context: false,
+            role: false,
         }
     }
 
     /// The built-in `storm` connection's handler: the same tools, served in
     /// process to the gateway as `Actor::Agent`, never with `delete_note`.
-    pub fn for_agent(state: Shared, writable: bool, context: bool, actor: Actor) -> Self {
+    pub fn for_agent(
+        state: Shared,
+        writable: bool,
+        context: bool,
+        role: bool,
+        actor: Actor,
+    ) -> Self {
         Self {
             state,
             writable,
             actor: Some(actor),
             context,
+            role,
         }
     }
 
@@ -559,7 +569,7 @@ impl Storm {
     }
 
     #[tool(
-        description = "Read the note this agent session was started from: its vault and note ids, title, path, version and full markdown. Takes no arguments."
+        description = "Read this agent session's launch context: the note it was started from (`context`) and its role note (`role`), each with vault and note ids, title, path, version and full markdown, or null when not set. A note deleted since is null and named in `missing`. Takes no arguments."
     )]
     async fn session_context(&self) -> Result<CallToolResult, ErrorData> {
         respond_object(crate::ops::session_context(&self.state, self.actor()?).await)
@@ -723,11 +733,19 @@ impl ServerHandler for Storm {
                  scripts in the kit vault are readable with list_scripts and get_script. \
                  These tools are read-only: this server does not allow changes."
         });
-        if self.context {
-            instructions.push_str(
-                " This session was started from a note. Call session_context to read it.",
-            );
-        }
+        instructions.push_str(match (self.context, self.role) {
+            (true, true) => {
+                " This session was started from a note and with a role note. Call \
+                 session_context to read both."
+            }
+            (true, false) => {
+                " This session was started from a note. Call session_context to read it."
+            }
+            (false, true) => {
+                " This session was started with a role note. Call session_context to read it."
+            }
+            (false, false) => "",
+        });
         info.instructions = Some(instructions);
         info
     }
