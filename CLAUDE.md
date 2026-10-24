@@ -655,6 +655,22 @@ Specification*; the slices are decisions 81 and 81a onward):
   forbids, and relaxing the unit would weaken every agent.
   `tests/codex_gate.rs` proves all of it against a real `codex` when
   `STORM_CODEX_BIN` is set.
+- **A host installs only what a recipe compiled into it fetches** (decision
+  133, `apps/runtime/src/install.rs`). The server's `agent.install` names an
+  agent and an operation, never a URL, version or command; an id with no
+  recipe is refused. Downloads are https to the vendors' hosts on every
+  redirect hop, capped in size, and a published checksum is always
+  verified — **a mismatch never installs** (Cursor publishes none, reported
+  as `checksum_verified: false`). A version from the network is checked
+  before it names a folder. **Storm updates and removes only what it
+  installed**, under `<state>/agents/managed`, whose `bin/` is first on the
+  host's search path; activation swaps `bin/<command>` atomically, so a
+  running session keeps its binary. `remove` with a live session of the
+  agent is `in_use`. **No agent, MCP key or MCP tool can trigger an
+  install**: the app's routes are session tier, owner only, and a job is
+  audited in `security_events` with codes only, never a URL or npm output.
+  `tests/agent_install_gate.rs` (`STORM_AGENT_INSTALL_GATE=1`) proves every
+  recipe against the real channels.
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,
