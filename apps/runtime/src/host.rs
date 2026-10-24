@@ -68,6 +68,8 @@ const TITLE_EVERY: Duration = Duration::from_secs(1);
 /// the host takes it for dead and reconnects.
 const HEARTBEAT: Duration = Duration::from_secs(15);
 const LINK_IDLE: Duration = Duration::from_secs(45);
+/// How often a host looks for newer agent CLIs (133-5).
+const AUTO_UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
 const START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
@@ -121,6 +123,14 @@ pub enum Command {
         connection: String,
         message: serde_json::Value,
     },
+    /// Install, update or remove an agent CLI (decision 133-4): an agent and
+    /// an operation, never a URL, version or command.
+    #[serde(rename = "agent.install")]
+    AgentInstall {
+        job: String,
+        agent: String,
+        op: crate::install::Op,
+    },
     /// A pasted image to fetch and stage in the session's inbox (D15 AM46).
     #[serde(rename = "terminal.image")]
     TerminalImage {
@@ -144,6 +154,7 @@ impl Command {
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
+            Self::AgentInstall { .. } => "agent.install",
         }
     }
 
@@ -157,7 +168,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh => None,
+            Self::Refresh | Self::AgentInstall { .. } => None,
         }
     }
 }
@@ -206,6 +217,8 @@ impl SessionEvents for Events {
 
 struct HostSession {
     id: String,
+    /// The provider it runs, so a remove can refuse an agent in use (133-4).
+    provider: String,
     session: Mutex<Box<dyn ProviderSession>>,
     events: Arc<Events>,
     /// The offset the server has acknowledged.
@@ -271,6 +284,8 @@ pub struct Host {
     launch_remote: Mutex<Vec<serde_json::Value>>,
     /// The agents' versions and Node's, probed in the background (133-3).
     agents: Arc<crate::agents::Inventory>,
+    /// Agents with a job running: one at a time each (133-4).
+    agent_jobs: Mutex<std::collections::HashSet<String>>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -331,6 +346,7 @@ impl Host {
             plugin_inventory: Arc::new(Mutex::new(Vec::new())),
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
+            agent_jobs: Mutex::default(),
         }))
     }
 
@@ -403,6 +419,9 @@ impl Host {
             // It stages pasted images (`terminal.image`, 85e), so the server
             // may send it one instead of refusing the paste.
             "images": true,
+            // It installs, updates and removes agent CLIs (`agent.install`,
+            // decision 133-4).
+            "agent_install": true,
             // The providers whose sessions it can resume (decision 89). A
             // host without this would start a resume as a new conversation.
             "resume": self
@@ -433,6 +452,12 @@ impl Host {
                 cap["version"] = json!(version);
             }
         }
+        if let Some(latest) = self.agents.latest(id) {
+            cap["latest"] = json!(latest);
+        }
+        if !crate::install::verified(id) {
+            cap["checksum_verified"] = json!(false);
+        }
         let enabled = self.config.agent_install == crate::config::AgentInstall::On;
         match crate::agents::install_blocked(id, enabled, self.agents.node_major()) {
             None => cap["installable"] = json!(true),
@@ -440,6 +465,169 @@ impl Host {
                 cap["installable"] = json!(false);
                 cap["install_blocked"] = json!(reason);
             }
+        }
+    }
+
+    /// Runs one `agent.install` job (133-4) and reports its steps and result
+    /// on `/v1/runtime/agents/jobs/<job>`, then a fresh inventory.
+    async fn agent_job(self: Arc<Self>, job: String, agent: String, op: crate::install::Op) {
+        use crate::install::{Failure, Op};
+        let job_ok = job.len() <= 64
+            && job.starts_with("agj_")
+            && job[4..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !job_ok {
+            tracing::warn!(job = %job, "agent job: a malformed job id, ignored");
+            return;
+        }
+        let report = format!("/v1/runtime/agents/jobs/{job}");
+        let enabled = self.config.agent_install == crate::config::AgentInstall::On;
+        let refused = if crate::install::recipe(&agent).is_none() {
+            Some(Failure::Unknown)
+        } else if let (false, _) | (_, Op::Install | Op::Update) = (enabled, op)
+            && let Some(reason) =
+                crate::agents::install_blocked(&agent, enabled, self.agents.node_major())
+        {
+            Some(Failure::Blocked(reason))
+        } else if op == Op::Remove
+            && self
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .any(|s| s.provider == agent && s.events.ended.lock().unwrap().is_none())
+        {
+            Some(Failure::InUse)
+        } else if !self.agent_jobs.lock().unwrap().insert(agent.clone()) {
+            Some(Failure::Busy)
+        } else {
+            None
+        };
+        if let Some(failure) = refused {
+            let _ = self
+                .post(&report, &json!({ "failed": failure.code() }))
+                .await;
+            return;
+        }
+        self.run_job(job, agent, op).await;
+    }
+
+    /// Runs a job that passed its checks and holds its agent's slot in
+    /// `agent_jobs`, which it releases.
+    async fn run_job(self: Arc<Self>, job: String, agent: String, op: crate::install::Op) {
+        use crate::install::Failure;
+        let report = format!("/v1/runtime/agents/jobs/{job}");
+        tracing::info!(agent = %agent, ?op, "agent job started");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<&'static str>();
+        let poster = {
+            let host = self.clone();
+            let report = report.clone();
+            tokio::spawn(async move {
+                while let Some(step) = rx.recv().await {
+                    let _ = host.post(&report, &json!({ "step": step })).await;
+                }
+            })
+        };
+        let path = self
+            .config
+            .search_path_with(&crate::agents::managed_bin(&self.state_dir))
+            .ok();
+        let step = move |s: &'static str| {
+            let _ = tx.send(s);
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(600),
+            crate::install::run(&self.state_dir, &agent, op, path, &step),
+        )
+        .await
+        .unwrap_or(Err(Failure::Timeout));
+        drop(step);
+        let _ = poster.await;
+        self.agent_jobs.lock().unwrap().remove(&agent);
+        let body = match &result {
+            Ok(version) => json!({ "done": { "version": version } }),
+            Err(failure) => {
+                tracing::warn!(agent = %agent, code = failure.code(), "agent job failed");
+                json!({ "failed": failure.code() })
+            }
+        };
+        let _ = self.post(&report, &body).await;
+        if op == crate::install::Op::Update {
+            self.agents.record_update(&agent, result.is_ok());
+        }
+        self.probe_agents();
+    }
+
+    /// Once a day, from a random point in the first hour (133-5): learns
+    /// each managed agent's newest version and, with `agent_updates =
+    /// "auto"`, updates one that is behind while none of its sessions runs.
+    async fn auto_updates(self: Arc<Self>) {
+        let first = Duration::from_secs(rand::random_range(300..3600));
+        tokio::time::sleep(first).await;
+        loop {
+            if *self.link_up.borrow() {
+                self.clone().check_updates().await;
+            }
+            tokio::time::sleep(AUTO_UPDATE_EVERY).await;
+        }
+    }
+
+    async fn check_updates(self: Arc<Self>) {
+        let auto = self.config.agent_updates == crate::config::AgentUpdates::Auto
+            && self.config.agent_install == crate::config::AgentInstall::On;
+        let mut changed = false;
+        for agent in crate::agents::MANAGEABLE {
+            if crate::install::managed_target(&self.state_dir, agent).is_none() {
+                continue;
+            }
+            let Ok(latest) = crate::install::latest(agent).await else {
+                continue;
+            };
+            changed |= self.agents.set_latest(agent, &latest);
+            let behind = self.agents.version(agent).is_some_and(|v| v != latest);
+            let in_use = self
+                .sessions
+                .lock()
+                .unwrap()
+                .values()
+                .any(|s| s.provider == agent && s.events.ended.lock().unwrap().is_none());
+            if !auto || !behind || in_use || !self.agents.may_auto_update(agent) {
+                continue;
+            }
+            if !self.agent_jobs.lock().unwrap().insert(agent.to_string()) {
+                continue;
+            }
+            // The server creates the job, so an automatic update is audited and
+            // shown like one started from the app.
+            let created = self
+                .post_for_response(
+                    "/v1/runtime/agents/jobs",
+                    &json!({ "agent": agent, "op": "update", "auto": true }),
+                    None,
+                )
+                .await;
+            let job = match created {
+                Ok(r) if r.status().is_success() => r
+                    .json::<serde_json::Value>()
+                    .await
+                    .ok()
+                    .and_then(|v| v["job"].as_str().map(str::to_owned)),
+                _ => None,
+            };
+            match job {
+                Some(job) => {
+                    self.clone()
+                        .run_job(job, agent.to_string(), crate::install::Op::Update)
+                        .await
+                }
+                None => {
+                    self.agent_jobs.lock().unwrap().remove(agent);
+                }
+            }
+        }
+        if changed {
+            let _ = self
+                .post("/v1/runtime/inventory", &self.capabilities())
+                .await;
         }
     }
 
@@ -580,6 +768,7 @@ impl Host {
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let listener = self.bind_socket()?;
         tokio::spawn(self.clone().serve_socket(listener));
+        tokio::spawn(self.clone().auto_updates());
         let mut backoff = Duration::from_secs(1);
         loop {
             match self.clone().connect_once().await {
@@ -826,7 +1015,7 @@ impl Host {
                     host.starting.lock().unwrap().remove(&id);
                 });
             }
-            Command::Refresh | Command::TerminalImage { .. } => {
+            Command::Refresh | Command::TerminalImage { .. } | Command::AgentInstall { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -885,6 +1074,7 @@ impl Host {
             } => {
                 tokio::spawn(self.stage_image(session, image, size, blake3, ext));
             }
+            Command::AgentInstall { job, agent, op } => self.agent_job(job, agent, op).await,
             command => self.handle_now(command),
         }
     }
@@ -894,7 +1084,10 @@ impl Host {
     /// the session) runs on a blocking thread.
     fn handle_now(&self, command: Command) {
         match command {
-            Command::Start { .. } | Command::Refresh | Command::TerminalImage { .. } => {
+            Command::Start { .. }
+            | Command::Refresh
+            | Command::TerminalImage { .. }
+            | Command::AgentInstall { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -1149,6 +1342,14 @@ impl Host {
                 .secret_env
                 .push((crate::credential::TOKEN_ENV.into(), token));
         }
+        // Storm is the only thing that updates its own copy (133-2).
+        if provider_id == "claude-code"
+            && provider
+                .resolved()
+                .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm")
+        {
+            launch.env.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
+        }
         // A resumed conversation has read its note already.
         let launch =
             crate::mcp::with_opening_prompt(launch, &provider_id, context && resume.is_none());
@@ -1195,6 +1396,7 @@ impl Host {
         let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let host_session = Arc::new(HostSession {
             id: id.clone(),
+            provider: provider_id.clone(),
             session: Mutex::new(session),
             events,
             sent: Mutex::new(0),
@@ -2437,6 +2639,76 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
         );
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 133-4: a job the host must refuse is reported failed with
+    /// its stable code, and never touches the managed folder.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn an_agent_job_is_refused_with_a_stable_code() {
+        let failed = |seen: &Arc<Mutex<Vec<(String, serde_json::Value)>>>, job: &str| {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .find(|(p, b)| {
+                    p.ends_with(&format!("/agents/jobs/{job}")) && b.get("failed").is_some()
+                })
+                .map(|(_, b)| b["failed"].as_str().unwrap().to_string())
+        };
+        let install = |job: &str, agent: &str, op: crate::install::Op| Command::AgentInstall {
+            job: job.into(),
+            agent: agent.into(),
+            op,
+        };
+        let (host, seen, state, _roots) =
+            harness_host(r#"echo "ARGS $0 $*"; exec sleep 1000"#).await;
+        assert_eq!(host.capabilities()["agent_install"], json!(true));
+
+        host.clone()
+            .handle(install("agj_a1", "shell", crate::install::Op::Install))
+            .await;
+        assert_eq!(failed(&seen, "agj_a1").as_deref(), Some("unknown_agent"));
+
+        host.clone()
+            .handle(install("agj_a2", "codex", crate::install::Op::Remove))
+            .await;
+        assert_eq!(
+            failed(&seen, "agj_a2").as_deref(),
+            Some("not_managed"),
+            "nothing of Storm's to remove"
+        );
+
+        host.clone()
+            .handle(harness_start("ags_LIVE", "opencode", None, false))
+            .await;
+        host.clone()
+            .handle(install("agj_a3", "opencode", crate::install::Op::Remove))
+            .await;
+        assert_eq!(failed(&seen, "agj_a3").as_deref(), Some("in_use"));
+
+        host.clone()
+            .handle(install("../evil", "codex", crate::install::Op::Install))
+            .await;
+        assert!(
+            !seen.lock().unwrap().iter().any(|(p, _)| p.contains("evil")),
+            "a malformed job id is never put in a URL"
+        );
+        assert!(
+            !crate::agents::managed_dir(state.path())
+                .join("opencode")
+                .exists()
+        );
+
+        let (off, seen, _state, _roots) =
+            harness_host_with(r#"exec sleep 1000"#, "agent_install = \"off\"").await;
+        off.clone()
+            .handle(install(
+                "agj_b1",
+                "claude-code",
+                crate::install::Op::Install,
+            ))
+            .await;
+        assert_eq!(failed(&seen, "agj_b1").as_deref(), Some("disabled"));
     }
 
     /// Decision 132: a Claude Code session keeps the agent's own MCP servers

@@ -125,7 +125,15 @@ struct Probe {
 pub struct Inventory {
     probes: Mutex<HashMap<String, Probe>>,
     node: Mutex<Option<u32>>,
+    /// Each managed agent's newest version, from the daily check (133-5).
+    latest: Mutex<HashMap<String, String>>,
+    /// Automatic updates that failed in a row, per agent.
+    failures: Mutex<HashMap<String, u32>>,
 }
+
+/// After this many failed automatic updates in a row, an agent waits for one
+/// started from the app to succeed (133-5).
+const AUTO_FAILURES_MAX: u32 = 3;
 
 impl Inventory {
     /// Probes every agent whose binary changed since the last time, and Node.
@@ -166,6 +174,39 @@ impl Inventory {
 
     pub fn node_major(&self) -> Option<u32> {
         *self.node.lock().unwrap()
+    }
+
+    /// Records `agent`'s newest version; whether it changed.
+    pub fn set_latest(&self, agent: &str, version: &str) -> bool {
+        self.latest
+            .lock()
+            .unwrap()
+            .insert(agent.to_string(), version.to_string())
+            .as_deref()
+            != Some(version)
+    }
+
+    pub fn latest(&self, agent: &str) -> Option<String> {
+        self.latest.lock().unwrap().get(agent).cloned()
+    }
+
+    pub fn record_update(&self, agent: &str, ok: bool) {
+        let mut failures = self.failures.lock().unwrap();
+        if ok {
+            failures.remove(agent);
+        } else {
+            *failures.entry(agent.to_string()).or_default() += 1;
+        }
+    }
+
+    pub fn may_auto_update(&self, agent: &str) -> bool {
+        self.failures
+            .lock()
+            .unwrap()
+            .get(agent)
+            .copied()
+            .unwrap_or(0)
+            < AUTO_FAILURES_MAX
     }
 }
 
@@ -269,5 +310,20 @@ mod tests {
             source(Path::new("/usr/local/bin/claude"), t.path()),
             "system"
         );
+    }
+
+    #[test]
+    fn three_failed_automatic_updates_stop_them_until_one_succeeds() {
+        let inv = Inventory::default();
+        assert!(inv.may_auto_update("codex"));
+        for _ in 0..3 {
+            inv.record_update("codex", false);
+        }
+        assert!(!inv.may_auto_update("codex"));
+        inv.record_update("codex", true);
+        assert!(inv.may_auto_update("codex"));
+        assert!(inv.set_latest("codex", "1.0"));
+        assert!(!inv.set_latest("codex", "1.0"));
+        assert_eq!(inv.latest("codex").as_deref(), Some("1.0"));
     }
 }

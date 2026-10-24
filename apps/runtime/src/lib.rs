@@ -76,6 +76,7 @@ pub mod fsutil;
 pub mod harness;
 pub mod host;
 pub mod identity;
+pub mod install;
 pub mod mcp;
 pub mod mcp_connect;
 pub mod platform;
