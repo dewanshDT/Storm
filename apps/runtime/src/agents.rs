@@ -77,8 +77,12 @@ pub fn node_major(path: Option<&OsStr>) -> Option<u32> {
     parse_version(&out)?.split('.').next()?.parse().ok()
 }
 
-/// Runs `<binary> --version` on `path`, killed after [`PROBE_DEADLINE`].
-fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String> {
+/// Runs `<binary> --version` on `path`, killed after [`PROBE_DEADLINE`]. It
+/// runs in a process group of its own, which is killed once it exits or
+/// times out: whatever it started would otherwise outlive it as the host's
+/// account, and on macOS nothing else ends it (the acceptance stub starts a
+/// child that ignores SIGHUP, as #270 found for `claude plugin list`).
+pub(crate) fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String> {
     let mut command = Command::new(binary);
     command
         .arg("--version")
@@ -88,6 +92,8 @@ fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String> {
     if let Some(path) = path {
         command.env("PATH", path);
     }
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut command, 0);
     let mut child = command.spawn().ok()?;
     let deadline = Instant::now() + PROBE_DEADLINE;
     loop {
@@ -95,12 +101,15 @@ fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String> {
             Ok(Some(_)) => break,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             _ => {
+                end_group(&child);
                 let _ = child.kill();
                 let _ = child.wait();
                 return None;
             }
         }
     }
+    // Before reading: a leftover would hold the pipe open.
+    end_group(&child);
     let mut out = String::new();
     use std::io::Read;
     child
@@ -111,6 +120,16 @@ fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String> {
         .ok()?;
     Some(out)
 }
+
+#[cfg(unix)]
+fn end_group(child: &std::process::Child) {
+    if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn end_group(_: &std::process::Child) {}
 
 /// One agent as last probed.
 #[derive(Debug, Clone, PartialEq)]
@@ -325,5 +344,39 @@ mod tests {
         assert!(inv.set_latest("codex", "1.0"));
         assert!(!inv.set_latest("codex", "1.0"));
         assert_eq!(inv.latest("codex").as_deref(), Some("1.0"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn nothing_a_version_probe_started_outlives_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let bin = t.path().join("agent");
+        let left = t.path().join("left");
+        // As the acceptance stub does: print, leave a HUP-ignoring child, and
+        // hang until the deadline.
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho 1.0.0\n(trap '' HUP; exec sleep 600) & echo $! > '{}'\nexec sleep 600\n",
+                left.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(run_version(&bin, None), None, "it timed out");
+        let pid: i32 = std::fs::read_to_string(&left)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let alive = || {
+            rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
+        };
+        let until = Instant::now() + Duration::from_secs(5);
+        while alive() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "pid {pid} outlived the probe");
     }
 }

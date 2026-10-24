@@ -557,7 +557,9 @@ def main():
             env = dict(re.findall(r"^(ENV_\w+|STUB|ARGS)=(.*?)\r?$", text, re.M))
             check("M3", "a session's HOME is state/home (AM38)", env.get("ENV_HOME") == HOME, env)
             check("M3", "its SHELL is /bin/zsh", env.get("ENV_SHELL") == "/bin/zsh", env)
-            check("M3", "its PATH is AM38's", env.get("ENV_PATH") == AM38_PATH, env.get("ENV_PATH"))
+            # Storm's managed agents first (decision 133-2), then AM38's.
+            check("M3", "its PATH is Storm's agents, then AM38's",
+                  env.get("ENV_PATH") == f"{STATE}/agents/managed/bin:{AM38_PATH}", env.get("ENV_PATH"))
             check("M3", "claude-code is started in default permission mode", "--permission-mode default" in env.get("ARGS", ""), env)
             check("M3", "the agent runs as _stormruntime", f"ID={ACCOUNT}" in text, text[-300:])
         else:
@@ -690,13 +692,22 @@ def main():
         del runs_before
 
         # The host is killed outright: only the startup sweep can end the child.
+        # launchd respawns a job no sooner than 10 s after it last started, so
+        # the kill comes within seconds of a fresh start: the child can then
+        # be seen alive before the new host's sweep. Without it, how long the
+        # steps above took decided whether the respawn beat the check.
+        before = daemon_pid()
+        sh(["launchctl", "kickstart", "-k", SERVICE], sudo=True)
+        try_wait(lambda: (daemon_pid() or before) != before and owner.online(host_id), timeout=60)
+        started = time.monotonic()
         sid = owner.launch(host_id, "shell")
         out = owner.run(sid, "(trap '' HUP; exec sleep 993) & echo BG=$!")
         bg = int(re.search(r"BG=(\d+)", out).group(1))
         before = daemon_pid()
         sh(["kill", "-9", str(before)], sudo=True)
-        time.sleep(1)
-        check("M5", "with the host killed (-9), the HUP-ignoring child is still there", alive(bg), bg)
+        time.sleep(0.5)
+        check("M5", "with the host killed (-9), the HUP-ignoring child is still there",
+              alive(bg), f"{bg}, killed {time.monotonic() - started:.1f} s after the host started")
         back = try_wait(lambda: (daemon_pid() or before) != before and owner.online(host_id), timeout=60)
         check("M5", "launchd restarts a host killed with SIGKILL", back is not None, launchd())
         gone = try_wait(lambda: not alive(bg), timeout=20)
