@@ -20,6 +20,15 @@ scrollback_bytes = 4194304
 # (decision 132).
 # agent_mcp = "own"
 
+# Agent CLIs from the app (decision 133): Settings › Agents may install,
+# update and remove Claude Code, OpenCode, Codex, Cursor and Command Code on
+# this host, into <state>/agents/managed, which comes first on the path; a CLI
+# installed elsewhere still works and is never touched. "off" if you pin CLIs
+# by hand. Storm updates its own copies once a day, while none of that agent's
+# sessions runs, unless agent_updates is "manual".
+# agent_install = "on"
+# agent_updates = "auto"
+
 # With agent_mcp = "storm-only": whether a Claude Code or Codex session still
 # gets its enabled plugins' local (stdio) MCP servers (decision 131b).
 # plugin_mcp = "allow"

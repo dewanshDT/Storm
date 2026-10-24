@@ -50,6 +50,14 @@ pub struct RuntimeConfig {
     /// integrations (decision 132), or gets Storm's alone.
     #[serde(default)]
     pub agent_mcp: AgentMcp,
+    /// Whether the app may install, update and remove agent CLIs on this
+    /// host (decision 133). `"off"` is for an operator who pins CLIs by hand.
+    #[serde(default)]
+    pub agent_install: AgentInstall,
+    /// Whether Storm updates the agents it installed by itself, once a day
+    /// and only while none of that agent's sessions runs (133-5).
+    #[serde(default)]
+    pub agent_updates: AgentUpdates,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -66,6 +74,22 @@ pub enum AgentMcp {
     #[default]
     Own,
     StormOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentInstall {
+    #[default]
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentUpdates {
+    #[default]
+    Auto,
+    Manual,
 }
 
 fn default_max_sessions() -> u32 {
@@ -96,6 +120,8 @@ impl Default for RuntimeConfig {
             forbidden_roots: default_forbidden(),
             plugin_mcp: PluginMcp::default(),
             agent_mcp: AgentMcp::default(),
+            agent_install: AgentInstall::default(),
+            agent_updates: AgentUpdates::default(),
         }
     }
 }
@@ -204,6 +230,19 @@ impl RuntimeConfig {
         }
     }
 
+    /// [`Self::search_path`] with `managed` (the folder of the agents Storm
+    /// installed, decision 133-2) first, so a session finds Storm's copy
+    /// before any other.
+    pub fn search_path_with(&self, managed: &Path) -> Result<OsString> {
+        let rest = match self.search_path()? {
+            Some(path) => Some(path),
+            None => std::env::var_os("PATH"),
+        };
+        let mut dirs = vec![managed.to_path_buf()];
+        dirs.extend(rest.iter().flat_map(std::env::split_paths));
+        std::env::join_paths(dirs).context("the host's search path")
+    }
+
     /// The `settings` of the `opencode` provider entry, as JSON.
     pub fn opencode_settings(&self) -> Option<serde_json::Value> {
         self.providers
@@ -217,7 +256,15 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
-        let path = self.search_path()?;
+        self.providers_on(self.search_path()?)
+    }
+
+    /// [`Self::providers`] on [`Self::search_path_with`] `managed`.
+    pub fn providers_with(&self, managed: &Path) -> Result<Vec<Arc<dyn Provider>>> {
+        self.providers_on(Some(self.search_path_with(managed)?))
+    }
+
+    fn providers_on(&self, path: Option<OsString>) -> Result<Vec<Arc<dyn Provider>>> {
         let on_path = |p: CliProvider| match &path {
             Some(path) => p.with_path(path.clone()),
             None => p,
@@ -566,6 +613,34 @@ mod tests {
     }
 
     /// Decision 131b: plugin servers are allowed unless the host says off.
+    #[test]
+    fn agent_install_and_updates_default_on_and_auto() {
+        let c = RuntimeConfig::default();
+        assert_eq!(c.agent_install, AgentInstall::On);
+        assert_eq!(c.agent_updates, AgentUpdates::Auto);
+        let off: RuntimeConfig =
+            toml::from_str("agent_install = \"off\"\nagent_updates = \"manual\"").unwrap();
+        assert_eq!(off.agent_install, AgentInstall::Off);
+        assert_eq!(off.agent_updates, AgentUpdates::Manual);
+    }
+
+    #[test]
+    fn the_managed_folder_comes_first_on_the_search_path() {
+        let c: RuntimeConfig = toml::from_str("path = [\"/usr/bin\", \"/bin\"]").unwrap();
+        let path = c
+            .search_path_with(Path::new("/state/agents/managed/bin"))
+            .unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/state/agents/managed/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin")
+            ]
+        );
+    }
+
     #[test]
     fn agent_mcp_defaults_to_the_agents_own() {
         assert_eq!(RuntimeConfig::default().agent_mcp, AgentMcp::Own);
