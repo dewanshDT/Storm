@@ -44,6 +44,39 @@ On every platform:
 default agent › Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt.
 
+## Installing agents from the app
+
+**Settings › Agents** (beta) lists every agent on every host, with its version
+and whether you or Storm installed it, and can **Install**, **Update** and
+**Remove** Claude Code, OpenCode, Codex, Cursor and Command Code on a Linux or
+macOS host. No sudo and no terminal:
+
+- The host installs into its own folder, `agents/managed` under its state
+  directory, which comes first on its search path. A CLI you installed
+  yourself keeps working, and Storm only ever updates or removes its own
+  copies.
+- The host downloads from each vendor's own release channel and checks the
+  checksum the vendor publishes; a download that does not match is never
+  installed. Cursor publishes no checksum, and its row says so.
+- Codex and Command Code install through npm, so they need Node.js on the
+  host (Command Code needs Node 22).
+- A running session keeps the version it started with; the next one gets the
+  new one. An agent with a live session can't be removed.
+- Once a day the host checks for newer versions and updates what it
+  installed while none of that agent's sessions is running. Every install,
+  update and removal, automatic or not, is recorded on your server.
+- Signing in stays the agent's own: Claude Code from **Settings › Claude
+  login**, the others from a shell session on the host (`opencode auth
+  login`, `codex login --device-auth`, `cursor-agent login`).
+
+To turn this off for a host, or keep its versions where they are, set in
+its `runtime.toml`:
+
+```toml
+agent_install = "off"     # no installs, updates or removals from the app
+agent_updates = "manual"  # installs from the app, but no automatic updates
+```
+
 ## Linux
 
 ```sh
