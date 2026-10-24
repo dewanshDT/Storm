@@ -557,7 +557,9 @@ def main():
             env = dict(re.findall(r"^(ENV_\w+|STUB|ARGS)=(.*?)\r?$", text, re.M))
             check("M3", "a session's HOME is state/home (AM38)", env.get("ENV_HOME") == HOME, env)
             check("M3", "its SHELL is /bin/zsh", env.get("ENV_SHELL") == "/bin/zsh", env)
-            check("M3", "its PATH is AM38's", env.get("ENV_PATH") == AM38_PATH, env.get("ENV_PATH"))
+            # Storm's managed agents first (decision 133-2), then AM38's.
+            check("M3", "its PATH is Storm's agents, then AM38's",
+                  env.get("ENV_PATH") == f"{STATE}/agents/managed/bin:{AM38_PATH}", env.get("ENV_PATH"))
             check("M3", "claude-code is started in default permission mode", "--permission-mode default" in env.get("ARGS", ""), env)
             check("M3", "the agent runs as _stormruntime", f"ID={ACCOUNT}" in text, text[-300:])
         else:
