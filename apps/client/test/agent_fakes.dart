@@ -97,6 +97,31 @@ class FakeAgentServer {
 
   final requests = <http.Request>[];
 
+  /// Each agent's install, update or removal as the host would report it
+  /// (decision 133): the job's states in order, the start answering the
+  /// first and each poll the next; the last one repeats.
+  final agentJobs = <String, List<Map<String, dynamic>>>{};
+
+  /// A refused start, by agent: its status and stable code.
+  final agentRefusals = <String, (int, String)>{};
+
+  /// Called when a poll first sees a job done, to change the host the way
+  /// the job would have.
+  void Function(String hostId, String agent, String op)? onAgentJobDone;
+
+  final _jobPolls = <String, int>{};
+  final _jobOps = <String, String>{};
+
+  /// The ops started, as `<host id>/<agent>:<op>`.
+  List<String> get agentJobStarts => [
+    for (final r in requests)
+      if (r.method == 'POST' &&
+          r.url.pathSegments.length == 6 &&
+          r.url.pathSegments[4] == 'agents')
+        '${r.url.pathSegments[3]}/${r.url.pathSegments[5]}:'
+            '${(jsonDecode(r.body) as Map)['op']}',
+  ];
+
   late final MockClient client = MockClient(_handle);
 
   Map<String, dynamic>? session(String id) =>
@@ -111,6 +136,28 @@ class FakeAgentServer {
         jsonDecode(r.body) as Map<String, dynamic>,
   ];
 
+  Map<String, dynamic> _job(
+    String id,
+    String hostId,
+    String agent,
+    String op,
+    int n,
+  ) {
+    final states = agentJobs[agent] ?? const [];
+    final at = states.isEmpty
+        ? const {'state': 'queued'}
+        : states[n.clamp(0, states.length - 1)];
+    return {
+      'id': id,
+      'host_id': hostId,
+      'agent': agent,
+      'op': op,
+      'created': '2026-10-24T12:00:00Z',
+      'updated': '2026-10-24T12:00:00Z',
+      ...at,
+    };
+  }
+
   http.Response _json(Object body, [int status = 200]) =>
       http.Response(jsonEncode(body), status);
 
@@ -123,6 +170,31 @@ class FakeAgentServer {
     if (path == '/v1/config') return _json({'agent_writes': agentWrites});
     if (path == '/v1/config/agent') {
       return _json({'default_provider': defaultProvider});
+    }
+    if (seg.length == 6 &&
+        seg[2] == 'hosts' &&
+        seg[4] == 'agents' &&
+        req.method == 'POST') {
+      final agent = seg[5];
+      if (agentRefusals[agent] case (final status, final code)) {
+        return _json({'error': code}, status);
+      }
+      final op = (jsonDecode(req.body) as Map)['op'] as String;
+      final id = 'job_$agent';
+      _jobPolls[id] = 0;
+      _jobOps[id] = op;
+      return _json(_job(id, seg[3], agent, op, 0), 202);
+    }
+    if (seg.length == 7 && seg[4] == 'agents' && seg[5] == 'jobs') {
+      final id = seg[6];
+      final agent = id.substring('job_'.length);
+      final n = _jobPolls[id] = (_jobPolls[id] ?? 0) + 1;
+      final job = _job(id, seg[3], agent, _jobOps[id]!, n);
+      final states = agentJobs[agent]!;
+      if (job['state'] == 'done' && n == states.length - 1) {
+        onAgentJobDone?.call(seg[3], agent, _jobOps[id]!);
+      }
+      return _json(job);
     }
     if (seg.length == 5 && seg[2] == 'hosts' && seg[4] == 'workspaces') {
       final host = hosts.firstWhere((h) => h['id'] == seg[3]);

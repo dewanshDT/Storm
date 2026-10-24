@@ -107,13 +107,13 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('Integrations and Claude login say Beta, in the nav and '
-        'on the page, and nothing else does', (tester) async {
+    testWidgets('Integrations, Claude login and Agents say Beta, in the nav '
+        'and on the page, and nothing else does', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'device');
       final beta = kSettingsPages.where((p) => p.beta).map((p) => p.id);
-      expect(beta, ['integrations', 'claude-login']);
+      expect(beta, ['integrations', 'claude-login', 'agents']);
       for (final p in kSettingsPages) {
         expect(
           find.descendant(
@@ -151,7 +151,7 @@ void main() {
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.settings);
       await tester.pumpAndSettle();
-      for (final id in ['integrations', 'claude-login']) {
+      for (final id in ['integrations', 'claude-login', 'agents']) {
         final row = find.byKey(Key('settings-row-$id'));
         await tester.ensureVisible(row);
         expect(
