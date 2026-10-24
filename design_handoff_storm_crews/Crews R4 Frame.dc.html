@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}*{box-sizing:border-box}
+@keyframes stormPulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+</helmet>
+<div style="{{ rootStyle }}">
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+<div style="position:absolute;inset:0;display:flex">
+  <div style="width:56px;flex:none;background:var(--bg);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:16px 0 14px;gap:8px">
+    <div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;color:var(--text3)"><svg width="20" height="22" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v1h-1zM7 1h1v1h-1zM0 2h1v1h-1zM8 2h1v1h-1zM0 3h1v1h-1zM2 3h4v1h-4zM9 3h1v1h-1zM0 4h1v1h-1zM9 4h1v1h-1zM0 5h1v1h-1zM2 5h6v1h-6zM9 5h1v1h-1zM0 6h1v1h-1zM9 6h1v1h-1zM0 7h1v1h-1zM2 7h6v1h-6zM9 7h1v1h-1zM0 8h1v1h-1zM9 8h1v1h-1zM0 9h1v1h-1zM9 9h1v1h-1zM1 10h8v1h-8z"></path></svg></div>
+    <div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);color:var(--accent);background:var(--accentSoft)"><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg></div>
+    <div style="flex:1"></div>
+    <div style="width:40px;height:32px;display:flex;align-items:center;justify-content:center"><div style="width:9px;height:9px;border-radius:999px;background:var(--amber)"></div></div>
+    <div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;color:var(--text3)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg></div>
+  </div>
+
+  <div style="{{ sidebarStyle }}">
+    <div style="padding:16px 12px 8px;display:flex;flex-direction:column;gap:6px">
+      <div style="font-size:14px;font-weight:600;color:var(--text);padding:6px 8px 4px">Agents</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">＋ New session</div>
+      <div style="{{ overviewRowStyle }}">Overview</div>
+    </div>
+    <div style="flex:1;min-height:0;overflow:hidden;padding:0 8px 12px;display:flex;flex-direction:column;gap:2px;position:relative">
+      <sc-for list="{{ side }}" as="e" hint-placeholder-count="8">
+        <sc-if value="{{ e.isLabel }}" hint-placeholder-val="{{ false }}">
+          <div style="{{ e.style }}"><span style="flex:1">{{ e.label }}</span><span>{{ e.right }}</span></div>
+        </sc-if>
+        <sc-if value="{{ e.isCrew }}" hint-placeholder-val="{{ false }}">
+          <div style="{{ e.style }}">
+            <span style="width:12px;flex:none;color:var(--text3);font-size:10px">{{ e.chev }}</span>
+            <span style="{{ e.sq }}"></span>
+            <span style="flex:1;min-width:0;font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.name }}</span>
+            <span style="{{ e.countStyle }}">{{ e.count }}</span>
+            <sc-if value="{{ e.dots }}" hint-placeholder-val="{{ false }}"><span style="flex:none;width:22px;height:20px;border-radius:6px;background:var(--surface);color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:1px">···</span></sc-if>
+          </div>
+        </sc-if>
+        <sc-if value="{{ e.isRow }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ e.outer }}"><div style="{{ e.inner }}">
+            {{ e.markEl }}
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;gap:6px;min-width:0">
+                <span style="{{ e.nameStyle }}">{{ e.name }}</span>
+                <sc-if value="{{ e.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ e.roleStyle }}">{{ e.role }}</span></sc-if>
+              </div>
+              <div style="display:flex;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap">
+                <span style="flex:none">{{ e.sub1 }}</span><span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ e.sub2 }}</span><span style="{{ e.sub3Style }}">{{ e.sub3 }}</span>
+              </div>
+            </div>
+          </div></div>
+        </sc-if>
+      </sc-for>
+      <sc-if value="{{ ctxMenu }}" hint-placeholder-val="{{ false }}">
+        <div style="{{ ctxMenuStyle }}">
+          <div style="padding:7px 10px;font-size:13px;color:var(--text)">Open crew page</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text)">Rename</div>
+          <div style="padding:6px 10px 8px;display:flex;flex-direction:column;gap:7px"><span style="font-size:13px;color:var(--text)">Colour</span><div style="display:flex;gap:5px;flex-wrap:wrap">{{ swatchRow }}</div></div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text)">Collapse</div>
+          <div style="height:1px;background:var(--border);margin:4px 6px"></div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text)">New session in crew</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text);display:flex"><span style="flex:1">Dismiss ended</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">1</span></div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--danger);display:flex"><span style="flex:1">End all running…</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px">1</span></div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+
+  <div style="flex:1;min-width:0;position:relative;background:var(--bg)">
+    <sc-if value="{{ mainOverview }}" hint-placeholder-val="{{ true }}">
+      <div style="position:absolute;inset:0;overflow:hidden">
+        <div style="max-width:760px;padding:28px 40px 40px;display:flex;flex-direction:column;gap:16px">
+          <div style="display:flex;flex-direction:column;gap:6px">
+            <div style="font-size:25px;font-weight:600;color:var(--text)">Agents</div>
+            <div style="font-size:14px;color:var(--text2);line-height:1.5">What your agents are working on. Sessions keep running on your hosts when you close Storm.</div>
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:4px">Crews</div>
+          <sc-for list="{{ ovCrews }}" as="g" hint-placeholder-count="3">
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);padding:12px 18px;display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;gap:9px;min-width:0">
+                <span style="{{ g.sq }}"></span>
+                <span style="min-width:0;font-size:15px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ g.name }}</span>
+                <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ g.summary }}</span>
+                <span style="flex:1"></span>
+                <span style="flex:none;color:var(--text3);font-size:15px;letter-spacing:1px">···</span>
+              </div>
+              <sc-if value="{{ g.open }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;padding-top:6px">
+                  <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="3">
+                    <div style="{{ r.cardRow }}">
+                      {{ r.markEl }}
+                      <span style="{{ r.cardName }}">{{ r.name }}</span>
+                      <sc-if value="{{ r.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ r.roleStyle }}">{{ r.role }}</span></sc-if>
+                      <div style="flex:1 1 auto;min-width:0;display:flex;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap"><span style="flex:none">{{ r.sub1 }}</span><span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ r.sub2 }}</span><span style="{{ r.sub3Style }}">{{ r.sub3 }}</span></div>
+                      <sc-if value="{{ r.hasCtx }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1 auto;max-width:150px;min-width:0;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--rControl);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">▤ {{ r.ctx }}</span></sc-if>
+                      <sc-if value="{{ r.hasWrote }}" hint-placeholder-val="{{ false }}"><span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">wrote {{ r.wrote }}</span></sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+              <sc-if value="{{ g.closed }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;align-items:center;gap:8px;padding-top:6px;min-width:0">{{ g.stack }}<span style="min-width:0;font-size:13px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ g.closedLine }}</span></div>
+              </sc-if>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:6px">Not in a crew</div>
+          <sc-for list="{{ ovLoose }}" as="g" hint-placeholder-count="2">
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);padding:12px 18px;display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:baseline;gap:8px;padding-bottom:4px"><span style="font-size:15px;font-weight:600;color:var(--text)">{{ g.ws }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">on {{ g.host }}</span></div>
+              <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="2">
+                <div style="{{ r.cardRow }}">
+                  {{ r.markEl }}
+                  <span style="{{ r.cardName }}">{{ r.name }}</span>
+                  <sc-if value="{{ r.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ r.roleStyle }}">{{ r.role }}</span></sc-if>
+                  <span style="flex:1 1 auto;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.age }}</span>
+                  <sc-if value="{{ r.hasCtx }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1 auto;max-width:150px;min-width:0;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--rControl);padding:2px 8px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">▤ {{ r.ctx }}</span></sc-if>
+                </div>
+              </sc-for>
+            </div>
+          </sc-for>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:6px">Start an agent</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <sc-for list="{{ startCards }}" as="a" hint-placeholder-count="3">
+              <div style="display:flex;flex-direction:column;gap:2px;padding:10px 14px;border-radius:var(--rControl);border:1px solid var(--border);background:var(--surface);min-width:150px"><span style="font-size:14px;color:var(--text);font-weight:500">{{ a.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ a.where }}</span></div>
+            </sc-for>
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">2 of 3 hosts online · mac-mini offline · <span style="color:var(--accent)">Settings ›</span></div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ mainCrew }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:hidden">
+        <div style="max-width:760px;padding:28px 40px 40px;display:flex;flex-direction:column;gap:16px">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <span style="{{ cp.sqBig }}"></span>
+            <span style="flex:1;min-width:0;font-size:25px;font-weight:600;color:var(--text);line-height:1.2;overflow-wrap:anywhere">{{ cp.name }}</span>
+            <span style="flex:none;display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:var(--rControl);background:var(--accentSoft);color:var(--accent);font-size:13px;font-weight:500">＋ New session in crew</span>
+            <span style="flex:none;padding:6px 11px;border-radius:var(--rControl);border:1px solid var(--border);color:var(--text2);font-size:15px;letter-spacing:1px;line-height:18px">···</span>
+          </div>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);margin-top:-8px">{{ cp.summary }}</span>
+          <sc-if value="{{ endAllBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="padding:14px 16px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:14px;font-weight:600;color:var(--text)">{{ eb.title }}</span>
+              <span style="font-size:13px;color:var(--text2);line-height:1.45">The agents and everything they started are stopped on their hosts.</span>
+              <sc-for list="{{ eb.groups }}" as="gr" hint-placeholder-count="2">
+                <div style="display:flex;flex-direction:column;gap:3px">
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ gr.label }}</span>
+                  <sc-for list="{{ gr.items }}" as="it" hint-placeholder-count="2"><span style="font-size:13px;color:var(--text);line-height:1.45">{{ it }}</span></sc-for>
+                </div>
+              </sc-for>
+              <div style="display:flex;gap:8px;justify-content:flex-end;padding-top:4px"><span style="font-size:13px;color:var(--text2);padding:6px 10px">Cancel</span><span style="font-size:13px;color:var(--onAccent);background:var(--danger);padding:6px 12px;border-radius:var(--rControl)">{{ eb.action }}</span></div>
+            </div>
+          </sc-if>
+          <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);padding:8px 18px;display:flex;flex-direction:column">
+            <sc-for list="{{ cp.rows }}" as="r" hint-placeholder-count="3">
+              <div style="{{ r.cardRow }}">
+                {{ r.markEl }}
+                <span style="{{ r.cardName }}">{{ r.name }}</span>
+                <sc-if value="{{ r.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ r.roleStyle }}">{{ r.role }}</span></sc-if>
+                <div style="flex:1 1 auto;min-width:0;display:flex;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap"><span style="flex:none">{{ r.sub1 }}</span><span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ r.sub2 }}</span><span style="{{ r.sub3Style }}">{{ r.sub3 }}</span></div>
+                <sc-if value="{{ r.hasWrote }}" hint-placeholder-val="{{ false }}"><span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">wrote {{ r.wrote }}</span></sc-if>
+              </div>
+            </sc-for>
+          </div>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:24px">
+            <div style="display:flex;flex-direction:column;gap:8px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Started from</div>
+              <sc-for list="{{ cp.ctx }}" as="n" hint-placeholder-count="2"><div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--rControl);border:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">▤ {{ n.title }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ n.meta }}</span></div></sc-for>
+            </div>
+            <div style="display:flex;flex-direction:column">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-bottom:6px">Wrote</div>
+              <sc-for list="{{ cp.wrote }}" as="w" hint-placeholder-count="2"><div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)"><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ w.title }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.crumb }}</span></div><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.meta }}</span></div></sc-for>
+            </div>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ mainSession }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="min-width:0;font-size:16px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ss.name }}</span>
+            <span style="{{ ss.chipStyle }}"><span style="{{ ss.dotStyle }}"></span>{{ ss.status }}</span>
+            <span style="flex:1"></span>
+            <span style="display:flex;padding:6px;border-radius:var(--rControl);color:var(--text2)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M15 3v18"></path></svg></span>
+            <span style="{{ ss.endBtnStyle }}">{{ ss.endLabel }}</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:8px;min-width:0">
+            <span style="flex:none;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ ss.meta }}</span>
+            <sc-if value="{{ ss.hasCrew }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1 auto;max-width:220px;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--rControl);padding:1px 8px"><span style="{{ ss.sq }}"></span><span style="min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ss.crew }}</span></span></sc-if>
+            <sc-if value="{{ ss.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ ss.roleStyle }}">{{ ss.role }}</span></sc-if>
+            <sc-if value="{{ ss.hasParent }}" hint-placeholder-val="{{ false }}"><span style="flex:none;font-size:12px;color:var(--accent)">↳ started by {{ ss.parent }} ›</span></sc-if>
+          </div>
+          <sc-if value="{{ ss.hasSpawn }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;align-items:center;gap:10px;padding-top:4px">
+              <div style="{{ ss.spawnTrack }}"><div style="{{ ss.spawnKnob }}"></div></div>
+              <span style="font-size:13px;color:var(--text)">Allow this session to start agents</span>
+              <span style="font-size:12px;color:var(--text3)">{{ ss.spawnNote }}</span>
+            </div>
+          </sc-if>
+          <sc-if value="{{ endBanner }}" hint-placeholder-val="{{ false }}">
+            <div style="margin-top:6px;padding:12px 14px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px">
+              <span style="font-size:13px;color:var(--text);line-height:1.45">{{ eb.title }}</span>
+              <sc-for list="{{ eb.groups }}" as="gr" hint-placeholder-count="2">
+                <div style="display:flex;gap:10px;align-items:baseline"><span style="width:110px;flex:none;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ gr.label }}</span><span style="font-size:13px;color:var(--text)">{{ gr.line }}</span></div>
+              </sc-for>
+              <div style="display:flex;align-items:center;gap:8px">
+                <sc-if value="{{ eb.hasTick }}" hint-placeholder-val="{{ false }}"><span style="width:16px;height:16px;border-radius:4px;border:1.5px solid var(--text3)"></span><span style="font-size:13px;color:var(--text2)">Let children report first (waits 30 s)</span></sc-if>
+                <span style="flex:1"></span>
+                <span style="font-size:13px;color:var(--text2);padding:5px 8px">Cancel</span>
+                <span style="{{ eb.actionStyle }}">{{ eb.action }}</span>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+        <div style="flex:1;min-height:0;display:flex">
+          <div style="flex:1;min-width:0;position:relative;overflow:hidden;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
+            <sc-for list="{{ ss.lines }}" as="l" hint-placeholder-count="4"><div style="{{ l.style }}">{{ l.text }}</div></sc-for>
+            <sc-if value="{{ ss.live }}" hint-placeholder-val="{{ true }}"><div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div></sc-if>
+            <sc-if value="{{ approval }}" hint-placeholder-val="{{ false }}">
+              <div style="position:absolute;left:20px;right:20px;bottom:18px;font-family:'IBM Plex Sans',sans-serif;background:var(--surface);border:1px solid var(--accent);border-radius:var(--rCard);box-shadow:var(--shadow);padding:16px 18px;display:flex;flex-direction:column;gap:10px">
+                <div style="display:flex;align-items:center;gap:8px"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.06em;color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:0 5px">{{ ap.kind }}</span><span style="font-size:14px;font-weight:600;color:var(--text)">{{ ap.title }}</span><span style="flex:1"></span><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)">expires in {{ ap.left }}</span></div>
+                <div style="display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px 12px;font-size:13px;line-height:1.45">
+                  <sc-for list="{{ ap.rows }}" as="r" hint-placeholder-count="4"><span style="color:var(--text3)">{{ r.k }}</span><span style="{{ r.vStyle }}">{{ r.v }}</span></sc-for>
+                </div>
+                <div style="display:flex;align-items:center;gap:10px;padding-top:2px">
+                  <sc-if value="{{ ap.write }}" hint-placeholder-val="{{ false }}"><div style="width:34px;height:20px;flex:none;border-radius:999px;position:relative;background:var(--surface2);border:1px solid var(--border)"><div style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:999px;background:var(--text3)"></div></div>
+                  <span style="font-size:13px;color:var(--text2)">Let the child write to personal</span></sc-if>
+                  <span style="flex:1"></span>
+                  <span style="font-size:13px;color:var(--text);padding:7px 14px;border-radius:var(--rControl);border:1px solid var(--border)">Deny</span>
+                  <span style="font-size:13px;font-weight:500;color:var(--onAccent);background:var(--accent);padding:7px 14px;border-radius:var(--rControl)">Approve</span>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+          <sc-if value="{{ inspOpen }}" hint-placeholder-val="{{ true }}">
+            <div style="width:320px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg);position:relative">
+              <div style="position:absolute;left:-3px;top:0;bottom:0;width:5px;cursor:col-resize"></div>
+              <div style="display:flex;align-items:center;gap:2px;padding:10px 12px;border-bottom:1px solid var(--border)">
+                <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="3"><span style="{{ t.style }}">{{ t.label }}</span></sc-for>
+                <span style="flex:1"></span><span style="color:var(--text3);font-size:15px;padding:2px 4px">×</span>
+              </div>
+              <div style="padding:18px 16px;display:flex;flex-direction:column;gap:14px;overflow:hidden">
+                <sc-for list="{{ inspRows }}" as="a" hint-placeholder-count="5">
+                  <div style="display:flex;flex-direction:column;gap:3px">
+                    <span style="{{ a.kStyle }}">{{ a.k }}</span>
+                    <span style="font-size:13.5px;color:var(--text);line-height:1.45">{{ a.v }}</span>
+                    <sc-if value="{{ a.hasLink }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--accent)">{{ a.link }}</span></sc-if>
+                  </div>
+                </sc-for>
+                <sc-if value="{{ resultPanel }}" hint-placeholder-val="{{ false }}">
+                  <div style="display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:var(--rControl);border:1px solid var(--border);background:var(--surface)">
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text)">+ branch storm/test-gateway</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text2)">gateway/tests/refresh.rs  +142</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text2)">gateway/tests/common.rs  +31 −4</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text2)">gateway/Cargo.toml  +2</span>
+                    <div style="display:flex;padding-top:6px"><span style="font-size:13px;font-weight:500;color:var(--onAccent);background:var(--accent);padding:7px 14px;border-radius:var(--rControl)">Apply</span></div>
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </sc-if>
+
+    <div style="position:absolute;left:24px;bottom:24px;display:flex;flex-direction:column-reverse;gap:8px;z-index:30"><sc-for list="{{ toasts }}" as="t" hint-placeholder-count="0">
+      <div style="{{ t.style }}"><span style="flex:1;font-size:13px;color:var(--text);line-height:1.4">{{ t.text }}</span><sc-if value="{{ t.hasAction }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;font-weight:500;color:var(--accent)">{{ t.action }}</span></sc-if></div>
+    </sc-for></div>
+  </div>
+
+  <sc-if value="{{ launcher }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:49"></div>
+    <div style="position:absolute;left:50%;top:40px;transform:translateX(-50%);width:480px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:12px;z-index:50">
+      <div style="display:flex;align-items:center"><span style="font-size:18px;font-weight:600;color:var(--text)">New session</span><span style="flex:1"></span><span style="color:var(--text3);font-size:16px">×</span></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--rControl);background:var(--accentSoft);border:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">▤ Gateway spec</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">personal / projects / storm</span></div>
+      <div style="display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px">
+        <sc-for list="{{ L.fields }}" as="f" hint-placeholder-count="4">
+          <span style="font-size:13px;color:var(--text2)">{{ f.label }}</span>
+          <span style="{{ f.style }}"><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ f.value }}</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+        </sc-for>
+        <span style="font-size:13px;color:var(--text2)">Role</span>
+        <div style="position:relative;display:flex;flex-direction:column;gap:4px">
+          <span style="{{ L.roleStyle }}"><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ L.roleValue }}</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:12px;color:var(--text3);line-height:1.4">{{ L.roleNote }}</span>
+          <sc-if value="{{ L.picker }}" hint-placeholder-val="{{ false }}">
+            <div style="position:absolute;left:0;right:0;top:42px;z-index:3;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rControl);box-shadow:var(--shadow);padding:6px;display:flex;flex-direction:column">
+              <sc-for list="{{ rolePicker }}" as="o" hint-placeholder-count="6">
+                <sc-if value="{{ o.isGroup }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:8px 8px 3px">{{ o.label }}</span></sc-if>
+                <sc-if value="{{ o.isItem }}" hint-placeholder-val="{{ true }}">
+                  <div style="{{ o.style }}"><div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px"><span style="font-size:13px;color:var(--text)">{{ o.label }}</span><span style="font-size:11.5px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ o.sum }}</span></div><span style="color:var(--accent);font-size:12px">{{ o.check }}</span></div>
+                </sc-if>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--text3);line-height:1.55;padding:10px 12px;border-radius:var(--rControl);background:var(--surface2)">{{ L.risk }}</div>
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;color:var(--text3)">{{ L.foot }}</span><span style="flex:1"></span><span style="padding:10px 20px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:14px;font-weight:500">Launch</span></div>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;inset:0">
+  <sc-if value="{{ pList }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;overflow:hidden;padding:80px 20px 120px;display:flex;flex-direction:column;gap:2px">
+      <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:6px">Agents</div>
+      <sc-for list="{{ side }}" as="e" hint-placeholder-count="8">
+        <sc-if value="{{ e.isLabel }}" hint-placeholder-val="{{ false }}"><div style="{{ e.style }}"><span style="flex:1">{{ e.label }}</span><span>{{ e.right }}</span></div></sc-if>
+        <sc-if value="{{ e.isCrew }}" hint-placeholder-val="{{ false }}">
+          <div style="{{ e.style }}"><span style="{{ e.sq }}"></span><span style="flex:1;min-width:0;font-size:15px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.name }}</span><span style="{{ e.countStyle }}">{{ e.count }}</span><span style="width:12px;flex:none;color:var(--text3);font-size:11px;text-align:right">{{ e.chev }}</span></div>
+        </sc-if>
+        <sc-if value="{{ e.isRow }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ e.outer }}"><div style="{{ e.inner }}">
+            {{ e.markEl }}
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+              <div style="display:flex;align-items:center;gap:6px;min-width:0"><span style="{{ e.nameStyle }}">{{ e.name }}</span><sc-if value="{{ e.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ e.roleStyle }}">{{ e.role }}</span></sc-if></div>
+              <div style="display:flex;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap"><span style="flex:none">{{ e.sub1 }}</span><span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ e.sub2 }}</span><span style="{{ e.sub3Style }}">{{ e.sub3 }}</span></div>
+            </div>
+          </div></div>
+        </sc-if>
+      </sc-for>
+    </div>
+    <div style="position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:15;padding:6px;border-radius:999px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)"><div style="height:48px;padding:0 22px;border-radius:999px;display:flex;align-items:center;background:var(--accent);color:var(--onAccent);font-size:15px;font-weight:500">＋ New session</div></div>
+  </sc-if>
+
+  <sc-if value="{{ pCrew }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;overflow:hidden;padding:80px 20px 120px;display:flex;flex-direction:column;gap:2px">
+      <div style="display:flex;align-items:flex-start;gap:10px"><span style="{{ cp.sqBig }}"></span><span style="flex:1;font-size:23px;font-weight:600;color:var(--text);line-height:1.2">{{ cp.name }}</span><span style="width:40px;height:36px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);border:1px solid var(--border);color:var(--text2);letter-spacing:1px">···</span></div>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);padding:4px 0 8px">{{ cp.summary }}</span>
+      <sc-for list="{{ cp.prows }}" as="e" hint-placeholder-count="4">
+        <div style="{{ e.outer }}"><div style="{{ e.inner }}">
+          {{ e.markEl }}
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:3px">
+            <div style="display:flex;align-items:center;gap:6px;min-width:0"><span style="{{ e.nameStyle }}">{{ e.name }}</span><sc-if value="{{ e.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ e.roleStyle }}">{{ e.role }}</span></sc-if></div>
+            <div style="display:flex;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap"><span style="flex:none">{{ e.sub1 }}</span><span style="flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis">{{ e.sub2 }}</span><span style="{{ e.sub3Style }}">{{ e.sub3 }}</span></div>
+          </div>
+        </div></div>
+      </sc-for>
+    </div>
+    <div style="position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:15;padding:6px;border-radius:999px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)"><div style="height:48px;padding:0 22px;border-radius:999px;display:flex;align-items:center;background:var(--accent);color:var(--onAccent);font-size:15px;font-weight:500;white-space:nowrap">＋ New session in crew</div></div>
+  </sc-if>
+
+  <div style="position:absolute;top:20px;left:20px;z-index:20;width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)">
+    <sc-if value="{{ pCrew }}" hint-placeholder-val="{{ false }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg></sc-if>
+    <sc-if value="{{ pList }}" hint-placeholder-val="{{ true }}"><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg></sc-if>
+  </div>
+  <div style="position:absolute;top:20px;right:20px;z-index:20;width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg></div>
+
+  <sc-if value="{{ pSheet }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:44"></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;max-height:86%;overflow:hidden;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--rCard) var(--rCard) 0 0;padding:10px 20px 28px;z-index:45;display:flex;flex-direction:column;gap:4px">
+      <div style="align-self:center;width:36px;height:4px;border-radius:2px;background:var(--border);margin-bottom:8px"></div>
+      <sc-for list="{{ sheet.items }}" as="o" hint-placeholder-count="8">
+        <sc-if value="{{ o.isTitle }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:8px;padding-bottom:4px"><span style="font-size:17px;font-weight:600;color:var(--text)">{{ o.label }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ o.sum }}</span></div></sc-if>
+        <sc-if value="{{ o.isGroup }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:baseline;gap:8px;padding:12px 0 2px"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ o.label }}</span><span style="font-size:11.5px;color:var(--text3)">{{ o.sum }}</span></div></sc-if>
+        <sc-if value="{{ o.isNote }}" hint-placeholder-val="{{ false }}"><div style="font-size:12px;color:var(--text3);line-height:1.45;padding:2px 0 4px">{{ o.label }}</div></sc-if>
+        <sc-if value="{{ o.isItem }}" hint-placeholder-val="{{ true }}">
+          <div style="display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border);min-height:44px">
+            <sc-if value="{{ o.hasSq }}" hint-placeholder-val="{{ false }}"><span style="{{ o.sq }}"></span></sc-if>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px"><span style="{{ o.labelStyle }}">{{ o.label }}</span><sc-if value="{{ o.hasSum }}" hint-placeholder-val="{{ false }}"><span style="font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ o.sum }}</span></sc-if></div>
+            <span style="color:var(--accent);font-size:13px">{{ o.check }}</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ o.isButton }}" hint-placeholder-val="{{ false }}"><div style="{{ o.style }}">{{ o.label }}</div></sc-if>
+      </sc-for>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ pNotif }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;left:10px;right:10px;top:10px;z-index:60;background:var(--surface2);border:1px solid var(--accent);border-radius:var(--rCard);box-shadow:var(--shadow);padding:14px 14px 12px;display:flex;flex-direction:column;gap:8px">
+      <div style="display:flex;align-items:center;gap:8px"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;letter-spacing:.06em;color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:0 5px">MESSAGE</span><span style="font-size:12px;color:var(--text3)">Storm · now</span><span style="flex:1"></span><span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text2)">6:10 left</span></div>
+      <span style="font-size:14px;font-weight:600;color:var(--text);line-height:1.35">gateway-impl wants to message review-gateway</span>
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text);background:var(--surface);border-radius:6px;padding:7px 9px;line-height:1.45">"Tests for token refresh are on storm/test-gateway. Please review before I merge."</span>
+      <span style="font-size:12px;color:var(--text3);line-height:1.4">Claude Code on build-vm · identity verified · isolates sessions</span>
+      <div style="display:flex;gap:8px"><span style="flex:1;text-align:center;padding:11px;border-radius:var(--rControl);border:1px solid var(--border);font-size:14px;color:var(--text)">Deny</span><span style="flex:1;text-align:center;padding:11px;border-radius:var(--rControl);background:var(--accent);font-size:14px;font-weight:500;color:var(--onAccent)">Approve</span></div>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+
+<sc-if value="{{ phase3 }}" hint-placeholder-val="{{ false }}">
+  <div style="{{ p3Style }}">Phase 3 · ships after crews V1</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:980},&quot;scene&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;overview&quot;,&quot;overview-light&quot;,&quot;overview-earth&quot;,&quot;crew-endall&quot;,&quot;session-roles&quot;,&quot;launcher&quot;,&quot;launcher-shell&quot;,&quot;narrow&quot;,&quot;sync&quot;,&quot;p3-approval&quot;,&quot;p3-result&quot;,&quot;p3-end-parent&quot;,&quot;p3-crew-endall&quot;,&quot;p3-resumed&quot;,&quot;p3-unavailable&quot;,&quot;p-list&quot;,&quot;p-sheet&quot;,&quot;p-crew-end&quot;,&quot;p3-p-notify&quot;],&quot;default&quot;:&quot;overview&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const CLAUDE = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z';
+const PRESETS = {
+  dark: { dark: true, bgL: 22, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 35 },
+  light: { dark: false, bgL: 92, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 20 },
+  earth: { dark: false, bgL: 84, hue: 62, chroma: 22, accentH: 55, accentC: 0.06, accentL: 45, rCard: 2, rControl: 10, shadow: 16 }
+};
+function tokens(p) {
+  const dir = p.dark ? 1 : -1, b = p.bgL / 100;
+  const n = (l) => `oklch(${l.toFixed(3)} ${(p.chroma / 1000).toFixed(3)} ${p.hue})`;
+  const aL = p.dark ? p.accentL / 100 : Math.min(0.40, p.accentL / 100);
+  const v = {
+    '--bg': n(b), '--surface': n(b + dir * 0.05), '--surface2': n(b + dir * 0.09), '--border': n(b + dir * 0.14),
+    '--text': n(p.dark ? 0.95 : 0.18), '--text2': n(p.dark ? 0.74 : 0.34), '--text3': n(p.dark ? 0.66 : 0.40),
+    '--accent': `oklch(${aL} ${p.accentC} ${p.accentH})`, '--accentSoft': `oklch(${(b + dir * 0.08).toFixed(3)} ${(p.accentC / 3).toFixed(3)} ${p.accentH})`,
+    '--onAccent': aL > 0.6 ? `oklch(0.16 0.03 ${p.accentH})` : '#ffffff',
+    '--amber': `oklch(${p.dark ? 0.78 : 0.55} 0.14 75)`, '--green': `oklch(${p.dark ? 0.74 : 0.42} 0.13 148)`, '--danger': `oklch(${p.dark ? 0.70 : 0.45} 0.17 25)`,
+    '--rCard': p.rCard + 'px', '--rControl': p.rControl + 'px',
+    '--shadow': `0 ${Math.round(p.shadow / 3)}px ${Math.round(p.shadow * 1.2)}px -8px rgba(0,0,0,${(p.shadow / 100).toFixed(2)})`
+  };
+  return Object.entries(v).map(([k, x]) => `${k}:${x}`).join(';');
+}
+const PAL = { coral: 25, peach: 50, clay: 70, sand: 85, sage: 135, mint: 165, sky: 230, lavender: 290, blossom: 340 };
+function swatch(word, theme) {
+  const L = theme === 'dark' ? 0.70 : theme === 'light' ? 0.62 : 0.58;
+  const C = (word === 'clay' ? 0.05 : 0.10) * (theme === 'earth' ? 0.85 : 1);
+  return `oklch(${L} ${C} ${PAL[word]})`;
+}
+const S = {
+  impl: { name: 'gateway-impl', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'working', age: '40m', role: 'storm coder', ctx: 'Gateway spec', wrote: 1 },
+  review: { name: 'review-gateway', agent: 'opencode', host: 'build-vm', ws: 'storm', st: 'idle', age: '12m', role: 'storm reviewer', ctx: 'Gateway spec' },
+  probe: { name: 'relay-probe', agent: 'claude', host: 'mac-mini', ws: 'relay-bench', st: 'unknown', age: '1h' },
+  notes: { name: 'release-notes', agent: 'claude', host: 'build-vm', ws: 'site', st: 'completed', age: '2h', role: 'storm lead', roleDeleted: true, ctx: 'BOARD', wrote: 2 },
+  docs: { name: 'docs-pass', agent: 'opencode', host: 'build-vm', ws: 'site', st: 'working', age: '1h', role: 'sop researcher', ctx: 'Install guide' },
+  docsrev: { name: 'docs-review', agent: 'claude', host: 'build-vm', ws: 'site', st: 'idle', age: '25m', role: 'sop reviewer', launchRole: 'storm reviewer', ctx: 'Install guide' },
+  r1: { name: 'relay-timeouts', agent: 'claude', host: 'pi-lab', ws: 'relay', st: 'idle', age: '3h' },
+  r2: { name: 'relay-load-test', agent: 'shell', host: 'pi-lab', ws: 'relay', st: 'completed', age: '4h' },
+  r3: { name: 'relay-review', agent: 'opencode', host: 'pi-lab', ws: 'relay', st: 'failed', age: '5h' },
+  spike: { name: 'spike-sync', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'starting', age: 'now', role: 'storm researcher' },
+  shell: { name: 'shell-1', agent: 'shell', host: 'build-vm', ws: 'storm', st: 'idle', age: '5m' },
+  lint: { name: 'lint-fix', agent: 'claude', host: 'mac-mini', ws: 'storm', st: 'failed', age: '5h' },
+  child: { name: 'test-gateway', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'working', age: '3m', parent: 'gateway-impl', copy: 'own copy of storm', attention: true },
+  child2: { name: 'spike-notes', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'completed', age: '20m', parent: 'gateway-impl', copy: 'scratch' },
+  childX: { name: 'bench-check', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'idle', age: '6m', parent: 'gateway-impl', copy: 'own copy of storm' },
+  bench: { name: 'bench-relay', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'idle', age: '1h', resumedFrom: 'gateway-impl' },
+  childDone: { name: 'test-gateway', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'completed', age: '9m', parent: 'gateway-impl', copy: 'own copy of storm' }
+};
+const LONG = 'Install guide and relay docs refresh, Q4';
+const CREWS = {
+  gw: { name: 'Gateway release', color: 'sage', members: ['impl', 'review', 'probe', 'notes'] },
+  docs: { name: LONG, color: 'sky', members: ['docs', 'docsrev'] },
+  relay: { name: 'Relay hardening', color: 'clay', members: ['r1', 'r2', 'r3'] }
+};
+const EXTRA = [['Android acceptance', 'mint', 1, 3], ['Kit cleanup', 'peach', 0, 2], ['Site redesign', 'lavender', 2, 0], ['Backup restore drill', 'coral', 0, 1], ['Release 0.4', 'blossom', 1, 1]];
+const LIVE = (s) => ['working', 'idle', 'starting', 'unknown'].includes(s.st);
+const ROLES = [
+  ['g', 'projects / storm / agents'],
+  ['Storm Lead', 'Runs the orchestrator loop; the single writer to work/.'],
+  ['Storm Coder', 'Implements one task; writes nothing in the vault.'],
+  ['Storm Reviewer', 'Checks finished work; writes nothing.'],
+  ['Storm Researcher', 'Proves a spike with code.'],
+  ['Storm Architect', 'Lays out a project from docs.'],
+  ['g', 'projects / sop / agents'],
+  ['SOP Researcher', 'Researches a written procedure before it is drafted.'],
+  ['SOP Reviewer', 'Reviews a written procedure for gaps.']
+];
+const LINES = {
+  impl: ['$ claude', '› read personal/projects/storm/Gateway spec', '› read kit/projects/storm/agents/Storm Coder', '› implementing token refresh in gateway/oauth.rs', '› updated BOARD: 1 item moved to Done'],
+  implOut: ['$ claude', '› asked Storm to start a session: "Write tests for token refresh…"', '◆ Storm: approved by you on MacBook → test-gateway started', '› asked Storm to message review-gateway', '◆ Storm: denied by you', '› asked Storm to start a session: "bench relay"', '◆ Storm: expired after 10 min with no answer', '› asked Storm to start a session: "lint pass"', '◆ Storm: refused · limit: 3 children', '› asked Storm to end spike-notes', '◆ Storm: waiting for your approval'],
+  implP3: ['$ claude', '› read kit/projects/storm/agents/Storm Coder', '› token refresh implemented, 2 commits', '› asked Storm to start a session: "Write tests for token refresh…"', '› waiting for your approval'],
+  docsrev: ['$ claude', '› read personal/site/Install guide', '› read kit/projects/storm/agents/Storm Reviewer', '› 3 comments on the relay section', '› waiting for input'],
+  childDone: ['$ claude', '› task from gateway-impl: write tests for token refresh', '› working in its own copy of storm', '› cargo test -p gateway: 14 passed', '✓ done · 2 commits on its copy'],
+  bench: ['$ claude', '› resumed by you on MacBook', '› benchmarking relay throughput…', '› waiting for input'],
+  r1: ['$ claude', '› reading relay/src/tunnel.rs', '› waiting for input']
+};
+const SC = {
+  'overview': { theme: 'dark', h: 1030, main: 'overview', open: ['gw'] },
+  'overview-light': { theme: 'light', h: 1030, main: 'overview', open: ['gw'] },
+  'overview-earth': { theme: 'earth', h: 1030, main: 'overview', open: ['gw'] },
+  'crew-endall': { main: 'crew', crew: 'gw', open: ['gw'], sel: 'crew:gw', banner: 'endAll' },
+  'session-roles': { main: 'session', sess: 'docsrev', open: ['docs'], sel: 'docsrev', insp: 'about', banner: 'end' },
+  'launcher': { main: 'overview', open: ['gw'], h: 900, launcher: 'claude' },
+  'launcher-shell': { main: 'overview', open: ['gw'], launcher: 'shell' },
+  'narrow': { w: 900, h: 720, main: 'crew', crew: 'docs', open: [], sel: 'crew:docs', extra: true, hover: 'relay' },
+  'sync': { main: 'overview', open: ['gw'], h: 1030, toasts: ['refused', 'empty'], snap: 'r3' },
+  'p3-approval': { main: 'session', sess: 'impl', p3: true, open: ['gw'], sel: 'impl', insp: 'requests', approval: true, spawn: 'on' },
+  'p3-result': { main: 'session', sess: 'childDone', p3: true, open: ['gw'], sel: 'childDone', insp: 'result', spawn: 'child', resumed: true },
+  'p3-end-parent': { main: 'session', sess: 'impl', p3: true, open: ['gw'], sel: 'impl', insp: 'about', banner: 'endParent', spawn: 'on', toasts: ['kept'] },
+  'p3-crew-endall': { main: 'crew', crew: 'gw', p3: true, open: ['gw'], sel: 'crew:gw', banner: 'endAllP3' },
+  'p3-resumed': { main: 'session', sess: 'bench', p3: true, open: ['gw'], sel: 'bench', insp: 'about', spawn: 'off', resumed: true },
+  'p3-spawn-on': { main: 'session', sess: 'impl', p3: true, open: ['gw'], sel: 'impl', insp: 'about', banner: 'spawnOn', spawn: 'off' },
+  'p3-message': { main: 'session', sess: 'impl', p3: true, open: ['gw'], sel: 'impl', insp: 'requests', approval: 'message', spawn: 'on' },
+  'p3-end-request': { main: 'session', sess: 'impl', p3: true, open: ['gw'], sel: 'impl', insp: 'requests', approval: 'end', spawn: 'on', lines: 'implOut' },
+  'p3-p-approve': { phone: true, p3: true, open: ['gw'], sheet: 'approveStart' },
+  'p3-unavailable': { main: 'session', sess: 'r1', p3: true, open: ['relay'], sel: 'r1', insp: 'about', spawn: 'unavailable' },
+  'p-list': { phone: true, open: ['gw'] },
+  'p-sheet': { phone: true, open: ['gw'], sheet: 'move' },
+  'p-crew-end': { phone: true, crewPage: 'gw', sheet: 'endAll' },
+  'p3-p-notify': { phone: true, p3: true, open: ['gw'], notif: true }
+};
+const mono = "font-family:'IBM Plex Mono',monospace";
+
+class Component extends DCLogic {
+  mark(s, size, ring) {
+    const h = React.createElement, ended = !LIVE(s), g = size * 0.58;
+    const glyph = s.agent === 'claude'
+      ? h('svg', { width: g, height: g, viewBox: '0 0 24 24' }, h('path', { fill: '#D97757', d: CLAUDE }))
+      : s.agent === 'opencode'
+        ? h('svg', { width: g * 0.8, height: g * 0.8, viewBox: '0 0 24 24' }, h('path', { fill: 'var(--text)', fillRule: 'evenodd', d: 'M22 24H2V0h20zM17 4.8H7v14.4h10z' }))
+        : h('svg', { width: g, height: g, viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--text2)', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'm7 11 2-2-2-2' }), h('path', { d: 'M11 13h4' }), h('rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }));
+    const badge = { working: 'var(--accent)', starting: 'var(--text3)', unknown: 'var(--amber)', failed: 'var(--danger)' }[s.st];
+    const d = Math.round(size * 0.34);
+    return h('div', { style: { position: 'relative', width: size, height: size, flex: 'none' } },
+      h('div', { style: { width: size, height: size, borderRadius: 'var(--rControl)', background: 'var(--surface2)', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: ended ? 0.5 : 1 } }, glyph),
+      badge && h('div', { style: { position: 'absolute', right: -d * 0.25, bottom: -d * 0.25, width: d, height: d, borderRadius: 999, boxSizing: 'border-box', border: `2px solid ${ring}`, background: badge, animation: s.st === 'working' ? 'stormPulse 1.6s ease-in-out infinite' : 'none' } }));
+  }
+  roleStyle(s) { return `${mono};font-size:10.5px;line-height:16px;color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:0 5px;flex:0 1000 auto;min-width:5ch;max-width:15ch;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${s.roleDeleted ? 'text-decoration:line-through;opacity:.6;' : ''}`; }
+  sq(word, size, theme) { return `width:${size}px;height:${size}px;flex:none;border-radius:${Math.round(size / 3)}px;background:${swatch(word, theme)}`; }
+
+  renderVals() {
+    const sc = SC[this.props.scene] || SC.overview;
+    const theme = sc.theme || 'dark', phone = !!sc.phone;
+    const w = phone ? 390 : (sc.w || 1280), hgt = phone ? 844 : (sc.h || 800);
+    const sideW = Math.max(260, Math.min(400, Math.round(w * 260 / 1200)));
+    const p3 = !!sc.p3;
+    const crewMembers = (id) => {
+      let m = [...CREWS[id].members];
+      if (p3 && id === 'gw') m = sc.sess === 'childDone' ? ['impl', 'childDone', 'child2', 'review', 'probe', 'notes'] : ['impl', 'child', 'child2', 'review', 'probe', 'notes'];
+      if (p3 && id === 'relay' && sc.banner === 'endAllP3') m = ['r1', 'childX', 'r2', 'r3'];
+      return [...m.filter(x => LIVE(S[x])), ...m.filter(x => !LIVE(S[x]))];
+    };
+    const loose = p3 && sc.resumed ? ['bench', 'spike', 'shell', 'lint'] : ['spike', 'shell', 'lint'];
+    const sideBg = 'var(--surface)';
+
+    const D = '\u00a0·\u00a0';
+    const sub = (s, withHost = true) => s.parent
+      ? { sub1: `↳\u00a0from\u00a0${s.parent}`, sub2: `${D}${s.copy}`, sub3: s.attention ? `${D}needs\u00a0attention` : '' }
+      : { sub1: withHost ? `${s.host}${D}` : '', sub2: s.ws, sub3: `${D}${LIVE(s) ? s.age : s.st}` };
+    const sub3Style = (s) => `flex:none;${s.attention ? 'color:var(--accent);font-weight:500' : ''}`;
+
+    const row = (id, mode) => {
+      const s = S[id], ended = !LIVE(s), sel = sc.sel === id, snap = sc.snap === id;
+      const inCrew = mode !== 'loose', child = !!s.parent && p3;
+      const size = phone ? 36 : 32;
+      const bg = sel ? 'var(--surface2)' : snap ? 'var(--accentSoft)' : 'transparent';
+      return {
+        isRow: true, isLabel: false, isCrew: false, name: s.name, hasRole: !!s.role, role: s.role, roleStyle: this.roleStyle(s),
+        ...sub(s), sub3Style: sub3Style(s),
+        markEl: this.mark(s, size, phone ? 'var(--bg)' : sel ? 'var(--surface2)' : snap ? 'var(--accentSoft)' : sideBg),
+        nameStyle: `flex:0 1 auto;min-width:0;font-size:${phone ? 15 : 13}px;color:${ended ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+        outer: phone
+          ? `${inCrew ? 'margin-left:5px;padding-left:12px;border-left:1px solid var(--border);' : ''}`
+          : `${inCrew ? 'margin-left:13px;padding-left:6px;border-left:1px solid var(--border);' : ''}`,
+        inner: `display:flex;align-items:center;gap:${phone ? 12 : 10}px;padding:${phone ? '9px 0' : '6px 8px'};${child ? `margin-left:${phone ? 14 : 10}px;padding-left:${phone ? 12 : 10}px;border-left:1px dashed var(--text3);` : ''}border-radius:${child ? '0' : 'var(--rControl)'};background:${bg};${snap ? 'box-shadow:inset 0 0 0 1.5px var(--accent);' : ''}${phone ? 'border-bottom:1px solid var(--border);' : ''}`
+      };
+    };
+    const card = (id, withHost = true) => {
+      const s = S[id], ended = !LIVE(s), child = !!s.parent && p3;
+      return {
+        name: s.name, hasRole: !!s.role, role: s.role, roleStyle: this.roleStyle(s), ...sub(s, withHost), sub3Style: sub3Style(s),
+        age: LIVE(s) ? s.age : s.st, hasCtx: !!s.ctx, ctx: s.ctx, hasWrote: !!s.wrote, wrote: s.wrote,
+        markEl: this.mark(s, 28, 'var(--surface)'),
+        cardName: `flex:0 1 auto;min-width:0;font-size:14px;color:${ended ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+        cardRow: `display:flex;align-items:center;gap:10px;padding:7px 8px 7px ${child ? 18 : 8}px;margin:0 -8px;${child ? 'margin-left:6px;border-left:1px dashed var(--text3);' : ''}min-width:0`
+      };
+    };
+    const counts = (ids) => { const r = ids.filter(x => LIVE(S[x])).length; return [r, ids.length - r]; };
+    const label = (text, right = '') => ({ isLabel: true, label: text, right, style: `display:flex;align-items:center;${mono};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:${phone ? '16px 0 4px' : '12px 8px 6px'}` });
+
+    const side = [];
+    const crewIds = ['gw', 'docs', 'relay'];
+    side.push(label('Crews', phone ? '▾' : '▾'));
+    crewIds.forEach(id => {
+      const c = CREWS[id], ids = crewMembers(id), open = (sc.open || []).includes(id), [r, e] = counts(ids);
+      const attention = p3 && id === 'gw' && sc.sess !== 'childDone';
+      side.push({
+        isCrew: true, isLabel: false, isRow: false, name: c.name, chev: open ? '▾' : '▸', sq: this.sq(c.color, phone ? 12 : 10, theme),
+        count: attention ? 'needs attention' : open ? `${r} running` : `${r} · ${e}`,
+        countStyle: `flex:none;${mono};font-size:11px;color:${attention ? 'var(--accent)' : 'var(--text3)'}`,
+        dots: sc.hover === id,
+        style: phone ? 'display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)' : `display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--rControl);background:${sc.sel === 'crew:' + id || sc.hover === id ? 'var(--surface2)' : 'transparent'}`
+      });
+      if (open) ids.forEach(x => side.push(row(x, 'crew')));
+    });
+    if (sc.extra) EXTRA.forEach(([name, color, r, e]) => side.push({ isCrew: true, isLabel: false, isRow: false, name, chev: '▸', sq: this.sq(color, 10, theme), count: `${r} · ${e}`, countStyle: `flex:none;${mono};font-size:11px;color:var(--text3)`, dots: false, style: 'display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--rControl)' }));
+    side.push(label('Running'));
+    loose.filter(x => LIVE(S[x])).forEach(x => side.push(row(x, 'loose')));
+    if (!sc.extra) { side.push(label('Ended')); loose.filter(x => !LIVE(S[x])).forEach(x => side.push(row(x, 'loose'))); }
+
+    const ovCrews = crewIds.map(id => {
+      const c = CREWS[id], ids = crewMembers(id), open = (sc.open || []).includes(id), [r, e] = counts(ids), h = React.createElement;
+      return {
+        name: c.name, sq: this.sq(c.color, 12, theme), open, closed: !open,
+        summary: [r ? `${r} running` : null, e ? `${e} ended` : null].filter(Boolean).join(' · '),
+        rows: ids.map(x => card(x)),
+        stack: h('div', { style: { display: 'flex', flex: 'none' } }, ids.map((x, i) => h('div', { key: x, style: { marginLeft: i ? -8 : 0 } }, this.mark(S[x], 24, 'var(--surface)')))),
+        closedLine: `Collapsed · ${ids.map(x => S[x].name).join(', ')}`
+      };
+    });
+    const looseLive = loose.filter(x => LIVE(S[x]) || true);
+    const groups = {};
+    looseLive.forEach(x => { const s = S[x], k = s.ws + '@' + s.host; (groups[k] = groups[k] || { ws: s.ws, host: s.host, rows: [] }).rows.push(card(x)); });
+    const ovLoose = Object.values(groups);
+
+    const cid = sc.crew || 'gw', C = CREWS[cid], cids = crewMembers(cid), [cr, ce] = counts(cids);
+    const hosts = [...new Set(cids.map(x => S[x].host))];
+    const cp = {
+      name: C.name, sqBig: this.sq(C.color, phone ? 16 : 18, theme) + ';margin-top:6px',
+      summary: `${cr} running${ce ? ` · ${ce} ended` : ''} · ${hosts.join(', ')}`,
+      rows: cids.map(x => card(x)),
+      prows: cids.map(x => row(x, 'page')).map(r => ({ ...r, outer: '' })),
+      ctx: cid === 'gw' ? [{ title: 'Gateway spec', meta: '2 sessions' }, { title: 'BOARD', meta: '1 session' }] : [{ title: 'Install guide', meta: '2 sessions' }],
+      wrote: cid === 'gw' ? [{ title: 'BOARD', crumb: 'personal / projects / storm', meta: 'v53 · gateway-impl' }, { title: 'Release notes 0.4', crumb: 'personal / projects / storm', meta: 'new · release-notes' }] : [{ title: 'Install guide', crumb: 'personal / site', meta: 'v12 · docs-pass' }]
+    };
+
+    const EB = {
+      endAll: { title: 'End all running in Gateway release?', action: 'End 2 sessions', groups: [{ label: 'Stops', items: ['gateway-impl · build-vm', 'review-gateway · build-vm'] }, { label: 'Can’t reach now', items: ['relay-probe · mac-mini is offline. Skipped: end it once the host is back.'] }, { label: 'Already ended', items: ['release-notes'] }] },
+      endAllP3: { title: 'End all running in Gateway release?', action: 'End 4 sessions', groups: [{ label: 'Stops', items: ['gateway-impl', 'review-gateway'] }, { label: 'Children it reaches', items: ['test-gateway (child of gateway-impl)', 'bench-check (child of gateway-impl, in Relay hardening)'] }, { label: 'Can’t reach now', items: ['relay-probe · mac-mini is offline. Skipped.'] }] },
+      end: { title: 'End docs-review? The agent and everything it started are stopped on the host.', action: 'End session', groups: [] },
+      endParent: { title: 'End gateway-impl? Its children end with it.', action: 'End 2 sessions', hasTick: true, groups: [{ label: 'Running', line: 'test-gateway' }, { label: 'Already ended', line: 'spike-notes' }] }
+    };
+    EB.spawnOn = { title: 'Allow gateway-impl to start agents? It can then ask to start, message and end sessions on build-vm. Each request waits for you, and children never get more access than gateway-impl. You can turn this off at any time.', action: 'Allow', accent: true, groups: [] };
+    const eb0 = EB[sc.banner] || { groups: [] };
+    const eb = { ...eb0, actionStyle: `font-size:13px;color:var(--onAccent);background:${eb0.accent ? 'var(--accent)' : 'var(--danger)'};padding:6px 10px;border-radius:var(--rControl)` };
+
+    const sid = sc.sess || 'impl', s0 = S[sid];
+    const live = LIVE(s0);
+    const stLabel = { working: 'Running', idle: 'Running', starting: 'Starting', unknown: 'Unknown', failed: 'Failed', completed: 'Completed', stopped: 'Stopped' }[s0.st];
+    const stColor = { working: 'var(--accent)', idle: 'var(--accent)', starting: 'var(--text3)', unknown: 'var(--amber)', failed: 'var(--danger)' }[s0.st] || 'var(--text3)';
+    const crewOf = Object.keys(CREWS).find(k => crewMembers(k).includes(sid));
+    const spawn = sc.spawn;
+    const tr = (on) => ({ spawnTrack: `width:34px;height:20px;flex:none;border-radius:999px;position:relative;background:${on ? 'var(--accent)' : 'var(--surface2)'};border:1px solid ${on ? 'var(--accent)' : 'var(--border)'};opacity:${spawn === 'unavailable' ? 0.5 : 1}`, spawnKnob: `position:absolute;top:2px;left:${on ? 16 : 2}px;width:14px;height:14px;border-radius:999px;background:${on ? 'var(--onAccent)' : 'var(--text3)'}` });
+    const ss = {
+      name: s0.name, status: stLabel, live,
+      chipStyle: `flex:none;display:inline-flex;align-items:center;gap:6px;${mono};font-size:11px;color:${stColor};border:1px solid var(--border);border-radius:999px;padding:2px 9px`,
+      dotStyle: `width:7px;height:7px;border-radius:999px;background:${stColor}`,
+      endLabel: live ? 'End' : 'Dismiss', endBtnStyle: `flex:none;font-size:12.8px;color:${sc.banner ? 'var(--text)' : 'var(--text2)'};padding:5px 10px;border:1px solid ${sc.banner ? 'var(--text3)' : 'var(--border)'};border-radius:var(--rControl)`,
+      meta: `${s0.agent === 'claude' ? 'Claude Code' : s0.agent === 'opencode' ? 'OpenCode' : 'Shell'} · ${s0.ws} on ${s0.host} · ${live ? 'started ' + s0.age + ' ago' : s0.st}`,
+      hasCrew: !!crewOf, crew: crewOf ? CREWS[crewOf].name : '', sq: crewOf ? this.sq(CREWS[crewOf].color, 9, theme) : '',
+      hasRole: !!s0.role, role: s0.role, roleStyle: this.roleStyle(s0) + 'flex:0 1 auto;',
+      hasParent: !!s0.parent && p3, parent: s0.parent,
+      hasSpawn: p3 && !!spawn && spawn !== 'child', ...tr(spawn === 'on'),
+      spawnNote: spawn === 'on' ? 'On · you approve each start, message and end · Turn off any time' : spawn === 'off' ? 'Off' : 'Unavailable · This host doesn’t isolate sessions yet',
+      lines: (LINES[sc.lines || (sc.approval || sc.banner === 'endParent' ? 'implP3' : sid)] || LINES.impl).map(t => ({ text: t, style: `white-space:pre-wrap;color:${t.startsWith('$') ? 'var(--text)' : /kit\/|updated|asked Storm|^◆/.test(t) ? 'var(--accent)' : 'var(--text2)'}` }))
+    };
+    const val = (v, code) => ({ v, vStyle: code ? "color:var(--text);font-family:'IBM Plex Mono',monospace;font-size:12px;background:var(--surface2);border-radius:6px;padding:6px 8px" : 'color:var(--text)' });
+    const AP = {
+      start: { kind: 'START', title: 'gateway-impl wants to start a session', left: '8:42', write: true, rows: [['Asked by', val('gateway-impl · Claude Code · build-vm')], ['Task', val('Write tests for token refresh in gateway/oauth.rs. Run cargo test -p gateway and report failures.', true)], ['Runs as', val('Claude Code on build-vm, in its own copy of storm (committed work only)')], ['Host', val('build-vm · identity 4F:2A:91 verified · isolates sessions')]] },
+      message: { kind: 'MESSAGE', title: 'gateway-impl wants to message review-gateway', left: '6:10', write: false, rows: [['Asked by', val('gateway-impl · Claude Code · build-vm')], ['To', val('review-gateway · OpenCode · build-vm (in Gateway release, not its child)')], ['Message', val('Tests for token refresh are on storm/test-gateway. Please review before I merge.', true)], ['Host', val('build-vm · identity 4F:2A:91 verified · isolates sessions')]] },
+      end: { kind: 'END', title: 'gateway-impl wants to end spike-notes', left: '9:30', write: false, rows: [['Asked by', val('gateway-impl · Claude Code · build-vm')], ['Ends', val('spike-notes, its child · scratch folder kept until you dismiss it')], ['Reason', val('Spike answered: the sync cursor fits in one table. Notes are in its scratch folder.', true)], ['Host', val('build-vm · identity 4F:2A:91 verified · isolates sessions')]] }
+    };
+    const apKey = sc.approval === true ? 'start' : sc.approval;
+    const ap = apKey ? { ...AP[apKey], rows: AP[apKey].rows.map(([k, x]) => ({ k, ...x })) } : { rows: [] };
+    const TABS = { about: ['Context', 'Wrote', 'About'], requests: ['Context', 'Wrote', 'About', 'Requests 5'], result: ['Context', 'Wrote', 'About', 'Result'] };
+    const activeTab = sc.insp === 'requests' ? 'Requests 5' : sc.insp === 'result' ? 'Result' : 'About';
+    const tabs = (TABS[sc.insp] || TABS.about).map(l => ({ label: l, style: `padding:6px 10px;border-radius:var(--rControl);font-size:13px;${l === activeTab ? 'font-weight:600;color:var(--accent);background:var(--accentSoft)' : 'color:var(--text3)'}` }));
+    const k = (x) => `${mono};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)`;
+    let inspRows = [];
+    if (sc.insp === 'about') {
+      if (sid === 'docsrev') inspRows = [
+        { k: 'Agent', v: 'Claude Code' }, { k: 'Workspace', v: 'site on build-vm' },
+        { k: 'Crew', v: LONG, link: 'Move to crew ▾' },
+        { k: 'Role', v: 'Launched as storm reviewer (the agent read this note) · Label: sop reviewer', link: 'Change label ▾' },
+        { k: 'Vault access', v: 'Reads all vaults. No writes.' }, { k: 'Network', v: 'Inherits build-vm’s policy' }];
+      else if (sid === 'bench') inspRows = [
+        { k: 'Agent', v: 'Claude Code' }, { k: 'Workspace', v: 'storm on build-vm' },
+        { k: 'History', v: 'Was started by gateway-impl (history). Resumed by you, so it runs on its own now: no parent, and ending gateway-impl doesn’t end it.' },
+        { k: 'Vault access', v: 'Reads all vaults. No writes.' }];
+      else if (sid === 'r1') inspRows = [
+        { k: 'Agent', v: 'Claude Code' }, { k: 'Workspace', v: 'relay on pi-lab' }, { k: 'Crew', v: 'Relay hardening' },
+        { k: 'Starting agents', v: 'pi-lab runs sessions as one user, so a child couldn’t get its own copy. Update storm-runtime on pi-lab to allow it.' }];
+      else inspRows = [
+        { k: 'Agent', v: 'Claude Code' }, { k: 'Workspace', v: 'storm on build-vm' }, { k: 'Crew', v: 'Gateway release' },
+        { k: 'Role', v: 'storm coder · the agent read this note at launch' },
+        { k: 'Children', v: 'test-gateway (running) · spike-notes (ended). Limits: 3 live children, 2 levels deep.' }];
+    } else if (sc.insp === 'requests') inspRows = [
+      { k: 'Waiting · 8:42 left', v: 'Start: "Write tests for token refresh…"' },
+      { k: 'Started · 14:02', v: 'test-gateway, approved by you on MacBook' },
+      { k: 'Denied · 13:40', v: 'Message to review-gateway' },
+      { k: 'Expired · 13:12', v: 'Start: "bench relay" · no answer in 10 min' },
+      { k: 'Refused · 12:55', v: 'Start: "lint pass" · limit: 3 children' }];
+    else if (sc.insp === 'result') inspRows = [
+      { k: 'Result', v: 'Nothing has reached storm yet. Apply creates a new branch from the child’s commits. It never merges or overwrites.' }];
+    inspRows = inspRows.map(r => ({ ...r, hasLink: !!r.link, kStyle: k() + (sc.insp === 'requests' && r.k.startsWith('Waiting') ? ';color:var(--accent)' : sc.insp === 'requests' && /Denied|Refused|Expired/.test(r.k) ? '' : '') }));
+
+    const toastDefs = {
+      refused: { text: 'Couldn’t move relay-review into Gateway release: it was dismissed on Pixel 8.', action: '' },
+      empty: { text: 'Kit cleanup was removed: its last session was dismissed.', action: 'Undo' },
+      kept: { text: 'Dismissed 1. 2 kept: gateway-impl’s child is still running.', action: '' }
+    };
+    const toasts = (sc.toasts || []).map((t, i) => ({ text: toastDefs[t].text, action: toastDefs[t].action, hasAction: !!toastDefs[t].action, style: `width:440px;display:flex;align-items:center;gap:14px;padding:12px 16px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border);box-shadow:var(--shadow);z-index:30` }));
+
+    const shellL = sc.launcher === 'shell';
+    const fieldStyle = (dim) => `display:flex;align-items:center;gap:8px;min-width:0;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rControl);padding:8px 12px;font-size:14px;color:${dim ? 'var(--text3)' : 'var(--text)'}`;
+    const L = {
+      fields: [['Host', 'build-vm · online'], ['Workspace', 'storm'], ['Agent', shellL ? 'Shell' : 'Claude Code · default'], ...(shellL ? [] : [['Can write to', 'personal']]), ['Crew', 'None']].map(([label, value]) => ({ label, value, style: fieldStyle(false) })),
+      roleStyle: fieldStyle(shellL) + (sc.launcher === 'claude' ? ';border-color:var(--accent)' : ''),
+      roleValue: shellL ? 'None' : 'Storm Reviewer',
+      roleNote: shellL ? 'Shell can’t read Storm notes. A role would only be a label.' : 'The role note may tell the agent not to write.',
+      picker: sc.launcher === 'claude',
+      risk: shellL ? 'Network: inherits build-vm’s policy. A shell has no access to your vaults or integrations.' : 'Network: inherits build-vm’s policy. This session can use your integrations and read your vaults, with that network access.',
+      foot: shellL ? '' : 'The agent reads Gateway spec and Storm Reviewer.'
+    };
+    let grp = '';
+    const rolePicker = [{ isGroup: false, isItem: true, label: 'None', sum: 'A plain agent', check: '', style: 'display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px' },
+      ...ROLES.map(([t, sm]) => t === 'g' ? { isGroup: true, isItem: false, label: sm } : { isGroup: false, isItem: true, label: t, sum: sm, check: t === 'Storm Reviewer' ? '✓' : '', style: `display:flex;align-items:center;gap:8px;padding:6px 8px;border-radius:7px;${t === 'Storm Reviewer' ? 'background:var(--surface)' : ''}` })];
+
+    const sq = (word) => this.sq(word, 12, theme);
+    const item = (label, o = {}) => ({ isItem: true, label, labelStyle: `font-size:15px;color:var(--text);${mono === '' ? '' : ''}`, hasSq: !!o.sq, sq: o.sq || '', hasSum: !!o.sum, sum: o.sum || '', check: o.check || '' });
+    const SHEETS = {
+      move: [
+        { isTitle: true, label: 'spike-sync', sum: 'starting · build-vm · storm' },
+        { isGroup: true, label: 'Crew', sum: 'where it’s listed' },
+        item('Not in a crew', { check: '✓' }), item('Gateway release', { sq: sq('sage') }), item(LONG, { sq: sq('sky') }), item('＋ New crew…'),
+        { isGroup: true, label: 'Role', sum: 'a label, separate from crew' },
+        { isNote: true, label: 'spike-sync launched as Storm Researcher and keeps that note. Changing the role here only changes the label.' },
+        item('None', { sum: 'A plain agent' }), item('Storm Researcher', { sum: 'Proves a spike with code.', check: '✓' }), item('Storm Coder', { sum: 'Implements one task; writes nothing in the vault.' }), item('SOP Researcher', { sum: 'Researches a written procedure before it is drafted.' })
+      ],
+      approveStart: [
+        { isTitle: true, label: 'Start a session?', sum: '8:42 left' },
+        { isNote: true, label: 'gateway-impl (Claude Code on build-vm) is asking. Nothing starts until you approve.' },
+        { isGroup: true, label: 'Task', sum: '' }, { isNote: true, label: '"Write tests for token refresh in gateway/oauth.rs. Run cargo test -p gateway and report failures."' },
+        { isGroup: true, label: 'Runs as', sum: '' }, item('Claude Code on build-vm', { sum: 'Own copy of storm · committed work only' }),
+        { isGroup: true, label: 'Host', sum: '' }, item('build-vm', { sum: 'Identity 4F:2A:91 verified · isolates sessions' }),
+        item('Let the child write to personal', { sum: 'Off by default' }),
+        { isButton: true, label: 'Approve', style: 'text-align:center;margin-top:14px;padding:13px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:15px;font-weight:500' },
+        { isButton: true, label: 'Deny', style: 'text-align:center;padding:12px;font-size:15px;color:var(--text)' }
+      ],
+      endAll: [
+        { isTitle: true, label: 'End all running?', sum: 'Gateway release' },
+        { isNote: true, label: 'The agents and everything they started are stopped on their hosts.' },
+        { isGroup: true, label: 'Stops', sum: '' }, item('gateway-impl', { sum: 'build-vm' }), item('review-gateway', { sum: 'build-vm' }),
+        { isGroup: true, label: 'Can’t reach now', sum: '' }, item('relay-probe', { sum: 'mac-mini is offline. Skipped: end it once the host is back.' }),
+        { isButton: true, label: 'End 2 sessions', style: 'text-align:center;margin-top:14px;padding:13px;border-radius:var(--rControl);background:var(--danger);color:var(--onAccent);font-size:15px;font-weight:500' },
+        { isButton: true, label: 'Cancel', style: 'text-align:center;padding:12px;font-size:15px;color:var(--text2)' }
+      ]
+    };
+    const sheetItems = (SHEETS[sc.sheet] || []).map(o => ({ isTitle: false, isGroup: false, isNote: false, isItem: false, isButton: false, ...o }));
+    const swatchRow = React.createElement('div', { style: { display: 'flex', gap: 5, flexWrap: 'wrap' } }, Object.keys(PAL).map(wd => React.createElement('span', { key: wd, title: wd, style: { width: 15, height: 15, borderRadius: 999, background: swatch(wd, theme), boxShadow: wd === 'clay' ? '0 0 0 2px var(--surface2), 0 0 0 3.5px var(--accent)' : 'none' } })));
+
+    return {
+      rootStyle: `${tokens(PRESETS[theme])};position:relative;width:${w}px;height:${hgt}px;overflow:hidden;background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased;border:1px solid var(--border);border-radius:${phone ? 36 : 12}px`,
+      isDesktop: !phone, isPhone: phone, phase3: p3,
+      p3Style: `position:absolute;top:${phone ? 74 : 12}px;left:50%;transform:translateX(-50%);${mono};font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text);background:var(--surface2);border:1px dashed var(--text3);border-radius:999px;padding:4px 12px;z-index:70;white-space:nowrap`,
+      sidebarStyle: `width:${sideW}px;flex:none;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0`,
+      overviewRowStyle: `padding:7px 10px;border-radius:var(--rControl);font-size:13px;color:${!sc.sel ? 'var(--text)' : 'var(--text2)'};background:${!sc.sel ? 'var(--surface2)' : 'transparent'}`,
+      side, ovCrews, ovLoose,
+      startCards: [{ name: 'Claude Code', where: 'build-vm, pi-lab' }, { name: 'OpenCode', where: 'build-vm, pi-lab' }, { name: 'Shell', where: 'build-vm, pi-lab' }],
+      mainOverview: sc.main === 'overview', mainCrew: sc.main === 'crew', mainSession: sc.main === 'session',
+      cp, eb: { ...eb, hasTick: !!eb.hasTick }, ap, endAllBanner: sc.banner === 'endAll' || sc.banner === 'endAllP3', endBanner: sc.banner === 'end' || sc.banner === 'endParent' || sc.banner === 'spawnOn',
+      ss, tabs, inspOpen: !!sc.insp, inspRows, resultPanel: sc.insp === 'result', approval: !!sc.approval,
+      toasts, ctxMenu: !!sc.hover, ctxMenuStyle: `position:absolute;left:${sideW - 60}px;top:${sc.extra ? 142 : 170}px;width:220px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:var(--shadow);padding:6px;display:flex;flex-direction:column;z-index:20`,
+      swatchRow,
+      launcher: !!sc.launcher, L, rolePicker,
+      pList: phone && !sc.crewPage, pCrew: phone && !!sc.crewPage, pSheet: !!sc.sheet, sheet: { items: sheetItems }, pNotif: !!sc.notif
+    };
+  }
+}
+</script>
+</body>
+</html>

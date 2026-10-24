@@ -14,6 +14,196 @@
 <style>body{margin:0;background:#f0eee9;font-family:system-ui,sans-serif}a{color:#2a62d6}a:hover{color:#1b438f}</style>
 </helmet>
 
+<section id="t4" style="padding:40px 44px 56px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid rgba(0,0,0,.08);font-family:system-ui,sans-serif">
+  <div style="display:flex;align-items:baseline;gap:10px">
+    <a href="#t4" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none">4</a>
+    <span style="font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a">Round 4 · crews V1 matched to the shipped app, plus the complete Phase 3</span>
+  </div>
+  <div style="max-width:980px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">The model hasn't changed: a crew is a server-side label, a session is in at most one crew, roles are optional, and the layout is collapsible sidebar sections plus a crew page. Every frame below uses the shipped values. Session rows read "host · workspace · age"; the workspace truncates first and the age never does. Marks are 32px in the sidebar, 36px on the phone and 28px in overview cards. The sidebar is at least 260px (277 at 1280) and the overview at most 760px. Ended rows fade only the mark and turn the name text2. The Details panel opens at 320px and resizes from 260 to 500. Crew colours are the nine vault palette words, derived per theme. Three rules hold everywhere: a person approves every agent start, message and end; a person switches spawning on for one session at a time; and nothing an agent does widens its own access.</div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:26px 0 6px">Overview · all five status badges · three themes</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="4a" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4a" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2a78d6;color:#fff;border-radius:5px;text-decoration:none">4a</a>Overview · Storm dark</div>
+      <dc-import name="Crews R4 Frame" scene="overview" hint-size="1280px,1030px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The status badges: <b>accent, pulsing</b> while the agent works (gateway-impl); <b>none</b> when running but idle (review-gateway); <b>text3</b> while starting (spike-sync); <b>amber</b> when the state is unknown because mac-mini is offline (relay-probe); <b>danger</b> when failed (lint-fix). release-notes has ended: its mark fades and its name turns text2, and its tag is struck through because the Storm Lead note was deleted. spike-sync is a loose running session with a role. Role tags cap at about 14 characters and shrink before the name ("storm researc…"); "storm reviewer" and "storm researcher" show two roles with the same prefix. The 40-character crew name ellipsizes in the sidebar header and fits on the card. The overview keeps today's "Not in a crew" grouping by workspace and host, and "Start an agent" stays at the bottom.</div>
+    </div>
+    <div id="4b" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4b" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4b</a>Overview · Storm light</div>
+      <dc-import name="Crews R4 Frame" scene="overview-light" hint-size="1280px,1030px"></dc-import>
+    </div>
+    <div id="4c" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4c" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4c</a>Overview · SlowFlow earth</div>
+      <dc-import name="Crews R4 Frame" scene="overview-earth" hint-size="1280px,1030px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Crew colours are derived per theme from one palette word: lightness 0.70 on dark, 0.62 on light and 0.58 on earth, with chroma 0.10 (clay 0.05, and 85% of that on earth).</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">Crew page, session, phone</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="4d" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4d" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4d</a>Crew page · End all running as an inline banner</div>
+      <dc-import name="Crews R4 Frame" scene="crew-endall" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">This is the same inline-banner pattern as ending one session, placed under the crew header and listing every session. relay-probe is on mac-mini, which is offline, so Storm can't reach it. It's listed under "Can't reach now" and skipped, and nothing is queued for later (inputs are never retried). The header names the crew's hosts, following open question 6.</div>
+    </div>
+    <div id="4e" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4e" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4e</a>Session · launch role differs from label · End banner</div>
+      <dc-import name="Crews R4 Frame" scene="session-roles" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">docs-review was launched as Storm Reviewer, and its label was later changed to SOP Reviewer. About shows both, and only the launch role is what the agent read. Resuming the session keeps the launch role. The crew chip caps at 220px, so the long name ellipsizes there and wraps in About. End shows the shipped inline banner, not a dialog.</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4f" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4f" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4f</a>Launcher · role picker with summaries, grouped by Kit folder</div>
+      <dc-import name="Crews R4 Frame" scene="launcher" hint-size="1280px,900px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Each role shows its note's title with the one-line summary under it. Roles are grouped by folder when Kit has <code>projects/&lt;name&gt;/agents/</code>. Crew and Role are separate rows. Because a write vault is granted, a quiet line under Role notes that the role note may tell the agent not to write (optional, drop it if it's noisy).</div>
+    </div>
+    <div id="4g" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4g" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4g</a>Launcher · an agent that can't read notes</div>
+      <dc-import name="Crews R4 Frame" scene="launcher-shell" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Shell, Cursor and Command Code can't read Storm notes. For them the Role row is greyed out with the reason, and "Can write to" is hidden as it is today. The alternative is hiding the Role row too; the disabled row makes it clear why nothing will be read. A role set later on these sessions is a label only, and About says so.</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4j" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4j" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4j</a>Phone · list</div>
+      <dc-import name="Crews R4 Frame" scene="p-list" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Marks are 36px. Crew members sit behind a solid left edge, and long tags cap and ellipsize.</div>
+    </div>
+    <div id="4k" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4k" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4k</a>Phone · long-press: Crew and Role are independent</div>
+      <dc-import name="Crews R4 Frame" scene="p-sheet" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Crew and Role are two separately headed lists. A loose session can carry a role. The note above the role list says this changes only the label.</div>
+    </div>
+    <div id="4l" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4l" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4l</a>Phone · crew page, End all running sheet</div>
+      <dc-import name="Crews R4 Frame" scene="p-crew-end" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The phone uses a sheet for the same list, with the same skip rule for the offline host.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">States not drawn before</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="4h" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4h" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4h</a>900px · 8 crews · hover ··· with its right-click menu · 40-character name</div>
+      <dc-import name="Crews R4 Frame" scene="narrow" hint-size="900px,720px"></dc-import>
+      <div style="max-width:900px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">This replaces 3l. At 900px the sidebar is 260 (its minimum), so "2 run" is no longer needed: open crews read "2 running" and collapsed ones "running · ended". The hovered header shows ···, and the same menu opens on right-click. Its colour row has all nine swatches. The CREWS label carries a ▾: collapsing it folds the whole section to one line, "CREWS · 8". The crew page wraps the 40-character name onto two lines.</div>
+    </div>
+    <div id="4i" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4i" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4i</a>A refused move snaps back · a crew loses its last member</div>
+      <dc-import name="Crews R4 Frame" scene="sync" hint-size="1280px,1030px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">A move, rename, recolour or reorder shows instantly on the device that made it. Other devices catch up by polling, about every 15 seconds; until then they show the old state, with no placeholder. If the server refuses a change (here relay-review was dismissed on another device, or the network is down), the row snaps back with an accent outline and a toast gives the reason. Dismiss deletes the session, so it also leaves its crew. When that was the crew's last member, the crew goes too, with Undo (open question 2).</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">Phase 3 · agents starting, messaging and ending agents · ships after crews V1</div>
+  <div style="max-width:980px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68)">Spawning is off for every session. A person switches it on for one running session from its header, and can turn it off at any time. There's no global setting, no launch option, and no way for an agent to switch it on, and the Settings row from Round 3 is gone. Every start, message and end an agent asks for waits for a person on a signed-in device, and expires after 10 minutes. A child runs on its parent's host with the same agent, works from task text only, and gets its own copy of the repository (committed work only), or read-only access plus a scratch folder. No agent can set a role. Limits: 2 levels deep, 3 live children per parent, 6 live sessions per family, and 2 pending requests per parent. A request over a limit is refused, never queued.</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:10px">
+    <div id="4m" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4m" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4m</a>Approval card in the session · request outcomes · lineage</div>
+      <dc-import name="Crews R4 Frame" scene="p3-approval" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The card shows who is asking, the kind of request, the exact task text, where the child will run, the host's identity and isolation, and the time left. "Let the child write to personal" is off by default. The Requests tab lists the outcomes: waiting, started, denied, expired, and refused with its reason. In the sidebar, children sit on a dashed indent with "↳ from gateway-impl · own copy of storm" or "· scratch". "Needs attention" appears beside the activity on the child's row and on the crew header; it only shows for a waiting request, a block or a permission prompt, never because a session is idle.</div>
+    </div>
+    <div id="4n" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4n" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4n</a>Phone · approval as a notification</div>
+      <dc-import name="Crews R4 Frame" scene="p3-p-notify" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">A message request carries the same fields as the card. Approve and Deny are full-width, one-handed targets. There's no auto-approve anywhere.</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4o" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4o" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4o</a>A child's result · Apply</div>
+      <dc-import name="Crews R4 Frame" scene="p3-result" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Nothing reaches the parent's folder until a person clicks Apply. Apply creates the branch <code>storm/test-gateway</code>, or a new folder outside git; the preview lists what it will create. It never merges or overwrites. bench-relay in the sidebar is a resumed child: it has no indent (see <a href="#4q">4q</a>).</div>
+    </div>
+    <div id="4p" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4p" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4p</a>Ending a parent ends its children · Dismiss keeps families together</div>
+      <dc-import name="Crews R4 Frame" scene="p3-end-parent" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The banner lists running and ended children separately. The optional "Let children report first" waits 30 seconds. A parent and its children are dismissed only together, once every one has ended. "Dismiss ended" skips families with a live member, and the toast says how many it kept.</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4r" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4r" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4r</a>Crew-wide End all running reaches children</div>
+      <dc-import name="Crews R4 Frame" scene="p3-crew-endall" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The banner lists every child it will reach, including bench-check, which you moved into Relay hardening.</div>
+    </div>
+    <div id="4q" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4q" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4q</a>A resumed child is independent</div>
+      <dc-import name="Crews R4 Frame" scene="p3-resumed" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">It has no indent and no "↳ from"; About says "Was started by gateway-impl (history)". Spawning is off for it until a person turns it on.</div>
+    </div>
+    <div id="4s" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4s" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4s</a>Spawning unavailable on this host</div>
+      <dc-import name="Crews R4 Frame" scene="p3-unavailable" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The switch shows, greyed out, with the reason "This host doesn't isolate sessions yet". About says what would fix it.</div>
+    </div>
+  </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4t" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4t" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4t</a>Turning spawning on for one session</div>
+      <dc-import name="Crews R4 Frame" scene="p3-spawn-on" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">The switch sits in the running session's header. Turning it on shows a confirmation that says what it allows. Turning it off takes effect at once: requests already waiting stay waiting, and new ones are refused with "starting agents is off for this session". Children keep running.</div>
+    </div>
+
+    <div id="4u" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4u" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4u</a>A message request</div>
+      <dc-import name="Crews R4 Frame" scene="p3-message" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">A message goes to another session by name; it can be a child, a sibling in the crew, or any session of yours. The card quotes the exact text. On Approve, Storm types it into the target's terminal as one input, never retried. The Requests tab keeps the outcome.</div>
+    </div>
+
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="4v" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4v" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4v</a>An end request · what the agent sees for each outcome</div>
+      <dc-import name="Crews R4 Frame" scene="p3-end-request" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">An agent can ask to end only its own children. The terminal shows the agent each answer as a Storm line: approved, denied, expired after 10 minutes, or refused with the limit or rule it hit. Storm never answers on your behalf.</div>
+    </div>
+
+    <div id="4w" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#4w" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">4w</a>Phone · approve a start from inside the app</div>
+      <dc-import name="Crews R4 Frame" scene="p3-p-approve" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.6)">Opening the notification, or tapping the session's "needs attention", opens this sheet. The write toggle is off by default, and Approve and Deny are full-width.</div>
+    </div>
+
+  </div>
+
+<div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:34px 0 6px">Open questions · options side by side, suggestion marked, not decided</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:18px;max-width:1400px;font:400 12.5px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>1. Collapse state</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;outline:2px solid #2a78d6;font:12px/1.5 'IBM Plex Mono',monospace">MacBook: ▸ Relay<br>Pixel: ▾ Relay<br><span style="color:#9b958c">each device remembers its own, across restarts</span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.5 'IBM Plex Mono',monospace">MacBook: ▸ Relay<br>Pixel: ▸ Relay<br><span style="color:#9b958c">synced; collapsing on the phone collapses it on the laptop too</span></div>
+      </div><span><span style="color:#2a78d6">Suggested: per device.</span> Synced collapse fights you when you use two screens at once.</span></div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>2. Empty crew after the last dismissal</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;outline:2px solid #2a78d6;font:12px/1.5 system-ui">Kit cleanup was removed: its last session was dismissed. <span style="color:#b9a6ff">Undo</span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.5 system-ui">▸ Kit cleanup <span style="color:#9b958c;font-family:'IBM Plex Mono',monospace">0 · 0</span><br><span style="color:#9b958c">kept as an empty header until deleted</span></div>
+      </div><span><span style="color:#2a78d6">Suggested: auto-delete with Undo.</span> Keeping it means empty headers pile up and you have to delete them by hand.</span></div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>3. Name for a crew made by dragging (different context notes)</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;outline:2px solid #2a78d6;font:12px/1.5 system-ui"><span style="background:#4a3f7a;padding:1px 3px">New crew</span>▏<br><span style="color:#9b958c">field open, text selected</span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.5 system-ui">Gateway spec▏<br><span style="color:#9b958c">the drop target's note title</span></div>
+      </div><span><span style="color:#2a78d6">Suggested: "New crew", selected.</span> Using the target's title quietly favours one of the two notes.</span></div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>4. Sidebar crew actions</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;outline:2px solid #2a78d6;font:12px/1.5 system-ui">▸ Relay hardening <span style="background:#3a3632;border-radius:4px;padding:0 4px">···</span><br><span style="color:#9b958c">on hover, and right-click (<a href="#4h">4h</a>)</span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.5 system-ui">▸ Relay hardening<br><span style="color:#9b958c">actions only on the crew page</span></div>
+      </div><span><span style="color:#2a78d6">Suggested: hover plus right-click.</span> The alternative means opening the crew page to end or dismiss.</span></div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>5. Where roles come from</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.45 system-ui">Every note in agents/<br><span style="color:#9b958c">Storm Lead · Storm Coder · Storm Reviewer · <i>code-search (subagent)</i> · <i>test-runner (subagent)</i></span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.45 system-ui">Only notes with <span style="font-family:'IBM Plex Mono',monospace">role: true</span><br><span style="color:#9b958c">Storm Lead · Storm Coder · Storm Reviewer</span></div>
+      </div><span>No suggestion. "Every note" needs no setup, but it also lists subagent definitions people don't mean as roles. Opting in is precise but needs a property on each note. A separate <code>roles/</code> folder would move notes that adapters already load.</span></div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px;display:flex;flex-direction:column;gap:10px"><b>6. Members sharing a host</b>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;outline:2px solid #2a78d6;font:12px/1.5 'IBM Plex Mono',monospace">Gateway release · build-vm, mac-mini<br><span style="color:#9b958c">rows keep build-vm · storm · 40m</span></div>
+        <div style="background:#2a2725;color:#eee;border-radius:8px;padding:10px;font:12px/1.5 'IBM Plex Mono',monospace">Gateway release<br><span style="color:#9b958c">rows: storm · 40m (host dropped)</span></div>
+      </div><span><span style="color:#2a78d6">Suggested: name the hosts in the header and keep them on rows</span> (<a href="#4d">4d</a>). Dropping the host breaks the row format shared with loose sessions.</span></div>
+  </div>
+</section>
+
 <section id="t3" style="padding:40px 44px 56px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid rgba(0,0,0,.08);font-family:system-ui,sans-serif">
   <div style="display:flex;align-items:baseline;gap:10px">
     <a href="#t3" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none">3</a>
@@ -284,12 +474,7 @@
     <div>• <b>Agent-started sessions</b> join the crew of the session that started them, nested under it. If the starter isn't in a crew, a crew is created around it and named after the starter's context note.</div>
   </div>
 
-  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Decided</div>
-  <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
-    <div>1. <b>Agents starting agents.</b> A started session never gets more access than the session that started it: the same vaults or fewer, the same write vault or none, and the same integrations. Each start waits for your approval, unless you've turned on <b>Let agents start agents</b> in Settings › AI access, under Storm agents (off by default). The approval prompt shows the same access summary as the launcher.</div>
-    <div>2. <b>Backend.</b> This needs a new Storm tool that lets an agent start a session (host, workspace, agent, role, parent), plus a "started by" link on sessions. It's orchestration work, planned for Phase 3, and it isn't in V1.</div>
-    <div>3. <b>Roles come entirely from Kit.</b> The role list is every note in Kit's <code>agents/</code> folder, read live, with nothing built in. Lead, Coder and Reviewer exist only because Kit is seeded with those notes.</div>
-  </div>
+  <div style="max-width:900px;margin:26px 0 0;padding:10px 14px;border:1px dashed rgba(0,0,0,.25);border-radius:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)"><b>Superseded.</b> This round's "Decided" panel was removed: it let agent starts skip approval once a setting was on, which is not allowed. The current rules are in <a href="#t4">Round 4</a>: a person approves every agent start, message and end, and spawning is switched on per session by a person.</div>
   <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:24px 0 4px">What follows from roles being dynamic</div>
   <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
     <div>• <b>A role is a link to its Kit note</b>, stored by the note's id, not its name. Renaming the note renames the role everywhere. The tag shows the note's title in capitals.</div>
