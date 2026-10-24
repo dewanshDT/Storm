@@ -419,11 +419,20 @@ args = ["-i"]
         gap = wait(past_capacity, "the cache to pass its capacity", timeout=60)
         g = json.loads(gap[2])
         check("a reader below the floor gets an explicit gap", g["from"] == 0 and g["to"] > 0, g)
+        status, made = call("POST", "/v1/agent/crews",
+                            {"name": "E2E crew", "session_ids": [sid2]}, auth=owner)
+        check("a crew is made around a session (decision 138)", status == 201, (status, made))
+        crew_id = made["crew"]["id"]
+        check("the session lists its crew",
+              session(owner, sid2)["crew"] == {"id": crew_id, "order": 0}, session(owner, sid2))
         call("POST", f"/v1/agent/sessions/{sid2}/end", auth=owner)
         wait(lambda: session(owner, sid2)["status"] == "stopped", "stopped")
-        status, _ = call("DELETE", f"/v1/agent/sessions/{sid2}", auth=owner)
-        check("an ended session is dismissed", status == 204, status)
+        status, gone = call("DELETE", f"/v1/agent/sessions/{sid2}", auth=owner)
+        check("an ended session is dismissed", status == 200, status)
         check("and is gone", call("GET", f"/v1/agent/sessions/{sid2}", auth=owner)[0] == 404)
+        check("its emptied crew goes with it, returned for Undo (138c)",
+              gone["removed_crew"]["id"] == crew_id
+              and call("GET", "/v1/agent/crews", auth=owner)[1] == [], gone)
 
         print("\n=== a real shell in a PTY ===")
         status, rec = launch(owner, host_id, workspace="site", provider="shell")

@@ -1992,6 +1992,19 @@ pub struct SessionView {
     /// Its plugins' local servers, which run outside the gateway (131a).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcp_plugin_local: Vec<String>,
+    /// The crew it is in and its place there (decision 138b).
+    pub crew: Option<crate::agent::Membership>,
+    /// Its role label (138d), named by the note's current title.
+    pub role: Option<RoleView>,
+}
+
+/// A role label as clients see it. `title` follows the note's renames and is
+/// `None` once the note is deleted: the client strikes the tag through.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleView {
+    pub vault_id: String,
+    pub note_id: String,
+    pub title: Option<String>,
 }
 
 fn session_view(
@@ -2003,6 +2016,16 @@ fn session_view(
     let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
     let (mcp_skipped, mcp_plugin_local) =
         state.agent.mcp_notice_of(&session.id).map_err(internal)?;
+    let crew = state.agent.membership(&session.id).map_err(internal)?;
+    let role = state
+        .agent
+        .role_of(&session.id)
+        .map_err(internal)?
+        .map(|r| RoleView {
+            vault_id: r.vault_id,
+            note_id: r.note_id,
+            title: None,
+        });
     // A session launched before names existed is called by its workspace.
     let (name, context, write_vault_id) = match launch {
         Some(l) => (l.name, l.context, l.write_vault_id),
@@ -2017,7 +2040,31 @@ fn session_view(
         integrations,
         mcp_skipped,
         mcp_plugin_local,
+        crew,
+        role,
     })
+}
+
+/// Names each view's role by its note's title now, so a rename follows and a
+/// deleted note reads as `None`.
+async fn name_roles(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
+    for view in views.iter_mut() {
+        let Some(role) = view.role.as_mut() else {
+            continue;
+        };
+        let handle = state.vaults.read().await.get(&role.vault_id);
+        role.title = match handle {
+            Some(handle) => handle
+                .indexer
+                .lock()
+                .await
+                .db
+                .get_note(&role.note_id)?
+                .map(|n| n.title),
+            None => None,
+        };
+    }
+    Ok(())
 }
 
 /// A launched session, plus what the MCP Gateway granted it (spec §6).
@@ -2192,6 +2239,8 @@ pub async fn launch_session(
             integrations,
             mcp_skipped: Vec::new(),
             mcp_plugin_local: Vec::new(),
+            crew: None,
+            role: None,
         },
         mcp: LaunchMcp {
             connections,
@@ -2204,17 +2253,25 @@ pub async fn launch_session(
 }
 
 pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<SessionView>> {
-    state
+    let mut views = state
         .agent
         .list()
         .map_err(agent_error)?
         .into_iter()
         .map(|s| session_view(state, s))
-        .collect()
+        .collect::<ApiResult<Vec<_>>>()?;
+    name_roles(state, &mut views).await?;
+    Ok(views)
 }
 
 pub async fn get_session(state: &Shared, id: &str) -> ApiResult<SessionView> {
-    session_view(state, state.agent.get(id).map_err(agent_error)?)
+    let mut view = [session_view(
+        state,
+        state.agent.get(id).map_err(agent_error)?,
+    )?];
+    name_roles(state, &mut view).await?;
+    let [view] = view;
+    Ok(view)
 }
 
 /// One note a session wrote, as its Wrote list shows it. `title` and `path`
@@ -2277,8 +2334,302 @@ pub async fn end_session(state: &Shared, id: &str) -> ApiResult<()> {
     state.agent.end(id).map_err(agent_error)
 }
 
-pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<()> {
-    state.agent.dismiss(id).map_err(agent_error)
+/// What dismissing a session did beyond removing it.
+#[derive(Debug, Clone, Serialize)]
+pub struct Dismissed {
+    /// The crew it was the last member of, now deleted (decision 138c). The
+    /// client offers Undo by creating it again.
+    pub removed_crew: Option<crate::agent::Crew>,
+}
+
+pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<Dismissed> {
+    let removed_crew = state.agent.dismiss(id).map_err(agent_error)?;
+    Ok(Dismissed { removed_crew })
+}
+
+// ---- crews and role labels (decision 138) --------------------------------
+//
+// Labels over sessions, the owner's alone. A crew changes how the Agents page
+// is organised and nothing else: no grant, host or lifecycle reads it (138a).
+// A role label is a Kit note a person set; no agent can set one (138d).
+
+/// The vault palette's words (`Accent` in the client), `none` included.
+const CREW_COLORS: &[&str] = &[
+    "none", "coral", "peach", "sand", "sage", "mint", "sky", "lavender", "blossom", "clay",
+];
+
+const CREW_NAME_MAX: usize = 80;
+
+/// Crews and labels are the signed-in owner's, never a key's or an agent's.
+fn crews_owner(actor: &Actor) -> ApiResult<&str> {
+    match actor {
+        Actor::Session { user_id } => Ok(user_id),
+        _ => Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "owner_only".into(),
+        )),
+    }
+}
+
+fn crew_name(name: &str) -> ApiResult<String> {
+    let name = name.trim();
+    if name.is_empty() || name.chars().count() > CREW_NAME_MAX {
+        return Err(bad_request(format!(
+            "a crew's name is 1 to {CREW_NAME_MAX} characters"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(bad_request("a crew's name is one line of text"));
+    }
+    Ok(name.to_string())
+}
+
+fn crew_color(color: &str) -> ApiResult<&'static str> {
+    CREW_COLORS
+        .iter()
+        .find(|c| **c == color)
+        .copied()
+        .ok_or_else(|| bad_request(format!("`{color}` is not a palette colour")))
+}
+
+/// The first palette colour no crew uses yet, cycling once all are taken.
+fn next_crew_color(crews: &[crate::agent::Crew]) -> &'static str {
+    let palette = &CREW_COLORS[1..];
+    palette
+        .iter()
+        .find(|c| !crews.iter().any(|crew| crew.color == **c))
+        .copied()
+        .unwrap_or(palette[crews.len() % palette.len()])
+}
+
+pub async fn list_crews(state: &Shared, actor: &Actor) -> ApiResult<Vec<crate::agent::Crew>> {
+    crews_owner(actor)?;
+    state.agent.crews().map_err(internal)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateCrew {
+    pub name: String,
+    pub color: Option<String>,
+    #[serde(default)]
+    pub session_ids: Vec<String>,
+}
+
+/// A crew change, and the crews it emptied and so deleted (138c).
+#[derive(Debug, Clone, Serialize)]
+pub struct CrewChange {
+    pub crew: Option<crate::agent::Crew>,
+    pub removed_crews: Vec<crate::agent::Crew>,
+}
+
+pub async fn create_crew(state: &Shared, actor: &Actor, req: CreateCrew) -> ApiResult<CrewChange> {
+    let owner = crews_owner(actor)?;
+    let name = crew_name(&req.name)?;
+    let color = match req.color.as_deref() {
+        Some(c) => crew_color(c)?,
+        None => next_crew_color(&state.agent.crews().map_err(internal)?),
+    };
+    let (crew, removed_crews) = state
+        .agent
+        .create_crew(owner, &name, color, &req.session_ids)
+        .map_err(agent_error)?;
+    Ok(CrewChange {
+        crew: Some(crew),
+        removed_crews,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCrew {
+    pub name: Option<String>,
+    pub color: Option<String>,
+}
+
+pub async fn update_crew(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    req: UpdateCrew,
+) -> ApiResult<crate::agent::Crew> {
+    crews_owner(actor)?;
+    let name = req.name.as_deref().map(crew_name).transpose()?;
+    let color = req.color.as_deref().map(crew_color).transpose()?;
+    state
+        .agent
+        .update_crew(id, name.as_deref(), color)
+        .map_err(agent_error)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct Order {
+    pub ids: Vec<String>,
+}
+
+pub async fn reorder_crews(state: &Shared, actor: &Actor, req: Order) -> ApiResult<()> {
+    crews_owner(actor)?;
+    state.agent.reorder_crews(&req.ids).map_err(agent_error)
+}
+
+pub async fn reorder_crew_members(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    req: Order,
+) -> ApiResult<()> {
+    crews_owner(actor)?;
+    state
+        .agent
+        .reorder_members(id, &req.ids)
+        .map_err(agent_error)
+}
+
+pub async fn delete_crew(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
+    crews_owner(actor)?;
+    state.agent.delete_crew(id).map_err(agent_error)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MoveToCrew {
+    /// `None` takes the session out of any crew.
+    pub crew_id: Option<String>,
+    /// Another member of that crew to place it before; last when absent.
+    pub before: Option<String>,
+}
+
+pub async fn move_session_to_crew(
+    state: &Shared,
+    actor: &Actor,
+    session_id: &str,
+    req: MoveToCrew,
+) -> ApiResult<CrewChange> {
+    crews_owner(actor)?;
+    let emptied = state
+        .agent
+        .move_session(session_id, req.crew_id.as_deref(), req.before.as_deref())
+        .map_err(agent_error)?;
+    let crew = match req.crew_id.as_deref() {
+        Some(id) => state
+            .agent
+            .crews()
+            .map_err(internal)?
+            .into_iter()
+            .find(|c| c.id == id),
+        None => None,
+    };
+    Ok(CrewChange {
+        crew,
+        removed_crews: emptied.into_iter().collect(),
+    })
+}
+
+/// A note in Kit that can be a role (138e): one under `agents/` or under a
+/// project's `projects/<name>/agents/`.
+fn is_role_path(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    path.ends_with(".md")
+        && ((parts.len() >= 2 && parts[0] == "agents")
+            || (parts.len() >= 4 && parts[0] == "projects" && parts[2] == "agents"))
+}
+
+/// A role note, as the launcher and the role picker list it.
+#[derive(Debug, Clone, Serialize)]
+pub struct RoleNote {
+    pub vault_id: String,
+    pub note_id: String,
+    pub title: String,
+    pub path: String,
+    /// The folder it is grouped under: `agents` or `projects/<name>/agents`.
+    pub folder: String,
+    /// The first line of its frontmatter `summary:`, when it has one.
+    pub summary: Option<String>,
+}
+
+const ROLE_SUMMARY_MAX: usize = 160;
+
+/// Every role note in Kit, read live (138e). No Kit vault is no roles, not an
+/// error: the launcher then offers only None.
+pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote>> {
+    crews_owner(actor)?;
+    let Ok(vault_id) = kit_vault_id(state).await else {
+        return Ok(Vec::new());
+    };
+    let handle = vault_of(state, actor, Access::Read, &vault_id).await?;
+    let ix = handle.indexer.lock().await;
+    let mut roles = Vec::new();
+    for note in ix.db.list_notes()? {
+        if !is_role_path(&note.path) {
+            continue;
+        }
+        let content = ix.vault.read(&note.path)?;
+        let summary = crate::frontmatter::parse(&content)
+            .frontmatter
+            .and_then(|fm| crate::frontmatter::get_scalar(&fm.raw, "summary"))
+            .and_then(|s| s.lines().next().map(str::trim).map(str::to_string))
+            .filter(|s| !s.is_empty())
+            .map(|s| match s.char_indices().nth(ROLE_SUMMARY_MAX) {
+                Some((cut, _)) => format!("{}…", s[..cut].trim_end()),
+                None => s,
+            });
+        let folder = note
+            .path
+            .rsplit_once('/')
+            .map(|(dir, _)| dir.to_string())
+            .unwrap_or_default();
+        roles.push(RoleNote {
+            vault_id: vault_id.clone(),
+            note_id: note.id,
+            title: note.title,
+            path: note.path,
+            folder,
+            summary,
+        });
+    }
+    roles.sort_by(|a, b| {
+        (a.folder != "agents", &a.folder, a.title.to_lowercase()).cmp(&(
+            b.folder != "agents",
+            &b.folder,
+            b.title.to_lowercase(),
+        ))
+    });
+    Ok(roles)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoleRef {
+    pub vault_id: String,
+    pub note_id: String,
+}
+
+/// Sets a session's role label, or clears it with `None`. The note must be a
+/// role note in Kit at the time it is set.
+pub async fn set_session_role(
+    state: &Shared,
+    actor: &Actor,
+    session_id: &str,
+    role: Option<RoleRef>,
+) -> ApiResult<()> {
+    crews_owner(actor)?;
+    let label = match role {
+        Some(r) => {
+            let kit = kit_vault_id(state).await?;
+            let handle = vault_of(state, actor, Access::Read, &kit).await?;
+            let row = handle.indexer.lock().await.db.get_note(&r.note_id)?;
+            if r.vault_id != kit || !row.is_some_and(|n| is_role_path(&n.path)) {
+                return Err(bad_request(
+                    "a role is a note in Kit's agents/ folder or a project's agents/ folder",
+                ));
+            }
+            Some(crate::agent::RoleLabel {
+                vault_id: r.vault_id,
+                note_id: r.note_id,
+            })
+        }
+        None => None,
+    };
+    state
+        .agent
+        .set_role(session_id, label.as_ref())
+        .map_err(agent_error)
 }
 
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
