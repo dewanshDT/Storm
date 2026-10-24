@@ -95,20 +95,49 @@ sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```sh
 sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
-sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
-  codex login --device-auth
 ```
 
 **Codex** keeps its login and its conversations in Storm's own Codex home,
 `agents/codex` under the host's state directory, not in `~/.codex`: Storm
-writes its own session settings there, so log it in with `CODEX_HOME` set as
-above (or `codex login --with-api-key`). Everything else in that home is
-yours: MCP servers you add with `codex mcp add` (with the same `CODEX_HOME`),
-plugins, ChatGPT apps, hooks. They load in Storm sessions beside your
-integrations, and Codex asks its own questions about them, such as whether
-to trust a workspace's own `.codex/` settings. Codex sessions run **without
-Codex's own sandbox**: it needs user namespaces, which this unit forbids, so
-the `storm-runtime` account is the boundary, as it is for every agent. Codex
+writes its own session settings there. The easiest way to log it in, on every
+platform, is a **Shell** session on the host (in the app, a new session with
+the agent **Shell**). It already runs as the host's account, in a directory
+that account can read, with the host's `PATH`:
+
+```sh
+export CODEX_HOME=/var/lib/storm-runtime/agents/codex
+mkdir -p "$CODEX_HOME" && codex login --device-auth
+```
+
+Codex refuses a `CODEX_HOME` that does not exist yet, hence the `mkdir`.
+`--device-auth` prints a link and a code, so you finish signing in on
+whichever device you are using (or use `codex login --with-api-key`). On
+macOS the Codex home is `/Library/StormRuntime/state/agents/codex`. On
+Windows, in the PowerShell a Shell session runs:
+
+```powershell
+$env:CODEX_HOME = 'C:\ProgramData\StormRuntime\state\agents\codex'
+New-Item -ItemType Directory -Force $env:CODEX_HOME | Out-Null; codex login --device-auth
+```
+
+From the host's own terminal instead:
+
+```sh
+cd / && sudo -u storm-runtime mkdir -p /var/lib/storm-runtime/agents/codex
+sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
+  "$(command -v codex)" login --device-auth
+```
+
+The `cd /` matters: Codex reads settings from the current directory, and the
+account cannot read your home.
+
+Everything else in that home is yours: MCP servers you add with `codex mcp
+add` (with the same `CODEX_HOME`), plugins, ChatGPT apps, hooks. They load in
+Storm sessions beside your integrations, and Codex asks its own questions
+about them, such as whether to trust a workspace's own `.codex/` settings.
+Codex sessions run **without Codex's own sandbox**: it needs user namespaces,
+which this unit forbids, so the `storm-runtime` account is the boundary, as it
+is for every agent. Codex
 still asks before the commands it is unsure of and before every Storm tool.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
@@ -247,7 +276,7 @@ have, and it fails there. The token route works:
 
    Type `CLAUDE_CODE_OAUTH_TOKEN=<the token>`, then Enter, then Ctrl-D.
 3. Name that file in `runtime.toml`. Listing providers replaces the
-   defaults, so list all three:
+   defaults, so list every agent you want offered:
 
    ```toml
    [[providers]]
@@ -256,6 +285,9 @@ have, and it fails there. The token route works:
 
    [[providers]]
    id = "opencode"
+
+   [[providers]]
+   id = "codex"
 
    [[providers]]
    id = "shell"
@@ -267,7 +299,24 @@ have, and it fails there. The token route works:
 cd / && sudo -u _stormruntime -H opencode auth login
 ```
 
-Storm never stores or transmits what is in it. Also, a login running as
+**Codex** logs in most easily from a Shell session on this host (see
+[Linux](#linux) for why it has its own home):
+
+```sh
+export CODEX_HOME=/Library/StormRuntime/state/agents/codex
+mkdir -p "$CODEX_HOME" && codex login --device-auth
+```
+
+From your own terminal, name Homebrew's copy by its full path, since `sudo`
+may find one in your own home that the account cannot run:
+
+```sh
+cd / && sudo -u _stormruntime mkdir -p /Library/StormRuntime/state/agents/codex
+sudo -u _stormruntime -H env CODEX_HOME=/Library/StormRuntime/state/agents/codex \
+  /opt/homebrew/bin/codex login --device-auth
+```
+
+Storm never stores or transmits these logins. Also, a login running as
 `_stormruntime` is ended if the host restarts during it (the
 `--exclusive-account` sweep), so log in while the host is up.
 
