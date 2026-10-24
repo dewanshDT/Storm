@@ -1,0 +1,556 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@500&family=Patrick+Hand&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#f0eee9;font-family:system-ui,sans-serif}a{color:#2a62d6}a:hover{color:#1b438f}</style>
+</helmet>
+
+<section id="t3" style="padding:40px 44px 56px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid rgba(0,0,0,.08);font-family:system-ui,sans-serif">
+  <div style="display:flex;align-items:baseline;gap:10px">
+    <a href="#t3" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none">3</a>
+    <span style="font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a">Crews inside the Storm v2 Agents page · chosen direction</span>
+  </div>
+  <div style="max-width:960px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">This round puts crews into the approved Agents page with as little added as possible. Crews are collapsible sections in the existing sidebar, above the Running / Ended list, and the Overview shows one card per crew. Rows, marks, status badges, the session view and the closable, resizable Details panel are unchanged. A crew adds three things: a colour square, a name, and a small mono role tag on its members. Everything is drawn in Storm dark with the v2 tokens. Frames marked <b>Phase 3 preview</b> show orchestration that isn't in V1.</div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:26px 0 6px">Decided · collapsible sections (from 1a), not a board or a tree</div>
+  <div style="display:grid;grid-template-columns:150px repeat(3,minmax(0,1fr));max-width:1100px;border:1px solid rgba(0,0,0,.1);border-radius:8px;overflow:hidden;background:#fff;font:400 12.5px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="padding:9px 12px;background:#f5f4f0;font-weight:600"></div>
+    <div style="padding:9px 12px;background:#f5f4f0;font-weight:600"><a href="#1a">1a</a> Sections · <span style="color:#2a62d6">chosen</span></div>
+    <div style="padding:9px 12px;background:#f5f4f0;font-weight:600"><a href="#1b">1b</a> Board</div>
+    <div style="padding:9px 12px;background:#f5f4f0;font-weight:600"><a href="#1c">1c</a> Lead-led tree</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08);font-weight:600">Scanability</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">The same rows as today, so every running session is visible in one column, in or out of a crew.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Strong inside one crew, but you can only see one crew at a time, and loose sessions are hidden behind it.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Members are hidden under the Lead until you expand it. A crew reads as a single session.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08);font-weight:600">Session management</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Open, end and dismiss work exactly as now. Crew actions sit on the header and the crew page.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Dragging changes roles, which makes the role look like a workflow stage. That's a Kanban, which you ruled out.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Crew actions live inside one session's Details panel, so ending the Lead becomes ambiguous.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08);font-weight:600">Nesting</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">One level, the crew. Lineage gets its own visual (below), so the two never compete.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">There's no place for a parent and child inside a column.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">It mixes up membership and lineage: the crew <i>is</i> the tree, so you can't group unrelated sessions.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08);font-weight:600">Orchestration later</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Sessions an agent starts add a dashed indent inside the section. Nothing in V1 has to change for that.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">Orchestration would need a second view on top of the board.</div>
+    <div style="padding:9px 12px;border-top:1px solid rgba(0,0,0,.08)">The best fit for orchestration, but it designs V1 around a capability that doesn't exist yet.</div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">In context · desktop and phone</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="3a" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3a" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2a78d6;color:#fff;border-radius:5px;text-decoration:none">3a</a>Overview · mixed state: one crew open, one collapsed, loose sessions below</div>
+      <dc-import name="Agents Crews Frame" scene="overview" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">Crews come first, both in the sidebar and as cards, followed by sessions that aren't in a crew. Within a crew, running sessions come before ended ones, and ended sessions stay dimmed until you dismiss them. A collapsed crew shows a one-line summary, and the overview card shows a stack of its members' marks. The overview's crew cards replace the approved grouping by workspace. Workspace stays visible as secondary text on every row: "storm · 40m" in the sidebar, and "storm on build-vm" on the crew page. Role tags appear only on sessions that have a role.</div>
+    </div>
+    <div id="3b" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3b" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3b</a>Phone · Agents list</div>
+      <dc-import name="Agents Crews Frame" scene="p-list" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">The same order as desktop. Crew members sit behind the same solid left edge as on desktop. Tap a crew row to open the crew screen, or tap ▾ to collapse it. There's no dragging on the phone: long-press any session (<a href="#3f">3f</a>), or use Crew in the session details sheet.</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="3c" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3c" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3c</a>Crew page · members, knowledge, and the crew menu open</div>
+      <dc-import name="Agents Crews Frame" scene="crew" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">Clicking a crew header opens this page. "Started from" and "Wrote" are put together from each member's existing context note and Wrote list; a crew has no notes of its own and no task concepts. The ··· menu holds the crew actions. End all running asks for confirmation and lists every session it will stop.</div>
+    </div>
+    <div id="3d" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3d" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3d</a>Phone · crew screen</div>
+      <dc-import name="Agents Crews Frame" scene="p-crew" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">The crew screen is pushed onto the stack, and the place bubble becomes the back chevron, as on the session screen. ··· opens the crew actions as a sheet. The pill reads "New session in crew".</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="3e" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3e" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3e</a>A crew member's session · Details panel open on About</div>
+      <dc-import name="Agents Crews Frame" scene="session" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">The session view is the approved one. The only additions are the crew chip and role tag on the meta line, plus Crew and Role rows in About. The Details panel is still the 320px closable, resizable panel; there's no third column. Context and Wrote work as before. That's how a member links to its note and to what it wrote.</div>
+    </div>
+    <div id="3f" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3f" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3f</a>Phone · long-press a session</div>
+      <dc-import name="Agents Crews Frame" scene="p-sheet" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This is the phone equivalent of dragging. Long-press opens a sheet to move the session to a crew, start a new crew, or take it out of one, and to set its role. Roles are read live from Kit.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">Interactions</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="3g" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3g" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3g</a>Drag one loose session onto another → Make crew</div>
+      <dc-import name="Agents Crews Frame" scene="drag" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">What dropping does depends on the target. On a loose session, it makes a new crew; the name field opens for editing, prefilled from the shared context note or "New crew". On a crew header or member, it joins that crew. Between rows in a crew, it reorders. On Running or Ended, it leaves the crew. Crew headers can be dragged to reorder crews. Dropping never assigns a role.</div>
+    </div>
+    <div id="3h" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3h" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3h</a>Phone · launcher with Crew and Role</div>
+      <dc-import name="Agents Crews Frame" scene="p-launch" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">Started from the crew screen, so Crew is already set. Role defaults to None. Picking one adds that role's Kit note to the context, and the note under the fields says so.</div>
+    </div>
+  </div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="3i" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3i" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3i</a>Select several → Make crew</div>
+      <dc-import name="Agents Crews Frame" scene="select" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">⌘-click or Shift-click selects rows, and a bar appears at the foot of the sidebar. Esc clears the selection. This is the keyboard-friendly route to the same result as dragging.</div>
+    </div>
+  </div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start;padding-top:18px">
+    <div id="3o" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3o" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3o</a>Start work from this note → launcher creates the crew</div>
+      <dc-import name="Agents Crews Frame" scene="launch" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This is the approved launcher with one new row. Opened from a note's Start session, it offers "New crew: {note title}" as a choice; the default stays None, so a plain session is still one click. A crew created here is only a label on the session, with no project or task attached. Role stays None unless you pick one.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">States</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="3j" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3j" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3j</a>Empty · no crews yet</div>
+      <dc-import name="Agents Crews Frame" scene="nocrews" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">With no crews, the sidebar is the approved Running / Ended list, and the overview shows one quiet hint above the sessions. The hint disappears after the first crew is made. With no sessions at all, the approved first-session and no-host states apply unchanged.</div>
+    </div>
+    <div id="3k" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3k" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3k</a>Loading</div>
+      <dc-import name="Agents Crews Frame" scene="loading" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">Skeletons without shimmer, as in the rest of Storm. Crew headers appear only once crews have loaded, so a session never jumps from loose into a crew while you're looking.</div>
+    </div>
+    <div id="3l" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3l" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3l</a>Narrow desktop · 900 px, Details panel closed</div>
+      <dc-import name="Agents Crews Frame" scene="narrow" hint-size="900px,640px"></dc-import>
+      <div style="max-width:900px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">At the breakpoint the sidebar narrows, and crew summaries shorten to "2 run". Names cut off with an ellipsis, while role tags and marks keep their size. The Details panel is closed, and the toggle in the header brings it back.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">Phase 3 preview · not in V1</div>
+  <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+    <div id="3m" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3m" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3m</a>Lineage: a session an agent started, inside a crew</div>
+      <dc-import name="Agents Crews Frame" scene="phase3" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This frame is labelled because it shows something V1 can't do. test-gateway was started by gateway-impl. It's indented under its parent with a dashed line, its sub-line reads "↳ from gateway-impl", its role tag is dashed because an agent set it, and About says who started it and that you approved it.</div>
+    </div>
+    <div id="3n" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3n" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3n</a>Settings · AI access, the global spawning default</div>
+      <dc-import name="Agents Crews Frame" scene="settings" hint-size="1280px,800px"></dc-import>
+      <div style="max-width:1280px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">A future concept, not shipped Settings. In V1, AI access is unchanged and this row doesn't exist. When Phase 3 ships, "Let agents start agents" is a global setting, off by default. The copy separates it from a possible per-session setting in the launcher, which could only narrow it.</div>
+    </div>
+    <div id="3p" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#3p" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">3p</a>Phone · lineage on the crew screen</div>
+      <dc-import name="Agents Crews Frame" scene="p-phase3" hint-size="390px,844px"></dc-import>
+      <div style="max-width:390px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">The same rule as desktop: the child sits on a dashed indent under its parent, with "↳ from gateway-impl" and a dashed role tag.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:34px 0 6px">Two relationships, drawn differently</div>
+  <div style="display:grid;grid-template-columns:repeat(2,minmax(0,440px));gap:20px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+      <b>Crew membership · you decide · V1</b>
+      <div>Drawn as a section: a header with a colour square and name, and members inside it, set off by a single solid line on the left.</div>
+      <div>Any sessions can be grouped, related or not. You can move a session in, out or between crews at any time. It's only a label on the server.</div>
+    </div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px 16px;display:flex;flex-direction:column;gap:6px">
+      <b>Lineage · an agent started it · Phase 3</b>
+      <div>Drawn as a dashed indent under the parent, a "↳ from parent" sub-line, and a "started by …" link in the session header.</div>
+      <div>Lineage is fixed and can't be edited. If you move the child to another crew, the indent goes away there, but "↳ from …" and the header link stay, so the relationship is never lost.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">Decided</div>
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:1000px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div>1. <b>Roles aren't unique seats.</b> Several sessions can have the same role. A role describes the kind of work a session does; it doesn't define a team structure.</div>
+    <div>2. <b>Role tags are neutral.</b> Mono text in a 1px outline: solid when you set the role, dashed when an agent did. The crew colour is the only colour a crew adds. No colours come from Kit notes.</div>
+    <div>3. <b>Membership and lineage are separate.</b> A crew is a coloured section with a solid left edge. A child session sits on a dashed indent with "↳ from …" and "Started by". Both appear on desktop and phone.</div>
+    <div>4. <b>The default is collapsible sections</b>, with sessions that aren't in a crew listed below. The crew page is the focused view for one crew.</div>
+    <div>5. <b>Spawning isn't in the shipped experience.</b> It appears only in frames labelled Phase 3 (<a href="#3m">3m</a>, <a href="#3n">3n</a>, <a href="#3p">3p</a>).</div>
+  </div>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:24px 0 6px">Still open</div>
+  <div style="display:flex;flex-direction:column;gap:8px;max-width:1000px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div>• <b>Collapse state:</b> per device (like the Details panel width) or synced? I've assumed per device.</div>
+    <div>• <b>Empty crews:</b> once every member is dismissed, delete the crew (with a few seconds of Undo) or keep it? Round 1 assumed it's deleted.</div>
+    <div>• <b>Name for a crew made by dragging</b> when the two sessions have different context notes: use the target's note, or always "New crew"?</div>
+  </div>
+  <div style="display:none">
+    <div><b>1. Can a role note declare "one per crew"?</b> <span style="color:#2a62d6">Recommended: not in V1.</span> Duplicate roles are allowed, and the crew page simply lists both. <i>If yes</i> (for example a <code>per_crew: 1</code> property), the launcher and the move sheet must grey out a role that's taken and explain why, a drag can be refused, and Storm starts enforcing rules written in notes. That's a new kind of coupling between Kit content and app behaviour. <span style="color:#c2410c">Unresolved.</span></div>
+    <div><b>2. Role colours.</b> <span style="color:#2a62d6">Recommended: neutral tags.</span> Mono text in a 1px outline, solid if you set the role and dashed if an agent did. The crew's colour square is the only colour a crew adds. <i>If role colours came from Kit metadata</i>, the colours would compete with status (accent = running, danger = failed), break the rule that each colour has one meaning, and a badly chosen colour in a note could fail contrast. <span style="color:#c2410c">Unresolved.</span></div>
+    <div><b>3. Membership vs lineage.</b> <span style="color:#2a62d6">Recommended: section vs dashed indent</span>, as described above. <i>If lineage defined the crew</i> (<a href="#1c">1c</a>), you couldn't group unrelated sessions. <i>If only a tag showed lineage</i>, a parent with three children would look like four unrelated sessions. <span style="color:#c2410c">Unresolved; this only affects Phase 3.</span></div>
+    <div><b>4. Default view.</b> <span style="color:#2a62d6">Recommended: collapsible sections plus a crew page</span> (<a href="#3a">3a</a>, <a href="#3c">3c</a>). <i>A board</i> (<a href="#1b">1b</a>) brings in a Kanban reading and hides loose sessions. <i>A tree with a separate members view</i> (<a href="#1c">1c</a>) needs two screens for one crew and depends on lineage. <span style="color:#c2410c">Unresolved.</span></div>
+    <div><b>5. Show the spawning setting before Phase 3?</b> <span style="color:#2a62d6">Recommended: hide it until the capability ships.</span> Showing a disabled row would promise something that doesn't exist yet. <i>If it's shown early</i>, it has to stay off and say "not available yet". <span style="color:#c2410c">Unresolved.</span></div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 6px">What it takes to build</div>
+  <div style="max-width:1000px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div>• <b>UI only:</b> sections, collapse state (kept per device, like the Details panel width), drag and drop, multi-select, the long-press sheet, and role tag styling.</div>
+    <div>• <b>New server work, V1:</b> a crew object (name, colour word, order) and membership (session, order, role note id, who set it), synced like sessions. Also: the launcher passing the role note as extra context, and End all / Dismiss all, which can loop over the existing calls.</div>
+    <div>• <b>Already depends on v2 server work:</b> the crew page's Started from and Wrote lists come from each session's context note and Wrote list, which the v2 handoff already marks as new API.</div>
+    <div>• <b>Phase 3, not designed for V1:</b> agents starting sessions, a parent link on sessions, the approval prompt, and the "Let agents start agents" setting.</div>
+  </div>
+</section>
+
+<section id="t2" style="padding:40px 44px 48px;display:flex;flex-direction:column;gap:10px;border-bottom:1px solid rgba(0,0,0,.08)">
+  <div style="display:flex;align-items:baseline;gap:10px">
+    <a href="#t2" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none">2</a>
+    <span style="font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a">Plain by default · roles only when someone sets them</span>
+  </div>
+  <div style="max-width:900px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.65);text-wrap:pretty">A crew member is a plain agent session unless a role is set explicitly, either by you in the launcher or by an agent when it starts another agent. A crew doesn't need a Lead. Sessions started by an agent hang under the session that started them, which is why this round builds on the tree from <a href="#1c">1c</a>. The same rules apply to <a href="#1a">1a</a> (plain members show no tag) and <a href="#1b">1b</a> (plain members go in a "Members" column).</div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start;padding-top:18px">
+    <div id="2a" style="flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#2a" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">2a</a>Mixed crew: plain members, a role you set, and a session started by an agent</div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+        <div style="width:820px;height:480px;display:grid;grid-template-columns:44px 250px minmax(0,1fr);font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="background:#f5f5f2;border-right:1.5px solid #222;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px 0">
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">N</div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#222;color:#fff">A</div>
+            <div style="flex:1"></div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">⚙</div>
+          </div>
+          <div style="border-right:1.5px solid #222;padding:12px;display:flex;flex-direction:column;gap:5px;overflow:hidden">
+            <div style="font-size:16px">Agents</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:4px 8px;background:#222;color:#fff;text-align:center">＋ New session</div>
+            <div style="color:#888">Overview</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Crews</div>
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 4px"><span>▾</span><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a;flex:none"></span><span style="flex:1">Gateway release</span><span style="font-size:11px;color:#888">3 run</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">C</span><span style="flex:1">gateway-impl</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px;background:#eee;border-radius:5px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">C</span><span style="flex:1">plan-release</span><span style="font-size:10px;letter-spacing:.04em;border:1px solid #222;border-radius:4px;padding:0 4px">LEAD</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:30px"><span style="color:#bbb">└</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">O</span><span style="flex:1">review-gateway</span><span style="font-size:10px;letter-spacing:.04em;border:1px dashed #666;color:#666;border-radius:4px;padding:0 4px">REVIEWER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">&gt;_</span><span style="flex:1">shell-1</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Running</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">O</span>docs-pass</div>
+            <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15;padding-top:10px">No tag means a plain agent. A solid tag is a role you set; a dashed tag was set by an agent. Indented rows were started by the row above them.</div>
+          </div>
+          <div style="display:flex;flex-direction:column;min-height:0">
+            <div style="padding:10px 14px;border-bottom:1.5px solid #222;display:flex;flex-direction:column;gap:3px">
+              <div style="display:flex;align-items:center;gap:8px"><span style="font-size:17px">review-gateway</span><span style="font-size:10px;border:1px dashed #666;color:#666;border-radius:4px;padding:0 4px">REVIEWER</span><span style="color:#2a62d6">● running</span><span style="flex:1"></span><span style="border:1.5px solid #222;border-radius:7px;padding:1px 7px">End</span></div>
+              <div style="display:flex;align-items:center;gap:6px;color:#666;font-size:13px"><span style="border:1.5px solid #2a62d6;color:#2a62d6;border-radius:6px;padding:0 6px">↳ Started by plan-release ›</span><span>OpenCode · storm on build-vm · 4m</span></div>
+            </div>
+            <div style="flex:1;display:grid;grid-template-columns:minmax(0,1fr) 220px;min-height:0">
+              <div style="background:#262626;color:#ddd;font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:10px;display:flex;flex-direction:column;gap:4px"><span>$ opencode</span><span>› task from plan-release: review the gateway diff</span><span>› read personal/projects/storm/Gateway spec</span><span>› waiting for input</span></div>
+              <div style="border-left:1.5px solid #222;padding:10px;display:flex;flex-direction:column;gap:7px">
+                <div style="display:flex;gap:6px;font-size:13px"><span style="color:#888">Context</span><span style="color:#888">Wrote</span><span style="background:#222;color:#fff;border-radius:5px;padding:0 5px">About</span></div>
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Started by</div>
+                <div style="font-size:13px">plan-release (agent), on your behalf</div>
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Role</div>
+                <div style="font-size:13px">Reviewer · set by plan-release</div>
+                <div style="color:#2a62d6;font-size:13px">Change role ▾ · Clear role</div>
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Access</div>
+                <div style="font-size:13px">Same as plan-release or less. Writes: none.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="2b" style="flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#2b" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">2b</a>Launcher: Role defaults to None</div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+        <div style="width:360px;padding:16px 18px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3;position:relative">
+          <div style="font-size:18px">New session</div>
+          <div style="display:grid;grid-template-columns:80px minmax(0,1fr);gap:6px;align-items:center">
+            <span style="color:#666">Host</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">build-vm ▾</span>
+            <span style="color:#666">Workspace</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">storm ▾</span>
+            <span style="color:#666">Agent</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">Claude Code ▾</span>
+            <span style="color:#666">Crew</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">Gateway release ▾</span>
+            <span style="color:#2a62d6">Role</span><span style="border:2px solid #2a62d6;border-radius:7px;padding:2px 8px;color:#2a62d6">None ▾</span>
+          </div>
+          <div style="margin-left:86px;border:1.5px solid #222;border-radius:8px;background:#fff;box-shadow:0 6px 16px rgba(0,0,0,.14);padding:6px 8px;display:flex;flex-direction:column;gap:3px">
+            <span style="background:#eee;border-radius:4px;padding:0 4px">None · a plain agent ✓</span>
+            <span style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:2px">From kit / agents</span>
+            <span>Architect</span><span>Coder</span><span>Lead</span><span>Researcher</span><span>Reviewer</span>
+            <span style="color:#888;font-size:12px;border-top:1px solid #ddd;padding-top:3px">Edit roles in Kit ›</span>
+          </div>
+          <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15">The list is read live from Kit's role notes. Add a note and it shows up here; delete one and it's gone. Leaving the role as None launches a plain agent.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Rules</div>
+  <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+    <div>• <b>Plain by default.</b> A session has no role unless one is set in the launcher, or by the agent that started it. Dragging a session into a crew doesn't give it a role.</div>
+    <div>• <b>Who set the role is visible.</b> A solid tag means you set it; a dashed tag means an agent did. About shows "set by …". You can change or clear any role later, and the tag turns solid once you do.</div>
+    <div>• <b>No required Lead.</b> A crew can be all plain members. Lead is a role like any other, coming from its Kit note.</div>
+    <div>• <b>Agent-started sessions</b> join the crew of the session that started them, nested under it. If the starter isn't in a crew, a crew is created around it and named after the starter's context note.</div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Decided</div>
+  <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+    <div>1. <b>Agents starting agents.</b> A started session never gets more access than the session that started it: the same vaults or fewer, the same write vault or none, and the same integrations. Each start waits for your approval, unless you've turned on <b>Let agents start agents</b> in Settings › AI access, under Storm agents (off by default). The approval prompt shows the same access summary as the launcher.</div>
+    <div>2. <b>Backend.</b> This needs a new Storm tool that lets an agent start a session (host, workspace, agent, role, parent), plus a "started by" link on sessions. It's orchestration work, planned for Phase 3, and it isn't in V1.</div>
+    <div>3. <b>Roles come entirely from Kit.</b> The role list is every note in Kit's <code>agents/</code> folder, read live, with nothing built in. Lead, Coder and Reviewer exist only because Kit is seeded with those notes.</div>
+  </div>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:24px 0 4px">What follows from roles being dynamic</div>
+  <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+    <div>• <b>A role is a link to its Kit note</b>, stored by the note's id, not its name. Renaming the note renames the role everywhere. The tag shows the note's title in capitals.</div>
+    <div>• <b>Deleted role note:</b> sessions keep the tag, struck through and dimmed, with "Role note was deleted" in About. You can clear it or pick another role. Nothing breaks, and nothing changes silently.</div>
+    <div>• <b>"Lead" is no longer special in code.</b> Earlier rounds had a one-Lead-per-crew rule; with roles coming from notes there's no built-in Lead to enforce it on. Any limit would have to come from the note itself, which is an open question (below).</div>
+    <div>• <b>No Kit vault, or an empty agents folder:</b> the Role row offers only None, with "Add roles in Kit ›".</div>
+    <div>• <b>Launching with a role</b> gives the agent that role's note as context, alongside any context note you picked. Dragging a session in, or setting a role after launch, only sets the label (open question 1 from round 1, now resolved).</div>
+  </div>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:24px 0 4px">Still open</div>
+  <div style="max-width:900px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+    <div>• <b>One-per-crew limits.</b> Should a role note be able to say "one per crew", for example with a property like <code>per_crew: 1</code>? If not, a crew can have two Leads.</div>
+    <div>• <b>Role colour.</b> Should the tag pick up the role note's colour property? It uses the existing vault palette words, so it needs no new tokens.</div>
+  </div>
+</section>
+
+<section id="t1" style="padding:40px 44px 48px;display:flex;flex-direction:column;gap:10px">
+  <div style="display:flex;align-items:baseline;gap:10px">
+    <a href="#t1" style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#1a1a1a;color:#fff;border-radius:4px;text-decoration:none">1</a>
+    <span style="font:600 13px/1.2 system-ui,sans-serif;color:#1a1a1a">Agent crews: three grouping models</span>
+  </div>
+  <div style="max-width:880px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.65);text-wrap:pretty">A crew is a set of sessions with roles: one Lead, plus Coders and Reviewers. Each session belongs to at most one crew. Crews are stored on the server, so every device sees them. Ungrouped sessions stay in a plain Running / Ended list below the crews. Inside a crew, running sessions come before ended ones, and ended sessions stay dimmed until you dismiss them. All three models use the same creation paths and group actions; they differ in how a crew is shown and what you drag onto what.</div>
+
+  <div style="display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start;padding-top:18px">
+
+    <div id="1a" style="flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#1a" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">1a</a>Crew sections · a list in the sidebar, roles as tags</div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+        <div style="width:820px;height:480px;display:grid;grid-template-columns:44px 230px minmax(0,1fr);font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="background:#f5f5f2;border-right:1.5px solid #222;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px 0">
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">N</div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#222;color:#fff">A</div>
+            <div style="flex:1"></div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">⚙</div>
+          </div>
+          <div style="border-right:1.5px solid #222;padding:12px;display:flex;flex-direction:column;gap:5px;overflow:hidden;position:relative">
+            <div style="font-size:16px">Agents</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:4px 8px;background:#222;color:#fff;text-align:center">＋ New session</div>
+            <div style="color:#888">Overview</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Crews</div>
+            <div style="display:flex;align-items:center;gap:6px;background:#eee;border-radius:5px;padding:2px 4px"><span>▾</span><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a;flex:none"></span><span style="flex:1">Gateway release</span><span style="font-size:11px;color:#888">2 run</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">C</span><span style="flex:1">gateway-plan</span><span style="font-size:10px;letter-spacing:.04em;border:1px solid #222;border-radius:4px;padding:0 4px">LEAD</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">C</span><span style="flex:1">gateway-impl</span><span style="font-size:10px;letter-spacing:.04em;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 4px">CODER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:16px;opacity:.45"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none">O</span><span style="flex:1">review-pr</span><span style="font-size:10px;letter-spacing:.04em;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 4px">REVIEWER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 4px"><span>▸</span><span style="width:10px;height:10px;border-radius:3px;background:#b9a6e3;flex:none"></span><span style="flex:1">Docs crew</span><span style="font-size:11px;color:#888">1 run · 2 end</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Running</div>
+            <div style="display:flex;align-items:center;gap:6px;border:1.5px dashed #bbb;border-radius:5px;padding:1px 4px;color:#bbb"><span style="width:18px;height:18px;border:1.5px dashed #bbb;border-radius:5px;flex:none"></span><span>docs-pass</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Ended</div>
+            <div style="display:flex;align-items:center;gap:6px;border:2px solid #2a62d6;border-radius:5px;padding:1px 4px;background:#eef3fd"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none;opacity:.5">C</span><span style="flex:1;color:#666">lint-fix</span><span style="font-size:11px;color:#2a62d6">＋ Create crew</span></div>
+            <div style="position:absolute;left:58px;top:342px;transform:rotate(-3deg);display:flex;align-items:center;gap:6px;border:1.5px solid #222;border-radius:5px;padding:2px 6px;background:#fff;box-shadow:0 6px 14px rgba(0,0,0,.18)"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span><span>docs-pass</span></div>
+          </div>
+          <div style="padding:16px 20px;display:flex;flex-direction:column;gap:9px;position:relative;overflow:hidden">
+            <div style="display:flex;align-items:center;gap:8px"><span style="width:14px;height:14px;border-radius:4px;background:#9cc59a"></span><span style="font-size:20px">Gateway release</span><span style="color:#888">· 3 sessions · 2 running</span></div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap">
+              <span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px;background:#222;color:#fff">＋ New session in crew</span>
+              <span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">End all running</span>
+              <span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">Dismiss ended</span>
+              <span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">⋯</span>
+            </div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:4px">Lead</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:6px 9px;display:flex;align-items:center;gap:8px"><span style="width:20px;height:20px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span><span style="flex:1">gateway-plan <span style="color:#888">· build-vm · storm</span></span><span style="color:#2a62d6">● running</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Coders</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:6px 9px;display:flex;align-items:center;gap:8px"><span style="width:20px;height:20px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span><span style="flex:1">gateway-impl <span style="color:#888">· build-vm · storm</span></span><span style="color:#2a62d6">● running</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Reviewers</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:6px 9px;display:flex;align-items:center;gap:8px;opacity:.5"><span style="width:20px;height:20px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span><span style="flex:1">review-pr <span style="color:#888">· mac-mini · storm</span></span><span>completed · Run again</span></div>
+            <div style="color:#888">＋ Add a Reviewer</div>
+            <div style="position:absolute;right:16px;bottom:14px;width:250px;font-family:'Caveat',cursive;font-size:17px;color:#c2410c;line-height:1.15">Drop a session on another one to make a crew. The session you drop onto becomes Lead. Drag rows to reorder; drag one out of a crew to ungroup it.</div>
+          </div>
+        </div>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden;align-self:flex-start">
+        <div style="width:250px;height:500px;padding:12px;display:flex;flex-direction:column;gap:7px;position:relative;box-sizing:border-box;font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="display:flex;align-items:center"><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">A</span><span style="flex:1"></span><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">⚙</span></div>
+          <div style="font-size:20px">Agents</div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Crews</div>
+          <div style="display:flex;align-items:center;gap:6px"><span>▾</span><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a"></span><span style="flex:1">Gateway release</span></div>
+          <div style="padding-left:16px">gateway-plan <span style="font-size:10px;border:1px solid #222;border-radius:4px;padding:0 3px">LEAD</span></div>
+          <div style="padding-left:16px">gateway-impl <span style="font-size:10px;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 3px">CODER</span></div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Running</div>
+          <div style="background:#eee;border-radius:5px;padding:2px 4px">docs-pass</div>
+          <div style="position:absolute;inset:0;background:rgba(0,0,0,.18)"></div>
+          <div style="position:absolute;left:0;right:0;bottom:0;background:#fff;border:1.5px solid #222;border-radius:10px 10px 0 0;padding:12px;display:flex;flex-direction:column;gap:7px">
+            <div style="font-size:16px">docs-pass</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Move to crew</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a"></span><span style="flex:1">Gateway release</span><span style="color:#2a62d6">✓</span></div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:3px;background:#b9a6e3"></span><span style="flex:1">Docs crew</span></div>
+            <div style="color:#2a62d6">＋ New crew…</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Role</div>
+            <div style="display:flex;border:1.5px solid #222;border-radius:7px;overflow:hidden"><span style="flex:1;text-align:center;padding:2px">Lead</span><span style="flex:1;text-align:center;padding:2px;background:#222;color:#fff">Coder</span><span style="flex:1;text-align:center;padding:2px">Reviewer</span></div>
+          </div>
+        </div>
+      </div>
+      <div style="max-width:820px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This is the closest to today's sidebar and the cheapest to build. A crew is a collapsible section, and roles are tags on rows. Selecting a crew opens a crew page grouped by role, with the group actions. The weakness is that roles are only labels: nothing on screen shows how the sessions relate to each other.</div>
+    </div>
+
+    <div id="1b" style="flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#1b" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">1b</a>Crew board · role columns, drag cards between roles</div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+        <div style="width:820px;height:480px;display:grid;grid-template-columns:44px 200px minmax(0,1fr);font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="background:#f5f5f2;border-right:1.5px solid #222;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px 0">
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">N</div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#222;color:#fff">A</div>
+            <div style="flex:1"></div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">⚙</div>
+          </div>
+          <div style="border-right:1.5px solid #222;padding:12px;display:flex;flex-direction:column;gap:5px;overflow:hidden">
+            <div style="font-size:16px">Agents</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:4px 8px;background:#222;color:#fff;text-align:center">＋ New session</div>
+            <div style="color:#888">Overview</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Crews</div>
+            <div style="display:flex;align-items:center;gap:6px;background:#eee;border-radius:5px;padding:2px 4px"><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a"></span><span style="flex:1">Gateway release</span><span style="font-size:11px;color:#888">2 · 1</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 4px"><span style="width:10px;height:10px;border-radius:3px;background:#b9a6e3"></span><span style="flex:1">Docs crew</span><span style="font-size:11px;color:#888">1 · 2</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Running</div>
+            <div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span>docs-pass</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Ended</div>
+            <div style="display:flex;align-items:center;gap:6px;opacity:.5"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span>lint-fix</div>
+            <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15;padding-top:10px">Sidebar shows crews only as names, with running · ended counts. Click a crew to open its board.</div>
+          </div>
+          <div style="padding:16px 18px;display:flex;flex-direction:column;gap:9px;position:relative;overflow:hidden">
+            <div style="display:flex;align-items:center;gap:8px"><span style="width:14px;height:14px;border-radius:4px;background:#9cc59a"></span><span style="font-size:20px">Gateway release</span><span style="flex:1"></span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">End all</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">Dismiss ended</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">⋯</span></div>
+            <div style="flex:1;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;min-height:0">
+              <div style="border:1.5px solid #222;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:7px;background:#fafaf8">
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Lead · 1</div>
+                <div style="border:1.5px solid #222;border-radius:7px;padding:6px;background:#fff;display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span>gateway-plan</div><span style="color:#888;font-size:12px">storm · build-vm · 1h</span><span style="color:#2a62d6;font-size:12px">● running</span></div>
+              </div>
+              <div style="border:1.5px solid #222;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:7px;background:#fafaf8">
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Coders · 2</div>
+                <div style="border:1.5px solid #222;border-radius:7px;padding:6px;background:#fff;display:flex;flex-direction:column;gap:3px"><div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span>gateway-impl</div><span style="color:#888;font-size:12px">storm · build-vm · 40m</span><span style="color:#2a62d6;font-size:12px">● running</span></div>
+                <div style="border:1.5px dashed #bbb;border-radius:7px;height:58px"></div>
+                <div style="color:#888;font-size:13px">＋ Coder session</div>
+              </div>
+              <div style="border:2px solid #2a62d6;border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:7px;background:#eef3fd">
+                <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#2a62d6">Reviewers · 1</div>
+                <div style="border:1.5px solid #222;border-radius:7px;padding:6px;background:#fff;display:flex;flex-direction:column;gap:3px;opacity:.5"><div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span>review-pr</div><span style="color:#888;font-size:12px">storm · mac-mini</span><span style="font-size:12px">completed</span></div>
+                <div style="border:1.5px solid #222;border-radius:7px;padding:6px;background:#fff;display:flex;flex-direction:column;gap:3px;transform:rotate(3deg);box-shadow:0 8px 16px rgba(0,0,0,.18)"><div style="display:flex;align-items:center;gap:6px"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span>tests-impl</div><span style="color:#2a62d6;font-size:12px">→ becomes Reviewer</span></div>
+              </div>
+            </div>
+            <div style="font-family:'Caveat',cursive;font-size:17px;color:#c2410c;line-height:1.15">Drag a card to another column to change its role. Drop a card from the sidebar onto a column to add it to the crew with that role. Drop it onto a card to swap their roles.</div>
+          </div>
+        </div>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden;align-self:flex-start">
+        <div style="width:250px;height:500px;padding:12px;display:flex;flex-direction:column;gap:7px;position:relative;box-sizing:border-box;font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="display:flex;align-items:center"><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">‹</span><span style="flex:1"></span><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">⚙</span></div>
+          <div style="display:flex;align-items:center;gap:6px"><span style="width:12px;height:12px;border-radius:3px;background:#9cc59a"></span><span style="font-size:20px">Gateway release</span></div>
+          <div style="color:#888;font-size:12px">2 running · 1 ended · ⋯</div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Lead</div>
+          <div style="border:1.5px solid #222;border-radius:7px;padding:5px 7px">gateway-plan <span style="color:#2a62d6">●</span></div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Coders</div>
+          <div style="border:1.5px solid #222;border-radius:7px;padding:5px 7px">gateway-impl <span style="color:#2a62d6">●</span></div>
+          <div style="border:1.5px solid #222;border-radius:7px;padding:5px 7px">tests-impl <span style="color:#2a62d6">●</span></div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Reviewers</div>
+          <div style="border:1.5px solid #222;border-radius:7px;padding:5px 7px;opacity:.5">review-pr · completed</div>
+          <div style="flex:1"></div>
+          <div style="align-self:center;border:1.5px solid #222;border-radius:999px;padding:5px 14px;background:#222;color:#fff">＋ New session in crew</div>
+        </div>
+      </div>
+      <div style="max-width:820px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This one puts roles first. The crew page is a board with one column per role, and drag and drop is the main way to change the crew. Columns get cramped past about four roles or on narrow windows, so the board would need horizontal scroll. On the phone, the columns stack into role sections, and long-press opens Move to crew and Change role.</div>
+    </div>
+
+    <div id="1c" style="flex:none;display:flex;flex-direction:column;gap:9px;scroll-margin-top:16px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="#1c" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">1c</a>Lead-led tree · the Lead session is the crew, members hang under it</div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+        <div style="width:820px;height:480px;display:grid;grid-template-columns:44px 230px minmax(0,1fr);font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="background:#f5f5f2;border-right:1.5px solid #222;display:flex;flex-direction:column;align-items:center;gap:10px;padding:12px 0">
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">N</div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#222;color:#fff">A</div>
+            <div style="flex:1"></div>
+            <div style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center;font-size:13px;background:#fff">⚙</div>
+          </div>
+          <div style="border-right:1.5px solid #222;padding:12px;display:flex;flex-direction:column;gap:5px;overflow:hidden;position:relative">
+            <div style="font-size:16px">Agents</div>
+            <div style="border:1.5px solid #222;border-radius:7px;padding:4px 8px;background:#222;color:#fff;text-align:center">＋ New session</div>
+            <div style="color:#888">Overview</div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Crews</div>
+            <div style="display:flex;align-items:center;gap:6px;background:#eee;border-radius:5px;padding:2px 4px"><span>▾</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 2px #9cc59a">C</span><span style="flex:1">Gateway release</span><span style="font-size:10px;border:1px solid #222;border-radius:4px;padding:0 3px">LEAD</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:12px"><span style="color:#bbb">├</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span><span style="flex:1">gateway-impl</span><span style="font-size:10px;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 3px">CODER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:12px"><span style="color:#bbb">├</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">C</span><span style="flex:1">tests-impl</span><span style="font-size:10px;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 3px">CODER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding-left:12px;opacity:.45"><span style="color:#bbb">└</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span><span style="flex:1">review-pr</span><span style="font-size:10px;border:1px solid #bbb;color:#666;border-radius:4px;padding:0 3px">REVIEWER</span></div>
+            <div style="display:flex;align-items:center;gap:6px;padding:2px 4px;border:2px solid #2a62d6;border-radius:5px;background:#eef3fd"><span>▸</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 2px #b9a6e3">O</span><span style="flex:1">Docs crew</span><span style="font-size:11px;color:#2a62d6">join as member</span></div>
+            <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888;padding-top:6px">Running</div>
+            <div style="display:flex;align-items:center;gap:6px;border:1.5px dashed #bbb;border-radius:5px;padding:1px 4px;color:#bbb"><span style="width:18px;height:18px;border:1.5px dashed #bbb;border-radius:5px"></span>docs-pass</div>
+            <div style="position:absolute;left:70px;top:234px;transform:rotate(-3deg);display:flex;align-items:center;gap:6px;border:1.5px solid #222;border-radius:5px;padding:2px 6px;background:#fff;box-shadow:0 6px 14px rgba(0,0,0,.18)"><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center">O</span>docs-pass</div>
+          </div>
+          <div style="display:grid;grid-template-columns:minmax(0,1fr) 220px;min-height:0">
+            <div style="display:flex;flex-direction:column;min-height:0">
+              <div style="padding:10px 14px;border-bottom:1.5px solid #222;display:flex;align-items:center;gap:8px"><span style="font-size:17px">gateway-plan</span><span style="font-size:10px;border:1px solid #222;border-radius:4px;padding:0 3px">LEAD</span><span style="color:#2a62d6">● running</span><span style="flex:1"></span><span style="border:1.5px solid #222;border-radius:7px;padding:1px 7px">End</span></div>
+              <div style="flex:1;background:#262626;color:#ddd;font-family:ui-monospace,Menlo,monospace;font-size:11px;padding:10px;display:flex;flex-direction:column;gap:4px"><span>$ claude</span><span>› plan: split gateway work into impl + tests</span><span>› waiting for input</span></div>
+            </div>
+            <div style="border-left:1.5px solid #222;padding:10px;display:flex;flex-direction:column;gap:7px">
+              <div style="display:flex;gap:6px;font-size:13px"><span style="color:#888">Context</span><span style="color:#888">Wrote</span><span style="color:#888">About</span><span style="background:#222;color:#fff;border-radius:5px;padding:0 5px">Crew</span></div>
+              <div style="display:flex;align-items:center;gap:6px"><span style="width:10px;height:10px;border-radius:3px;background:#9cc59a"></span>Gateway release</div>
+              <div style="font-size:13px">gateway-impl <span style="color:#888">coder</span> <span style="color:#2a62d6">●</span></div>
+              <div style="font-size:13px">tests-impl <span style="color:#888">coder</span> <span style="color:#2a62d6">●</span></div>
+              <div style="font-size:13px;opacity:.5">review-pr <span style="color:#888">reviewer</span></div>
+              <div style="color:#2a62d6;font-size:13px">＋ Add a member</div>
+              <div style="border-top:1px solid #ddd;margin:3px 0"></div>
+              <div style="font-size:13px">End all running</div>
+              <div style="font-size:13px">Dismiss ended</div>
+              <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15;padding-top:4px">On a member session, this tab shows "Lead: gateway-plan ›" and the other members.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden;align-self:flex-start">
+        <div style="width:250px;height:500px;padding:12px;display:flex;flex-direction:column;gap:7px;position:relative;box-sizing:border-box;font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+          <div style="display:flex;align-items:center"><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">A</span><span style="flex:1"></span><span style="width:28px;height:28px;border:1.5px solid #222;border-radius:7px;display:flex;align-items:center;justify-content:center">⚙</span></div>
+          <div style="font-size:20px">Agents</div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Crews</div>
+          <div style="display:flex;align-items:center;gap:6px"><span>▾</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 2px #9cc59a">C</span><span style="flex:1">Gateway release</span><span style="color:#2a62d6">●</span></div>
+          <div style="padding-left:14px"><span style="color:#bbb">├</span> gateway-impl <span style="color:#888;font-size:12px">coder</span></div>
+          <div style="padding-left:14px"><span style="color:#bbb">├</span> tests-impl <span style="color:#888;font-size:12px">coder</span></div>
+          <div style="padding-left:14px;opacity:.5"><span style="color:#bbb">└</span> review-pr <span style="color:#888;font-size:12px">reviewer</span></div>
+          <div style="display:flex;align-items:center;gap:6px"><span>▸</span><span style="width:18px;height:18px;border:1.5px solid #222;border-radius:5px;font-size:10px;display:flex;align-items:center;justify-content:center;box-shadow:inset 0 0 0 2px #b9a6e3">O</span><span style="flex:1">Docs crew</span><span style="color:#888;font-size:12px">1 · 2</span></div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Running</div>
+          <div>docs-pass</div>
+          <div style="font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:#888">Ended</div>
+          <div style="opacity:.5">lint-fix</div>
+          <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15;padding-top:6px">Tapping the crew row opens the Lead session. Long-press any row for Move to crew, Change role and Make Lead.</div>
+        </div>
+      </div>
+      <div style="max-width:820px;font:400 12px/1.5 system-ui,sans-serif;color:rgba(0,0,0,.6)">This one treats the Lead as the crew. There's no separate crew page: the Lead session is the crew's home, and a Crew tab in the existing Details panel lists the members. It needs the fewest new screens and matches the parent/child sessions planned for Phase 3. Its weakness is that a crew can't exist without a Lead, so ending or dismissing the Lead needs a rule (open question 3).</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:36px 0 4px">Same in all three</div>
+  <div style="display:flex;flex-wrap:wrap;gap:28px;align-items:flex-start">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.08);border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,.06);overflow:hidden">
+      <div style="width:360px;padding:16px 18px;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;font-family:'Patrick Hand',cursive;color:#222;font-size:14px;line-height:1.3">
+        <div style="font-size:18px">New session</div>
+        <div style="border:1.5px solid #222;border-radius:7px;padding:4px 8px;background:#f5f5f2">▤ Gateway spec <span style="color:#888">personal</span></div>
+        <div style="display:grid;grid-template-columns:80px minmax(0,1fr);gap:6px;align-items:center">
+          <span style="color:#666">Host</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">build-vm ▾</span>
+          <span style="color:#666">Workspace</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">storm ▾</span>
+          <span style="color:#666">Agent</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">Claude Code ▾</span>
+          <span style="color:#666">Can write to</span><span style="border:1.5px solid #222;border-radius:7px;padding:2px 8px">personal ▾</span>
+          <span style="color:#2a62d6">Crew</span><span style="border:2px solid #2a62d6;border-radius:7px;padding:2px 8px;color:#2a62d6">None ▾ · Gateway release · New crew…</span>
+          <span style="color:#2a62d6">Role</span><span style="display:flex;border:2px solid #2a62d6;border-radius:7px;overflow:hidden;color:#2a62d6"><span style="flex:1;text-align:center;background:#2a62d6;color:#fff">Lead</span><span style="flex:1;text-align:center">Coder</span><span style="flex:1;text-align:center">Reviewer</span></span>
+        </div>
+        <div style="font-family:'Caveat',cursive;font-size:16px;color:#c2410c;line-height:1.15">Crew and Role are new, optional rows, set to None by default. Role appears only once a crew is picked. "New crew…" names the crew after the context note.</div>
+      </div>
+    </div>
+    <div style="max-width:520px;display:flex;flex-direction:column;gap:10px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+      <div><b>Creating a crew</b></div>
+      <div>• <b>Drop a session onto another.</b> Both join a new crew, and the session you dropped onto becomes the Lead. The crew is named after the Lead's context note, or "New crew" if there isn't one. The name field opens straight away for editing.</div>
+      <div>• <b>Select several, then Group.</b> ⌘-click or Shift-click rows, and a bar appears at the foot of the sidebar: "3 selected · Make crew". The first session you selected becomes the Lead.</div>
+      <div>• <b>From the launcher.</b> Choose "New crew…", and the session you're launching becomes its Lead.</div>
+      <div>• <b>From a note.</b> "Start work from this note" opens the launcher with Crew set to a new crew named after the note, and Role set to Lead.</div>
+      <div style="padding-top:4px"><b>Group actions</b>: New session in crew (the launcher opens with this crew set, with Role defaulting to Coder) · End all running (one confirmation that lists every session it will stop) · Dismiss all ended · Rename · Colour (vault palette) · Collapse.</div>
+      <div><b>Dragging</b>: move a session into or out of a crew, reorder sessions within a crew, and reorder crews. On the phone, there's no dragging: long-press a session to Move to crew or Change role.</div>
+      <div><b>Server</b>: crews need a new object and API (id, name, colour, order, plus members as session id, role and order). A crew is only a label: sessions never move hosts, and a crew has no effect on what an agent can access.</div>
+    </div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:36px 0 4px">Open questions</div>
+  <div style="max-width:880px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.7)">
+    <div>1. <b>Does a role do anything?</b> One option is that a role is only a label. The other is that launching with a role also gives the agent the matching Kit role note (Storm Lead, Coder, Reviewer) as context. I'd suggest the second for sessions you launch, and label-only for sessions you drag in, because a running session can't take on new context.</div>
+    <div>2. <b>Which roles?</b> Lead, Coder and Reviewer, taken from Kit's role notes, which would also bring in Architect and Researcher. A crew has one Lead and any number of the other roles.</div>
+    <div>3. <b>When the Lead ends:</b> the crew stays, and nothing stops automatically, because there's no cascade-stop in V1. When the Lead is dismissed, the next member becomes Lead. This matters most for <a href="#1c">1c</a>.</div>
+    <div>4. <b>An empty crew</b>, once every session is dismissed, is deleted automatically, and Undo appears for a few seconds.</div>
+  </div>
+</section>
+</x-dc>
+</body>
+</html>
