@@ -487,6 +487,23 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(agent_get_session).delete(agent_dismiss_session),
         )
         .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        // Crews and role labels (decision 138): owner only, checked in ops.
+        .route("/v1/agent/crews", get(crews_list).post(crews_create))
+        .route("/v1/agent/crews/order", put(crews_reorder))
+        .route(
+            "/v1/agent/crews/{id}",
+            patch(crews_update).delete(crews_delete),
+        )
+        .route(
+            "/v1/agent/crews/{id}/members/order",
+            put(crews_reorder_members),
+        )
+        .route("/v1/agent/sessions/{id}/crew", put(agent_session_crew))
+        .route(
+            "/v1/agent/sessions/{id}/role",
+            put(agent_session_role).delete(agent_clear_session_role),
+        )
+        .route("/v1/agent/roles", get(agent_roles))
         .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
             "/v1/agent/sessions/{id}/terminal/stream",
@@ -1921,12 +1938,105 @@ async fn agent_end_session(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// DELETE a session: 200 with what else it removed (decision 138c). Older
+/// clients ignore the body.
 async fn agent_dismiss_session(
     State(state): State<Shared>,
     Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::Dismissed>> {
+    Ok(Json(crate::ops::dismiss_session(&state, &id).await?))
+}
+
+async fn crews_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::agent::Crew>>> {
+    Ok(Json(crate::ops::list_crews(&state, &actor).await?))
+}
+
+async fn crews_create(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<crate::ops::CreateCrew>,
+) -> ApiResult<(StatusCode, Json<crate::ops::CrewChange>)> {
+    let change = crate::ops::create_crew(&state, &actor, req).await?;
+    Ok((StatusCode::CREATED, Json(change)))
+}
+
+async fn crews_update(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::UpdateCrew>,
+) -> ApiResult<Json<crate::agent::Crew>> {
+    Ok(Json(
+        crate::ops::update_crew(&state, &actor, &id, req).await?,
+    ))
+}
+
+async fn crews_reorder(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(req): Json<crate::ops::Order>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::dismiss_session(&state, &id).await?;
+    crate::ops::reorder_crews(&state, &actor, req).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn crews_reorder_members(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::Order>,
+) -> ApiResult<StatusCode> {
+    crate::ops::reorder_crew_members(&state, &actor, &id, req).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn crews_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_crew(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_session_crew(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::MoveToCrew>,
+) -> ApiResult<Json<crate::ops::CrewChange>> {
+    Ok(Json(
+        crate::ops::move_session_to_crew(&state, &actor, &id, req).await?,
+    ))
+}
+
+async fn agent_session_role(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::RoleRef>,
+) -> ApiResult<StatusCode> {
+    crate::ops::set_session_role(&state, &actor, &id, Some(req)).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_clear_session_role(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::set_session_role(&state, &actor, &id, None).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_roles(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::ops::RoleNote>>> {
+    Ok(Json(crate::ops::list_roles(&state, &actor).await?))
 }
 
 /// POST …/terminal/input — raw bytes, at most 64 KiB, at most once.
@@ -8409,11 +8519,477 @@ pub(crate) mod tests {
             delete_with_auth(&format!("/v1/agent/sessions/{session}"), &f.owner_bearer),
         )
         .await;
-        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(status, StatusCode::OK);
         let (_, note) = f.get(&format!("/v1/vaults/{work}/notes/{agent_id}")).await;
         assert_eq!(note["agent_write"]["session_name"], name.as_str());
         assert_eq!(note["agent_write"]["session_dismissed"], true);
         assert_eq!(note["agent_write"]["kind"], "created");
+    }
+
+    // ---- crews and role labels (decision 138) ----------------------------
+
+    impl GatewayFixture {
+        async fn ask(
+            &self,
+            req: axum::http::Request<axum::body::Body>,
+        ) -> (StatusCode, serde_json::Value) {
+            send(&self.app, req).await
+        }
+
+        async fn crew_of(&self, session: &str) -> serde_json::Value {
+            let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
+            view["crew"].clone()
+        }
+
+        async fn crew_ids(&self) -> Vec<String> {
+            let (status, crews) = self.get("/v1/agent/crews").await;
+            assert_eq!(status, StatusCode::OK, "{crews}");
+            crews
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["id"].as_str().unwrap().to_string())
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn crews_group_sessions_one_crew_each_and_change_nothing_about_them() {
+        let dir = tempdir::TempDir::new("storm-crews").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let mut ids = Vec::new();
+        for _ in 0..3 {
+            let body = f.launch("claude-code", false).await;
+            ids.push(body["id"].as_str().unwrap().to_string());
+        }
+        let (s1, s2, s3) = (ids[0].clone(), ids[1].clone(), ids[2].clone());
+        let (_, before) = f.get(&format!("/v1/agent/sessions/{s1}")).await;
+        assert_eq!(before["crew"], serde_json::Value::Null);
+
+        // A crew of two, coloured with the first unused palette word.
+        let (status, made) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "  Gateway release ", "session_ids": [s1, s2]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{made}");
+        let gw = made["crew"]["id"].as_str().unwrap().to_string();
+        assert!(gw.starts_with("crw_"), "{gw}");
+        assert_eq!(made["crew"]["name"], "Gateway release");
+        assert_eq!(made["crew"]["color"], "coral");
+        assert_eq!(made["removed_crews"], serde_json::json!([]));
+        assert_eq!(
+            f.crew_of(&s1).await,
+            serde_json::json!({"id": gw, "order": 0})
+        );
+        assert_eq!(
+            f.crew_of(&s2).await,
+            serde_json::json!({"id": gw, "order": 1})
+        );
+        assert_eq!(f.crew_of(&s3).await, serde_json::Value::Null);
+
+        // A crew changes nothing else about a session (138a).
+        let (_, after) = f.get(&format!("/v1/agent/sessions/{s1}")).await;
+        let mut stripped = after.clone();
+        stripped["crew"] = serde_json::Value::Null;
+        assert_eq!(stripped, before);
+
+        // A session is in at most one crew: making a second crew moves it.
+        let (status, relay) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "Relay", "color": "sky", "session_ids": [s2]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{relay}");
+        let relay = relay["crew"]["id"].as_str().unwrap().to_string();
+        assert_eq!(f.crew_of(&s2).await["id"], relay.as_str());
+        assert_eq!(f.crew_ids().await, [gw.clone(), relay.clone()]);
+
+        // Moving the last member out deletes the crew and says so (138c).
+        let (status, moved) = f
+            .ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{s1}/crew"),
+                serde_json::json!({"crew_id": relay, "before": s2}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{moved}");
+        assert_eq!(moved["removed_crews"][0]["id"], gw.as_str());
+        assert_eq!(moved["removed_crews"][0]["name"], "Gateway release");
+        assert_eq!(moved["crew"]["id"], relay.as_str());
+        assert_eq!(f.crew_ids().await, std::slice::from_ref(&relay));
+        assert_eq!(f.crew_of(&s1).await["order"], 0);
+        assert_eq!(f.crew_of(&s2).await["order"], 1);
+
+        // Member order: every member exactly once.
+        let order = |ids: serde_json::Value| {
+            put_json_with_auth(
+                &format!("/v1/agent/crews/{relay}/members/order"),
+                serde_json::json!({ "ids": ids }),
+                &f.owner_bearer,
+            )
+        };
+        let (status, _) = f.ask(order(serde_json::json!([s2, s1]))).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(f.crew_of(&s2).await["order"], 0);
+        for bad in [
+            serde_json::json!([s2]),
+            serde_json::json!([s2, s1, s1]),
+            serde_json::json!([s2, s3]),
+        ] {
+            let (status, body) = f.ask(order(bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+
+        // Crew order, likewise.
+        let (_, third) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "Spikes", "session_ids": [s3]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let spikes = third["crew"]["id"].as_str().unwrap().to_string();
+        assert_eq!(
+            third["crew"]["color"], "coral",
+            "the first colour is free again"
+        );
+        let (status, _) = f
+            .ask(put_json_with_auth(
+                "/v1/agent/crews/order",
+                serde_json::json!({"ids": [spikes, relay]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(f.crew_ids().await, [spikes.clone(), relay.clone()]);
+        let (status, _) = f
+            .ask(put_json_with_auth(
+                "/v1/agent/crews/order",
+                serde_json::json!({"ids": [spikes]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Rename and recolour, validated.
+        let patch = |body: serde_json::Value| {
+            patch_json_with_auth(&format!("/v1/agent/crews/{relay}"), body, &f.owner_bearer)
+        };
+        let (status, renamed) = f
+            .ask(patch(
+                serde_json::json!({"name": "Relay hardening", "color": "mint"}),
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{renamed}");
+        assert_eq!(renamed["name"], "Relay hardening");
+        assert_eq!(renamed["color"], "mint");
+        for bad in [
+            serde_json::json!({"color": "rose"}),
+            serde_json::json!({"name": "   "}),
+            serde_json::json!({"name": "x".repeat(81)}),
+            serde_json::json!({"name": "two\nlines"}),
+        ] {
+            let (status, body) = f.ask(patch(bad)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        let (status, _) = f
+            .ask(patch_json_with_auth(
+                "/v1/agent/crews/crw_NOPE",
+                serde_json::json!({"name": "x"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Moves that cannot be.
+        for (session, body, want) in [
+            (
+                s3.clone(),
+                serde_json::json!({"crew_id": "crw_NOPE"}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "ags_NOPE".to_string(),
+                serde_json::json!({"crew_id": relay}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                s3.clone(),
+                serde_json::json!({"crew_id": relay, "before": s3}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                s3.clone(),
+                serde_json::json!({"crew_id": null, "before": s1}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, out) = f
+                .ask(put_json_with_auth(
+                    &format!("/v1/agent/sessions/{session}/crew"),
+                    body,
+                    &f.owner_bearer,
+                ))
+                .await;
+            assert_eq!(status, want, "{out}");
+        }
+        let (status, _) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "Twice", "session_ids": [s1, s1]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        // Leaving: the session goes loose, and its emptied crew with it.
+        let (status, left) = f
+            .ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{s3}/crew"),
+                serde_json::json!({"crew_id": null}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{left}");
+        assert_eq!(left["removed_crews"][0]["id"], spikes.as_str());
+        assert_eq!(f.crew_of(&s3).await, serde_json::Value::Null);
+
+        // Dismissing a member takes it out; dismissing the last one removes
+        // the crew and returns it for Undo.
+        f.report(&s2, "completed").await;
+        let (status, out) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/sessions/{s2}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(out, serde_json::json!({"removed_crew": null}));
+        assert_eq!(f.crew_of(&s1).await["order"], 1, "orders are not compacted");
+        f.report(&s1, "completed").await;
+        let (_, out) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/sessions/{s1}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(out["removed_crew"]["id"], relay.as_str());
+        assert_eq!(out["removed_crew"]["name"], "Relay hardening");
+        assert!(f.crew_ids().await.is_empty());
+
+        // Deleting a crew leaves its sessions running, loose.
+        let (_, made) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "Short", "session_ids": [s3]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let short = made["crew"]["id"].as_str().unwrap().to_string();
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/crews/{short}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(f.crew_of(&s3).await, serde_json::Value::Null);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{s3}")).await;
+        assert_eq!(view["status"], "running");
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/crews/{short}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn crews_and_roles_are_the_signed_in_owners_never_a_keys() {
+        let dir = tempdir::TempDir::new("storm-crews-key").unwrap();
+        let f = gateway_fixture(dir.path()).await;
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for req in [
+            get_with_auth("/v1/agent/crews", &key),
+            get_with_auth("/v1/agent/roles", &key),
+            post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "x", "session_ids": []}),
+                &key,
+            ),
+            put_json_with_auth(
+                "/v1/agent/sessions/ags_X/role",
+                serde_json::json!({"vault_id": "v", "note_id": "n"}),
+                &key,
+            ),
+        ] {
+            let (status, body) = f.ask(req).await;
+            assert!(
+                status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN,
+                "{status} {body}"
+            );
+        }
+        // And the ops refuse any actor but a signed-in session.
+        let agent = Actor::Agent {
+            session_id: "ags_X".into(),
+            host_id: f.host_id.clone(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        };
+        let refused = crate::ops::list_crews(&f.state, &agent).await.unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        let refused = crate::ops::list_roles(&f.state, &agent).await.unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn a_role_label_is_a_kit_agents_note_named_live_and_goes_with_a_dismiss() {
+        let dir = tempdir::TempDir::new("storm-crew-roles").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // No Kit vault: no roles, not an error.
+        let (status, roles) = f.get("/v1/agent/roles").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(roles, serde_json::json!([]));
+
+        let kit = f.vault("kit").await;
+        let work = f.vault("Work").await;
+        let reviewer = f
+            .note(
+                &kit,
+                "agents/Storm Reviewer.md",
+                "---\nkind: agent\nsummary: Checks completed work against the task.\n---\n# Storm Reviewer\n",
+            )
+            .await;
+        let release = f
+            .note(
+                &kit,
+                "projects/storm/agents/Release Notes.md",
+                "# Release Notes\n",
+            )
+            .await;
+        let other = f.note(&kit, "Notes/Other.md", "# Other\n").await;
+        let elsewhere = f.note(&work, "agents/Fake.md", "# Fake\n").await;
+
+        let (status, roles) = f.get("/v1/agent/roles").await;
+        assert_eq!(status, StatusCode::OK, "{roles}");
+        let listed: Vec<(&str, &str, Option<&str>)> = roles
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| {
+                (
+                    r["title"].as_str().unwrap(),
+                    r["folder"].as_str().unwrap(),
+                    r["summary"].as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                (
+                    "Storm Reviewer",
+                    "agents",
+                    Some("Checks completed work against the task.")
+                ),
+                ("Release Notes", "projects/storm/agents", None),
+            ]
+        );
+        assert_eq!(roles[0]["vault_id"], kit.as_str());
+        assert_eq!(roles[0]["note_id"], reviewer["id"]);
+
+        // Only a role note can be a label.
+        let set = |vault: &str, note: &serde_json::Value| {
+            put_json_with_auth(
+                &format!("/v1/agent/sessions/{session}/role"),
+                serde_json::json!({"vault_id": vault, "note_id": note["id"]}),
+                &f.owner_bearer,
+            )
+        };
+        for (vault, note) in [(&kit, &other), (&work, &elsewhere), (&work, &reviewer)] {
+            let (status, body) = f.ask(set(vault, note)).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        }
+        let (status, _) = f.ask(set(&kit, &release)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = f.ask(set(&kit, &reviewer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(
+            view["role"],
+            serde_json::json!({"vault_id": kit, "note_id": reviewer["id"], "title": "Storm Reviewer"})
+        );
+        assert_eq!(
+            view["crew"],
+            serde_json::Value::Null,
+            "a loose session has a role"
+        );
+
+        // The label is named live: a renamed note renames it, a deleted one
+        // leaves it with no title.
+        let reviewer_id = reviewer["id"].as_str().unwrap();
+        let (status, body) = f
+            .ask(put_json_with_auth(
+                &format!("/v1/vaults/{kit}/notes/{reviewer_id}"),
+                serde_json::json!({"base_version": reviewer["version"],
+                    "content": "---\nkind: agent\n---\n# Code Reviewer\n"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (_, list) = f.get("/v1/agent/sessions").await;
+        assert_eq!(list[0]["role"]["title"], "Code Reviewer", "{list}");
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/vaults/{kit}/notes/{reviewer_id}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert!(status.is_success(), "{status}");
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["role"]["title"], serde_json::Value::Null, "{view}");
+        assert_eq!(view["role"]["note_id"], reviewer_id);
+
+        // Cleared, set again, then gone with the session.
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/sessions/{session}/role"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["role"], serde_json::Value::Null);
+        f.ask(set(&kit, &release)).await;
+        f.report(&session, "completed").await;
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/sessions/{session}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(f.state.agent.role_of(&session).unwrap(), None);
+        let (status, _) = f.ask(set(&kit, &release)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]

@@ -1,8 +1,11 @@
 //! `state/agent/agent.db`: agent session records (freeze §7.1, §13).
 //!
-//! Durable but rebuildable in spirit: if this file is lost, the sessions a
-//! host still runs are re-adopted from its next `hello`. `auth.db` holds the
-//! host registry; this holds only sessions.
+//! Durable but rebuildable in spirit for sessions: if this file is lost, the
+//! sessions a host still runs are re-adopted from its next `hello`. `auth.db`
+//! holds the host registry.
+//!
+//! **Crews, their members and role labels (decision 138) are the owner's own
+//! data and are not rebuilt from anything**: losing this file loses them.
 
 use std::path::Path;
 
@@ -129,6 +132,29 @@ impl WriteRecord {
     }
 }
 
+/// A crew (decision 138a). `color` is a vault palette word.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Crew {
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub order: i64,
+}
+
+/// The crew a session is in, and its place there.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct Membership {
+    pub id: String,
+    pub order: i64,
+}
+
+/// A session's role label: a note, by id (138d).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoleLabel {
+    pub vault_id: String,
+    pub note_id: String,
+}
+
 pub struct Store {
     pub(super) conn: Connection,
 }
@@ -234,6 +260,32 @@ impl Store {
                  skipped      TEXT NOT NULL,
                  plugin_local TEXT NOT NULL,
                  reported_at  TEXT NOT NULL
+             );
+
+             -- Crews (decision 138a): a named, coloured label over sessions.
+             -- They change how the Agents page is organised and nothing else.
+             CREATE TABLE IF NOT EXISTS crews (
+                 id            TEXT PRIMARY KEY,
+                 owner_user_id TEXT NOT NULL,
+                 name          TEXT NOT NULL,
+                 color         TEXT NOT NULL,
+                 ord           INTEGER NOT NULL,
+                 created_at    TEXT NOT NULL
+             );
+             -- At most one crew per session (138b): the session is the key.
+             CREATE TABLE IF NOT EXISTS crew_members (
+                 session_id TEXT PRIMARY KEY,
+                 crew_id    TEXT NOT NULL,
+                 ord        INTEGER NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS crew_members_by_crew
+                 ON crew_members(crew_id, ord);
+             -- A session's role label (138d): a Kit note, set only by a person.
+             CREATE TABLE IF NOT EXISTS session_role (
+                 session_id TEXT PRIMARY KEY,
+                 vault_id   TEXT NOT NULL,
+                 note_id    TEXT NOT NULL,
+                 set_at     TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -658,12 +710,280 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    pub fn delete(&self, id: &str) -> Result<bool> {
+    /// Removes a session's record, its crew membership and its role label in
+    /// one transaction. A crew left with no members is deleted with it and
+    /// returned (decision 138c). Its launch and writes are kept, so provenance
+    /// still resolves.
+    pub fn delete(&mut self, id: &str) -> Result<(bool, Option<Crew>)> {
+        let tx = self.conn.transaction()?;
+        let gone = tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])? > 0;
+        let crew = leave_crew(&tx, id)?;
+        tx.execute(
+            "DELETE FROM session_role WHERE session_id = ?1",
+            params![id],
+        )?;
+        tx.commit()?;
+        Ok((gone, crew))
+    }
+
+    // ---- crews (decision 138) ---------------------------------------------
+
+    pub fn crews(&self) -> Result<Vec<Crew>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, name, color, ord FROM crews ORDER BY ord, created_at, id")?;
+        let rows = stmt.query_map([], crew_from_row)?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn crew(&self, id: &str) -> Result<Option<Crew>> {
         Ok(self
             .conn
-            .execute("DELETE FROM sessions WHERE id = ?1", params![id])?
-            > 0)
+            .query_row(
+                "SELECT id, name, color, ord FROM crews WHERE id = ?1",
+                params![id],
+                crew_from_row,
+            )
+            .optional()?)
     }
+
+    /// The sessions in a crew, in order.
+    pub fn members(&self, crew_id: &str) -> Result<Vec<String>> {
+        members_of(&self.conn, crew_id)
+    }
+
+    pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT crew_id, ord FROM crew_members WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(Membership {
+                        id: r.get(0)?,
+                        order: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// Creates a crew at the end of the list and moves `sessions` into it, in
+    /// that order. Crews the move empties are deleted and returned.
+    pub fn create_crew(
+        &mut self,
+        crew: &Crew,
+        owner_user_id: &str,
+        sessions: &[String],
+        now: &str,
+    ) -> Result<(Crew, Vec<Crew>)> {
+        let tx = self.conn.transaction()?;
+        let order: i64 = tx.query_row("SELECT COALESCE(MAX(ord) + 1, 0) FROM crews", [], |r| {
+            r.get(0)
+        })?;
+        tx.execute(
+            "INSERT INTO crews (id, owner_user_id, name, color, ord, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![crew.id, owner_user_id, crew.name, crew.color, order, now],
+        )?;
+        let mut removed = Vec::new();
+        for (i, s) in sessions.iter().enumerate() {
+            if let Some(emptied) = leave_crew(&tx, s)? {
+                removed.push(emptied);
+            }
+            tx.execute(
+                "INSERT INTO crew_members (session_id, crew_id, ord) VALUES (?1, ?2, ?3)",
+                params![s, crew.id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        let created = Crew {
+            order,
+            ..crew.clone()
+        };
+        Ok((created, removed))
+    }
+
+    pub fn update_crew(&self, id: &str, name: Option<&str>, color: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE crews SET name = COALESCE(?2, name), color = COALESCE(?3, color)
+             WHERE id = ?1",
+            params![id, name, color],
+        )?;
+        Ok(())
+    }
+
+    /// Renumbers the crews in the given order. The caller checks that `ids`
+    /// is every crew exactly once.
+    pub fn reorder_crews(&mut self, ids: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (i, id) in ids.iter().enumerate() {
+            tx.execute(
+                "UPDATE crews SET ord = ?2 WHERE id = ?1",
+                params![id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Renumbers a crew's members. The caller checks that `sessions` is every
+    /// member exactly once.
+    pub fn reorder_members(&mut self, crew_id: &str, sessions: &[String]) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        for (i, s) in sessions.iter().enumerate() {
+            tx.execute(
+                "UPDATE crew_members SET ord = ?3 WHERE session_id = ?1 AND crew_id = ?2",
+                params![s, crew_id, i as i64],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Deletes a crew; its members become loose.
+    pub fn delete_crew(&mut self, id: &str) -> Result<bool> {
+        let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM crew_members WHERE crew_id = ?1", params![id])?;
+        let gone = tx.execute("DELETE FROM crews WHERE id = ?1", params![id])? > 0;
+        tx.commit()?;
+        Ok(gone)
+    }
+
+    /// Puts a session in `crew_id` before `before` (or last), or takes it out
+    /// of any crew when `crew_id` is `None`. A crew the move empties is
+    /// deleted and returned (138c). The caller checks that the crew and
+    /// `before` exist.
+    pub fn move_session(
+        &mut self,
+        session_id: &str,
+        crew_id: Option<&str>,
+        before: Option<&str>,
+    ) -> Result<Option<Crew>> {
+        let tx = self.conn.transaction()?;
+        let from: Option<String> = tx
+            .query_row(
+                "SELECT crew_id FROM crew_members WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        tx.execute(
+            "DELETE FROM crew_members WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        if let Some(to) = crew_id {
+            let mut order = members_of(&tx, to)?;
+            let at = before
+                .and_then(|b| order.iter().position(|s| s == b))
+                .unwrap_or(order.len());
+            order.insert(at, session_id.to_string());
+            for (i, s) in order.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO crew_members (session_id, crew_id, ord) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (session_id) DO UPDATE SET crew_id = excluded.crew_id,
+                         ord = excluded.ord",
+                    params![s, to, i as i64],
+                )?;
+            }
+        }
+        let emptied = match from {
+            Some(from) if Some(from.as_str()) != crew_id => delete_if_empty(&tx, &from)?,
+            _ => None,
+        };
+        tx.commit()?;
+        Ok(emptied)
+    }
+
+    pub fn role_of(&self, session_id: &str) -> Result<Option<RoleLabel>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT vault_id, note_id FROM session_role WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(RoleLabel {
+                        vault_id: r.get(0)?,
+                        note_id: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_role(&self, session_id: &str, role: Option<&RoleLabel>, now: &str) -> Result<()> {
+        match role {
+            Some(role) => self.conn.execute(
+                "INSERT INTO session_role (session_id, vault_id, note_id, set_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (session_id) DO UPDATE SET vault_id = excluded.vault_id,
+                     note_id = excluded.note_id, set_at = excluded.set_at",
+                params![session_id, role.vault_id, role.note_id, now],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM session_role WHERE session_id = ?1",
+                params![session_id],
+            )?,
+        };
+        Ok(())
+    }
+}
+
+fn crew_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Crew> {
+    Ok(Crew {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        color: r.get(2)?,
+        order: r.get(3)?,
+    })
+}
+
+fn members_of(conn: &Connection, crew_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT session_id FROM crew_members WHERE crew_id = ?1 ORDER BY ord, session_id",
+    )?;
+    let rows = stmt.query_map(params![crew_id], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Takes a session out of its crew, deleting the crew if that empties it.
+fn leave_crew(conn: &Connection, session_id: &str) -> Result<Option<Crew>> {
+    let from: Option<String> = conn
+        .query_row(
+            "SELECT crew_id FROM crew_members WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    conn.execute(
+        "DELETE FROM crew_members WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    match from {
+        Some(from) => delete_if_empty(conn, &from),
+        None => Ok(None),
+    }
+}
+
+/// Deletes a crew with no members and returns what it was.
+fn delete_if_empty(conn: &Connection, crew_id: &str) -> Result<Option<Crew>> {
+    let left: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM crew_members WHERE crew_id = ?1",
+        params![crew_id],
+        |r| r.get(0),
+    )?;
+    if left > 0 {
+        return Ok(None);
+    }
+    let crew = conn
+        .query_row(
+            "SELECT id, name, color, ord FROM crews WHERE id = ?1",
+            params![crew_id],
+            crew_from_row,
+        )
+        .optional()?;
+    conn.execute("DELETE FROM crews WHERE id = ?1", params![crew_id])?;
+    Ok(crew)
 }
 
 fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {

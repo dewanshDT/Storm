@@ -32,6 +32,7 @@ use tokio::sync::{mpsc, watch};
 
 use cache::{OutputCache, Read};
 use credential::CredentialOutcome;
+pub use store::{Crew, Membership, RoleLabel};
 use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord};
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
@@ -1646,17 +1647,153 @@ impl AgentManager {
         self.send(&r.host_id, Command::End { session: r.id })
     }
 
-    /// Removes an ended session from the list (freeze §7.4).
-    pub fn dismiss(&self, id: &str) -> AgentResult<()> {
+    /// Removes an ended session from the list (freeze §7.4), with its crew
+    /// membership and role label. Returns the crew this emptied, which is
+    /// deleted with it (decision 138c).
+    pub fn dismiss(&self, id: &str) -> AgentResult<Option<Crew>> {
         let r = self.get(id)?;
         if !r.is_ended() {
             return Err(AgentError::Conflict(
                 "only an ended session can be dismissed".into(),
             ));
         }
-        self.store.lock().unwrap().delete(id)?;
+        let (_, emptied) = self.store.lock().unwrap().delete(id)?;
         self.live.lock().unwrap().sessions.remove(id);
+        Ok(emptied)
+    }
+
+    // ---- crews and role labels (decision 138) ------------------------------
+    //
+    // Labels only: nothing here touches a grant, a host or how a session runs
+    // (138a). Each method checks and writes under one lock of the store, so a
+    // concurrent change cannot slip between the check and the write.
+
+    pub fn crews(&self) -> Result<Vec<Crew>> {
+        self.store.lock().unwrap().crews()
+    }
+
+    pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
+        self.store.lock().unwrap().membership(session_id)
+    }
+
+    pub fn role_of(&self, session_id: &str) -> Result<Option<RoleLabel>> {
+        self.store.lock().unwrap().role_of(session_id)
+    }
+
+    /// A new crew, last in the list, holding `sessions` in that order. Returns
+    /// it and any crews the move emptied.
+    pub fn create_crew(
+        &self,
+        owner_user_id: &str,
+        name: &str,
+        color: &str,
+        sessions: &[String],
+    ) -> AgentResult<(Crew, Vec<Crew>)> {
+        let mut store = self.store.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for s in sessions {
+            if !seen.insert(s.as_str()) {
+                return Err(AgentError::BadRequest(format!("{s} is listed twice")));
+            }
+            if store.get(s)?.is_none() {
+                return Err(AgentError::NotFound("no such session"));
+            }
+        }
+        let crew = Crew {
+            id: crate::auth::identity::random_id("crw_"),
+            name: name.to_string(),
+            color: color.to_string(),
+            order: 0,
+        };
+        Ok(store.create_crew(&crew, owner_user_id, sessions, &now())?)
+    }
+
+    pub fn update_crew(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        color: Option<&str>,
+    ) -> AgentResult<Crew> {
+        let store = self.store.lock().unwrap();
+        if store.crew(id)?.is_none() {
+            return Err(AgentError::NotFound("no such crew"));
+        }
+        store.update_crew(id, name, color)?;
+        Ok(store.crew(id)?.expect("just updated"))
+    }
+
+    /// `ids` must name every crew exactly once.
+    pub fn reorder_crews(&self, ids: &[String]) -> AgentResult<()> {
+        let mut store = self.store.lock().unwrap();
+        let all: Vec<String> = store.crews()?.into_iter().map(|c| c.id).collect();
+        if !is_permutation(ids, &all) {
+            return Err(AgentError::BadRequest(
+                "the order must name every crew exactly once".into(),
+            ));
+        }
+        Ok(store.reorder_crews(ids)?)
+    }
+
+    /// `sessions` must name every member of the crew exactly once.
+    pub fn reorder_members(&self, crew_id: &str, sessions: &[String]) -> AgentResult<()> {
+        let mut store = self.store.lock().unwrap();
+        if store.crew(crew_id)?.is_none() {
+            return Err(AgentError::NotFound("no such crew"));
+        }
+        if !is_permutation(sessions, &store.members(crew_id)?) {
+            return Err(AgentError::BadRequest(
+                "the order must name every member exactly once".into(),
+            ));
+        }
+        Ok(store.reorder_members(crew_id, sessions)?)
+    }
+
+    /// Deletes a crew; its sessions stay, outside any crew.
+    pub fn delete_crew(&self, id: &str) -> AgentResult<()> {
+        if !self.store.lock().unwrap().delete_crew(id)? {
+            return Err(AgentError::NotFound("no such crew"));
+        }
         Ok(())
+    }
+
+    /// Joins, moves within or leaves a crew. Returns the crew this emptied.
+    pub fn move_session(
+        &self,
+        session_id: &str,
+        crew_id: Option<&str>,
+        before: Option<&str>,
+    ) -> AgentResult<Option<Crew>> {
+        let mut store = self.store.lock().unwrap();
+        if store.get(session_id)?.is_none() {
+            return Err(AgentError::NotFound("no such session"));
+        }
+        if let Some(crew_id) = crew_id {
+            if store.crew(crew_id)?.is_none() {
+                return Err(AgentError::NotFound("no such crew"));
+            }
+            if let Some(before) = before
+                && (before == session_id || !store.members(crew_id)?.iter().any(|m| m == before))
+            {
+                return Err(AgentError::BadRequest(
+                    "`before` must be another member of that crew".into(),
+                ));
+            }
+        } else if before.is_some() {
+            return Err(AgentError::BadRequest(
+                "`before` needs a crew to place the session in".into(),
+            ));
+        }
+        Ok(store.move_session(session_id, crew_id, before)?)
+    }
+
+    /// Sets or clears a session's role label. The caller has checked that the
+    /// note is a role note.
+    pub fn set_role(&self, session_id: &str, role: Option<&RoleLabel>) -> AgentResult<()> {
+        let store = self.store.lock().unwrap();
+        if store.get(session_id)?.is_none() {
+            return Err(AgentError::NotFound("no such session"));
+        }
+        Ok(store.set_role(session_id, role, &now())?)
     }
 
     /// Fails live and dismisses ended sessions not owned by `account_id`.
@@ -1726,6 +1863,15 @@ impl AgentManager {
 
 /// A session's name: the slug of its context note's title, else
 /// `{workspace}-{n}`; a name a live session holds gets `-2`, `-3`, ….
+/// Whether `given` names each of `all` exactly once.
+fn is_permutation(given: &[String], all: &[String]) -> bool {
+    let mut a: Vec<&str> = given.iter().map(String::as_str).collect();
+    let mut b: Vec<&str> = all.iter().map(String::as_str).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
 pub fn session_name(title: Option<&str>, workspace: &str, live: &[String]) -> String {
     let taken = |name: &str| live.iter().any(|l| l == name);
     match title.map(slug).filter(|s| !s.is_empty()) {
