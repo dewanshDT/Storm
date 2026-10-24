@@ -61,6 +61,7 @@
 //!   the service account and service manager, the default `PATH`, and a PTY
 //!   write's wait for room. Nothing else matches on `target_os`.
 
+pub mod agents;
 pub mod bridge;
 pub mod cli;
 pub mod client;

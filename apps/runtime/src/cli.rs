@@ -170,6 +170,10 @@ impl Provider for CliProvider {
         }
     }
 
+    fn resolved(&self) -> Option<std::path::PathBuf> {
+        pty::resolve(&self.command, self.path.as_deref())
+    }
+
     fn helper_command(&self) -> Option<std::process::Command> {
         let program = pty::resolve(&self.command, self.path.as_deref())?;
         let mut command = std::process::Command::new(program);

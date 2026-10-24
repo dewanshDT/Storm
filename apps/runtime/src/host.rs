@@ -269,6 +269,8 @@ pub struct Host {
     /// waits on it, and what launches found (project-enabled plugins).
     plugin_inventory: Arc<Mutex<Vec<serde_json::Value>>>,
     launch_remote: Mutex<Vec<serde_json::Value>>,
+    /// The agents' versions and Node's, probed in the background (133-3).
+    agents: Arc<crate::agents::Inventory>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -282,7 +284,7 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
-        let providers = config.providers()?;
+        let providers = config.providers_with(&crate::agents::managed_bin(state_dir))?;
         Self::with_providers(state_dir, config, providers)
     }
 
@@ -328,6 +330,7 @@ impl Host {
             starting: Mutex::new(HashMap::new()),
             plugin_inventory: Arc::new(Mutex::new(Vec::new())),
             launch_remote: Mutex::new(Vec::new()),
+            agents: Arc::default(),
         }))
     }
 
@@ -374,6 +377,7 @@ impl Host {
                 if let Some(mcp) = crate::profile::supports_mcp(p.id().as_str()) {
                     cap["mcp"] = json!(mcp);
                 }
+                self.agent_caps(p.as_ref(), &mut cap);
                 cap
             })
             .collect();
@@ -414,6 +418,57 @@ impl Host {
             // suggestions (131g); never a header or env value.
             "plugin_mcp_remote": self.plugin_remote(),
         })
+    }
+
+    /// An installable agent's version, where it came from, and whether this
+    /// host could install it now (133-3). Nothing for any other provider.
+    fn agent_caps(&self, p: &dyn Provider, cap: &mut serde_json::Value) {
+        let id = p.id().as_str();
+        if !crate::agents::MANAGEABLE.contains(&id) {
+            return;
+        }
+        if let Some(binary) = p.resolved() {
+            cap["source"] = json!(crate::agents::source(&binary, &self.state_dir));
+            if let Some(version) = self.agents.version(id) {
+                cap["version"] = json!(version);
+            }
+        }
+        let enabled = self.config.agent_install == crate::config::AgentInstall::On;
+        match crate::agents::install_blocked(id, enabled, self.agents.node_major()) {
+            None => cap["installable"] = json!(true),
+            Some(reason) => {
+                cap["installable"] = json!(false);
+                cap["install_blocked"] = json!(reason);
+            }
+        }
+    }
+
+    /// Probes the agents' binaries and Node in the background, and sends the
+    /// server a fresh inventory when what the host reports changed.
+    fn probe_agents(self: &Arc<Self>) {
+        let agents: Vec<(String, Option<PathBuf>)> = self
+            .providers
+            .iter()
+            .filter(|p| crate::agents::MANAGEABLE.contains(&p.id().as_str()))
+            .map(|p| (p.id().as_str().to_string(), p.resolved()))
+            .collect();
+        let path = self
+            .config
+            .search_path_with(&crate::agents::managed_bin(&self.state_dir))
+            .ok();
+        let host = self.clone();
+        tokio::spawn(async move {
+            let inventory = host.agents.clone();
+            let changed =
+                tokio::task::spawn_blocking(move || inventory.refresh(&agents, path.as_deref()))
+                    .await
+                    .unwrap_or(false);
+            if changed && *host.link_up.borrow() {
+                let _ = host
+                    .post("/v1/runtime/inventory", &host.capabilities())
+                    .await;
+            }
+        });
     }
 
     fn plugin_remote(&self) -> Vec<serde_json::Value> {
@@ -616,6 +671,7 @@ impl Host {
 
         self.hello().await?;
         self.link_up.send_replace(true);
+        self.probe_agents();
         tracing::info!(host = %self.identity.host_id, "link up");
         for session in self.sessions.lock().unwrap().values() {
             session.events.wake.notify_one();
@@ -815,6 +871,7 @@ impl Host {
             }
             Command::Refresh => {
                 self.refresh_plugin_inventory();
+                self.probe_agents();
                 let _ = self
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
@@ -2231,6 +2288,42 @@ mod tests {
             ]
         );
         assert_eq!(caps["resume"], json!(["claude-code", "opencode"]));
+
+        // Decision 133-3: an installable agent says where its binary came
+        // from and whether this host could install it; `shell` and an
+        // unknown id say neither.
+        let by_id = |id: &str| {
+            caps["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let claude = by_id("claude-code");
+        // `/bin/true` exists on Linux only; elsewhere the agent is simply
+        // not installed, and says nothing of where it came from.
+        if claude["available"] == json!(true) {
+            assert_eq!(claude["source"], "system", "{claude}");
+        } else {
+            assert!(claude.get("source").is_none(), "{claude}");
+        }
+        assert_eq!(claude["installable"], json!(cfg!(unix)), "{claude}");
+        for id in ["shell", "my-agent"] {
+            let p = by_id(id);
+            assert!(
+                p.get("installable").is_none() && p.get("source").is_none(),
+                "{p}"
+            );
+        }
+        let off = Host::new(
+            state.path(),
+            toml::from_str(&format!("agent_install = \"off\"\n{toml}")).unwrap(),
+        )
+        .unwrap();
+        let claude = off.capabilities()["providers"][0].clone();
+        assert_eq!(claude["install_blocked"], "disabled", "{claude}");
     }
 
     /// 131g: the inventory lists the account's plugins in the background

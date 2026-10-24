@@ -198,6 +198,12 @@ pub trait Provider: Send + Sync {
     fn helper_command(&self) -> Option<std::process::Command> {
         None
     }
+    /// The binary a session would run, as found on the provider's `PATH`
+    /// (decision 133: its version and where it came from). `None` for one
+    /// that is not installed or not a command.
+    fn resolved(&self) -> Option<std::path::PathBuf> {
+        None
+    }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.
     fn start(
