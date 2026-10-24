@@ -11,11 +11,40 @@ class ProviderCap {
     required this.kind,
     required this.available,
     this.mcp,
+    this.version,
+    this.source,
+    this.installable = false,
+    this.installBlocked,
+    this.checksumVerified = true,
+    this.latest,
   });
 
   final String id;
   final String kind;
   final bool available;
+
+  /// What the installed CLI reports; null when not installed or not probed
+  /// yet (decision 133).
+  final String? version;
+
+  /// `storm` (Storm installed it and can update or remove it) or `system`
+  /// (the owner's own install); null when not installed.
+  final String? source;
+
+  /// The host could install it now.
+  final bool installable;
+
+  /// Why it could not: `disabled`, `unsupported_platform`, `no_node` or
+  /// `node_too_old`.
+  final String? installBlocked;
+
+  /// False for Cursor, whose downloads have no published checksum.
+  final bool checksumVerified;
+
+  /// The newest version available, when the server knows it.
+  final String? latest;
+
+  bool get managed => source == 'storm';
 
   /// The host can give its sessions Storm's MCP (decision 130a); null from a
   /// host too old to say, or for an agent it has no adapter for.
@@ -26,6 +55,12 @@ class ProviderCap {
     kind: j['kind'] as String? ?? 'cli',
     available: j['available'] as bool? ?? false,
     mcp: j['mcp'] as bool?,
+    version: j['version'] as String?,
+    source: j['source'] as String?,
+    installable: j['installable'] as bool? ?? false,
+    installBlocked: j['install_blocked'] as String?,
+    checksumVerified: j['checksum_verified'] as bool? ?? true,
+    latest: j['latest'] as String?,
   );
 
   /// Its sessions can read your vaults and use your integrations: what the
@@ -63,6 +98,7 @@ class AgentHost {
     this.resumes = const [],
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
+    this.agentInstall = false,
   });
 
   final String id;
@@ -88,6 +124,10 @@ class AgentHost {
 
   /// Whether it has said what it can do: an offline host has not.
   final bool capabilitiesKnown;
+
+  /// It can install, update and remove agents (decision 133); false for an
+  /// older runtime.
+  final bool agentInstall;
 
   bool get online => status == 'online';
 
@@ -121,8 +161,70 @@ class AgentHost {
           k as String,
       ],
       capabilitiesKnown: caps != null,
+      agentInstall: caps?['agent_install'] == true,
     );
   }
+}
+
+/// The agents a host can install from Settings › Agents, in the page's
+/// order (decision 133).
+const kInstallableAgents = [
+  'claude-code',
+  'opencode',
+  'codex',
+  'cursor',
+  'command-code',
+];
+
+/// An install, update or removal of an agent on a host (decision 133).
+class AgentJob {
+  const AgentJob({
+    required this.id,
+    required this.hostId,
+    required this.agent,
+    required this.op,
+    required this.state,
+    this.step,
+    this.error,
+    this.version,
+    this.created,
+    this.updated,
+  });
+
+  final String id;
+  final String hostId;
+  final String agent;
+
+  /// `install`, `update` or `remove`.
+  final String op;
+
+  /// `queued`, `running`, `done` or `failed`.
+  final String state;
+
+  /// `Downloading`, `Verifying` or `Installing`, while running.
+  final String? step;
+
+  /// The stable failure code, once failed.
+  final String? error;
+  final String? version;
+  final String? created;
+  final String? updated;
+
+  bool get done => state == 'done';
+  bool get failed => state == 'failed';
+
+  factory AgentJob.fromJson(Map<String, dynamic> j) => AgentJob(
+    id: j['id'] as String,
+    hostId: j['host_id'] as String? ?? '',
+    agent: j['agent'] as String? ?? '',
+    op: j['op'] as String? ?? '',
+    state: j['state'] as String? ?? 'queued',
+    step: j['step'] as String?,
+    error: j['error'] as String?,
+    version: j['version'] as String?,
+    created: j['created'] as String?,
+    updated: j['updated'] as String?,
+  );
 }
 
 /// A workspace on a host, with how many live sessions already share it.

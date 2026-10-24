@@ -339,22 +339,7 @@ class AgentMark extends StatelessWidget {
     final s = session;
     final side = size ?? t.sp * 4;
     final glyph = side * 0.6;
-    final mark = switch (s.provider) {
-      'claude-code' => SvgPicture.asset(
-        'assets/agents/claude-code.svg',
-        width: glyph,
-        height: glyph,
-        colorFilter: const ColorFilter.mode(claudeOrange, BlendMode.srcIn),
-      ),
-      'opencode' => SvgPicture.asset(
-        'assets/agents/opencode.svg',
-        width: glyph * 0.8,
-        height: glyph * 0.8,
-        colorFilter: ColorFilter.mode(t.text, BlendMode.srcIn),
-      ),
-      'shell' => Icon(LucideIcons.square_terminal, size: glyph, color: t.text2),
-      _ => Icon(LucideIcons.bot, size: glyph, color: t.text2),
-    };
+    final mark = ProviderGlyph(s.provider, size: glyph);
     final badge = switch (s.status) {
       'running' when s.working => t.accent,
       'creating' || 'starting' => t.text3,
@@ -398,6 +383,38 @@ class AgentMark extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// An agent's own mark, or a generic one for an agent without one.
+class ProviderGlyph extends StatelessWidget {
+  const ProviderGlyph(this.provider, {super.key, required this.size});
+
+  final String provider;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return switch (provider) {
+      'claude-code' => SvgPicture.asset(
+        'assets/agents/claude-code.svg',
+        width: size,
+        height: size,
+        colorFilter: const ColorFilter.mode(
+          AgentMark.claudeOrange,
+          BlendMode.srcIn,
+        ),
+      ),
+      'opencode' => SvgPicture.asset(
+        'assets/agents/opencode.svg',
+        width: size * 0.8,
+        height: size * 0.8,
+        colorFilter: ColorFilter.mode(t.text, BlendMode.srcIn),
+      ),
+      'shell' => Icon(LucideIcons.square_terminal, size: size, color: t.text2),
+      _ => Icon(LucideIcons.bot, size: size, color: t.text2),
+    };
   }
 }
 

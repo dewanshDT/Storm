@@ -6,6 +6,14 @@ import 'package:http/http.dart' as http;
 import '../api/models.dart';
 import 'agent_models.dart';
 
+/// A refusal from `/v1/agent/*`, with the server's stable code when it gave
+/// one.
+class AgentRefusal extends StormApiException {
+  AgentRefusal(super.statusCode, super.message, this.code);
+
+  final String? code;
+}
+
 /// REST client for the Agent Runtime routes (`/v1/agent/*`, owner only;
 /// decisions 77c and 77d).
 ///
@@ -39,13 +47,15 @@ class AgentApi {
         503 => 'The host is offline.',
         _ => 'HTTP ${r.statusCode}',
       };
+      String? code;
       try {
         final body = jsonDecode(r.body);
-        if (body is Map && body['error'] != null && r.statusCode != 503) {
-          message = '${body['error']}';
+        if (body is Map && body['error'] != null) {
+          code = '${body['error']}';
+          if (r.statusCode != 503) message = code;
         }
       } catch (_) {}
-      throw StormApiException(r.statusCode, message);
+      throw AgentRefusal(r.statusCode, message, code);
     }
     if (r.bodyBytes.isEmpty) return null;
     return jsonDecode(utf8.decode(r.bodyBytes));
@@ -75,6 +85,41 @@ class AgentApi {
         AgentHost.fromJson(h as Map<String, dynamic>),
     ];
   }
+
+  String _agentOn(String hostId, String agent) =>
+      '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/'
+      '${Uri.encodeComponent(agent)}';
+
+  /// Starts an install, update or removal (`op`) of [agent] on a host
+  /// (decision 133). The answer is the job, still queued or running.
+  Future<AgentJob> startAgentJob(
+    String hostId,
+    String agent,
+    String op,
+  ) async => AgentJob.fromJson(
+    _decode(
+          await _client.post(
+            _uri(_agentOn(hostId, agent)),
+            headers: _headers,
+            body: jsonEncode({'op': op}),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  Future<AgentJob> agentJob(String hostId, String jobId) async =>
+      AgentJob.fromJson(
+        _decode(
+              await _client.get(
+                _uri(
+                  '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/jobs/'
+                  '${Uri.encodeComponent(jobId)}',
+                ),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>,
+      );
 
   /// Issues an enrollment. The string carries a single-use secret and is
   /// shown once; nothing stores it.

@@ -3,6 +3,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/agents_settings_screen.dart';
 import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
 import '../../agent/claude_login_screen.dart';
 import '../../agent/hosts_screen.dart';
@@ -52,6 +53,7 @@ const kSettingsPages = [
   SettingsPageInfo('integrations', 'Integrations', storm: true, beta: true),
   SettingsPageInfo('claude-login', 'Claude login', storm: true, beta: true),
   SettingsPageInfo('hosts', 'Hosts & default agent', storm: true),
+  SettingsPageInfo('agents', 'Agents', storm: true, beta: true),
   SettingsPageInfo('storage', 'Storage', storm: true),
   SettingsPageInfo('connection', 'Connection', storm: true),
   SettingsPageInfo('advanced', 'Advanced', storm: true),
@@ -71,6 +73,7 @@ Widget _pageFor(String id) => switch (id) {
   'integrations' => const IntegrationsScreen(),
   'claude-login' => const ClaudeLoginScreen(),
   'hosts' => const HostsScreen(),
+  'agents' => const AgentsSettingsScreen(),
   'storage' => const StoragePage(),
   'connection' => const ConnectionPage(),
   'advanced' => const AdvancedPage(),
