@@ -1851,6 +1851,129 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
         .collect())
 }
 
+// ---- Agent installs (decision 133) ------------------------------------
+//
+// The owner's routes are session tier only, so an `stk_` key or a host token
+// never reaches them, and no MCP tool starts one.
+
+use crate::agent::jobs::{AgentJob, Finished, ReportBody};
+
+/// The audit row of a finished install job.
+pub const EVENT_AGENT_INSTALL: &str = "agent_install";
+
+/// One row per finished job: what was asked and the stable result code.
+/// Never a URL and never anything the host printed.
+async fn audit_agent_jobs(state: &Shared, finished: Vec<Finished>) {
+    if finished.is_empty() {
+        return;
+    }
+    let now = crate::index::now_rfc3339();
+    let auth_db = state.auth_db.lock().await;
+    for Finished { job, user_id } in finished {
+        let detail = serde_json::json!({
+            "job_id": job.id,
+            "op": job.op,
+            "agent": job.agent,
+            "host_id": job.host_id,
+            "result": job.error.as_deref().unwrap_or("done"),
+            "version": job.version,
+            "auto": job.auto,
+        });
+        if let Err(e) = auth_db.record_event(
+            EVENT_AGENT_INSTALL,
+            user_id.as_deref(),
+            None,
+            &now,
+            &detail.to_string(),
+        ) {
+            tracing::warn!(error = %e, job = job.id, "could not record an agent install event");
+        }
+    }
+}
+
+async fn prune_agent_jobs(state: &Shared) {
+    let timed_out = state.agent.prune_agent_jobs();
+    audit_agent_jobs(state, timed_out).await;
+}
+
+pub async fn start_agent_job(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    agent: &str,
+    op: &str,
+) -> ApiResult<AgentJob> {
+    if !matches!(actor, Actor::Session { .. }) {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "owner_only".into(),
+        ));
+    }
+    {
+        let auth_db = state.auth_db.lock().await;
+        match auth_db.host_by_id(host_id).map_err(internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(not_found("no such host")),
+        }
+    }
+    prune_agent_jobs(state).await;
+    let job = state
+        .agent
+        .start_agent_job(host_id, agent, op, actor.user_id())
+        .map_err(agent_error)?;
+    tracing::info!(host = host_id, job = job.id, agent, op, "agent job started");
+    Ok(job)
+}
+
+pub async fn get_agent_job(state: &Shared, host_id: &str, job: &str) -> ApiResult<AgentJob> {
+    prune_agent_jobs(state).await;
+    state.agent.agent_job(host_id, job).map_err(agent_error)
+}
+
+/// A host's own update (decision 133-5), already under way when it says so.
+pub async fn runtime_start_agent_job(
+    state: &Shared,
+    host_id: &str,
+    agent: &str,
+    op: &str,
+) -> ApiResult<AgentJob> {
+    prune_agent_jobs(state).await;
+    let job = state
+        .agent
+        .start_auto_job(host_id, agent, op)
+        .map_err(agent_error)?;
+    tracing::info!(
+        host = host_id,
+        job = job.id,
+        agent,
+        "automatic agent update started"
+    );
+    Ok(job)
+}
+
+pub async fn runtime_agent_job(
+    state: &Shared,
+    host_id: &str,
+    job: &str,
+    body: ReportBody,
+) -> ApiResult<()> {
+    let report = body.parse().map_err(bad_request)?;
+    let finished = state
+        .agent
+        .report_agent_job(host_id, job, report)
+        .map_err(agent_error)?;
+    if let Some(finished) = finished {
+        tracing::info!(
+            host = host_id,
+            job,
+            result = finished.job.error.as_deref().unwrap_or("done"),
+            "agent job finished"
+        );
+        audit_agent_jobs(state, vec![finished]).await;
+    }
+    Ok(())
+}
+
 /// A session as clients see it: the record plus what it was launched with
 /// and how many notes it has written.
 #[derive(Debug, Clone, Serialize)]

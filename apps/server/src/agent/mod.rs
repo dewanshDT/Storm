@@ -19,6 +19,7 @@
 pub mod cache;
 pub mod credential;
 pub mod images;
+pub mod jobs;
 pub mod store;
 
 use std::collections::HashMap;
@@ -105,6 +106,14 @@ pub enum Command {
         blake3: String,
         ext: String,
     },
+    /// Install, update or remove an agent CLI (decision 133). The host
+    /// reports on `/v1/runtime/agents/jobs/{job}`.
+    #[serde(rename = "agent.install")]
+    AgentInstall {
+        job: String,
+        agent: String,
+        op: String,
+    },
 }
 
 impl Command {
@@ -119,6 +128,7 @@ impl Command {
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
+            Self::AgentInstall { .. } => "agent.install",
         }
     }
 
@@ -132,7 +142,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh => None,
+            Self::Refresh | Self::AgentInstall { .. } => None,
         }
     }
 }
@@ -192,6 +202,10 @@ pub struct Capabilities {
     /// 131g), for the owner's suggestions. An old host says nothing.
     #[serde(default)]
     pub plugin_mcp_remote: Vec<PluginRemote>,
+    /// The host takes `agent.install` (decision 133). An old host does not,
+    /// and is never sent one.
+    #[serde(default)]
+    pub agent_install: bool,
 }
 
 /// At most this many entries in each of a session's 131a lists.
@@ -247,6 +261,25 @@ pub struct ProviderCap {
     /// has no adapter for: granted as before.
     #[serde(default)]
     pub mcp: Option<bool>,
+    /// What the host found installed (decision 133). Each of these is absent
+    /// from an older host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `storm` (installed by the host, so removable) or `system`; absent when
+    /// not installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installable: Option<bool>,
+    /// Why not, when `installable` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_blocked: Option<String>,
+    /// False for an agent whose download has no published checksum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_verified: Option<bool>,
+    /// The newest version the host can install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
 }
 
 /// One session in a host's `hello`.
@@ -459,6 +492,7 @@ pub struct AgentManager {
     store: Mutex<Store>,
     live: Mutex<Live>,
     images: Mutex<images::Images>,
+    jobs: Mutex<jobs::Jobs>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
 }
@@ -511,6 +545,7 @@ impl AgentManager {
             store: Mutex::new(store),
             live: Mutex::new(Live::default()),
             images: Mutex::new(images::Images::default()),
+            jobs: Mutex::new(jobs::Jobs::default()),
             config_path,
             config: Mutex::new(config),
         })
@@ -803,6 +838,148 @@ impl AgentManager {
         link.capabilities = Some(capabilities);
         link.inventory.send_modify(|v| *v += 1);
         Ok(())
+    }
+
+    // ---- agent installs (decision 133) ----------------------------------
+
+    /// Fails jobs their hosts went silent on and forgets old ones. Returns
+    /// the jobs it failed, for their audit rows.
+    pub fn prune_agent_jobs(&self) -> Vec<jobs::Finished> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .prune(std::time::Instant::now(), &now())
+    }
+
+    /// Starts an install, update or removal the owner asked for, and sends it
+    /// to the host. Each refusal is a stable code.
+    pub fn start_agent_job(
+        &self,
+        host_id: &str,
+        agent: &str,
+        op: &str,
+        user_id: &str,
+    ) -> AgentResult<jobs::AgentJob> {
+        if !jobs::INSTALLABLE.contains(&agent) {
+            return Err(AgentError::BadRequest("unknown_agent".into()));
+        }
+        if !jobs::OPS.contains(&op) {
+            return Err(AgentError::BadRequest("unknown_op".into()));
+        }
+        let caps = self
+            .host_live(host_id)
+            .capabilities
+            .ok_or(AgentError::HostOffline)?;
+        if !caps.agent_install {
+            return Err(AgentError::Conflict("host_too_old".into()));
+        }
+        let cap = caps.providers.iter().find(|p| p.id == agent);
+        if op == "remove" {
+            if cap.and_then(|c| c.source.as_deref()) != Some("storm") {
+                return Err(AgentError::Conflict("not_managed".into()));
+            }
+            let in_use = self
+                .store
+                .lock()
+                .unwrap()
+                .for_host(host_id)?
+                .iter()
+                .any(|r| r.provider == agent && !r.is_ended());
+            if in_use {
+                return Err(AgentError::Conflict("agent_in_use".into()));
+            }
+        } else if let Some(c) = cap
+            && c.installable == Some(false)
+        {
+            // The host's reason, if it is one we know; never its free text.
+            let code = c
+                .install_blocked
+                .as_deref()
+                .filter(|b| jobs::BLOCKED.contains(b))
+                .unwrap_or("install_blocked");
+            return Err(AgentError::Conflict(code.into()));
+        }
+        let job = self
+            .jobs
+            .lock()
+            .unwrap()
+            .admit(
+                jobs::NewJob {
+                    host_id,
+                    agent,
+                    op,
+                    auto: false,
+                    user_id: Some(user_id),
+                    state: jobs::JobState::Queued,
+                },
+                &now(),
+            )
+            .map_err(|code| AgentError::Conflict(code.into()))?;
+        let command = Command::AgentInstall {
+            job: job.id.clone(),
+            agent: agent.into(),
+            op: op.into(),
+        };
+        if let Err(e) = self.send(host_id, command) {
+            self.jobs.lock().unwrap().remove(&job.id);
+            return Err(e);
+        }
+        Ok(job)
+    }
+
+    /// A host starting an update of its own (decision 133-5): it is already
+    /// running, so nothing is sent.
+    pub fn start_auto_job(
+        &self,
+        host_id: &str,
+        agent: &str,
+        op: &str,
+    ) -> AgentResult<jobs::AgentJob> {
+        if !jobs::INSTALLABLE.contains(&agent) {
+            return Err(AgentError::BadRequest("unknown_agent".into()));
+        }
+        if op != "update" {
+            return Err(AgentError::BadRequest("auto_update_only".into()));
+        }
+        self.jobs
+            .lock()
+            .unwrap()
+            .admit(
+                jobs::NewJob {
+                    host_id,
+                    agent,
+                    op,
+                    auto: true,
+                    user_id: None,
+                    state: jobs::JobState::Running,
+                },
+                &now(),
+            )
+            .map_err(|code| AgentError::Conflict(code.into()))
+    }
+
+    /// A job on `host_id`. Another host's job is not found.
+    pub fn agent_job(&self, host_id: &str, id: &str) -> AgentResult<jobs::AgentJob> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(host_id, id)
+            .ok_or(AgentError::NotFound("no such job"))
+    }
+
+    /// A host's report on its own job. Returns the job when this report
+    /// finished it.
+    pub fn report_agent_job(
+        &self,
+        host_id: &str,
+        id: &str,
+        report: jobs::Report,
+    ) -> AgentResult<Option<jobs::Finished>> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .report(host_id, id, report, &now())
+            .ok_or(AgentError::NotFound("no such job"))
     }
 
     fn owned_by(&self, host_id: &str, session_id: &str) -> AgentResult<SessionRecord> {
@@ -1682,6 +1859,12 @@ mod tests {
                     interactions: vec!["terminal".into()],
                     available: *available,
                     mcp: None,
+                    version: None,
+                    source: None,
+                    installable: None,
+                    install_blocked: None,
+                    checksum_verified: None,
+                    latest: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -1693,6 +1876,7 @@ mod tests {
             resume: vec!["claude-code".into(), "opencode".into()],
             provider_credentials: Vec::new(),
             plugin_mcp_remote: Vec::new(),
+            agent_install: false,
         }
     }
 
@@ -3091,5 +3275,190 @@ mod tests {
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
         );
+    }
+
+    #[test]
+    fn a_providers_install_fields_round_trip_and_are_absent_when_unknown() {
+        let old = r#"{"id":"codex","kind":"cli","interactions":["terminal"],"available":true,"mcp":null}"#;
+        let cap: ProviderCap = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (cap.version.clone(), cap.source.clone(), cap.latest.clone()),
+            (None, None, None)
+        );
+        let wire = serde_json::to_value(&cap).unwrap();
+        for key in [
+            "version",
+            "source",
+            "installable",
+            "install_blocked",
+            "checksum_verified",
+            "latest",
+        ] {
+            assert!(wire.get(key).is_none(), "{key}: {wire}");
+        }
+
+        let new = serde_json::json!({
+            "id": "cursor", "kind": "cli", "interactions": ["terminal"], "available": true,
+            "version": "2026.10.1", "source": "storm", "installable": true,
+            "checksum_verified": false, "latest": "2026.10.2",
+        });
+        let cap: ProviderCap = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(cap.source.as_deref(), Some("storm"));
+        assert_eq!(cap.checksum_verified, Some(false));
+        assert_eq!(
+            serde_json::from_value::<ProviderCap>(serde_json::to_value(&cap).unwrap()).unwrap(),
+            cap
+        );
+        let mut expected = new;
+        expected["mcp"] = serde_json::Value::Null;
+        assert_eq!(serde_json::to_value(&cap).unwrap(), expected);
+
+        let blocked: ProviderCap = serde_json::from_value(serde_json::json!({
+            "id": "codex", "kind": "cli", "available": false,
+            "installable": false, "install_blocked": "no_node",
+        }))
+        .unwrap();
+        assert_eq!(blocked.install_blocked.as_deref(), Some("no_node"));
+
+        let caps: Capabilities = serde_json::from_str("{}").unwrap();
+        assert!(!caps.agent_install);
+        let caps: Capabilities = serde_json::from_str(r#"{"agent_install":true}"#).unwrap();
+        assert!(caps.agent_install);
+    }
+
+    #[test]
+    fn agent_install_is_its_wire_command() {
+        let e = Envelope {
+            cmd_seq: 3,
+            command: Command::AgentInstall {
+                job: "agj_X".into(),
+                agent: "codex".into(),
+                op: "install".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"cmd_seq":3,"type":"agent.install","job":"agj_X","agent":"codex","op":"install"}"#
+        );
+        assert_eq!(e.command.session(), None);
+    }
+
+    fn install_caps() -> Capabilities {
+        let mut c = caps(&[("claude-code", true), ("shell", true)]);
+        c.agent_install = true;
+        let cap = |id: &str, source: Option<&str>, installable: bool, blocked: Option<&str>| {
+            ProviderCap {
+                id: id.into(),
+                kind: "cli".into(),
+                interactions: vec!["terminal".into()],
+                available: source.is_some(),
+                mcp: None,
+                version: source.map(|_| "1.0.0".into()),
+                source: source.map(Into::into),
+                installable: Some(installable),
+                install_blocked: blocked.map(Into::into),
+                checksum_verified: None,
+                latest: None,
+            }
+        };
+        c.providers[0].source = Some("storm".into());
+        c.providers.extend([
+            cap("codex", None, false, Some("no_node")),
+            cap("cursor", None, false, Some("we were told: rm -rf")),
+            cap("opencode", Some("system"), true, None),
+            cap("command-code", Some("storm"), true, None),
+        ]);
+        c
+    }
+
+    fn refusal(r: AgentResult<jobs::AgentJob>) -> String {
+        match r {
+            Err(AgentError::Conflict(c)) | Err(AgentError::BadRequest(c)) => c,
+            Err(AgentError::HostOffline) => "offline".into(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_install_is_refused_with_its_code() {
+        let (m, _dir) = manager();
+        let start = |agent: &str, op: &str| m.start_agent_job("hst_A", agent, op, "usr_1");
+        assert_eq!(refusal(start("codex", "install")), "offline");
+
+        let mut old = install_caps();
+        old.agent_install = false;
+        let _link = online(&m, "hst_A", old);
+        assert_eq!(refusal(start("codex", "install")), "host_too_old");
+
+        m.inventory("hst_A", install_caps()).unwrap();
+        assert_eq!(refusal(start("vim", "install")), "unknown_agent");
+        assert_eq!(refusal(start("shell", "install")), "unknown_agent");
+        assert_eq!(refusal(start("codex", "upgrade")), "unknown_op");
+        assert_eq!(refusal(start("codex", "install")), "no_node");
+        assert_eq!(refusal(start("codex", "update")), "no_node");
+        assert_eq!(refusal(start("cursor", "install")), "install_blocked");
+        assert_eq!(refusal(start("opencode", "remove")), "not_managed");
+        assert_eq!(refusal(start("codex", "remove")), "not_managed");
+
+        launch(&m, Some("claude-code")).unwrap();
+        assert_eq!(refusal(start("claude-code", "remove")), "agent_in_use");
+
+        start("command-code", "update").unwrap();
+        assert_eq!(refusal(start("command-code", "remove")), "busy");
+        start("opencode", "update").unwrap();
+        assert_eq!(refusal(start("claude-code", "update")), "busy");
+    }
+
+    #[test]
+    fn a_job_goes_to_its_host_and_only_that_host_reports_it() {
+        let (m, _dir) = manager();
+        let mut link = online(&m, "hst_A", install_caps());
+        let _other = online(&m, "h2", install_caps());
+        let job = m
+            .start_agent_job("hst_A", "command-code", "remove", "usr_1")
+            .unwrap();
+        assert_eq!(job.state, jobs::JobState::Queued);
+        assert!(job.id.starts_with("agj_"));
+        let sent = link.try_recv().unwrap();
+        assert_eq!(
+            sent.command,
+            Command::AgentInstall {
+                job: job.id.clone(),
+                agent: "command-code".into(),
+                op: "remove".into(),
+            }
+        );
+        assert!(matches!(
+            m.agent_job("h2", &job.id),
+            Err(AgentError::NotFound(_))
+        ));
+        assert!(matches!(
+            m.report_agent_job("h2", &job.id, jobs::Report::Done(None)),
+            Err(AgentError::NotFound(_))
+        ));
+        let done = m
+            .report_agent_job("hst_A", &job.id, jobs::Report::Done(None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.user_id.as_deref(), Some("usr_1"));
+        assert_eq!(
+            m.agent_job("hst_A", &job.id).unwrap().state,
+            jobs::JobState::Done
+        );
+    }
+
+    #[test]
+    fn a_job_that_could_not_be_sent_is_not_kept() {
+        let (m, _dir) = manager();
+        let link = online(&m, "h1", install_caps());
+        drop(link);
+        assert_eq!(
+            refusal(m.start_agent_job("h1", "opencode", "update", "usr_1")),
+            "offline"
+        );
+        // Nothing holds the agent busy.
+        let _link = online(&m, "h1", install_caps());
+        m.start_agent_job("h1", "opencode", "update", "usr_1")
+            .unwrap();
     }
 }

@@ -385,6 +385,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/sessions/{id}/provider-credential",
             get(runtime_provider_credential),
         )
+        // Agent installs (decision 133): a job's progress, and a host's own
+        // automatic update (133-5).
+        .route("/v1/runtime/agents/jobs", post(runtime_start_agent_job))
+        .route("/v1/runtime/agents/jobs/{job}", post(runtime_agent_job))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -471,6 +475,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}/workspaces",
             get(agent_host_workspaces),
         )
+        // Agent installs (decision 133): owner only, never an `stk_` key.
+        .route("/v1/agent/hosts/{id}/agents/{agent}", post(agent_start_job))
+        .route("/v1/agent/hosts/{id}/agents/jobs/{job}", get(agent_get_job))
         .route(
             "/v1/agent/sessions",
             get(agent_list_sessions).post(agent_launch),
@@ -1814,6 +1821,57 @@ async fn agent_host_workspaces(
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
     Ok(Json(crate::ops::host_workspaces(&state, &id).await?))
+}
+
+#[derive(Deserialize)]
+struct AgentJobRequest {
+    op: String,
+}
+
+async fn agent_start_job(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((id, agent)): Path<(String, String)>,
+    Json(body): Json<AgentJobRequest>,
+) -> ApiResult<(StatusCode, Json<crate::agent::jobs::AgentJob>)> {
+    let job = crate::ops::start_agent_job(&state, &actor, &id, &agent, &body.op).await?;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+async fn agent_get_job(
+    State(state): State<Shared>,
+    Path((id, job)): Path<(String, String)>,
+) -> ApiResult<Json<crate::agent::jobs::AgentJob>> {
+    Ok(Json(crate::ops::get_agent_job(&state, &id, &job).await?))
+}
+
+#[derive(Deserialize)]
+struct AutoJobRequest {
+    agent: String,
+    op: String,
+}
+
+async fn runtime_start_agent_job(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(body): Json<AutoJobRequest>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    let job =
+        crate::ops::runtime_start_agent_job(&state, &auth.host.id, &body.agent, &body.op).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(serde_json::json!({ "job": job.id })),
+    ))
+}
+
+async fn runtime_agent_job(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(job): Path<String>,
+    Json(body): Json<crate::agent::jobs::ReportBody>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_agent_job(&state, &auth.host.id, &job, body).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn agent_launch(
@@ -10873,6 +10931,535 @@ pub(crate) mod tests {
         let debug = format!("{pulled:?}");
         assert!(!debug.contains("CANARY"), "{debug}");
         assert!(serde_json::to_string(&pulled).unwrap().contains(CANARY));
+    }
+
+    // ---- agent installs (decision 133) ------------------------------------
+
+    fn install_caps(agent_install: bool) -> serde_json::Value {
+        let provider = |id: &str, extra: serde_json::Value| {
+            let mut p = serde_json::json!({
+                "id": id, "kind": "cli", "interactions": ["terminal"], "available": true,
+            });
+            p.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            p
+        };
+        serde_json::json!({
+            "version": "0.14.0",
+            "providers": [
+                provider("claude-code", serde_json::json!({"version": "2.1.0", "source": "storm", "installable": true})),
+                provider("opencode", serde_json::json!({"version": "1.0.0", "source": "system", "installable": true, "latest": "1.1.0"})),
+                provider("codex", serde_json::json!({"available": false, "installable": false, "install_blocked": "no_node"})),
+                provider("cursor", serde_json::json!({"available": false, "installable": true, "checksum_verified": false})),
+                provider("command-code", serde_json::json!({"version": "0.3.0", "source": "storm", "installable": true})),
+                provider("shell", serde_json::json!({})),
+            ],
+            "workspaces": ["storm"],
+            "max_sessions": 8,
+            "mcp_bridge": true,
+            "agent_install": agent_install,
+        })
+    }
+
+    struct InstallFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+        host: String,
+        host_bearer: String,
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+    }
+
+    async fn install_fixture(dir: &FsPath) -> InstallFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, token) = enroll_a_host(&app, &owner_bearer).await;
+        let link = install_host_online(&state, &host, true);
+        InstallFixture {
+            app,
+            state,
+            owner_bearer,
+            host,
+            host_bearer: format!("Bearer {token}"),
+            link,
+        }
+    }
+
+    fn install_host_online(
+        state: &Shared,
+        host: &str,
+        agent_install: bool,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope> {
+        let (_, link) = state.agent.connect_host(host);
+        state
+            .agent
+            .hello(
+                host,
+                serde_json::from_value(install_caps(agent_install)).unwrap(),
+            )
+            .unwrap();
+        link
+    }
+
+    impl InstallFixture {
+        async fn start_on(
+            &self,
+            host: &str,
+            agent: &str,
+            op: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/agent/hosts/{host}/agents/{agent}"),
+                    serde_json::json!({ "op": op }),
+                    &self.owner_bearer,
+                ),
+            )
+            .await
+        }
+
+        async fn start(&self, agent: &str, op: &str) -> (StatusCode, serde_json::Value) {
+            self.start_on(&self.host.clone(), agent, op).await
+        }
+
+        async fn job(&self, job: &str) -> (StatusCode, serde_json::Value) {
+            send(
+                &self.app,
+                get_with_auth(
+                    &format!("/v1/agent/hosts/{}/agents/jobs/{job}", self.host),
+                    &self.owner_bearer,
+                ),
+            )
+            .await
+        }
+
+        async fn report_as(
+            &self,
+            bearer: &str,
+            job: &str,
+            body: serde_json::Value,
+        ) -> (StatusCode, serde_json::Value) {
+            send(
+                &self.app,
+                post_json_with_auth(&format!("/v1/runtime/agents/jobs/{job}"), body, bearer),
+            )
+            .await
+        }
+
+        async fn report(&self, job: &str, body: serde_json::Value) -> StatusCode {
+            self.report_as(&self.host_bearer.clone(), job, body).await.0
+        }
+
+        async fn install_events(&self) -> Vec<serde_json::Value> {
+            security_events(&self.state)
+                .await
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_AGENT_INSTALL)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    #[tokio::test]
+    async fn the_owner_installs_an_agent_and_the_host_reports_it_through() {
+        let dir = tempdir::TempDir::new("storm-install-flow").unwrap();
+        let mut f = install_fixture(dir.path()).await;
+
+        // The host list carries what the host reported, additively.
+        let (status, hosts) = send(&f.app, get_with_auth("/v1/agent/hosts", &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK);
+        let caps = &hosts[0]["capabilities"];
+        assert_eq!(caps["agent_install"], true);
+        assert_eq!(caps["providers"][1]["latest"], "1.1.0");
+        assert_eq!(caps["providers"][2]["install_blocked"], "no_node");
+        assert_eq!(caps["providers"][3]["checksum_verified"], false);
+        assert!(caps["providers"][5].get("source").is_none(), "{caps}");
+
+        let (status, job) = f.start("cursor", "install").await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{job}");
+        let id = job["id"].as_str().unwrap().to_string();
+        assert!(id.starts_with("agj_") && id.len() == 28, "{id}");
+        assert_eq!(job["host_id"], f.host);
+        assert_eq!(job["agent"], "cursor");
+        assert_eq!(job["op"], "install");
+        assert_eq!(job["state"], "queued");
+        assert_eq!(job["auto"], false);
+        assert!(
+            job.get("step").is_none() && job.get("error").is_none(),
+            "{job}"
+        );
+        assert!(job["created"].as_str().is_some() && job["updated"].as_str().is_some());
+
+        let sent = serde_json::to_value(f.link.try_recv().unwrap()).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({
+                "cmd_seq": sent["cmd_seq"], "type": "agent.install",
+                "job": id, "agent": "cursor", "op": "install",
+            })
+        );
+        assert!(sent["cmd_seq"].as_u64().unwrap() >= 1);
+
+        assert_eq!(
+            f.report(&id, serde_json::json!({"step": "Downloading"}))
+                .await,
+            StatusCode::NO_CONTENT
+        );
+        let (_, job) = f.job(&id).await;
+        assert_eq!(
+            (job["state"].clone(), job["step"].clone()),
+            ("running".into(), "Downloading".into())
+        );
+        assert!(f.install_events().await.is_empty());
+
+        assert_eq!(
+            f.report(
+                &id,
+                serde_json::json!({"done": {"version": "2026.10.24-1"}})
+            )
+            .await,
+            StatusCode::NO_CONTENT
+        );
+        let (status, job) = f.job(&id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(job["state"], "done");
+        assert_eq!(job["version"], "2026.10.24-1");
+
+        // A finished job keeps its result.
+        assert_eq!(
+            f.report(&id, serde_json::json!({"failed": "disk_full"}))
+                .await,
+            StatusCode::NO_CONTENT
+        );
+        let (_, again) = f.job(&id).await;
+        assert_eq!(again, job);
+
+        let events = f.install_events().await;
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            events[0],
+            serde_json::json!({
+                "job_id": id, "op": "install", "agent": "cursor", "host_id": f.host,
+                "result": "done", "version": "2026.10.24-1", "auto": false,
+            })
+        );
+        let host_token = f.host_bearer.trim_start_matches("Bearer ");
+        let owner_token = f.owner_bearer.trim_start_matches("Bearer ");
+        for (kind, detail) in security_events(&f.state).await {
+            assert!(!detail.contains(host_token), "{kind}: {detail}");
+            assert!(!detail.contains(owner_token), "{kind}: {detail}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_job_is_audited_with_its_code_and_never_the_hosts_text() {
+        let dir = tempdir::TempDir::new("storm-install-failed").unwrap();
+        let f = install_fixture(dir.path()).await;
+        let (_, job) = f.start("opencode", "update").await;
+        let id = job["id"].as_str().unwrap();
+        let (status, body) = f
+            .report_as(&f.host_bearer, id, serde_json::json!({"step": "Compiling"}))
+            .await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "unknown_step".into())
+        );
+        let (status, _) = f
+            .report_as(
+                &f.host_bearer,
+                id,
+                serde_json::json!({"done": {"version": "1 https://x"}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let (status, _) = f.report_as(&f.host_bearer, id, serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(f.job(id).await.1["state"], "queued");
+
+        let leak = "npm ERR! https://registry.example/token=SECRET";
+        assert_eq!(
+            f.report(id, serde_json::json!({ "failed": leak })).await,
+            StatusCode::NO_CONTENT
+        );
+        let (_, job) = f.job(id).await;
+        assert_eq!(
+            (job["state"].clone(), job["error"].clone()),
+            ("failed".into(), "unknown".into())
+        );
+        let events = f.install_events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["result"], "unknown");
+        assert_eq!(events[0]["version"], serde_json::Value::Null);
+        for (_, detail) in security_events(&f.state).await {
+            assert!(
+                !detail.contains("SECRET") && !detail.contains("https://"),
+                "{detail}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn an_install_is_refused_with_a_stable_code() {
+        let dir = tempdir::TempDir::new("storm-install-refusals").unwrap();
+        let f = install_fixture(dir.path()).await;
+        let code = |r: (StatusCode, serde_json::Value)| {
+            (r.0, r.1["error"].as_str().unwrap_or("").to_string())
+        };
+
+        assert_eq!(
+            f.start_on("hst_nope", "codex", "install").await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            code(f.start("vim", "install").await),
+            (StatusCode::BAD_REQUEST, "unknown_agent".into())
+        );
+        assert_eq!(
+            code(f.start("shell", "install").await),
+            (StatusCode::BAD_REQUEST, "unknown_agent".into())
+        );
+        assert_eq!(
+            code(f.start("cursor", "reinstall").await),
+            (StatusCode::BAD_REQUEST, "unknown_op".into())
+        );
+
+        let (old, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let _old_link = install_host_online(&f.state, &old, false);
+        assert_eq!(
+            code(f.start_on(&old, "cursor", "install").await),
+            (StatusCode::CONFLICT, "host_too_old".into())
+        );
+        let (offline, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        assert_eq!(
+            f.start_on(&offline, "cursor", "install").await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        assert_eq!(
+            code(f.start("codex", "install").await),
+            (StatusCode::CONFLICT, "no_node".into())
+        );
+        assert_eq!(
+            code(f.start("codex", "update").await),
+            (StatusCode::CONFLICT, "no_node".into())
+        );
+        assert_eq!(
+            code(f.start("opencode", "remove").await),
+            (StatusCode::CONFLICT, "not_managed".into())
+        );
+        assert_eq!(
+            code(f.start("cursor", "remove").await),
+            (StatusCode::CONFLICT, "not_managed".into())
+        );
+
+        let (status, body) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "host_id": f.host, "workspace": "storm", "provider": "claude-code",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            code(f.start("claude-code", "remove").await),
+            (StatusCode::CONFLICT, "agent_in_use".into())
+        );
+        // Only a removal waits for the sessions.
+        assert_eq!(
+            f.start("claude-code", "update").await.0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            code(f.start("claude-code", "update").await),
+            (StatusCode::CONFLICT, "busy".into())
+        );
+        assert_eq!(
+            f.start("command-code", "remove").await.0,
+            StatusCode::ACCEPTED
+        );
+        assert_eq!(
+            code(f.start("cursor", "install").await),
+            (StatusCode::CONFLICT, "busy".into())
+        );
+        assert!(f.install_events().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_host_reports_only_its_own_jobs() {
+        let dir = tempdir::TempDir::new("storm-install-other-host").unwrap();
+        let f = install_fixture(dir.path()).await;
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let _other_link = install_host_online(&f.state, &other, true);
+        let other_bearer = format!("Bearer {other_token}");
+
+        let (_, job) = f.start("cursor", "install").await;
+        let id = job["id"].as_str().unwrap();
+        let (status, _) = f
+            .report_as(
+                &other_bearer,
+                id,
+                serde_json::json!({"done": {"version": "9"}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = f
+            .report_as(
+                &f.host_bearer,
+                "agj_000000000000000000000000",
+                serde_json::json!({"step": "Verifying"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Nor does the owner find it under another host.
+        let (status, _) = send(
+            &f.app,
+            get_with_auth(
+                &format!("/v1/agent/hosts/{other}/agents/jobs/{id}"),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(f.job(id).await.1["state"], "queued");
+    }
+
+    #[tokio::test]
+    async fn agent_installs_stay_in_their_tiers() {
+        let dir = tempdir::TempDir::new("storm-install-tiers").unwrap();
+        let f = install_fixture(dir.path()).await;
+        let (_, job) = f.start("cursor", "install").await;
+        let id = job["id"].as_str().unwrap();
+        let (_, secret) = seed_key(&f.state).await;
+        let key = format!("Bearer {secret}");
+
+        let start = format!("/v1/agent/hosts/{}/agents/opencode", f.host);
+        let get = format!("/v1/agent/hosts/{}/agents/jobs/{id}", f.host);
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(&start, serde_json::json!({"op": "update"}), bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{start}");
+            let (status, _) = send(&f.app, get_with_auth(&get, bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{get}");
+        }
+        for bearer in [&key, &f.owner_bearer] {
+            let (status, _) = f
+                .report_as(bearer, id, serde_json::json!({"done": {"version": "1"}}))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(
+                    "/v1/runtime/agents/jobs",
+                    serde_json::json!({"agent": "opencode", "op": "update", "auto": true}),
+                    bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        assert_eq!(f.job(id).await.1["state"], "queued");
+        // No MCP tool starts one.
+        assert!(
+            !include_str!("mcp.rs").contains("start_agent_job"),
+            "agent installs are never an MCP tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hosts_own_update_is_a_job_it_reports_and_is_audited_as_automatic() {
+        let dir = tempdir::TempDir::new("storm-install-auto").unwrap();
+        let f = install_fixture(dir.path()).await;
+        let auto = |agent: &str, op: &str, bearer: &str| {
+            let request = post_json_with_auth(
+                "/v1/runtime/agents/jobs",
+                serde_json::json!({"agent": agent, "op": op, "auto": true}),
+                bearer,
+            );
+            let app = f.app.clone();
+            async move { send(&app, request).await }
+        };
+
+        let (status, body) = auto("opencode", "install", &f.host_bearer).await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "auto_update_only".into())
+        );
+        let (status, body) = auto("vim", "update", &f.host_bearer).await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::BAD_REQUEST, "unknown_agent".into())
+        );
+
+        let (status, body) = auto("opencode", "update", &f.host_bearer).await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let id = body["job"].as_str().unwrap().to_string();
+        assert!(id.starts_with("agj_"));
+        assert_eq!(body.as_object().unwrap().len(), 1, "{body}");
+
+        let (status, job) = f.job(&id).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (job["state"].clone(), job["auto"].clone(), job["op"].clone()),
+            ("running".into(), true.into(), "update".into())
+        );
+
+        // It holds its agent, and the host's second slot, like any job.
+        let (status, body) = auto("opencode", "update", &f.host_bearer).await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::CONFLICT, "busy".into())
+        );
+        assert_eq!(f.start("opencode", "update").await.1["error"], "busy");
+        assert_eq!(f.start("cursor", "install").await.0, StatusCode::ACCEPTED);
+        let (status, body) = auto("command-code", "update", &f.host_bearer).await;
+        assert_eq!(
+            (status, body["error"].clone()),
+            (StatusCode::CONFLICT, "busy".into())
+        );
+
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let _other_link = install_host_online(&f.state, &other, true);
+        let (status, _) = f
+            .report_as(
+                &format!("Bearer {other_token}"),
+                &id,
+                serde_json::json!({"step": "Installing"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        assert_eq!(
+            f.report(&id, serde_json::json!({"step": "Installing"}))
+                .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(f.job(&id).await.1["step"], "Installing");
+        assert_eq!(
+            f.report(&id, serde_json::json!({"done": {"version": "1.1.0"}}))
+                .await,
+            StatusCode::NO_CONTENT
+        );
+        assert_eq!(f.job(&id).await.1["state"], "done");
+        let events = f.install_events().await;
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            serde_json::json!({
+                "job_id": id, "op": "update", "agent": "opencode", "host_id": f.host,
+                "result": "done", "version": "1.1.0", "auto": true,
+            })
+        );
     }
 
     /// Decision 128a: a 404 must mean only "no such note". The client's
