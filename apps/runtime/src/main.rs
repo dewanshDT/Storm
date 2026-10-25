@@ -86,6 +86,10 @@ enum Command {
     /// resume it. Run by the agent's own hook or plugin, never by hand; reads
     /// the id from stdin (a Claude Code hook's input) when none is given.
     HarnessSession { id: Option<String> },
+    /// Tells the host the agent's permission prompt is waiting for a person
+    /// (`permission_prompt`) or answered (`none`). Run by the agent's own hook
+    /// or plugin, never by hand.
+    Attention { kind: String },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
     /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
@@ -167,6 +171,10 @@ async fn main() -> Result<()> {
         }
         Command::HarnessSession { id } => {
             storm_runtime::harness::report(id);
+            Ok(())
+        }
+        Command::Attention { kind } => {
+            storm_runtime::harness::report_attention(&kind);
             Ok(())
         }
         Command::AgentJob { agent, action } => {

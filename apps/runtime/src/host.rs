@@ -254,6 +254,13 @@ struct Events {
     leader: watch::Sender<Option<Arc<Leader>>>,
     /// A spawned child's own workspace, as the helper made it (137-1).
     child: Mutex<Option<crate::isolation::ChildWorkspace>>,
+    /// Its adapter's hooks report a permission prompt (134-9), so its status
+    /// reports say whether one is waiting. Off for every adapter until its
+    /// G-134-7 passes.
+    attention_hooks: bool,
+    /// `permission_prompt` while the agent's own prompt waits, as its hooks
+    /// last said.
+    attention: Mutex<Option<&'static str>>,
 }
 
 /// A session's leader, and on an isolated host the uid it runs as: both
@@ -306,6 +313,8 @@ struct HostSession {
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// The agent's session id last acknowledged by the server.
     harness_sent: Mutex<Option<String>>,
+    /// The permission prompt last acknowledged by the server (134-9).
+    attention_sent: Mutex<Option<&'static str>>,
     /// Input, in order, for this session's writer task. A queue so the link
     /// never waits on a PTY, and one writer so keystrokes never reorder.
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -358,6 +367,8 @@ pub struct Host {
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
     harness_handles: Mutex<HarnessHandles>,
+    /// The adapters whose permission prompts are reported (134-9).
+    permission_prompt: Mutex<&'static [&'static str]>,
     /// Bridge identity (decision 135): whether connections are checked, and
     /// each session's leader to check them against.
     peer_identity: crate::peer_identity::Identity,
@@ -468,6 +479,7 @@ impl Host {
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
             harness_handles: Mutex::new(HashMap::new()),
+            permission_prompt: Mutex::new(crate::harness::PERMISSION_PROMPT_ADAPTERS),
             peer_identity: crate::peer_identity::Identity::detect(),
             leaders: Mutex::new(HashMap::new()),
             isolation_status,
@@ -1262,6 +1274,7 @@ impl Host {
             let end = *s.events.ended.lock().unwrap();
             let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
             entry = with_harness(entry, s.events.harness.lock().unwrap().as_deref());
+            entry = with_attention(entry, &s.events);
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -1769,6 +1782,12 @@ impl Host {
             harness: Mutex::new(None),
             leader: watch::channel(None).0,
             child: Mutex::new(None),
+            attention_hooks: self
+                .permission_prompt
+                .lock()
+                .unwrap()
+                .contains(&provider_id.as_str()),
+            attention: Mutex::new(None),
         });
         self.leaders
             .lock()
@@ -1926,6 +1945,7 @@ impl Host {
             start_report,
             title_sent: Mutex::new((Title::default(), None)),
             harness_sent: Mutex::new(None),
+            attention_sent: Mutex::new(None),
             input,
         });
         // The writer: one per session, in order. Each write is bounded by the
@@ -2055,7 +2075,9 @@ impl Host {
             let end = *s.events.ended.lock().unwrap();
             let (sent, posted_at) = s.title_sent.lock().unwrap().clone();
             let harness_changed = harness != *s.harness_sent.lock().unwrap();
-            if end.is_none() && (title != sent || harness_changed) {
+            let attention = *s.events.attention.lock().unwrap();
+            let attention_changed = attention != *s.attention_sent.lock().unwrap();
+            if end.is_none() && (title != sent || harness_changed || attention_changed) {
                 let wait =
                     posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
                 if !wait.is_zero() {
@@ -2065,7 +2087,11 @@ impl Host {
                     }
                     continue;
                 }
-                let body = with_harness(with_title(status_json(None), &title), harness.as_deref());
+                let mut body =
+                    with_harness(with_title(status_json(None), &title), harness.as_deref());
+                if s.events.attention_hooks {
+                    body["attention"] = json!(attention);
+                }
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -2073,6 +2099,7 @@ impl Host {
                     Ok(st) if st.is_success() => {
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
+                        *s.attention_sent.lock().unwrap() = attention;
                         retry = Duration::from_millis(250);
                     }
                     _ => {
@@ -2263,6 +2290,7 @@ impl Host {
             resume,
             synced,
             spawn,
+            events.attention_hooks,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -2598,6 +2626,35 @@ impl Host {
         }
     }
 
+    /// The agent's hook or plugin saying its permission prompt waits, or was
+    /// answered (134-9). Taken only through a handle this host gave out, as
+    /// a harness report is, and only for a session whose adapter reports it.
+    async fn attention_reported(&self, report: crate::harness::AttentionLine, peer: Peer) {
+        let attention = match report.attention.as_str() {
+            crate::harness::PERMISSION_PROMPT => Some(crate::harness::PERMISSION_PROMPT),
+            crate::harness::ATTENTION_CLEAR => None,
+            _ => return,
+        };
+        let Some((session, events)) = self
+            .harness_handles
+            .lock()
+            .unwrap()
+            .get(&report.handle)
+            .map(|(s, _, e)| (s.clone(), e.clone()))
+        else {
+            return;
+        };
+        if !events.attention_hooks || !self.admit(peer, &session, "harness").await {
+            return;
+        }
+        let mut current = events.attention.lock().unwrap();
+        if *current != attention {
+            tracing::info!(%session, attention = ?attention, "permission prompt");
+            *current = attention;
+            events.wake.notify_one();
+        }
+    }
+
     /// One bridge connection: a message to forward, or a subscription.
     /// `via` is the session whose own socket it came in on (136i), or none
     /// for the host's shared one.
@@ -2626,6 +2683,9 @@ impl Host {
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::HarnessLine>(&line) {
             return self.harness_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::AttentionLine>(&line) {
+            return self.attention_reported(report, peer).await;
         }
         let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
             return;
@@ -2838,6 +2898,15 @@ fn running_report(extra: &serde_json::Value) -> serde_json::Value {
 fn with_harness(mut body: serde_json::Value, harness: Option<&str>) -> serde_json::Value {
     if let Some(id) = harness {
         body["harness_session"] = json!(id);
+    }
+    body
+}
+
+/// A status body with whether the agent's permission prompt waits, for a
+/// session whose adapter reports it (134-9); unchanged for any other.
+fn with_attention(mut body: serde_json::Value, events: &Events) -> serde_json::Value {
+    if events.attention_hooks {
+        body["attention"] = json!(*events.attention.lock().unwrap());
     }
     body
 }
@@ -3226,6 +3295,12 @@ mod tests {
         match verb {
             // A hook: the session's own process, with its own handle.
             "send" => crate::harness::send(socket(), handle(), arg.into()).unwrap(),
+            // A permission prompt hook (134-9), with its own handle.
+            "attend" => crate::harness::send_attention(socket(), handle(), arg.into()).unwrap(),
+            "attend-as" => {
+                let (h, kind) = arg.split_once(' ').unwrap();
+                crate::harness::send_attention(socket(), h.into(), kind.into()).unwrap()
+            }
             // With the handle in file `arg` (another session's, say), or a
             // literal one when there is no such file.
             "as" => {
@@ -3474,6 +3549,8 @@ mod tests {
             harness: Mutex::new(None),
             leader: watch::channel(None).0,
             child: Mutex::new(None),
+            attention_hooks: false,
+            attention: Mutex::new(None),
         });
         host.harness_handles.lock().unwrap().insert(
             "h_ORPHAN".into(),
@@ -3650,6 +3727,179 @@ mod tests {
                 == Some(id)
         })
         .await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[cfg(unix)]
+    fn attention_posts(
+        seen: &Mutex<Vec<(String, serde_json::Value)>>,
+        session: &str,
+    ) -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with(&format!("/{session}/status")))
+            .filter_map(|(_, b)| b.get("attention").cloned())
+            .collect()
+    }
+
+    /// 134-9: no adapter's permission prompt is reported until its G-134-7
+    /// passes. A session's own hook saying so changes nothing, and no
+    /// status or `hello` carries the field.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn no_adapter_reports_a_permission_prompt_yet() {
+        assert!(crate::harness::PERMISSION_PROMPT_ADAPTERS.is_empty());
+        let script = format!(
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; exec sleep 1000",
+            probe("attend permission_prompt", false),
+            probe("send 66666666-6666-4666-8666-666666666666", false),
+        );
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        host.clone()
+            .handle(harness_start("ags_OFF", "claude-code", None, false))
+            .await;
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        wait_for("the id after the prompt", || {
+            harness_posts(&seen, "ags_off")
+                .contains(&"66666666-6666-4666-8666-666666666666".to_string())
+        })
+        .await;
+        let s = host.session("ags_OFF").unwrap();
+        assert!(!s.events.attention_hooks);
+        assert_eq!(*s.events.attention.lock().unwrap(), None);
+        assert_eq!(
+            attention_posts(&seen, "ags_off"),
+            Vec::<serde_json::Value>::new()
+        );
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert!(hello["sessions"][0].get("attention").is_none(), "{hello}");
+        let settings = std::fs::read_to_string(
+            crate::mcp::session_dir(&host.state_dir, "ags_OFF").join("claude-settings.json"),
+        )
+        .unwrap();
+        assert!(!settings.contains("attention"), "{settings}");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-9 with an adapter on, as once its gate passes: the session's own
+    /// hook sets and clears it, each change reaches the server once, a value
+    /// that is neither is ignored, and so is a handle no session has.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_permission_prompt_is_set_and_cleared_by_the_sessions_hook() {
+        let marker = "77777777-7777-4777-8777-777777777777";
+        let second = "88888888-8888-4888-8888-888888888888";
+        let wait = |file: &str| format!("while [ ! -e {file} ]; do sleep 0.05; done");
+        let script = format!(
+            "{}; {}; {}; {}; {}; {}; {}; {}; {}; {}; {}; exec sleep 1000",
+            wait("go"),
+            probe("attend-as not-a-handle permission_prompt", false),
+            probe("attend idle_prompt", false),
+            probe(&format!("send {marker}"), false),
+            wait("go2"),
+            probe("attend permission_prompt", false),
+            probe("attend permission_prompt", false),
+            probe("attend idle_prompt", false),
+            probe(&format!("send {second}"), false),
+            wait("go3"),
+            probe("attend none", false),
+        );
+        let (host, seen, state, roots) = harness_host(&script).await;
+        *host.permission_prompt.lock().unwrap() = &["claude-code"];
+        host.clone()
+            .handle(harness_start("ags_ON", "claude-code", None, false))
+            .await;
+        let s = host.session("ags_ON").unwrap();
+        assert!(s.events.attention_hooks);
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                crate::mcp::session_dir(&host.state_dir, "ags_ON").join("claude-settings.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["Notification"][0]["matcher"],
+            "permission_prompt"
+        );
+        // The session's own handle from outside its tree (135): refused on
+        // a host that checks who connects.
+        let handle = host
+            .harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == "ags_ON")
+            .map(|(h, _)| h.clone())
+            .unwrap();
+        let socket = crate::mcp::socket_path(state.path());
+        tokio::task::spawn_blocking(move || {
+            crate::harness::send_attention(&socket, handle, "permission_prompt".into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        if host.peer_identity.verified() {
+            assert_eq!(*s.events.attention.lock().unwrap(), None, "an outsider");
+        }
+        let go = |file: &str| std::fs::write(roots.path().join("w").join(file), "").unwrap();
+        go("go");
+        wait_for("the marker", || {
+            harness_posts(&seen, "ags_on").contains(&marker.to_string())
+        })
+        .await;
+        assert_eq!(
+            *s.events.attention.lock().unwrap(),
+            None,
+            "another handle and another value change nothing"
+        );
+        go("go2");
+        wait_for("the prompt", || {
+            attention_posts(&seen, "ags_on").contains(&json!("permission_prompt"))
+        })
+        .await;
+        wait_for("the second marker", || {
+            harness_posts(&seen, "ags_on").contains(&second.to_string())
+        })
+        .await;
+        assert_eq!(
+            *s.events.attention.lock().unwrap(),
+            Some("permission_prompt"),
+            "another value leaves it as it is"
+        );
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["attention"], "permission_prompt");
+        go("go3");
+        wait_for("the answer", || {
+            attention_posts(&seen, "ags_on").last() == Some(&serde_json::Value::Null)
+        })
+        .await;
+        assert_eq!(
+            attention_posts(&seen, "ags_on")
+                .into_iter()
+                .skip_while(|a| a.is_null())
+                .collect::<Vec<_>>(),
+            [json!("permission_prompt"), serde_json::Value::Null],
+            "one post per change"
+        );
+        assert_eq!(*s.events.attention.lock().unwrap(), None);
         host.shutdown(Duration::from_millis(200)).await;
     }
 

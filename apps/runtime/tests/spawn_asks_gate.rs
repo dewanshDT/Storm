@@ -145,6 +145,7 @@ fn claude_run(bin: &str, extra: &[&str]) -> Run {
         None,
         None,
         Some(&asks),
+        false,
     )
     .unwrap();
     let mcp_json = ws.path().join("mcp.json");

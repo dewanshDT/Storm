@@ -19,6 +19,7 @@
 // Dark until 134-5: no tool creates a request yet.
 #[allow(dead_code)]
 pub mod approval;
+pub mod attention;
 pub mod cache;
 pub mod cascade;
 pub mod credential;
@@ -30,6 +31,8 @@ pub mod store;
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod attention_tests;
 #[cfg(test)]
 mod cascade_tests;
 #[cfg(test)]
@@ -483,6 +486,10 @@ pub struct StatusReport {
     pub title: Option<String>,
     #[serde(default)]
     pub activity: Option<String>,
+    /// `permission_prompt` while the agent's own prompt waits for a person,
+    /// from a host whose hooks report it for the adapter (134-9).
+    #[serde(default)]
+    pub attention: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -681,6 +688,8 @@ struct SessionLive {
     cache: OutputCache,
     /// `working` / `idle`, as the host last said (D15 AM42).
     activity: Option<String>,
+    /// A permission prompt waiting, as the host last said (134-9).
+    attention: Option<String>,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
     /// The credential kind its `start` named (decision 124): the only one the
@@ -693,6 +702,7 @@ impl SessionLive {
         Self {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
+            attention: None,
             version: watch::channel(0).0,
             credential: None,
         }
@@ -733,6 +743,9 @@ pub struct AgentManager {
     config: Mutex<AgentConfig>,
     /// Bumped whenever the approval engine decides a request.
     requests: watch::Sender<u64>,
+    /// The adapters whose permission prompts are taken from their hosts
+    /// (134-9).
+    permission_prompt: Mutex<&'static [&'static str]>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -822,6 +835,7 @@ impl AgentManager {
             config_path,
             config: Mutex::new(config),
             requests: watch::channel(0).0,
+            permission_prompt: Mutex::new(attention::PERMISSION_PROMPT_ADAPTERS),
         })
     }
 
@@ -2019,13 +2033,14 @@ impl AgentManager {
             .as_deref()
             .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
             .map(str::to_owned);
-        self.live
-            .lock()
-            .unwrap()
+        let attention = self.reported_attention(r, report);
+        let mut live = self.live.lock().unwrap();
+        let session = live
             .sessions
             .entry(r.id.clone())
-            .or_insert_with(SessionLive::new)
-            .activity = activity;
+            .or_insert_with(SessionLive::new);
+        session.activity = activity;
+        session.attention = attention;
     }
 
     /// Activity is shown only while the session runs: an `unknown` session's
@@ -2760,6 +2775,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -2892,6 +2908,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3408,6 +3425,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3426,6 +3444,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3449,6 +3468,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3536,6 +3556,7 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3659,6 +3680,7 @@ mod tests {
                         signal: None,
                         title: None,
                         activity: None,
+                        attention: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -3693,6 +3715,7 @@ mod tests {
             end_reason: None,
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
+            attention: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -3996,6 +4019,7 @@ mod tests {
                     signal: None,
                     title: None,
                     activity: None,
+                    attention: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,

@@ -3417,6 +3417,9 @@ pub struct SessionView {
     /// made it: the mode and the commit a clone starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_workspace: Option<crate::agent::ChildWorkspace>,
+    /// Whether it waits for a person (134p): `approval`, `permission_prompt`
+    /// or `blocked`. Beside `activity`, never a status, never from idle.
+    pub needs_attention: Option<&'static str>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -3455,6 +3458,7 @@ fn session_view(
         .agent
         .child_workspace_of(&session.id)
         .map_err(internal)?;
+    let needs_attention = state.agent.needs_attention(&session).map_err(agent_error)?;
     let role = state
         .agent
         .role_of(&session.id)
@@ -3484,6 +3488,7 @@ fn session_view(
         lineage,
         isolation,
         child_workspace,
+        needs_attention,
     })
 }
 
@@ -3701,6 +3706,7 @@ pub async fn launch_session(
             },
             isolation,
             child_workspace: None,
+            needs_attention: None,
         },
         mcp: LaunchMcp {
             connections,

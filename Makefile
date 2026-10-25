@@ -171,6 +171,11 @@ gate-spawn-asks:
 	@cd $(RUNTIME) && STORM_SPAWN_ASKS_GATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 \
 		cargo test --quiet --test spawn_asks_gate -- --nocapture --test-threads 1
 
+## gate-attention: G-134-7 — needs_attention's permission prompt hooks against the real Claude Code and OpenCode on this host, typed into like a person (never CI)
+gate-attention:
+	@cd $(RUNTIME) && STORM_ATTENTION_GATE=1 \
+		cargo test --quiet --test attention_gate -- --nocapture --test-threads 1
+
 ## gate-bridge-identity: G-135-2 (Linux) or G-135-4 (macOS) against the real, signed-in agent CLIs on this host (never CI)
 gate-bridge-identity:
 	@cd $(SERVER) && cargo build --quiet
@@ -596,7 +601,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-spawn-asks fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-spawn-asks gate-attention fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

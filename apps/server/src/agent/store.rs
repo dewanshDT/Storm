@@ -2415,6 +2415,22 @@ pub mod spawn {
             )
         }
 
+        /// Whether a request the session made waits for a person at `now`:
+        /// pending and not yet past its expiry, which the sweeper may not
+        /// have reached.
+        pub fn awaits_decision(&self, requester: &str, now: &str) -> Result<bool> {
+            let mut stmt = self.conn.prepare(
+                "SELECT expires_at FROM agent_requests WHERE requester = ?1 AND state = 'pending'",
+            )?;
+            let rows = stmt.query_map(params![requester], |r| r.get::<_, String>(0))?;
+            for expires in rows {
+                if !expired(now, &expires?) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
         /// The requests a session made, oldest first.
         pub fn requests_of(&self, requester: &str) -> Result<Vec<Request>> {
             let mut stmt = self.conn.prepare(&format!(

@@ -14669,6 +14669,53 @@ pub(crate) mod tests {
         );
     }
 
+    /// 134-9 through the real routes and tools: a requester's view says
+    /// `approval` until a device decides, a child's says `blocked` until it
+    /// reports again, and every other view says nothing.
+    #[tokio::test]
+    async fn needs_attention_is_on_every_session_view() {
+        let dir = tempdir::TempDir::new("storm-134-9-view").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        let attention = async |f: &GatewayFixture, id: &str| {
+            let (code, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+            assert_eq!(code, StatusCode::OK, "{view}");
+            let (_, list) = f.get("/v1/agent/sessions").await;
+            let listed = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()["needs_attention"]
+                .clone();
+            assert_eq!(listed, view["needs_attention"], "the list says the same");
+            view["needs_attention"].clone()
+        };
+        assert_eq!(attention(&f, &parent).await, serde_json::Value::Null);
+
+        let sent = structured(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"id": child, "text": "check the cap"}),
+            )
+            .await,
+        );
+        let id = sent["request_id"].as_str().unwrap().to_string();
+        assert_eq!(attention(&f, &parent).await, "approval");
+        assert_eq!(attention(&f, &child).await, serde_json::Value::Null);
+        let (code, body) = f.decide(&id, "approve", &f.owner_bearer).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(attention(&f, &parent).await, serde_json::Value::Null);
+
+        let blocked = serde_json::json!({"outcome": "blocked", "summary": "need a key"});
+        f.tool(&child, "report_result", blocked).await;
+        assert_eq!(attention(&f, &child).await, "blocked");
+        let done = serde_json::json!({"outcome": "succeeded", "summary": "found it"});
+        f.tool(&child, "report_result", done).await;
+        assert_eq!(attention(&f, &child).await, serde_json::Value::Null);
+    }
+
     /// A2 over the gateway: only the parent's own descendants, never itself,
     /// an unknown id or anyone from a child; a cap refuses with its name.
     #[tokio::test]
