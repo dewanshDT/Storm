@@ -299,9 +299,12 @@ args = ["-i"]
                                   input=(issued["enrollment"] + "\n").encode(), capture_output=True)
         check("storm-runtime enrolls", enrolled.returncode == 0, enrolled.stderr.decode())
         host_id = json.load(open(os.path.join(HOST_STATE, "host.json")))["host_id"]
+        # The host's `claude --version` probe runs the fixture in the host's
+        # cwd, where it writes agent-env.json: keep that out of the checkout.
         runtime = subprocess.Popen(
             [RUNTIME_BIN, "serve", "--state", HOST_STATE, "--config", os.path.join(WORK, "runtime.toml")],
-            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"})
+            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"},
+            cwd=WORK)
 
         def host_online():
             _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
