@@ -730,16 +730,6 @@ async fn npm_install(
 
 /// Points `bin/<command>` at `target`, atomically, records the version, and
 /// keeps only the current and previous releases.
-#[cfg(test)]
-fn activate(
-    state_dir: &Path,
-    recipe: &Recipe,
-    target: &Path,
-    version: &str,
-) -> std::io::Result<()> {
-    activate_as(state_dir, recipe, target, version, false)
-}
-
 fn activate_as(
     state_dir: &Path,
     recipe: &Recipe,
@@ -887,7 +877,7 @@ mod tests {
         for v in ["1.0.0", "1.1.0", "1.2.0"] {
             std::fs::create_dir_all(dir.join(v)).unwrap();
             std::fs::write(dir.join(v).join("claude"), v).unwrap();
-            activate(t.path(), r, &dir.join(v).join("claude"), v).unwrap();
+            activate_as(t.path(), r, &dir.join(v).join("claude"), v, false).unwrap();
         }
         assert_eq!(
             managed_target(t.path(), "claude-code"),
@@ -913,7 +903,7 @@ mod tests {
         let dir = agent_dir(t.path(), r).join("1.0");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cursor-agent"), "x").unwrap();
-        activate(t.path(), r, &dir.join("cursor-agent"), "1.0").unwrap();
+        activate_as(t.path(), r, &dir.join("cursor-agent"), "1.0", false).unwrap();
         remove(t.path(), r, None).await.unwrap();
         assert!(managed_target(t.path(), "cursor").is_none());
         assert!(!agent_dir(t.path(), r).exists());
