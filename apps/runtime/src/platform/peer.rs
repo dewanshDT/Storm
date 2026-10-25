@@ -1,8 +1,8 @@
 //! What the OS says about the process at the other end of the bridge socket
 //! and the processes above it (decision 135b, 135c). Linux has it:
 //! `SO_PEERPIDFD`, `pidfd_open` and `/proc`. macOS has `LOCAL_PEERTOKEN` and
-//! `sysctl`'s process table, built but not yet reported (G-135-4). Windows has neither,
-//! and [`support`] says how the host reports each (135d).
+//! `sysctl`'s process table, built but not yet reported (G-135-4). Windows
+//! has neither, and [`support`] says how the host reports each (135d).
 
 pub use imp::{Process, parent, peer, ptrace_scope, socketpair_peer};
 
