@@ -22,6 +22,9 @@ pub mod images;
 pub mod jobs;
 pub mod store;
 
+#[cfg(test)]
+mod spawn_tests;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

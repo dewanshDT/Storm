@@ -317,6 +317,7 @@ impl Store {
                 )?;
             }
         }
+        spawn::init(&conn)?;
         Ok(Self { conn })
     }
 
@@ -333,36 +334,7 @@ impl Store {
     }
 
     pub fn insert(&self, r: &SessionRecord) -> Result<()> {
-        self.conn.execute(
-            &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
-            params![
-                r.id,
-                r.owner_user_id,
-                r.host_id,
-                r.workspace,
-                r.provider,
-                r.provider_kind,
-                r.interaction,
-                r.provider_fallback
-                    .as_ref()
-                    .map(|f| serde_json::to_string(f).expect("serializable")),
-                r.status,
-                r.end_reason,
-                r.signal,
-                r.exit_code,
-                r.created_at,
-                r.started_at,
-                r.ended_at,
-                r.last_activity,
-                r.egress,
-                r.cols,
-                r.rows,
-                r.title,
-                r.harness_session,
-                r.resumed_from,
-            ],
-        )?;
-        Ok(())
+        insert_session(&self.conn, r)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
@@ -723,7 +695,7 @@ impl Store {
     /// Removes a session's record, its crew membership and its role label in
     /// one transaction. A crew left with no members is deleted with it and
     /// returned (decision 138c). Its launch and writes are kept, so provenance
-    /// still resolves.
+    /// still resolves; so is its lineage (decision 134, L-1).
     pub fn delete(&mut self, id: &str) -> Result<(bool, Option<Crew>)> {
         let tx = self.conn.transaction()?;
         let gone = tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])? > 0;
@@ -732,6 +704,7 @@ impl Store {
             "DELETE FROM session_role WHERE session_id = ?1",
             params![id],
         )?;
+        spawn::forget(&tx, id)?;
         tx.commit()?;
         Ok((gone, crew))
     }
@@ -979,6 +952,39 @@ impl Store {
     }
 }
 
+fn insert_session(conn: &Connection, r: &SessionRecord) -> Result<()> {
+    conn.execute(
+        &format!("INSERT INTO sessions ({COLUMNS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)"),
+        params![
+            r.id,
+            r.owner_user_id,
+            r.host_id,
+            r.workspace,
+            r.provider,
+            r.provider_kind,
+            r.interaction,
+            r.provider_fallback
+                .as_ref()
+                .map(|f| serde_json::to_string(f).expect("serializable")),
+            r.status,
+            r.end_reason,
+            r.signal,
+            r.exit_code,
+            r.created_at,
+            r.started_at,
+            r.ended_at,
+            r.last_activity,
+            r.egress,
+            r.cols,
+            r.rows,
+            r.title,
+            r.harness_session,
+            r.resumed_from,
+        ],
+    )?;
+    Ok(())
+}
+
 fn crew_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Crew> {
     Ok(Crew {
         id: r.get(0)?,
@@ -1063,4 +1069,695 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
         harness_session: r.get(20)?,
         resumed_from: r.get(21)?,
     })
+}
+
+/// Agent spawning's records (decision 134): lineage, the spawn switch, task,
+/// result, approval requests, the inbox and cascades. Additive tables only;
+/// nothing older is altered.
+// Dark until 134-2…134-7: nothing outside the tests calls this yet.
+#[allow(dead_code)]
+pub mod spawn {
+    use anyhow::{Result, bail};
+    use rusqlite::{Connection, OptionalExtension, params};
+
+    use super::{SessionRecord, Store, insert_session};
+
+    pub const MAX_TASK_BYTES: usize = 16 * 1024;
+    pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
+
+    pub(super) fn init(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "-- 134d: who started a session. A top-level session has no row.
+             -- Set once, at approval, and never changed (L-1); kept when the
+             -- session is dismissed, as history.
+             CREATE TABLE IF NOT EXISTS session_lineage (
+                 session_id     TEXT PRIMARY KEY,
+                 parent_session TEXT NOT NULL,
+                 root_session   TEXT NOT NULL,
+                 depth          INTEGER NOT NULL,
+                 created_at     TEXT NOT NULL,
+                 CHECK (depth >= 1),
+                 CHECK (parent_session != session_id AND root_session != session_id),
+                 CHECK ((depth = 1) = (root_session = parent_session))
+             );
+             CREATE INDEX IF NOT EXISTS lineage_by_parent ON session_lineage(parent_session);
+             CREATE INDEX IF NOT EXISTS lineage_by_root ON session_lineage(root_session);
+             CREATE TRIGGER IF NOT EXISTS lineage_no_update
+                 BEFORE UPDATE ON session_lineage
+                 BEGIN SELECT RAISE(ABORT, 'lineage is immutable'); END;
+             CREATE TRIGGER IF NOT EXISTS lineage_no_delete
+                 BEFORE DELETE ON session_lineage
+                 BEGIN SELECT RAISE(ABORT, 'lineage is immutable'); END;
+             -- INSERT OR REPLACE deletes without firing a delete trigger.
+             CREATE TRIGGER IF NOT EXISTS lineage_no_replace
+                 BEFORE INSERT ON session_lineage
+                 WHEN EXISTS (SELECT 1 FROM session_lineage WHERE session_id = NEW.session_id)
+                 BEGIN SELECT RAISE(ABORT, 'lineage is immutable'); END;
+
+             -- 134c: the spawn switch. No row is off; set only by a person.
+             CREATE TABLE IF NOT EXISTS session_spawn (
+                 session_id        TEXT PRIMARY KEY,
+                 enabled           INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                 changed_by_device TEXT,
+                 changed_at        TEXT NOT NULL
+             );
+
+             -- 134f: a child's task, the exact text a person approved.
+             CREATE TABLE IF NOT EXISTS session_task (
+                 session_id TEXT PRIMARY KEY,
+                 text       TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 16384),
+                 created_at TEXT NOT NULL
+             );
+             CREATE TRIGGER IF NOT EXISTS task_no_update
+                 BEFORE UPDATE ON session_task
+                 BEGIN SELECT RAISE(ABORT, 'a task is fixed at approval'); END;
+
+             -- 134h: what a session reported with report_result, on its own record.
+             CREATE TABLE IF NOT EXISTS session_result (
+                 session_id  TEXT PRIMARY KEY,
+                 outcome     TEXT NOT NULL CHECK (outcome != ''),
+                 summary     TEXT NOT NULL,
+                 details     TEXT,
+                 reported_at TEXT NOT NULL
+             );
+
+             -- 134o: start, message and end wait here for a person's decision.
+             CREATE TABLE IF NOT EXISTS agent_requests (
+                 id                TEXT PRIMARY KEY,
+                 kind              TEXT NOT NULL CHECK (kind IN ('start', 'message', 'end')),
+                 requester         TEXT NOT NULL,
+                 target            TEXT,
+                 payload           TEXT NOT NULL,
+                 created_at        TEXT NOT NULL,
+                 expires_at        TEXT NOT NULL,
+                 state             TEXT NOT NULL
+                     CHECK (state IN ('pending', 'approving', 'decided')),
+                 decided_by_device TEXT,
+                 decided_at        TEXT,
+                 outcome           TEXT CHECK (outcome IN ('started', 'start_failed',
+                     'delivered', 'ended', 'denied', 'expired', 'refused')),
+                 reason            TEXT CHECK (reason IN ('limit', 'not_permitted', 'revoked',
+                     'requester_ended', 'target_gone', 'identity_unverified',
+                     'isolation_unverified')),
+                 session           TEXT,
+                 CHECK ((kind = 'start') = (target IS NULL)),
+                 CHECK ((state = 'decided') = (outcome IS NOT NULL)),
+                 CHECK ((COALESCE(outcome, '') = 'refused') = (reason IS NOT NULL)),
+                 CHECK (session IS NULL OR outcome IN ('started', 'start_failed')),
+                 CHECK (COALESCE(outcome, '') != 'started' OR session IS NOT NULL)
+             );
+             CREATE INDEX IF NOT EXISTS requests_by_requester
+                 ON agent_requests(requester, state);
+             CREATE INDEX IF NOT EXISTS requests_by_target ON agent_requests(target, state);
+             -- What a person approves is what acts (T8, T9), and once.
+             CREATE TRIGGER IF NOT EXISTS request_text_fixed
+                 BEFORE UPDATE OF id, kind, requester, target, payload, created_at, expires_at
+                 ON agent_requests
+                 BEGIN SELECT RAISE(ABORT, 'a request is fixed when it is made'); END;
+             CREATE TRIGGER IF NOT EXISTS request_decided_once
+                 BEFORE UPDATE ON agent_requests WHEN OLD.state = 'decided'
+                 BEGIN SELECT RAISE(ABORT, 'a request is decided once'); END;
+
+             -- 134j: a child's inbox. The sender is the parent or `storm` (C9).
+             CREATE TABLE IF NOT EXISTS session_inbox (
+                 session_id TEXT NOT NULL,
+                 seq        INTEGER NOT NULL,
+                 sender     TEXT NOT NULL,
+                 text       TEXT NOT NULL CHECK (length(CAST(text AS BLOB)) <= 8192),
+                 request_id TEXT,
+                 state      TEXT NOT NULL CHECK (state IN ('pending_approval', 'queued',
+                     'delivered', 'acknowledged', 'denied', 'expired', 'undeliverable')),
+                 at         TEXT NOT NULL,
+                 PRIMARY KEY (session_id, seq),
+                 CHECK ((sender = 'storm') = (request_id IS NULL))
+             );
+
+             -- L-3: a parent's end, persisted with the descendants it stops.
+             CREATE TABLE IF NOT EXISTS spawn_cascades (
+                 id                TEXT PRIMARY KEY,
+                 cause             TEXT NOT NULL
+                     CHECK (cause IN ('human_end', 'parent_end', 'end_all_children')),
+                 parent_session    TEXT NOT NULL,
+                 parent_end_reason TEXT,
+                 report_first      INTEGER NOT NULL CHECK (report_first IN (0, 1)),
+                 created_at        TEXT NOT NULL,
+                 completed_at      TEXT,
+                 CHECK ((cause = 'end_all_children') = (parent_end_reason IS NULL))
+             );
+             CREATE TRIGGER IF NOT EXISTS cascade_fixed
+                 BEFORE UPDATE OF id, cause, parent_session, parent_end_reason, report_first,
+                     created_at ON spawn_cascades
+                 BEGIN SELECT RAISE(ABORT, 'a cascade is fixed when it is made'); END;
+             CREATE TABLE IF NOT EXISTS spawn_cascade_targets (
+                 cascade_id TEXT NOT NULL,
+                 session_id TEXT NOT NULL,
+                 state      TEXT NOT NULL
+                     CHECK (state IN ('pending', 'ended', 'already_ended', 'unreachable')),
+                 updated_at TEXT NOT NULL,
+                 PRIMARY KEY (cascade_id, session_id)
+             );
+             CREATE INDEX IF NOT EXISTS cascade_targets_by_session
+                 ON spawn_cascade_targets(session_id);
+             CREATE TRIGGER IF NOT EXISTS cascade_target_final
+                 BEFORE UPDATE ON spawn_cascade_targets
+                 WHEN OLD.state IN ('ended', 'already_ended')
+                 BEGIN SELECT RAISE(ABORT, 'a cascade target is ended once'); END;",
+        )?;
+        Ok(())
+    }
+
+    /// Who started a session (134d). A top-level session is its own root at
+    /// depth 0.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Lineage {
+        pub parent_session: Option<String>,
+        pub root_session: String,
+        pub depth: i64,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct SpawnResult {
+        pub outcome: String,
+        pub summary: String,
+        pub details: Option<String>,
+        pub reported_at: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Request {
+        pub id: String,
+        pub kind: String,
+        pub requester: String,
+        pub target: Option<String>,
+        pub payload: String,
+        pub created_at: String,
+        pub expires_at: String,
+        pub state: String,
+        pub decided_by_device: Option<String>,
+        pub decided_at: Option<String>,
+        pub outcome: Option<String>,
+        pub reason: Option<String>,
+        pub session: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Message {
+        pub seq: i64,
+        pub sender: String,
+        pub text: String,
+        pub request_id: Option<String>,
+        pub state: String,
+        pub at: String,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct Cascade {
+        pub id: String,
+        pub cause: String,
+        pub parent_session: String,
+        pub parent_end_reason: Option<String>,
+        pub report_first: bool,
+        pub created_at: String,
+        pub completed_at: Option<String>,
+        /// Each target and its state, in the order they were snapshotted.
+        pub targets: Vec<(String, String)>,
+    }
+
+    /// How a cascaded child ended (L-4, L-5): its end reason, its parent's,
+    /// and the cascade that ended it.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct EndCause {
+        pub end_reason: String,
+        pub parent_end_reason: Option<String>,
+        pub cascade_id: String,
+    }
+
+    const ENDED: &str = "('completed', 'failed', 'stopped')";
+
+    impl Store {
+        pub fn lineage(&self, session_id: &str) -> Result<Lineage> {
+            lineage_of(&self.conn, session_id)
+        }
+
+        /// Records a child at its approval, in one transaction: the session,
+        /// its lineage under `parent` and its task. The only writer of
+        /// lineage; nothing ever changes it after (L-1).
+        pub fn insert_spawned(
+            &mut self,
+            child: &SessionRecord,
+            parent: &str,
+            task: &str,
+            now: &str,
+        ) -> Result<Lineage> {
+            if task.len() > MAX_TASK_BYTES {
+                bail!("the task is over {MAX_TASK_BYTES} bytes");
+            }
+            let tx = self.conn.transaction()?;
+            let exists = tx
+                .prepare("SELECT 1 FROM sessions WHERE id = ?1")?
+                .exists([parent])?;
+            if !exists {
+                bail!("no parent session {parent}");
+            }
+            let up = lineage_of(&tx, parent)?;
+            let lineage = Lineage {
+                parent_session: Some(parent.to_string()),
+                root_session: up.root_session,
+                depth: up.depth + 1,
+            };
+            insert_session(&tx, child)?;
+            tx.execute(
+                "INSERT INTO session_lineage
+                     (session_id, parent_session, root_session, depth, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![child.id, parent, lineage.root_session, lineage.depth, now],
+            )?;
+            tx.execute(
+                "INSERT INTO session_task (session_id, text, created_at) VALUES (?1, ?2, ?3)",
+                params![child.id, task, now],
+            )?;
+            tx.commit()?;
+            Ok(lineage)
+        }
+
+        /// A session's descendants that still have a record, nearest first;
+        /// with `live_only`, those that have not ended (`unknown` is live, L-6).
+        pub fn descendants(&self, session_id: &str, live_only: bool) -> Result<Vec<String>> {
+            descendants_of(&self.conn, session_id, live_only)
+        }
+
+        pub fn spawn_enabled(&self, session_id: &str) -> Result<bool> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT enabled FROM session_spawn WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(false))
+        }
+
+        /// Turns a session's spawn switch on or off. Turning it off refuses
+        /// that session's pending requests, `revoked`, in the same
+        /// transaction (B2, P-4); how many it refused.
+        pub fn set_spawn(
+            &mut self,
+            session_id: &str,
+            enabled: bool,
+            device: Option<&str>,
+            now: &str,
+        ) -> Result<usize> {
+            let tx = self.conn.transaction()?;
+            tx.execute(
+                "INSERT INTO session_spawn (session_id, enabled, changed_by_device, changed_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (session_id) DO UPDATE SET enabled = excluded.enabled,
+                     changed_by_device = excluded.changed_by_device,
+                     changed_at = excluded.changed_at",
+                params![session_id, enabled, device, now],
+            )?;
+            let refused = if enabled {
+                0
+            } else {
+                refuse_where(&tx, "requester = ?1", session_id, "revoked", now)?
+            };
+            tx.commit()?;
+            Ok(refused)
+        }
+
+        pub fn task(&self, session_id: &str) -> Result<Option<String>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT text FROM session_task WHERE session_id = ?1",
+                    params![session_id],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        }
+
+        /// The session's own result; a later report replaces an earlier one.
+        pub fn set_result(&self, session_id: &str, r: &SpawnResult) -> Result<()> {
+            self.conn.execute(
+                "INSERT INTO session_result (session_id, outcome, summary, details, reported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (session_id) DO UPDATE SET outcome = excluded.outcome,
+                     summary = excluded.summary, details = excluded.details,
+                     reported_at = excluded.reported_at",
+                params![session_id, r.outcome, r.summary, r.details, r.reported_at],
+            )?;
+            Ok(())
+        }
+
+        pub fn result(&self, session_id: &str) -> Result<Option<SpawnResult>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT outcome, summary, details, reported_at FROM session_result
+                     WHERE session_id = ?1",
+                    params![session_id],
+                    |r| {
+                        Ok(SpawnResult {
+                            outcome: r.get(0)?,
+                            summary: r.get(1)?,
+                            details: r.get(2)?,
+                            reported_at: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?)
+        }
+
+        /// Records a new request, `pending`.
+        pub fn insert_request(&self, r: &Request) -> Result<()> {
+            self.conn.execute(
+                "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
+                     expires_at, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')",
+                params![
+                    r.id,
+                    r.kind,
+                    r.requester,
+                    r.target,
+                    r.payload,
+                    r.created_at,
+                    r.expires_at
+                ],
+            )?;
+            Ok(())
+        }
+
+        pub fn request(&self, id: &str) -> Result<Option<Request>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT id, kind, requester, target, payload, created_at, expires_at, state,
+                         decided_by_device, decided_at, outcome, reason, session
+                     FROM agent_requests WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        Ok(Request {
+                            id: r.get(0)?,
+                            kind: r.get(1)?,
+                            requester: r.get(2)?,
+                            target: r.get(3)?,
+                            payload: r.get(4)?,
+                            created_at: r.get(5)?,
+                            expires_at: r.get(6)?,
+                            state: r.get(7)?,
+                            decided_by_device: r.get(8)?,
+                            decided_at: r.get(9)?,
+                            outcome: r.get(10)?,
+                            reason: r.get(11)?,
+                            session: r.get(12)?,
+                        })
+                    },
+                )
+                .optional()?)
+        }
+
+        /// Refuses a requester's pending requests with `reason` (L-7, P-4).
+        pub fn refuse_requests_of(
+            &self,
+            requester: &str,
+            reason: &str,
+            now: &str,
+        ) -> Result<usize> {
+            refuse_where(&self.conn, "requester = ?1", requester, reason, now)
+        }
+
+        /// Puts a message in a session's inbox at the next sequence number.
+        pub fn queue_message(
+            &mut self,
+            session_id: &str,
+            sender: &str,
+            text: &str,
+            request_id: Option<&str>,
+            state: &str,
+            now: &str,
+        ) -> Result<i64> {
+            if text.len() > MAX_MESSAGE_BYTES {
+                bail!("the message is over {MAX_MESSAGE_BYTES} bytes");
+            }
+            let tx = self.conn.transaction()?;
+            let seq: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_inbox WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )?;
+            tx.execute(
+                "INSERT INTO session_inbox (session_id, seq, sender, text, request_id, state, at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![session_id, seq, sender, text, request_id, state, now],
+            )?;
+            tx.commit()?;
+            Ok(seq)
+        }
+
+        pub fn inbox(&self, session_id: &str) -> Result<Vec<Message>> {
+            let mut stmt = self.conn.prepare(
+                "SELECT seq, sender, text, request_id, state, at FROM session_inbox
+                 WHERE session_id = ?1 ORDER BY seq",
+            )?;
+            let rows = stmt.query_map(params![session_id], |r| {
+                Ok(Message {
+                    seq: r.get(0)?,
+                    sender: r.get(1)?,
+                    text: r.get(2)?,
+                    request_id: r.get(3)?,
+                    state: r.get(4)?,
+                    at: r.get(5)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+
+        /// Opens a cascade (L-3): in one transaction, the cause, the parent and
+        /// its own end reason, and every live descendant as a `pending`
+        /// target. When the parent is ending, its pending requests are refused
+        /// `requester_ended` in the same transaction (L-7). A cascade with no
+        /// live descendant is complete at once. Returns the targets.
+        pub fn open_cascade(
+            &mut self,
+            id: &str,
+            cause: &str,
+            parent: &str,
+            parent_end_reason: Option<&str>,
+            report_first: bool,
+            now: &str,
+        ) -> Result<Vec<String>> {
+            let tx = self.conn.transaction()?;
+            let targets = descendants_of(&tx, parent, true)?;
+            tx.execute(
+                "INSERT INTO spawn_cascades (id, cause, parent_session, parent_end_reason,
+                     report_first, created_at, completed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    id,
+                    cause,
+                    parent,
+                    parent_end_reason,
+                    report_first,
+                    now,
+                    targets.is_empty().then_some(now)
+                ],
+            )?;
+            for t in &targets {
+                tx.execute(
+                    "INSERT INTO spawn_cascade_targets (cascade_id, session_id, state, updated_at)
+                     VALUES (?1, ?2, 'pending', ?3)",
+                    params![id, t, now],
+                )?;
+            }
+            if cause != "end_all_children" {
+                refuse_where(&tx, "requester = ?1", parent, "requester_ended", now)?;
+            }
+            tx.commit()?;
+            Ok(targets)
+        }
+
+        /// Moves a cascade target on. `ended` and `already_ended` are final:
+        /// a second end is a no-op (L-3), answered `false`. The cascade is
+        /// complete once no target is `pending` or `unreachable`.
+        pub fn set_cascade_target(
+            &mut self,
+            cascade_id: &str,
+            session_id: &str,
+            state: &str,
+            now: &str,
+        ) -> Result<bool> {
+            let tx = self.conn.transaction()?;
+            let changed = tx.execute(
+                "UPDATE spawn_cascade_targets SET state = ?3, updated_at = ?4
+                 WHERE cascade_id = ?1 AND session_id = ?2
+                   AND state IN ('pending', 'unreachable') AND state != ?3",
+                params![cascade_id, session_id, state, now],
+            )? > 0;
+            tx.execute(
+                "UPDATE spawn_cascades SET completed_at = ?2
+                 WHERE id = ?1 AND completed_at IS NULL AND NOT EXISTS (
+                     SELECT 1 FROM spawn_cascade_targets
+                     WHERE cascade_id = ?1 AND state IN ('pending', 'unreachable'))",
+                params![cascade_id, now],
+            )?;
+            tx.commit()?;
+            Ok(changed)
+        }
+
+        pub fn cascade(&self, id: &str) -> Result<Option<Cascade>> {
+            let Some(mut c) = self
+                .conn
+                .query_row(
+                    "SELECT id, cause, parent_session, parent_end_reason, report_first,
+                         created_at, completed_at
+                     FROM spawn_cascades WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        Ok(Cascade {
+                            id: r.get(0)?,
+                            cause: r.get(1)?,
+                            parent_session: r.get(2)?,
+                            parent_end_reason: r.get(3)?,
+                            report_first: r.get(4)?,
+                            created_at: r.get(5)?,
+                            completed_at: r.get(6)?,
+                            targets: Vec::new(),
+                        })
+                    },
+                )
+                .optional()?
+            else {
+                return Ok(None);
+            };
+            let mut stmt = self.conn.prepare(
+                "SELECT session_id, state FROM spawn_cascade_targets
+                 WHERE cascade_id = ?1 ORDER BY rowid",
+            )?;
+            c.targets = stmt
+                .query_map(params![id], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(Some(c))
+        }
+
+        /// Cascades not yet complete, oldest first: what resumes after a
+        /// server restart (L-3).
+        pub fn open_cascades(&self) -> Result<Vec<String>> {
+            let mut stmt = self.conn.prepare(
+                "SELECT id FROM spawn_cascades WHERE completed_at IS NULL
+                 ORDER BY created_at, rowid",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+
+        /// The end reason a cascaded session takes: the first cascade that
+        /// named it wins (L-4), with its parent's reason copied (L-5).
+        pub fn end_cause(&self, session_id: &str) -> Result<Option<EndCause>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT c.cause, c.parent_end_reason, c.id
+                     FROM spawn_cascade_targets t JOIN spawn_cascades c ON c.id = t.cascade_id
+                     WHERE t.session_id = ?1 ORDER BY c.created_at, c.rowid LIMIT 1",
+                    params![session_id],
+                    |r| {
+                        let cause: String = r.get(0)?;
+                        Ok(EndCause {
+                            end_reason: if cause == "parent_end" {
+                                "parent_ended"
+                            } else {
+                                "cascade"
+                            }
+                            .to_string(),
+                            parent_end_reason: r.get(1)?,
+                            cascade_id: r.get(2)?,
+                        })
+                    },
+                )
+                .optional()?)
+        }
+    }
+
+    fn lineage_of(conn: &Connection, session_id: &str) -> Result<Lineage> {
+        Ok(conn
+            .query_row(
+                "SELECT parent_session, root_session, depth FROM session_lineage
+                 WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(Lineage {
+                        parent_session: Some(r.get(0)?),
+                        root_session: r.get(1)?,
+                        depth: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_else(|| Lineage {
+                parent_session: None,
+                root_session: session_id.to_string(),
+                depth: 0,
+            }))
+    }
+
+    fn descendants_of(conn: &Connection, session_id: &str, live_only: bool) -> Result<Vec<String>> {
+        let live = if live_only {
+            format!("AND s.status NOT IN {ENDED}")
+        } else {
+            String::new()
+        };
+        let mut stmt = conn.prepare(&format!(
+            "WITH RECURSIVE tree(id) AS (
+                 SELECT session_id FROM session_lineage WHERE parent_session = ?1
+                 UNION
+                 SELECT l.session_id FROM session_lineage l JOIN tree ON l.parent_session = tree.id
+             )
+             SELECT tree.id FROM tree
+             JOIN sessions s ON s.id = tree.id
+             JOIN session_lineage l ON l.session_id = tree.id
+             WHERE 1 {live}
+             ORDER BY l.depth, s.created_at, tree.id"
+        ))?;
+        let rows = stmt.query_map(params![session_id], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn refuse_where(
+        conn: &Connection,
+        clause: &str,
+        session_id: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<usize> {
+        Ok(conn.execute(
+            &format!(
+                "UPDATE agent_requests SET state = 'decided', outcome = 'refused', reason = ?2,
+                     decided_at = ?3
+                 WHERE state IN ('pending', 'approving') AND {clause}"
+            ),
+            params![session_id, reason, now],
+        )?)
+    }
+
+    /// What a dismissal takes with a session (C8): its switch, task, result
+    /// and inbox. Requests still pending from or to it are refused; decided
+    /// ones, its lineage and cascades stay as history.
+    pub(super) fn forget(conn: &Connection, session_id: &str) -> Result<()> {
+        let now = crate::index::now_rfc3339();
+        refuse_where(conn, "requester = ?1", session_id, "requester_ended", &now)?;
+        refuse_where(conn, "target = ?1", session_id, "target_gone", &now)?;
+        for table in [
+            "session_spawn",
+            "session_task",
+            "session_result",
+            "session_inbox",
+        ] {
+            conn.execute(
+                &format!("DELETE FROM {table} WHERE session_id = ?1"),
+                params![session_id],
+            )?;
+        }
+        Ok(())
+    }
 }
