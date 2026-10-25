@@ -30,7 +30,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::BASE64;
@@ -257,6 +257,10 @@ type Leaders = HashMap<String, watch::Receiver<Option<Arc<crate::platform::peer:
 /// is still starting: the agent can run a hook before `start` returns.
 const LEADER_WAIT: Duration = Duration::from_secs(5);
 
+/// At most this many refusals a minute reach the server's audit (135-2).
+const REFUSALS_PER_MINUTE: u32 = 30;
+const REFUSAL_POST_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The table that survives a restart: which sessions this host was running.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SessionTable {
@@ -288,6 +292,9 @@ pub struct Host {
     /// each session's leader to check them against.
     peer_identity: crate::peer_identity::Identity,
     leaders: Mutex<Leaders>,
+    /// Refusals told to the server in the current minute; past
+    /// [`REFUSALS_PER_MINUTE`] only the journal has them.
+    refusals_reported: Mutex<(Instant, u32)>,
     /// Refused connections, for the tests to see what the audit line said.
     #[cfg(test)]
     refused: Mutex<Vec<(String, &'static str, &'static str)>>,
@@ -363,6 +370,7 @@ impl Host {
             harness_handles: Mutex::new(HashMap::new()),
             peer_identity: crate::peer_identity::Identity::detect(),
             leaders: Mutex::new(HashMap::new()),
+            refusals_reported: Mutex::new((Instant::now(), 0)),
             #[cfg(test)]
             refused: Mutex::new(Vec::new()),
             opencode_settings,
@@ -1986,6 +1994,26 @@ impl Host {
                     .await;
             }
         }
+        // The server's audit row (135-2). An older server answers 404, and a
+        // flood of refusals is bounded here: the journal line above has each.
+        if *self.link_up.borrow() && self.may_report_refusal() {
+            let _ = self
+                .post_for_response(
+                    &format!("/v1/runtime/sessions/{session}/identity-refused"),
+                    &json!({"connection": kind, "reason": why.as_str()}),
+                    Some(REFUSAL_POST_TIMEOUT),
+                )
+                .await;
+        }
+    }
+
+    fn may_report_refusal(&self) -> bool {
+        let mut window = self.refusals_reported.lock().unwrap();
+        if window.0.elapsed() >= Duration::from_secs(60) {
+            *window = (Instant::now(), 0);
+        }
+        window.1 += 1;
+        window.1 <= REFUSALS_PER_MINUTE
     }
 
     /// The session's leader, waiting a little for one still starting.
@@ -2952,6 +2980,18 @@ mod tests {
         );
         assert_eq!(forwarded(), 1);
         assert_eq!(refusals(&host, "ags_BRIDGE"), [("bridge", "reached_host")]);
+        // The server is told, for its audit row (135-2); never the handle.
+        let told: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/sessions/ags_bridge/identity-refused"))
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(
+            told,
+            [json!({"connection": "bridge", "reason": "reached_host"})]
+        );
         host.shutdown(Duration::from_millis(200)).await;
     }
 

@@ -1570,6 +1570,9 @@ pub struct HostView {
     pub status: &'static str,
     /// What the host offers, while it is online.
     pub capabilities: Option<crate::agent::Capabilities>,
+    /// Its bridge identity (decision 135d), online or not: anything but
+    /// `verified` is labelled. `None` for a host not heard from since.
+    pub identity: Option<crate::agent::Identity>,
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
@@ -1584,10 +1587,18 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
     } else {
         "offline"
     };
+    let identity = match &live.capabilities {
+        Some(caps) => Some(caps.identity.clone()),
+        None => state.agent.host_identity(&host.id).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, host = host.id, "could not read a host's identity");
+            None
+        }),
+    };
     HostView {
         host,
         status,
         capabilities: live.capabilities,
+        identity,
         egress: "host",
     }
 }
@@ -1996,6 +2007,9 @@ pub struct SessionView {
     pub crew: Option<crate::agent::Membership>,
     /// Its role label (138d), named by the note's current title.
     pub role: Option<RoleView>,
+    /// Its host's bridge identity (decision 135d), so Details can say when
+    /// sessions there can act as each other.
+    pub identity: Option<crate::agent::Identity>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -2017,6 +2031,10 @@ fn session_view(
     let (mcp_skipped, mcp_plugin_local) =
         state.agent.mcp_notice_of(&session.id).map_err(internal)?;
     let crew = state.agent.membership(&session.id).map_err(internal)?;
+    let identity = state
+        .agent
+        .host_identity(&session.host_id)
+        .map_err(internal)?;
     let role = state
         .agent
         .role_of(&session.id)
@@ -2042,6 +2060,7 @@ fn session_view(
         mcp_plugin_local,
         crew,
         role,
+        identity,
     })
 }
 
@@ -2229,6 +2248,10 @@ pub async fn launch_session(
         );
     }
     let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
+    let identity = state
+        .agent
+        .host_identity(&session.host_id)
+        .map_err(internal)?;
     Ok(LaunchedSession {
         session: SessionView {
             session,
@@ -2241,6 +2264,7 @@ pub async fn launch_session(
             mcp_plugin_local: Vec::new(),
             crew: None,
             role: None,
+            identity,
         },
         mcp: LaunchMcp {
             connections,
@@ -2780,6 +2804,65 @@ pub fn runtime_status(
         .map_err(agent_error)?;
     sweep_gateway_sessions(state);
     Ok(())
+}
+
+/// The security event of a connection a host refused (decision 135a).
+pub const EVENT_IDENTITY_MISMATCH: &str = "identity_mismatch";
+
+/// What a host says about a connection it refused for one of its sessions.
+#[derive(Debug, Deserialize)]
+pub struct IdentityRefusal {
+    /// `bridge` or `harness`.
+    pub connection: String,
+    pub reason: String,
+}
+
+/// A host refused a bridge or harness connection that named `session`
+/// (135a): audited on that session, beside the host's own journal line.
+/// Nothing else changes; the host already refused it.
+pub async fn runtime_identity_refused(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    refusal: &IdentityRefusal,
+) -> ApiResult<()> {
+    let word = |s: &str| {
+        !s.is_empty() && s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+    };
+    if !matches!(refusal.connection.as_str(), "bridge" | "harness") || !word(&refusal.reason) {
+        return Err(bad_request(
+            "connection is bridge or harness; reason is a code",
+        ));
+    }
+    let record = state.agent.get(session).map_err(agent_error)?;
+    if record.host_id != host_id {
+        return Err(agent_error(crate::agent::AgentError::NotYours));
+    }
+    tracing::warn!(
+        host = host_id,
+        session,
+        connection = refusal.connection,
+        reason = refusal.reason,
+        "identity_mismatch: the host refused a connection"
+    );
+    let detail = serde_json::json!({
+        "session_id": session,
+        "host_id": host_id,
+        "connection": refusal.connection,
+        "reason": refusal.reason,
+    });
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            EVENT_IDENTITY_MISMATCH,
+            Some(&record.owner_user_id),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        )
+        .map_err(internal)
 }
 
 // ---- MCP Gateway: integrations (decisions 81, 81c) -------------------------
@@ -3610,6 +3693,7 @@ async fn probe_integration(
             error_code: result.as_ref().err().map(|e| e.code().to_string()),
             duration_ms: Some(started.elapsed().as_millis() as i64),
             response_bytes: None,
+            identity: None,
         });
     Ok((c, result))
 }
@@ -3726,6 +3810,8 @@ struct CallScope {
     session_id: String,
     host_id: String,
     connection_id: String,
+    /// The host's bridge identity when it forwarded the call (decision 135d).
+    identity: &'static str,
 }
 
 impl CallScope {
@@ -3751,7 +3837,19 @@ impl CallScope {
             error_code: outcome.err().map(str::to_string),
             duration_ms: Some(duration_ms),
             response_bytes,
+            identity: Some(self.identity),
         });
+    }
+}
+
+/// `verified` only while the host's link says so; a host that is offline,
+/// old or anything else is `unverified` (135d). Labelled, never refused:
+/// existing tools keep working on such a host (135g).
+fn call_identity(state: &Shared, host_id: &str) -> &'static str {
+    if state.agent.host_verified(host_id) {
+        "verified"
+    } else {
+        "unverified"
     }
 }
 
@@ -3866,6 +3964,7 @@ pub async fn integration_call(
         session_id: session_id.to_string(),
         host_id: host_id.to_string(),
         connection_id: connection_id.to_string(),
+        identity: call_identity(state, host_id),
     };
 
     let authorized = match authorize_call(state, host_id, session_id, connection_id).await {

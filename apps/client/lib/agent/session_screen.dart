@@ -1253,6 +1253,7 @@ List<(String, String)> aboutRows(
       ].join('\n'),
     ),
   ('Network', 'Inherits $host’s policy'),
+  if (s.identityUnverified) ('Identity', '$kIdentityNotVerified.'),
 ];
 
 /// Under About when a plugin's remote server was skipped: it reaches a

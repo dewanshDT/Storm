@@ -286,6 +286,16 @@ impl Store {
                  vault_id   TEXT NOT NULL,
                  note_id    TEXT NOT NULL,
                  set_at     TEXT NOT NULL
+             );
+             -- Each host's bridge identity as it last reported it (decision
+             -- 135d), so a host offline or not yet back since a restart is
+             -- still labelled.
+             CREATE TABLE IF NOT EXISTS host_identity (
+                 host_id     TEXT PRIMARY KEY,
+                 state       TEXT NOT NULL,
+                 mechanism   TEXT,
+                 reason      TEXT,
+                 reported_at TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -925,6 +935,46 @@ impl Store {
                 params![session_id],
             )?,
         };
+        Ok(())
+    }
+
+    pub fn host_identity(&self, host_id: &str) -> Result<Option<super::Identity>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state, mechanism, reason FROM host_identity WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(super::Identity {
+                        state: r.get(0)?,
+                        mechanism: r.get(1)?,
+                        reason: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_host_identity(
+        &self,
+        host_id: &str,
+        identity: &super::Identity,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO host_identity (host_id, state, mechanism, reason, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (host_id) DO UPDATE SET state = excluded.state,
+                 mechanism = excluded.mechanism, reason = excluded.reason,
+                 reported_at = excluded.reported_at",
+            params![
+                host_id,
+                identity.state,
+                identity.mechanism,
+                identity.reason,
+                now
+            ],
+        )?;
         Ok(())
     }
 }

@@ -99,6 +99,7 @@ class AgentHost {
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
     this.agentInstall = false,
+    this.identityState,
   });
 
   final String id;
@@ -128,6 +129,15 @@ class AgentHost {
   /// It can install, update and remove agents (decision 133); false for an
   /// older runtime.
   final bool agentInstall;
+
+  /// Its bridge identity (decision 135d): `verified`, `unsupported` or
+  /// `unavailable`; null from a server that does not say.
+  final String? identityState;
+
+  /// Anything but `verified` is labelled (135d). The label is disclosure,
+  /// not a control.
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
 
   bool get online => status == 'online';
 
@@ -162,9 +172,21 @@ class AgentHost {
       ],
       capabilitiesKnown: caps != null,
       agentInstall: caps?['agent_install'] == true,
+      identityState: _identityState(j),
     );
   }
 }
+
+String? _identityState(Map<String, dynamic> j) {
+  final identity = j['identity'];
+  return identity is Map ? '${identity['state'] ?? 'unavailable'}' : null;
+}
+
+/// What Storm says on a host or session whose identity is not verified
+/// (decision 135d).
+const kIdentityNotVerified =
+    'Session identity not verified — sessions on this host can act as each '
+    'other';
 
 /// The agents a host can install from Settings › Agents, in the page's
 /// order (decision 133).
@@ -326,6 +348,7 @@ class AgentSession {
     this.resumedFrom,
     this.mcpSkipped = const [],
     this.mcpPluginLocal = const [],
+    this.identityState,
   }) : name = name ?? workspace;
 
   final String id;
@@ -374,6 +397,13 @@ class AgentSession {
   /// Its plugins' local MCP servers, which run on the host outside Storm's
   /// integrations (131a).
   final List<String> mcpPluginLocal;
+
+  /// Its host's bridge identity (decision 135d); null from a server that
+  /// does not say.
+  final String? identityState;
+
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -456,6 +486,7 @@ class AgentSession {
           resumedFrom: resumedFrom,
           mcpSkipped: mcpSkipped,
           mcpPluginLocal: mcpPluginLocal,
+          identityState: identityState,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -502,6 +533,7 @@ class AgentSession {
     mcpPluginLocal: [
       for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
     ],
+    identityState: _identityState(j),
   );
 }
 

@@ -207,6 +207,85 @@ pub struct Capabilities {
     /// and is never sent one.
     #[serde(default)]
     pub agent_install: bool,
+    /// Whether the host checks who connects for a session (decision 135d).
+    /// An old host does not say, and is `unavailable: old_host`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub identity: Identity,
+}
+
+/// A host's bridge identity (decision 135d): `verified`, `unsupported` or
+/// `unavailable`, with the mechanism and the reason as the host gave them.
+/// Only `verified` means the host checks every connection's peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub state: String,
+    pub mechanism: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub const IDENTITY_VERIFIED: &str = "verified";
+pub const IDENTITY_UNSUPPORTED: &str = "unsupported";
+pub const IDENTITY_UNAVAILABLE: &str = "unavailable";
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self::unavailable("old_host")
+    }
+}
+
+impl Identity {
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            state: IDENTITY_UNAVAILABLE.into(),
+            mechanism: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn verified(&self) -> bool {
+        self.state == IDENTITY_VERIFIED
+    }
+
+    /// A host's words, kept short: they reach every client's host list.
+    fn bounded(mut self) -> Self {
+        for field in [&mut self.mechanism, &mut self.reason] {
+            if let Some(s) = field
+                && s.len() > IDENTITY_WORD_MAX
+            {
+                let mut end = IDENTITY_WORD_MAX;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        }
+        self
+    }
+}
+
+const IDENTITY_WORD_MAX: usize = 64;
+
+/// Fails closed: a field that is null, malformed or names a state this server
+/// does not know is never `verified`, and never refuses the host's `hello`.
+fn identity_or_unavailable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Identity, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    if value.is_null() {
+        return Ok(Identity::default());
+    }
+    Ok(match serde_json::from_value::<Identity>(value) {
+        Ok(i)
+            if [
+                IDENTITY_VERIFIED,
+                IDENTITY_UNSUPPORTED,
+                IDENTITY_UNAVAILABLE,
+            ]
+            .contains(&i.state.as_str()) =>
+        {
+            i
+        }
+        _ => Identity::unavailable("unrecognised"),
+    }
+    .bounded())
 }
 
 /// At most this many entries in each of a session's 131a lists.
@@ -765,11 +844,13 @@ impl AgentManager {
             last_cmd_seq = hello.last_cmd_seq,
             "runtime host hello"
         );
+        let identity = hello.capabilities.identity.clone();
         {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(hello.capabilities);
         }
+        self.record_identity(host_id, &identity);
         let reported: HashMap<String, ReportedSession> = hello
             .sessions
             .into_iter()
@@ -834,11 +915,55 @@ impl AgentManager {
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
-        let mut live = self.live.lock().unwrap();
-        let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
-        link.capabilities = Some(capabilities);
-        link.inventory.send_modify(|v| *v += 1);
+        let identity = capabilities.identity.clone();
+        {
+            let mut live = self.live.lock().unwrap();
+            let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
+            link.capabilities = Some(capabilities);
+            link.inventory.send_modify(|v| *v += 1);
+        }
+        self.record_identity(host_id, &identity);
         Ok(())
+    }
+
+    /// Never fails the report it came with: the label it keeps is for while
+    /// the host is away, and the link's own copy is what calls are judged by.
+    fn record_identity(&self, host_id: &str, identity: &Identity) {
+        let store = self.store.lock().unwrap();
+        let stored = store.host_identity(host_id);
+        if matches!(&stored, Ok(Some(known)) if known == identity) {
+            return;
+        }
+        tracing::info!(
+            host = host_id,
+            state = identity.state,
+            reason = identity.reason.as_deref(),
+            "runtime host identity"
+        );
+        if let Err(e) = store.set_host_identity(host_id, identity, &now()) {
+            tracing::warn!(error = %e, host = host_id, "could not record a host's identity");
+        }
+    }
+
+    /// Whether the host's link says it checks every connection (135d).
+    pub fn host_verified(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.identity.verified())
+    }
+
+    /// The host's bridge identity (decision 135d): what its link says now,
+    /// else what it last said. `None` for a host not heard from since this
+    /// was recorded.
+    pub fn host_identity(&self, host_id: &str) -> Result<Option<Identity>> {
+        if let Some(caps) = self.host_live(host_id).capabilities {
+            return Ok(Some(caps.identity));
+        }
+        self.store.lock().unwrap().host_identity(host_id)
     }
 
     // ---- agent installs (decision 133) ----------------------------------
@@ -2023,6 +2148,7 @@ mod tests {
             provider_credentials: Vec::new(),
             plugin_mcp_remote: Vec::new(),
             agent_install: false,
+            identity: Identity::default(),
         }
     }
 
@@ -3470,6 +3596,92 @@ mod tests {
         assert!(!caps.agent_install);
         let caps: Capabilities = serde_json::from_str(r#"{"agent_install":true}"#).unwrap();
         assert!(caps.agent_install);
+    }
+
+    /// G-135-3 on the server (135d): a host that says nothing, says null,
+    /// or says something this server does not know is never `verified`,
+    /// and its `hello` is still taken.
+    #[test]
+    fn identity_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Identity {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .identity
+        };
+        let old_host = Identity {
+            state: "unavailable".into(),
+            mechanism: None,
+            reason: Some("old_host".into()),
+        };
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"identity": null})), old_host);
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "trusted", "mechanism": "so_peerpidfd"}),
+            serde_json::json!("verified"),
+            serde_json::json!({"mechanism": "so_peerpidfd"}),
+        ] {
+            let i = parse(serde_json::json!({"identity": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"identity":
+            {"state": "verified", "mechanism": "so_peerpidfd", "reason": null}}));
+        assert!(v.verified());
+        assert_eq!(v.mechanism.as_deref(), Some("so_peerpidfd"));
+        let w =
+            parse(serde_json::json!({"identity": {"state": "unsupported", "reason": "windows"}}));
+        assert_eq!(
+            (w.state.as_str(), w.reason.as_deref()),
+            ("unsupported", Some("windows"))
+        );
+        let long = parse(serde_json::json!({"identity":
+            {"state": "unavailable", "reason": "é".repeat(100)}}));
+        assert!(long.reason.unwrap().len() <= IDENTITY_WORD_MAX);
+        // Always all three keys on the way out, as the host sends them.
+        assert_eq!(
+            serde_json::to_value(&old_host).unwrap(),
+            serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"})
+        );
+    }
+
+    #[test]
+    fn a_hosts_identity_is_kept_while_it_is_away_and_its_link_wins() {
+        let (m, _d) = manager();
+        assert_eq!(m.host_identity("hst_A").unwrap(), None);
+        let verified = Identity {
+            state: "verified".into(),
+            mechanism: Some("so_peerpidfd".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    identity: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.inventory("hst_A", caps(&[("shell", true)])).unwrap();
+        assert!(!m.host_verified("hst_A"));
+        assert_eq!(m.host_identity("hst_A").unwrap(), Some(Identity::default()));
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                identity: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert!(!m.host_verified("hst_A"), "an offline host checks nothing");
+        assert_eq!(m.host_identity("hst_A").unwrap(), Some(verified));
     }
 
     #[test]

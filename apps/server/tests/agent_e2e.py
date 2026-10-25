@@ -245,6 +245,12 @@ args = ["-i"]
         check("it offers fake and shell", {p["id"] for p in caps["providers"]} == {"fake", "shell"}, caps)
         check("it lists its workspaces", sorted(caps["workspaces"]) == ["site", "storm"], caps)
         check("egress is the host's", host["egress"] == "host")
+        # Decision 135d: the host row carries the identity the host reported.
+        identity = host.get("identity") or {}
+        check("the host row carries its bridge identity, as its capabilities say",
+              sorted(identity) == ["mechanism", "reason", "state"]
+              and identity == caps.get("identity")
+              and identity["state"] in ("verified", "unsupported", "unavailable"), host)
         status, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
         check("workspaces carry live counts", status == 200 and all("live_sessions" in w for w in wss), wss)
 

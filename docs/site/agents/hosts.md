@@ -52,6 +52,15 @@ and Windows hosts `unsupported`; both keep working as before. This binds a
 connection to its session's processes. It does not isolate sessions of one
 host from each other: they share an account and its files.
 
+A host that is not `verified` — macOS, Windows, a Linux host missing a
+precondition, or a runtime too old to say — shows *"Session identity not
+verified — sessions on this host can act as each other"* on its row in
+**Settings › Hosts** and in each of its sessions' Details. That is a
+disclosure, not a restriction: every tool keeps working there. Each of an
+agent's calls to Storm or an integration is audited as `verified` or
+`unverified`, and a connection the host refused is recorded on the server as
+an `identity_mismatch` event on the session it named.
+
 **Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
 default agent › Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt.

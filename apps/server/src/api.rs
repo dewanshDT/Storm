@@ -380,6 +380,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/sessions/{id}/mcp/{connection}",
             post(runtime_mcp),
         )
+        // Bridge identity (decision 135a): a connection the host refused.
+        .route(
+            "/v1/runtime/sessions/{id}/identity-refused",
+            post(runtime_identity_refused),
+        )
         // Token sync (decision 124): the synced login for a starting session.
         .route(
             "/v1/runtime/sessions/{id}/provider-credential",
@@ -1808,6 +1813,16 @@ async fn runtime_status(
     Json(report): Json<crate::agent::StatusReport>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_status(&state, &auth.host.id, &id, &report)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_identity_refused(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(refusal): Json<crate::ops::IdentityRefusal>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_identity_refused(&state, &auth.host.id, &id, &refusal).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -7364,6 +7379,234 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    }
+
+    /// The identity rows of a session's audited calls, newest first.
+    fn call_identities(f: &GatewayFixture, session: &str) -> Vec<Option<&'static str>> {
+        f.state
+            .gateway
+            .store
+            .lock()
+            .unwrap()
+            .recent_calls(100)
+            .unwrap()
+            .into_iter()
+            .filter(|c| c.session_id.as_deref() == Some(session))
+            .map(|c| c.identity)
+            .collect()
+    }
+
+    async fn host_identity_seen(f: &GatewayFixture) -> (serde_json::Value, serde_json::Value) {
+        let (_, hosts) = send(&f.app, get_with_auth("/v1/agent/hosts", &f.owner_bearer)).await;
+        let host = hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == f.host_id)
+            .unwrap()
+            .clone();
+        (
+            host["identity"].clone(),
+            host["capabilities"]["identity"].clone(),
+        )
+    }
+
+    /// G-135-6 and `old_host` (decision 135d, 135g): a host that does not
+    /// say it checks connections keeps every existing tool; its host row,
+    /// its sessions and every audit row say unverified; nothing privileged
+    /// is listed. A host that says `verified` is audited as such, and a
+    /// downgrade is in force from the next call.
+    #[tokio::test]
+    async fn g_135_6_an_unverified_host_keeps_its_tools_labelled_and_audited() {
+        let dir = tempdir::TempDir::new("storm-identity-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let old_host =
+            serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"});
+        assert_eq!(
+            host_identity_seen(&f).await,
+            (old_host.clone(), old_host.clone())
+        );
+
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _start = f.link.try_recv().unwrap();
+        let (_, view) = send(
+            &f.app,
+            get_with_auth(&format!("/v1/agent/sessions/{session}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(view["identity"], old_host);
+
+        f.initialize(&session, &f.connection).await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+        f.initialize(&session, "storm").await;
+        let listed = f
+            .mcp(
+                &session,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        let names: Vec<String> = listed[0]["message"]["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"list_vaults".to_string()), "{names:?}");
+        // AM-G18's spawn tools need a verified host; none is offered here.
+        for privileged in [
+            "list_agents",
+            "start_agent",
+            "agent_status",
+            "list_children",
+            "wait_agent",
+            "send_message",
+            "end_agent",
+            "report_result",
+            "read_messages",
+        ] {
+            assert!(
+                !names.contains(&privileged.to_string()),
+                "{privileged} listed"
+            );
+        }
+        let storm = f.call(&session, "storm", "list_vaults").await;
+        assert!(
+            storm.last().unwrap().pointer("/message/result").is_some(),
+            "{storm:?}"
+        );
+        // A refused call is audited the same way.
+        assert_eq!(
+            error_code(&f.call(&session, &f.connection, "secret").await).as_deref(),
+            Some("tool_not_allowed")
+        );
+        let rows = call_identities(&f, &session);
+        assert!(rows.len() >= 5, "{rows:?}");
+        assert!(rows.iter().all(|r| *r == Some("unverified")), "{rows:?}");
+
+        // The host now says it checks every connection.
+        let verified =
+            serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd", "reason": null});
+        let mut caps = host_caps(true);
+        caps["identity"] = verified.clone();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps.clone(), &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        assert_eq!(
+            host_identity_seen(&f).await,
+            (verified.clone(), verified.clone())
+        );
+        f.call(&session, &f.connection, "echo").await;
+        assert_eq!(call_identities(&f, &session)[0], Some("verified"));
+
+        // A runtime downgrade (135d) is in force from the next call.
+        let downgraded = serde_json::json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"});
+        caps["identity"] = downgraded.clone();
+        send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&f.call(&session, &f.connection, "echo").await),
+            "called echo"
+        );
+        assert_eq!(call_identities(&f, &session)[0], Some("unverified"));
+
+        // Offline, the host and its sessions keep their last word.
+        let generation = f.state.agent.connect_host(&f.host_id).0;
+        f.state.agent.disconnect_host(&f.host_id, generation);
+        assert_eq!(
+            host_identity_seen(&f).await,
+            (downgraded.clone(), serde_json::Value::Null)
+        );
+        let (_, view) = send(
+            &f.app,
+            get_with_auth(&format!("/v1/agent/sessions/{session}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(view["identity"], downgraded);
+    }
+
+    /// 135a: a connection the host refused is a security event on the
+    /// session it named, and only the session's own host may say so.
+    #[tokio::test]
+    async fn a_refused_connection_is_audited_on_its_session() {
+        let dir = tempdir::TempDir::new("storm-identity-refused").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let refuse = |body: serde_json::Value, session: &str, bearer: &str| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{session}/identity-refused"),
+                body,
+                bearer,
+            )
+        };
+        let (code, _) = send(
+            &f.app,
+            refuse(
+                serde_json::json!({"connection": "harness", "reason": "reached_host"}),
+                &session,
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        let events = f.state.auth_db.lock().await.all_events().unwrap();
+        let (_, detail) = events
+            .iter()
+            .find(|(kind, _)| kind == crate::ops::EVENT_IDENTITY_MISMATCH)
+            .expect("an identity_mismatch event");
+        let detail: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(
+            detail,
+            serde_json::json!({"session_id": session, "host_id": f.host_id,
+                "connection": "harness", "reason": "reached_host"})
+        );
+
+        let (code, _) = send(
+            &f.app,
+            refuse(
+                serde_json::json!({"connection": "bridge", "reason": "not a code\n"}),
+                &session,
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        let (other_host, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let _other = f.state.agent.connect_host(&other_host);
+        let (code, _) = send(
+            &f.app,
+            refuse(
+                serde_json::json!({"connection": "bridge", "reason": "reached_host"}),
+                &session,
+                &format!("Bearer {other_token}"),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::FORBIDDEN);
+        assert_eq!(
+            f.state
+                .auth_db
+                .lock()
+                .await
+                .event_count(crate::ops::EVENT_IDENTITY_MISMATCH)
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]

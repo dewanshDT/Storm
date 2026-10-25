@@ -35,6 +35,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -308,6 +309,31 @@ args = ["-i"]
             return h if h and h["status"] == "online" and h.get("capabilities") else None
         host = wait(host_online, "the host")
         check("the host reports mcp_bridge", host["capabilities"].get("mcp_bridge") is True, host)
+        # Decision 135d: Linux checks who connects; macOS is not gated yet and
+        # Windows cannot (AM80).
+        expected_identity = ("verified" if sys.platform.startswith("linux")
+                             else "unsupported" if sys.platform == "win32" else "unavailable")
+        check(f"the host row says its identity is {expected_identity} (135d)",
+              host.get("identity", {}).get("state") == expected_identity
+              and host["identity"] == host["capabilities"].get("identity"), host)
+
+        def call_identities(session):
+            db = sqlite3.connect(f"file:{os.path.join(STATE, 'gateway', 'gateway.db')}?mode=ro", uri=True)
+            try:
+                return [r[0] for r in db.execute(
+                    "SELECT call_identity.identity FROM calls"
+                    " LEFT JOIN call_identity ON call_identity.call_id = calls.id"
+                    " WHERE calls.session_id = ?", (session,))]
+            finally:
+                db.close()
+
+        def security_events(kind):
+            db = sqlite3.connect(f"file:{os.path.join(STATE, 'auth.db')}?mode=ro", uri=True)
+            try:
+                return [json.loads(r[0]) for r in db.execute(
+                    "SELECT detail FROM security_events WHERE kind = ?", (kind,))]
+            finally:
+                db.close()
 
         print("\n=== plugins' remote servers, suggested (decision 131g) ===")
 
@@ -358,6 +384,8 @@ args = ["-i"]
         _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
         check("nothing is skipped: Claude Code loads its plugins itself (132a)",
               not view.get("mcp_skipped"), view)
+        check("the session view carries its host's identity (135d)",
+              view.get("identity") == host["identity"], view)
         status, _ = call("POST", "/v1/integrations/suggestions/dismiss",
                          {"plugin": "e2eplug", "server": "remote", "url": "https://e2e-remote.example.com/mcp"},
                          auth=owner)
@@ -400,6 +428,10 @@ args = ["-i"]
               "list_vaults" in stools and "create_note" not in stools and "delete_note" not in stools, stools)
         a.tool("storm", 103, "list_vaults")
         check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
+        audited = call_identities(sid)
+        want = "verified" if expected_identity == "verified" else "unverified"
+        check(f"every audited call of the session says {want} (135d)",
+              len(audited) >= 8 and all(i == want for i in audited), audited)
 
         print("\n=== an integration scoped to another host (decision 121) ===")
         _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
@@ -627,6 +659,13 @@ args = ["-i"]
             time.sleep(1.5)
             check("the same hook from outside the session is refused (135a)",
                   call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared)
+            refusals = wait(lambda: [e for e in security_events("identity_mismatch")
+                                     if e.get("session_id") == rec["id"]] or None,
+                            "the refusal's audit row")
+            check("the refusal is audited on its session by the server, never with the handle (135a)",
+                  refusals == [{"session_id": rec["id"], "host_id": host_id,
+                                "connection": "harness", "reason": refusals[0]["reason"]}]
+                  and refusals[0]["reason"] not in ("", None), refusals)
         check("the first id was the launch's own", first != cleared and len(first) == 36, first)
         for sid_ in (rec["id"], rec2["id"]):
             call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)
