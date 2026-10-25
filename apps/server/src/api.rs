@@ -9392,13 +9392,13 @@ pub(crate) mod tests {
             serde_json::json!({"enabled": true, "refused_requests": 0})
         );
         assert_eq!(list_changed(&f.sent()), 1);
-        // The list gains exactly 134-4's parent tools (134-5 adds start).
+        // The list gains exactly the built parent tools (134-5 adds start).
         for name in SPAWN_134 {
             assert!(!before.contains(&name.to_string()), "{name} listed");
         }
         let after = f.storm_tools(&session).await;
-        assert_eq!(spawn_134(&after), PARENT_134_4.to_vec());
-        assert_eq!(after.len(), before.len() + PARENT_134_4.len());
+        assert_eq!(spawn_134(&after), PARENT_BUILT.to_vec());
+        assert_eq!(after.len(), before.len() + PARENT_BUILT.len());
 
         // Asked again: audited, but nothing flipped, so no notification.
         let (status, _) = f.spawn(&session, true).await;
@@ -13315,7 +13315,16 @@ pub(crate) mod tests {
 
     // ---- the read and report tools (decision 134-4) ----
 
-    const PARENT_134_4: [&str; 4] = ["list_agents", "agent_status", "list_children", "wait_agent"];
+    /// What a parent is offered once 134-6 is built: 134-4's reads and
+    /// `send_message`, in `SPAWN_134`'s order.
+    const PARENT_BUILT: [&str; 5] = [
+        "list_agents",
+        "agent_status",
+        "list_children",
+        "wait_agent",
+        "send_message",
+    ];
+    const CHILD_BUILT: [&str; 2] = ["report_result", "read_messages"];
 
     impl GatewayFixture {
         /// A running parent with spawn on, its host C0 by the test-only
@@ -13382,10 +13391,11 @@ pub(crate) mod tests {
             let names = f.storm_tools(session).await;
             assert!(names.contains(&"list_vaults".to_string()), "{names:?}");
             assert!(spawn_134(&names).is_empty(), "{names:?}");
-            for tool in PARENT_134_4.iter().chain(&["report_result"]) {
+            for tool in PARENT_BUILT.iter().chain(&CHILD_BUILT) {
                 let args = match *tool {
                     "agent_status" => serde_json::json!({"id": child}),
                     "wait_agent" => serde_json::json!({"ids": [child]}),
+                    "send_message" => serde_json::json!({"id": child, "text": "hi"}),
                     "report_result" => serde_json::json!({"outcome": "succeeded", "summary": "s"}),
                     _ => serde_json::json!({}),
                 };
@@ -13427,6 +13437,22 @@ pub(crate) mod tests {
                 .0,
             StatusCode::FORBIDDEN
         );
+        assert_eq!(
+            crate::ops::send_message(&f.state, &p, &child, "hi")
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            crate::ops::read_messages(&f.state, &c, None, None)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert!(f.state.agent.inbox_of(&child).unwrap().is_empty());
+        assert!(f.state.agent.requests_of_for_tests(&parent).is_empty());
         // The task is not given out either.
         assert_eq!(
             crate::ops::session_context(&f.state, &c)
@@ -13450,11 +13476,11 @@ pub(crate) mod tests {
         let (parent, child) = f.tree().await;
         assert_eq!(
             spawn_134(&f.storm_tools(&parent).await),
-            PARENT_134_4.to_vec()
+            PARENT_BUILT.to_vec()
         );
         assert_eq!(
             spawn_134(&f.storm_tools(&child).await),
-            vec!["report_result"]
+            CHILD_BUILT.to_vec()
         );
 
         let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
@@ -13658,17 +13684,6 @@ pub(crate) mod tests {
             .as_deref(),
             Some("tool_not_allowed")
         );
-        // `read_messages` is 134-6's.
-        let unbuilt = f.tool(&child, "read_messages", serde_json::json!({})).await;
-        assert!(
-            unbuilt.last().unwrap().pointer("/message/error").is_some(),
-            "{unbuilt:?}"
-        );
-        assert!(
-            !f.storm_tools(&child)
-                .await
-                .contains(&"read_messages".to_string())
-        );
 
         for outcome in ["blocked", "failed"] {
             let r = structured(
@@ -13742,5 +13757,291 @@ pub(crate) mod tests {
             .unwrap()
             .clone();
         assert_eq!(listed["depth"], 1);
+    }
+
+    // ---- the inbox (decision 134-6) ----
+
+    /// No command meant for a terminal went down the host's link (C9,
+    /// G-134-3).
+    fn no_terminal_input(sent: &[serde_json::Value]) {
+        for m in sent {
+            assert!(
+                !["terminal.input", "terminal.resize", "terminal.image"]
+                    .contains(&m["type"].as_str().unwrap_or("")),
+                "{m}"
+            );
+        }
+    }
+
+    /// 134j's states through the real tools and routes: pending until a
+    /// device approves, then delivered once to its child, read at least once
+    /// and acknowledged by the cursor; a denial never arrives.
+    #[tokio::test]
+    async fn a_message_is_approved_through_the_route_and_read_by_its_child() {
+        let dir = tempdir::TempDir::new("storm-134-6-message").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.sent();
+        let sent = structured(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"id": child, "text": "check the cap"}),
+            )
+            .await,
+        );
+        assert_eq!(sent["state"], "pending", "{sent}");
+        let id = sent["request_id"].as_str().unwrap().to_string();
+
+        let read = structured(&f.tool(&child, "read_messages", serde_json::json!({})).await);
+        assert_eq!(read, serde_json::json!({"messages": [], "timed_out": true}));
+        let status = structured(
+            &f.tool(&parent, "agent_status", serde_json::json!({"id": child}))
+                .await,
+        );
+        assert_eq!(status["messages"][0]["request_id"], id);
+        assert_eq!(status["messages"][0]["state"], "pending_approval");
+
+        let (code, body) = f.decide(&id, "approve", &f.owner_bearer).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(
+            (&body["outcome"], &body["target"]),
+            (&serde_json::json!("delivered"), &serde_json::json!(child))
+        );
+        let (code, body) = f.decide(&id, "approve", &f.owner_bearer).await;
+        assert_eq!(
+            (code, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "already_decided"})
+            )
+        );
+
+        let read = structured(
+            &f.tool(&child, "read_messages", serde_json::json!({"wait": 5}))
+                .await,
+        );
+        assert_eq!(read["timed_out"], false);
+        let message = &read["messages"][0];
+        assert_eq!(
+            (&message["sender"], &message["text"]),
+            (
+                &serde_json::json!(parent),
+                &serde_json::json!("check the cap")
+            )
+        );
+        let seq = message["seq"].as_i64().unwrap();
+        let again = structured(&f.tool(&child, "read_messages", serde_json::json!({})).await);
+        assert_eq!(again["messages"][0]["seq"], seq, "at least once");
+        let acked = structured(
+            &f.tool(&child, "read_messages", serde_json::json!({"after": seq}))
+                .await,
+        );
+        assert_eq!(acked["messages"], serde_json::json!([]));
+
+        let denied = structured(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"id": child, "text": "never mind"}),
+            )
+            .await,
+        );
+        let denied = denied["request_id"].as_str().unwrap().to_string();
+        let (code, body) = f.decide(&denied, "deny", &f.owner_bearer).await;
+        assert_eq!(
+            (code, &body["outcome"]),
+            (StatusCode::OK, &serde_json::json!("denied"))
+        );
+        let read = structured(&f.tool(&child, "read_messages", serde_json::json!({})).await);
+        assert_eq!(read["messages"], serde_json::json!([]));
+        let status = structured(
+            &f.tool(&parent, "agent_status", serde_json::json!({"id": child}))
+                .await,
+        );
+        assert_eq!(
+            status["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|m| m["state"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["acknowledged", "denied"]
+        );
+
+        no_terminal_input(&f.sent());
+        let events: Vec<(String, Option<String>)> = f
+            .request_events()
+            .await
+            .into_iter()
+            .map(|(kind, d)| (kind, d["outcome"].as_str().map(Into::into)))
+            .collect();
+        assert_eq!(
+            events,
+            [
+                ("spawn_request".to_string(), None),
+                (
+                    "spawn_request_decided".to_string(),
+                    Some("delivered".into())
+                ),
+                ("spawn_request".to_string(), None),
+                ("spawn_request_decided".to_string(), Some("denied".into())),
+            ]
+        );
+        assert!(
+            !f.spawn_events()
+                .await
+                .iter()
+                .any(|(_, d)| d.to_string().contains("check the cap")),
+            "metadata only"
+        );
+    }
+
+    /// A2 over the gateway: only the parent's own descendants, never itself,
+    /// an unknown id or anyone from a child; a cap refuses with its name.
+    #[tokio::test]
+    async fn a_message_reaches_only_the_callers_descendants() {
+        let dir = tempdir::TempDir::new("storm-134-6-scope").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        for id in [parent.as_str(), "ags_NOPE"] {
+            let err = tool_error(
+                &f.tool(
+                    &parent,
+                    "send_message",
+                    serde_json::json!({"id": id, "text": "hi"}),
+                )
+                .await,
+            );
+            assert!(err.contains("no such agent"), "{err}");
+        }
+        assert_eq!(
+            error_code(
+                &f.tool(
+                    &child,
+                    "send_message",
+                    serde_json::json!({"id": parent, "text": "hi"})
+                )
+                .await
+            )
+            .as_deref(),
+            Some("tool_not_allowed")
+        );
+        assert_eq!(
+            error_code(
+                &f.tool(&parent, "read_messages", serde_json::json!({}))
+                    .await
+            )
+            .as_deref(),
+            Some("tool_not_allowed"),
+            "a top-level session has no inbox tool"
+        );
+        let err = tool_error(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"id": child, "text": "  "}),
+            )
+            .await,
+        );
+        assert!(err.contains("needs text"), "{err}");
+        for _ in 0..2 {
+            let ok = structured(
+                &f.tool(
+                    &parent,
+                    "send_message",
+                    serde_json::json!({"id": child, "text": "hi"}),
+                )
+                .await,
+            );
+            assert_eq!(ok["state"], "pending");
+        }
+        let refused = structured(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"id": child, "text": "hi"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            refused,
+            serde_json::json!({"request_id": null, "state": "refused", "reason": "limit", "cap": "pending"})
+        );
+        assert!(
+            f.state
+                .agent
+                .messages_from(&parent, &parent)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// LT-13 over the real routes: the parent's own end puts Storm's notice
+    /// in its child's inbox; 30 s later the child is sent `end`, recorded
+    /// `parent_ended` and audited; no terminal hears any of it.
+    #[tokio::test]
+    async fn a_parent_ending_by_itself_gives_its_child_the_notice_then_stops_it() {
+        use crate::agent::store::spawn::{NOTICE_GRACE_SECS, PARENT_ENDED_NOTICE};
+        let dir = tempdir::TempDir::new("storm-134-6-notice").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.sent();
+        f.report(&parent, "completed").await;
+        let read = structured(&f.tool(&child, "read_messages", serde_json::json!({})).await);
+        assert_eq!(read["messages"][0]["sender"], "storm");
+        assert_eq!(read["messages"][0]["text"], PARENT_ENDED_NOTICE);
+        // Its report still goes on its record.
+        f.tool(
+            &child,
+            "report_result",
+            serde_json::json!({"outcome": "partial", "summary": "half done"}),
+        )
+        .await;
+
+        let at = |secs: i64| crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -secs);
+        crate::ops::stop_notified_children(&f.state, &at(NOTICE_GRACE_SECS - 1)).await;
+        assert!(f.sent().is_empty(), "nothing before the grace is over");
+        crate::ops::stop_notified_children(&f.state, &at(NOTICE_GRACE_SECS + 1)).await;
+        let sent = f.sent();
+        no_terminal_input(&sent);
+        assert_eq!(
+            sent.iter()
+                .map(|m| (m["type"].as_str().unwrap(), m["session"].as_str().unwrap()))
+                .collect::<Vec<_>>(),
+            [("end", child.as_str())]
+        );
+        f.report(&child, "stopped").await;
+        let (status, view) = send(
+            &f.app,
+            get_with_auth(&format!("/v1/agent/sessions/{child}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (&view["status"], &view["end_reason"]),
+            (
+                &serde_json::json!("stopped"),
+                &serde_json::json!("parent_ended")
+            )
+        );
+        assert_eq!(
+            f.state.agent.result_of(&child).unwrap().unwrap().summary,
+            "half done"
+        );
+        let stops: Vec<serde_json::Value> = f
+            .spawn_events()
+            .await
+            .into_iter()
+            .filter(|(kind, _)| kind == crate::ops::EVENT_SPAWN_PARENT_ENDED)
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(
+            stops,
+            [
+                serde_json::json!({"session_id": child, "host_id": f.host_id,
+                "parent_session": parent, "end": "sent"})
+            ]
+        );
     }
 }

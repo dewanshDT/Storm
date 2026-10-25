@@ -90,9 +90,15 @@ impl AgentManager {
                 self.host_check(host)
             })?
             .ok_or(AgentError::NotFound("no such request"))?;
-        if let Decision::Decided { child, .. } = &decision {
+        if let Decision::Decided { child, request, .. } = &decision {
             if let Some(child) = child {
                 self.dispatch_spawned(child)?;
+            }
+            // A delivered message wakes the child's read (134-6).
+            if let (Some("delivered"), Some(target)) =
+                (request.outcome.as_deref(), request.target.as_deref())
+            {
+                self.bump(target);
             }
             self.requests_changed();
         }

@@ -371,6 +371,14 @@ impl Store {
     /// in the same transaction (P-4, L-7).
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
+        let was_ended = tx
+            .query_row(
+                "SELECT status FROM sessions WHERE id = ?1",
+                params![r.id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .is_some_and(|s| matches!(s.as_str(), "completed" | "failed" | "stopped"));
         tx.execute(
             "UPDATE sessions SET status = ?2, end_reason = ?3, signal = ?4, exit_code = ?5,
                  started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10,
@@ -392,12 +400,11 @@ impl Store {
             ],
         )?;
         if r.is_ended() {
-            spawn::refuse_requests_of_in(
-                &tx,
-                &r.id,
-                "requester_ended",
-                &crate::index::now_rfc3339(),
-            )?;
+            let now = crate::index::now_rfc3339();
+            spawn::refuse_requests_of_in(&tx, &r.id, "requester_ended", &now)?;
+            if !was_ended {
+                spawn::on_ended(&tx, r, &now)?;
+            }
         }
         tx.commit()?;
         Ok(())
@@ -1380,6 +1387,18 @@ pub mod spawn {
     /// A5: undecided for ten minutes, a request expires.
     pub const REQUEST_TTL_SECS: i64 = 600;
 
+    /// 134j: at most this many unacknowledged messages (`pending_approval`,
+    /// `queued`, `delivered`) in one inbox. A parent's messages may take all
+    /// but one: the last is kept for C9's notice, which is never refused, so
+    /// the cap holds with it.
+    pub const MAX_INBOX: i64 = 32;
+    const UNACKED: &str = "('pending_approval', 'queued', 'delivered')";
+    /// C9: Storm's own words, fixed, with nothing of the parent's in them.
+    pub const PARENT_ENDED_NOTICE: &str = "Storm: the agent that started you has ended. \
+        Report your result now with report_result. This session is stopped in 30 seconds.";
+    /// C9: the stop follows the notice after this long; no session extends it.
+    pub const NOTICE_GRACE_SECS: i64 = 30;
+
     /// What an agent asks a person to approve (134o).
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum NewRequest {
@@ -1479,7 +1498,7 @@ pub mod spawn {
             /// the reason only.
             cap: Option<&'static str>,
         },
-        /// Approved, but acting on its kind is a later slice's (134-6, 134-7).
+        /// Approved, but acting on its kind is a later slice's (134-7).
         /// Nothing was written: it stays pending.
         NotBuilt(Request),
     }
@@ -1488,6 +1507,7 @@ pub mod spawn {
         Expired,
         Refused(Refusal),
         Started(Box<SessionRecord>),
+        Delivered,
         NotBuilt,
     }
 
@@ -1732,40 +1752,103 @@ pub mod spawn {
             state: &str,
             now: &str,
         ) -> Result<i64> {
-            if text.len() > MAX_MESSAGE_BYTES {
-                bail!("the message is over {MAX_MESSAGE_BYTES} bytes");
-            }
             let tx = self.conn.transaction()?;
-            let seq: i64 = tx.query_row(
-                "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_inbox WHERE session_id = ?1",
-                params![session_id],
-                |r| r.get(0),
-            )?;
-            tx.execute(
-                "INSERT INTO session_inbox (session_id, seq, sender, text, request_id, state, at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![session_id, seq, sender, text, request_id, state, now],
-            )?;
+            let seq = insert_message(&tx, session_id, sender, text, request_id, state, now)?;
             tx.commit()?;
             Ok(seq)
         }
 
         pub fn inbox(&self, session_id: &str) -> Result<Vec<Message>> {
-            let mut stmt = self.conn.prepare(
-                "SELECT seq, sender, text, request_id, state, at FROM session_inbox
-                 WHERE session_id = ?1 ORDER BY seq",
+            messages_where(&self.conn, "session_id = ?1", params![session_id])
+        }
+
+        /// The messages `sender` asked to put in `session_id`'s inbox, in
+        /// order, as their states now stand.
+        pub fn messages_from(&self, sender: &str, session_id: &str) -> Result<Vec<Message>> {
+            messages_where(
+                &self.conn,
+                "session_id = ?1 AND sender = ?2",
+                params![session_id, sender],
+            )
+        }
+
+        /// `read_messages` (134j), at least once. A cursor `after` first
+        /// acknowledges what was delivered up to it; then every message
+        /// queued, and every delivered one past the cursor, is returned and
+        /// becomes `delivered`. A message is never returned before its
+        /// approval, and one never returned is never acknowledged.
+        pub fn read_messages(
+            &mut self,
+            session_id: &str,
+            after: Option<i64>,
+        ) -> Result<Vec<Message>> {
+            let tx = self.conn.transaction()?;
+            if let Some(after) = after {
+                tx.execute(
+                    "UPDATE session_inbox SET state = 'acknowledged'
+                     WHERE session_id = ?1 AND state = 'delivered' AND seq <= ?2",
+                    params![session_id, after],
+                )?;
+            }
+            let mut read = messages_where(
+                &tx,
+                "session_id = ?1 AND (state = 'queued' OR (state = 'delivered' AND seq > ?2))",
+                params![session_id, after.unwrap_or(0)],
             )?;
-            let rows = stmt.query_map(params![session_id], |r| {
-                Ok(Message {
-                    seq: r.get(0)?,
-                    sender: r.get(1)?,
-                    text: r.get(2)?,
-                    request_id: r.get(3)?,
-                    state: r.get(4)?,
-                    at: r.get(5)?,
-                })
+            tx.execute(
+                "UPDATE session_inbox SET state = 'delivered'
+                 WHERE session_id = ?1 AND state = 'queued'",
+                params![session_id],
+            )?;
+            tx.commit()?;
+            for m in &mut read {
+                m.state = "delivered".into();
+            }
+            Ok(read)
+        }
+
+        /// The C9 stops that are due at `now`: each live target of a
+        /// `parent_end` cascade opened at least the grace ago, with its
+        /// cascade.
+        pub fn due_stops(&self, now: &str) -> Result<Vec<(String, String)>> {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT c.id, c.created_at, t.session_id
+                 FROM spawn_cascades c
+                 JOIN spawn_cascade_targets t ON t.cascade_id = c.id
+                 JOIN sessions s ON s.id = t.session_id
+                 WHERE c.cause = 'parent_end' AND c.completed_at IS NULL
+                   AND t.state = 'pending' AND s.status NOT IN {ENDED}
+                 ORDER BY c.created_at, c.rowid, t.rowid"
+            ))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
             })?;
-            Ok(rows.collect::<rusqlite::Result<_>>()?)
+            Ok(rows
+                .collect::<rusqlite::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|(_, at, _)| grace_over(now, at))
+                .map(|(id, _, session)| (id, session))
+                .collect())
+        }
+
+        /// Whether Storm is stopping `session_id` for C9 now: it is still a
+        /// target of a `parent_end` cascade whose grace is over. Its end is
+        /// then `parent_ended`, whatever the host says it was.
+        pub fn stopping(&self, session_id: &str, now: &str) -> Result<bool> {
+            let mut stmt = self.conn.prepare(
+                "SELECT c.created_at FROM spawn_cascades c
+                 JOIN spawn_cascade_targets t ON t.cascade_id = c.id
+                 WHERE t.session_id = ?1 AND c.cause = 'parent_end'
+                   AND t.state IN ('pending', 'unreachable')",
+            )?;
+            let opened = stmt
+                .query_map(params![session_id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(opened.iter().any(|at| grace_over(now, at)))
         }
 
         /// Opens a cascade (L-3): in one transaction, the cause, the parent and
@@ -1783,31 +1866,8 @@ pub mod spawn {
             now: &str,
         ) -> Result<Vec<String>> {
             let tx = self.conn.transaction()?;
-            let targets = descendants_of(&tx, parent, true)?;
-            tx.execute(
-                "INSERT INTO spawn_cascades (id, cause, parent_session, parent_end_reason,
-                     report_first, created_at, completed_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    id,
-                    cause,
-                    parent,
-                    parent_end_reason,
-                    report_first,
-                    now,
-                    targets.is_empty().then_some(now)
-                ],
-            )?;
-            for t in &targets {
-                tx.execute(
-                    "INSERT INTO spawn_cascade_targets (cascade_id, session_id, state, updated_at)
-                     VALUES (?1, ?2, 'pending', ?3)",
-                    params![id, t, now],
-                )?;
-            }
-            if cause != "end_all_children" {
-                refuse_where(&tx, "requester = ?1", parent, "requester_ended", now)?;
-            }
+            let targets =
+                open_cascade_in(&tx, id, cause, parent, parent_end_reason, report_first, now)?;
             tx.commit()?;
             Ok(targets)
         }
@@ -1823,19 +1883,7 @@ pub mod spawn {
             now: &str,
         ) -> Result<bool> {
             let tx = self.conn.transaction()?;
-            let changed = tx.execute(
-                "UPDATE spawn_cascade_targets SET state = ?3, updated_at = ?4
-                 WHERE cascade_id = ?1 AND session_id = ?2
-                   AND state IN ('pending', 'unreachable') AND state != ?3",
-                params![cascade_id, session_id, state, now],
-            )? > 0;
-            tx.execute(
-                "UPDATE spawn_cascades SET completed_at = ?2
-                 WHERE id = ?1 AND completed_at IS NULL AND NOT EXISTS (
-                     SELECT 1 FROM spawn_cascade_targets
-                     WHERE cascade_id = ?1 AND state IN ('pending', 'unreachable'))",
-                params![cascade_id, now],
-            )?;
+            let changed = set_target_in(&tx, cascade_id, session_id, state, now)?;
             tx.commit()?;
             Ok(changed)
         }
@@ -1946,6 +1994,11 @@ pub mod spawn {
             if let Some(cap) = over_cap(&tx, &r, new.kind(), max_sessions, id)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
+            if let NewRequest::Message { target, .. } = new
+                && inbox_full(&tx, target, None)?
+            {
+                return Ok(Err(Refusal::limit("inbox")));
+            }
             let request = Request {
                 id: id.to_string(),
                 kind: new.kind().to_string(),
@@ -1975,6 +2028,17 @@ pub mod spawn {
                     request.expires_at
                 ],
             )?;
+            if let NewRequest::Message { target, text } = new {
+                insert_message(
+                    &tx,
+                    target,
+                    requester,
+                    text,
+                    Some(id),
+                    "pending_approval",
+                    now,
+                )?;
+            }
             tx.commit()?;
             Ok(Ok(request))
         }
@@ -2008,6 +2072,7 @@ pub mod spawn {
                     Act::Expired => ("expired", None, None, None),
                     Act::Refused(r) => ("refused", Some(r.reason), r.cap, None),
                     Act::Started(child) => ("started", None, None, Some(child)),
+                    Act::Delivered => ("delivered", None, None, None),
                     Act::NotBuilt => return Ok(Some(Decision::NotBuilt(request))),
                 };
             let session = child.as_ref().map(|c| c.id.as_str());
@@ -2310,8 +2375,16 @@ pub mod spawn {
             }
             return Ok(Act::Refused(refusal));
         }
-        if request.kind != "start" {
-            return Ok(Act::NotBuilt);
+        match (request.kind.as_str(), request.target.as_deref()) {
+            ("start", _) => {}
+            ("message", Some(target)) => {
+                if inbox_full(conn, target, Some(&request.id))? {
+                    return Ok(Act::Refused(Refusal::limit("inbox")));
+                }
+                deliver(conn, request, target, now)?;
+                return Ok(Act::Delivered);
+            }
+            _ => return Ok(Act::NotBuilt),
         }
         let payload: StartPayload = serde_json::from_str(&request.payload)?;
         if payload.provider.as_ref().is_some_and(|p| *p != r.provider) {
@@ -2452,6 +2525,7 @@ pub mod spawn {
         if changed != 1 {
             bail!("request {id} is not open");
         }
+        settle_messages(conn)?;
         Ok(())
     }
 
@@ -2542,14 +2616,18 @@ pub mod spawn {
         reason: &str,
         now: &str,
     ) -> Result<usize> {
-        Ok(conn.execute(
+        let refused = conn.execute(
             &format!(
                 "UPDATE agent_requests SET state = 'decided', outcome = 'refused', reason = ?2,
                      decided_at = ?3
                  WHERE state IN ('pending', 'approving') AND {clause}"
             ),
             params![session_id, reason, now],
-        )?)
+        )?;
+        if refused > 0 {
+            settle_messages(conn)?;
+        }
+        Ok(refused)
     }
 
     pub(super) fn refuse_requests_of_in(
@@ -2578,6 +2656,249 @@ pub mod spawn {
                 &format!("DELETE FROM {table} WHERE session_id = ?1"),
                 params![session_id],
             )?;
+        }
+        Ok(())
+    }
+
+    // ---- 134-6: the inbox (134j) and C9's notice --------------------------
+
+    fn messages_where(
+        conn: &Connection,
+        clause: &str,
+        params: impl rusqlite::Params,
+    ) -> Result<Vec<Message>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT seq, sender, text, request_id, state, at FROM session_inbox
+             WHERE {clause} ORDER BY seq"
+        ))?;
+        let rows = stmt.query_map(params, |r| {
+            Ok(Message {
+                seq: r.get(0)?,
+                sender: r.get(1)?,
+                text: r.get(2)?,
+                request_id: r.get(3)?,
+                state: r.get(4)?,
+                at: r.get(5)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn next_seq(conn: &Connection, session_id: &str) -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_inbox WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    fn insert_message(
+        conn: &Connection,
+        session_id: &str,
+        sender: &str,
+        text: &str,
+        request_id: Option<&str>,
+        state: &str,
+        now: &str,
+    ) -> Result<i64> {
+        if text.len() > MAX_MESSAGE_BYTES {
+            bail!("the message is over {MAX_MESSAGE_BYTES} bytes");
+        }
+        let seq = next_seq(conn, session_id)?;
+        conn.execute(
+            "INSERT INTO session_inbox (session_id, seq, sender, text, request_id, state, at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![session_id, seq, sender, text, request_id, state, now],
+        )?;
+        Ok(seq)
+    }
+
+    /// Whether one more message from a parent would break the inbox's cap.
+    /// Messages waiting for approval count, so an approval can never
+    /// overfill it; `except` is the request being approved.
+    fn inbox_full(conn: &Connection, session_id: &str, except: Option<&str>) -> Result<bool> {
+        let waiting: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM session_inbox
+                 WHERE session_id = ?1 AND state IN {UNACKED}
+                   AND (?2 IS NULL OR request_id IS NOT ?2)"
+            ),
+            params![session_id, except],
+            |r| r.get(0),
+        )?;
+        Ok(waiting + 1 > MAX_INBOX - 1)
+    }
+
+    /// An approved message enters the inbox `queued`, numbered then, so the
+    /// child's cursor only ever moves forward whatever order approvals
+    /// come in.
+    fn deliver(conn: &Connection, request: &Request, target: &str, now: &str) -> Result<()> {
+        let seq: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_inbox
+             WHERE session_id = ?1 AND request_id IS NOT ?2",
+            params![target, request.id],
+            |r| r.get(0),
+        )?;
+        let moved = conn.execute(
+            "UPDATE session_inbox SET state = 'queued', seq = ?3, at = ?4
+             WHERE session_id = ?1 AND request_id = ?2 AND state = 'pending_approval'",
+            params![target, request.id, seq, now],
+        )?;
+        if moved == 0 {
+            // A request recorded without its inbox row, as before 134-6.
+            let payload: MessagePayload = serde_json::from_str(&request.payload)?;
+            insert_message(
+                conn,
+                target,
+                &request.requester,
+                &payload.text,
+                Some(&request.id),
+                "queued",
+                now,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A message whose request was decided any way but `delivered` leaves
+    /// `pending_approval` for the matching state; a refusal of any reason
+    /// is `undeliverable`.
+    fn settle_messages(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "UPDATE session_inbox SET state = CASE
+                     (SELECT outcome FROM agent_requests r WHERE r.id = session_inbox.request_id)
+                 WHEN 'denied' THEN 'denied' WHEN 'expired' THEN 'expired'
+                 ELSE 'undeliverable' END
+             WHERE state = 'pending_approval' AND request_id IN
+                 (SELECT id FROM agent_requests WHERE state = 'decided' AND outcome != 'delivered')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// C9's notice, `queued` at once: Storm's own fixed text, no approval,
+    /// never refused by the cap. One waiting notice is enough.
+    fn queue_notice(conn: &Connection, session_id: &str, now: &str) -> Result<()> {
+        let waiting = conn
+            .prepare(&format!(
+                "SELECT 1 FROM session_inbox
+                 WHERE session_id = ?1 AND sender = 'storm' AND state IN {UNACKED}"
+            ))?
+            .exists(params![session_id])?;
+        if !waiting {
+            insert_message(
+                conn,
+                session_id,
+                "storm",
+                PARENT_ENDED_NOTICE,
+                None,
+                "queued",
+                now,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn grace_over(now: &str, opened: &str) -> bool {
+        expired(now, &plus_secs(opened, NOTICE_GRACE_SECS))
+    }
+
+    fn open_cascade_in(
+        conn: &Connection,
+        id: &str,
+        cause: &str,
+        parent: &str,
+        parent_end_reason: Option<&str>,
+        report_first: bool,
+        now: &str,
+    ) -> Result<Vec<String>> {
+        let targets = descendants_of(conn, parent, true)?;
+        conn.execute(
+            "INSERT INTO spawn_cascades (id, cause, parent_session, parent_end_reason,
+                 report_first, created_at, completed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                id,
+                cause,
+                parent,
+                parent_end_reason,
+                report_first,
+                now,
+                targets.is_empty().then_some(now)
+            ],
+        )?;
+        for t in &targets {
+            conn.execute(
+                "INSERT INTO spawn_cascade_targets (cascade_id, session_id, state, updated_at)
+                 VALUES (?1, ?2, 'pending', ?3)",
+                params![id, t, now],
+            )?;
+        }
+        if cause != "end_all_children" {
+            refuse_where(conn, "requester = ?1", parent, "requester_ended", now)?;
+        }
+        Ok(targets)
+    }
+
+    fn set_target_in(
+        conn: &Connection,
+        cascade_id: &str,
+        session_id: &str,
+        state: &str,
+        now: &str,
+    ) -> Result<bool> {
+        let changed = conn.execute(
+            "UPDATE spawn_cascade_targets SET state = ?3, updated_at = ?4
+             WHERE cascade_id = ?1 AND session_id = ?2
+               AND state IN ('pending', 'unreachable') AND state != ?3",
+            params![cascade_id, session_id, state, now],
+        )? > 0;
+        conn.execute(
+            "UPDATE spawn_cascades SET completed_at = ?2
+             WHERE id = ?1 AND completed_at IS NULL AND NOT EXISTS (
+                 SELECT 1 FROM spawn_cascade_targets
+                 WHERE cascade_id = ?1 AND state IN ('pending', 'unreachable'))",
+            params![cascade_id, now],
+        )?;
+        Ok(changed)
+    }
+
+    /// What a session's end does, in the transaction that records it:
+    /// - its messages never read are `undeliverable` (L-7);
+    /// - as a cascade's target it is `ended` when Storm stopped it, else
+    ///   `already_ended`, its own reason kept (L-4);
+    /// - a parent that ended by itself (`completed` or `failed`, not a
+    ///   person's stop and not a host restart) opens a `parent_end` cascade
+    ///   over its live descendants (L-3), and each gets C9's notice (L-8).
+    ///   The stop after the grace is the manager's.
+    pub(super) fn on_ended(conn: &Connection, r: &SessionRecord, now: &str) -> Result<()> {
+        conn.execute(
+            "UPDATE session_inbox SET state = 'undeliverable'
+             WHERE session_id = ?1 AND state = 'queued'",
+            params![r.id],
+        )?;
+        let by_storm = matches!(r.end_reason.as_deref(), Some("parent_ended" | "cascade"));
+        let cascades: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT cascade_id FROM spawn_cascade_targets
+                 WHERE session_id = ?1 AND state IN ('pending', 'unreachable')",
+            )?;
+            let rows = stmt.query_map(params![r.id], |row| row.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for c in cascades {
+            let state = if by_storm { "ended" } else { "already_ended" };
+            set_target_in(conn, &c, &r.id, state, now)?;
+        }
+        let by_itself = matches!(r.status.as_str(), "completed" | "failed")
+            && r.end_reason.as_deref() != Some("host_restart");
+        if !by_itself || descendants_of(conn, &r.id, true)?.is_empty() {
+            return Ok(());
+        }
+        let reason = r.end_reason.as_deref().unwrap_or(&r.status);
+        let id = crate::auth::identity::random_id("spc_");
+        for target in open_cascade_in(conn, &id, "parent_end", &r.id, Some(reason), false, now)? {
+            queue_notice(conn, &target, now)?;
         }
         Ok(())
     }

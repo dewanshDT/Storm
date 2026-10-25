@@ -2072,9 +2072,9 @@ async fn record_spawn_event(
     }
 }
 
-/// P-2, for 134-5's tools: the requesting session's agent asks. A refusal
-/// names its reason and, for `limit`, the cap; both outcomes are audited.
-#[allow(dead_code)] // Dark until 134-5's `start_agent`.
+/// P-2, for the request tools: the requesting session's agent asks. A
+/// refusal names its reason and, for `limit`, the cap; both outcomes are
+/// audited.
 pub async fn create_spawn_request(
     state: &Shared,
     requester: &str,
@@ -2282,19 +2282,48 @@ pub struct AgentView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
     pub result: Option<ResultView>,
+    /// Only on `agent_status`: the caller's messages to it, by state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub messages: Option<Vec<SentMessage>>,
 }
 
+/// A message a parent asked to send, as it stands (134j): `pending_approval`,
+/// `queued`, `delivered`, `acknowledged`, `denied`, `expired` or
+/// `undeliverable`.
+#[derive(Debug, Clone, Serialize)]
+pub struct SentMessage {
+    pub request_id: Option<String>,
+    pub state: String,
+    pub at: String,
+}
+
+/// One descendant's view; `detail_for` names the asking ancestor when the
+/// view is `agent_status`'s, with the task and that ancestor's messages.
 fn agent_view(
     state: &Shared,
     r: crate::agent::store::SessionRecord,
-    with_task: bool,
+    detail_for: Option<&str>,
 ) -> ApiResult<AgentView> {
     let lineage = state.agent.lineage(&r.id).map_err(agent_error)?;
     let result = state.agent.result_of(&r.id).map_err(agent_error)?;
-    let task = if with_task {
-        state.agent.task_of(&r.id).map_err(agent_error)?
-    } else {
-        None
+    let (task, messages) = match detail_for {
+        Some(caller) => (
+            state.agent.task_of(&r.id).map_err(agent_error)?,
+            Some(
+                state
+                    .agent
+                    .messages_from(caller, &r.id)
+                    .map_err(agent_error)?
+                    .into_iter()
+                    .map(|m| SentMessage {
+                        request_id: m.request_id,
+                        state: m.state,
+                        at: m.at,
+                    })
+                    .collect(),
+            ),
+        ),
+        None => (None, None),
     };
     let name = state
         .agent
@@ -2315,6 +2344,7 @@ fn agent_view(
         lineage: lineage.into(),
         task,
         result: result.map(Into::into),
+        messages,
     })
 }
 
@@ -2341,7 +2371,7 @@ fn spawned_caller(state: &Shared, actor: &Actor) -> ApiResult<String> {
         }
         _ => Err(ApiError(
             axum::http::StatusCode::FORBIDDEN,
-            "only a session another agent started may report a result".into(),
+            "only a session another agent started has these tools".into(),
         )),
     }
 }
@@ -2398,7 +2428,7 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
 pub async fn agent_status(state: &Shared, actor: &Actor, id: &str) -> ApiResult<AgentView> {
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.descendant(&caller, id).map_err(agent_error)?;
-    agent_view(state, r, true)
+    agent_view(state, r, Some(&caller))
 }
 
 /// `list_children`: the caller's own children, oldest first.
@@ -2409,7 +2439,7 @@ pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Vec<Agent
         .children_of(&caller)
         .map_err(agent_error)?
         .into_iter()
-        .map(|r| agent_view(state, r, false))
+        .map(|r| agent_view(state, r, None))
         .collect()
 }
 
@@ -2445,7 +2475,7 @@ pub async fn wait_agent(
     Ok(WaitAgents {
         agents: records
             .into_iter()
-            .map(|r| agent_view(state, r, false))
+            .map(|r| agent_view(state, r, None))
             .collect::<ApiResult<_>>()?,
         timed_out,
     })
@@ -2476,6 +2506,153 @@ pub async fn report_result(
     )
     .await;
     Ok(result.into())
+}
+
+// ---- The inbox (decision 134-6) ----------------------------------------
+//
+// A parent's message is a request a person decides (134o); approved, it
+// enters only the child's inbox (A2), and the child reads it with
+// `read_messages`. Nothing is written to any terminal (C9, G-134-3).
+
+/// A child stopped after its parent ended by itself (C9), with the notice
+/// it was given 30 s before. Metadata only.
+pub const EVENT_SPAWN_PARENT_ENDED: &str = "spawn_parent_ended";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MessageSent {
+    /// What a person decides on; none when Storm refused it at once.
+    pub request_id: Option<String>,
+    /// `pending`, or `refused`.
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// For `refused: limit`, the cap: `pending` or `inbox`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<&'static str>,
+}
+
+/// `send_message {id, text}`: asks a person to approve a message to one of
+/// the caller's descendants. Answered at once; `agent_status` shows the
+/// message's state after.
+pub async fn send_message(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    text: &str,
+) -> ApiResult<MessageSent> {
+    use crate::agent::store::spawn::NewRequest;
+    let caller = spawning_caller(state, actor)?;
+    if text.trim().is_empty() {
+        return Err(bad_request("a message needs text"));
+    }
+    let new = NewRequest::Message {
+        target: id.to_string(),
+        text: text.to_string(),
+    };
+    match create_spawn_request(state, &caller, new).await? {
+        Ok(r) => Ok(MessageSent {
+            request_id: Some(r.id),
+            state: "pending",
+            reason: None,
+            cap: None,
+        }),
+        Err(refusal) if refusal.reason == "not_found" => {
+            Err(not_found("no such agent among your descendants"))
+        }
+        Err(refusal) => Ok(MessageSent {
+            request_id: None,
+            state: "refused",
+            reason: Some(refusal.reason),
+            cap: refusal.cap,
+        }),
+    }
+}
+
+/// A message as its child reads it. `sender` is the parent's session id, or
+/// `storm` for C9's notice; a parent's text is its own words, untrusted.
+#[derive(Debug, Clone, Serialize)]
+pub struct InboxMessage {
+    pub seq: i64,
+    pub sender: String,
+    pub text: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Messages {
+    pub messages: Vec<InboxMessage>,
+    /// The wait ended with nothing to read.
+    pub timed_out: bool,
+}
+
+/// `read_messages {after?, wait?}` (134j): the calling spawned session's own
+/// inbox, at least once. Passing the last `seq` read as `after`
+/// acknowledges it and everything before; `wait` seconds, capped as
+/// `wait_agent` is, hold the call until a message comes.
+pub async fn read_messages(
+    state: &Shared,
+    actor: &Actor,
+    after: Option<i64>,
+    wait_secs: Option<u64>,
+) -> ApiResult<Messages> {
+    let caller = spawned_caller(state, actor)?;
+    let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
+    let bound = crate::agent::scope::wait_bound(
+        &provider,
+        Some(std::time::Duration::from_secs(wait_secs.unwrap_or(0))),
+    );
+    let agent = state.agent.clone();
+    let offered = caller.clone();
+    let (read, timed_out) = state
+        .agent
+        .read_messages(&caller, after, bound, &move || {
+            agent.spawned_offered(&offered)
+        })
+        .await
+        .map_err(agent_error)?;
+    Ok(Messages {
+        messages: read
+            .into_iter()
+            .map(|m| InboxMessage {
+                seq: m.seq,
+                sender: m.sender,
+                text: m.text,
+                at: m.at,
+            })
+            .collect(),
+        timed_out,
+    })
+}
+
+/// C9's stop pass at `now`: children whose parent ended by itself 30 s
+/// before are sent `end`, each audited once.
+pub async fn stop_notified_children(state: &Shared, now: &str) {
+    let stopped = match state.agent.stop_notified_children(now) {
+        Ok(stopped) => stopped,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not stop notified children");
+            return;
+        }
+    };
+    for (session, sent) in stopped {
+        let Ok(r) = state.agent.get(&session) else {
+            continue;
+        };
+        let parent = state
+            .agent
+            .lineage(&session)
+            .ok()
+            .and_then(|l| l.parent_session);
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_PARENT_ENDED,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": session, "host_id": r.host_id,
+                "parent_session": parent, "end": if sent { "sent" } else { "unreachable" }}),
+        )
+        .await;
+    }
 }
 
 // ---- Agent installs (decision 133) ------------------------------------

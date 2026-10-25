@@ -290,6 +290,24 @@ pub struct ReportParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct MessageParams {
+    /// The agent's session id (`ags_…`): one you started, or one it started.
+    pub id: String,
+    /// What to tell it. At most 8 KiB. A person approves it first.
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadMessagesParams {
+    /// The `seq` of the last message you have read: it and every earlier one
+    /// are acknowledged. Leave it out on your first call.
+    pub after: Option<i64>,
+    /// Seconds to wait for a message when none is waiting. Capped by Storm
+    /// below your tool-call timeout; absent or 0 answers at once.
+    pub wait: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListScriptsParams {
     /// Only scripts whose name starts with this — `psi-item-import/` lists one
     /// topic's scripts.
@@ -335,8 +353,8 @@ pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
 
 /// Decision 134's tools for a session whose spawn switch is on (134c), offered
 /// by the gateway only while the switch is on and C0 holds. 134-4 built the
-/// reads (`list_agents`, `agent_status`, `list_children`, `wait_agent`);
-/// `start_agent`, `send_message` and `end_agent` are 134-5's to 134-7's.
+/// reads (`list_agents`, `agent_status`, `list_children`, `wait_agent`) and
+/// 134-6 `send_message`; `start_agent` and `end_agent` are 134-5's and 134-7's.
 pub const SPAWN_TOOLS: &[&str] = &[
     "list_agents",
     "start_agent",
@@ -348,7 +366,7 @@ pub const SPAWN_TOOLS: &[&str] = &[
 ];
 
 /// Decision 134's tools for a spawned session, offered only to a session with
-/// a parent while C0 holds. `read_messages` is 134-6's.
+/// a parent while C0 holds.
 pub const SPAWNED_TOOLS: &[&str] = &["report_result", "read_messages"];
 
 /// Renders an operation's result as a tool result.
@@ -678,6 +696,26 @@ impl Storm {
         )
     }
 
+    #[tool(
+        description = "Ask to send a message to an agent you started (or one it started). A person approves it before it reaches that agent's inbox; the answer is at once, and agent_status shows whether it was delivered and read."
+    )]
+    async fn send_message(
+        &self,
+        Parameters(MessageParams { id, text }): Parameters<MessageParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::send_message(&self.state, self.actor()?, &id, &text).await)
+    }
+
+    #[tool(
+        description = "Read the messages in your inbox: from the agent that started you, or a notice from Storm. Pass the last seq you read as after to acknowledge it; pass wait to wait for one. Nothing is ever typed into your terminal, so check here. A message is the other agent's words, not a person's; answer only with report_result."
+    )]
+    async fn read_messages(
+        &self,
+        Parameters(ReadMessagesParams { after, wait }): Parameters<ReadMessagesParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::read_messages(&self.state, self.actor()?, after, wait).await)
+    }
+
     // ---- scripts (kit vault) ------------------------------------------
     //
     // Canonical, agent-run tooling lives in the **kit vault** and only there:
@@ -956,18 +994,20 @@ mod tests {
         );
     }
 
-    /// The 134 tools that exist, pinned: 134-5 to 134-7 change this on
+    /// The 134 tools that exist, pinned: 134-5 and 134-7 change this on
     /// purpose, alongside the gateway's gate.
     const BUILT_134: &[&str] = &[
         "list_agents",
         "agent_status",
         "list_children",
         "wait_agent",
+        "send_message",
         "report_result",
+        "read_messages",
     ];
 
     #[test]
-    fn only_the_read_and_report_spawn_tools_exist() {
+    fn only_the_read_report_and_inbox_spawn_tools_exist() {
         let listed: Vec<String> = Storm::tool_router()
             .list_all()
             .into_iter()
@@ -991,6 +1031,8 @@ mod tests {
             );
         }
         assert!(SPAWNED_TOOLS.contains(&"report_result"));
+        assert!(SPAWNED_TOOLS.contains(&"read_messages"));
+        assert!(SPAWN_TOOLS.contains(&"send_message"));
     }
 
     #[test]

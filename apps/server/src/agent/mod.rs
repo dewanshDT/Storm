@@ -22,12 +22,15 @@ pub mod approval;
 pub mod cache;
 pub mod credential;
 pub mod images;
+pub mod inbox;
 pub mod jobs;
 pub mod scope;
 pub mod store;
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod inbox_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]
@@ -589,6 +592,9 @@ struct Live {
     /// Whether C0 held for each host when its agents were last told, so a
     /// flip sends `list_changed` once (134-3). Kept across links.
     c0: HashMap<String, bool>,
+    /// Children a C9 stop has been sent to in this run (134-6), so each
+    /// is sent one `end`.
+    stopping: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1295,6 +1301,14 @@ impl AgentManager {
         }
         let before = r.status.clone();
         apply_report(&mut r, report)?;
+        if r.is_ended()
+            && (self.live.lock().unwrap().stopping.contains(&r.id)
+                || self.store.lock().unwrap().stopping(&r.id, &now())?)
+        {
+            // C9: Storm stopped it after its parent ended (L-4, LT-13).
+            r.status = "stopped".into();
+            r.end_reason = Some("parent_ended".into());
+        }
         if r.status != before || r.is_ended() {
             tracing::info!(
                 host = host_id,

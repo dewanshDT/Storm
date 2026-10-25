@@ -791,7 +791,7 @@ fn a_denial_is_recorded_with_its_device_and_never_acts() {
 }
 
 #[test]
-fn acting_on_a_message_or_an_end_waits_for_its_slice() {
+fn acting_on_an_end_waits_for_its_slice() {
     let f = fixture(16);
     let p = f.parent();
     let c = f.child(&p.id, "ags_C", false);

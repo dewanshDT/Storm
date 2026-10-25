@@ -1206,6 +1206,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         });
     }
 
+    // C9: a child whose parent ended by itself is stopped once its grace is
+    // over. Checked every second, so the stop lands within a second of it.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                ops::stop_notified_children(&state, &crate::index::now_rfc3339()).await;
+            }
+        });
+    }
+
     // One watcher over the whole root, attributing each event to a vault by
     // directory prefix. Adding or removing a vault then needs no watcher work
     // at all, and a root change respawns this one.
