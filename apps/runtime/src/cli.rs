@@ -234,6 +234,9 @@ impl Provider for CliProvider {
         };
         let spawned = pty::spawn(&launch, size)
             .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
+        if let Some(leader) = spawned.leader {
+            events.leader(leader);
+        }
 
         let shared = Arc::new(Shared {
             status: Mutex::new(SessionStatus::Running),

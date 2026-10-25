@@ -79,6 +79,7 @@ pub mod identity;
 pub mod install;
 pub mod mcp;
 pub mod mcp_connect;
+pub mod peer_identity;
 pub mod platform;
 pub mod plugins;
 pub mod profile;

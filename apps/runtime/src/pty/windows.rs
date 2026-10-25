@@ -139,6 +139,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
             console: console.clone(),
         },
         group: Group { job, console },
+        leader: None,
     })
 }
 

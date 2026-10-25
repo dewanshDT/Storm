@@ -162,6 +162,10 @@ pub struct LaunchExtras {
 pub trait SessionEvents: Send + Sync {
     fn output(&self, bytes: &[u8]);
     fn ended(&self, end: SessionEnd);
+    /// The session's leader, as soon as it exists: what its bridges and
+    /// hooks must descend from (decision 135). A provider with no process
+    /// never calls it, and no connection is taken for it on a verified host.
+    fn leader(&self, _leader: crate::platform::peer::Process) {}
 }
 
 /// Why a session could not be started.

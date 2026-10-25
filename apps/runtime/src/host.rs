@@ -26,6 +26,7 @@
 //! spawned outlives the host, whichever service manager runs it.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -198,6 +199,8 @@ struct Events {
     titles: bool,
     /// The agent's own session id, as last reported (decision 89).
     harness: Mutex<Option<String>>,
+    /// The session's leader once the provider has started it (decision 135).
+    leader: watch::Sender<Option<Arc<crate::platform::peer::Process>>>,
 }
 
 impl SessionEvents for Events {
@@ -212,6 +215,10 @@ impl SessionEvents for Events {
     fn ended(&self, end: SessionEnd) {
         *self.ended.lock().unwrap() = Some(end);
         self.wake.notify_one();
+    }
+
+    fn leader(&self, leader: crate::platform::peer::Process) {
+        self.leader.send_replace(Some(Arc::new(leader)));
     }
 }
 
@@ -243,6 +250,13 @@ type Subscribers = HashMap<(String, String), Vec<tokio::sync::mpsc::Sender<serde
 /// `harness-session` handles: handle → (session, provider, its events).
 type HarnessHandles = HashMap<String, (String, String, Arc<Events>)>;
 
+/// Each session's leader, by session id, from before it is started.
+type Leaders = HashMap<String, watch::Receiver<Option<Arc<crate::platform::peer::Process>>>>;
+
+/// How long a connection waits for its session's leader while the session
+/// is still starting: the agent can run a hook before `start` returns.
+const LEADER_WAIT: Duration = Duration::from_secs(5);
+
 /// The table that survives a restart: which sessions this host was running.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct SessionTable {
@@ -270,6 +284,13 @@ pub struct Host {
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
     harness_handles: Mutex<HarnessHandles>,
+    /// Bridge identity (decision 135): whether connections are checked, and
+    /// each session's leader to check them against.
+    peer_identity: crate::peer_identity::Identity,
+    leaders: Mutex<Leaders>,
+    /// Refused connections, for the tests to see what the audit line said.
+    #[cfg(test)]
+    refused: Mutex<Vec<(String, &'static str, &'static str)>>,
     opencode_settings: Option<serde_json::Value>,
     /// Set once by [`Host::shutdown`]: from then on nothing is posted, so an
     /// ending the shutdown caused never reaches the server as `stopped`.
@@ -340,6 +361,10 @@ impl Host {
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
             harness_handles: Mutex::new(HashMap::new()),
+            peer_identity: crate::peer_identity::Identity::detect(),
+            leaders: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            refused: Mutex::new(Vec::new()),
             opencode_settings,
             shutting_down: AtomicBool::new(false),
             starting: Mutex::new(HashMap::new()),
@@ -367,6 +392,13 @@ impl Host {
                 "provider"
             );
         }
+        let identity = self.peer_identity.report();
+        tracing::info!(
+            state = identity.state.as_str(),
+            mechanism = identity.mechanism,
+            reason = identity.reason,
+            "bridge identity"
+        );
         for root in &self.config.workspace_roots {
             tracing::info!(root = %root.display(), "workspace root");
         }
@@ -436,6 +468,9 @@ impl Host {
             // Remote servers its agents' plugins declare, for the app's
             // suggestions (131g); never a header or env value.
             "plugin_mcp_remote": self.plugin_remote(),
+            // Whether bridge and harness connections are bound to their
+            // session (decision 135d). A host without it is `old_host`.
+            "identity": self.peer_identity.report().to_json(),
         })
     }
 
@@ -1317,7 +1352,12 @@ impl Host {
             title: Mutex::new(TitleObserver::default()),
             titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             harness: Mutex::new(None),
+            leader: watch::channel(None).0,
         });
+        self.leaders
+            .lock()
+            .unwrap()
+            .insert(id.clone(), events.leader.subscribe());
         let pins = synced.as_ref().map(|(pins, _)| pins);
         match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins) {
             Ok(extras) => {
@@ -1855,6 +1895,7 @@ impl Host {
 
     fn forget_mcp(&self, session: &str) {
         self.handles.forget_session(session);
+        self.leaders.lock().unwrap().remove(session);
         self.harness_handles
             .lock()
             .unwrap()
@@ -1895,10 +1936,85 @@ impl Host {
         }
     }
 
+    /// 135a: whether a connection that named `session` may act for it. On a
+    /// host that is not `verified` it is handle-only, as before. Otherwise
+    /// the connector must descend from the session's leader, and every
+    /// failure — no leader, an error, a walk that does not arrive — refuses,
+    /// audited on the session.
+    async fn admit(
+        &self,
+        peer: Option<io::Result<crate::platform::peer::Process>>,
+        session: &str,
+        kind: &'static str,
+    ) -> bool {
+        let Some(peer) = peer else {
+            return true;
+        };
+        let leader = self.leader_of(session).await;
+        match verdict(peer, leader).await {
+            Ok(()) => true,
+            Err(why) => {
+                self.refuse(session, kind, why).await;
+                false
+            }
+        }
+    }
+
+    /// Audits a refusal on its session, never its handle. A precondition
+    /// that stopped holding drops the host to `unavailable` there and then,
+    /// and the server hears it at once (135d).
+    async fn refuse(&self, session: &str, kind: &'static str, why: crate::peer_identity::Mismatch) {
+        tracing::warn!(
+            target: "storm_runtime::audit",
+            %session,
+            connection = kind,
+            reason = why.as_str(),
+            "identity_mismatch: connection refused"
+        );
+        #[cfg(test)]
+        self.refused
+            .lock()
+            .unwrap()
+            .push((session.to_string(), kind, why.as_str()));
+        if let crate::peer_identity::Mismatch::Precondition(reason) = why
+            && self.peer_identity.downgrade(reason)
+        {
+            tracing::error!(reason, "bridge identity is now unavailable");
+            if *self.link_up.borrow() {
+                let _ = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await;
+            }
+        }
+    }
+
+    /// The session's leader, waiting a little for one still starting.
+    async fn leader_of(&self, session: &str) -> Option<Arc<crate::platform::peer::Process>> {
+        let mut rx = self.leaders.lock().unwrap().get(session)?.clone();
+        let found = tokio::time::timeout(LEADER_WAIT, rx.wait_for(Option::is_some)).await;
+        found.ok()?.ok()?.clone()
+    }
+
     /// The agent's hook or plugin saying which conversation it is on. Only
     /// a handle this host gave out, and only an id its provider could have
     /// made, is taken.
-    fn harness_reported(&self, report: crate::harness::HarnessLine) {
+    async fn harness_reported(
+        &self,
+        report: crate::harness::HarnessLine,
+        peer: Option<io::Result<crate::platform::peer::Process>>,
+    ) {
+        let Some(session) = self
+            .harness_handles
+            .lock()
+            .unwrap()
+            .get(&report.handle)
+            .map(|(s, _, _)| s.clone())
+        else {
+            return;
+        };
+        if !self.admit(peer, &session, "harness").await {
+            return;
+        }
         let handles = self.harness_handles.lock().unwrap();
         let Some((session, provider, events)) = handles.get(&report.handle) else {
             return;
@@ -1918,6 +2034,12 @@ impl Host {
     /// One bridge connection: a message to forward, or a subscription.
     async fn bridge_connection(self: Arc<Self>, stream: crate::platform::ipc::Stream) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        // Who connected, asked before anything is read: the connector, even
+        // if it hands the socket on (135b).
+        let peer = self
+            .peer_identity
+            .verified()
+            .then(|| crate::platform::peer::peer(&stream));
         let (read, mut write) = tokio::io::split(stream);
         let mut line = String::new();
         let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
@@ -1925,7 +2047,7 @@ impl Host {
             return;
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::HarnessLine>(&line) {
-            return self.harness_reported(report);
+            return self.harness_reported(report, peer).await;
         }
         let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
             return;
@@ -1943,6 +2065,12 @@ impl Host {
                 .await;
             return;
         };
+        if !self.admit(peer, &session, "bridge").await {
+            let _ = write
+                .write_all(&send(json!({"storm_error": "identity_mismatch"})))
+                .await;
+            return;
+        }
         if request.subscribe {
             let (tx, mut rx) = tokio::sync::mpsc::channel(64);
             self.subscribers
@@ -1992,6 +2120,23 @@ impl Host {
 }
 
 /// The wire form of a session's status: running, or how it ended.
+/// 135a's answer for one connection: any error, or no leader, refuses.
+async fn verdict(
+    peer: io::Result<crate::platform::peer::Process>,
+    leader: Option<Arc<crate::platform::peer::Process>>,
+) -> Result<(), crate::peer_identity::Mismatch> {
+    use crate::peer_identity::Mismatch;
+    match (peer, leader) {
+        (Err(e), _) => Err(Mismatch::from(e)),
+        (_, None) => Err(Mismatch::LeaderGone),
+        (Ok(peer), Some(leader)) => {
+            tokio::task::spawn_blocking(move || crate::peer_identity::check(&peer, &leader))
+                .await
+                .unwrap_or(Err(Mismatch::Error(io::ErrorKind::Other)))
+        }
+    }
+}
+
 /// The host account's home, where Cursor and Command Code keep their own
 /// config.
 fn account_home() -> Result<PathBuf> {
@@ -2374,13 +2519,495 @@ mod tests {
             .collect()
     }
 
+    /// A command for a session's script that runs [`identity_probe`] as one
+    /// of the session's own processes: `exec` makes it the leader itself.
+    #[cfg(unix)]
+    fn probe(mode: &str, exec: bool) -> String {
+        format!(
+            "STORM_PROBE='{mode}' {}'{}' --exact host::tests::identity_probe --nocapture -q --test-threads=1 >/dev/null 2>&1",
+            if exec { "exec " } else { "" },
+            std::env::current_exe().unwrap().display()
+        )
+    }
+
+    #[cfg(unix)]
+    fn rerun_probe(mode: String) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::tests::identity_probe",
+                "--nocapture",
+                "-q",
+                "--test-threads=1",
+            ])
+            .env("STORM_PROBE", mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn wait_for_new_parent(was: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::os::unix::process::parent_id() == was {
+            assert!(std::time::Instant::now() < deadline, "never re-parented");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Not a test: the process a session's script starts to reach its host
+    /// the way a hook, a tool command or a stray would (decision 135). It
+    /// does nothing unless `STORM_PROBE` names what to do.
+    #[cfg(unix)]
+    #[test]
+    fn identity_probe() {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let Ok(mode) = std::env::var("STORM_PROBE") else {
+            return;
+        };
+        let (verb, arg) = mode.split_once(' ').unwrap_or((&mode, ""));
+        let socket = || std::env::var_os(crate::mcp::SOCKET_ENV).unwrap();
+        let handle = || std::env::var(crate::harness::HANDLE_ENV).unwrap();
+        let line = |handle: String, id: &str| {
+            let mut l = serde_json::to_vec(&crate::harness::HarnessLine {
+                handle,
+                harness_session: id.into(),
+            })
+            .unwrap();
+            l.push(b'\n');
+            l
+        };
+        match verb {
+            // A hook: the session's own process, with its own handle.
+            "send" => crate::harness::send(socket(), handle(), arg.into()).unwrap(),
+            // With the handle in file `arg` (another session's, say), or a
+            // literal one when there is no such file.
+            "as" => {
+                let (h, id) = arg.split_once(' ').unwrap();
+                let h = std::fs::read_to_string(h).unwrap_or_else(|_| h.to_string());
+                crate::harness::send(socket(), h, id.into()).unwrap()
+            }
+            // A tool command: a new process session, still a descendant.
+            "setsid" => {
+                rustix::process::setsid().unwrap();
+                crate::harness::send(socket(), handle(), arg.into()).unwrap()
+            }
+            // A detached shell: leaves the tree, then reports.
+            "detach" => {
+                rerun_probe(format!("orphan {} {arg}", std::process::id()));
+                std::process::exit(0);
+            }
+            "orphan" => {
+                let (parent, id) = arg.split_once(' ').unwrap();
+                wait_for_new_parent(parent.parse().unwrap());
+                crate::harness::send(socket(), handle(), id.into()).unwrap()
+            }
+            // An exited connector: connect, hand the socket to a child that
+            // outlives this process, and let the child write.
+            "handoff" => {
+                let stream = std::os::unix::net::UnixStream::connect(socket()).unwrap();
+                rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::empty()).unwrap();
+                rerun_probe(format!(
+                    "heir {} {} {arg}",
+                    stream.as_raw_fd(),
+                    std::process::id()
+                ));
+                std::process::exit(0);
+            }
+            "heir" => {
+                let mut parts = arg.splitn(3, ' ');
+                let fd: i32 = parts.next().unwrap().parse().unwrap();
+                let parent: u32 = parts.next().unwrap().parse().unwrap();
+                let id = parts.next().unwrap();
+                wait_for_new_parent(parent);
+                // SAFETY: the parent left this descriptor open for us.
+                let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                stream.write_all(&line(handle(), id)).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let _ = stream.read(&mut [0u8; 64]);
+            }
+            // The session's bridge: one call through its own MCP config,
+            // the answer written to a file.
+            "bridge" => {
+                let config = std::env::var("STORM_PROBE_CONFIG").unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+                let (_, server) = config["mcpServers"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap();
+                let env = &server["env"];
+                let mut stream = std::os::unix::net::UnixStream::connect(
+                    env[crate::mcp::SOCKET_ENV].as_str().unwrap(),
+                )
+                .unwrap();
+                let mut request = serde_json::to_vec(&json!({
+                    "handle": env[crate::mcp::HANDLE_ENV],
+                    "connection": server["args"][1],
+                    "message": {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                }))
+                .unwrap();
+                request.push(b'\n');
+                stream.write_all(&request).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut answer = String::new();
+                let _ = stream.read_to_string(&mut answer);
+                std::fs::write("answer", answer).unwrap();
+            }
+            other => panic!("no probe {other:?}"),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn refusals(host: &Host, session: &str) -> Vec<(&'static str, &'static str)> {
+        host.refused
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(s, _, _)| s == session)
+            .map(|(_, kind, why)| (*kind, *why))
+            .collect()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn harness_id(host: &Host, session: &str) -> Option<String> {
+        host.session(session)?
+            .events
+            .harness
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn handle_of(host: &Host, session: &str) -> String {
+        host.harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == session)
+            .map(|(h, _)| h.clone())
+            .unwrap()
+    }
+
+    /// A script that does `cases` by session id, then stays up.
+    #[cfg(target_os = "linux")]
+    fn by_session(cases: &[(&str, String)]) -> String {
+        let arms: String = cases
+            .iter()
+            .map(|(session, cmd)| format!("{session}) {cmd};; "))
+            .collect();
+        format!(
+            "while [ ! -e go ]; do sleep 0.05; done; \
+             case \"$STORM_RUNTIME_SESSION\" in {arms}esac; exec sleep 1000"
+        )
+    }
+
+    /// G-135-1, accepted: the session's own processes — its leader, a hook
+    /// under it, and a tool command in a process session of its own.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn g_135_1_the_sessions_own_processes_are_accepted() {
+        let ids = [
+            ("ags_LEAD", "11111111-1111-4111-8111-111111111111"),
+            ("ags_HOOK", "22222222-2222-4222-8222-222222222222"),
+            ("ags_TOOL", "33333333-3333-4333-8333-333333333333"),
+        ];
+        let script = by_session(&[
+            (ids[0].0, probe(&format!("send {}", ids[0].1), true)),
+            (ids[1].0, probe(&format!("send {}", ids[1].1), false)),
+            (
+                ids[2].0,
+                format!(
+                    "/bin/sh -c \"{}\"",
+                    probe(&format!("setsid {}", ids[2].1), false)
+                ),
+            ),
+        ]);
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        assert!(
+            host.peer_identity.verified(),
+            "{:?}",
+            host.peer_identity.report()
+        );
+        assert_eq!(host.capabilities()["identity"]["state"], "verified");
+        for (session, _) in ids {
+            host.clone()
+                .handle(harness_start(session, "claude-code", None, false))
+                .await;
+        }
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        for (session, id) in ids {
+            // The leader's session ends with it, so its report is read
+            // from what was posted.
+            wait_for(&format!("{session}'s report"), || {
+                harness_posts(&seen, &session.to_lowercase()).contains(&id.to_string())
+            })
+            .await;
+            assert_eq!(refusals(&host, session), [], "{session}");
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-1, refused and audited: a real handle from outside the session
+    /// — the host's own process, another session's, a detached shell's — and
+    /// a connector that exited and left its socket to a child. None of them
+    /// changes a session's id.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn g_135_1_a_real_handle_from_outside_the_session_is_refused() {
+        let id = "44444444-4444-4444-8444-444444444444";
+        let script = by_session(&[
+            ("ags_OTHER", probe(&format!("as victim {id}"), false)),
+            ("ags_DETACH", probe(&format!("detach {id}"), false)),
+            ("ags_HANDOFF", probe(&format!("handoff {id}"), false)),
+        ]);
+        let (host, _seen, state, roots) = harness_host(&script).await;
+        assert!(host.peer_identity.verified());
+        let sessions = ["ags_VICTIM", "ags_OTHER", "ags_DETACH", "ags_HANDOFF"];
+        for session in sessions {
+            host.clone()
+                .handle(harness_start(session, "claude-code", None, false))
+                .await;
+        }
+        let before: Vec<_> = sessions.iter().map(|s| harness_id(&host, s)).collect();
+        let victim = handle_of(&host, "ags_VICTIM");
+        std::fs::write(roots.path().join("w").join("victim"), &victim).unwrap();
+
+        // The host's own process — no session's — with the real handle.
+        let socket = crate::mcp::socket_path(state.path());
+        let h = victim.clone();
+        tokio::task::spawn_blocking(move || crate::harness::send(&socket, h, id.into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refusals(&host, "ags_VICTIM"), [("harness", "reached_host")]);
+
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        wait_for("another session's process refused", || {
+            refusals(&host, "ags_VICTIM").len() == 2
+        })
+        .await;
+        assert_eq!(
+            refusals(&host, "ags_VICTIM")[1],
+            ("harness", "reached_host")
+        );
+        for (session, why) in [
+            ("ags_DETACH", "reached_init"),
+            ("ags_HANDOFF", "peer_exited"),
+        ] {
+            wait_for(&format!("{session} refused"), || {
+                !refusals(&host, session).is_empty()
+            })
+            .await;
+            assert_eq!(refusals(&host, session), [("harness", why)], "{session}");
+        }
+        let after: Vec<_> = sessions.iter().map(|s| harness_id(&host, s)).collect();
+        assert_eq!(after, before);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 135a: a handle whose session has no leader on record — none was ever
+    /// started, or it has gone — takes nothing, whoever sends it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_session_without_a_leader_takes_no_connection() {
+        let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
+        let events = Arc::new(Events {
+            ring: Mutex::new(Scrollback::new(64)),
+            ended: Mutex::new(None),
+            wake: Notify::new(),
+            title: Mutex::new(TitleObserver::default()),
+            titles: false,
+            harness: Mutex::new(None),
+            leader: watch::channel(None).0,
+        });
+        host.harness_handles.lock().unwrap().insert(
+            "h_ORPHAN".into(),
+            ("ags_NOLEAD".into(), "claude-code".into(), events.clone()),
+        );
+        let socket = crate::mcp::socket_path(state.path());
+        let id = "66666666-6666-4666-8666-666666666666";
+        tokio::task::spawn_blocking(move || {
+            crate::harness::send(&socket, "h_ORPHAN".into(), id.into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(refusals(&host, "ags_NOLEAD"), [("harness", "leader_gone")]);
+        assert_eq!(*events.harness.lock().unwrap(), None);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 135a: a connector the kernel would not name is refused like any other
+    /// failure, never waved through.
+    #[tokio::test]
+    #[cfg(target_os = "linux")]
+    async fn a_peer_that_cannot_be_read_is_refused() {
+        let me = Arc::new(crate::platform::peer::Process::open(std::process::id() as i32).unwrap());
+        let r = verdict(Err(io::ErrorKind::InvalidInput.into()), Some(me)).await;
+        assert_eq!(r.unwrap_err().as_str(), "error");
+    }
+
+    /// 135d: a precondition that stops holding while the host runs drops it
+    /// to `unavailable` at once, and the server is told straight away.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_lost_precondition_downgrades_the_host_at_once() {
+        let (host, seen, _state, _roots) = harness_host("exec sleep 1000").await;
+        assert!(host.peer_identity.verified());
+        host.refuse(
+            "ags_X",
+            "bridge",
+            crate::peer_identity::Mismatch::Precondition("ptrace_scope"),
+        )
+        .await;
+        assert!(!host.peer_identity.verified());
+        let inventory = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/inventory"))
+            .map(|(_, b)| b.clone())
+            .expect("an inventory was posted");
+        assert_eq!(
+            inventory["identity"],
+            json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"})
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-1 for a bridge line: the session's own call is forwarded; the
+    /// same handle from outside is answered `identity_mismatch`, audited,
+    /// and never reaches the server.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn g_135_1_a_bridge_line_from_outside_is_never_forwarded() {
+        use std::io::{Read, Write};
+        // The probe finds the session's MCP config in its own arguments.
+        let script =
+            "for a in \"$0\" \"$@\"; do [ \"$prev\" = --mcp-config ] && cfg=$a; prev=$a; done; \
+             while [ ! -e go ]; do sleep 0.05; done; "
+                .to_string()
+                + &probe("bridge", false)
+                    .replace("STORM_PROBE=", "STORM_PROBE_CONFIG=\"$cfg\" STORM_PROBE=")
+                + "; exec sleep 1000";
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        let mut start = harness_start("ags_BRIDGE", "claude-code", None, false);
+        if let Command::Start { mcp, .. } = &mut start {
+            mcp.push(crate::mcp::McpGrant {
+                id: "con_NOTES".into(),
+                slug: "notes".into(),
+                plugin_origin: None,
+            });
+        }
+        host.clone().handle(start).await;
+        let forwarded = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/sessions/ags_bridge/mcp/con_notes"))
+                .count()
+        };
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        let answer = roots.path().join("w").join("answer");
+        wait_for("the session's own call", || answer.exists()).await;
+        assert_eq!(std::fs::read_to_string(&answer).unwrap(), "{}");
+        assert_eq!(forwarded(), 1);
+
+        // Its handle, read from its config, presented from outside.
+        let config_path = crate::mcp::session_dir(&host.state_dir, "ags_BRIDGE").join("mcp.json");
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
+        let env = config["mcpServers"]["notes"]["env"].clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(
+                env[crate::mcp::SOCKET_ENV].as_str().unwrap(),
+            )
+            .unwrap();
+            let line = json!({
+                "handle": env[crate::mcp::HANDLE_ENV],
+                "connection": "notes",
+                "message": {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            });
+            stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap(),
+            json!({"storm_error": "identity_mismatch"})
+        );
+        assert_eq!(forwarded(), 1);
+        assert_eq!(refusals(&host, "ags_BRIDGE"), [("bridge", "reached_host")]);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-3: a host that is not `verified` is handle-only, as before —
+    /// it says so, and a line from outside still goes through.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn an_unverified_host_is_handle_only_and_says_why() {
+        let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
+        host.peer_identity.downgrade("ptrace_scope");
+        let caps = host.capabilities();
+        assert_eq!(caps["identity"]["state"], "unavailable");
+        assert!(caps["identity"]["reason"].is_string());
+        host.clone()
+            .handle(harness_start("ags_OPEN", "claude-code", None, false))
+            .await;
+        let handle = host
+            .harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == "ags_OPEN")
+            .map(|(h, _)| h.clone())
+            .unwrap();
+        let id = "55555555-5555-4555-8555-555555555555";
+        let socket = crate::mcp::socket_path(state.path());
+        tokio::task::spawn_blocking(move || crate::harness::send(&socket, handle, id.into()))
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for("the outsider's report", || {
+            host.session("ags_OPEN")
+                .and_then(|s| s.events.harness.lock().unwrap().clone())
+                .as_deref()
+                == Some(id)
+        })
+        .await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     /// Decision 89: the id a fresh Claude Code session starts with is
     /// reported, then whatever its hook says, but only through its own
-    /// handle and only as an id Claude Code could have made.
+    /// handle and only as an id Claude Code could have made. The reports
+    /// come from the session's own processes, as a real hook's do: on a
+    /// Linux host they are checked (decision 135).
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(unix)]
     async fn the_agents_session_id_is_reported_as_it_changes() {
-        let (host, seen, state, _roots) = harness_host("exec sleep 1000").await;
+        let cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63";
+        let script = format!(
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; exec sleep 1000",
+            probe(&format!("as not-a-handle {cleared}"), false),
+            probe("send ses_notclaude", false),
+            probe(&format!("send {cleared}"), false),
+        );
+        let (host, seen, _state, roots) = harness_host(&script).await;
         host.clone()
             .handle(harness_start("ags_HARN", "claude-code", None, false))
             .await;
@@ -2398,20 +3025,7 @@ mod tests {
             harness_posts(&seen, "ags_harn").contains(&first)
         })
         .await;
-
-        let handle = host
-            .harness_handles
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, (s, _, _))| s == "ags_HARN")
-            .map(|(h, _)| h.clone())
-            .unwrap();
-        let socket = crate::mcp::socket_path(state.path());
-        let cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63";
-        crate::harness::send(&socket, "not-a-handle".into(), cleared.into()).unwrap();
-        crate::harness::send(&socket, handle.clone(), "ses_notclaude".into()).unwrap();
-        crate::harness::send(&socket, handle.clone(), cleared.into()).unwrap();
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
         wait_for("the cleared id", || {
             harness_posts(&seen, "ags_harn").last().map(String::as_str) == Some(cleared)
         })

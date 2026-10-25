@@ -41,6 +41,8 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
     // The parent's copy must go, or the master never sees end-of-file.
     drop(slave);
     let leader = Pid::from_child(&child);
+    // Nothing waits on the child yet, so its number is still its own.
+    let process = crate::platform::peer::Process::open(leader.as_raw_nonzero().get()).ok();
     // Non-blocking, so an input write takes what fits and never sleeps
     // until all of it does: macOS's `ptcwrite` would (decision 83), and
     // writing a byte at a time instead split escape sequences, which Codex
@@ -60,6 +62,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
             leader,
             tag: launch.tag.clone(),
         },
+        leader: process,
     })
 }
 

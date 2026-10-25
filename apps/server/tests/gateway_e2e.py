@@ -186,6 +186,19 @@ class Agent:
                                   ("result" in m or "error" in m)), None),
                     f"the answer to {rid} on {slug}", timeout)
 
+    def run(self, command, stdin=""):
+        """Runs `command` as the agent's own child, as a hook would run."""
+        self.n += 1
+        out = f"run-{self.n:05d}.json"
+        inbox = os.path.join(self.dir, "inbox")
+        tmp = os.path.join(inbox, f"{self.n:05d}.tmp")
+        with open(tmp, "w") as f:
+            json.dump({"run": command, "input": stdin, "out": out}, f)
+        os.rename(tmp, os.path.join(inbox, f"{self.n:05d}.json"))
+        path = os.path.join(self.dir, out)
+        return wait(lambda: json.load(open(path)) if os.path.exists(path) else None,
+                    f"the agent to run {command[:40]}")
+
     def env(self):
         path = os.path.join(self.dir, "agent-env.json")
         return json.load(open(path)) if os.path.exists(path) else None
@@ -598,13 +611,22 @@ args = ["-i"]
         # A file in the session's directory, never inline: claude.cmd on Windows (99).
         hook = json.load(open(argv[argv.index("--settings") + 1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63"
-        env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
-        ran = subprocess.run(hook, shell=True, env=env, capture_output=True,
-                             input=json.dumps({"session_id": cleared, "source": "clear"}).encode())
-        check("the hook Claude Code runs is silent and succeeds", ran.returncode == 0 and ran.stdout == b"",
-              (ran.returncode, ran.stdout, ran.stderr))
+        # Run by the agent, as Claude Code runs it: on Linux the host takes a
+        # report only from inside the session (decision 135).
+        ran = c.run(hook, json.dumps({"session_id": cleared, "source": "clear"}))
+        check("the hook Claude Code runs is silent and succeeds", ran["returncode"] == 0 and ran["stdout"] == "",
+              ran)
         wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared,
              "the hook's id on the record")
+        if sys.platform.startswith("linux"):
+            # The same hook and handle from outside the session.
+            stolen = "1f0e8a52-5d4e-4c4b-9a8f-0e6a3b2c1d00"
+            env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
+            subprocess.run(hook, shell=True, env=env, capture_output=True,
+                           input=json.dumps({"session_id": stolen, "source": "clear"}).encode())
+            time.sleep(1.5)
+            check("the same hook from outside the session is refused (135a)",
+                  call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared)
         check("the first id was the launch's own", first != cleared and len(first) == 36, first)
         for sid_ in (rec["id"], rec2["id"]):
             call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)

@@ -40,6 +40,18 @@ On every platform:
   `host.json.revoked` and exits 3, and stays stopped.** Enroll it again to
   bring it back; no `--force` is needed.
 
+**Session identity (Linux).** A session's Storm tools and its Resume reports
+reach the host through a local socket. On Linux the host also checks, with
+the kernel's peer credentials, that each connection comes from a live process
+inside that session; anything else is refused and logged as
+`identity_mismatch`, even with a valid handle. At start the host logs
+`bridge identity` as `verified`, or as `unavailable` with the reason — most
+often `ptrace_scope` (the kernel's `kernel.yama.ptrace_scope` must be 1 or
+more) or a kernel older than 6.5. macOS hosts report `unavailable` for now
+and Windows hosts `unsupported`; both keep working as before. This binds a
+connection to its session's processes. It does not isolate sessions of one
+host from each other: they share an account and its files.
+
 **Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
 default agent › Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt.

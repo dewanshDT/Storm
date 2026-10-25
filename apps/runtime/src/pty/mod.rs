@@ -51,6 +51,9 @@ pub(crate) struct Spawned {
     pub output: Output,
     pub input: Input,
     pub group: Group,
+    /// A handle on the agent's process, taken before anything can reap it
+    /// (decision 135). `None` where the platform has none.
+    pub leader: Option<crate::platform::peer::Process>,
 }
 
 /// How the agent's own process ended.

@@ -54,6 +54,7 @@ pub use windows_service::{enable_and_start, service_main};
 
 pub mod ipc;
 pub mod launchd;
+pub mod peer;
 pub mod wincmd;
 pub mod winsvc;
 

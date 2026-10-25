@@ -32,6 +32,10 @@ use crate::provider::LaunchExtras;
 
 pub const HANDLE_ENV: &str = "STORM_HARNESS_HANDLE";
 
+/// The longest a report waits for the host to take it: well past the host's
+/// own wait for a session still starting.
+const REPORT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One line from `harness-session` on the daemon socket.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HarnessLine {
@@ -255,6 +259,8 @@ pub(crate) fn send(socket: impl AsRef<Path>, handle: String, id: String) -> Resu
     line.push(b'\n');
     let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
     stream.write_all(&line)?;
+    // Stay alive until the host has checked who sent it (decision 135).
+    stream.wait_closed(REPORT_WAIT);
     Ok(())
 }
 
