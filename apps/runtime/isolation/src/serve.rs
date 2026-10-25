@@ -83,10 +83,17 @@ impl Settings {
                     .flat_map(std::env::split_paths),
             ),
         }
+        let (mut providers, mut commands) = (config.provider_ids(), config.provider_commands());
+        // The host's own isolation self-test (136j), never the operator's.
+        providers.push(crate::session::PROBE.into());
+        commands.push((
+            crate::session::PROBE.into(),
+            crate::agents::STORM_RUNTIME.into(),
+        ));
         Ok(Self {
             roots: config.canonical_roots(),
-            providers: config.provider_ids(),
-            commands: config.provider_commands(),
+            providers,
+            commands,
             search,
             shell,
             host_ports: crate::net::host_ports(&config.isolation_host_ports)?,
@@ -390,11 +397,11 @@ pub mod tests {
     }
 
     #[test]
-    fn the_operations_137_and_136_5_build_are_still_refused() {
+    fn the_operations_137_builds_are_still_refused() {
         let t = tempfile::tempdir().unwrap();
         let h = helper(t.path());
         for request in [
-            &br#"{"op":"self_test"}"#[..],
+            &br#"{"op":"child_dispose","child":"ags_C"}"#[..],
             br#"{"op":"child_export","child":"ags_C"}"#,
         ] {
             let mut lines = Vec::new();

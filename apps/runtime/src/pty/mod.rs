@@ -60,6 +60,9 @@ pub(crate) struct Spawned {
     /// A handle on the agent's process, taken before anything can reap it
     /// (decision 135). `None` where the platform has none.
     pub leader: Option<crate::platform::peer::Process>,
+    /// On an isolated host, the uid the helper leased the session (136i):
+    /// its bridge connections must come from it.
+    pub user: Option<u32>,
 }
 
 /// How the agent's own process ended.

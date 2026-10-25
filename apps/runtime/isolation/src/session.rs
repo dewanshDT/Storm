@@ -38,6 +38,12 @@ pub struct Layout {
 
 pub const HOST_STATE: &str = "/var/lib/storm-runtime";
 
+/// The host's isolation self-test (136j): two probe sessions, each running
+/// the host's own binary (`storm-runtime isolation-probe`) in its own home.
+/// Everything else about them is a session's: the same lease, unit,
+/// network and revocation.
+pub const PROBE: &str = "storm-probe";
+
 impl Layout {
     pub fn installed() -> Self {
         Self {
@@ -164,6 +170,7 @@ impl Helper {
                 roots: &self.roots,
                 providers: &self.providers,
                 leases: &st.leases,
+                homes: &self.layout.state.join("homes"),
             };
             policy::validate(req, &cx)?;
         }
@@ -205,11 +212,10 @@ impl Helper {
                 none()
             }
             Op::AgentJob => self.agent_job(req.get("agent"), req.get("action")),
-            Op::ChildCreate
-            | Op::ChildExport
-            | Op::ChildImport
-            | Op::ChildDispose
-            | Op::SelfTest => Err(Refusal::NotBuilt),
+            Op::SelfTest => self.self_test(),
+            Op::ChildCreate | Op::ChildExport | Op::ChildImport | Op::ChildDispose => {
+                Err(Refusal::NotBuilt)
+            }
         }
     }
 
@@ -235,6 +241,8 @@ impl Helper {
         }
         st.records.insert(user.clone(), record);
         let mut out = Map::new();
+        // The host binds each bridge connection to this uid (136i).
+        out.insert("uid".into(), self.pool.users[&user].into());
         out.insert("user".into(), user.into());
         Ok((out, None))
     }
@@ -288,7 +296,11 @@ impl Helper {
             return Err(Refusal::AlreadyStarted);
         }
         let terminal = crate::tty::verify(tty.as_fd())?;
+        if !self.deps.units.network_ready() {
+            return Err(Refusal::NoPasst);
+        }
         let program = self.program(provider)?;
+        let probe = provider == PROBE;
         let launch = files::read_launch(
             &self.layout.launch_dir(),
             &format!("{session}.json"),
@@ -302,15 +314,20 @@ impl Helper {
             self.check_resume(session, provider, resume)?;
         }
         let own = self.deps.own.as_ref();
-        let group = files::workspace_group(workspace, &self.pool, &self.layout.manifests(), own)
-            .map_err(|e| failed("the workspace's group", e))?;
+        let group = if probe {
+            user.to_string()
+        } else {
+            files::workspace_group(workspace, &self.pool, &self.layout.manifests(), own)
+                .map_err(|e| failed("the workspace's group", e))?
+        };
         // The workspace is recorded before the session can write in it, so
         // whatever happens next, lease end knows what to hand back.
         {
             let mut st = self.state.lock().unwrap();
             let record = LeaseRecord {
                 session: session.to_string(),
-                workspace: Some(workspace.to_path_buf()),
+                // A probe's workspace is its home, which lease end removes.
+                workspace: (!probe).then(|| workspace.to_path_buf()),
                 provider: Some(provider.to_string()),
             };
             files::save_lease(&self.layout.leases(), user, &record)
@@ -412,6 +429,16 @@ impl Helper {
         // could not have named another terminal meanwhile.
         drop(tty);
         Ok((out, pidfd))
+    }
+
+    /// The helper's half of the host's self-test (136j): what every
+    /// session's network needs is here and answers. The probe sessions are
+    /// the host's, through `start`.
+    fn self_test(&self) -> Result<Answer, Refusal> {
+        if !self.deps.units.network_ready() {
+            return Err(Refusal::NoPasst);
+        }
+        Ok((Map::new(), None))
     }
 
     /// An install job under the install identity (136g), one per agent at
@@ -654,8 +681,10 @@ pub mod tests {
         pub nets: Mutex<Vec<crate::net::NetSpec>>,
         pub units: Mutex<BTreeMap<String, (UnitState, Option<std::process::Child>)>>,
         pub fail_start: std::sync::atomic::AtomicBool,
-        /// As if pasta were missing.
+        /// As if pasta failed to start the network.
         pub fail_network: std::sync::atomic::AtomicBool,
+        /// As if pasta were not installed.
+        pub no_passt: std::sync::atomic::AtomicBool,
         pub jobs: Mutex<Vec<crate::agents::JobSpec>>,
         pub job_output: Mutex<String>,
     }
@@ -677,6 +706,9 @@ pub mod tests {
     }
 
     impl Units for Arc<FakeUnits> {
+        fn network_ready(&self) -> bool {
+            !self.no_passt.load(std::sync::atomic::Ordering::SeqCst)
+        }
         fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
             let unit = crate::net::unit_name(&spec.session);
             self.calls.lock().unwrap().push(format!("start {unit}"));
@@ -1246,6 +1278,111 @@ pub mod tests {
         let back = metas(&dir.join("mcp.json"));
         assert_eq!(back.gid, f.helper.pool.host_gid);
         assert_eq!(back.mode & 0o070, 0);
+    }
+
+    /// 136i: the session's own bridge socket, which the host binds in its
+    /// directory before `start`, is shared with the session's group with its
+    /// write bit, which `connect` needs; nothing else there is writable.
+    #[test]
+    fn the_sessions_bridge_socket_is_its_groups_to_connect_to() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let f = fixture();
+        let dir = f.helper.layout.session_dir("ags_A");
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("mcp.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o660)).unwrap();
+        let (user, ..) = f.started("ags_A");
+        let md = std::fs::symlink_metadata(&sock).unwrap();
+        let seen = f.own.meta(
+            Key {
+                dev: md.dev(),
+                ino: md.ino(),
+            },
+            Meta {
+                uid: md.uid(),
+                gid: md.gid(),
+                mode: md.mode() & 0o7777,
+            },
+        );
+        assert_eq!(seen.uid, me(), "still the host's");
+        assert_eq!(seen.gid, f.helper.pool.primary[&user]);
+        assert_eq!(seen.mode & 0o777, 0o660);
+    }
+
+    /// The leased user's uid comes back with the lease: the host binds each
+    /// of the session's bridge connections to it (136i).
+    #[test]
+    fn a_lease_names_the_users_uid() {
+        let f = fixture();
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_A"}), vec![]);
+        let user = v["user"].as_str().unwrap();
+        assert_eq!(v["uid"], f.helper.pool.users[user]);
+    }
+
+    /// 136j: a self-test probe runs the host's own binary in its own home,
+    /// as a session in every other way; it never names a workspace.
+    #[test]
+    fn a_probe_runs_in_its_own_home_as_a_session_otherwise() {
+        let mut f = fixture();
+        f.helper.commands.push((PROBE.into(), "/bin/sh".into()));
+        f.helper.providers.push(PROBE.into());
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_P"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_P", "user": user}),
+            vec![],
+        );
+        f.launch("ags_P");
+        let home = f.helper.layout.home("ags_P");
+        let start = |workspace: &str| {
+            let (_m, slave) = crate::tty::tests::pty();
+            f.call(
+                json!({"op": "start", "session": "ags_P", "user": user, "provider": PROBE, "workspace": workspace}),
+                vec![slave],
+            )
+            .0
+        };
+        // Not a workspace, and not another session's home.
+        assert_eq!(start(&f.workspace())["error"], "path_outside_roots");
+        let other = f.helper.layout.home("ags_Q");
+        assert_eq!(
+            start(other.to_str().unwrap())["error"],
+            "path_outside_roots"
+        );
+        assert_eq!(start(home.to_str().unwrap())["ok"], true);
+        let spec = f.units.specs.lock().unwrap()[0].clone();
+        assert_eq!(spec.workspace, home);
+        assert_eq!(spec.workspace_group, user, "its own group, no workspace's");
+        assert_eq!(spec.program, PathBuf::from("/bin/sh"));
+        let props = spec.properties().unwrap();
+        assert_eq!(
+            props.iter().filter(|p| p.starts_with("BindPaths=")).count(),
+            1
+        );
+        let record = f.helper.state.lock().unwrap().records[&user].clone();
+        assert_eq!(record.workspace, None, "nothing to hand back");
+        f.ok(
+            json!({"op": "release", "session": "ags_P", "user": user}),
+            vec![],
+        );
+        assert!(!home.exists());
+    }
+
+    /// IT-7's half the helper answers: without pasta no session starts, and
+    /// the self-test says why, before anything is leased or started.
+    #[test]
+    fn it_7_without_pasta_the_self_test_and_every_start_say_no_passt() {
+        let f = fixture();
+        f.ok(json!({"op": "self_test"}), vec![]);
+        f.units
+            .no_passt
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (v, _) = f.call(json!({"op": "self_test"}), vec![]);
+        assert_eq!(v["error"], "no_passt");
+        let (v, _, _, _) = f.start_as("ags_A", "shell", None);
+        assert_eq!(v["error"], "no_passt");
+        assert!(f.units.calls.lock().unwrap().is_empty(), "nothing started");
     }
 
     /// The terminal goes from one process to the helper, and the leader's

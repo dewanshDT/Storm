@@ -22,7 +22,7 @@ impl Helper for Recording {
     ) -> io::Result<(Value, Option<OwnedFd>)> {
         self.0.lock().unwrap().push((request.clone(), fd.is_some()));
         let answer = match request["op"].as_str() {
-            Some("lease") => json!({"ok": true, "op": "lease", "user": "storm-s001"}),
+            Some("lease") => json!({"ok": true, "op": "lease", "user": "storm-s001", "uid": 2001}),
             Some("start") => json!({"ok": true, "op": "start", "pid": 0}),
             Some("end") => json!({"ok": true, "op": "end", "exit_code": 0, "signal": null}),
             _ => json!({"ok": true}),
@@ -37,8 +37,12 @@ fn every_request_the_host_sends_is_one_the_helper_accepts() {
     let link = Link {
         helper: rec.clone(),
         state_dir: "/var/lib/storm-runtime".into(),
+        homes: storm_runtime::isolation::HOMES.into(),
+        status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
     };
-    let user = link.lease("ags_A").unwrap();
+    link.ready().unwrap();
+    let (user, uid) = link.lease("ags_A").unwrap();
+    assert_eq!(uid, 2001);
     link.prepare("ags_A", &user).unwrap();
     let (_r, w) = std::io::pipe().unwrap();
     link.start(
@@ -54,6 +58,16 @@ fn every_request_the_host_sends_is_one_the_helper_accepts() {
     }
     assert_eq!(link.end("ags_A").unwrap(), (Some(0), None));
     link.release("ags_A", &user).unwrap();
+    // A self-test probe (136j): the helper's own provider, in its own home.
+    let home = std::path::Path::new(storm_runtime::isolation::HOMES).join("ags_P");
+    link.start(
+        "ags_P",
+        &user,
+        storm_runtime::isolation::PROBE,
+        &home,
+        w.as_fd(),
+    )
+    .unwrap();
     let sent = rec.0.lock().unwrap().clone();
     let ops: Vec<&str> = sent
         .iter()
@@ -62,7 +76,15 @@ fn every_request_the_host_sends_is_one_the_helper_accepts() {
     assert_eq!(
         ops,
         [
-            "lease", "prepare", "start", "signal", "signal", "end", "release"
+            "self_test",
+            "lease",
+            "prepare",
+            "start",
+            "signal",
+            "signal",
+            "end",
+            "release",
+            "start"
         ]
     );
     for (request, with_fd) in &sent {
@@ -80,6 +102,8 @@ fn an_agent_job_is_one_the_helper_accepts() {
     let link = Link {
         helper: rec.clone(),
         state_dir: "/var/lib/storm-runtime".into(),
+        homes: storm_runtime::isolation::HOMES.into(),
+        status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
     };
     for action in ["install", "update", "remove"] {
         link.agent_job("opencode", action).unwrap().unwrap();
@@ -111,7 +135,45 @@ fn a_refusal_is_an_error_naming_its_code() {
     let link = Link {
         helper: Arc::new(No),
         state_dir: "/var/lib/storm-runtime".into(),
+        homes: storm_runtime::isolation::HOMES.into(),
+        status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
     };
     let e = link.lease("ags_A").unwrap_err();
     assert!(e.to_string().contains("pool_exhausted"), "{e}");
+    assert_eq!(
+        storm_runtime::isolation::refusal(&e),
+        Some("pool_exhausted")
+    );
+    // A refusal is the helper answering: isolation stays as it was.
+    assert_eq!(storm_runtime::isolation::unavailable_because(&e), None);
+}
+
+/// 136i: a lease that names no uid, or root's, is no lease the host can
+/// bind a session's connections to.
+#[test]
+fn a_lease_without_a_usable_uid_is_refused() {
+    struct Leases(Value);
+    impl Helper for Leases {
+        fn call(
+            &self,
+            _: &Value,
+            _: Option<BorrowedFd<'_>>,
+        ) -> io::Result<(Value, Option<OwnedFd>)> {
+            Ok((self.0.clone(), None))
+        }
+    }
+    for answer in [
+        json!({"ok": true, "user": "storm-s001"}),
+        json!({"ok": true, "user": "storm-s001", "uid": 0}),
+        json!({"ok": true, "user": "storm-s001", "uid": "2001"}),
+        json!({"ok": true, "user": "storm-s001", "uid": -1}),
+    ] {
+        let link = Link {
+            helper: Arc::new(Leases(answer.clone())),
+            state_dir: "/var/lib/storm-runtime".into(),
+            homes: storm_runtime::isolation::HOMES.into(),
+            status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
+        };
+        assert!(link.lease("ags_A").is_err(), "{answer}");
+    }
 }

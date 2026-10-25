@@ -711,7 +711,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   login. **The agents prefix belongs to `storm-install`** (136g,
   `agents.rs`): installs run through the helper's `agent_job` as the host's
   own `storm-runtime agent-job`, in a unit that can write only the prefix.
-  The operator's
+  **On an isolated host each session has its own bridge socket**
+  (136-5): `<state>/sessions/<id>/mcp.sock`, `0660`, bound before `start`
+  so the helper shares it with the session's group; a bridge or harness
+  connection is taken only on its session's own socket, from the uid the
+  lease named (`SO_PEERCRED`), and on a verified host also under the leader
+  the helper handed back (`wrong_socket`, `wrong_user`, then 135b). **No
+  isolated session starts before the self-test passes** (`isolation_probe.rs`:
+  two probe sessions of the helper's `storm-probe` provider, the host's own
+  `storm-runtime isolation-probe`; B must reach none of A's processes,
+  state, sockets, ports, `/tmp`, `/dev/shm`, IPC or the agents prefix, and
+  each probe's own controls must work); anything else is `isolation:
+  unavailable` and `isolation_unavailable`, and a helper that stops
+  answering or `no_passt` drops it at once. The operator's
   `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
   record every entry before changing any, and write `isolation` in
   `runtime.toml` last. Nothing at install creates the pools or enables the

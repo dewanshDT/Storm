@@ -296,6 +296,16 @@ impl Store {
                  mechanism   TEXT,
                  reason      TEXT,
                  reported_at TEXT NOT NULL
+             );
+             -- Each host's session isolation as it last reported it
+             -- (decision 136j), for its views while it is away. Never what a
+             -- privileged operation is judged by: that is the live link.
+             CREATE TABLE IF NOT EXISTS host_isolation (
+                 host_id     TEXT PRIMARY KEY,
+                 state       TEXT NOT NULL,
+                 mechanism   TEXT,
+                 reason      TEXT,
+                 reported_at TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -935,6 +945,46 @@ impl Store {
                 params![session_id],
             )?,
         };
+        Ok(())
+    }
+
+    pub fn host_isolation(&self, host_id: &str) -> Result<Option<super::Isolation>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT state, mechanism, reason FROM host_isolation WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(super::Isolation {
+                        state: r.get(0)?,
+                        mechanism: r.get(1)?,
+                        reason: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    pub fn set_host_isolation(
+        &self,
+        host_id: &str,
+        isolation: &super::Isolation,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO host_isolation (host_id, state, mechanism, reason, reported_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (host_id) DO UPDATE SET state = excluded.state,
+                 mechanism = excluded.mechanism, reason = excluded.reason,
+                 reported_at = excluded.reported_at",
+            params![
+                host_id,
+                isolation.state,
+                isolation.mechanism,
+                isolation.reason,
+                now
+            ],
+        )?;
         Ok(())
     }
 

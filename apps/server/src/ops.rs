@@ -1573,6 +1573,9 @@ pub struct HostView {
     /// Its bridge identity (decision 135d), online or not: anything but
     /// `verified` is labelled. `None` for a host not heard from since.
     pub identity: Option<crate::agent::Identity>,
+    /// Its session isolation (decision 136j), online or not, by the same
+    /// rule. `None` for a host not heard from since 136-5.
+    pub isolation: Option<crate::agent::Isolation>,
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
@@ -1594,11 +1597,22 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
             None
         }),
     };
+    let isolation = match &live.capabilities {
+        Some(caps) => Some(caps.isolation.clone()),
+        None => state
+            .agent
+            .host_isolation_report(&host.id)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, host = host.id, "could not read a host's isolation");
+                None
+            }),
+    };
     HostView {
         host,
         status,
         capabilities: live.capabilities,
         identity,
+        isolation,
         egress: "host",
     }
 }
@@ -2010,6 +2024,9 @@ pub struct SessionView {
     /// Its host's bridge identity (decision 135d), so Details can say when
     /// sessions there can act as each other.
     pub identity: Option<crate::agent::Identity>,
+    /// Its host's session isolation (decision 136j): whether it runs as its
+    /// own identity there.
+    pub isolation: Option<crate::agent::Isolation>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -2034,6 +2051,10 @@ fn session_view(
     let identity = state
         .agent
         .host_identity(&session.host_id)
+        .map_err(internal)?;
+    let isolation = state
+        .agent
+        .host_isolation_report(&session.host_id)
         .map_err(internal)?;
     let role = state
         .agent
@@ -2061,6 +2082,7 @@ fn session_view(
         crew,
         role,
         identity,
+        isolation,
     })
 }
 
@@ -2252,6 +2274,10 @@ pub async fn launch_session(
         .agent
         .host_identity(&session.host_id)
         .map_err(internal)?;
+    let isolation = state
+        .agent
+        .host_isolation_report(&session.host_id)
+        .map_err(internal)?;
     Ok(LaunchedSession {
         session: SessionView {
             session,
@@ -2265,6 +2291,7 @@ pub async fn launch_session(
             crew: None,
             role: None,
             identity,
+            isolation,
         },
         mcp: LaunchMcp {
             connections,

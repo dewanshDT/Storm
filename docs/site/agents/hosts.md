@@ -223,8 +223,22 @@ OpenCode an API key, or one of its free models. A session with none of these
 fails with `credential_unavailable` rather than using your login. The agents
 Storm installs belong to a separate `storm-install` account while isolation
 is on: sessions can run them but not change them, and installs and updates
-from Settings › Agents run as that account. Storm's tools and Resume across
-isolated sessions are not finished yet, so leave isolation off. A workspace root outside `/var/lib/storm-runtime`
+from Settings › Agents run as that account.
+
+Each isolated session reaches Storm through **its own bridge socket**, in
+its own session directory, which only it and the host can open; the host
+takes a connection there only from the system user the session was leased,
+and, where the host's identity is verified, only from under the session's
+own process. Pasted images land in the same directory, readable to that
+session alone. **Before an isolated host starts any session it runs a
+self-test**: two probe sessions, the second trying to see, signal or read
+the first, connect to its sockets and local ports, and write where agents
+live. The host reports `isolation: verified` only when every attempt is
+refused; until then, or if the helper stops answering or `pasta` goes
+missing later, it reports `unavailable` with the reason, the app says so on
+the host row and in each session's Details, and **new sessions fail with
+"isolation unavailable on this host"** while running ones carry on.
+Isolation is still being finished, so leave it off for now. A workspace root outside `/var/lib/storm-runtime`
 needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 

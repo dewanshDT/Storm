@@ -264,7 +264,7 @@ impl Provider for CliProvider {
         let spawned = pty::spawn(&launch, size)
             .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
         if let Some(leader) = spawned.leader {
-            events.leader(leader);
+            events.leader(leader, spawned.user);
         }
 
         let shared = Arc::new(Shared {

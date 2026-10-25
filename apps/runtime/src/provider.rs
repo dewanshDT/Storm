@@ -168,7 +168,9 @@ pub trait SessionEvents: Send + Sync {
     /// The session's leader, as soon as it exists: what its bridges and
     /// hooks must descend from (decision 135). A provider with no process
     /// never calls it, and no connection is taken for it on a verified host.
-    fn leader(&self, _leader: crate::platform::peer::Process) {}
+    /// On an isolated host it comes with the uid the session runs as, which
+    /// its connections must come from too (decision 136i).
+    fn leader(&self, _leader: crate::platform::peer::Process, _user: Option<u32>) {}
 }
 
 /// Why a session could not be started.

@@ -76,6 +76,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
             tag: launch.tag.clone(),
         }),
         leader: process,
+        user: None,
     })
 }
 
@@ -91,7 +92,14 @@ fn spawn_isolated(
     let link = &isolated.link;
     let session = launch.tag.as_str();
     let (master, slave) = open(size)?;
-    let user = link.lease(session)?;
+    let (user, uid) = link.lease(session)?;
+    // A self-test probe works in its own home, which this account cannot
+    // look into; a session's workspace is checked as it resolves.
+    let workspace = if isolated.provider == crate::isolation::PROBE {
+        launch.cwd.clone()
+    } else {
+        launch.cwd.canonicalize()?
+    };
     let started = (|| -> io::Result<(i32, Option<OwnedFd>)> {
         link.prepare(session, &user)?;
         crate::platform::create_private_dir(&crate::mcp::session_dir(&link.state_dir, session))?;
@@ -104,7 +112,7 @@ fn spawn_isolated(
                 session,
                 &user,
                 &isolated.provider,
-                &launch.cwd.canonicalize()?,
+                &workspace,
                 slave.as_fd(),
             )
         });
@@ -148,6 +156,7 @@ fn spawn_isolated(
         },
         group: Group(GroupKind::Unit(unit)),
         leader,
+        user: Some(uid),
     })
 }
 

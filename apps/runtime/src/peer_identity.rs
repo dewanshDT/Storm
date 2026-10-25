@@ -80,6 +80,12 @@ pub enum Mismatch {
     OutsideNamespace,
     /// The session's leader has exited, or the host never held it.
     LeaderGone,
+    /// On an isolated host, a connector that is not the session's leased
+    /// user (decision 136i).
+    WrongUser,
+    /// On an isolated host, a connection for a session that did not come
+    /// in on that session's own socket (136i).
+    WrongSocket,
     /// A precondition stopped holding (`ptrace_scope` was lowered, say).
     Precondition(&'static str),
     Error(io::ErrorKind),
@@ -95,6 +101,8 @@ impl Mismatch {
             Self::TooDeep => "too_deep",
             Self::OutsideNamespace => "outside_namespace",
             Self::LeaderGone => "leader_gone",
+            Self::WrongUser => "wrong_user",
+            Self::WrongSocket => "wrong_socket",
             Self::Precondition(r) => r,
             Self::Error(_) => "error",
         }

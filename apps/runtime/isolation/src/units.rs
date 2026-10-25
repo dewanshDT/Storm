@@ -164,7 +164,9 @@ impl UnitSpec {
         for hidden in &self.hidden {
             out.push(format!("TemporaryFileSystem={}:ro", hidden.display()));
         }
-        out.push(format!("BindPaths={}", self.workspace.display()));
+        if self.workspace != self.home {
+            out.push(format!("BindPaths={}", self.workspace.display()));
+        }
         out.push(format!("BindPaths={}", self.home.display()));
         out.push(format!("BindReadOnlyPaths={}", self.session_dir.display()));
         out.push(format!(
@@ -260,6 +262,8 @@ pub const SHOW_PROPERTIES: &str = "LoadState,SubState,MainPID,ExecMainCode,ExecM
 
 /// systemd, as the helper uses it.
 pub trait Units: Send + Sync {
+    /// Whether pasta and `ip` are installed and pasta runs (136j).
+    fn network_ready(&self) -> bool;
     /// Starts the session's network and returns once it is configured.
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()>;
     fn start(&self, spec: &UnitSpec) -> Result<()>;
@@ -297,6 +301,10 @@ fn run(program: &str, args: &[OsString]) -> Result<String> {
 }
 
 impl Units for Systemd {
+    fn network_ready(&self) -> bool {
+        Path::new(crate::net::IP).is_file() && run(crate::net::PASTA, &["--version".into()]).is_ok()
+    }
+
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
         for tool in [crate::net::PASTA, crate::net::IP] {
             if !Path::new(tool).is_file() {

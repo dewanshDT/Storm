@@ -143,6 +143,9 @@ pub enum Refusal {
     BadAgent,
     /// The host has no install identity yet (136g): `on` has to run again.
     NoInstallIdentity,
+    /// pasta or `ip` is missing or does not run (136j): no session can
+    /// have its network.
+    NoPasst,
     /// The workspace, a session directory or systemd failed the operation.
     Failed,
 }
@@ -181,6 +184,7 @@ impl Refusal {
             Refusal::NothingKept => "nothing_kept",
             Refusal::BadAgent => "bad_agent",
             Refusal::NoInstallIdentity => "no_install_identity",
+            Refusal::NoPasst => "no_passt",
             Refusal::Failed => "failed",
         }
     }

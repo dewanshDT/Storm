@@ -24,6 +24,8 @@ pub struct Context<'a> {
     pub roots: &'a [PathBuf],
     pub providers: &'a [String],
     pub leases: &'a Leases,
+    /// Where sessions' homes are: a self-test probe's workspace is its own.
+    pub homes: &'a Path,
 }
 
 pub const SIGNALS: &[&str] = &["hup", "int", "term", "kill"];
@@ -52,7 +54,14 @@ pub fn validate(req: &Request, cx: &Context) -> Result<(), Refusal> {
         return Err(Refusal::BadProvider);
     }
     if let Some(path) = req.fields.get("workspace") {
-        check_workspace(path, cx.roots)?;
+        if req.fields.get("provider").map(String::as_str) == Some(crate::session::PROBE) {
+            // A probe (136j) works in its own home, never in a workspace.
+            if Path::new(path) != cx.homes.join(req.get("session")) {
+                return Err(Refusal::PathOutsideRoots);
+            }
+        } else {
+            check_workspace(path, cx.roots)?;
+        }
     }
     if req.op == Op::Signal && !SIGNALS.contains(&req.get("signal")) {
         return Err(Refusal::BadSignal);
@@ -171,6 +180,7 @@ mod tests {
             roots: &roots,
             providers: &providers,
             leases: &leases,
+            homes: Path::new("/var/lib/storm-runtime-isolation/homes"),
         };
         let req = |session: &str, user: &str| {
             parse(format!(r#"{{"op":"prepare","session":"{session}","user":"{user}"}}"#).as_bytes())
@@ -223,6 +233,7 @@ mod tests {
             roots: &[],
             providers: &[],
             leases: &leases,
+            homes: Path::new("/var/lib/storm-runtime-isolation/homes"),
         };
         let req = |user: &str| {
             parse(format!(r#"{{"op":"release","session":"ags_A","user":"{user}"}}"#).as_bytes())
@@ -286,6 +297,7 @@ mod tests {
             roots: &[],
             providers: &providers,
             leases: &leases,
+            homes: Path::new("/var/lib/storm-runtime-isolation/homes"),
         };
         let start = parse(br#"{"op":"start","session":"ags_A","user":"storm-s001","provider":"/bin/sh","workspace":"/x"}"#).unwrap();
         assert_eq!(validate(&start, &cx), Err(Refusal::BadProvider));

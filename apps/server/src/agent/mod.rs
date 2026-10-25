@@ -216,6 +216,24 @@ pub struct Capabilities {
     /// An old host does not say, and is `unavailable: old_host`.
     #[serde(default, deserialize_with = "identity_or_unavailable")]
     pub identity: Identity,
+    /// Whether each session runs as its own identity, from the host's
+    /// self-test (decision 136j). The same three states and the same fail
+    /// closed reading: an old host is `unavailable: old_host`, anything this
+    /// server does not know is never `verified`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub isolation: Isolation,
+}
+
+/// A host's session isolation (decision 136j), shaped as [`Identity`] is.
+pub type Isolation = Identity;
+
+/// A host's isolation state as calls are judged by it: what its live link
+/// says, `unavailable` for a host that is offline or has not said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationState {
+    Verified,
+    Unsupported,
+    Unavailable,
 }
 
 /// A host's bridge identity (decision 135d): `verified`, `unsupported` or
@@ -850,12 +868,14 @@ impl AgentManager {
             "runtime host hello"
         );
         let identity = hello.capabilities.identity.clone();
+        let isolation = hello.capabilities.isolation.clone();
         {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(hello.capabilities);
         }
         self.record_identity(host_id, &identity);
+        self.record_isolation(host_id, &isolation);
         let reported: HashMap<String, ReportedSession> = hello
             .sessions
             .into_iter()
@@ -921,6 +941,7 @@ impl AgentManager {
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
         let identity = capabilities.identity.clone();
+        let isolation = capabilities.isolation.clone();
         {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
@@ -928,7 +949,26 @@ impl AgentManager {
             link.inventory.send_modify(|v| *v += 1);
         }
         self.record_identity(host_id, &identity);
+        self.record_isolation(host_id, &isolation);
         Ok(())
+    }
+
+    /// Never fails the report it came with, like [`Self::record_identity`].
+    fn record_isolation(&self, host_id: &str, isolation: &Isolation) {
+        let store = self.store.lock().unwrap();
+        let stored = store.host_isolation(host_id);
+        if matches!(&stored, Ok(Some(known)) if known == isolation) {
+            return;
+        }
+        tracing::info!(
+            host = host_id,
+            state = isolation.state,
+            reason = isolation.reason.as_deref(),
+            "runtime host isolation"
+        );
+        if let Err(e) = store.set_host_isolation(host_id, isolation, &now()) {
+            tracing::warn!(error = %e, host = host_id, "could not record a host's isolation");
+        }
     }
 
     /// Never fails the report it came with: the label it keeps is for while
@@ -959,6 +999,34 @@ impl AgentManager {
             .get(host_id)
             .and_then(|link| link.capabilities.as_ref())
             .is_some_and(|caps| caps.identity.verified())
+    }
+
+    /// The host's session isolation (decision 136j) as its live link says
+    /// it now. Offline, or never said: `Unavailable`. Only this is what a
+    /// privileged operation may be judged by; never the stored copy.
+    // C0 reads it where the agent-spawning chain (134-2) meets this one.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn host_isolation(&self, host_id: &str) -> IsolationState {
+        let live = self.live.lock().unwrap();
+        let state = live
+            .hosts
+            .get(host_id)
+            .and_then(|link| link.capabilities.as_ref())
+            .map(|caps| caps.isolation.state.clone());
+        match state.as_deref() {
+            Some(IDENTITY_VERIFIED) => IsolationState::Verified,
+            Some(IDENTITY_UNSUPPORTED) => IsolationState::Unsupported,
+            _ => IsolationState::Unavailable,
+        }
+    }
+
+    /// The host's isolation for its views: what its link says now, else
+    /// what it last said; `None` for a host not heard from since 136-5.
+    pub fn host_isolation_report(&self, host_id: &str) -> Result<Option<Isolation>> {
+        if let Some(caps) = self.host_live(host_id).capabilities {
+            return Ok(Some(caps.isolation));
+        }
+        self.store.lock().unwrap().host_isolation(host_id)
     }
 
     /// The host's bridge identity (decision 135d): what its link says now,
@@ -2155,6 +2223,7 @@ mod tests {
             plugin_mcp_remote: Vec::new(),
             agent_install: false,
             identity: Identity::default(),
+            isolation: Isolation::default(),
         }
     }
 
@@ -3691,6 +3760,121 @@ mod tests {
         m.disconnect_host("hst_A", generation);
         assert!(!m.host_verified("hst_A"), "an offline host checks nothing");
         assert_eq!(m.host_identity("hst_A").unwrap(), Some(verified));
+    }
+
+    /// 136j, read as 135-2 reads `identity`: an old host is
+    /// `unavailable: old_host`, and nothing this server does not know is
+    /// ever `verified`.
+    #[test]
+    fn isolation_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Isolation {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .isolation
+        };
+        let old_host = Isolation::default();
+        assert_eq!(old_host.reason.as_deref(), Some("old_host"));
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"isolation": null})), old_host);
+        // `identity` verified says nothing about isolation.
+        assert_eq!(
+            parse(serde_json::json!({"identity": {"state": "verified"}})),
+            old_host
+        );
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "isolated", "mechanism": "systemd_units"}),
+            serde_json::json!(true),
+            serde_json::json!({"mechanism": "systemd_units"}),
+        ] {
+            let i = parse(serde_json::json!({"isolation": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"isolation":
+            {"state": "verified", "mechanism": "systemd_units", "reason": null}}));
+        assert!(v.verified());
+        let off = parse(serde_json::json!({"isolation":
+            {"state": "unavailable", "mechanism": null, "reason": "off"}}));
+        assert_eq!(off.reason.as_deref(), Some("off"));
+    }
+
+    /// `host_isolation` is the live link's alone: verified only while a
+    /// link says so, `Unavailable` offline whatever was stored, and the
+    /// stored copy only labels views.
+    #[test]
+    fn a_hosts_isolation_is_its_live_links_and_kept_for_its_views() {
+        let (m, _d) = manager();
+        assert_eq!(m.host_isolation("hst_A"), IsolationState::Unavailable);
+        assert_eq!(m.host_isolation_report("hst_A").unwrap(), None);
+        let verified = Isolation {
+            state: "verified".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(m.host_isolation("hst_A"), IsolationState::Verified);
+        assert!(!m.host_verified("hst_A"), "identity is its own");
+        // A downgrade in the inventory takes effect at once.
+        let down = Isolation {
+            state: "unavailable".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: Some("no_passt".into()),
+        };
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: down.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        assert_eq!(m.host_isolation("hst_A"), IsolationState::Unavailable);
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert_eq!(
+            m.host_isolation("hst_A"),
+            IsolationState::Unavailable,
+            "an offline host isolates nothing new"
+        );
+        assert_eq!(m.host_isolation_report("hst_A").unwrap(), Some(verified));
+        let (_g, _rx) = m.connect_host("hst_B");
+        m.hello(
+            "hst_B",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: Isolation {
+                        state: "unsupported".into(),
+                        mechanism: None,
+                        reason: Some("windows".into()),
+                    },
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(m.host_isolation("hst_B"), IsolationState::Unsupported);
     }
 
     #[test]

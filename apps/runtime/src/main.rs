@@ -121,6 +121,13 @@ enum Command {
     /// JSON line: the version, or the failure's code.
     #[command(hide = true)]
     AgentJob { agent: String, action: String },
+    /// One of the two probe sessions of the isolation self-test (decision
+    /// 136j), run by the isolation helper as a session, never by hand.
+    #[command(hide = true)]
+    IsolationProbe {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -171,6 +178,9 @@ async fn main() -> Result<()> {
             .await;
             println!("{line}");
             Ok(())
+        }
+        Command::IsolationProbe { args } => {
+            std::process::exit(storm_runtime::isolation_probe::main(&args))
         }
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;
