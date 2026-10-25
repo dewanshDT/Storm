@@ -1,9 +1,13 @@
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
+import 'package:go_router/go_router.dart';
 
+import '../router.dart';
 import '../ui/accents.dart';
 import '../ui/settings/settings_widgets.dart' show promptForText;
 import '../ui/states.dart' show describeFailure;
@@ -14,6 +18,7 @@ import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'agents_screen.dart' show launchAgentSession;
 import 'crew_prefs.dart';
 
 /// The pieces crews are drawn with (decision 138, plan §4.2): one role tag,
@@ -275,7 +280,8 @@ class CrewChip extends StatelessWidget {
 }
 
 /// A crew in the sidebar: chevron, square, name and count; a ··· on hover
-/// and right-click both open [showCrewMenu] (138n, Q4).
+/// and right-click both open [showCrewMenu] (138n, Q4). The header opens the
+/// crew page and the chevron folds it.
 class CrewHeader extends StatefulWidget {
   const CrewHeader({
     super.key,
@@ -283,13 +289,19 @@ class CrewHeader extends StatefulWidget {
     required this.members,
     required this.collapsed,
     required this.onToggle,
+    required this.onOpen,
     required this.onMenu,
+    this.selected = false,
   });
 
   final Crew crew;
   final List<AgentSession> members;
   final bool collapsed;
   final VoidCallback onToggle;
+  final VoidCallback onOpen;
+
+  /// Its crew page is showing.
+  final bool selected;
 
   /// Opens the menu, anchored to the given key.
   final void Function(GlobalKey anchor) onMenu;
@@ -315,18 +327,24 @@ class _CrewHeaderState extends State<CrewHeader> {
         onSecondaryTapUp: (_) => widget.onMenu(_anchor),
         child: Semantics(
           button: true,
+          selected: widget.selected,
           expanded: !widget.collapsed,
           label: '${c.name}, crew, $count',
           excludeSemantics: true,
-          onTap: widget.onToggle,
+          onTap: widget.onOpen,
+          customSemanticsActions: {
+            CustomSemanticsAction(
+              label: widget.collapsed ? 'Expand' : 'Collapse',
+            ): widget.onToggle,
+          },
           child: Material(
             key: _anchor,
-            color: _hover ? t.surface2 : Colors.transparent,
+            color: widget.selected || _hover ? t.surface2 : Colors.transparent,
             borderRadius: radius,
             child: InkWell(
               key: Key('crew-${c.id}'),
               borderRadius: radius,
-              onTap: widget.onToggle,
+              onTap: widget.onOpen,
               child: Padding(
                 padding: EdgeInsets.symmetric(
                   horizontal: t.sp,
@@ -334,14 +352,19 @@ class _CrewHeaderState extends State<CrewHeader> {
                 ),
                 child: Row(
                   children: [
-                    SizedBox(
-                      width: t.sp * 1.5,
-                      child: Icon(
-                        widget.collapsed
-                            ? LucideIcons.chevron_right
-                            : LucideIcons.chevron_down,
-                        size: t.labelSize,
-                        color: t.text3,
+                    GestureDetector(
+                      key: Key('crew-chevron-${c.id}'),
+                      behavior: HitTestBehavior.opaque,
+                      onTap: widget.onToggle,
+                      child: SizedBox(
+                        width: t.sp * 1.5,
+                        child: Icon(
+                          widget.collapsed
+                              ? LucideIcons.chevron_right
+                              : LucideIcons.chevron_down,
+                          size: t.labelSize,
+                          color: t.text3,
+                        ),
                       ),
                     ),
                     SizedBox(width: t.sp),
@@ -374,7 +397,7 @@ class _CrewHeaderState extends State<CrewHeader> {
                     ),
                     if (_hover) ...[
                       SizedBox(width: t.sp * 0.5),
-                      _Dots(
+                      CrewDots(
                         key: Key('crew-menu-${c.id}'),
                         onTap: () => widget.onMenu(_anchor),
                       ),
@@ -390,32 +413,47 @@ class _CrewHeaderState extends State<CrewHeader> {
   }
 }
 
-class _Dots extends StatelessWidget {
-  const _Dots({super.key, required this.onTap, this.card = false});
+/// The crew actions button: 22×20 on `surface` in the sidebar, bare on a
+/// card, outlined on the crew page.
+class CrewDots extends StatelessWidget {
+  const CrewDots({
+    super.key,
+    required this.onTap,
+    this.card = false,
+    this.page = false,
+  });
 
   final VoidCallback onTap;
 
   /// The overview card's: bare, in `text3`.
   final bool card;
 
+  /// The crew page's: a 36 square with a hairline.
+  final bool page;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl * 0.6);
+    final radius = BorderRadius.circular(t.rControl * (page ? 1 : 0.6));
     return Semantics(
       button: true,
       label: 'Crew actions',
       excludeSemantics: true,
       onTap: onTap,
       child: Material(
-        color: card ? Colors.transparent : t.surface,
-        borderRadius: radius,
+        color: card || page ? Colors.transparent : t.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: radius,
+          side: page
+              ? BorderSide(color: t.border, width: t.bw)
+              : BorderSide.none,
+        ),
         child: InkWell(
           borderRadius: radius,
           onTap: onTap,
           child: SizedBox(
-            width: t.sp * 2.75,
-            height: t.sp * 2.5,
+            width: t.sp * (page ? 5.25 : 2.75),
+            height: t.sp * (page ? 4.5 : 2.5),
             child: Icon(
               LucideIcons.ellipsis,
               size: t.codeSize,
@@ -461,9 +499,8 @@ class CrewMembers extends StatelessWidget {
 /// What the crew menu was closed with.
 enum CrewAction { openPage, rename, collapse, newSession, dismissEnded, endAll }
 
-/// The crew menu's contents (handoff §3): 220 wide on `surface2`. An item
-/// with no handler is drawn disabled; Open crew page, New session in crew and
-/// End all running wait for their screens (138-4).
+/// The crew menu's contents (handoff §3): 220 wide on `surface2`. A counted
+/// item with nothing to count is drawn disabled.
 class CrewMenu extends StatelessWidget {
   const CrewMenu({
     super.key,
@@ -471,18 +508,12 @@ class CrewMenu extends StatelessWidget {
     required this.collapsed,
     required this.ended,
     required this.running,
-    this.enabled = const {
-      CrewAction.rename,
-      CrewAction.collapse,
-      CrewAction.dismissEnded,
-    },
   });
 
   final Crew crew;
   final bool collapsed;
   final int ended;
   final int running;
-  final Set<CrewAction> enabled;
 
   @override
   Widget build(BuildContext context) {
@@ -493,7 +524,7 @@ class CrewMenu extends StatelessWidget {
       int? count,
       PopoverTone tone = PopoverTone.normal,
     }) {
-      final on = enabled.contains(a) && (count == null || count > 0);
+      final on = count == null || count > 0;
       return PopoverItem(
         key: Key('crew-action-${a.name}'),
         label: label,
@@ -607,9 +638,10 @@ class CrewSwatches extends StatelessWidget {
   }
 }
 
-/// Opens the crew menu at [anchor] and does what was picked: rename,
-/// recolour, collapse and dismiss ended are wired; the rest are drawn
-/// disabled until their screens exist.
+/// The crew whose End all running banner is open (138k), by id.
+final crewEndAllProvider = StateProvider<String?>((ref) => null);
+
+/// Opens the crew menu at [anchor] and does what was picked.
 Future<void> showCrewMenu(
   BuildContext context,
   WidgetRef ref, {
@@ -681,6 +713,13 @@ Future<void> showCrewMenu(
       if (removed != null) {
         toast('${removed!.name} was removed: its last session was dismissed.');
       }
+    case CrewAction.openPage:
+      context.go(Routes.agentCrew(crew.id));
+    case CrewAction.newSession:
+      await launchAgentSession(context, ref, crew: crew);
+    case CrewAction.endAll:
+      ref.read(crewEndAllProvider.notifier).state = crew.id;
+      context.go(Routes.agentCrew(crew.id));
     default:
       break;
   }
@@ -721,7 +760,7 @@ class _CrewCardState extends ConsumerState<CrewCard> {
       crew: crew,
       overview: overview,
     );
-    void toggle() => ref.read(crewPrefsProvider.notifier).toggleCrew(crew.id);
+    void open() => context.go(Routes.agentCrew(crew.id));
     return GestureDetector(
       onSecondaryTapUp: (_) => menu(),
       child: Container(
@@ -743,11 +782,11 @@ class _CrewCardState extends ConsumerState<CrewCard> {
               expanded: !collapsed,
               label: '${crew.name}, crew, ${crewSummary(members)}',
               excludeSemantics: true,
-              onTap: toggle,
+              onTap: open,
               child: GestureDetector(
                 key: Key('crew-card-header-${crew.id}'),
                 behavior: HitTestBehavior.opaque,
-                onTap: toggle,
+                onTap: open,
                 child: Row(
                   key: anchor,
                   children: [
@@ -784,7 +823,7 @@ class _CrewCardState extends ConsumerState<CrewCard> {
                         ],
                       ),
                     ),
-                    _Dots(
+                    CrewDots(
                       key: Key('crew-card-menu-${crew.id}'),
                       card: true,
                       onTap: menu,
@@ -818,11 +857,15 @@ class CrewCardRow extends StatelessWidget {
     required this.session,
     required this.host,
     required this.onTap,
+    this.showContext = true,
   });
 
   final AgentSession session;
   final String host;
   final VoidCallback onTap;
+
+  /// Its context note's chip; the crew page lists those under Started from.
+  final bool showContext;
 
   @override
   Widget build(BuildContext context) {
@@ -907,7 +950,7 @@ class CrewCardRow extends StatelessWidget {
                     },
                   ),
                 ),
-                if (s.context != null) ...[
+                if (showContext && s.context != null) ...[
                   SizedBox(width: t.sp),
                   NoteContextChip(title: s.context!.title, maxWidth: t.sp * 15),
                 ],
@@ -980,3 +1023,117 @@ class _Stacked extends StatelessWidget {
     );
   }
 }
+
+/// "PROJECTS / STORM / AGENTS" for `projects/storm/agents`.
+String roleFolderLabel(String folder) =>
+    folder.split('/').where((p) => p.isNotEmpty).join(' / ');
+
+/// Kit's roles by folder, in the server's order (`agents` first).
+Map<String, List<RoleNote>> roleGroups(List<RoleNote> roles) {
+  final groups = <String, List<RoleNote>>{};
+  for (final r in roles) {
+    (groups[r.folder] ??= []).add(r);
+  }
+  return groups;
+}
+
+/// The role picker (138e, handoff §3): None, then each role note's title with
+/// its one-line summary under it, grouped by folder. [onPick] gets null for
+/// None.
+class RoleMenu extends StatelessWidget {
+  const RoleMenu({
+    super.key,
+    required this.roles,
+    required this.selected,
+    required this.onPick,
+    this.noneLabel = 'None',
+    this.noneDetail = 'A plain agent',
+    this.room,
+  });
+
+  /// The height the window leaves it at its anchor (see [popoverRoom]).
+  final double? room;
+
+  final List<RoleNote> roles;
+
+  /// The note shown as chosen; null is None.
+  final ({String vaultId, String noteId})? selected;
+  final ValueChanged<RoleNote?> onPick;
+  final String noneLabel;
+  final String noneDetail;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final picked = selected;
+    return StormPopover(
+      key: const Key('role-menu'),
+      padding: t.sp * 0.75,
+      children: [
+        ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: math.min(
+              t.sp * 52.5,
+              (room ?? double.infinity) - t.sp * 3,
+            ),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                PopoverItem(
+                  key: const Key('role-none'),
+                  label: noneLabel,
+                  subtitle: noneDetail,
+                  selected: picked == null,
+                  onTap: () => onPick(null),
+                ),
+                for (final MapEntry(key: folder, value: notes) in roleGroups(
+                  roles,
+                ).entries) ...[
+                  Padding(
+                    padding: EdgeInsets.fromLTRB(
+                      t.sp * 0.75,
+                      t.sp * 1.25,
+                      t.sp * 0.75,
+                      t.sp * 0.5,
+                    ),
+                    child: AgentsLabel(roleFolderLabel(folder)),
+                  ),
+                  for (final r in notes)
+                    PopoverItem(
+                      key: Key('role-${r.noteId}'),
+                      label: r.title,
+                      subtitle: r.summary,
+                      selected:
+                          picked != null &&
+                          picked.vaultId == r.vaultId &&
+                          picked.noteId == r.noteId,
+                      onTap: () => onPick(r),
+                    ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// How tall a popover at [anchor] can be before it leaves the window: the
+/// room below it, or above it where [placePopover] flips it up.
+double popoverRoom(BuildContext context, GlobalKey anchor) {
+  final height = MediaQuery.sizeOf(context).height;
+  final box = anchor.currentContext?.findRenderObject() as RenderBox?;
+  if (box == null) return height / 2;
+  final top = box.localToGlobal(Offset.zero).dy;
+  final below = height - top - box.size.height;
+  return below < height * 0.3 ? top : below;
+}
+
+/// The crew's hosts, as its page header names them (138o), in member order.
+List<String> crewHosts(AgentOverview o, List<AgentSession> members) => [
+  ...{for (final s in members) o.hostName(s.hostId)},
+];

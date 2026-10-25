@@ -21,6 +21,12 @@ String? sessionIdOf(Uri location) {
   return seg.length == 3 && seg[0] == 'agents' && seg[1] == 's' ? seg[2] : null;
 }
 
+/// The crew a location shows, or null.
+String? crewIdOf(Uri location) {
+  final seg = location.pathSegments;
+  return seg.length == 3 && seg[0] == 'agents' && seg[1] == 'c' ? seg[2] : null;
+}
+
 /// The frame every Agents screen sits in.
 ///
 /// On a phone it is nothing at all: the child is the screen. On a wide
@@ -40,7 +46,10 @@ class AgentsShell extends StatelessWidget {
       body: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          AgentsSidebar(selected: sessionIdOf(location)),
+          AgentsSidebar(
+            selected: sessionIdOf(location),
+            selectedCrew: crewIdOf(location),
+          ),
           Expanded(child: PaneSemantics(child: child)),
         ],
       ),
@@ -52,10 +61,13 @@ class AgentsShell extends StatelessWidget {
 /// RUNNING and ENDED (handoff §2.6; crews Round 4 §3). RUNNING and ENDED
 /// list only sessions in no crew.
 class AgentsSidebar extends ConsumerWidget {
-  const AgentsSidebar({super.key, this.selected});
+  const AgentsSidebar({super.key, this.selected, this.selectedCrew});
 
   /// The open session, if any.
   final String? selected;
+
+  /// The crew whose page is open, if any.
+  final String? selectedCrew;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -66,7 +78,7 @@ class AgentsSidebar extends ConsumerWidget {
     final ended = o?.looseEnded ?? const <AgentSession>[];
     final crews = o?.crews ?? const <Crew>[];
     final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
-    final overview = selected == null;
+    final overview = selected == null && selectedCrew == null;
 
     Widget row(AgentSession s) => SessionRow(
       session: s,
@@ -104,8 +116,10 @@ class AgentsSidebar extends ConsumerWidget {
               crew: c,
               members: o!.membersOf(c),
               collapsed: prefs.collapsed(c.id),
+              selected: c.id == selectedCrew,
               onToggle: () =>
                   ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+              onOpen: () => context.go(Routes.agentCrew(c.id)),
               onMenu: (anchor) => showCrewMenu(
                 context,
                 ref,

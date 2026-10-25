@@ -15,6 +15,7 @@ Map<String, dynamic> agentHost({
   List<String> workspaces = const ['storm', 'site'],
   List<String>? workspaceRoots,
   List<String>? resumes = const ['claude-code', 'opencode'],
+  Map<String, bool> mcp = const {},
 }) => {
   'id': id,
   'name': name,
@@ -22,7 +23,8 @@ Map<String, dynamic> agentHost({
   'egress': 'host',
   'capabilities': {
     'providers': [
-      for (final p in providers) {'id': p, 'kind': 'cli', 'available': true},
+      for (final p in providers)
+        {'id': p, 'kind': 'cli', 'available': true, 'mcp': ?mcp[p]},
     ],
     'workspaces': workspaces,
     'workspace_roots': ?workspaceRoots,
@@ -92,6 +94,21 @@ Map<String, dynamic> roleRef(String noteId, String? title) => {
   'vault_id': 'v-kit',
   'note_id': noteId,
   'title': title,
+};
+
+/// A Kit role note as `GET /v1/agent/roles` lists it.
+Map<String, dynamic> kitRole(
+  String noteId,
+  String title, {
+  String folder = 'agents',
+  String? summary,
+}) => {
+  'vault_id': 'v-kit',
+  'note_id': noteId,
+  'title': title,
+  'path': '$folder/$title.md',
+  'folder': folder,
+  'summary': summary,
 };
 
 class FakeAgentServer {
@@ -384,6 +401,27 @@ class FakeAgentServer {
         harnessSession: resumed?['harness_session'] as String?,
         resumedFrom: resumed?['id'] as String?,
       );
+      // As 138-2's launch: join or make the crew, label the role, and keep
+      // it as the launch role only for an agent that reads Storm.
+      final crewAsk = body['crew'] as Map<String, dynamic>?;
+      if (crewAsk != null) {
+        var id = crewAsk['id'] as String?;
+        if (id == null) {
+          id = 'crw_new${crews.length}';
+          crews.add(
+            agentCrew(id, name: crewAsk['new_name'] as String, order: 99),
+          );
+        }
+        made['crew'] = {'id': id, 'order': sessions.length};
+      }
+      final roleAsk = body['role'] as Map<String, dynamic>?;
+      if (roleAsk != null) {
+        final note = roles
+            .where((r) => r['note_id'] == roleAsk['note_id'])
+            .firstOrNull;
+        made['role'] = {...roleAsk, 'title': note?['title']};
+        if (made['provider'] != 'shell') made['launch_role'] = made['role'];
+      }
       sessions.add(made);
       return _json({
         ...made,

@@ -195,6 +195,8 @@ class AgentApi {
     ({String vaultId, String noteId})? context,
     String? writeVaultId,
     String? resumeOf,
+    LaunchCrew? crew,
+    ({String vaultId, String noteId})? role,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -216,6 +218,12 @@ class AgentApi {
               'write_vault_id': ?writeVaultId,
               // The server takes the rest from that session (decision 89).
               'resume_of': ?resumeOf,
+              if (crew != null)
+                'crew': crew.id != null
+                    ? {'id': crew.id}
+                    : {'new_name': crew.newName},
+              if (role != null)
+                'role': {'vault_id': role.vaultId, 'note_id': role.noteId},
             }),
           ),
         )

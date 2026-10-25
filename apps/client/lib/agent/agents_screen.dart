@@ -113,18 +113,24 @@ class AgentsScreen extends ConsumerWidget {
 /// opened — on its Context tab when it has a note, else About.
 ///
 /// [contextNote] starts it from a note (Start session); [provider] from an
-/// agent card; [runAgain] prefills everything an ended session had.
+/// agent card; [runAgain] prefills everything an ended session had; [crew]
+/// presets the crew (a crew page's New session in crew, 138h).
 Future<AgentSession?> launchAgentSession(
   BuildContext context,
   WidgetRef ref, {
   ({String vaultId, String noteId})? contextNote,
   String? provider,
   AgentSession? runAgain,
+  Crew? crew,
 }) async {
   final overview = ref.read(agentOverviewProvider).value;
   final prefill = runAgain != null
       ? LaunchPrefill.runAgain(runAgain)
-      : LaunchPrefill(context: contextNote, provider: provider);
+      : LaunchPrefill(
+          context: contextNote,
+          provider: provider,
+          crewId: crew?.id,
+        );
   final launched = await showNewSessionLauncher(
     context,
     hosts: overview?.hosts ?? const [],

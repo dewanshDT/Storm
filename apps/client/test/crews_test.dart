@@ -109,7 +109,7 @@ void main() {
     testWidgets('a crew and the CREWS section collapse, and stay collapsed '
         'after a restart', (t) async {
       var c = await open(t, crewServer());
-      await t.tap(find.byKey(const Key('crew-crw_1')));
+      await t.tap(find.byKey(const Key('crew-chevron-crw_1')));
       await t.pumpAndSettle();
       expect(find.byKey(const Key('session-ags_impl')), findsNothing);
       expect(
@@ -365,21 +365,6 @@ void main() {
         findsOneWidget,
       );
       expect(find.byKey(const Key('crew-crw_1')), findsNothing);
-      await disposeShell(t, c);
-    });
-
-    testWidgets('items whose screens come later do nothing yet', (t) async {
-      final agents = crewServer();
-      final c = await open(t, agents);
-      await rightClick(t, find.byKey(const Key('crew-crw_1')));
-      final before = agents.requests.length;
-      for (final a in ['openPage', 'newSession', 'endAll']) {
-        await t.tap(find.byKey(Key('crew-action-$a')));
-        await t.pumpAndSettle();
-        expect(find.byKey(const Key('crew-menu')), findsOneWidget, reason: a);
-      }
-      expect(agents.requests.length, before);
-      expect(agents.session('ags_impl')!['status'], 'running');
       await disposeShell(t, c);
     });
   });

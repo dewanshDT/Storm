@@ -15,6 +15,7 @@ import 'ui/login_screen.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
 import 'agent/agent_state.dart' show sessionTabOf;
+import 'agent/crew_screen.dart';
 import 'agent/session_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
@@ -55,6 +56,9 @@ abstract final class Routes {
   /// One session, with its panel tab (`context`, `wrote` or `about`).
   static String agentSession(String id, {String? tab}) =>
       '/agents/s/${Uri.encodeComponent(id)}${tab == null ? '' : '?tab=$tab'}';
+
+  /// One crew's page (decision 138).
+  static String agentCrew(String id) => '/agents/c/${Uri.encodeComponent(id)}';
 
   /// The settings list on a phone; the first page at desk width.
   static const settings = '/settings';
@@ -268,6 +272,11 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: Routes.agents,
                 builder: (_, _) => _leaf(const AgentsScreen()),
+              ),
+              GoRoute(
+                path: '/agents/c/:id',
+                builder: (_, state) =>
+                    _leaf(CrewScreen(crewId: state.pathParameters['id']!)),
               ),
               GoRoute(
                 path: '/agents/s/:id',

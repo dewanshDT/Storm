@@ -27,6 +27,7 @@ import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
+import 'session_crew.dart';
 import 'session_inspector.dart';
 import 'image_target.dart';
 import 'terminal_surface.dart';
@@ -413,12 +414,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ],
           ),
           SizedBox(height: t.sp * 0.5),
-          Text(
-            sessionMeta(s, host),
-            key: const Key('session-meta'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: _mono(t, t.labelSize * 1.09),
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  sessionMeta(s, host),
+                  key: const Key('session-meta'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _mono(t, t.labelSize * 1.09),
+                ),
+              ),
+              SessionMetaTags(session: s),
+            ],
           ),
           if (_resumeBlocker(s) case final why?) ...[
             SizedBox(height: t.sp * 0.25),
@@ -1295,22 +1303,26 @@ class _About extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final rows = aboutRows(
+      session,
+      host: host,
+      writeVault: vaults
+          .where((v) => v.id == session.writeVaultId)
+          .firstOrNull
+          ?.name,
+      integrations: sessionIntegrations(ref, session),
+    );
+    // Crew and Role sit after Agent and Workspace (handoff 4e).
     return Column(
+      key: const Key('session-about'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        KeyValueList(
-          key: const Key('session-about'),
-          rows: aboutRows(
-            session,
-            host: host,
-            writeVault: vaults
-                .where((v) => v.id == session.writeVaultId)
-                .firstOrNull
-                ?.name,
-            integrations: sessionIntegrations(ref, session),
-          ),
-        ),
+        KeyValueList(rows: rows.take(2).toList()),
+        AboutCrewRole(session: session),
+        SizedBox(height: t.sp * 1.75),
+        KeyValueList(rows: rows.skip(2).toList()),
         AddSkippedToIntegrations(session: session),
       ],
     );

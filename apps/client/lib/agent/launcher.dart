@@ -14,6 +14,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'claude_login_api.dart';
+import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
 
 typedef NoteRef = ({String vaultId, String noteId});
@@ -29,6 +30,7 @@ class LaunchPrefill {
     this.contextTitle,
     this.writes,
     this.writeVaultId,
+    this.crewId,
   });
 
   /// Everything the session was launched with. Its host may be offline by
@@ -54,6 +56,9 @@ class LaunchPrefill {
   /// Null: on when Settings allows agent writes (handoff §4.5).
   final bool? writes;
   final String? writeVaultId;
+
+  /// The crew to join: preset when opened from a crew page (138h).
+  final String? crewId;
 }
 
 /// The New session launcher: a centred modal at desk width, a bottom sheet
@@ -85,6 +90,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   NoteRef? _context;
   bool? _writes;
   String? _writeVault;
+
+  /// [_noCrew], [_newCrew] or a crew's id (138h).
+  late String _crew = widget.prefill.crewId ?? _noCrew;
+  RoleNote? _role;
   String? _error;
   bool _busy = false;
 
@@ -175,7 +184,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     }
   }
 
-  Future<void> _launch(bool writes, String? writeVault) async {
+  Future<void> _launch(
+    bool writes,
+    String? writeVault,
+    LaunchCrew? crew,
+  ) async {
     final host = _host, ws = _workspace;
     if (host == null || ws == null) return;
     final api = agentApi(ref);
@@ -195,6 +208,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         rows: (size.height / 20).clamp(12, 80).floor(),
         context: _context,
         writeVaultId: writes && _reachesStorm ? writeVault : null,
+        crew: crew,
+        // An agent that can't read Storm notes is never sent one (138g).
+        role: _role == null || !_reachesStorm
+            ? null
+            : (vaultId: _role!.vaultId, noteId: _role!.noteId),
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -244,6 +262,32 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     final hostName = host?.name ?? 'the host';
     final claudeLogin = ref.watch(claudeLoginSummaryProvider).value;
     final ctx = _context;
+    final crews = ref.watch(agentOverviewProvider).value?.crews;
+    final roles = ref.watch(rolesProvider).value ?? const <RoleNote>[];
+    final ctxNote = ctx == null
+        ? null
+        : ref.watch(agentNoteProvider(ctx)).value;
+    final ctxTitle = ctx == null
+        ? null
+        : widget.prefill.context == ctx && widget.prefill.contextTitle != null
+        ? widget.prefill.contextTitle
+        : ctxNote == null
+        ? null
+        : noteTitleOf(ctxNote.meta.title, ctxNote.meta.path);
+    final crewOptions = [
+      const _Opt(_noCrew, 'None'),
+      if (ctxTitle != null && ctxTitle.isNotEmpty)
+        _Opt(_newCrew, 'New crew: $ctxTitle'),
+      for (final c in crews ?? const <Crew>[]) _Opt(c.id, c.name),
+    ];
+    // A preset crew that has since gone, or a new crew without its note.
+    final crewKey = crewOptions.any((o) => o.value == _crew) ? _crew : _noCrew;
+    final crew = switch (crewKey) {
+      _noCrew => null,
+      _newCrew => LaunchCrew.create(ctxTitle!),
+      final id => LaunchCrew.join(id),
+    };
+    final roleKey = _role == null ? _noRole : _roleKey(_role!);
 
     final children = <Widget>[
       Row(
@@ -288,7 +332,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             key: const Key('launcher-host'),
             label: 'Host',
             value: host?.id,
-            options: [for (final h in _online) (h.id, '${h.name} · online')],
+            options: [
+              for (final h in _online) _Opt(h.id, '${h.name} · online'),
+            ],
             onChanged: (id) => _pickHost(_online.firstWhere((h) => h.id == id)),
           ),
         ),
@@ -303,7 +349,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 : 'No workspaces on this host',
             options: [
               for (final w in _workspaces ?? const <AgentWorkspace>[])
-                (
+                _Opt(
                   w.name,
                   w.liveSessions > 0
                       ? '${w.name}  (another session is working here)'
@@ -324,7 +370,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             options: [
               for (final p in host?.providers ?? const <ProviderCap>[])
                 if (p.available)
-                  (p.id, p.id == _default ? '${p.label} · default' : p.label),
+                  _Opt(
+                    p.id,
+                    p.id == _default ? '${p.label} · default' : p.label,
+                  ),
             ],
             disabled: [
               for (final p in host?.providers ?? const <ProviderCap>[])
@@ -357,7 +406,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                           label: 'Write vault',
                           value: writeVault,
                           compact: true,
-                          options: [for (final v in vaults) (v.id, v.name)],
+                          options: [for (final v in vaults) _Opt(v.id, v.name)],
                           onChanged: (v) => setState(() => _writeVault = v),
                         )
                       : Text(
@@ -373,6 +422,55 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               ],
             ),
           ),
+        if (crews != null)
+          _Field(
+            label: 'Crew',
+            child: _Select<String>(
+              key: const Key('launcher-crew'),
+              label: 'Crew',
+              value: crewKey,
+              options: crewOptions,
+              onChanged: (c) => setState(() => _crew = c),
+            ),
+          ),
+        _Field(
+          label: 'Role',
+          under: shell
+              ? _Under(
+                  key: const Key('launcher-role-label-only'),
+                  text:
+                      "${providerLabel(_provider ?? '')} can't read Storm notes. "
+                      'A role would only be a label.',
+                )
+              : writes && _role != null
+              ? const _Under(
+                  key: Key('launcher-role-may-not-write'),
+                  text: 'The role note may tell the agent not to write.',
+                )
+              : null,
+          child: _Select<String>(
+            key: const Key('launcher-role'),
+            label: 'Role',
+            value: shell ? _noRole : roleKey,
+            enabled: !shell,
+            options: [
+              const _Opt(_noRole, 'None'),
+              for (final r in roles) _Opt(_roleKey(r), r.title),
+            ],
+            menu: (popover, room) => RoleMenu(
+              roles: roles,
+              room: room,
+              selected: _role == null
+                  ? null
+                  : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+              onPick: (r) =>
+                  Navigator.of(popover).pop(r == null ? _noRole : _roleKey(r)),
+            ),
+            onChanged: (k) => setState(
+              () => _role = roles.where((r) => _roleKey(r) == k).firstOrNull,
+            ),
+          ),
+        ),
       ],
       Container(
         key: const Key('launcher-risk'),
@@ -436,7 +534,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             label: _busy ? 'Starting' : 'Launch',
             onPressed: _busy || host == null || _workspace == null
                 ? null
-                : () => _launch(writes, writeVault),
+                : () => _launch(writes, writeVault, crew),
           ),
         ],
       ),
@@ -676,15 +774,18 @@ class _NoWorkspaces extends StatelessWidget {
 }
 
 class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.child});
+  const _Field({required this.label, required this.child, this.under});
 
   final String label;
   final Widget child;
 
+  /// A line under [child], lined up with it.
+  final Widget? under;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Row(
+    final row = Row(
       children: [
         SizedBox(
           width: t.sp * 12,
@@ -701,10 +802,57 @@ class _Field extends StatelessWidget {
         Expanded(child: child),
       ],
     );
+    if (under == null) return row;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        Padding(
+          padding: EdgeInsets.only(left: t.sp * 13.25, top: t.sp * 0.75),
+          child: under,
+        ),
+      ],
+    );
   }
 }
 
-/// A select: `surface2`, a hairline, `rControl`, and a popover of options.
+const _noCrew = '';
+const _newCrew = 'new';
+const _noRole = '';
+
+String _roleKey(RoleNote r) => '${r.vaultId}/${r.noteId}';
+
+/// A quiet line under a field's control.
+class _Under extends StatelessWidget {
+  const _Under({super.key, required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Text(
+      text,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.labelSize * 1.09,
+        height: 1.45,
+        color: t.text3,
+      ),
+    );
+  }
+}
+
+/// One choice in a [_Select].
+class _Opt<T> {
+  const _Opt(this.value, this.label);
+
+  final T value;
+  final String label;
+}
+
+/// A select: `surface2`, a hairline, `rControl`, a trailing chevron (138h),
+/// and a popover of options.
 class _Select<T> extends StatefulWidget {
   const _Select({
     super.key,
@@ -715,17 +863,26 @@ class _Select<T> extends StatefulWidget {
     this.disabled = const [],
     this.placeholder = '',
     this.compact = false,
+    this.enabled = true,
+    this.menu,
   });
 
   final String label;
   final T? value;
-  final List<(T, String)> options;
+  final List<_Opt<T>> options;
   final ValueChanged<T> onChanged;
 
   /// Shown in the menu, never choosable (an agent not installed).
   final List<String> disabled;
   final String placeholder;
   final bool compact;
+
+  /// False draws it muted and opens nothing.
+  final bool enabled;
+
+  /// The popover in place of the plain list, given the height it has; it
+  /// pops the value picked.
+  final Widget Function(BuildContext popover, double room)? menu;
 
   @override
   State<_Select<T>> createState() => _SelectState<T>();
@@ -736,21 +893,24 @@ class _SelectState<T> extends State<_Select<T>> {
 
   Future<void> _open() async {
     final box = _anchor.currentContext?.findRenderObject() as RenderBox?;
+    final room = popoverRoom(context, _anchor);
     final picked = await showStormPopover<T>(
       context: context,
       anchorKey: _anchor,
       width: box?.size.width ?? 240,
-      builder: (popover) => StormPopover(
-        children: [
-          for (final (value, label) in widget.options)
-            PopoverItem(
-              label: label,
-              selected: value == widget.value,
-              onTap: () => Navigator.of(popover).pop(value),
-            ),
-          for (final label in widget.disabled) PopoverItem(label: label),
-        ],
-      ),
+      builder: (popover) =>
+          widget.menu?.call(popover, room) ??
+          StormPopover(
+            children: [
+              for (final o in widget.options)
+                PopoverItem(
+                  label: o.label,
+                  selected: o.value == widget.value,
+                  onTap: () => Navigator.of(popover).pop(o.value),
+                ),
+              for (final label in widget.disabled) PopoverItem(label: label),
+            ],
+          ),
     );
     if (picked != null && picked != widget.value) widget.onChanged(picked);
   }
@@ -759,11 +919,15 @@ class _SelectState<T> extends State<_Select<T>> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final shown =
-        widget.options.where((o) => o.$1 == widget.value).firstOrNull?.$2 ??
+        widget.options
+            .where((o) => o.value == widget.value)
+            .firstOrNull
+            ?.label ??
         widget.placeholder;
-    final live = widget.options.isNotEmpty;
+    final live = widget.enabled && widget.options.isNotEmpty;
     return Semantics(
       button: true,
+      enabled: live,
       label: '${widget.label}: $shown',
       excludeSemantics: true,
       onTap: live ? _open : null,
@@ -782,15 +946,28 @@ class _SelectState<T> extends State<_Select<T>> {
               horizontal: t.sp * 1.5,
               vertical: t.sp * (widget.compact ? 0.875 : 1.125),
             ),
-            child: Text(
-              shown,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.uiSize,
-                color: live ? t.text : t.text3,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    shown,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: live ? t.text : t.text3,
+                    ),
+                  ),
+                ),
+                SizedBox(width: t.sp),
+                Icon(
+                  LucideIcons.chevron_down,
+                  key: const Key('select-chevron'),
+                  size: t.codeSize,
+                  color: live ? t.text2 : t.text3,
+                ),
+              ],
             ),
           ),
         ),
@@ -845,7 +1022,7 @@ Future<AgentSession?> showNewSessionLauncher(
     pageBuilder: (dialog, _, _) => Align(
       alignment: Alignment.topCenter,
       child: Padding(
-        padding: EdgeInsets.only(top: t.sp * 12),
+        padding: EdgeInsets.only(top: t.sp * 12, bottom: t.sp * 3),
         child: SizedBox(
           width: t.sp * 57.5,
           child: DecoratedBox(
@@ -859,7 +1036,8 @@ Future<AgentSession?> showNewSessionLauncher(
                 borderRadius: BorderRadius.circular(t.rCard),
                 side: BorderSide(color: t.border, width: t.bw),
               ),
-              child: Padding(
+              // Scrolls in a short window rather than overflowing it.
+              child: SingleChildScrollView(
                 padding: EdgeInsets.all(t.sp * 2.75),
                 child: launcher,
               ),

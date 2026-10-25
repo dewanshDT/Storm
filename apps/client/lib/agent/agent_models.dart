@@ -389,6 +389,16 @@ class RoleNote {
   );
 }
 
+/// The crew a launch joins (138h): an existing one by [id], or a new one
+/// named [newName].
+class LaunchCrew {
+  const LaunchCrew.join(String this.id) : newName = null;
+  const LaunchCrew.create(String this.newName) : id = null;
+
+  final String? id;
+  final String? newName;
+}
+
 /// A crew change, with the crews it emptied and so deleted (138c).
 class CrewChange {
   const CrewChange({this.crew, this.removedCrews = const []});
