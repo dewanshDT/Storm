@@ -510,6 +510,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         // The spawn switch (decision 134-2): owner only, checked in ops.
         .route("/v1/agent/sessions/{id}/spawn", put(agent_session_spawn))
+        // The approval engine (decision 134-3): a device decides, owner only.
+        .route(
+            "/v1/agent/requests/{id}/approve",
+            post(agent_request_approve),
+        )
+        .route("/v1/agent/requests/{id}/deny", post(agent_request_deny))
         .route("/v1/agent/roles", get(agent_roles))
         .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
@@ -2029,6 +2035,30 @@ async fn agent_session_spawn(
     let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
     Ok(Json(
         crate::ops::set_session_spawn(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+async fn agent_request_approve(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Extension(auth): Extension<SessionAuth>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::ApproveRequest>,
+) -> ApiResult<Json<crate::ops::RequestView>> {
+    Ok(Json(
+        crate::ops::approve_spawn_request(&state, &actor, &auth.authenticated.device.id, &id, req)
+            .await?,
+    ))
+}
+
+async fn agent_request_deny(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Extension(auth): Extension<SessionAuth>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::RequestView>> {
+    Ok(Json(
+        crate::ops::deny_spawn_request(&state, &actor, &auth.authenticated.device.id, &id).await?,
     ))
 }
 
@@ -9412,6 +9442,256 @@ pub(crate) mod tests {
             )
         );
         assert_eq!(list_changed(&f.sent()), 0);
+    }
+
+    // ---- the approval engine (decision 134-3) ----
+
+    impl GatewayFixture {
+        /// A running session with spawn on, on a host whose isolation is
+        /// verified by the test-only hook, and a start request from it.
+        async fn spawn_request(&mut self) -> (String, String) {
+            self.verified().await;
+            self.state.agent.verify_isolation_for_tests(&self.host_id);
+            let session = self.launch("claude-code", false).await["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (status, body) = self.spawn(&session, true).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let id = self.request_from(&session).await;
+            (session, id)
+        }
+
+        async fn request_from(&self, session: &str) -> String {
+            crate::ops::create_spawn_request(
+                &self.state,
+                session,
+                crate::agent::store::spawn::NewRequest::Start {
+                    task: "write the tests".into(),
+                    provider: None,
+                },
+            )
+            .await
+            .ok()
+            .expect("created")
+            .unwrap()
+            .id
+        }
+
+        async fn decide(
+            &self,
+            id: &str,
+            verb: &str,
+            bearer: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            self.ask(post_json_with_auth(
+                &format!("/v1/agent/requests/{id}/{verb}"),
+                serde_json::json!({}),
+                bearer,
+            ))
+            .await
+        }
+
+        async fn request_events(&self) -> Vec<(String, serde_json::Value)> {
+            self.spawn_events()
+                .await
+                .into_iter()
+                .filter(|(kind, _)| kind.starts_with("spawn_request"))
+                .collect()
+        }
+    }
+
+    /// AP-6 and A5: only a signed-in person's device decides. A key, the
+    /// host's credential and an agent are refused, and no MCP tool decides.
+    #[tokio::test]
+    async fn only_a_signed_in_owners_device_approves_or_denies() {
+        let dir = tempdir::TempDir::new("storm-approve-owner").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (session, id) = f.spawn_request().await;
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for verb in ["approve", "deny"] {
+            for bearer in [&key, &f.host_bearer] {
+                let (status, body) = f.decide(&id, verb, bearer).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{verb}: {body}");
+            }
+        }
+        let agent = Actor::Agent {
+            session_id: session.clone(),
+            host_id: f.host_id.clone(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        };
+        let key_actor = Actor::Key {
+            key_id: "key_X".into(),
+            user_id: f.owner.clone(),
+        };
+        for actor in [&agent, &key_actor] {
+            let approve = crate::ops::approve_spawn_request(
+                &f.state,
+                actor,
+                "dev_X",
+                &id,
+                crate::ops::ApproveRequest::default(),
+            )
+            .await
+            .unwrap_err();
+            let deny = crate::ops::deny_spawn_request(&f.state, actor, "dev_X", &id)
+                .await
+                .unwrap_err();
+            for refused in [approve, deny] {
+                assert_eq!(
+                    (refused.0, refused.1.as_str()),
+                    (StatusCode::FORBIDDEN, "owner_only")
+                );
+            }
+        }
+        let other = Actor::Session {
+            user_id: "usr_SOMEONE".into(),
+        };
+        let refused = crate::ops::deny_spawn_request(&f.state, &other, "dev_X", &id)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.0, StatusCode::NOT_FOUND);
+        let (status, _) = f.decide("agr_NOPE", "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // No tool an agent or a key reaches decides anything.
+        f.initialize(&session, "storm").await;
+        let tools = f.storm_tools(&session).await;
+        assert!(tools.contains(&"list_vaults".to_string()), "{tools:?}");
+        for name in &tools {
+            assert!(
+                !["approv", "deny", "request"]
+                    .iter()
+                    .any(|w| name.contains(w)),
+                "{name}"
+            );
+        }
+        assert_eq!(f.state.agent.request(&id).unwrap().state, "pending");
+        assert!(
+            f.request_events()
+                .await
+                .iter()
+                .all(|(kind, _)| kind == "spawn_request"),
+            "no refusal of an actor is a decision"
+        );
+    }
+
+    /// Approving goes through the route, once; a denial and an expiry are
+    /// recorded; each decision is audited with what it decided.
+    #[tokio::test]
+    async fn a_device_decides_a_request_once_through_the_route() {
+        let dir = tempdir::TempDir::new("storm-approve-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (session, id) = f.spawn_request().await;
+        let (status, body) = f.decide(&id, "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (
+                &body["id"],
+                &body["state"],
+                &body["outcome"],
+                &body["requester"]
+            ),
+            (
+                &serde_json::json!(id),
+                &serde_json::json!("decided"),
+                &serde_json::json!("started"),
+                &serde_json::json!(session)
+            )
+        );
+        let child = body["session"].as_str().unwrap().to_string();
+        assert!(child.starts_with("ags_"));
+        let stored = f.state.agent.request(&id).unwrap();
+        assert!(stored.decided_by_device.is_some_and(|d| !d.is_empty()));
+        // AP-4 through the route: the second device finds it decided.
+        for verb in ["approve", "deny"] {
+            let (status, body) = f.decide(&id, verb, &f.owner_bearer).await;
+            assert_eq!(
+                (status, body),
+                (
+                    StatusCode::CONFLICT,
+                    serde_json::json!({"error": "already_decided"})
+                )
+            );
+        }
+
+        let denied = f.request_from(&session).await;
+        let (status, body) = f.decide(&denied, "deny", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "denied");
+        assert!(body.get("session").is_none());
+
+        // AP-5 through the route, and the sweeper's record.
+        let expired = |id: &str| crate::agent::store::spawn::Request {
+            id: id.into(),
+            kind: "start".into(),
+            requester: session.clone(),
+            target: None,
+            payload: r#"{"task":"late"}"#.into(),
+            created_at: "2020-01-01T09:00:00Z".into(),
+            expires_at: "2020-01-01T09:10:00Z".into(),
+            state: "pending".into(),
+            decided_by_device: None,
+            decided_at: None,
+            outcome: None,
+            reason: None,
+            session: None,
+        };
+        f.state.agent.insert_request_for_tests(&expired("agr_LATE"));
+        let (status, body) = f.decide("agr_LATE", "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["outcome"], "expired");
+        f.state
+            .agent
+            .insert_request_for_tests(&expired("agr_SWEPT"));
+        crate::ops::sweep_spawn_requests(&f.state).await;
+        assert_eq!(
+            f.state
+                .agent
+                .request("agr_SWEPT")
+                .unwrap()
+                .outcome
+                .as_deref(),
+            Some("expired")
+        );
+
+        let events: Vec<(String, Option<String>, Option<String>)> = f
+            .request_events()
+            .await
+            .into_iter()
+            .map(|(kind, d)| {
+                (
+                    kind,
+                    d["request_id"].as_str().map(Into::into),
+                    d["outcome"].as_str().map(Into::into),
+                )
+            })
+            .collect();
+        let row = |kind: &str, id: &str, outcome: Option<&str>| {
+            (
+                kind.to_string(),
+                Some(id.to_string()),
+                outcome.map(Into::into),
+            )
+        };
+        assert_eq!(
+            events,
+            vec![
+                row("spawn_request", &id, None),
+                row("spawn_request_decided", &id, Some("started")),
+                row("spawn_request", &denied, None),
+                row("spawn_request_decided", &denied, Some("denied")),
+                row("spawn_request_decided", "agr_LATE", Some("expired")),
+                row("spawn_request_expired", "agr_SWEPT", Some("expired")),
+            ]
+        );
     }
 
     #[tokio::test]

@@ -366,8 +366,12 @@ impl Store {
 
     /// Writes the whole record back. Records are small and every change is a
     /// state transition worth persisting in full.
+    ///
+    /// An ending refuses the session's pending requests, `requester_ended`,
+    /// in the same transaction (P-4, L-7).
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE sessions SET status = ?2, end_reason = ?3, signal = ?4, exit_code = ?5,
                  started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10,
                  title = ?11, harness_session = ?12
@@ -387,6 +391,15 @@ impl Store {
                 r.harness_session
             ],
         )?;
+        if r.is_ended() {
+            spawn::refuse_requests_of_in(
+                &tx,
+                &r.id,
+                "requester_ended",
+                &crate::index::now_rfc3339(),
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -401,18 +414,7 @@ impl Store {
         now: &str,
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        tx.execute(
-            "INSERT INTO session_mcp (session_id, allow_vault_writes, created_at)
-             VALUES (?1, ?2, ?3)",
-            params![session_id, allow_vault_writes, now],
-        )?;
-        for g in grants {
-            tx.execute(
-                "INSERT INTO session_mcp_grants (session_id, connection_id, slug, granted_at)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, g.id, g.slug, now],
-            )?;
-        }
+        insert_grants(&tx, session_id, allow_vault_writes, grants, now)?;
         tx.commit()?;
         Ok(())
     }
@@ -464,14 +466,7 @@ impl Store {
         integrations: &[SessionIntegration],
     ) -> Result<()> {
         let tx = self.conn.transaction()?;
-        for i in integrations {
-            tx.execute(
-                "INSERT OR REPLACE INTO session_integrations
-                     (session_id, connection_id, slug, display_name)
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, i.id, i.slug, i.display_name],
-            )?;
-        }
+        insert_integrations(&tx, session_id, integrations)?;
         tx.commit()?;
         Ok(())
     }
@@ -547,25 +542,7 @@ impl Store {
     }
 
     pub fn insert_launch(&self, l: &LaunchRecord, now: &str) -> Result<()> {
-        let (vault, note, title) = match &l.context {
-            Some(c) => (Some(&c.vault_id), Some(&c.note_id), Some(&c.title)),
-            None => (None, None, None),
-        };
-        self.conn.execute(
-            "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
-                 context_title, write_vault_id, created_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                l.session_id,
-                l.name,
-                vault,
-                note,
-                title,
-                l.write_vault_id,
-                now
-            ],
-        )?;
-        Ok(())
+        insert_launch(&self.conn, l, now)
     }
 
     pub fn launch(&self, session_id: &str) -> Result<Option<LaunchRecord>> {
@@ -985,6 +962,66 @@ fn insert_session(conn: &Connection, r: &SessionRecord) -> Result<()> {
     Ok(())
 }
 
+fn insert_grants(
+    conn: &Connection,
+    session_id: &str,
+    allow_vault_writes: bool,
+    grants: &[McpGrant],
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_mcp (session_id, allow_vault_writes, created_at)
+         VALUES (?1, ?2, ?3)",
+        params![session_id, allow_vault_writes, now],
+    )?;
+    for g in grants {
+        conn.execute(
+            "INSERT INTO session_mcp_grants (session_id, connection_id, slug, granted_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, g.id, g.slug, now],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_integrations(
+    conn: &Connection,
+    session_id: &str,
+    integrations: &[SessionIntegration],
+) -> Result<()> {
+    for i in integrations {
+        conn.execute(
+            "INSERT OR REPLACE INTO session_integrations
+                 (session_id, connection_id, slug, display_name)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![session_id, i.id, i.slug, i.display_name],
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
+    let (vault, note, title) = match &l.context {
+        Some(c) => (Some(&c.vault_id), Some(&c.note_id), Some(&c.title)),
+        None => (None, None, None),
+    };
+    conn.execute(
+        "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
+             context_title, write_vault_id, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            l.session_id,
+            l.name,
+            vault,
+            note,
+            title,
+            l.write_vault_id,
+            now
+        ],
+    )?;
+    Ok(())
+}
+
 fn crew_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Crew> {
     Ok(Crew {
         id: r.get(0)?,
@@ -1080,7 +1117,12 @@ pub mod spawn {
     use anyhow::{Result, bail};
     use rusqlite::{Connection, OptionalExtension, params};
 
-    use super::{SessionRecord, Store, insert_session};
+    use serde::{Deserialize, Serialize};
+
+    use super::{
+        COLUMNS, LaunchRecord, McpGrant, SessionIntegration, SessionRecord, Store, from_row,
+        insert_grants, insert_integrations, insert_launch, insert_session,
+    };
 
     pub const MAX_TASK_BYTES: usize = 16 * 1024;
     pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
@@ -1316,6 +1358,132 @@ pub mod spawn {
         a == b || inside(a, b) || inside(b, a)
     }
 
+    // ---- 134-3: the approval engine (P-1…P-6) -------------------------------
+    //
+    // Every step below runs in one transaction of the store, whose lock the
+    // manager holds throughout: that lock is P-1's serialization point, for
+    // every tree at once.
+
+    /// C4's hard caps. Counted here rather than held as constraints, so a
+    /// revisit needs no migration.
+    pub const MAX_DEPTH: i64 = 2;
+    pub const MAX_CHILDREN: i64 = 3;
+    pub const MAX_TREE: i64 = 6;
+    pub const MAX_PENDING: i64 = 2;
+    /// A5: undecided for ten minutes, a request expires.
+    pub const REQUEST_TTL_SECS: i64 = 600;
+
+    /// What an agent asks a person to approve (134o).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum NewRequest {
+        Start {
+            task: String,
+            /// Another provider than the parent's: refused in V1 (B4).
+            provider: Option<String>,
+        },
+        Message {
+            target: String,
+            text: String,
+        },
+        End {
+            target: String,
+        },
+    }
+
+    impl NewRequest {
+        fn kind(&self) -> &'static str {
+            match self {
+                Self::Start { .. } => "start",
+                Self::Message { .. } => "message",
+                Self::End { .. } => "end",
+            }
+        }
+
+        fn target(&self) -> Option<&str> {
+            match self {
+                Self::Start { .. } => None,
+                Self::Message { target, .. } | Self::End { target } => Some(target),
+            }
+        }
+
+        fn payload(&self) -> String {
+            match self {
+                Self::Start { task, provider } => serde_json::to_string(&StartPayload {
+                    task: task.clone(),
+                    provider: provider.clone(),
+                }),
+                Self::Message { text, .. } => {
+                    serde_json::to_string(&MessagePayload { text: text.clone() })
+                }
+                Self::End { .. } => Ok("{}".into()),
+            }
+            .expect("serializable")
+        }
+    }
+
+    /// A start request's payload: the exact task a person approves.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct StartPayload {
+        pub task: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub provider: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct MessagePayload {
+        pub text: String,
+    }
+
+    /// Why a request was refused: one of 134o's reasons, and for `limit`,
+    /// the cap. `not_found` is creation's answer for a target out of scope.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Refusal {
+        pub reason: &'static str,
+        pub cap: Option<&'static str>,
+    }
+
+    impl Refusal {
+        fn because(reason: &'static str) -> Self {
+            Self { reason, cap: None }
+        }
+
+        fn limit(cap: &'static str) -> Self {
+            Self {
+                reason: "limit",
+                cap: Some(cap),
+            }
+        }
+    }
+
+    /// What the host's live link says now: C0's refusal, or its
+    /// `max_sessions` (0 is no limit).
+    pub type HostCheck<'a> = &'a dyn Fn(&str) -> std::result::Result<u32, &'static str>;
+
+    /// How an approval or a denial came out.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Decision {
+        /// It was no longer pending: something else decided it first.
+        Taken(Request),
+        Decided {
+            request: Request,
+            /// The child a start's approval recorded, before its host is told.
+            child: Option<Box<SessionRecord>>,
+            /// The cap a `refused: limit` names. Not stored: the schema keeps
+            /// the reason only.
+            cap: Option<&'static str>,
+        },
+        /// Approved, but acting on its kind is a later slice's (134-6, 134-7).
+        /// Nothing was written: it stays pending.
+        NotBuilt(Request),
+    }
+
+    enum Act {
+        Expired,
+        Refused(Refusal),
+        Started(Box<SessionRecord>),
+        NotBuilt,
+    }
+
     impl Store {
         pub fn lineage(&self, session_id: &str) -> Result<Lineage> {
             lineage_of(&self.conn, session_id)
@@ -1331,33 +1499,8 @@ pub mod spawn {
             task: &str,
             now: &str,
         ) -> Result<Lineage> {
-            if task.len() > MAX_TASK_BYTES {
-                bail!("the task is over {MAX_TASK_BYTES} bytes");
-            }
             let tx = self.conn.transaction()?;
-            let exists = tx
-                .prepare("SELECT 1 FROM sessions WHERE id = ?1")?
-                .exists([parent])?;
-            if !exists {
-                bail!("no parent session {parent}");
-            }
-            let up = lineage_of(&tx, parent)?;
-            let lineage = Lineage {
-                parent_session: Some(parent.to_string()),
-                root_session: up.root_session,
-                depth: up.depth + 1,
-            };
-            insert_session(&tx, child)?;
-            tx.execute(
-                "INSERT INTO session_lineage
-                     (session_id, parent_session, root_session, depth, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![child.id, parent, lineage.root_session, lineage.depth, now],
-            )?;
-            tx.execute(
-                "INSERT INTO session_task (session_id, text, created_at) VALUES (?1, ?2, ?3)",
-                params![child.id, task, now],
-            )?;
+            let lineage = insert_spawned(&tx, child, parent, task, now)?;
             tx.commit()?;
             Ok(lineage)
         }
@@ -1497,32 +1640,7 @@ pub mod spawn {
         }
 
         pub fn request(&self, id: &str) -> Result<Option<Request>> {
-            Ok(self
-                .conn
-                .query_row(
-                    "SELECT id, kind, requester, target, payload, created_at, expires_at, state,
-                         decided_by_device, decided_at, outcome, reason, session
-                     FROM agent_requests WHERE id = ?1",
-                    params![id],
-                    |r| {
-                        Ok(Request {
-                            id: r.get(0)?,
-                            kind: r.get(1)?,
-                            requester: r.get(2)?,
-                            target: r.get(3)?,
-                            payload: r.get(4)?,
-                            created_at: r.get(5)?,
-                            expires_at: r.get(6)?,
-                            state: r.get(7)?,
-                            decided_by_device: r.get(8)?,
-                            decided_at: r.get(9)?,
-                            outcome: r.get(10)?,
-                            reason: r.get(11)?,
-                            session: r.get(12)?,
-                        })
-                    },
-                )
-                .optional()?)
+            request_of(&self.conn, id)
         }
 
         /// Refuses a requester's pending requests with `reason` (L-7, P-4).
@@ -1725,6 +1843,583 @@ pub mod spawn {
                 )
                 .optional()?)
         }
+
+        /// P-2: checks C0, scope and every cap, counting live sessions and
+        /// pending requests, and records the request `pending`, in one
+        /// transaction. A refusal writes nothing.
+        pub fn create_request(
+            &mut self,
+            id: &str,
+            requester: &str,
+            new: &NewRequest,
+            now: &str,
+            host: HostCheck<'_>,
+        ) -> Result<std::result::Result<Request, Refusal>> {
+            let tx = self.conn.transaction()?;
+            let Some(r) = session_of(&tx, requester)? else {
+                bail!("no session {requester}");
+            };
+            if let Err(mut refusal) = may_request(&tx, &r, new.kind(), new.target(), host) {
+                // A switch that is off was never on for this request.
+                if refusal.reason == "revoked" {
+                    refusal.reason = "not_permitted";
+                }
+                return Ok(Err(refusal));
+            }
+            if let NewRequest::Start {
+                provider: Some(p), ..
+            } = new
+                && *p != r.provider
+            {
+                return Ok(Err(Refusal::because("not_permitted")));
+            }
+            let max_sessions = host(&r.host_id).unwrap_or(0);
+            if let Some(cap) = over_cap(&tx, &r, new.kind(), max_sessions, id)? {
+                return Ok(Err(Refusal::limit(cap)));
+            }
+            let request = Request {
+                id: id.to_string(),
+                kind: new.kind().to_string(),
+                requester: requester.to_string(),
+                target: new.target().map(Into::into),
+                payload: new.payload(),
+                created_at: now.to_string(),
+                expires_at: plus_secs(now, REQUEST_TTL_SECS),
+                state: "pending".into(),
+                decided_by_device: None,
+                decided_at: None,
+                outcome: None,
+                reason: None,
+                session: None,
+            };
+            tx.execute(
+                "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
+                     expires_at, state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')",
+                params![
+                    request.id,
+                    request.kind,
+                    request.requester,
+                    request.target,
+                    request.payload,
+                    request.created_at,
+                    request.expires_at
+                ],
+            )?;
+            tx.commit()?;
+            Ok(Ok(request))
+        }
+
+        /// P-3: takes the request `pending` → `approving` (single use), then
+        /// re-checks it against current state and acts, recording the
+        /// outcome in the same transaction. `None` when there is no such
+        /// request. A start's child is recorded here with its lineage, task
+        /// and narrowed grants; its host is told after commit.
+        pub fn approve_request(
+            &mut self,
+            id: &str,
+            device: &str,
+            write_vault: bool,
+            now: &str,
+            host: HostCheck<'_>,
+        ) -> Result<Option<Decision>> {
+            let tx = self.conn.transaction()?;
+            let claimed = tx.execute(
+                "UPDATE agent_requests SET state = 'approving' WHERE id = ?1 AND state = 'pending'",
+                params![id],
+            )? == 1;
+            let Some(request) = request_of(&tx, id)? else {
+                return Ok(None);
+            };
+            if !claimed {
+                return Ok(Some(Decision::Taken(request)));
+            }
+            let (outcome, reason, cap, child) =
+                match recheck_and_act(&tx, &request, write_vault, now, host)? {
+                    Act::Expired => ("expired", None, None, None),
+                    Act::Refused(r) => ("refused", Some(r.reason), r.cap, None),
+                    Act::Started(child) => ("started", None, None, Some(child)),
+                    Act::NotBuilt => return Ok(Some(Decision::NotBuilt(request))),
+                };
+            let session = child.as_ref().map(|c| c.id.as_str());
+            decide(&tx, id, outcome, reason, session, Some(device), now)?;
+            let request = request_of(&tx, id)?.expect("just decided");
+            tx.commit()?;
+            Ok(Some(Decision::Decided {
+                request,
+                child,
+                cap,
+            }))
+        }
+
+        /// A person denies a pending request; one already past its expiry is
+        /// recorded `expired` instead (P-5). `None` when there is no such
+        /// request.
+        pub fn deny_request(
+            &mut self,
+            id: &str,
+            device: &str,
+            now: &str,
+        ) -> Result<Option<Decision>> {
+            let tx = self.conn.transaction()?;
+            let claimed = tx.execute(
+                "UPDATE agent_requests SET state = 'approving' WHERE id = ?1 AND state = 'pending'",
+                params![id],
+            )? == 1;
+            let Some(request) = request_of(&tx, id)? else {
+                return Ok(None);
+            };
+            if !claimed {
+                return Ok(Some(Decision::Taken(request)));
+            }
+            let outcome = if expired(now, &request.expires_at) {
+                "expired"
+            } else {
+                "denied"
+            };
+            decide(&tx, id, outcome, None, None, Some(device), now)?;
+            let request = request_of(&tx, id)?.expect("just decided");
+            tx.commit()?;
+            Ok(Some(Decision::Decided {
+                request,
+                child: None,
+                cap: None,
+            }))
+        }
+
+        /// The sweeper (P-5): every pending request past its expiry becomes
+        /// `expired`. Returns those it expired.
+        pub fn expire_requests(&mut self, now: &str) -> Result<Vec<Request>> {
+            let tx = self.conn.transaction()?;
+            let due: Vec<String> = {
+                let mut stmt = tx.prepare(
+                    "SELECT id, expires_at FROM agent_requests WHERE state = 'pending'
+                     ORDER BY created_at, id",
+                )?;
+                let rows =
+                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()?
+                    .into_iter()
+                    .filter(|(_, expires)| expired(now, expires))
+                    .map(|(id, _)| id)
+                    .collect()
+            };
+            let mut swept = Vec::new();
+            for id in due {
+                decide(&tx, &id, "expired", None, None, None, now)?;
+                swept.push(request_of(&tx, &id)?.expect("just decided"));
+            }
+            tx.commit()?;
+            Ok(swept)
+        }
+
+        /// P-4 for a host downgrade: refuses the pending requests of every
+        /// session on the host with C0's reason. How many it refused.
+        pub fn refuse_requests_on_host(
+            &self,
+            host_id: &str,
+            reason: &str,
+            now: &str,
+        ) -> Result<usize> {
+            refuse_where(
+                &self.conn,
+                "requester IN (SELECT id FROM sessions WHERE host_id = ?1)",
+                host_id,
+                reason,
+                now,
+            )
+        }
+
+        /// The requests a session made, oldest first.
+        pub fn requests_of(&self, requester: &str) -> Result<Vec<Request>> {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE requester = ?1
+                 ORDER BY created_at, id"
+            ))?;
+            let rows = stmt.query_map(params![requester], request_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+    }
+
+    const REQUEST_COLUMNS: &str = "id, kind, requester, target, payload, created_at, expires_at, \
+        state, decided_by_device, decided_at, outcome, reason, session";
+
+    fn request_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Request> {
+        Ok(Request {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            requester: r.get(2)?,
+            target: r.get(3)?,
+            payload: r.get(4)?,
+            created_at: r.get(5)?,
+            expires_at: r.get(6)?,
+            state: r.get(7)?,
+            decided_by_device: r.get(8)?,
+            decided_at: r.get(9)?,
+            outcome: r.get(10)?,
+            reason: r.get(11)?,
+            session: r.get(12)?,
+        })
+    }
+
+    fn request_of(conn: &Connection, id: &str) -> Result<Option<Request>> {
+        Ok(conn
+            .query_row(
+                &format!("SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE id = ?1"),
+                params![id],
+                request_from_row,
+            )
+            .optional()?)
+    }
+
+    fn session_of(conn: &Connection, id: &str) -> Result<Option<SessionRecord>> {
+        Ok(conn
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1"),
+                params![id],
+                from_row,
+            )
+            .optional()?)
+    }
+
+    fn spawn_on(conn: &Connection, session_id: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT enabled FROM session_spawn WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Past its expiry at `now`. A stamp that does not parse is expired: an
+    /// approval it cannot date never acts.
+    pub fn expired(now: &str, expires_at: &str) -> bool {
+        use time::format_description::well_known::Rfc3339;
+        match (
+            time::OffsetDateTime::parse(now, &Rfc3339),
+            time::OffsetDateTime::parse(expires_at, &Rfc3339),
+        ) {
+            (Ok(now), Ok(at)) => now >= at,
+            _ => true,
+        }
+    }
+
+    fn plus_secs(stamp: &str, secs: i64) -> String {
+        crate::index::rfc3339_minus_secs(stamp, -secs)
+    }
+
+    /// What creation and approval both require of the requester and its
+    /// target: live, spawn on, a spawning adapter, C0, and a target that is
+    /// its live descendant. Creation answers an out-of-scope target
+    /// `not_found`; approval, `target_gone`.
+    fn may_request(
+        conn: &Connection,
+        r: &SessionRecord,
+        kind: &str,
+        target: Option<&str>,
+        host: HostCheck<'_>,
+    ) -> std::result::Result<(), Refusal> {
+        let fail = |e: anyhow::Error| {
+            tracing::warn!(error = %e, "a spawn request's check failed");
+            Refusal::because("not_permitted")
+        };
+        if r.is_ended() {
+            return Err(Refusal::because("requester_ended"));
+        }
+        if !spawn_on(conn, &r.id).map_err(fail)? {
+            return Err(Refusal::because("revoked"));
+        }
+        if !crate::agent::SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
+            return Err(Refusal::because("not_permitted"));
+        }
+        host(&r.host_id).map_err(Refusal::because)?;
+        if kind != "start" {
+            let Some(target) = target else {
+                return Err(Refusal::because("not_found"));
+            };
+            let live = descendants_of(conn, &r.id, true).map_err(fail)?;
+            if !live.iter().any(|d| d == target) {
+                return Err(Refusal::because("not_found"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The cap this request would break, counting live sessions and pending
+    /// requests and the request itself once (C4). `except` is its own id,
+    /// so an approval does not count it twice.
+    fn over_cap(
+        conn: &Connection,
+        r: &SessionRecord,
+        kind: &str,
+        max_sessions: u32,
+        except: &str,
+    ) -> Result<Option<&'static str>> {
+        let open: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT kind, requester FROM agent_requests
+                 WHERE state IN ('pending', 'approving') AND id != ?1",
+            )?;
+            let rows = stmt.query_map(params![except], |row| Ok((row.get(0)?, row.get(1)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let starts_by = |who: &dyn Fn(&str) -> bool| {
+            open.iter()
+                .filter(|(k, requester)| k == "start" && who(requester))
+                .count() as i64
+        };
+        let lineage = lineage_of(conn, &r.id)?;
+        if kind == "start" && lineage.depth + 1 > MAX_DEPTH {
+            return Ok(Some("depth"));
+        }
+        let mine = open.iter().filter(|(_, q)| *q == r.id).count() as i64;
+        if mine + 1 > MAX_PENDING {
+            return Ok(Some("pending"));
+        }
+        if kind != "start" {
+            return Ok(None);
+        }
+        let children: i64 = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM session_lineage l JOIN sessions s ON s.id = l.session_id
+                 WHERE l.parent_session = ?1 AND s.status NOT IN {ENDED}"
+            ),
+            params![r.id],
+            |row| row.get(0),
+        )?;
+        if children + starts_by(&|q| q == r.id) + 1 > MAX_CHILDREN {
+            return Ok(Some("children"));
+        }
+        let root = &lineage.root_session;
+        let members: Vec<String> = std::iter::once(root.clone())
+            .chain(descendants_of(conn, root, false)?)
+            .collect();
+        let root_live = session_of(conn, root)?.is_some_and(|s| !s.is_ended());
+        let tree_live = root_live as i64 + descendants_of(conn, root, true)?.len() as i64;
+        if tree_live + starts_by(&|q| members.iter().any(|m| m == q)) + 1 > MAX_TREE {
+            return Ok(Some("tree"));
+        }
+        if max_sessions > 0 {
+            let on_host: Vec<(String, bool)> = {
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT id, status NOT IN {ENDED} FROM sessions WHERE host_id = ?1"
+                ))?;
+                let rows =
+                    stmt.query_map(params![r.host_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let live = on_host.iter().filter(|(_, live)| *live).count() as i64;
+            let pending = starts_by(&|q| on_host.iter().any(|(id, _)| id == q));
+            if live + pending + 1 > max_sessions as i64 {
+                return Ok(Some("max_sessions"));
+            }
+        }
+        Ok(None)
+    }
+
+    /// P-3's re-check against current state, then the act.
+    fn recheck_and_act(
+        conn: &Connection,
+        request: &Request,
+        write_vault: bool,
+        now: &str,
+        host: HostCheck<'_>,
+    ) -> Result<Act> {
+        if expired(now, &request.expires_at) {
+            return Ok(Act::Expired);
+        }
+        let Some(r) = session_of(conn, &request.requester)? else {
+            return Ok(Act::Refused(Refusal::because("requester_ended")));
+        };
+        if let Err(mut refusal) =
+            may_request(conn, &r, &request.kind, request.target.as_deref(), host)
+        {
+            if refusal.reason == "not_found" {
+                refusal.reason = "target_gone";
+            }
+            return Ok(Act::Refused(refusal));
+        }
+        if request.kind != "start" {
+            return Ok(Act::NotBuilt);
+        }
+        let payload: StartPayload = serde_json::from_str(&request.payload)?;
+        if payload.provider.as_ref().is_some_and(|p| *p != r.provider) {
+            return Ok(Act::Refused(Refusal::because("not_permitted")));
+        }
+        let max_sessions = host(&r.host_id).unwrap_or(0);
+        if let Some(cap) = over_cap(conn, &r, "start", max_sessions, &request.id)? {
+            return Ok(Act::Refused(Refusal::limit(cap)));
+        }
+        Ok(Act::Started(Box::new(spawn_child(
+            conn,
+            &r,
+            &payload.task,
+            write_vault,
+            now,
+        )?)))
+    }
+
+    /// A start's act: the child's record, lineage and task (L-1), narrowed
+    /// to the parent's grants as they are now (134e, AP-7), with the
+    /// parent's write vault only when the person ticked it (D2). Spawn is
+    /// off: a child has no switch row. Its workspace is the parent's until
+    /// 137-1 makes one per child.
+    fn spawn_child(
+        conn: &Connection,
+        parent: &SessionRecord,
+        task: &str,
+        write_vault: bool,
+        now: &str,
+    ) -> Result<SessionRecord> {
+        let child = SessionRecord {
+            id: crate::auth::identity::random_id("ags_"),
+            owner_user_id: parent.owner_user_id.clone(),
+            host_id: parent.host_id.clone(),
+            workspace: parent.workspace.clone(),
+            provider: parent.provider.clone(),
+            provider_kind: parent.provider_kind.clone(),
+            interaction: parent.interaction.clone(),
+            provider_fallback: None,
+            status: "creating".into(),
+            end_reason: None,
+            signal: None,
+            exit_code: None,
+            created_at: now.to_string(),
+            started_at: None,
+            ended_at: None,
+            last_activity: None,
+            egress: parent.egress.clone(),
+            cols: parent.cols,
+            rows: parent.rows,
+            title: None,
+            activity: None,
+            harness_session: None,
+            resumed_from: None,
+        };
+        insert_spawned(conn, &child, &parent.id, task, now)?;
+        let grants: Vec<McpGrant> = {
+            let mut stmt = conn.prepare(
+                "SELECT connection_id, slug FROM session_mcp_grants
+                 WHERE session_id = ?1 AND revoked_at IS NULL ORDER BY granted_at, slug",
+            )?;
+            let rows = stmt.query_map(params![parent.id], |r| {
+                Ok(McpGrant {
+                    id: r.get(0)?,
+                    slug: r.get(1)?,
+                    plugin_origin: None,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let builtin = crate::gateway::connections::BUILTIN_ID;
+        let reads_storm = grants.iter().any(|g| g.id == builtin);
+        let parent_vault: Option<String> = conn
+            .query_row(
+                "SELECT write_vault_id FROM session_launch WHERE session_id = ?1",
+                params![parent.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let write_vault_id = parent_vault.filter(|_| write_vault && reads_storm);
+        insert_grants(conn, &child.id, write_vault_id.is_some(), &grants, now)?;
+        let live_names: Vec<String> = {
+            let mut stmt = conn.prepare(&format!(
+                "SELECT l.name FROM session_launch l JOIN sessions s ON s.id = l.session_id
+                 WHERE s.status NOT IN {ENDED}"
+            ))?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        insert_launch(
+            conn,
+            &LaunchRecord {
+                session_id: child.id.clone(),
+                name: crate::agent::session_name(None, &child.workspace, &live_names),
+                context: None,
+                write_vault_id,
+            },
+            now,
+        )?;
+        let named: Vec<SessionIntegration> = {
+            let mut stmt = conn.prepare(
+                "SELECT connection_id, slug, display_name FROM session_integrations
+                 WHERE session_id = ?1",
+            )?;
+            let rows = stmt.query_map(params![parent.id], |r| {
+                Ok(SessionIntegration {
+                    id: r.get(0)?,
+                    slug: r.get(1)?,
+                    display_name: r.get(2)?,
+                })
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let integrations: Vec<SessionIntegration> = named
+            .into_iter()
+            .filter(|i| i.id != builtin && grants.iter().any(|g| g.id == i.id))
+            .collect();
+        insert_integrations(conn, &child.id, &integrations)?;
+        Ok(child)
+    }
+
+    fn decide(
+        conn: &Connection,
+        id: &str,
+        outcome: &str,
+        reason: Option<&str>,
+        session: Option<&str>,
+        device: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        let changed = conn.execute(
+            "UPDATE agent_requests SET state = 'decided', outcome = ?2, reason = ?3,
+                 session = ?4, decided_by_device = ?5, decided_at = ?6
+             WHERE id = ?1 AND state IN ('pending', 'approving')",
+            params![id, outcome, reason, session, device, now],
+        )?;
+        if changed != 1 {
+            bail!("request {id} is not open");
+        }
+        Ok(())
+    }
+
+    fn insert_spawned(
+        conn: &Connection,
+        child: &SessionRecord,
+        parent: &str,
+        task: &str,
+        now: &str,
+    ) -> Result<Lineage> {
+        if task.len() > MAX_TASK_BYTES {
+            bail!("the task is over {MAX_TASK_BYTES} bytes");
+        }
+        let exists = conn
+            .prepare("SELECT 1 FROM sessions WHERE id = ?1")?
+            .exists([parent])?;
+        if !exists {
+            bail!("no parent session {parent}");
+        }
+        let up = lineage_of(conn, parent)?;
+        let lineage = Lineage {
+            parent_session: Some(parent.to_string()),
+            root_session: up.root_session,
+            depth: up.depth + 1,
+        };
+        insert_session(conn, child)?;
+        conn.execute(
+            "INSERT INTO session_lineage
+                 (session_id, parent_session, root_session, depth, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![child.id, parent, lineage.root_session, lineage.depth, now],
+        )?;
+        conn.execute(
+            "INSERT INTO session_task (session_id, text, created_at) VALUES (?1, ?2, ?3)",
+            params![child.id, task, now],
+        )?;
+        Ok(lineage)
     }
 
     fn lineage_of(conn: &Connection, session_id: &str) -> Result<Lineage> {
@@ -1786,6 +2481,15 @@ pub mod spawn {
             ),
             params![session_id, reason, now],
         )?)
+    }
+
+    pub(super) fn refuse_requests_of_in(
+        conn: &Connection,
+        requester: &str,
+        reason: &str,
+        now: &str,
+    ) -> Result<usize> {
+        refuse_where(conn, "requester = ?1", requester, reason, now)
     }
 
     /// What a dismissal takes with a session (C8): its switch, task, result

@@ -1950,6 +1950,237 @@ pub async fn set_session_spawn(
     })
 }
 
+// ---- Agent spawning: the approval engine (decision 134-3) -----------------
+//
+// A person's device decides on the session tier, owner only (A5): no key, no
+// agent, no host. Dark: no tool creates a request before 134-5, and C0
+// refuses on every host until 136-5.
+
+#[allow(dead_code)] // 134-5's tools create requests.
+pub const EVENT_SPAWN_REQUEST: &str = "spawn_request";
+#[allow(dead_code)] // 134-5's tools create requests.
+pub const EVENT_SPAWN_REQUEST_REFUSED: &str = "spawn_request_refused";
+pub const EVENT_SPAWN_REQUEST_DECIDED: &str = "spawn_request_decided";
+pub const EVENT_SPAWN_REQUEST_EXPIRED: &str = "spawn_request_expired";
+
+#[derive(Debug, Default, Deserialize)]
+pub struct ApproveRequest {
+    /// D2: the child may write the parent's own write vault. Off unless the
+    /// person ticks it.
+    #[serde(default)]
+    pub write_vault: bool,
+}
+
+/// A request as its decision left it.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct RequestView {
+    pub id: String,
+    pub kind: String,
+    pub requester: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    pub state: String,
+    pub created_at: String,
+    pub expires_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `refused: limit`, the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<String>,
+    /// For `started`, the child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decided_at: Option<String>,
+}
+
+impl RequestView {
+    fn of(r: crate::agent::store::spawn::Request, cap: Option<&str>) -> Self {
+        Self {
+            id: r.id,
+            kind: r.kind,
+            requester: r.requester,
+            target: r.target,
+            state: r.state,
+            created_at: r.created_at,
+            expires_at: r.expires_at,
+            outcome: r.outcome,
+            reason: r.reason,
+            cap: cap.map(Into::into),
+            session: r.session,
+            decided_at: r.decided_at,
+        }
+    }
+}
+
+fn request_detail(r: &RequestView) -> serde_json::Value {
+    serde_json::json!({
+        "request_id": r.id,
+        "kind": r.kind,
+        "requester": r.requester,
+        "target": r.target,
+        "outcome": r.outcome,
+        "reason": r.reason,
+        "cap": r.cap,
+        "session": r.session,
+    })
+}
+
+async fn record_spawn_event(
+    state: &Shared,
+    kind: &str,
+    user: Option<&str>,
+    device: Option<&str>,
+    detail: &serde_json::Value,
+) {
+    if let Err(e) = state.auth_db.lock().await.record_event(
+        kind,
+        user,
+        device,
+        &crate::index::now_rfc3339(),
+        &detail.to_string(),
+    ) {
+        tracing::warn!(error = %e, kind, "could not audit a spawn request");
+    }
+}
+
+/// P-2, for 134-5's tools: the requesting session's agent asks. A refusal
+/// names its reason and, for `limit`, the cap; both outcomes are audited.
+#[allow(dead_code)] // Dark until 134-5's `start_agent`.
+pub async fn create_spawn_request(
+    state: &Shared,
+    requester: &str,
+    new: crate::agent::store::spawn::NewRequest,
+) -> ApiResult<std::result::Result<RequestView, crate::agent::store::spawn::Refusal>> {
+    let record = state.agent.get(requester).map_err(agent_error)?;
+    let created = state
+        .agent
+        .create_request(requester, new)
+        .map_err(agent_error)?;
+    match &created {
+        Ok(r) => {
+            let view = RequestView::of(r.clone(), None);
+            record_spawn_event(
+                state,
+                EVENT_SPAWN_REQUEST,
+                Some(&record.owner_user_id),
+                None,
+                &request_detail(&view),
+            )
+            .await;
+        }
+        Err(refusal) => {
+            record_spawn_event(
+                state,
+                EVENT_SPAWN_REQUEST_REFUSED,
+                Some(&record.owner_user_id),
+                None,
+                &serde_json::json!({"requester": requester, "reason": refusal.reason,
+                    "cap": refusal.cap}),
+            )
+            .await;
+        }
+    }
+    Ok(created.map(|r| RequestView::of(r, None)))
+}
+
+/// The owner's request, or 404.
+fn owners_request(
+    state: &Shared,
+    owner: &str,
+    id: &str,
+) -> ApiResult<crate::agent::store::spawn::Request> {
+    let request = state.agent.request(id).map_err(agent_error)?;
+    match state.agent.get(&request.requester) {
+        Ok(r) if r.owner_user_id == owner => Ok(request),
+        _ => Err(not_found("no such request")),
+    }
+}
+
+fn decided(decision: crate::agent::store::spawn::Decision) -> ApiResult<RequestView> {
+    use crate::agent::store::spawn::Decision as D;
+    match decision {
+        D::Decided { request, cap, .. } => Ok(RequestView::of(request, cap)),
+        // Single use (P-3, P-6): what the app showed is stale.
+        D::Taken(_) => Err(conflict("already_decided")),
+        D::NotBuilt(_) => Err(conflict("not_built")),
+    }
+}
+
+/// `POST /v1/agent/requests/{id}/approve`. Re-checked against current state
+/// at approval; the answer is the outcome, a refusal included.
+pub async fn approve_spawn_request(
+    state: &Shared,
+    actor: &Actor,
+    device: &str,
+    id: &str,
+    req: ApproveRequest,
+) -> ApiResult<RequestView> {
+    let owner = crews_owner(actor)?;
+    owners_request(state, owner, id)?;
+    let decision = state
+        .agent
+        .approve_request(id, device, req.write_vault)
+        .map_err(agent_error)?;
+    let view = decided(decision)?;
+    record_spawn_event(
+        state,
+        EVENT_SPAWN_REQUEST_DECIDED,
+        Some(owner),
+        Some(device),
+        &request_detail(&view),
+    )
+    .await;
+    Ok(view)
+}
+
+/// `POST /v1/agent/requests/{id}/deny`.
+pub async fn deny_spawn_request(
+    state: &Shared,
+    actor: &Actor,
+    device: &str,
+    id: &str,
+) -> ApiResult<RequestView> {
+    let owner = crews_owner(actor)?;
+    owners_request(state, owner, id)?;
+    let decision = state.agent.deny_request(id, device).map_err(agent_error)?;
+    let view = decided(decision)?;
+    record_spawn_event(
+        state,
+        EVENT_SPAWN_REQUEST_DECIDED,
+        Some(owner),
+        Some(device),
+        &request_detail(&view),
+    )
+    .await;
+    Ok(view)
+}
+
+/// The expiry sweeper's pass (P-5), audited per request.
+pub async fn sweep_spawn_requests(state: &Shared) {
+    let swept = match state.agent.expire_requests() {
+        Ok(swept) => swept,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not sweep spawn requests");
+            return;
+        }
+    };
+    for r in swept {
+        let owner = state.agent.get(&r.requester).ok().map(|s| s.owner_user_id);
+        let view = RequestView::of(r, None);
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_REQUEST_EXPIRED,
+            owner.as_deref(),
+            None,
+            &request_detail(&view),
+        )
+        .await;
+    }
+}
+
 // ---- Agent installs (decision 133) ------------------------------------
 //
 // The owner's routes are session tier only, so an `stk_` key or a host token

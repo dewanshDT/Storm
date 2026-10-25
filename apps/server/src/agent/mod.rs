@@ -16,12 +16,17 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
+// Dark until 134-5: no tool creates a request yet.
+#[allow(dead_code)]
+pub mod approval;
 pub mod cache;
 pub mod credential;
 pub mod images;
 pub mod jobs;
 pub mod store;
 
+#[cfg(test)]
+mod approval_tests;
 #[cfg(test)]
 mod spawn_tests;
 
@@ -578,6 +583,9 @@ struct Live {
     hosts: HashMap<String, HostLink>,
     sessions: HashMap<String, SessionLive>,
     next_generation: u64,
+    /// Whether C0 held for each host when its agents were last told, so a
+    /// flip sends `list_changed` once (134-3). Kept across links.
+    c0: HashMap<String, bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -593,6 +601,8 @@ pub struct AgentManager {
     jobs: Mutex<jobs::Jobs>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
+    /// Bumped whenever the approval engine decides a request.
+    requests: watch::Sender<u64>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -646,6 +656,7 @@ impl AgentManager {
             jobs: Mutex::new(jobs::Jobs::default()),
             config_path,
             config: Mutex::new(config),
+            requests: watch::channel(0).0,
         })
     }
 
@@ -909,6 +920,7 @@ impl AgentManager {
         for session in replay {
             self.send(host_id, Command::Replay { session, from: 0 })?;
         }
+        self.reassess_spawn_gate(host_id);
         Ok(())
     }
 
@@ -942,6 +954,7 @@ impl AgentManager {
             link.inventory.send_modify(|v| *v += 1);
         }
         self.record_identity(host_id, &identity);
+        self.reassess_spawn_gate(host_id);
         Ok(())
     }
 
@@ -994,6 +1007,7 @@ impl AgentManager {
         if let Some(link) = self.live.lock().unwrap().hosts.get_mut(host_id) {
             link.isolation_verified = true;
         }
+        self.reassess_spawn_gate(host_id);
     }
 
     /// C0 (134r): nothing privileged unless the host checks every
