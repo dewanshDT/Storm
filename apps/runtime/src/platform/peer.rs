@@ -162,8 +162,8 @@ mod imp {
         super::MACOS
     };
 
-    /// `PROC_PIDT_BSDINFOWITHUNIQID` in `<sys/proc_info.h>`, not in `libc`.
-    const PROC_PIDT_BSDINFOWITHUNIQID: libc::c_int = 18;
+    /// `PROC_PIDUNIQIDENTIFIERINFO` in `<sys/proc_info.h>`, not in `libc`.
+    const PROC_PIDUNIQIDENTIFIERINFO: libc::c_int = 17;
 
     /// `struct proc_uniqidentifierinfo`. Only its layout matters past
     /// `p_idversion`.
@@ -179,41 +179,24 @@ mod imp {
         p_reserve3: u64,
     }
 
-    /// `struct proc_bsdinfowithuniqid`.
-    #[repr(C)]
-    struct BsdInfoWithUniqId {
-        pbsd: libc::proc_bsdinfo,
-        p_uniqidentifier: UniqIdentifierInfo,
-    }
-
     /// One read of a process: what the walk needs of it.
     struct Info {
         ppid: i32,
         zombie: bool,
-        /// When it started, which exec keeps and a reused number cannot.
+        /// When it started, which a reused number cannot match.
         start: (u64, u64),
-        /// What its audit token names: a new number on every exec as well as
-        /// on every fork.
-        idversion: i32,
     }
 
-    /// `None` once there is no process with that number.
-    fn info(pid: i32) -> io::Result<Option<Info>> {
+    /// `proc_pidinfo` of `flavor` into a `T`; `None` once there is no
+    /// process with that number.
+    fn pidinfo<T>(pid: i32, flavor: libc::c_int) -> io::Result<Option<T>> {
         if pid <= 0 {
             return Err(io::ErrorKind::InvalidInput.into());
         }
-        let mut buf = std::mem::MaybeUninit::<BsdInfoWithUniqId>::zeroed();
-        let size = std::mem::size_of::<BsdInfoWithUniqId>() as libc::c_int;
+        let mut buf = std::mem::MaybeUninit::<T>::zeroed();
+        let size = std::mem::size_of::<T>() as libc::c_int;
         // SAFETY: `buf` is valid for writes of `size` bytes.
-        let n = unsafe {
-            libc::proc_pidinfo(
-                pid,
-                PROC_PIDT_BSDINFOWITHUNIQID,
-                0,
-                buf.as_mut_ptr().cast(),
-                size,
-            )
-        };
+        let n = unsafe { libc::proc_pidinfo(pid, flavor, 0, buf.as_mut_ptr().cast(), size) };
         if n <= 0 {
             let e = io::Error::last_os_error();
             return match e.raw_os_error() {
@@ -224,14 +207,25 @@ mod imp {
         if n != size {
             return Err(io::ErrorKind::InvalidData.into());
         }
-        // SAFETY: the kernel filled all of it, and every field is plain data.
-        let buf = unsafe { buf.assume_init() };
-        Ok(Some(Info {
-            ppid: buf.pbsd.pbi_ppid as i32,
-            zombie: buf.pbsd.pbi_status == libc::SZOMB,
-            start: (buf.pbsd.pbi_start_tvsec, buf.pbsd.pbi_start_tvusec),
-            idversion: buf.p_uniqidentifier.p_idversion,
-        }))
+        // SAFETY: the kernel filled all of it, and `T` is plain data.
+        Ok(Some(unsafe { buf.assume_init() }))
+    }
+
+    /// `PROC_PIDTBSDINFO`, which answers for any process, root's included:
+    /// a walk that leaves the host's account still has to reach launchd.
+    fn info(pid: i32) -> io::Result<Option<Info>> {
+        Ok(
+            pidinfo::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO)?.map(|b| Info {
+                ppid: b.pbi_ppid as i32,
+                zombie: b.pbi_status == libc::SZOMB,
+                start: (b.pbi_start_tvsec, b.pbi_start_tvusec),
+            }),
+        )
+    }
+
+    /// The pid version an audit token for `pid` would carry now.
+    fn idversion(pid: i32) -> io::Result<Option<i32>> {
+        Ok(pidinfo::<UniqIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?.map(|u| u.p_idversion))
     }
 
     /// A process as the host saw it: its number and when it started. There
@@ -276,7 +270,7 @@ mod imp {
 
     /// The process that connected `stream`, from its audit token. The token
     /// carries the pid version, so a number that has since gone to another
-    /// process, or a process that has exec'd since, reads as gone.
+    /// process reads as gone.
     pub fn peer(stream: &impl AsFd) -> io::Result<Process> {
         let mut token = [0u32; 8];
         let mut len = std::mem::size_of_val(&token) as libc::socklen_t;
@@ -302,15 +296,25 @@ mod imp {
         if pid <= 0 {
             return Ok(Process { pid, start: (0, 0) });
         }
-        Ok(match info(pid)? {
-            Some(i) if i.idversion == version => Process {
-                pid,
-                start: i.start,
-            },
-            _ => Process {
-                pid: -1,
-                start: (0, 0),
-            },
+        // The start time is read after the version matched, so it is that
+        // process's unless the number was reused in between — which the
+        // second version read catches.
+        let gone = Process {
+            pid: -1,
+            start: (0, 0),
+        };
+        if idversion(pid)? != Some(version) {
+            return Ok(gone);
+        }
+        let Some(i) = info(pid)? else {
+            return Ok(gone);
+        };
+        if idversion(pid)? != Some(version) {
+            return Ok(gone);
+        }
+        Ok(Process {
+            pid,
+            start: i.start,
         })
     }
 

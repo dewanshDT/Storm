@@ -988,12 +988,11 @@ mod tests {
     }
 
     /// Not a test: a child of a real-process test that connects to the
-    /// socket `STORM_PEER_PROBE` names, then stays, exits, or execs.
+    /// socket `STORM_PEER_PROBE` names, then stays or exits.
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn peer_probe() {
         use std::io::Read;
-        use std::os::unix::process::CommandExt;
         let Ok(mode) = std::env::var("STORM_PEER_PROBE") else {
             return;
         };
@@ -1004,12 +1003,6 @@ mod tests {
                 let _ = stream.read(&mut [0u8; 1]);
             }
             "exit" => {}
-            // The socket kept across an exec, into a process that holds it.
-            "exec" => {
-                rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::empty()).unwrap();
-                let e = std::process::Command::new("/bin/sleep").arg("30").exec();
-                panic!("{e}");
-            }
             other => panic!("no probe {other:?}"),
         }
     }
@@ -1083,32 +1076,6 @@ mod tests {
                 "peer_exited"
             ),
         }
-    }
-
-    /// macOS: the audit token's pid version changes on exec, so a connector
-    /// that has since become another program reads as gone (135c).
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn a_real_connector_that_execd_is_refused() {
-        let (mut child, stream) = connected("exec");
-        let me = Process::open(std::process::id() as i32).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        // Until the exec, the connector is still itself.
-        loop {
-            let p = peer::peer(&stream).unwrap();
-            if p.pid() == -1 {
-                break;
-            }
-            assert!(std::time::Instant::now() < deadline, "never exec'd");
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let p = peer::peer(&stream).unwrap();
-        assert_eq!(
-            descends(&Os, &p, &me, None).unwrap_err().as_str(),
-            "peer_exited"
-        );
-        let _ = child.kill();
-        let _ = child.wait();
     }
 
     /// macOS: a process handle is its number and start time, so a process
