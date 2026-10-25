@@ -89,6 +89,8 @@ enum Command {
     /// Tells the host the agent's permission prompt is waiting for a person
     /// (`permission_prompt`) or answered (`none`). Run by the agent's own hook
     /// or plugin, never by hand.
+    // Hidden while no adapter's hooks are on (134-9): the site lists commands.
+    #[command(hide = true)]
     Attention { kind: String },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
