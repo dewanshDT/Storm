@@ -27,6 +27,14 @@ mod imp {
         pub fn installed(_: &std::path::Path) -> Option<Self> {
             None
         }
+
+        pub fn agent_job(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::io::Result<Result<Option<String>, String>> {
+            match self._never {}
+        }
     }
 
     #[derive(Clone)]
