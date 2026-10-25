@@ -9,18 +9,19 @@
 //!
 //! The helper's wire format is its own crate's (`apps/runtime/isolation`,
 //! `protocol.rs`): one JSON line each way, `SCM_RIGHTS` beside it. The two
-//! crates share no code; `tests/isolation.rs` runs this client against that
-//! helper.
+//! crates share no code; `tests/isolation_wire.rs` parses every request this
+//! client sends with the helper's own parser. Linux only (136k).
 
-#[cfg(unix)]
 pub use imp::*;
 
-#[cfg(not(unix))]
+#[cfg(not(target_os = "linux"))]
 mod imp {
     /// No isolation off Linux (136k): a host there never gets a link, so
     /// with isolation on it starts nothing.
     #[derive(Clone, Debug)]
-    pub struct Link(std::convert::Infallible);
+    pub struct Link {
+        _never: std::convert::Infallible,
+    }
 
     impl Link {
         pub fn installed(_: &std::path::Path) -> Option<Self> {
@@ -35,7 +36,7 @@ mod imp {
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 mod imp {
     use std::io::{self, IoSlice, IoSliceMut};
     use std::mem::MaybeUninit;
@@ -277,7 +278,7 @@ mod imp {
 
     /// A test helper that runs sessions as this account, on the terminal it
     /// is handed, speaking the helper's wire format over a real socket.
-    #[cfg(all(test, target_os = "linux"))]
+    #[cfg(test)]
     pub mod fake {
         use super::*;
         use std::collections::HashMap;

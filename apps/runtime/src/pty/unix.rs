@@ -29,7 +29,16 @@ use crate::provider::TerminalSize;
 /// on an isolated host, through the isolation helper (decision 136).
 pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> {
     if let Some(isolated) = &launch.isolated {
+        #[cfg(target_os = "linux")]
         return spawn_isolated(launch, size, isolated);
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = isolated;
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "per-session isolation is Linux only",
+            ));
+        }
     }
     let (master, slave) = open(size)?;
     let mut command = Command::new(&launch.program);
@@ -73,7 +82,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
 /// A session in its own unit (136d). The host keeps the master; the slave
 /// goes to the helper and is closed here once the unit has it, so the
 /// master sees end-of-file when the session's last process lets go.
-/// Linux only in practice: elsewhere no host has a link (136k).
+#[cfg(target_os = "linux")]
 fn spawn_isolated(
     launch: &Launch,
     size: TerminalSize,
@@ -117,18 +126,12 @@ fn spawn_isolated(
         &master,
         rustix::fs::fcntl_getfl(&master)? | OFlags::NONBLOCK,
     )?;
-    #[cfg(target_os = "linux")]
     let leader = match &pidfd {
         Some(fd) => Some(crate::platform::peer::Process::from_pidfd(
             pid,
             fd.try_clone()?,
         )),
         None => None,
-    };
-    #[cfg(not(target_os = "linux"))]
-    let leader = {
-        let _ = pid;
-        None
     };
     let unit = std::sync::Arc::new(Unit {
         link: link.clone(),
@@ -152,6 +155,7 @@ fn spawn_isolated(
 /// program is the operator's, so it is not here. The variables are what the
 /// session would have been given on top of the host's own: the helper's
 /// unit starts from systemd's environment, not this process's.
+#[cfg(target_os = "linux")]
 fn write_launch(path: &std::path::Path, launch: &Launch) -> io::Result<()> {
     let text = |s: &std::ffi::OsStr| {
         s.to_str()
@@ -192,6 +196,7 @@ fn write_launch(path: &std::path::Path, launch: &Launch) -> io::Result<()> {
 }
 
 /// A session the helper started, shared by its child and its group.
+#[cfg(target_os = "linux")]
 pub(crate) struct Unit {
     link: crate::isolation::Link,
     session: String,
@@ -201,6 +206,7 @@ pub(crate) struct Unit {
     ended: std::sync::atomic::AtomicBool,
 }
 
+#[cfg(target_os = "linux")]
 impl Unit {
     fn signal(&self, signal: &str) {
         if self.ended.load(std::sync::atomic::Ordering::SeqCst) {
@@ -313,6 +319,7 @@ pub(crate) struct Child(ChildKind);
 
 enum ChildKind {
     Local(std::process::Child),
+    #[cfg(target_os = "linux")]
     Unit(std::sync::Arc<Unit>),
 }
 
@@ -326,6 +333,7 @@ impl Child {
                     signal: status.signal(),
                 })
             }
+            #[cfg(target_os = "linux")]
             ChildKind::Unit(unit) => unit.wait(),
         }
     }
@@ -404,6 +412,7 @@ enum GroupKind {
         /// [`crate::platform::SESSION_TAG`].
         tag: String,
     },
+    #[cfg(target_os = "linux")]
     Unit(std::sync::Arc<Unit>),
 }
 
@@ -415,6 +424,7 @@ impl Group {
             GroupKind::Local { leader, .. } => {
                 let _ = rustix::process::kill_process_group(*leader, Signal::HUP);
             }
+            #[cfg(target_os = "linux")]
             GroupKind::Unit(unit) => unit.signal("hup"),
         }
     }
@@ -423,6 +433,7 @@ impl Group {
     pub fn hang_up_rest(&self) {
         match &self.0 {
             GroupKind::Local { leader, tag } => signal_each(&stragglers(*leader, tag), Signal::HUP),
+            #[cfg(target_os = "linux")]
             GroupKind::Unit(unit) => unit.signal("hup"),
         }
     }
@@ -436,6 +447,7 @@ impl Group {
                 let _ = rustix::process::kill_process_group(*leader, Signal::KILL);
                 signal_each(&stragglers(*leader, tag), Signal::KILL);
             }
+            #[cfg(target_os = "linux")]
             GroupKind::Unit(unit) => unit.signal("kill"),
         }
     }
@@ -443,6 +455,7 @@ impl Group {
     pub fn is_empty(&self) -> bool {
         match &self.0 {
             GroupKind::Local { leader, tag } => stragglers(*leader, tag).is_empty(),
+            #[cfg(target_os = "linux")]
             GroupKind::Unit(unit) => unit.ended.load(std::sync::atomic::Ordering::SeqCst),
         }
     }
