@@ -1,7 +1,8 @@
 //! What the OS says about the process at the other end of the bridge socket
-//! and the processes above it (decision 135b). Linux has it: `SO_PEERPIDFD`,
-//! `pidfd_open` and `/proc`. Everywhere else every call is unsupported, and
-//! [`support`] says how the host reports that (135c, 135d).
+//! and the processes above it (decision 135b, 135c). Linux has it:
+//! `SO_PEERPIDFD`, `pidfd_open` and `/proc`. macOS has `LOCAL_PEERTOKEN` and
+//! `proc_pidinfo`, built but not yet reported (G-135-4). Windows has neither,
+//! and [`support`] says how the host reports each (135d).
 
 pub use imp::{Process, parent, peer, ptrace_scope, socketpair_peer};
 
@@ -19,6 +20,16 @@ pub enum Support {
 pub fn support() -> Support {
     imp::SUPPORT
 }
+
+/// macOS's mechanism: the peer's audit token, then `proc_pidinfo` for each
+/// ancestor, checked by start time (135c).
+pub const MACOS_MECHANISM: &str = "local_peertoken";
+
+/// What a macOS host reports. 135c: `unavailable` until G-135-4 passes with
+/// real agents on a real Mac — never `verified` on an untested mechanism.
+/// **G-135-4 switch:** once it has passed, this becomes
+/// `Support::Available(MACOS_MECHANISM)`, and nothing else changes.
+pub const MACOS: Support = Support::Unavailable("macos_not_gated");
 
 #[cfg(target_os = "linux")]
 mod imp {
@@ -138,20 +149,199 @@ mod imp {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod imp {
+    use std::io;
+    use std::os::fd::{AsFd, AsRawFd};
+
+    /// The unit tests, and a host built for G-135-4, run the mechanism; a
+    /// release reports [`super::MACOS`].
+    pub const SUPPORT: super::Support = if cfg!(any(test, feature = "macos-identity-gate")) {
+        super::Support::Available(super::MACOS_MECHANISM)
+    } else {
+        super::MACOS
+    };
+
+    /// `PROC_PIDT_BSDINFOWITHUNIQID` in `<sys/proc_info.h>`, not in `libc`.
+    const PROC_PIDT_BSDINFOWITHUNIQID: libc::c_int = 18;
+
+    /// `struct proc_uniqidentifierinfo`. Only its layout matters past
+    /// `p_idversion`.
+    #[allow(dead_code)]
+    #[repr(C)]
+    struct UniqIdentifierInfo {
+        p_uuid: [u8; 16],
+        p_uniqueid: u64,
+        p_puniqueid: u64,
+        p_idversion: i32,
+        p_orig_ppidversion: i32,
+        p_reserve2: u64,
+        p_reserve3: u64,
+    }
+
+    /// `struct proc_bsdinfowithuniqid`.
+    #[repr(C)]
+    struct BsdInfoWithUniqId {
+        pbsd: libc::proc_bsdinfo,
+        p_uniqidentifier: UniqIdentifierInfo,
+    }
+
+    /// One read of a process: what the walk needs of it.
+    struct Info {
+        ppid: i32,
+        zombie: bool,
+        /// When it started, which exec keeps and a reused number cannot.
+        start: (u64, u64),
+        /// What its audit token names: a new number on every exec as well as
+        /// on every fork.
+        idversion: i32,
+    }
+
+    /// `None` once there is no process with that number.
+    fn info(pid: i32) -> io::Result<Option<Info>> {
+        if pid <= 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut buf = std::mem::MaybeUninit::<BsdInfoWithUniqId>::zeroed();
+        let size = std::mem::size_of::<BsdInfoWithUniqId>() as libc::c_int;
+        // SAFETY: `buf` is valid for writes of `size` bytes.
+        let n = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDT_BSDINFOWITHUNIQID,
+                0,
+                buf.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if n <= 0 {
+            let e = io::Error::last_os_error();
+            return match e.raw_os_error() {
+                Some(libc::ESRCH) => Ok(None),
+                _ => Err(e),
+            };
+        }
+        if n != size {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // SAFETY: the kernel filled all of it, and every field is plain data.
+        let buf = unsafe { buf.assume_init() };
+        Ok(Some(Info {
+            ppid: buf.pbsd.pbi_ppid as i32,
+            zombie: buf.pbsd.pbi_status == libc::SZOMB,
+            start: (buf.pbsd.pbi_start_tvsec, buf.pbsd.pbi_start_tvusec),
+            idversion: buf.p_uniqidentifier.p_idversion,
+        }))
+    }
+
+    /// A process as the host saw it: its number and when it started. There
+    /// is no pidfd, so [`Process::alive`] asks whether that number still
+    /// names a live process that started then — a reused number started
+    /// later.
+    #[derive(Debug)]
+    pub struct Process {
+        pid: i32,
+        start: (u64, u64),
+    }
+
+    impl Process {
+        pub fn open(pid: i32) -> io::Result<Self> {
+            let i = info(pid)?.ok_or(io::ErrorKind::NotFound)?;
+            Ok(Self {
+                pid,
+                start: i.start,
+            })
+        }
+
+        /// `-1` for a peer that was gone, or no longer the process that
+        /// connected, by the time it was read.
+        pub fn pid(&self) -> i32 {
+            self.pid
+        }
+
+        pub fn alive(&self) -> io::Result<bool> {
+            if self.pid <= 0 {
+                return Ok(false);
+            }
+            Ok(info(self.pid)?.is_some_and(|i| i.start == self.start && !i.zombie))
+        }
+
+        /// Whether this process started no later than `child`: a parent
+        /// always does, and a process that took a dead parent's number did
+        /// not (135c's start-time check).
+        pub fn older_than(&self, child: &Process) -> bool {
+            self.start <= child.start
+        }
+    }
+
+    /// The process that connected `stream`, from its audit token. The token
+    /// carries the pid version, so a number that has since gone to another
+    /// process, or a process that has exec'd since, reads as gone.
+    pub fn peer(stream: &impl AsFd) -> io::Result<Process> {
+        let mut token = [0u32; 8];
+        let mut len = std::mem::size_of_val(&token) as libc::socklen_t;
+        // SAFETY: `token` and `len` are valid for writes of the sizes given,
+        // and the descriptor is borrowed for the call.
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_fd().as_raw_fd(),
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERTOKEN,
+                token.as_mut_ptr().cast(),
+                &mut len,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len as usize != std::mem::size_of_val(&token) {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        // `audit_token_to_pid` and `audit_token_to_pidversion`.
+        let (pid, version) = (token[5] as i32, token[7] as i32);
+        if pid <= 0 {
+            return Ok(Process { pid, start: (0, 0) });
+        }
+        Ok(match info(pid)? {
+            Some(i) if i.idversion == version => Process {
+                pid,
+                start: i.start,
+            },
+            _ => Process {
+                pid: -1,
+                start: (0, 0),
+            },
+        })
+    }
+
+    /// `pid`'s parent as the kernel says now.
+    pub fn parent(pid: i32) -> io::Result<i32> {
+        Ok(info(pid)?.ok_or(io::ErrorKind::NotFound)?.ppid)
+    }
+
+    /// Yama is Linux's; macOS has nothing to read.
+    pub fn ptrace_scope() -> io::Result<u32> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+
+    /// `LOCAL_PEERTOKEN` on one end of a fresh socket pair: this process.
+    pub fn socketpair_peer() -> io::Result<Process> {
+        let (a, _b) = std::os::unix::net::UnixStream::pair()?;
+        peer(&a)
+    }
+}
+
+#[cfg(windows)]
 mod imp {
     use std::io;
 
-    #[cfg(target_os = "macos")]
-    pub const SUPPORT: super::Support = super::Support::Unavailable("macos_not_gated");
-    #[cfg(windows)]
     pub const SUPPORT: super::Support = super::Support::Unsupported("windows");
 
     fn unsupported() -> io::Error {
         io::ErrorKind::Unsupported.into()
     }
 
-    /// Never constructed off Linux.
+    /// Never constructed on Windows.
     #[derive(Debug)]
     pub struct Process {
         never: std::convert::Infallible,

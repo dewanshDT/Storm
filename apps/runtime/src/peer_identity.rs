@@ -3,8 +3,10 @@
 //!
 //! A handle is not proof: every process of the host account can read every
 //! bridge's environment. So on a host that reports `verified`, the host asks
-//! the kernel who connected (`SO_PEERPIDFD`) and walks that process's
-//! ancestors to the session's leader (135b). Every failure refuses, as
+//! the kernel who connected (`SO_PEERPIDFD` on Linux, `LOCAL_PEERTOKEN` on
+//! macOS) and walks that process's ancestors to the session's leader (135b,
+//! 135c). macOS reports `unavailable` until G-135-4 has passed on a real Mac
+//! ([`crate::platform::peer::MACOS`]). Every failure refuses, as
 //! `identity_mismatch`, never forwarded (135a). A host that cannot check
 //! says so — `unavailable` with the failing precondition, or `unsupported` —
 //! and keeps today's handle-only behaviour, which the server labels (135d).
@@ -114,12 +116,18 @@ pub trait Procs {
     fn parent(&self, pid: i32) -> io::Result<i32>;
     /// A handle that keeps naming `pid`'s process whatever reuses the number.
     fn open(&self, pid: i32) -> io::Result<Self::P>;
+    /// Whether `parent` started no later than `child`. A pidfd already pins
+    /// its process, so only a platform without one (macOS) checks.
+    fn older(&self, _parent: &Self::P, _child: &Self::P) -> io::Result<bool> {
+        Ok(true)
+    }
 }
 
 /// 135b: whether `peer` descends from `leader`, walking up from it. At each
 /// hop the parent's handle is opened first, then the child is checked to be
-/// alive and to still have that parent — otherwise the number read may
-/// already name another process. Refused at pid 1, at `host`, or after
+/// alive and to still have that parent, and the parent not to have started
+/// after it — otherwise the number read may already name another process.
+/// Refused at pid 1, at `host`, or after
 /// [`MAX_HOPS`]; the leader and the peer must both be alive at the end.
 pub fn descends<S: Procs>(
     os: &S,
@@ -160,7 +168,7 @@ pub fn descends<S: Procs>(
             return Err(Mismatch::OutsideNamespace);
         }
         let up = os.open(ppid)?;
-        if !os.alive(node)? || os.parent(pid)? != ppid {
+        if !os.alive(node)? || os.parent(pid)? != ppid || !os.older(&up, node)? {
             return Err(Mismatch::Reparented);
         }
         above = Some(up);
@@ -194,6 +202,16 @@ impl Procs for Os {
     fn open(&self, pid: i32) -> io::Result<Process> {
         Process::open(pid)
     }
+    #[cfg(target_os = "macos")]
+    fn older(&self, parent: &Process, child: &Process) -> io::Result<bool> {
+        Ok(parent.older_than(child))
+    }
+}
+
+/// A platform's start-up preconditions: the first that fails is the reason
+/// the host reports `unavailable`.
+pub trait Preconditions {
+    fn verdict(&self) -> Result<(), &'static str>;
 }
 
 /// What the preconditions read, so each failure can be tested without root.
@@ -243,6 +261,50 @@ impl Probe {
     }
 }
 
+impl Preconditions for Probe {
+    fn verdict(&self) -> Result<(), &'static str> {
+        Probe::verdict(self)
+    }
+}
+
+/// macOS's preconditions (135c). There is no Yama: what keeps one process
+/// of the account out of another is the platform's own rule that
+/// `task_for_pid` needs root or a debugger's entitlement.
+pub struct MacProbe {
+    pub proc_readable: bool,
+    pub local_peertoken: bool,
+    pub self_test: bool,
+}
+
+impl MacProbe {
+    /// Reads every precondition and runs the self-test on this machine.
+    pub fn run() -> Self {
+        let me = std::process::id() as i32;
+        // A token whose pid version is not this process's reads as gone.
+        let local_peertoken = peer::socketpair_peer().is_ok_and(|p| p.pid() == me);
+        Self {
+            proc_readable: peer::parent(me).is_ok_and(|p| p > 0),
+            local_peertoken,
+            self_test: local_peertoken && self_test(&Os, me).is_ok(),
+        }
+    }
+}
+
+impl Preconditions for MacProbe {
+    fn verdict(&self) -> Result<(), &'static str> {
+        if !self.proc_readable {
+            return Err("proc_unreadable");
+        }
+        if !self.local_peertoken {
+            return Err("no_local_peertoken");
+        }
+        if !self.self_test {
+            return Err("self_test");
+        }
+        Ok(())
+    }
+}
+
 /// The start-up self-test: the walk on real processes, both ways, and a
 /// pidfd seeing a process exit.
 ///
@@ -283,10 +345,13 @@ pub struct Identity {
 
 impl Identity {
     pub fn detect() -> Self {
+        #[cfg(target_os = "macos")]
+        return Self::from_support(peer::support(), MacProbe::run);
+        #[cfg(not(target_os = "macos"))]
         Self::from_support(peer::support(), Probe::run)
     }
 
-    fn from_support(support: Support, probe: impl FnOnce() -> Probe) -> Self {
+    fn from_support<V: Preconditions>(support: Support, probe: impl FnOnce() -> V) -> Self {
         let report = match support {
             Support::Unsupported(reason) => Report {
                 state: State::Unsupported,
@@ -344,11 +409,16 @@ impl Identity {
 }
 
 /// The whole check for one connection on a verified host: the precondition
-/// that can change at run time, then the walk from `peer` to `leader`.
+/// that can change at run time (Linux's `ptrace_scope`), then the walk from
+/// `peer` to `leader`.
 pub fn check(peer: &Process, leader: &Process) -> Result<(), Mismatch> {
-    check_with(peer::ptrace_scope(), peer, leader)
+    #[cfg(target_os = "linux")]
+    return check_with(peer::ptrace_scope(), peer, leader);
+    #[cfg(not(target_os = "linux"))]
+    descends(&Os, peer, leader, Some(std::process::id() as i32))
 }
 
+#[cfg(target_os = "linux")]
 fn check_with(
     ptrace_scope: io::Result<u32>,
     peer: &Process,
@@ -369,6 +439,7 @@ mod tests {
 
     type OnOpen = dyn Fn(&Tree, i32);
     type Case = (fn(&mut Probe), &'static str);
+    type MacCase = (fn(&mut MacProbe), &'static str);
 
     /// A synthetic process table. A handle is `(pid, generation)`: a reused
     /// number gets a new generation, and a handle is alive only while its
@@ -381,6 +452,9 @@ mod tests {
         on_open: RefCell<Option<Box<OnOpen>>>,
         fail_parent: Cell<Option<i32>>,
         fail_open: Cell<Option<i32>>,
+        /// When a handle's process started, for the start-time check; 0 if
+        /// not given.
+        starts: RefCell<HashMap<(i32, u32), u64>>,
     }
 
     impl Tree {
@@ -447,6 +521,11 @@ mod tests {
                 .map(|&(g, _, _)| g)
                 .ok_or(io::ErrorKind::NotFound)?;
             Ok((pid, g))
+        }
+        fn older(&self, parent: &(i32, u32), child: &(i32, u32)) -> io::Result<bool> {
+            let starts = self.starts.borrow();
+            let at = |h| starts.get(h).copied().unwrap_or(0);
+            Ok(at(parent) <= at(child))
         }
     }
 
@@ -584,6 +663,21 @@ mod tests {
     }
 
     #[test]
+    fn a_parent_younger_than_its_child_is_refused() {
+        // A number read as 40's parent that, by the time it is opened, names
+        // a process started after 40: not its parent, whatever the table
+        // says (135c's start-time check, which a pidfd makes moot).
+        let t = tree();
+        t.starts.borrow_mut().insert((40, 0), 50);
+        t.reuse(30, 20);
+        t.starts.borrow_mut().insert((30, 1), 60);
+        assert_eq!(refused(walk(&t, 40, 20)), "reparented");
+        // Started at the same moment or before is a parent.
+        t.starts.borrow_mut().insert((30, 1), 50);
+        assert!(walk(&t, 40, 20).is_ok());
+    }
+
+    #[test]
     fn an_exited_leader_whose_number_was_reused_is_refused() {
         let t = tree();
         let leader = t.h(20);
@@ -687,6 +781,55 @@ mod tests {
         }
     }
 
+    fn mac_passing() -> MacProbe {
+        MacProbe {
+            proc_readable: true,
+            local_peertoken: true,
+            self_test: true,
+        }
+    }
+
+    /// G-135-3 for macOS's preconditions, once a host runs the mechanism.
+    #[test]
+    fn each_failed_macos_precondition_is_unavailable_with_its_reason() {
+        let mechanism = crate::platform::peer::MACOS_MECHANISM;
+        let id = Identity::from_support(Support::Available(mechanism), mac_passing);
+        assert_eq!(
+            id.report().to_json(),
+            json!({"state": "verified", "mechanism": "local_peertoken", "reason": null})
+        );
+        let cases: [MacCase; 3] = [
+            (|p| p.proc_readable = false, "proc_unreadable"),
+            (|p| p.local_peertoken = false, "no_local_peertoken"),
+            (|p| p.self_test = false, "self_test"),
+        ];
+        for (break_it, reason) in cases {
+            let mut p = mac_passing();
+            break_it(&mut p);
+            let r = Identity::from_support(Support::Available(mechanism), || p).report();
+            assert_eq!(
+                (r.state, r.mechanism, r.reason),
+                (State::Unavailable, Some(mechanism), Some(reason))
+            );
+        }
+    }
+
+    /// 135c: what a release reports on macOS until G-135-4 passes, whatever
+    /// the mechanism can do. Changing it is the gate's one-line switch.
+    #[test]
+    fn macos_ships_unavailable_until_g_135_4() {
+        assert!(matches!(
+            crate::platform::peer::MACOS,
+            Support::Unavailable("macos_not_gated")
+        ));
+        let probe = || -> MacProbe { panic!("must not probe") };
+        let mac = Identity::from_support(crate::platform::peer::MACOS, probe);
+        assert_eq!(
+            mac.report().to_json(),
+            json!({"state": "unavailable", "mechanism": null, "reason": "macos_not_gated"})
+        );
+    }
+
     #[test]
     fn the_platforms_without_the_mechanism_say_so_without_probing() {
         let probe = || -> Probe { panic!("must not probe") };
@@ -711,8 +854,10 @@ mod tests {
     }
 
     /// This platform's own report, as CI runs it on each: Linux hosts with
-    /// the mechanism are `verified`; macOS `unavailable`; Windows
-    /// `unsupported` (135b–135d, AM80).
+    /// the mechanism are `verified`; Windows `unsupported` (135b–135d,
+    /// AM80). A macOS release is `unavailable`
+    /// ([`macos_ships_unavailable_until_g_135_4`]); these tests run the
+    /// mechanism, so on the CI Mac its self-test has to pass.
     #[test]
     fn this_platform_reports_what_135_says() {
         let r = Identity::detect().report();
@@ -724,15 +869,16 @@ mod tests {
         );
         #[cfg(target_os = "macos")]
         assert_eq!(
-            (r.state, r.reason),
-            (State::Unavailable, Some("macos_not_gated"))
+            (r.state, r.mechanism, r.reason),
+            (State::Verified, Some("local_peertoken"), None),
+            "this Mac should verify; if it cannot, the reason says why"
         );
         #[cfg(windows)]
         assert_eq!((r.state, r.reason), (State::Unsupported, Some("windows")));
     }
 
     /// The real OS with one lie, to show the self-test notices it.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     struct Lying {
         alive_always: bool,
         one_pid: Option<i32>,
@@ -741,7 +887,7 @@ mod tests {
         moving: Option<&'static std::sync::atomic::AtomicBool>,
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     impl Procs for Lying {
         type P = Process;
         fn pid(&self, p: &Process) -> i32 {
@@ -764,9 +910,12 @@ mod tests {
         fn open(&self, pid: i32) -> io::Result<Process> {
             Process::open(pid)
         }
+        fn older(&self, parent: &Process, child: &Process) -> io::Result<bool> {
+            Os.older(parent, child)
+        }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_self_test_fails_on_a_kernel_that_lies() {
         let me = std::process::id() as i32;
@@ -829,11 +978,150 @@ mod tests {
         assert_eq!(refused(check_with(Ok(1), &me(), &parent)), "reached_host");
     }
 
-    /// The real kernel: a pidfd of a reaped child is not alive, and the walk
-    /// accepts this process under its parent and refuses the reverse.
-    #[cfg(target_os = "linux")]
+    /// The real kernel: a reaped child is not alive (a pidfd on Linux, a
+    /// start time on macOS), and the walk accepts this process under its
+    /// parent and refuses the reverse.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn the_self_test_passes_on_this_kernel() {
         assert_eq!(self_test(&Os, std::process::id() as i32), Ok(()));
+    }
+
+    /// Not a test: a child of a real-process test that connects to the
+    /// socket `STORM_PEER_PROBE` names, then stays, exits, or execs.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn peer_probe() {
+        use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        let Ok(mode) = std::env::var("STORM_PEER_PROBE") else {
+            return;
+        };
+        let (verb, path) = mode.split_once(' ').unwrap();
+        let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+        match verb {
+            "stay" => {
+                let _ = stream.read(&mut [0u8; 1]);
+            }
+            "exit" => {}
+            // The socket kept across an exec, into a process that holds it.
+            "exec" => {
+                rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::empty()).unwrap();
+                let e = std::process::Command::new("/bin/sleep").arg("30").exec();
+                panic!("{e}");
+            }
+            other => panic!("no probe {other:?}"),
+        }
+    }
+
+    /// A child of this process connected to a socket it listens on, and
+    /// the end the host would read.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn connected(verb: &str) -> (std::process::Child, std::os::unix::net::UnixStream) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "peer_identity::tests::peer_probe",
+                "--nocapture",
+                "-q",
+                "--test-threads=1",
+            ])
+            .env("STORM_PEER_PROBE", format!("{verb} {}", path.display()))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let (stream, _) = listener.accept().unwrap();
+        (child, stream)
+    }
+
+    /// G-135-1/G-135-4 on real processes: a child's connection names that
+    /// child, alive, descended from this process — and this process does not
+    /// descend from it.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_real_child_is_named_and_descends_from_its_parent() {
+        let (mut child, stream) = connected("stay");
+        let peer = peer::peer(&stream).unwrap();
+        assert_eq!(peer.pid(), child.id() as i32);
+        assert!(peer.alive().unwrap());
+        let me = Process::open(std::process::id() as i32).unwrap();
+        assert!(descends(&Os, &peer, &me, None).is_ok());
+        let reverse = descends(&Os, &me, &peer, None).unwrap_err();
+        assert_eq!(reverse.as_str(), "reached_init");
+        // The leader is the host's child; the host itself is never a session.
+        let host = Some(std::process::id() as i32);
+        assert_eq!(
+            descends(&Os, &me, &peer, host).unwrap_err().as_str(),
+            "reached_host"
+        );
+        drop(stream);
+        child.wait().unwrap();
+        assert!(!peer.alive().unwrap());
+        assert_eq!(
+            descends(&Os, &peer, &me, None).unwrap_err().as_str(),
+            "peer_exited"
+        );
+    }
+
+    /// A connector that has exited and been reaped is never taken: its
+    /// number may already be someone else's.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn a_real_connector_that_exited_is_refused() {
+        let (mut child, stream) = connected("exit");
+        child.wait().unwrap();
+        let me = Process::open(std::process::id() as i32).unwrap();
+        match peer::peer(&stream) {
+            // Linux refuses to make a pidfd for a reaped process.
+            Err(_) => {}
+            Ok(p) => assert_eq!(
+                descends(&Os, &p, &me, None).unwrap_err().as_str(),
+                "peer_exited"
+            ),
+        }
+    }
+
+    /// macOS: the audit token's pid version changes on exec, so a connector
+    /// that has since become another program reads as gone (135c).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_real_connector_that_execd_is_refused() {
+        let (mut child, stream) = connected("exec");
+        let me = Process::open(std::process::id() as i32).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        // Until the exec, the connector is still itself.
+        loop {
+            let p = peer::peer(&stream).unwrap();
+            if p.pid() == -1 {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "never exec'd");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let p = peer::peer(&stream).unwrap();
+        assert_eq!(
+            descends(&Os, &p, &me, None).unwrap_err().as_str(),
+            "peer_exited"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    /// macOS: a process handle is its number and start time, so a process
+    /// is older than the children it started.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_real_parent_is_older_than_its_child() {
+        let (mut child, stream) = connected("stay");
+        let peer = peer::peer(&stream).unwrap();
+        let me = Process::open(std::process::id() as i32).unwrap();
+        assert!(me.older_than(&peer));
+        assert!(!peer.older_than(&me));
+        drop(stream);
+        child.wait().unwrap();
     }
 }

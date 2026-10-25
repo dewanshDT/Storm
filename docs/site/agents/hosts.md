@@ -47,8 +47,10 @@ inside that session; anything else is refused and logged as
 `identity_mismatch`, even with a valid handle. At start the host logs
 `bridge identity` as `verified`, or as `unavailable` with the reason — most
 often `ptrace_scope` (the kernel's `kernel.yama.ptrace_scope` must be 1 or
-more) or a kernel older than 6.5. macOS hosts report `unavailable` for now
-and Windows hosts `unsupported`; both keep working as before. This binds a
+more) or a kernel older than 6.5. macOS hosts report `unavailable`
+(`macos_not_gated`): the macOS check is built, but stays off until it has
+been tested with real agents on a Mac. Windows hosts report `unsupported`.
+Both keep working as before. This binds a
 connection to its session's processes. It does not isolate sessions of one
 host from each other: they share an account and its files.
 

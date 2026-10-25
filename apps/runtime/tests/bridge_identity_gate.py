@@ -1,8 +1,12 @@
 #!/usr/bin/env python3
-"""Gate G-135-2: bridge identity against real agent CLIs (decision 135f).
+"""Gates G-135-2 and G-135-4: bridge identity against real agent CLIs
+(decisions 135f, 135c).
 
-A real storm-server and a real storm-runtime on a Linux host that reports
-`verified`, and real agents the host launches as it would for anyone:
+A real storm-server and a real storm-runtime on a host that reports
+`verified` — Linux (G-135-2), or macOS (G-135-4, with the host built with
+`--features macos-identity-gate`, since a macOS release reports
+`unavailable` until this gate has passed) — and real agents the host
+launches as it would for anyone:
 Claude Code and OpenCode (MCP bridges and the harness plugin); Codex can be
 named too, but has not been run through it. Per agent it proves:
 
@@ -31,7 +35,8 @@ own permission prompts with Enter.
     RUNTIME_BIN=apps/runtime/target/debug/storm-runtime \\
         python3 apps/runtime/tests/bridge_identity_gate.py
 
-or `make gate-bridge-identity`. `STORM_GATE_AGENTS` (default
+or `make gate-bridge-identity`, which builds the macOS feature on a Mac.
+`STORM_GATE_AGENTS` (default
 `claude-code,opencode`) picks the agents.
 `STORM_GATE_WORKSPACE_PARENT` is where the throwaway workspace goes
 (default the system temp directory): Claude Code asks whether to trust a
@@ -60,11 +65,13 @@ sys.path.insert(0, os.path.join(HERE, "..", "..", "server", "tests"))
 import storm_auth  # noqa: E402
 
 if os.environ.get("STORM_BRIDGE_IDENTITY_GATE") != "1":
-    print("STORM_BRIDGE_IDENTITY_GATE is not 1; skipping G-135-2")
+    print("STORM_BRIDGE_IDENTITY_GATE is not 1; skipping G-135-2 and G-135-4")
     sys.exit(0)
-if not sys.platform.startswith("linux"):
-    print("G-135-2 runs on a verified Linux host only")
+LINUX = sys.platform.startswith("linux")
+if not LINUX and sys.platform != "darwin":
+    print("G-135-2 and G-135-4 run on a Linux or macOS host only")
     sys.exit(2)
+GATE = "G-135-2" if LINUX else "G-135-4"
 
 SERVER_BIN = os.path.abspath(os.environ["SERVER_BIN"])
 RUNTIME_BIN = os.path.abspath(os.environ["RUNTIME_BIN"])
@@ -148,26 +155,59 @@ def version_of(command):
 
 # ---- the session's processes -------------------------------------------------
 
-def environ(pid):
-    try:
-        raw = open(f"/proc/{pid}/environ", "rb").read()
-    except OSError:
-        return {}
-    pairs = (kv.split(b"=", 1) for kv in raw.split(b"\0") if b"=" in kv)
-    return {k.decode(errors="replace"): v.decode(errors="replace") for k, v in pairs}
+# A process's arguments, environment and parent: `/proc` on Linux, and on
+# macOS `KERN_PROCARGS2` (exact, unlike `ps`) and `ps`. Also pasted into the
+# planted hook, so it is a string.
+PROCS = r'''
+import os, subprocess, sys
 
+def _procargs(pid):
+    """argv and the environment, raw."""
+    if sys.platform.startswith("linux"):
+        try:
+            argv = open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0")
+            env = open(f"/proc/{pid}/environ", "rb").read().split(b"\0")
+        except OSError:
+            return [], []
+        return [a for a in argv if a], env
+    import ctypes
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN, KERN_PROCARGS2
+    size = ctypes.c_size_t(1 << 20)
+    buf = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+        return [], []
+    raw = buf.raw[:size.value]
+    argc = int.from_bytes(raw[:4], sys.byteorder)
+    rest = raw[4:]
+    rest = rest[rest.index(b"\0"):].lstrip(b"\0")  # the executable's path
+    parts = rest.split(b"\0")
+    return parts[:argc], parts[argc:]
 
 def cmdline(pid):
-    try:
-        return [a.decode(errors="replace") for a in open(f"/proc/{pid}/cmdline", "rb").read().split(b"\0") if a]
-    except OSError:
-        return []
+    return [a.decode(errors="replace") for a in _procargs(pid)[0]]
+
+def environ(pid):
+    pairs = (kv.split(b"=", 1) for kv in _procargs(pid)[1] if b"=" in kv)
+    return {k.decode(errors="replace"): v.decode(errors="replace") for k, v in pairs}
+
+def ppid(pid):
+    if sys.platform.startswith("linux"):
+        return int(next(l for l in open(f"/proc/{pid}/status") if l.startswith("PPid:")).split()[1])
+    return int(subprocess.run(["ps", "-o", "ppid=", "-p", str(pid)], capture_output=True).stdout.strip())
+
+def pids():
+    if sys.platform.startswith("linux"):
+        return [int(p) for p in os.listdir("/proc") if p.isdigit()]
+    out = subprocess.run(["ps", "-axo", "pid="], capture_output=True).stdout.split()
+    return [int(p) for p in out]
+'''
+exec(PROCS)
 
 
 def processes_of(session):
     """Every live process carrying the session's tag (it is never proof, 135e)."""
-    return [int(p) for p in os.listdir("/proc")
-            if p.isdigit() and environ(p).get("STORM_RUNTIME_SESSION") == session]
+    return [p for p in pids() if environ(p).get("STORM_RUNTIME_SESSION") == session]
 
 
 def bridge_env(session, slug="storm"):
@@ -424,11 +464,12 @@ def run_agent(agent, owner, host_id, vaults, notes):
         with open(planted, "w") as f:
             # The bridge's handle is in the session's MCP config, which the
             # agent's own command line names.
-            f.write(f"""import json, os, subprocess
+            f.write(PROCS + f"""
+import json
 pid, env = os.getpid(), None
 for _ in range(16):
-    pid = int(next(l for l in open(f"/proc/{{pid}}/status") if l.startswith("PPid:")).split()[1])
-    argv = open(f"/proc/{{pid}}/cmdline", "rb").read().decode().split("\\0")
+    pid = ppid(pid)
+    argv = cmdline(pid)
     if "--mcp-config" in argv:
         env = json.load(open(argv[argv.index("--mcp-config") + 1]))["mcpServers"]["storm"]["env"]
         break
@@ -610,8 +651,8 @@ args = ["-i"]
 """)
     os.environ.pop("STORM_SESSION", None)
     os.environ.pop("STORM_DEVICE", None)
-    print(f"G-135-2 on {os.uname().sysname} {os.uname().release}, "
-          f"ptrace_scope {open('/proc/sys/kernel/yama/ptrace_scope').read().strip()}; agents {AGENTS}")
+    scope = f"ptrace_scope {open('/proc/sys/kernel/yama/ptrace_scope').read().strip()}; " if LINUX else ""
+    print(f"{GATE} on {os.uname().sysname} {os.uname().release}, {scope}agents {AGENTS}")
 
     server = subprocess.Popen([SERVER_BIN, "serve", "--vault-root", os.path.join(WORK, "vaults"),
                                "--state", STATE, "--port", str(PORT)],
@@ -638,7 +679,8 @@ args = ["-i"]
             h = next((h for h in hosts or [] if h["id"] == host_id), None)
             return h if h and h["status"] == "online" and h.get("capabilities") else None
         host = wait(online, "the host", 60)
-        if not check("the host is verified (135b)", (host.get("identity") or {}).get("state") == "verified",
+        if not check(f"the host is verified ({'135b' if LINUX else '135c'})",
+                     (host.get("identity") or {}).get("state") == "verified",
                      host.get("identity")):
             return
         status, _ = call("PUT", "/v1/config/mcp", {"agent_writes": True}, auth=owner)
