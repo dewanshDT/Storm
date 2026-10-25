@@ -553,6 +553,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(agent_request_approve),
         )
         .route("/v1/agent/requests/{id}/deny", post(agent_request_deny))
+        // What a session asked for, for the person's cards (134-10).
+        .route("/v1/agent/requests/{id}", get(agent_request))
+        .route(
+            "/v1/agent/sessions/{id}/requests",
+            get(agent_session_requests),
+        )
         .route("/v1/agent/roles", get(agent_roles))
         .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
@@ -2240,6 +2246,24 @@ async fn agent_request_deny(
 ) -> ApiResult<Json<crate::ops::RequestView>> {
     Ok(Json(
         crate::ops::deny_spawn_request(&state, &actor, &auth.authenticated.device.id, &id).await?,
+    ))
+}
+
+async fn agent_request(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::RequestCard>> {
+    Ok(Json(crate::ops::spawn_request(&state, &actor, &id).await?))
+}
+
+async fn agent_session_requests(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::SessionRequests>> {
+    Ok(Json(
+        crate::ops::session_requests(&state, &actor, &id).await?,
     ))
 }
 
@@ -16090,5 +16114,233 @@ pub(crate) mod tests {
             "{refused:?}"
         );
         assert!(f.sent().iter().all(|m| m["type"] != "start"));
+    }
+
+    // ---- the spawning client's reads (decision 134-10) ----
+
+    /// The card's read: what a session asked for, word for word, with what
+    /// became of it, newest first; the signed-in owner's only.
+    #[tokio::test]
+    async fn a_sessions_requests_are_read_word_for_word_by_its_owner_only() {
+        let dir = tempdir::TempDir::new("storm-requests-read").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (session, first) = f.spawn_request().await;
+        let (status, body) = f.decide(&first, "deny", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let second = f.request_from(&session).await;
+
+        let (status, body) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/sessions/{session}/requests"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let listed = body["requests"].as_array().unwrap();
+        assert_eq!(
+            listed.iter().map(|r| r["id"].clone()).collect::<Vec<_>>(),
+            vec![serde_json::json!(second), serde_json::json!(first)],
+            "newest first"
+        );
+        assert_eq!(listed[0]["kind"], "start");
+        assert_eq!(listed[0]["state"], "pending");
+        assert_eq!(listed[0]["task"], "write the tests");
+        assert_eq!(listed[0]["requester"], serde_json::json!(session));
+        assert!(listed[0]["expires_at"].as_str().is_some());
+        assert_eq!(listed[1]["outcome"], "denied");
+        assert!(listed[0].get("text").is_none());
+
+        let (status, card) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/requests/{second}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{card}");
+        assert_eq!(card, listed[0]);
+
+        // A key and the host's credential never reach either route.
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            for path in [
+                format!("/v1/agent/sessions/{session}/requests"),
+                format!("/v1/agent/requests/{second}"),
+            ] {
+                let (status, _) = f.ask(get_with_auth(&path, bearer)).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{path}");
+            }
+        }
+        // Nor an agent or a key's actor, nor another account.
+        let agent = Actor::Agent {
+            session_id: session.clone(),
+            host_id: f.host_id.clone(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        };
+        let key_actor = Actor::Key {
+            key_id: "key_X".into(),
+            user_id: f.owner.clone(),
+        };
+        for actor in [&agent, &key_actor] {
+            let listed = crate::ops::session_requests(&f.state, actor, &session)
+                .await
+                .unwrap_err();
+            let one = crate::ops::spawn_request(&f.state, actor, &second)
+                .await
+                .unwrap_err();
+            for refused in [listed, one] {
+                assert_eq!(
+                    (refused.0, refused.1.as_str()),
+                    (StatusCode::FORBIDDEN, "owner_only")
+                );
+            }
+        }
+        let other = Actor::Session {
+            user_id: "usr_SOMEONE".into(),
+        };
+        assert_eq!(
+            crate::ops::session_requests(&f.state, &other, &session)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            crate::ops::spawn_request(&f.state, &other, &second)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, _) = f
+            .ask(get_with_auth(
+                "/v1/agent/requests/agr_NOPE",
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        // Reading changes nothing.
+        assert_eq!(f.state.agent.request(&second).unwrap().state, "pending");
+    }
+
+    /// A message's card carries its exact text and its target.
+    #[tokio::test]
+    async fn a_message_requests_card_carries_its_exact_text() {
+        let dir = tempdir::TempDir::new("storm-requests-message").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, start) = f.spawn_request().await;
+        let (_, body) = f.decide(&start, "approve", &f.owner_bearer).await;
+        let child = body["session"].as_str().unwrap().to_string();
+        f.report(&child, "running").await;
+        let text = "line one\n  `two` — three";
+        let id = crate::ops::create_spawn_request(
+            &f.state,
+            &parent,
+            crate::agent::store::spawn::NewRequest::Message {
+                target: child.clone(),
+                text: text.into(),
+            },
+        )
+        .await
+        .ok()
+        .expect("created")
+        .unwrap()
+        .id;
+        let (status, card) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/requests/{id}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{card}");
+        assert_eq!(card["kind"], "message");
+        assert_eq!(card["text"], text);
+        assert_eq!(card["target"], serde_json::json!(child));
+        assert!(card.get("task").is_none());
+    }
+
+    /// The switch is on a view only where its host could offer spawning now
+    /// (C0), or where it is already on; nowhere else is any of it shown.
+    #[tokio::test]
+    async fn the_spawn_switch_is_on_a_view_only_where_c0_holds_or_it_is_on() {
+        let dir = tempdir::TempDir::new("storm-spawn-view").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let view = |f: &GatewayFixture, id: String| {
+            let req = get_with_auth(&format!("/v1/agent/sessions/{id}"), &f.owner_bearer);
+            let app = f.app.clone();
+            async move {
+                let (status, body) = send(&app, req).await;
+                assert_eq!(status, StatusCode::OK, "{body}");
+                body
+            }
+        };
+        // Today's host: no identity, no isolation. Nothing.
+        let before = f.launch("claude-code", false).await;
+        assert!(before.get("spawn").is_none(), "{before}");
+        let before = before["id"].as_str().unwrap().to_string();
+        assert!(view(&f, before.clone()).await.get("spawn").is_none());
+        f.verified().await;
+        assert!(view(&f, before.clone()).await.get("spawn").is_none());
+        let (status, list) = f
+            .ask(get_with_auth("/v1/agent/sessions", &f.owner_bearer))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            list.as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s.get("spawn").is_none())
+        );
+
+        // Isolation verified too: C0 holds, and a reason where it would not
+        // turn on.
+        f.state.agent.verify_isolation_for_tests(&f.host_id);
+        assert_eq!(
+            view(&f, before.clone()).await["spawn"],
+            serde_json::json!({"enabled": false, "refused": "launched_without_asks"})
+        );
+        f.report(&before, "completed").await;
+        let session = f.launch("claude-code", false).await;
+        assert_eq!(session["spawn"], serde_json::json!({"enabled": false}));
+        let session = session["id"].as_str().unwrap().to_string();
+        let shell = f.launch("shell", false).await;
+        assert_eq!(
+            shell["spawn"],
+            serde_json::json!({"enabled": false, "refused": "provider_cannot_spawn"})
+        );
+        // WS-9: another live session shares its workspace.
+        assert_eq!(
+            view(&f, session.clone()).await["spawn"],
+            serde_json::json!({"enabled": false, "refused": "workspace_held"})
+        );
+        let shell = shell["id"].as_str().unwrap().to_string();
+        f.report(&shell, "completed").await;
+        assert_eq!(
+            view(&f, session.clone()).await["spawn"],
+            serde_json::json!({"enabled": false})
+        );
+        assert_eq!(f.spawn(&session, true).await.0, StatusCode::OK);
+        assert_eq!(
+            view(&f, session.clone()).await["spawn"],
+            serde_json::json!({"enabled": true})
+        );
+
+        // A downgrade: the switch that is on stays shown, with why it is
+        // not offered, so a person can still turn it off; others go.
+        f.state.agent.lose_isolation_for_tests(&f.host_id);
+        assert_eq!(
+            view(&f, session.clone()).await["spawn"],
+            serde_json::json!({"enabled": true, "refused": "isolation_unverified"})
+        );
+        assert!(view(&f, before).await.get("spawn").is_none());
+        assert_eq!(f.spawn(&session, false).await.0, StatusCode::OK);
+        assert!(view(&f, session).await.get("spawn").is_none());
     }
 }

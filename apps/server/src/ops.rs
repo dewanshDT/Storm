@@ -2198,6 +2198,80 @@ pub async fn deny_spawn_request(
     Ok(view)
 }
 
+/// A request as a person's card shows it (134-10): its decision so far and
+/// what it asks, word for word.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RequestCard {
+    #[serde(flatten)]
+    pub request: RequestView,
+    /// A start's task, exactly as the agent sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// A start's name for its child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The note a start hands its child: `{vault_id, note_id, title}`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_note: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// A message's text, exactly as the agent sent it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+}
+
+/// How many of a session's requests its list carries, newest first.
+const REQUESTS_LISTED: usize = 50;
+
+impl RequestCard {
+    fn of(r: crate::agent::store::spawn::Request) -> Self {
+        let payload: serde_json::Value =
+            serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
+        let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
+        let (task, name, provider, message) =
+            (text("task"), text("name"), text("provider"), text("text"));
+        let context_note = payload
+            .get("context_note")
+            .filter(|v| v.is_object())
+            .cloned();
+        Self {
+            request: RequestView::of(r, None),
+            task,
+            name,
+            context_note,
+            provider,
+            text: message,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct SessionRequests {
+    pub requests: Vec<RequestCard>,
+}
+
+/// `GET /v1/agent/sessions/{id}/requests`: what a session asked a person
+/// for and what became of each, newest first (134-10). Owner only.
+pub async fn session_requests(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<SessionRequests> {
+    owners_session(state, actor, id)?;
+    let mut requests = state.agent.requests_of(id).map_err(agent_error)?;
+    requests.reverse();
+    requests.truncate(REQUESTS_LISTED);
+    Ok(SessionRequests {
+        requests: requests.into_iter().map(RequestCard::of).collect(),
+    })
+}
+
+/// `GET /v1/agent/requests/{id}`: one request as its card shows it.
+pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestCard> {
+    let owner = crews_owner(actor)?;
+    Ok(RequestCard::of(owners_request(state, owner, id)?))
+}
+
 /// The expiry sweeper's pass (P-5), audited per request.
 pub async fn sweep_spawn_requests(state: &Shared) {
     let swept = match state.agent.expire_requests() {
@@ -3420,6 +3494,10 @@ pub struct SessionView {
     /// Whether it waits for a person (134p): `approval`, `permission_prompt`
     /// or `blocked`. Beside `activity`, never a status, never from idle.
     pub needs_attention: Option<&'static str>,
+    /// Its spawn switch (134-10), only where its host could offer spawning
+    /// now or the switch is on; absent everywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spawn: Option<crate::agent::SpawnView>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -3459,6 +3537,7 @@ fn session_view(
         .child_workspace_of(&session.id)
         .map_err(internal)?;
     let needs_attention = state.agent.needs_attention(&session).map_err(agent_error)?;
+    let spawn = state.agent.spawn_view(&session).map_err(internal)?;
     let role = state
         .agent
         .role_of(&session.id)
@@ -3489,6 +3568,7 @@ fn session_view(
         isolation,
         child_workspace,
         needs_attention,
+        spawn,
     })
 }
 
@@ -3686,6 +3766,7 @@ pub async fn launch_session(
         .agent
         .host_isolation_report(&session.host_id)
         .map_err(internal)?;
+    let spawn = state.agent.spawn_view(&session).map_err(internal)?;
     Ok(LaunchedSession {
         session: SessionView {
             session,
@@ -3707,6 +3788,7 @@ pub async fn launch_session(
             isolation,
             child_workspace: None,
             needs_attention: None,
+            spawn,
         },
         mcp: LaunchMcp {
             connections,

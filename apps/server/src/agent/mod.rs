@@ -79,6 +79,16 @@ pub struct SpawnChange {
     pub enabled: bool,
     pub refused: usize,
 }
+
+/// A session's spawn switch on its view (134-10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpawnView {
+    pub enabled: bool,
+    /// What turning it on would be refused with now (134-2's codes); absent
+    /// when it would turn on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<&'static str>,
+}
 pub const DEFAULT_PROVIDER: &str = "claude-code";
 /// Largest input POST (freeze §11.1).
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -1278,6 +1288,60 @@ impl AgentManager {
         Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
     }
 
+    fn workspace_paths(&self, host_id: &str) -> HashMap<String, String> {
+        self.host_live(host_id)
+            .capabilities
+            .map(|caps| caps.workspace_paths)
+            .unwrap_or_default()
+    }
+
+    /// Why turning a session's switch on would be refused now, in 134-2's
+    /// order, or `None` when it would not. Takes the store held, so the
+    /// WS-9 check and a write share one lock (store, then live).
+    fn enable_refusal(
+        &self,
+        r: &SessionRecord,
+        store: &Store,
+        paths: &HashMap<String, String>,
+    ) -> Result<Option<&'static str>> {
+        if r.is_ended() {
+            return Ok(Some("session_not_live"));
+        }
+        if !SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
+            return Ok(Some("provider_cannot_spawn"));
+        }
+        if let Err(code) = self.spawn_gate(&r.host_id) {
+            return Ok(Some(code));
+        }
+        if !store.spawn_asks(&r.id)? {
+            return Ok(Some("launched_without_asks"));
+        }
+        let held = store.workspace_held(
+            &r.host_id,
+            &r.workspace,
+            store::spawn::Claim::Spawn(&r.id),
+            paths,
+        )?;
+        Ok(held.then_some("workspace_held"))
+    }
+
+    /// The spawn switch as a session's view shows it (134-10): only where
+    /// C0 holds on its host now, or the switch is already on, so a person
+    /// can still turn it off after a downgrade. Elsewhere `None`: a host
+    /// that cannot offer spawning shows nothing of it.
+    pub fn spawn_view(&self, r: &SessionRecord) -> Result<Option<SpawnView>> {
+        let paths = self.workspace_paths(&r.host_id);
+        let store = self.store.lock().unwrap();
+        let enabled = store.spawn_enabled(&r.id)?;
+        if !enabled && self.spawn_gate(&r.host_id).is_err() {
+            return Ok(None);
+        }
+        Ok(Some(SpawnView {
+            enabled,
+            refused: self.enable_refusal(r, &store, &paths)?,
+        }))
+    }
+
     /// A person turns a session's spawn switch on or off (134c, B1, B2).
     /// Off always succeeds and refuses the session's pending requests at
     /// once. On needs a live session of a spawning adapter, C0, and WS-9;
@@ -1289,38 +1353,13 @@ impl AgentManager {
         device: Option<&str>,
     ) -> AgentResult<std::result::Result<SpawnChange, &'static str>> {
         let r = self.get(session_id)?;
-        if enabled {
-            if r.is_ended() {
-                return Ok(Err("session_not_live"));
-            }
-            if !SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
-                return Ok(Err("provider_cannot_spawn"));
-            }
-            if let Err(code) = self.spawn_gate(&r.host_id) {
-                return Ok(Err(code));
-            }
-        }
-        let paths = self
-            .host_live(&r.host_id)
-            .capabilities
-            .map(|caps| caps.workspace_paths)
-            .unwrap_or_default();
+        let paths = self.workspace_paths(&r.host_id);
         // One lock for the WS-9 check and the write, so a launch into the
         // workspace cannot slip between them.
         let mut store = self.store.lock().unwrap();
         let was = store.spawn_enabled(session_id)?;
-        if enabled && !store.spawn_asks(session_id)? {
-            return Ok(Err("launched_without_asks"));
-        }
-        if enabled
-            && store.workspace_held(
-                &r.host_id,
-                &r.workspace,
-                store::spawn::Claim::Spawn(session_id),
-                &paths,
-            )?
-        {
-            return Ok(Err("workspace_held"));
+        if enabled && let Some(code) = self.enable_refusal(&r, &store, &paths)? {
+            return Ok(Err(code));
         }
         let refused = store.set_spawn(session_id, enabled, device, &now())?;
         Ok(Ok(SpawnChange {
