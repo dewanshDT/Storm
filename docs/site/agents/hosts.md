@@ -201,9 +201,13 @@ a group; `sudo storm-runtime-isolation off` puts every workspace back as it
 was. With it on, the host starts each session through the helper, in its own
 systemd unit (`storm-session-<id>.service`) under a leased pool user, with
 its own `/tmp`, `/dev/shm` and IPC, its own home, and only its own workspace
-and session files visible; it never runs one the old way. Storm's tools,
-Resume, the agents Storm installed and a session's own network are not
-there yet, so leave it off. A workspace root outside `/var/lib/storm-runtime`
+and session files visible; it never runs one the old way. Each session also
+has its own network: it reaches the internet and resolves names through
+`pasta` (from `passt`), but not the host's loopback services nor another
+session's. If a session must reach a service on the host's loopback (a local
+model server, say), list its TCP port in `runtime.toml`:
+`isolation_host_ports = [11434]`. Storm's tools, Resume and the agents Storm
+installed are not there yet, so leave it off. A workspace root outside `/var/lib/storm-runtime`
 needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 

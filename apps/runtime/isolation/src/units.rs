@@ -4,8 +4,9 @@
 //! read-write at its real path, its own home and Storm session directory,
 //! and nothing of the host account's state or another session's
 //! directories; it has its own `/tmp`, `/dev` (and with it `/dev/shm`) and
-//! IPC namespace, and its own control group, which stopping the unit ends
-//! whole. The terminal is the one the host handed over.
+//! IPC namespace, its own network namespace (`net.rs`), and its own
+//! control group, which stopping the unit ends whole. The terminal is the
+//! one the host handed over.
 //!
 //! systemd creates the unit (`systemd-run`, from the helper's own unit);
 //! nothing here needs a capability.
@@ -51,6 +52,9 @@ pub struct UnitSpec {
     pub cols: u16,
     /// The environment the helper wrote, which systemd reads as root.
     pub env_file: PathBuf,
+    /// The session's resolver (`net::resolv_conf`), shown as
+    /// `/etc/resolv.conf`.
+    pub resolv_conf: PathBuf,
     pub program: PathBuf,
     pub args: Vec<OsString>,
 }
@@ -74,6 +78,7 @@ impl UnitSpec {
             &self.home,
             &self.tty,
             &self.env_file,
+            &self.resolv_conf,
         ]
         .into_iter()
         .map(PathBuf::as_path)
@@ -87,6 +92,7 @@ impl UnitSpec {
             bail!("{} cannot be written into a unit property", bad.display());
         }
         let p = |s: &str| s.to_string();
+        let net = crate::net::unit_name(&self.session);
         let mut out = vec![
             format!("Description=Storm session {}", self.session),
             p("Type=exec"),
@@ -95,6 +101,18 @@ impl UnitSpec {
             p("RemainAfterExit=yes"),
             format!("BindsTo={HOST_UNIT}"),
             format!("After={HOST_UNIT}"),
+            // Its network is up before it starts, and a session whose
+            // network is stopped is stopped; one whose pasta dies keeps
+            // running with no way out.
+            format!("Requires={net}"),
+            format!("After={net}"),
+            format!(
+                "NetworkNamespacePath={}",
+                crate::net::netns_path(&self.session).display()
+            ),
+            // Every family the namespace does not scope (AF_VSOCK, …) is
+            // refused, so nothing local is reached around it.
+            p("RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"),
             format!("User={}", self.user),
             format!("Group={}", self.user),
             format!("SupplementaryGroups={}", self.workspace_group),
@@ -149,6 +167,10 @@ impl UnitSpec {
         out.push(format!("BindPaths={}", self.workspace.display()));
         out.push(format!("BindPaths={}", self.home.display()));
         out.push(format!("BindReadOnlyPaths={}", self.session_dir.display()));
+        out.push(format!(
+            "BindReadOnlyPaths={}:/etc/resolv.conf",
+            self.resolv_conf.display()
+        ));
         if let Some(agents) = &self.agents {
             out.push(format!("BindReadOnlyPaths=-{}", agents.display()));
         }
@@ -181,7 +203,7 @@ impl UnitSpec {
         let mut service = String::from("[Service]\n");
         for property in self.properties()? {
             let key = property.split('=').next().unwrap_or("");
-            if matches!(key, "Description" | "BindsTo" | "After") {
+            if matches!(key, "Description" | "BindsTo" | "After" | "Requires") {
                 unit.push_str(&property);
                 unit.push('\n');
             } else {
@@ -238,6 +260,8 @@ pub const SHOW_PROPERTIES: &str = "LoadState,SubState,MainPID,ExecMainCode,ExecM
 
 /// systemd, as the helper uses it.
 pub trait Units: Send + Sync {
+    /// Starts the session's network and returns once it is configured.
+    fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()>;
     fn start(&self, spec: &UnitSpec) -> Result<()>;
     fn show(&self, unit: &str) -> Result<UnitState>;
     /// Sends `signal` (a name, `SIGHUP`) to every process of the unit.
@@ -270,6 +294,15 @@ fn run(program: &str, args: &[OsString]) -> Result<String> {
 }
 
 impl Units for Systemd {
+    fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
+        for tool in [crate::net::PASTA, crate::net::IP] {
+            if !Path::new(tool).is_file() {
+                bail!("{tool} is not installed; a session needs it for its network");
+            }
+        }
+        run(SYSTEMD_RUN, &spec.systemd_run_args()).map(drop)
+    }
+
     fn start(&self, spec: &UnitSpec) -> Result<()> {
         run(SYSTEMD_RUN, &spec.systemd_run_args()?).map(drop)
     }
@@ -330,6 +363,7 @@ pub mod tests {
             rows: 40,
             cols: 120,
             env_file: "/var/lib/storm-runtime-isolation/sessions/ags_A1/env".into(),
+            resolv_conf: "/var/lib/storm-runtime-isolation/sessions/ags_A1/resolv.conf".into(),
             program: "/usr/bin/bash".into(),
             args: vec!["-l".into(), "$HOME %h".into()],
         }
@@ -374,6 +408,10 @@ pub mod tests {
             "TTYColumns=120",
             "Environment=HOME=/var/lib/storm-runtime-isolation/homes/ags_A1",
             "EnvironmentFile=/var/lib/storm-runtime-isolation/sessions/ags_A1/env",
+            "NetworkNamespacePath=/run/netns/storm-ags_A1",
+            "Requires=storm-session-ags_A1-net.service",
+            "After=storm-session-ags_A1-net.service",
+            "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
         ] {
             assert!(has(&props, want), "{want} missing from {props:#?}");
         }
@@ -412,6 +450,7 @@ pub mod tests {
                 "BindPaths=/var/lib/storm-runtime/workspaces/app",
                 "BindPaths=/var/lib/storm-runtime-isolation/homes/ags_A1",
                 "BindReadOnlyPaths=/var/lib/storm-runtime/sessions/ags_A1",
+                "BindReadOnlyPaths=/var/lib/storm-runtime-isolation/sessions/ags_A1/resolv.conf:/etc/resolv.conf",
                 "BindReadOnlyPaths=-/var/lib/storm-runtime/agents/managed",
             ]
         );

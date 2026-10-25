@@ -57,6 +57,9 @@ pub struct HelperConfig {
     /// Where agent CLIs are looked for (the host's `path`).
     #[serde(default)]
     pub path: Option<Vec<PathBuf>>,
+    /// The host's loopback ports an isolated session may reach (136d).
+    #[serde(default)]
+    pub isolation_host_ports: Vec<u16>,
 }
 
 impl HelperConfig {
@@ -153,6 +156,20 @@ mod tests {
         );
         assert!(HelperConfig::parse("isolation = \"on\"").is_err());
         assert!(HelperConfig::parse("isolation = true").is_err());
+    }
+
+    #[test]
+    fn the_host_port_list_is_the_operators_and_empty_by_default() {
+        assert!(
+            HelperConfig::parse("")
+                .unwrap()
+                .isolation_host_ports
+                .is_empty()
+        );
+        let c = HelperConfig::parse("isolation_host_ports = [11434, 5432]").unwrap();
+        assert_eq!(c.isolation_host_ports, [11434, 5432]);
+        assert!(HelperConfig::parse("isolation_host_ports = [70000]").is_err());
+        assert!(HelperConfig::parse("isolation_host_ports = [\"80\"]").is_err());
     }
 
     #[test]

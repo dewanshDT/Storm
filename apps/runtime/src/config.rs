@@ -63,6 +63,10 @@ pub struct RuntimeConfig {
     /// runs as this host's account: one that cannot be isolated is refused.
     #[serde(default)]
     pub isolation: Isolation,
+    /// With isolation on, the TCP ports on this host's loopback a session
+    /// may reach from its own network (136d); the helper reads them.
+    #[serde(default)]
+    pub isolation_host_ports: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -136,6 +140,7 @@ impl Default for RuntimeConfig {
             agent_install: AgentInstall::default(),
             agent_updates: AgentUpdates::default(),
             isolation: Isolation::default(),
+            isolation_host_ports: Vec::new(),
         }
     }
 }
@@ -179,7 +184,23 @@ impl RuntimeConfig {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         config.check_roots()?;
+        config.check_host_ports()?;
         Ok(config)
+    }
+
+    /// The helper's rule (`net::host_ports`), so a list it would refuse
+    /// stops the host here with the reason, not every session later.
+    pub fn check_host_ports(&self) -> Result<()> {
+        if self.isolation_host_ports.contains(&0) {
+            bail!("isolation_host_ports: 0 is not a port");
+        }
+        let mut ports = self.isolation_host_ports.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        if ports.len() > 64 {
+            bail!("isolation_host_ports: at most 64 ports");
+        }
+        Ok(())
     }
 
     /// A workspace root may not be inside, or contain, a Storm data root this
@@ -672,6 +693,22 @@ mod tests {
         ] {
             assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn isolation_host_ports_default_empty_and_are_checked() {
+        assert!(RuntimeConfig::default().isolation_host_ports.is_empty());
+        let c: RuntimeConfig = toml::from_str("isolation_host_ports = [11434, 5432]").unwrap();
+        assert_eq!(c.isolation_host_ports, [11434, 5432]);
+        c.check_host_ports().unwrap();
+        let zero: RuntimeConfig = toml::from_str("isolation_host_ports = [0]").unwrap();
+        assert!(zero.check_host_ports().is_err());
+        let many = RuntimeConfig {
+            isolation_host_ports: (1..=65).collect(),
+            ..RuntimeConfig::default()
+        };
+        assert!(many.check_host_ports().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("isolation_host_ports = [70000]").is_err());
     }
 
     #[test]

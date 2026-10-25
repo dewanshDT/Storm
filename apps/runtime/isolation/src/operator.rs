@@ -84,7 +84,10 @@ pub fn on(
         None => bail!("isolation needs systemd {MIN_SYSTEMD} or newer; systemctl did not answer"),
     }
     if !m.has_passt() {
-        bail!("isolation needs passt for each session's network: sudo apt install passt");
+        bail!(
+            "isolation needs passt (pasta) and iproute2 for each session's network: \
+             sudo apt install passt iproute2"
+        );
     }
     let config = HelperConfig::load(&paths.config)?;
     if !paths.sysusers.is_file() {
@@ -232,12 +235,13 @@ impl Machine for Real {
     }
 
     fn has_passt(&self) -> bool {
-        Command::new("passt")
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        Path::new(crate::net::IP).is_file()
+            && Command::new(crate::net::PASTA)
+                .arg("--version")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
     }
 
     fn unit_active(&self, unit: &str) -> bool {

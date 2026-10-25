@@ -686,7 +686,15 @@ Specification*; the slices are decisions 81 and 81a onward):
   PTY master and sends the slave over `SCM_RIGHTS`; the helper checks it is
   a devpts slave, resolves the program from `runtime.toml` itself and asks
   systemd for `storm-session-<id>.service` (`units.rs` is the property set,
-  tested as data), and hands back the leader's pidfd. Ending is the unit's
+  tested as data), and hands back the leader's pidfd. **Each session has its
+  own network namespace** (136-3, `net.rs`): `storm-session-<id>-net.service`
+  creates `/run/netns/storm-<id>` and runs `pasta` in it as a dynamic user
+  with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only; pasta's every forwarding
+  direction is set explicitly (each defaults to `auto`, which would publish
+  listeners both ways), `--no-map-gw` keeps the host's loopback out, and only
+  `runtime.toml` `isolation_host_ports` reach it; DNS goes through pasta's
+  forwarder, named in a bound `/etc/resolv.conf`. A session whose network
+  does not start is never started. Ending is the unit's
   stop; at lease end (`release`) the helper hands back what the user wrote
   and removes its home before the user is free, and leases are on disk so
   a restarted helper revokes them first. The operator's

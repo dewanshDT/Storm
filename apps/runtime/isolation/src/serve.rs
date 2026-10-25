@@ -55,6 +55,8 @@ pub struct Helper {
     pub(crate) search: Vec<PathBuf>,
     /// The host account's login shell, for `shell`.
     pub(crate) shell: PathBuf,
+    /// The host's loopback ports sessions may reach (`net.rs`).
+    pub(crate) host_ports: Vec<u16>,
     pub(crate) layout: Layout,
     pub(crate) deps: Deps,
     pub(crate) state: Mutex<State>,
@@ -66,11 +68,12 @@ pub struct Settings {
     pub commands: Vec<(String, String)>,
     pub search: Vec<PathBuf>,
     pub shell: PathBuf,
+    pub host_ports: Vec<u16>,
     pub layout: Layout,
 }
 
 impl Settings {
-    pub fn from_config(config: &HelperConfig, layout: Layout, shell: PathBuf) -> Self {
+    pub fn from_config(config: &HelperConfig, layout: Layout, shell: PathBuf) -> Result<Self> {
         let mut search = vec![layout.agents().join("bin")];
         match &config.path {
             Some(dirs) => search.extend(dirs.iter().cloned()),
@@ -80,14 +83,15 @@ impl Settings {
                     .flat_map(std::env::split_paths),
             ),
         }
-        Self {
+        Ok(Self {
             roots: config.canonical_roots(),
             providers: config.provider_ids(),
             commands: config.provider_commands(),
             search,
             shell,
+            host_ports: crate::net::host_ports(&config.isolation_host_ports)?,
             layout,
-        }
+        })
     }
 }
 
@@ -105,7 +109,7 @@ impl Helper {
             .map(|u| u.shell)
             .filter(|s| !s.is_empty() && !crate::pool::NOLOGIN.contains(&s.as_str()))
             .unwrap_or_else(|| "/bin/sh".into());
-        let settings = Settings::from_config(&config, Layout::installed(), shell.into());
+        let settings = Settings::from_config(&config, Layout::installed(), shell.into())?;
         let helper = Self::new(pool, settings, deps);
         helper.recover()?;
         Ok(helper)
@@ -120,6 +124,7 @@ impl Helper {
             commands: settings.commands,
             search: settings.search,
             shell: settings.shell,
+            host_ports: settings.host_ports,
             layout: settings.layout,
             deps,
             state: Mutex::new(state),
@@ -283,6 +288,7 @@ pub mod tests {
             commands: vec![("shell".into(), String::new())],
             search: vec![],
             shell: "/bin/sh".into(),
+            host_ports: vec![],
             layout: Layout {
                 state: root.join(".isolation"),
                 host_state: root.join(".host"),

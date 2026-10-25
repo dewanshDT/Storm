@@ -38,6 +38,11 @@ scrollback_bytes = 4194304
 # `off`) also creates the user pools, converts the workspaces and enables the
 # helper, then sets this. Linux with systemd 255+ and passt only.
 # isolation = "off"
+#
+# With isolation on, each session has its own network: the internet and name
+# resolution, but nothing listening on this host's loopback, except the TCP
+# ports listed here (a local model server, say).
+# isolation_host_ports = []
 
 # Omit [[providers]] entirely to offer every built-in (decision 130):
 # claude-code (the default), opencode, codex, cursor, command-code and shell.

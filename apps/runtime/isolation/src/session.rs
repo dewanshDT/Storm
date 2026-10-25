@@ -1,7 +1,8 @@
 //! The session operations (136b, 136d): lease and release a pool user,
 //! prepare and clean a session's directories, start it in its own unit with
 //! the terminal the host handed over, signal it, and end it by stopping the
-//! unit.
+//! unit. Each session's network is a unit of its own beside it
+//! (`net.rs`), started first and stopped after it.
 //!
 //! At lease end (`release`) the unit is stopped, which ends every process
 //! of the user: nothing else ever runs as a pool user, and nothing in a
@@ -58,6 +59,9 @@ impl Layout {
     }
     pub fn env_file(&self, session: &str) -> PathBuf {
         self.private(session).join("env")
+    }
+    pub fn resolv_conf(&self, session: &str) -> PathBuf {
+        self.private(session).join("resolv.conf")
     }
     /// The host's directory for the session (its MCP config, 136i).
     pub fn session_dir(&self, session: &str) -> PathBuf {
@@ -301,6 +305,11 @@ impl Helper {
             files::env_file(&launch.env).as_bytes(),
         )
         .map_err(|e| failed("writing the environment", e))?;
+        files::write_root_readable(
+            &self.layout.resolv_conf(session),
+            crate::net::resolv_conf().as_bytes(),
+        )
+        .map_err(|e| failed("writing the resolver", e))?;
         let agents = self.layout.agents();
         let spec = UnitSpec {
             session: session.to_string(),
@@ -315,21 +324,39 @@ impl Helper {
             rows: terminal.rows,
             cols: terminal.cols,
             env_file: self.layout.env_file(session),
+            resolv_conf: self.layout.resolv_conf(session),
             program,
             args: launch.args,
         };
         let unit = units::unit_name(session);
+        let net = crate::net::NetSpec {
+            session: session.to_string(),
+            host_ports: self.host_ports.clone(),
+        };
         self.state
             .lock()
             .unwrap()
             .started
             .insert(session.to_string());
-        if let Err(e) = self.deps.units.start(&spec) {
+        let started = self
+            .deps
+            .units
+            .start_network(&net)
+            .map_err(|e| ("starting the network", e))
+            .and_then(|()| {
+                self.deps
+                    .units
+                    .start(&spec)
+                    .map_err(|e| ("starting the unit", e))
+            });
+        if let Err((what, e)) = started {
             // A unit that failed to start may still be loaded.
-            let _ = self.deps.units.stop(&unit);
-            self.deps.units.reset_failed(&unit);
+            for unit in [unit.clone(), crate::net::unit_name(session)] {
+                let _ = self.deps.units.stop(&unit);
+                self.deps.units.reset_failed(&unit);
+            }
             self.state.lock().unwrap().started.remove(session);
-            return Err(failed("starting the unit", e));
+            return Err(failed(what, e));
         }
         let mut out = Map::new();
         let (pid, pidfd) = self.leader(&unit);
@@ -388,13 +415,19 @@ impl Helper {
     fn end(&self, session: &str) -> Result<Answer, Refusal> {
         let unit = self.started(session)?;
         let state = self.deps.units.show(&unit).unwrap_or_default();
-        self.stop_unit(&unit)
+        self.stop_session(session)
             .map_err(|e| failed("stopping the unit", e))?;
         self.state.lock().unwrap().started.remove(session);
         let mut out = Map::new();
         out.insert("exit_code".into(), json!(state.exit_code));
         out.insert("signal".into(), json!(state.signal));
         Ok((out, None))
+    }
+
+    /// The session's unit, then its network.
+    fn stop_session(&self, session: &str) -> Result<()> {
+        self.stop_unit(&units::unit_name(session))?;
+        self.stop_unit(&crate::net::unit_name(session))
     }
 
     fn stop_unit(&self, unit: &str) -> Result<()> {
@@ -412,8 +445,7 @@ impl Helper {
     /// Everything a session's user can have written, made the host's
     /// again; the unit stopped first if it is still there.
     fn clean(&self, session: &str, user: &str) -> Result<(), Refusal> {
-        let unit = units::unit_name(session);
-        self.stop_unit(&unit)
+        self.stop_session(session)
             .map_err(|e| failed("stopping the unit", e))?;
         self.state.lock().unwrap().started.remove(session);
         let record = self.state.lock().unwrap().records.get(user).cloned();
@@ -462,7 +494,7 @@ impl Helper {
             if !self.pool.users.contains_key(&user) {
                 continue;
             }
-            self.stop_unit(&units::unit_name(&record.session))?;
+            self.stop_session(&record.session)?;
             self.revoke(&record.session, &user, Some(&record))?;
             files::remove_lease(&self.layout.leases(), &user)?;
         }
@@ -506,8 +538,11 @@ pub mod tests {
     pub struct FakeUnits {
         pub calls: Mutex<Vec<String>>,
         pub specs: Mutex<Vec<UnitSpec>>,
+        pub nets: Mutex<Vec<crate::net::NetSpec>>,
         pub units: Mutex<BTreeMap<String, (UnitState, Option<std::process::Child>)>>,
         pub fail_start: std::sync::atomic::AtomicBool,
+        /// As if pasta were missing.
+        pub fail_network: std::sync::atomic::AtomicBool,
     }
 
     impl FakeUnits {
@@ -527,6 +562,21 @@ pub mod tests {
     }
 
     impl Units for Arc<FakeUnits> {
+        fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
+            let unit = crate::net::unit_name(&spec.session);
+            self.calls.lock().unwrap().push(format!("start {unit}"));
+            self.nets.lock().unwrap().push(spec.clone());
+            if self.fail_network.load(std::sync::atomic::Ordering::SeqCst) {
+                anyhow::bail!("injected: no pasta");
+            }
+            let state = UnitState {
+                loaded: true,
+                running: true,
+                ..UnitState::default()
+            };
+            self.units.lock().unwrap().insert(unit, (state, None));
+            Ok(())
+        }
         fn start(&self, spec: &UnitSpec) -> Result<()> {
             let unit = units::unit_name(&spec.session);
             self.calls.lock().unwrap().push(format!("start {unit}"));
@@ -816,8 +866,10 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
-                "stop storm-session-ags_A.service"
+                "stop storm-session-ags_A.service",
+                "stop storm-session-ags_A-net.service",
             ]
         );
         let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
@@ -873,10 +925,12 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
                 "kill storm-session-ags_A.service SIGHUP",
                 "kill storm-session-ags_A.service SIGKILL",
                 "stop storm-session-ags_A.service",
+                "stop storm-session-ags_A-net.service",
             ]
         );
         let spec = f.units.specs.lock().unwrap()[0].clone();
@@ -921,7 +975,13 @@ pub mod tests {
             vec![],
         );
         let calls = f.units.calls.lock().unwrap().clone();
-        assert_eq!(calls.last().unwrap(), "stop storm-session-ags_A.service");
+        assert_eq!(
+            calls[calls.len() - 2..],
+            [
+                "stop storm-session-ags_A.service",
+                "stop storm-session-ags_A-net.service"
+            ]
+        );
         let meta = f.own.meta(
             Key {
                 dev: md.dev(),
@@ -973,7 +1033,13 @@ pub mod tests {
         assert_eq!(records.len(), 1);
         f.helper.recover().unwrap();
         let calls = f.units.calls.lock().unwrap().clone();
-        assert_eq!(calls.last().unwrap(), "stop storm-session-ags_A.service");
+        assert_eq!(
+            calls[calls.len() - 2..],
+            [
+                "stop storm-session-ags_A.service",
+                "stop storm-session-ags_A-net.service"
+            ]
+        );
         assert!(
             files::load_leases(&f.helper.layout.leases())
                 .unwrap()
@@ -1020,6 +1086,106 @@ pub mod tests {
     /// The terminal goes from one process to the helper, and the leader's
     /// pidfd comes back, over a real socket between two processes: the
     /// second is this test binary again, as the host.
+    /// AT-11's half the helper decides: each session joins a network
+    /// namespace of its own, so its loopback and abstract sockets are its
+    /// own, beside its own /tmp, /dev/shm and IPC; and it resolves names
+    /// through its own network, never the host's loopback resolver.
+    #[test]
+    fn at_11_each_session_has_its_own_network_and_local_endpoints() {
+        let f = fixture();
+        f.started("ags_A");
+        f.started("ags_B");
+        let specs = f.units.specs.lock().unwrap().clone();
+        let netns = |spec: &UnitSpec| {
+            let props = spec.properties().unwrap();
+            let found: Vec<String> = props
+                .iter()
+                .filter(|p| p.starts_with("NetworkNamespacePath="))
+                .cloned()
+                .collect();
+            for private in ["PrivateTmp=yes", "PrivateIPC=yes", "PrivateDevices=yes"] {
+                assert!(props.contains(&private.to_string()), "{private}");
+            }
+            assert!(!props.iter().any(|p| p.starts_with("PrivateNetwork=")));
+            found
+        };
+        assert_eq!(
+            netns(&specs[0]),
+            ["NetworkNamespacePath=/run/netns/storm-ags_A"]
+        );
+        assert_eq!(
+            netns(&specs[1]),
+            ["NetworkNamespacePath=/run/netns/storm-ags_B"]
+        );
+        let nets = f.units.nets.lock().unwrap().clone();
+        assert_eq!(
+            nets.iter().map(|n| n.session.as_str()).collect::<Vec<_>>(),
+            ["ags_A", "ags_B"]
+        );
+        let calls = f.units.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls[..2],
+            [
+                "start storm-session-ags_A-net.service",
+                "start storm-session-ags_A.service"
+            ],
+            "the network first"
+        );
+        let resolv = f.helper.layout.resolv_conf("ags_A");
+        assert_eq!(specs[0].resolv_conf, resolv);
+        assert_eq!(
+            std::fs::read_to_string(&resolv).unwrap(),
+            crate::net::resolv_conf()
+        );
+        use std::os::unix::fs::PermissionsExt as _;
+        let mode = std::fs::metadata(&resolv).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644, "the session's user reads it");
+    }
+
+    #[test]
+    fn a_session_whose_network_cannot_start_never_starts() {
+        let f = fixture();
+        f.units
+            .fail_network
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_A"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.launch("ags_A");
+        let (_m, slave) = crate::tty::tests::pty();
+        let (v, _) = f.call(
+            json!({"op": "start", "session": "ags_A", "user": user, "provider": "shell", "workspace": f.workspace()}),
+            vec![slave],
+        );
+        assert_eq!(v["error"], "failed");
+        assert!(f.units.specs.lock().unwrap().is_empty(), "no session unit");
+        let calls = f.units.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            [
+                "start storm-session-ags_A-net.service",
+                "stop storm-session-ags_A.service",
+                "stop storm-session-ags_A-net.service",
+            ]
+        );
+        let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
+        assert_eq!(v["error"], "not_started");
+    }
+
+    /// IT-4's list comes from the operator's configuration only.
+    #[test]
+    fn the_operators_host_ports_reach_the_network() {
+        let mut f = fixture();
+        f.helper.host_ports = vec![5432, 11434];
+        f.started("ags_A");
+        let nets = f.units.nets.lock().unwrap().clone();
+        assert_eq!(nets[0].host_ports, [5432, 11434]);
+        let bad = crate::config::HelperConfig::parse("isolation_host_ports = [0]").unwrap();
+        assert!(
+            crate::serve::Settings::from_config(&bad, f.helper.layout.clone(), "/bin/sh".into())
+                .is_err()
+        );
+    }
+
     #[test]
     fn the_terminal_and_the_pidfd_cross_between_two_processes() {
         const SOCK: &str = "STORM_ISOLATION_TEST_SOCKET";

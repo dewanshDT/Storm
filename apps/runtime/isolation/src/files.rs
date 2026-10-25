@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::{Read, Write as _};
 use std::os::fd::OwnedFd;
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -193,6 +193,19 @@ pub fn write_root_private(path: &Path, bytes: &[u8]) -> Result<()> {
         .with_context(|| format!("writing {}", path.display()))?;
     f.write_all(bytes)?;
     f.sync_all()?;
+    Ok(())
+}
+
+/// A root-owned file every user may read, which a unit shows read-only
+/// (the session's resolver). The helper's umask would narrow the mode, so
+/// it is set on the descriptor.
+pub fn write_root_readable(path: &Path, bytes: &[u8]) -> Result<()> {
+    write_root_private(path, bytes)?;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)?;
+    f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
     Ok(())
 }
 

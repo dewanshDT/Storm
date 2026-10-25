@@ -25,6 +25,7 @@ pub mod convert;
 pub mod fdpass;
 pub mod files;
 pub mod leases;
+pub mod net;
 pub mod operator;
 pub mod policy;
 pub mod pool;
