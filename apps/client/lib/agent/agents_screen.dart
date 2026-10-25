@@ -18,6 +18,8 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'launcher.dart';
+import 'spawn_state.dart' show lineageOrder;
+import 'spawn_widgets.dart' show LineageIndent, lineageLine;
 
 /// Agents at `/agents` (handoff §2.7, §2.8).
 ///
@@ -939,6 +941,14 @@ class _AgentCards extends ConsumerWidget {
   }
 }
 
+/// A child listed under its parent sits on the dashed indent (134l).
+Widget _indentedChild(AgentSession s, List<AgentSession> list, Widget row) {
+  final p = s.spawn.parentSession;
+  return p != null && list.any((o) => o.id == p)
+      ? LineageIndent(child: row)
+      : row;
+}
+
 /// The phone list: Running, then Ended, then the infrastructure line. No
 /// work grouping — the rows already carry the workspace (handoff §2.8).
 class _PhoneList extends StatelessWidget {
@@ -957,12 +967,17 @@ class _PhoneList extends StatelessWidget {
           padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
           child: AgentsLabel(label),
         ),
-        for (final s in list)
-          SessionRow(
-            session: s,
-            host: o.hostName(s.hostId),
-            phone: true,
-            onTap: () => openAgentSession(context, s.id),
+        for (final s in lineageOrder(list))
+          _indentedChild(
+            s,
+            list,
+            SessionRow(
+              session: s,
+              host: o.hostName(s.hostId),
+              phone: true,
+              lineage: lineageLine(s, o),
+              onTap: () => openAgentSession(context, s.id),
+            ),
           ),
       ],
     );

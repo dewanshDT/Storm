@@ -97,6 +97,10 @@ class FakeAgentServer {
 
   final requests = <http.Request>[];
 
+  /// Answers a route this fake does not know before it says 404, or null
+  /// to fall through (the spawning routes, `spawn_fakes.dart`).
+  Future<http.Response?> Function(http.Request req)? extra;
+
   /// Each agent's install, update or removal as the host would report it
   /// (decision 133): the job's states in order, the start answering the
   /// first and each poll the next; the last one repeats.
@@ -164,6 +168,7 @@ class FakeAgentServer {
   Future<http.Response> _handle(http.Request req) async {
     requests.add(req);
     if (down) return http.Response('', 503);
+    if (await extra?.call(req) case final answer?) return answer;
     final path = req.url.path;
     final seg = req.url.pathSegments;
     if (path == '/v1/agent/hosts') return _json(hosts);

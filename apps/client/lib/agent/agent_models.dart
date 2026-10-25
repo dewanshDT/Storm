@@ -3,6 +3,7 @@
 library;
 
 import 'claude_login_api.dart' show claudeCredentialNotice;
+import 'spawn_models.dart';
 
 /// A provider a host offers.
 class ProviderCap {
@@ -395,6 +396,7 @@ class AgentSession {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.spawn = SpawnFacts.none,
   }) : name = name ?? workspace;
 
   final String id;
@@ -457,6 +459,9 @@ class AgentSession {
 
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
+
+  /// Its lineage, attention, own workspace and spawn switch (decision 134).
+  final SpawnFacts spawn;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -546,6 +551,7 @@ class AgentSession {
           identityState: identityState,
           isolationState: isolationState,
           isolationReason: isolationReason,
+          spawn: spawn,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -595,6 +601,7 @@ class AgentSession {
     identityState: _identityState(j),
     isolationState: _isolation(j).$1,
     isolationReason: _isolation(j).$2,
+    spawn: SpawnFacts.fromJson(j),
   );
 }
 
