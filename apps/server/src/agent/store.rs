@@ -1294,6 +1294,28 @@ pub mod spawn {
 
     const ENDED: &str = "('completed', 'failed', 'stopped')";
 
+    /// What asks for a workspace under WS-9.
+    #[derive(Debug, Clone, Copy)]
+    pub enum Claim<'a> {
+        /// A new session launching into it.
+        Launch,
+        /// This session turning its spawn switch on.
+        Spawn(&'a str),
+    }
+
+    /// The same directory, or one inside the other. The host reports
+    /// workspaces as it found them, so only separators are normalized here.
+    pub fn same_workspace(a: &str, b: &str) -> bool {
+        let sep = |c: char| c == '/' || c == '\\';
+        let (a, b) = (a.trim_end_matches(sep), b.trim_end_matches(sep));
+        let inside = |inner: &str, outer: &str| {
+            inner
+                .strip_prefix(outer)
+                .is_some_and(|rest| rest.starts_with(sep))
+        };
+        a == b || inside(a, b) || inside(b, a)
+    }
+
     impl Store {
         pub fn lineage(&self, session_id: &str) -> Result<Lineage> {
             lineage_of(&self.conn, session_id)
@@ -1384,6 +1406,32 @@ pub mod spawn {
             };
             tx.commit()?;
             Ok(refused)
+        }
+
+        /// WS-9 (decision 137): whether `workspace` on `host_id` is held
+        /// against `claim`. A launch is refused beside a live session whose
+        /// spawn is on; spawn is refused beside any other live session.
+        /// `unknown` is live. Nested workspaces share files, so they count as
+        /// one.
+        pub fn workspace_held(
+            &self,
+            host_id: &str,
+            workspace: &str,
+            claim: Claim<'_>,
+        ) -> Result<bool> {
+            for r in self.for_host(host_id)? {
+                if r.is_ended() || !same_workspace(&r.workspace, workspace) {
+                    continue;
+                }
+                let held = match claim {
+                    Claim::Launch => self.spawn_enabled(&r.id)?,
+                    Claim::Spawn(session) => r.id != session,
+                };
+                if held {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
 
         pub fn task(&self, session_id: &str) -> Result<Option<String>> {

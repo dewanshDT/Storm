@@ -508,6 +508,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/sessions/{id}/role",
             put(agent_session_role).delete(agent_clear_session_role),
         )
+        // The spawn switch (decision 134-2): owner only, checked in ops.
+        .route("/v1/agent/sessions/{id}/spawn", put(agent_session_spawn))
         .route("/v1/agent/roles", get(agent_roles))
         .route("/v1/agent/sessions/{id}/writes", get(agent_session_writes))
         .route(
@@ -2015,6 +2017,19 @@ async fn crews_delete(
 ) -> ApiResult<StatusCode> {
     crate::ops::delete_crew(&state, &actor, &id).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_session_spawn(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::SetSpawn>,
+) -> ApiResult<Json<crate::ops::SpawnSwitch>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::set_session_spawn(&state, &actor, device, &id, req).await?,
+    ))
 }
 
 async fn agent_session_crew(
@@ -9096,6 +9111,307 @@ pub(crate) mod tests {
         assert_eq!(refused.0, StatusCode::FORBIDDEN);
         let refused = crate::ops::list_roles(&f.state, &agent).await.unwrap_err();
         assert_eq!(refused.0, StatusCode::FORBIDDEN);
+    }
+
+    // ---- the spawn switch (decision 134-2) ----
+
+    const SPAWN_134: [&str; 9] = [
+        "list_agents",
+        "start_agent",
+        "agent_status",
+        "list_children",
+        "wait_agent",
+        "send_message",
+        "end_agent",
+        "report_result",
+        "read_messages",
+    ];
+
+    impl GatewayFixture {
+        async fn spawn(&self, session: &str, enabled: bool) -> (StatusCode, serde_json::Value) {
+            self.ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{session}/spawn"),
+                serde_json::json!({"enabled": enabled}),
+                &self.owner_bearer,
+            ))
+            .await
+        }
+
+        async fn spawn_events(&self) -> Vec<(String, serde_json::Value)> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind.starts_with("spawn_"))
+                .map(|(kind, detail)| (kind, serde_json::from_str(&detail).unwrap()))
+                .collect()
+        }
+
+        async fn storm_tools(&self, session: &str) -> Vec<String> {
+            tools_of(
+                self.mcp(
+                    session,
+                    "storm",
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                )
+                .await,
+            )
+        }
+
+        /// What went down the host's link since the last look.
+        fn sent(&mut self) -> Vec<serde_json::Value> {
+            std::iter::from_fn(|| self.link.try_recv().ok())
+                .map(|e| serde_json::to_value(e).unwrap())
+                .collect()
+        }
+
+        async fn verified(&self) {
+            let mut caps = host_caps(true);
+            caps["identity"] =
+                serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd"});
+            let (code, _) = send(
+                &self.app,
+                post_json_with_auth("/v1/runtime/inventory", caps, &self.host_bearer),
+            )
+            .await;
+            assert!(code.is_success());
+        }
+    }
+
+    fn list_changed(sent: &[serde_json::Value]) -> usize {
+        sent.iter()
+            .filter(|m| {
+                m["type"] == "mcp.message"
+                    && m["connection"] == "storm"
+                    && m["message"]["method"] == "notifications/tools/list_changed"
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn the_spawn_switch_is_the_signed_in_owners_never_a_keys_or_an_agents() {
+        let dir = tempdir::TempDir::new("storm-spawn-owner").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for enabled in [true, false] {
+            let (status, body) = f
+                .ask(put_json_with_auth(
+                    &format!("/v1/agent/sessions/{session}/spawn"),
+                    serde_json::json!({"enabled": enabled}),
+                    &key,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+            // Nor the host's own credential.
+            let (status, _) = f
+                .ask(put_json_with_auth(
+                    &format!("/v1/agent/sessions/{session}/spawn"),
+                    serde_json::json!({"enabled": enabled}),
+                    &f.host_bearer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        // The op refuses any actor but a signed-in session, the session's
+        // own agent included, before it looks at anything.
+        f.verified().await;
+        f.state.agent.verify_isolation_for_tests(&f.host_id);
+        for actor in [
+            Actor::Agent {
+                session_id: session.clone(),
+                host_id: f.host_id.clone(),
+                user_id: f.owner.clone(),
+                write_vault: None,
+            },
+            Actor::Key {
+                key_id: "key_X".into(),
+                user_id: f.owner.clone(),
+            },
+        ] {
+            for enabled in [true, false] {
+                let refused = crate::ops::set_session_spawn(
+                    &f.state,
+                    &actor,
+                    None,
+                    &session,
+                    crate::ops::SetSpawn { enabled },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(
+                    (refused.0, refused.1.as_str()),
+                    (StatusCode::FORBIDDEN, "owner_only")
+                );
+            }
+        }
+        // Another account's session is not found.
+        let other = Actor::Session {
+            user_id: "usr_SOMEONE".into(),
+        };
+        let refused = crate::ops::set_session_spawn(
+            &f.state,
+            &other,
+            None,
+            &session,
+            crate::ops::SetSpawn { enabled: true },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, StatusCode::NOT_FOUND);
+        assert!(f.spawn_events().await.is_empty(), "nothing was changed");
+        assert_eq!(list_changed(&f.sent()), 0);
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    /// C0 on every host today: identity is the fixture's old host, then
+    /// verified without isolation. Each refusal is audited and changes nothing.
+    #[tokio::test]
+    async fn the_spawn_switch_refuses_on_every_host_today() {
+        let dir = tempdir::TempDir::new("storm-spawn-c0").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, "storm").await;
+        f.sent();
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "identity_unverified"})
+            )
+        );
+        f.verified().await;
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "isolation_unverified"})
+            )
+        );
+        let events = f.spawn_events().await;
+        assert_eq!(
+            events,
+            ["identity_unverified", "isolation_unverified"]
+                .map(|reason| (
+                    "spawn_refused".to_string(),
+                    serde_json::json!({"session_id": session, "host_id": f.host_id, "reason": reason})
+                ))
+                .to_vec()
+        );
+        assert_eq!(list_changed(&f.sent()), 0);
+        let tools = f.storm_tools(&session).await;
+        assert!(tools.contains(&"list_vaults".to_string()), "{tools:?}");
+        for name in SPAWN_134 {
+            assert!(!tools.contains(&name.to_string()), "{name} listed");
+            assert_eq!(
+                error_code(&f.call(&session, "storm", name).await).as_deref(),
+                Some("tool_not_allowed"),
+                "{name}"
+            );
+        }
+        // Revoking is always allowed, and audited.
+        let (status, body) = f.spawn(&session, false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({"enabled": false, "refused_requests": 0})
+        );
+        assert_eq!(f.spawn_events().await.last().unwrap().0, "spawn_revoked");
+    }
+
+    /// The allowed path, through the test-only isolation hook no host can
+    /// reach: a flip tells the agent its tools changed, every change is
+    /// audited, and no 134 tool exists to list yet.
+    #[tokio::test]
+    async fn turning_spawn_on_and_off_tells_the_agent_and_is_audited() {
+        let dir = tempdir::TempDir::new("storm-spawn-flip").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.verified().await;
+        f.state.agent.verify_isolation_for_tests(&f.host_id);
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, "storm").await;
+        let before = f.storm_tools(&session).await;
+        f.sent();
+
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body,
+            serde_json::json!({"enabled": true, "refused_requests": 0})
+        );
+        assert_eq!(list_changed(&f.sent()), 1);
+        // No 134 tool exists before 134-4: the list is unchanged.
+        assert_eq!(f.storm_tools(&session).await, before);
+        for name in SPAWN_134 {
+            assert!(!before.contains(&name.to_string()), "{name} listed");
+        }
+
+        // Asked again: audited, but nothing flipped, so no notification.
+        let (status, _) = f.spawn(&session, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list_changed(&f.sent()), 0);
+
+        // WS-9 from the launch side.
+        let (status, body) = f.launch_body(serde_json::json!({})).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "workspace_held"})
+            )
+        );
+
+        let (status, body) = f.spawn(&session, false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], false);
+        assert_eq!(list_changed(&f.sent()), 1);
+        let detail = |was: bool| {
+            serde_json::json!({"session_id": session, "host_id": f.host_id,
+                "was": was, "refused_requests": 0})
+        };
+        assert_eq!(
+            f.spawn_events().await,
+            vec![
+                ("spawn_enabled".to_string(), detail(false)),
+                ("spawn_enabled".to_string(), detail(true)),
+                ("spawn_revoked".to_string(), detail(true)),
+            ]
+        );
+
+        // Another session now shares the workspace, so spawn is held.
+        let (status, body) = f.launch_body(serde_json::json!({})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "workspace_held"})
+            )
+        );
+        assert_eq!(list_changed(&f.sent()), 0);
     }
 
     #[tokio::test]

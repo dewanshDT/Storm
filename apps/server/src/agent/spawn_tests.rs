@@ -812,3 +812,303 @@ fn the_oldest_database_reaches_134() {
         .unwrap();
     assert_eq!(s.descendants("ags_OLD", false).unwrap(), ["ags_C"]);
 }
+
+// ---- 134-2: the spawn switch ------------------------------------------------
+
+use super::store::spawn::{Claim, same_workspace};
+use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
+
+const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
+
+fn hello(identity: Option<&str>) -> Hello {
+    hello_with(identity, serde_json::json!({}))
+}
+
+fn hello_with(identity: Option<&str>, extra: serde_json::Value) -> Hello {
+    let providers: Vec<_> = ["claude-code", "opencode", "shell"]
+        .iter()
+        .map(|id| serde_json::json!({"id": id, "kind": "cli", "interactions": ["terminal"], "available": true}))
+        .collect();
+    let mut caps = serde_json::json!({
+        "providers": providers,
+        "workspaces": ["storm", "storm/site", "other"],
+        "max_sessions": 16,
+        "mcp_bridge": true,
+        "resume": ["claude-code"],
+    });
+    if let Some(identity) = identity {
+        caps["identity"] = serde_json::from_str(identity).unwrap();
+    }
+    for (k, v) in extra.as_object().unwrap() {
+        caps[k] = v.clone();
+    }
+    serde_json::from_value(caps).unwrap()
+}
+
+fn host(identity: Option<&str>) -> (AgentManager, tempdir::TempDir, UnboundedReceiver<Envelope>) {
+    let d = tempdir::TempDir::new("storm-spawn-switch").unwrap();
+    let m = AgentManager::open(d.path()).unwrap();
+    let (_, rx) = m.connect_host("hst_A");
+    m.hello("hst_A", hello(identity)).unwrap();
+    (m, d, rx)
+}
+
+/// A host whose identity is verified and, by the test-only hook, isolated.
+fn verified_host() -> (AgentManager, tempdir::TempDir, UnboundedReceiver<Envelope>) {
+    let (m, d, rx) = host(Some(VERIFIED));
+    m.verify_isolation_for_tests("hst_A");
+    (m, d, rx)
+}
+
+fn start(
+    m: &AgentManager,
+    workspace: &str,
+    provider: &str,
+    resume_of: Option<&str>,
+) -> Result<SessionRecord, AgentError> {
+    let launch: Launch = serde_json::from_value(serde_json::json!({
+        "host_id": "hst_A", "workspace": workspace, "provider": provider,
+        "terminal": {"cols": 80, "rows": 24}, "resume_of": resume_of,
+    }))
+    .unwrap();
+    let storm = McpGrant {
+        id: "storm".into(),
+        slug: "storm".into(),
+        plugin_origin: None,
+    };
+    m.launch("usr_A", launch, LaunchMeta::default(), vec![storm])
+        .map(|(r, ..)| r)
+}
+
+fn report(m: &AgentManager, id: &str, status: &str, harness: Option<&str>) {
+    let report = serde_json::from_value(serde_json::json!({
+        "status": status, "exit_code": 0, "harness_session": harness,
+    }))
+    .unwrap();
+    m.host_status("hst_A", id, &report).unwrap();
+}
+
+fn refusal(m: &AgentManager, id: &str, enabled: bool) -> &'static str {
+    m.set_spawn(id, enabled, Some("dev_A"))
+        .unwrap()
+        .unwrap_err()
+}
+
+use tokio::sync::mpsc::UnboundedReceiver;
+
+#[test]
+fn c0_refuses_an_old_host_and_unverified_identity_or_isolation() {
+    // An old host says nothing about identity.
+    let (m, _d, _rx) = host(None);
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
+
+    // A host that says its identity is unavailable.
+    let (m, _d, _rx) = host(Some(
+        r#"{"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"}"#,
+    ));
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
+    for state in ["unsupported", "VERIFIED", ""] {
+        m.inventory(
+            "hst_A",
+            hello(Some(&format!(r#"{{"state": "{state}"}}"#))).capabilities,
+        )
+        .unwrap();
+        assert_eq!(refusal(&m, &s.id, true), "identity_unverified", "{state}");
+    }
+
+    // Verified identity, isolation absent: every host today. A host saying
+    // it is isolated is not believed before 136-5 reads it.
+    let (m, _d, _rx) = host(Some(VERIFIED));
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &s.id, true), "isolation_unverified");
+    let claims = hello_with(
+        Some(VERIFIED),
+        serde_json::json!({"isolation": {"state": "verified", "mechanism": "units"}}),
+    );
+    m.inventory("hst_A", claims.capabilities).unwrap();
+    assert_eq!(refusal(&m, &s.id, true), "isolation_unverified");
+    assert!(!m.spawn_enabled(&s.id).unwrap(), "a refusal writes nothing");
+    assert!(!m.spawn_offered(&s.id));
+}
+
+#[test]
+fn c0_holds_only_while_the_live_link_says_so() {
+    let (m, _d, _rx) = verified_host();
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    let change = m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
+    assert!(change.enabled && !change.was);
+    assert!(m.spawn_offered(&s.id));
+
+    // An identity downgrade hides the tools at once; the switch stays on.
+    m.inventory(
+        "hst_A",
+        hello(Some(r#"{"state": "unavailable", "reason": "self_test"}"#)).capabilities,
+    )
+    .unwrap();
+    assert!(!m.spawn_offered(&s.id));
+    assert!(m.spawn_enabled(&s.id).unwrap());
+    m.inventory("hst_A", hello(Some(VERIFIED)).capabilities)
+        .unwrap();
+    assert!(m.spawn_offered(&s.id));
+
+    // A new link has not said it is isolated.
+    let (generation, _rx2) = m.connect_host("hst_A");
+    m.inventory("hst_A", hello(Some(VERIFIED)).capabilities)
+        .unwrap();
+    assert!(!m.spawn_offered(&s.id));
+    m.disconnect_host("hst_A", generation);
+    assert!(!m.spawn_offered(&s.id), "an offline host offers nothing");
+    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
+    // Revoking never waits for the host.
+    assert!(!m.set_spawn(&s.id, false, None).unwrap().unwrap().enabled);
+}
+
+#[test]
+fn spawn_starts_off_for_fresh_children_and_resumed_sessions() {
+    let (m, _d, _rx) = verified_host();
+    let parent = start(&m, "storm", "claude-code", None).unwrap();
+    assert!(!m.spawn_enabled(&parent.id).unwrap());
+    assert!(!m.spawn_offered(&parent.id));
+    m.set_spawn(&parent.id, true, Some("dev_A"))
+        .unwrap()
+        .unwrap();
+
+    let mut child = record("ags_CHILD", "running");
+    child.workspace = "other".into();
+    m.store
+        .lock()
+        .unwrap()
+        .insert_spawned(&child, &parent.id, "a task", NOW)
+        .unwrap();
+    assert!(!m.spawn_enabled("ags_CHILD").unwrap());
+    assert!(!m.spawn_offered("ags_CHILD"));
+
+    let uuid = "80d0cf8c-8176-43b4-8206-7908d74d1387";
+    report(&m, &parent.id, "running", Some(uuid));
+    report(&m, &parent.id, "completed", None);
+    assert!(
+        !m.spawn_offered(&parent.id),
+        "an ended session offers nothing"
+    );
+    let resumed = start(&m, "storm", "claude-code", Some(&parent.id)).unwrap();
+    assert_eq!(resumed.resumed_from.as_deref(), Some(parent.id.as_str()));
+    assert!(!m.spawn_enabled(&resumed.id).unwrap());
+    assert!(!m.spawn_offered(&resumed.id));
+}
+
+#[test]
+fn only_a_live_session_of_a_spawning_adapter_can_turn_it_on() {
+    let (m, _d, _rx) = verified_host();
+    let shell = start(&m, "other", "shell", None).unwrap();
+    assert_eq!(refusal(&m, &shell.id, true), "provider_cannot_spawn");
+    report(&m, &shell.id, "completed", None);
+    let s = start(&m, "storm", "opencode", None).unwrap();
+    report(&m, &s.id, "completed", None);
+    assert_eq!(refusal(&m, &s.id, true), "session_not_live");
+    // Off is always allowed.
+    assert_eq!(m.set_spawn(&s.id, false, None).unwrap().unwrap().refused, 0);
+    assert!(matches!(
+        m.set_spawn("ags_NOPE", true, None),
+        Err(AgentError::NotFound(_))
+    ));
+}
+
+/// LT-7: revoked with requests pending, they are refused at once; children
+/// keep running; nothing new is offered.
+#[test]
+fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
+    let (m, _d, _rx) = verified_host();
+    let parent = start(&m, "storm", "claude-code", None).unwrap();
+    m.set_spawn(&parent.id, true, Some("dev_A"))
+        .unwrap()
+        .unwrap();
+    {
+        let mut s = m.store.lock().unwrap();
+        let mut child = record("ags_CHILD", "running");
+        child.workspace = "other".into();
+        s.insert_spawned(&child, &parent.id, "a task", NOW).unwrap();
+        s.insert_request(&request("agr_1", "start", &parent.id, None))
+            .unwrap();
+        s.insert_request(&request("agr_2", "end", &parent.id, Some("ags_CHILD")))
+            .unwrap();
+    }
+    let change = m
+        .set_spawn(&parent.id, false, Some("dev_A"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (change.was, change.enabled, change.refused),
+        (true, false, 2)
+    );
+    for id in ["agr_1", "agr_2"] {
+        let r = m.store.lock().unwrap().request(id).unwrap().unwrap();
+        assert_eq!(
+            (r.state.as_str(), r.outcome.as_deref(), r.reason.as_deref()),
+            ("decided", Some("refused"), Some("revoked")),
+            "{id}"
+        );
+    }
+    assert_eq!(m.get("ags_CHILD").unwrap().status, "running");
+    assert!(!m.spawn_offered(&parent.id), "new requests have no tool");
+}
+
+#[test]
+fn ws9_a_spawning_session_holds_its_workspace_alone() {
+    let (m, _d, _rx) = verified_host();
+    let a = start(&m, "storm", "claude-code", None).unwrap();
+    let b = start(&m, "storm", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
+    // A workspace inside it shares its files.
+    report(&m, &b.id, "completed", None);
+    let nested = start(&m, "storm/site", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
+    report(&m, &nested.id, "completed", None);
+    m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
+
+    for workspace in ["storm", "storm/site"] {
+        assert!(
+            matches!(start(&m, workspace, "claude-code", None),
+                Err(AgentError::Conflict(ref c)) if c == "workspace_held"),
+            "{workspace}"
+        );
+    }
+    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
+    assert!(!elsewhere.is_ended());
+
+    // `unknown` is live and still holds it.
+    m.store.lock().unwrap().mark_unknown_on_boot().unwrap();
+    assert!(
+        m.store
+            .lock()
+            .unwrap()
+            .workspace_held("hst_A", "storm", Claim::Launch)
+            .unwrap()
+    );
+    m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
+    assert!(
+        !m.store
+            .lock()
+            .unwrap()
+            .workspace_held("hst_A", "storm", Claim::Launch)
+            .unwrap()
+    );
+}
+
+#[test]
+fn workspaces_are_shared_when_one_is_inside_the_other() {
+    for (a, b) in [
+        ("/w/storm", "/w/storm"),
+        ("/w/storm/", "/w/storm"),
+        ("/w/storm", "/w/storm/site"),
+        ("/w/storm/site", "/w/storm"),
+        ("C:\\w\\storm", "C:\\w\\storm\\site"),
+        ("/", "/w/storm"),
+    ] {
+        assert!(same_workspace(a, b), "{a} {b}");
+    }
+    for (a, b) in [("/w/storm", "/w/storm-site"), ("/w/storm", "/w/other")] {
+        assert!(!same_workspace(a, b), "{a} {b}");
+    }
+}

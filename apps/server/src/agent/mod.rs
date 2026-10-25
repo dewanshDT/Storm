@@ -40,6 +40,19 @@ use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord}
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
 pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
+
+/// The adapters that may be a spawning parent (decision 134, "candidate").
+pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
+
+/// A spawn switch a person set: the session, what it was, what it is now,
+/// and how many pending requests turning it off refused.
+#[derive(Debug)]
+pub struct SpawnChange {
+    pub session: SessionRecord,
+    pub was: bool,
+    pub enabled: bool,
+    pub refused: usize,
+}
 pub const DEFAULT_PROVIDER: &str = "claude-code";
 /// Largest input POST (freeze §11.1).
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -530,6 +543,8 @@ struct HostLink {
     last_seen: std::time::Instant,
     /// Bumped on every inventory the host reports.
     inventory: watch::Sender<u64>,
+    /// No host reports `isolation` before 136-5: only a test sets this.
+    isolation_verified: bool,
 }
 
 struct SessionLive {
@@ -673,6 +688,7 @@ impl AgentManager {
                 capabilities,
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
+                isolation_verified: false,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -957,6 +973,102 @@ impl AgentManager {
             .get(host_id)
             .and_then(|link| link.capabilities.as_ref())
             .is_some_and(|caps| caps.identity.verified())
+    }
+
+    /// Whether the host's link says it isolates its sessions (136, IG-7).
+    /// No host says so yet: `isolation` arrives in `hello` with 136-5, and
+    /// until then this is false on every host.
+    pub fn host_isolated(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .is_some_and(|link| link.isolation_verified)
+    }
+
+    /// Test-only: the host's link says `isolation: verified`. There is no
+    /// production path to this.
+    #[cfg(test)]
+    pub fn verify_isolation_for_tests(&self, host_id: &str) {
+        if let Some(link) = self.live.lock().unwrap().hosts.get_mut(host_id) {
+            link.isolation_verified = true;
+        }
+    }
+
+    /// C0 (134r): nothing privileged unless the host checks every
+    /// connection's identity and isolates its sessions, both as its live
+    /// link says now. The refusal names the first that fails.
+    pub fn spawn_gate(&self, host_id: &str) -> std::result::Result<(), &'static str> {
+        if !self.host_verified(host_id) {
+            return Err("identity_unverified");
+        }
+        if !self.host_isolated(host_id) {
+            return Err("isolation_unverified");
+        }
+        Ok(())
+    }
+
+    /// Whether a session is offered the spawn tools now: its switch is on
+    /// and C0 holds. Checked on every call, never cached.
+    pub fn spawn_offered(&self, session_id: &str) -> bool {
+        let (record, on) = {
+            let store = self.store.lock().unwrap();
+            (
+                store.get(session_id).ok().flatten(),
+                store.spawn_enabled(session_id).unwrap_or(false),
+            )
+        };
+        on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
+    }
+
+    #[cfg(test)]
+    pub fn spawn_enabled(&self, session_id: &str) -> AgentResult<bool> {
+        Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
+    }
+
+    /// A person turns a session's spawn switch on or off (134c, B1, B2).
+    /// Off always succeeds and refuses the session's pending requests at
+    /// once. On needs a live session of a spawning adapter, C0, and WS-9;
+    /// otherwise the inner error is the refusal's code.
+    pub fn set_spawn(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+    ) -> AgentResult<std::result::Result<SpawnChange, &'static str>> {
+        let r = self.get(session_id)?;
+        if enabled {
+            if r.is_ended() {
+                return Ok(Err("session_not_live"));
+            }
+            if !SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
+                return Ok(Err("provider_cannot_spawn"));
+            }
+            if let Err(code) = self.spawn_gate(&r.host_id) {
+                return Ok(Err(code));
+            }
+        }
+        // One lock for the WS-9 check and the write, so a launch into the
+        // workspace cannot slip between them.
+        let mut store = self.store.lock().unwrap();
+        let was = store.spawn_enabled(session_id)?;
+        if enabled
+            && store.workspace_held(
+                &r.host_id,
+                &r.workspace,
+                store::spawn::Claim::Spawn(session_id),
+            )?
+        {
+            return Ok(Err("workspace_held"));
+        }
+        let refused = store.set_spawn(session_id, enabled, device, &now())?;
+        Ok(Ok(SpawnChange {
+            session: r,
+            was,
+            enabled,
+            refused,
+        }))
     }
 
     /// The host's bridge identity (decision 135d): what its link says now,
@@ -1362,6 +1474,15 @@ impl AgentManager {
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
         let launch = {
             let mut store = self.store.lock().unwrap();
+            // WS-9: under the same lock as the insert, so a spawn switch
+            // turned on beside it cannot slip between.
+            if store.workspace_held(
+                &record.host_id,
+                &record.workspace,
+                store::spawn::Claim::Launch,
+            )? {
+                return Err(AgentError::Conflict("workspace_held".into()));
+            }
             let launch = LaunchRecord {
                 session_id: record.id.clone(),
                 name: session_name(

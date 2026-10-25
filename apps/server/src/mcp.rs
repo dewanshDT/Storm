@@ -308,6 +308,23 @@ pub const NEVER_FOR_AGENTS: &[&str] = &["delete_note"];
 /// Tools only an agent session is offered.
 pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
 
+/// Decision 134's tools for a session whose spawn switch is on (134c). None
+/// exists yet (134-4, 134-5); the gateway already offers them only while the
+/// switch is on and C0 holds.
+pub const SPAWN_TOOLS: &[&str] = &[
+    "list_agents",
+    "start_agent",
+    "agent_status",
+    "list_children",
+    "wait_agent",
+    "send_message",
+    "end_agent",
+];
+
+/// Decision 134's tools for a spawned session. None exists yet, and none is
+/// offered until 134-4 gates them on lineage.
+pub const SPAWNED_TOOLS: &[&str] = &["report_result", "read_messages"];
+
 /// Renders an operation's result as a tool result.
 ///
 /// Two details here are the spec's, not preference.
@@ -427,6 +444,11 @@ impl Storm {
         };
         for name in removed {
             router.remove_route(name);
+        }
+        if !self.is_agent() {
+            for name in SPAWN_TOOLS.iter().chain(SPAWNED_TOOLS) {
+                router.remove_route(name);
+            }
         }
         router
     }
@@ -841,6 +863,20 @@ mod tests {
             listed.len() - WRITE_TOOLS.len(),
             "only the write tools should have been removed"
         );
+    }
+
+    #[test]
+    fn no_spawn_tool_exists_before_134_4() {
+        // 134-2 only flips the switch. When 134-4 and 134-5 add these, this
+        // test is changed on purpose, alongside the gateway's gate.
+        let listed: Vec<String> = Storm::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.into())
+            .collect();
+        for name in SPAWN_TOOLS.iter().chain(SPAWNED_TOOLS) {
+            assert!(!listed.contains(&name.to_string()), "{name} exists");
+        }
     }
 
     #[test]

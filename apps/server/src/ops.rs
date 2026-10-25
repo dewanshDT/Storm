@@ -1862,6 +1862,94 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
         .collect())
 }
 
+// ---- Agent spawning: the spawn switch (decision 134-2) ---------------------
+//
+// Session tier and owner only: no `stk_` key and no agent turns it on (B1).
+// Dark: C0 refuses on every host until isolation is reported (136-5).
+
+pub const EVENT_SPAWN_ENABLED: &str = "spawn_enabled";
+pub const EVENT_SPAWN_REVOKED: &str = "spawn_revoked";
+pub const EVENT_SPAWN_REFUSED: &str = "spawn_refused";
+
+#[derive(Debug, Deserialize)]
+pub struct SetSpawn {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SpawnSwitch {
+    pub enabled: bool,
+    /// Pending requests that turning it off refused, `revoked`.
+    pub refused_requests: usize,
+}
+
+/// `PUT /v1/agent/sessions/{id}/spawn`. Every accepted change and every
+/// refused enable is audited; a flip tells the session's agent its tool list
+/// changed.
+pub async fn set_session_spawn(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    id: &str,
+    req: SetSpawn,
+) -> ApiResult<SpawnSwitch> {
+    let owner = crews_owner(actor)?;
+    let record = state.agent.get(id).map_err(agent_error)?;
+    if record.owner_user_id != owner {
+        return Err(not_found("no such session"));
+    }
+    let outcome = state
+        .agent
+        .set_spawn(id, req.enabled, device)
+        .map_err(agent_error)?;
+    let (kind, detail) = match &outcome {
+        Ok(change) => (
+            if change.enabled {
+                EVENT_SPAWN_ENABLED
+            } else {
+                EVENT_SPAWN_REVOKED
+            },
+            serde_json::json!({
+                "session_id": id,
+                "host_id": record.host_id,
+                "was": change.was,
+                "refused_requests": change.refused,
+            }),
+        ),
+        Err(code) => (
+            EVENT_SPAWN_REFUSED,
+            serde_json::json!({"session_id": id, "host_id": record.host_id, "reason": code}),
+        ),
+    };
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            kind,
+            Some(owner),
+            device,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        )
+        .map_err(internal)?;
+    let change = outcome.map_err(conflict)?;
+    if change.was != change.enabled
+        && !change.session.is_ended()
+        && matches!(state.agent.grant(id, BUILTIN_ID), Ok(Some(_)))
+    {
+        state.agent.mcp_message(
+            id,
+            BUILTIN_ID,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
+        );
+    }
+    Ok(SpawnSwitch {
+        enabled: change.enabled,
+        refused_requests: change.refused,
+    })
+}
+
 // ---- Agent installs (decision 133) ------------------------------------
 //
 // The owner's routes are session tier only, so an `stk_` key or a host token
@@ -3785,6 +3873,8 @@ struct Authorized {
     write_vault: Option<String>,
     /// The session was started from a note.
     has_context: bool,
+    /// The spawn tools are offered: the switch is on and C0 holds (134c).
+    spawn: bool,
 }
 
 impl Authorized {
@@ -3797,6 +3887,8 @@ impl Authorized {
             None => {
                 !crate::mcp::NEVER_FOR_AGENTS.contains(&name)
                     && (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                    && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
+                    && !crate::mcp::SPAWNED_TOOLS.contains(&name)
             }
         }
     }
@@ -3933,6 +4025,7 @@ async fn authorize_call(
         vault_writes,
         write_vault: write_vault.filter(|_| vault_writes),
         has_context: launch.is_some_and(|l| l.context.is_some()),
+        spawn: state.agent.spawn_offered(session_id),
     })
 }
 
