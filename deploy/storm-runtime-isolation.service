@@ -1,0 +1,87 @@
+# Storm Runtime isolation helper (decision 136c): the one root service of
+# per-session isolation. Started by storm-runtime-isolation.socket, never
+# enabled on its own; a host with isolation off never runs it.
+#
+# It answers only the host account and only its fixed operations, and
+# refuses and audits anything else (to the journal). Every capability it
+# keeps is listed and justified here (gate G-136-2); a slice that needs
+# another adds it here with its reason, and tests/packaging.rs holds the
+# list.
+
+[Unit]
+Description=Storm Runtime isolation helper
+Documentation=https://github.com/dewanshDT/Storm/blob/main/deploy/README.md
+Requires=storm-runtime-isolation.socket
+After=storm-runtime-isolation.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/storm-runtime-isolation serve
+User=root
+Group=root
+Restart=on-failure
+RestartSec=3
+StateDirectory=storm-runtime-isolation
+StateDirectoryMode=0700
+UMask=0077
+
+# Its capabilities, each for one part of 136b/136d (136-2):
+# - CAP_DAC_READ_SEARCH: to reach and read inside /var/lib/storm-runtime
+#   (0700, the host account's): a workspace, a session's launch, its
+#   Storm directory, and what a session's user wrote, without the right to
+#   write anything there; and (137-1) to measure a parent's repository and
+#   the child workspaces against their caps before a clone.
+# - CAP_CHOWN: to give a session its home and its terminal, its group a
+#   share of its Storm directory, and at lease end to hand back to the
+#   workspace's owner everything the session's user wrote; and (137-1) to
+#   give a spawned child its own workspace, and take it back at lease end.
+# - CAP_FOWNER: to set the modes that go with those owners (group read on
+#   the session's Storm files, the workspace's group-writable modes) on
+#   files neither root nor the helper owns.
+# A child's clone runs as the child's user, in a unit systemd starts
+# (137-1); the helper reads none of the repository's contents itself.
+# It never sends a signal or starts a process under another user itself:
+# systemd does both, for the units it asks for (systemd-run, systemctl).
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
+AmbientCapabilities=
+NoNewPrivileges=true
+# Where it hands files back and shares a session's directory: the host's
+# state, which holds the default workspace root. A workspace root outside
+# it needs the same ReadWritePaths drop-in as storm-runtime.service.
+ReadWritePaths=/var/lib/storm-runtime
+
+# Its socket is passed in; it needs no network and no other socket family.
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+PrivateTmp=true
+PrivateDevices=true
+PrivateIPC=true
+DevicePolicy=closed
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+# Not RestrictSUIDSGID: a workspace's directories carry the setgid bit
+# that makes new files inherit its group (136h), and the helper sets it on
+# a workspace made since `on` and on a session's directories at lease end.
+# It never sets setuid, and drops setuid and setgid from every file.
+LockPersonality=true
+MemoryDenyWriteExecute=true
+KeyringMode=private
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount
+# @privileged includes @chown; the capabilities above are what it is for.
+SystemCallFilter=@chown
+SystemCallErrorNumber=EPERM

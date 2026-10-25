@@ -1,0 +1,896 @@
+//! The host's side of per-session isolation (decision 136): with
+//! `isolation = "per-session"`, a session is started by the root helper
+//! `storm-runtime-isolation`, never by this process. The host leases a pool
+//! user for it, keeps the terminal's master and hands the slave over as a
+//! descriptor; the helper starts the session in its own transient unit and
+//! hands back a pidfd for its leader. Ending it is the helper's too: it
+//! stops the unit, which reaches everything the session started, and at
+//! lease end hands back what the session's user wrote.
+//!
+//! The helper's wire format is its own crate's (`apps/runtime/isolation`,
+//! `protocol.rs`): one JSON line each way, `SCM_RIGHTS` beside it. The two
+//! crates share no code; `tests/isolation_wire.rs` parses every request this
+//! client sends with the helper's own parser. Linux only (136k).
+
+pub use imp::*;
+
+/// A spawned child's workspace, as the helper made it (decision 137): its
+/// own clone of the parent's `HEAD` (W2), or a scratch directory beside its
+/// parent's workspace shown read-only (W3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildWorkspace {
+    pub mode: ChildMode,
+    /// Where the child works, at this same path in its own view.
+    pub path: std::path::PathBuf,
+    /// The commit a clone starts from.
+    pub commit: Option<String>,
+    /// The branch it is on; none when the parent's `HEAD` was detached.
+    pub branch: Option<String>,
+    /// Submodules and large-file pointers are not materialized (137b).
+    pub submodules: bool,
+    pub large_files: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildMode {
+    Clone,
+    Scratch,
+}
+
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use crate::peer_identity::{Report, State};
+
+/// `isolation.mechanism` on the wire (136j): a leased pool user in a
+/// transient systemd unit per session.
+pub const MECHANISM: &str = "systemd_units";
+
+/// A failed self-test is tried again no sooner than this, when a session
+/// asks for one.
+pub const RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// The host's isolation state (136j): `verified` only when isolation is on,
+/// the helper answers, pasta works and the self-test passed. Any failure
+/// later drops it to `unavailable` at once; only another passing self-test
+/// brings it back.
+pub struct Status {
+    report: Mutex<Report>,
+    /// When a failed self-test may run again.
+    retry_at: Mutex<Option<Instant>>,
+    /// Bumped on every change, so the host re-sends its inventory.
+    changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl Status {
+    /// Before the self-test: what the platform and `runtime.toml` say.
+    pub fn new(on: bool, helper: bool) -> Self {
+        let unavailable = |mechanism, reason| Report {
+            state: State::Unavailable,
+            mechanism,
+            reason: Some(reason),
+        };
+        let report = if !cfg!(target_os = "linux") {
+            Report {
+                state: State::Unsupported,
+                mechanism: None,
+                reason: Some(if cfg!(windows) { "windows" } else { "macos" }),
+            }
+        } else if !on {
+            unavailable(None, "off")
+        } else if !helper {
+            unavailable(Some(MECHANISM), "no_helper")
+        } else {
+            unavailable(Some(MECHANISM), "pending")
+        };
+        Self {
+            report: Mutex::new(report),
+            retry_at: Mutex::new(None),
+            changed: tokio::sync::watch::channel(0).0,
+        }
+    }
+
+    pub fn report(&self) -> Report {
+        self.report.lock().unwrap().clone()
+    }
+
+    pub fn verified(&self) -> bool {
+        self.report.lock().unwrap().state == State::Verified
+    }
+
+    /// The self-test has not answered yet.
+    pub fn pending(&self) -> bool {
+        self.report.lock().unwrap().reason == Some("pending")
+    }
+
+    /// Whether a self-test may run now: one is due, or the last failed
+    /// long enough ago. Claims the attempt.
+    pub fn may_test(&self) -> bool {
+        let report = self.report.lock().unwrap();
+        if report.mechanism.is_none() || report.reason == Some("no_helper") {
+            return false;
+        }
+        let mut at = self.retry_at.lock().unwrap();
+        let due = at.is_none_or(|t| Instant::now() >= t);
+        if due {
+            *at = Some(Instant::now() + RETRY_AFTER);
+        }
+        due
+    }
+
+    /// A self-test's outcome.
+    pub fn settle(&self, outcome: Result<(), &'static str>) {
+        self.set(match outcome {
+            Ok(()) => (State::Verified, None),
+            Err(reason) => (State::Unavailable, Some(reason)),
+        });
+    }
+
+    /// Something isolation needs stopped working. Whether it was verified.
+    pub fn downgrade(&self, reason: &'static str) -> bool {
+        if !self.verified() {
+            return false;
+        }
+        self.set((State::Unavailable, Some(reason)));
+        true
+    }
+
+    fn set(&self, (state, reason): (State, Option<&'static str>)) {
+        let mut r = self.report.lock().unwrap();
+        if (r.state, r.reason) == (state, reason) {
+            return;
+        }
+        r.state = state;
+        r.reason = reason;
+        drop(r);
+        self.changed.send_modify(|n| *n += 1);
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    #[cfg(test)]
+    pub fn set_for_tests_pending(&self) {
+        self.set((State::Unavailable, Some("pending")));
+        *self.retry_at.lock().unwrap() = None;
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn before_the_self_test_the_platform_and_the_mode_say() {
+        let r = Status::new(false, true).report();
+        if cfg!(target_os = "linux") {
+            assert_eq!(
+                (r.state, r.mechanism, r.reason),
+                (State::Unavailable, None, Some("off"))
+            );
+            let r = Status::new(true, false).report();
+            assert_eq!(r.reason, Some("no_helper"));
+            assert!(!Status::new(true, false).may_test());
+            let s = Status::new(true, true);
+            assert!(s.pending() && !s.verified());
+            assert_eq!(s.report().mechanism, Some(MECHANISM));
+        } else {
+            assert_eq!(r.state, State::Unsupported);
+        }
+    }
+
+    /// Linux only: elsewhere there is no isolation to test (136k).
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn only_a_passing_self_test_verifies_and_any_failure_drops_it() {
+        let s = Status::new(true, true);
+        let changes = s.subscribe();
+        assert!(s.may_test());
+        assert!(!s.may_test(), "once a minute");
+        assert!(!s.downgrade("helper"), "nothing to drop while pending");
+        s.settle(Ok(()));
+        assert!(s.verified() && !s.pending());
+        assert!(changes.has_changed().unwrap());
+        assert!(s.downgrade("no_passt"));
+        assert_eq!(
+            s.report().to_json(),
+            serde_json::json!({"state": "unavailable", "mechanism": MECHANISM, "reason": "no_passt"})
+        );
+        assert!(!s.downgrade("helper"), "the first reason stands");
+        s.settle(Err("self_test"));
+        assert_eq!(s.report().reason, Some("self_test"));
+        s.settle(Ok(()));
+        assert!(s.verified());
+    }
+}
+
+/// A session's own bridge socket in its directory (136i), which the helper
+/// shares with the session's group at `start`: `0660`, so that group can
+/// connect and no one else.
+#[cfg(unix)]
+pub fn bind_session_socket(
+    path: &std::path::Path,
+) -> std::io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::remove_file(path);
+    let listener = std::os::unix::net::UnixListener::bind(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))?;
+    Ok(listener)
+}
+
+#[cfg(not(target_os = "linux"))]
+mod imp {
+    /// No isolation off Linux (136k): a host there never gets a link, so
+    /// with isolation on it starts nothing.
+    #[derive(Clone, Debug)]
+    pub struct Link {
+        _never: std::convert::Infallible,
+    }
+
+    impl Link {
+        pub fn installed(_: &std::path::Path, _: std::sync::Arc<super::Status>) -> Option<Self> {
+            None
+        }
+
+        pub fn agent_job(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> std::io::Result<Result<Option<String>, String>> {
+            match self._never {}
+        }
+
+        pub fn status(&self) -> std::sync::Arc<super::Status> {
+            match self._never {}
+        }
+    }
+
+    #[derive(Clone)]
+    pub struct Isolated {
+        pub link: Link,
+        pub provider: String,
+    }
+
+    impl Link {
+        pub fn self_test(&self) -> Result<(), &'static str> {
+            match self._never {}
+        }
+
+        pub fn child_create(
+            &self,
+            _: &str,
+            _: &str,
+            _: &std::path::Path,
+        ) -> std::io::Result<super::ChildWorkspace> {
+            match self._never {}
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod imp {
+    use std::io::{self, IoSlice, IoSliceMut};
+    use std::mem::MaybeUninit;
+    use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use rustix::net::{
+        RecvAncillaryBuffer, RecvAncillaryMessage, RecvFlags, SendAncillaryBuffer,
+        SendAncillaryMessage, SendFlags,
+    };
+    use serde_json::{Value, json};
+
+    /// Where the helper's socket unit listens (136c).
+    pub const SOCKET: &str = "/run/storm-runtime-isolation/helper.sock";
+    /// Where the helper keeps sessions' homes: a self-test probe's
+    /// workspace is its own home (136j).
+    pub const HOMES: &str = "/var/lib/storm-runtime-isolation/homes";
+    /// The helper's provider id for a self-test probe, which runs this
+    /// host's own binary (`isolation-probe`).
+    pub const PROBE: &str = "storm-probe";
+
+    /// The helper refused an operation, with its code.
+    #[derive(Debug)]
+    pub struct Refused {
+        pub op: String,
+        pub code: String,
+    }
+
+    impl std::fmt::Display for Refused {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "the isolation helper refused {}: {}", self.op, self.code)
+        }
+    }
+
+    impl std::error::Error for Refused {}
+
+    /// The helper's code, when `e` is its refusal.
+    pub fn refusal(e: &io::Error) -> Option<&str> {
+        e.get_ref()
+            .and_then(|e| e.downcast_ref::<Refused>())
+            .map(|r| r.code.as_str())
+    }
+
+    /// Why a child's workspace could not be made (137f, 137h), for the
+    /// child's `start_failed`: `workspace_cap`, `unreadable_repository`,
+    /// `wrong_parent`, `child_exists`, … None when `e` is not the helper
+    /// refusing `child_create`.
+    pub fn child_failure(e: &io::Error) -> Option<&str> {
+        e.get_ref()
+            .and_then(|e| e.downcast_ref::<Refused>())
+            .filter(|r| r.op == "child_create")
+            .map(|r| r.code.as_str())
+    }
+
+    /// Why isolation cannot be had through the helper now (136j): it does
+    /// not answer, or no session could have a network.
+    pub fn unavailable_because(e: &io::Error) -> Option<&'static str> {
+        match refusal(e) {
+            Some("no_passt") => Some("no_passt"),
+            Some(_) => None,
+            None => matches!(
+                e.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::PermissionDenied
+                    | io::ErrorKind::TimedOut
+                    | io::ErrorKind::WouldBlock
+                    | io::ErrorKind::UnexpectedEof
+            )
+            .then_some("helper"),
+        }
+    }
+
+    /// A connect or a request that takes longer than this is a helper that
+    /// is not answering; only `end` waits longer, for the stop's grace.
+    const IO_TIMEOUT: Duration = Duration::from_secs(10);
+    const END_TIMEOUT: Duration = Duration::from_secs(30);
+    /// The job unit's own limit is 900 s (the helper's `agents.rs`).
+    const JOB_TIMEOUT: Duration = Duration::from_secs(960);
+    /// A child's clone unit's own limit is 600 s (`children.rs`).
+    const CHILD_TIMEOUT: Duration = Duration::from_secs(660);
+    const MAX_RESPONSE: usize = 16 * 1024;
+
+    /// One request to the helper, and its answer.
+    pub trait Helper: Send + Sync {
+        fn call(
+            &self,
+            request: &Value,
+            fd: Option<BorrowedFd<'_>>,
+        ) -> io::Result<(Value, Option<OwnedFd>)>;
+    }
+
+    /// The helper on its socket.
+    pub struct Socket(pub PathBuf);
+
+    impl Helper for Socket {
+        fn call(
+            &self,
+            request: &Value,
+            fd: Option<BorrowedFd<'_>>,
+        ) -> io::Result<(Value, Option<OwnedFd>)> {
+            let stream = UnixStream::connect(&self.0)?;
+            let wait = if request["op"] == "agent_job" {
+                JOB_TIMEOUT
+            } else if request["op"] == "child_create" {
+                CHILD_TIMEOUT
+            } else if request["op"] == "end" || request["op"] == "release" {
+                END_TIMEOUT
+            } else {
+                IO_TIMEOUT
+            };
+            stream.set_read_timeout(Some(wait))?;
+            stream.set_write_timeout(Some(IO_TIMEOUT))?;
+            let mut line = request.to_string().into_bytes();
+            line.push(b'\n');
+            send_line(&stream, &line, fd)?;
+            let (bytes, mut fds) = recv_line(&stream, MAX_RESPONSE)?;
+            let answer: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the helper's answer"))?;
+            Ok((answer, fds.pop()))
+        }
+    }
+
+    pub fn send_line(
+        socket: impl AsFd,
+        bytes: &[u8],
+        fd: Option<BorrowedFd<'_>>,
+    ) -> io::Result<()> {
+        let socket = socket.as_fd();
+        let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(1))];
+        let mut control = SendAncillaryBuffer::new(&mut space);
+        let fds;
+        if let Some(fd) = fd {
+            fds = [fd];
+            control.push(SendAncillaryMessage::ScmRights(&fds));
+        }
+        let mut sent = rustix::net::sendmsg(
+            socket,
+            &[IoSlice::new(bytes)],
+            &mut control,
+            SendFlags::NOSIGNAL,
+        )?;
+        while sent < bytes.len() {
+            sent += rustix::net::send(socket, &bytes[sent..], SendFlags::NOSIGNAL)?;
+        }
+        Ok(())
+    }
+
+    /// A line and the descriptors that came with it, close-on-exec.
+    pub fn recv_line(socket: impl AsFd, max: usize) -> io::Result<(Vec<u8>, Vec<OwnedFd>)> {
+        let socket = socket.as_fd();
+        let (mut line, mut fds) = (Vec::new(), Vec::new());
+        let mut buf = [0u8; 4096];
+        loop {
+            let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(2))];
+            let mut control = RecvAncillaryBuffer::new(&mut space);
+            let got = rustix::net::recvmsg(
+                socket,
+                &mut [IoSliceMut::new(&mut buf)],
+                &mut control,
+                RecvFlags::CMSG_CLOEXEC,
+            )?;
+            for msg in control.drain() {
+                if let RecvAncillaryMessage::ScmRights(received) = msg {
+                    fds.extend(received);
+                }
+            }
+            let chunk = &buf[..got.bytes];
+            if let Some(end) = chunk.iter().position(|&b| b == b'\n') {
+                line.extend_from_slice(&chunk[..end]);
+                return Ok((line, fds));
+            }
+            line.extend_from_slice(chunk);
+            if got.bytes == 0 || line.len() > max {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the helper's answer was cut short",
+                ));
+            }
+        }
+    }
+
+    /// What a provider needs to start its sessions through the helper.
+    #[derive(Clone)]
+    pub struct Link {
+        pub helper: Arc<dyn Helper>,
+        /// The host's state directory: where it writes each session's
+        /// launch for the helper to read.
+        pub state_dir: PathBuf,
+        /// [`HOMES`], or a test's.
+        pub homes: PathBuf,
+        /// What a helper that stops answering downgrades (136j).
+        pub status: Arc<super::Status>,
+    }
+
+    impl std::fmt::Debug for Link {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("Link")
+                .field("state_dir", &self.state_dir)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl Link {
+        /// The installed helper. On a host whose state directory is not the
+        /// packaged one the helper would read the wrong launches, so there
+        /// is none: with isolation on, that host starts nothing.
+        pub fn installed(state_dir: &Path, status: Arc<super::Status>) -> Option<Self> {
+            if !cfg!(target_os = "linux") || state_dir != Path::new(crate::platform::DEFAULT_STATE)
+            {
+                return None;
+            }
+            Some(Self {
+                helper: Arc::new(Socket(SOCKET.into())),
+                state_dir: state_dir.to_path_buf(),
+                homes: HOMES.into(),
+                status,
+            })
+        }
+
+        pub fn launch_dir(&self) -> PathBuf {
+            self.state_dir.join("launch")
+        }
+
+        pub fn status(&self) -> Arc<super::Status> {
+            self.status.clone()
+        }
+
+        fn ask(
+            &self,
+            request: Value,
+            fd: Option<BorrowedFd<'_>>,
+        ) -> io::Result<(Value, Option<OwnedFd>)> {
+            let answered = self.helper.call(&request, fd).and_then(|(answer, fd)| {
+                if answer["ok"] != true {
+                    return Err(io::Error::other(Refused {
+                        op: request["op"].as_str().unwrap_or("?").to_string(),
+                        code: answer["error"].as_str().unwrap_or("no answer").to_string(),
+                    }));
+                }
+                Ok((answer, fd))
+            });
+            if let Err(e) = &answered
+                && let Some(reason) = unavailable_because(e)
+                && self.status.downgrade(reason)
+            {
+                tracing::error!(reason, error = %e, "session isolation is now unavailable");
+            }
+            answered
+        }
+
+        /// The leased user, and its uid: every bridge connection of the
+        /// session must come from it (136i).
+        pub fn lease(&self, session: &str) -> io::Result<(String, u32)> {
+            let (answer, _) = self.ask(json!({"op": "lease", "session": session}), None)?;
+            let user = answer["user"]
+                .as_str()
+                .map(str::to_string)
+                .ok_or_else(|| io::Error::other("the helper leased no user"))?;
+            let uid = answer["uid"]
+                .as_u64()
+                .and_then(|u| u32::try_from(u).ok())
+                .filter(|&u| u != 0)
+                .ok_or_else(|| io::Error::other("the helper named no uid for the lease"))?;
+            Ok((user, uid))
+        }
+
+        /// The helper's half of the self-test (136j): it answers, and pasta
+        /// is there to give a session its network.
+        pub fn ready(&self) -> io::Result<()> {
+            self.ask(json!({"op": "self_test"}), None).map(drop)
+        }
+
+        /// The whole self-test: the helper's half, then two probe sessions
+        /// (`crate::isolation_probe`). The reason when it fails.
+        pub fn self_test(&self) -> Result<(), &'static str> {
+            crate::isolation_probe::self_test(self)
+        }
+
+        pub fn prepare(&self, session: &str, user: &str) -> io::Result<()> {
+            self.ask(
+                json!({"op": "prepare", "session": session, "user": user}),
+                None,
+            )
+            .map(drop)
+        }
+
+        /// Returns the leader's pid and its pidfd; none when it had already
+        /// exited.
+        pub fn start(
+            &self,
+            session: &str,
+            user: &str,
+            provider: &str,
+            workspace: &Path,
+            terminal: BorrowedFd<'_>,
+        ) -> io::Result<(i32, Option<OwnedFd>)> {
+            let workspace = workspace
+                .to_str()
+                .ok_or_else(|| io::Error::other("the workspace path is not UTF-8"))?;
+            let (answer, pidfd) = self.ask(
+                json!({"op": "start", "session": session, "user": user, "provider": provider, "workspace": workspace}),
+                Some(terminal),
+            )?;
+            let pid = answer["pid"].as_i64().unwrap_or(0) as i32;
+            Ok((pid, pidfd.filter(|_| pid > 0)))
+        }
+
+        pub fn signal(&self, session: &str, signal: &str) -> io::Result<()> {
+            self.ask(
+                json!({"op": "signal", "session": session, "signal": signal}),
+                None,
+            )
+            .map(drop)
+        }
+
+        /// Stops the session's unit; how its main process ended.
+        pub fn end(&self, session: &str) -> io::Result<(Option<i32>, Option<i32>)> {
+            let (answer, _) = self.ask(json!({"op": "end", "session": session}), None)?;
+            let n = |k: &str| answer[k].as_i64().map(|v| v as i32);
+            Ok((n("exit_code"), n("signal")))
+        }
+
+        /// An install job under the install identity (136g): the version
+        /// now installed (none after a remove), or the job's failure code.
+        pub fn agent_job(
+            &self,
+            agent: &str,
+            action: &str,
+        ) -> io::Result<Result<Option<String>, String>> {
+            let (answer, _) = self.ask(
+                json!({"op": "agent_job", "agent": agent, "action": action}),
+                None,
+            )?;
+            if let Some(code) = answer["failed"].as_str() {
+                return Ok(Err(code.to_string()));
+            }
+            Ok(Ok(answer["version"].as_str().map(str::to_string)))
+        }
+
+        /// Makes `child`'s workspace from `parent`'s, which is `workspace`
+        /// (decision 137): after `child`'s lease and `prepare`, before its
+        /// `start`. Asked again for the same parent, it answers the same.
+        pub fn child_create(
+            &self,
+            parent: &str,
+            child: &str,
+            workspace: &Path,
+        ) -> io::Result<super::ChildWorkspace> {
+            let workspace = workspace
+                .to_str()
+                .ok_or_else(|| io::Error::other("the workspace path is not UTF-8"))?;
+            let (answer, _) = self.ask(
+                json!({"op": "child_create", "parent": parent, "child": child, "workspace": workspace}),
+                None,
+            )?;
+            let mode = match answer["mode"].as_str() {
+                Some("clone") => super::ChildMode::Clone,
+                Some("scratch") => super::ChildMode::Scratch,
+                _ => return Err(io::Error::other("the helper named no workspace mode")),
+            };
+            let path = answer["workspace"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| io::Error::other("the helper named no child workspace"))?;
+            let text = |k: &str| answer[k].as_str().map(str::to_string);
+            Ok(super::ChildWorkspace {
+                mode,
+                path,
+                commit: text("commit"),
+                branch: text("branch"),
+                submodules: answer["submodules"] == true,
+                large_files: answer["large_files"] == true,
+            })
+        }
+
+        pub fn release(&self, session: &str, user: &str) -> io::Result<()> {
+            self.ask(
+                json!({"op": "release", "session": session, "user": user}),
+                None,
+            )
+            .map(drop)
+        }
+    }
+
+    /// A provider's sessions run isolated through `link`.
+    #[derive(Clone)]
+    pub struct Isolated {
+        pub link: Link,
+        pub provider: String,
+    }
+
+    /// A test helper that runs sessions as this account, on the terminal it
+    /// is handed, speaking the helper's wire format over a real socket.
+    #[cfg(test)]
+    pub mod fake {
+        use super::*;
+        use std::collections::HashMap;
+        use std::os::unix::net::UnixListener;
+        use std::os::unix::process::{CommandExt, ExitStatusExt};
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        pub struct Seen {
+            pub ops: Vec<String>,
+            pub launches: Vec<Value>,
+            pub children: HashMap<String, std::process::Child>,
+            pub released: Vec<String>,
+            /// The uid each lease names; this account's by default, so a
+            /// session's own connections pass 136i's user check.
+            pub lease_uid: Option<u32>,
+            /// As if pasta were missing (IT-7).
+            pub no_passt: bool,
+            /// What `child_create` is refused with, if it is.
+            pub child_refusal: Option<String>,
+        }
+
+        pub struct FakeHelper {
+            pub socket: PathBuf,
+            pub seen: Arc<Mutex<Seen>>,
+            /// Every link's, so a host and its providers share it.
+            pub status: Arc<crate::isolation::Status>,
+            _dir: tempfile::TempDir,
+        }
+
+        impl FakeHelper {
+            /// `program` is what every provider runs here.
+            pub fn start(state_dir: &Path, program: &str) -> Self {
+                let dir = tempfile::tempdir().unwrap();
+                let socket = dir.path().join("helper.sock");
+                let listener = UnixListener::bind(&socket).unwrap();
+                let seen = Arc::new(Mutex::new(Seen::default()));
+                let (s, state_dir, program) =
+                    (seen.clone(), state_dir.to_path_buf(), program.to_string());
+                std::thread::spawn(move || {
+                    for stream in listener.incoming() {
+                        let Ok(stream) = stream else { return };
+                        let (s, state_dir, program) =
+                            (s.clone(), state_dir.clone(), program.clone());
+                        std::thread::spawn(move || serve(stream, &s, &state_dir, &program));
+                    }
+                });
+                Self {
+                    socket,
+                    seen,
+                    status: Arc::new(crate::isolation::Status::new(true, true)),
+                    _dir: dir,
+                }
+            }
+
+            pub fn link(&self, state_dir: &Path) -> Link {
+                Link {
+                    helper: Arc::new(Socket(self.socket.clone())),
+                    state_dir: state_dir.to_path_buf(),
+                    homes: self._dir.path().join("homes"),
+                    status: self.status.clone(),
+                }
+            }
+        }
+
+        fn serve(stream: UnixStream, seen: &Mutex<Seen>, state_dir: &Path, program: &str) {
+            let Ok((line, mut fds)) = recv_line(&stream, 64 * 1024) else {
+                return;
+            };
+            let req: Value = serde_json::from_slice(&line).unwrap();
+            let op = req["op"].as_str().unwrap().to_string();
+            let session = req["session"]
+                .as_str()
+                .or(req["child"].as_str())
+                .unwrap_or("")
+                .to_string();
+            let what = match (req["signal"].as_str(), req["agent"].as_str()) {
+                (Some(signal), _) => format!("{op} {session} {signal}"),
+                (None, Some(agent)) => {
+                    format!("{op} {agent} {}", req["action"].as_str().unwrap_or(""))
+                }
+                (None, None) => format!("{op} {session}"),
+            };
+            seen.lock().unwrap().ops.push(what);
+            let refuse = |code: &str| (json!({"ok": false, "error": code}), None);
+            let (answer, fd): (Value, Option<OwnedFd>) = match op.as_str() {
+                "lease" => {
+                    let uid = seen
+                        .lock()
+                        .unwrap()
+                        .lease_uid
+                        .unwrap_or_else(|| rustix::process::getuid().as_raw());
+                    (json!({"ok": true, "user": "storm-s001", "uid": uid}), None)
+                }
+                "self_test" | "start" if seen.lock().unwrap().no_passt => refuse("no_passt"),
+                "self_test" => (json!({"ok": true}), None),
+                "prepare" | "release" => {
+                    if op == "release" {
+                        seen.lock().unwrap().released.push(session.clone());
+                    }
+                    (json!({"ok": true}), None)
+                }
+                "start" => {
+                    let slave = fds.pop().expect("a terminal");
+                    let path = state_dir.join("launch").join(format!("{session}.json"));
+                    let launch: Value =
+                        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                    seen.lock().unwrap().launches.push(launch.clone());
+                    let args = launch["args"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|a| a.as_str().unwrap().to_string());
+                    // A probe is this test binary's `probe_entry`, given the
+                    // arguments the host would give `storm-runtime`.
+                    let probe = req["provider"] == PROBE;
+                    let mut cmd = if probe {
+                        let mut c = std::process::Command::new(std::env::current_exe().unwrap());
+                        c.args([
+                            "--exact",
+                            "isolation_probe::tests::probe_entry",
+                            "--nocapture",
+                            "-q",
+                            "--test-threads=1",
+                        ]);
+                        c
+                    } else {
+                        let mut c = std::process::Command::new(program);
+                        c.args(args.clone());
+                        c
+                    };
+                    let workspace = if probe {
+                        let home = PathBuf::from(req["workspace"].as_str().unwrap());
+                        std::fs::create_dir_all(&home).unwrap();
+                        home
+                    } else {
+                        PathBuf::from(req["workspace"].as_str().unwrap())
+                    };
+                    cmd.env_clear().current_dir(&workspace);
+                    if probe {
+                        cmd.env(
+                            "STORM_ISOLATION_PROBE",
+                            serde_json::to_string(&args.collect::<Vec<_>>()).unwrap(),
+                        )
+                        .env("HOME", &workspace);
+                    }
+                    cmd.stdin(slave.try_clone().unwrap())
+                        .stdout(slave.try_clone().unwrap())
+                        .stderr(slave);
+                    for pair in launch["env"].as_array().unwrap() {
+                        cmd.env(pair[0].as_str().unwrap(), pair[1].as_str().unwrap());
+                    }
+                    // SAFETY: two raw syscalls in the child before exec.
+                    unsafe {
+                        cmd.pre_exec(|| {
+                            rustix::process::setsid()?;
+                            rustix::process::ioctl_tiocsctty(BorrowedFd::borrow_raw(0))?;
+                            Ok(())
+                        });
+                    }
+                    let Ok(child) = cmd.spawn() else {
+                        let line = b"{\"ok\":false,\"error\":\"provider_unavailable\"}\n";
+                        let _ = send_line(&stream, line, None);
+                        return;
+                    };
+                    let pid = child.id();
+                    let pidfd = rustix::process::pidfd_open(
+                        rustix::process::Pid::from_child(&child),
+                        rustix::process::PidfdFlags::empty(),
+                    )
+                    .unwrap();
+                    seen.lock().unwrap().children.insert(session.clone(), child);
+                    (json!({"ok": true, "pid": pid}), Some(pidfd))
+                }
+                "signal" => {
+                    let sig = match req["signal"].as_str().unwrap() {
+                        "hup" => rustix::process::Signal::HUP,
+                        "kill" => rustix::process::Signal::KILL,
+                        "int" => rustix::process::Signal::INT,
+                        _ => rustix::process::Signal::TERM,
+                    };
+                    let pid = seen.lock().unwrap().children.get(&session).map(|c| c.id());
+                    match pid {
+                        Some(pid) => {
+                            let _ = rustix::process::kill_process_group(
+                                rustix::process::Pid::from_raw(pid as i32).unwrap(),
+                                sig,
+                            );
+                            (json!({"ok": true}), None)
+                        }
+                        None => (json!({"ok": false, "error": "not_started"}), None),
+                    }
+                }
+                "end" => {
+                    let child = seen.lock().unwrap().children.remove(&session);
+                    match child {
+                        Some(mut child) => {
+                            let status = child.wait().unwrap();
+                            let _ = rustix::process::kill_process_group(
+                                rustix::process::Pid::from_raw(child.id() as i32).unwrap(),
+                                rustix::process::Signal::KILL,
+                            );
+                            (
+                                json!({"ok": true, "exit_code": status.code(), "signal": status.signal()}),
+                                None,
+                            )
+                        }
+                        None => (json!({"ok": false, "error": "not_started"}), None),
+                    }
+                }
+                "agent_job" => (json!({"ok": true, "version": "9.9.9"}), None),
+                "child_create" => match seen.lock().unwrap().child_refusal.clone() {
+                    Some(code) => refuse(&code),
+                    None => (
+                        json!({"ok": true, "mode": "clone", "workspace": format!("/var/lib/storm-runtime-isolation/children/{session}/workspace"), "commit": "a".repeat(40), "branch": "main", "submodules": false, "large_files": true}),
+                        None,
+                    ),
+                },
+                _ => (json!({"ok": false, "error": "not_built"}), None),
+            };
+            let mut line = answer.to_string().into_bytes();
+            line.push(b'\n');
+            let _ = send_line(&stream, &line, fd.as_ref().map(|f| f.as_fd()));
+        }
+    }
+}

@@ -261,7 +261,8 @@ class _HostTile extends StatelessWidget {
         label: host.name,
         sub:
             '$state · $agents · network: host policy'
-            '${host.identityUnverified && !revoked ? '\n$kIdentityNotVerified' : ''}',
+            '${host.identityUnverified && !revoked ? '\n$kIdentityNotVerified' : ''}'
+            '${host.isolationLabel != null && !revoked ? '\n${host.isolationLabel}' : ''}',
         monoSub: true,
         trailing: revoked
             ? null

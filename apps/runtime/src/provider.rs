@@ -152,6 +152,13 @@ pub struct LaunchExtras {
     pub env_remove: Vec<std::ffi::OsString>,
     /// Like `env`, applied last, but never printed: `Debug` shows names only.
     pub secret_env: Vec<(std::ffi::OsString, crate::credential::SecretOsString)>,
+    /// On an isolated host, the conversation a resume reopens and the
+    /// session that had it (136e): the helper copies it into the new home.
+    pub resumed_from: Option<(String, String)>,
+    /// On an isolated host, a spawned child's parent session (decision
+    /// 137): the helper makes the child's own workspace from the parent's,
+    /// which is this session's `workspace`, before it starts.
+    pub child_of: Option<String>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.
@@ -165,7 +172,9 @@ pub trait SessionEvents: Send + Sync {
     /// The session's leader, as soon as it exists: what its bridges and
     /// hooks must descend from (decision 135). A provider with no process
     /// never calls it, and no connection is taken for it on a verified host.
-    fn leader(&self, _leader: crate::platform::peer::Process) {}
+    /// On an isolated host it comes with the uid the session runs as, which
+    /// its connections must come from too (decision 136i).
+    fn leader(&self, _leader: crate::platform::peer::Process, _user: Option<u32>) {}
 }
 
 /// Why a session could not be started.
@@ -207,6 +216,16 @@ pub trait Provider: Send + Sync {
     /// that is not installed or not a command.
     fn resolved(&self) -> Option<std::path::PathBuf> {
         None
+    }
+    /// Whether its sessions run isolated, each under its own identity
+    /// (decision 136). On an isolated host nothing else starts.
+    fn isolated(&self) -> bool {
+        false
+    }
+    /// The variables its env file sets, with their values' emptiness only:
+    /// whether a key decision 136f permits is there.
+    fn env_names(&self) -> Vec<(std::ffi::OsString, bool)> {
+        Vec::new()
     }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.

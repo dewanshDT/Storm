@@ -1254,6 +1254,7 @@ List<(String, String)> aboutRows(
     ),
   ('Network', 'Inherits $host’s policy'),
   if (s.identityUnverified) ('Identity', '$kIdentityNotVerified.'),
+  if (s.isolationLabel case final label?) ('Isolation', '$label.'),
 ];
 
 /// Under About when a plugin's remote server was skipped: it reaches a

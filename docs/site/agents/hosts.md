@@ -193,6 +193,68 @@ sudo systemctl edit storm-runtime
 `MemoryDenyWriteExecute`, under which OpenCode cannot start. The unit's
 `RestartPreventExitStatus=3` keeps a revoked host stopped.
 
+**Per-session isolation is being built, and is off.** The package ships a
+second, separate root service, `storm-runtime-isolation`, disabled. When it
+is finished, `sudo storm-runtime-isolation on` will run each session as its
+own system user in its own sandbox, so sessions on one host cannot reach each
+other. Turning it on needs systemd 255 or newer and `passt`, stops nothing by
+itself (stop the host first), creates the user pools and gives each workspace
+a group; `sudo storm-runtime-isolation off` puts every workspace back as it
+was. With it on, the host starts each session through the helper, in its own
+systemd unit (`storm-session-<id>.service`) under a leased pool user, with
+its own `/tmp`, `/dev/shm` and IPC, its own home, and only its own workspace
+and session files visible; it never runs one the old way. Each session also
+has its own network: it reaches the internet and resolves names through
+`pasta` (from `passt`), but not the host's loopback services nor another
+session's. If a session must reach a service on the host's loopback (a local
+model server, say), list its TCP port in `runtime.toml`:
+`isolation_host_ports = [11434]`.
+
+Each isolated session starts in a fresh home holding a copy of your agent's
+configuration: its settings, instructions, MCP servers, plugins, skills and
+your shell's start-up files. Most of it is read-only to the session, and
+nothing it changes there reaches your own configuration; edit yours, and the
+next session gets it. **Logins that refresh themselves are never copied**:
+Claude Code's own `/login`, Codex's ChatGPT login and OpenCode's OAuth
+logins would let one session rotate the tokens out from under another. An
+isolated Claude Code session needs a synced token or an API key in its env
+file; Codex an `OPENAI_API_KEY` there;
+OpenCode an API key, or one of its free models. A session with none of these
+fails with `credential_unavailable` rather than using your login. The agents
+Storm installs belong to a separate `storm-install` account while isolation
+is on: sessions can run them but not change them, and installs and updates
+from Settings › Agents run as that account.
+
+Each isolated session reaches Storm through **its own bridge socket**, in
+its own session directory, which only it and the host can open; the host
+takes a connection there only from the system user the session was leased,
+and, where the host's identity is verified, only from under the session's
+own process. Pasted images land in the same directory, readable to that
+session alone. **Before an isolated host starts any session it runs a
+self-test**: two probe sessions, the second trying to see, signal or read
+the first, connect to its sockets and local ports, and write where agents
+live. The host reports `isolation: verified` only when every attempt is
+refused; until then, or if the helper stops answering or `pasta` goes
+missing later, it reports `unavailable` with the reason, the app says so on
+the host row and in each session's Details, and **new sessions fail with
+"isolation unavailable on this host"** while running ones carry on.
+
+On an isolated host, an agent that starts another agent (agent spawning, not
+yet available) gives the new one **a workspace of its own**, made under the
+new session's user, in `/var/lib/storm-runtime-isolation/children/`, never
+inside a workspace root. In a git repository it is an independent clone of
+the commit you have checked out: only committed files, never your untracked,
+ignored or uncommitted ones, and nothing from the repository or your git
+configuration (hooks, filters, `core.fsmonitor`, includes) runs while it is
+made. Submodules and Git LFS files are not fetched. Anywhere else, the new
+session sees your workspace read-only and writes in a scratch directory.
+Two caps in `runtime.toml`, in bytes, keep clones from filling the disk:
+`child_workspace_max` (one child, default 2 GiB) and `children_max` (all of
+them, default 20 GiB); a child that would go over either does not start.
+Isolation is still being finished, so leave it off for now. A workspace root outside `/var/lib/storm-runtime`
+needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
+`storm-runtime`. `storm-runtime.service` itself is unchanged either way.
+
 Remove it with `sudo apt remove storm-runtime`.
 
 ## macOS

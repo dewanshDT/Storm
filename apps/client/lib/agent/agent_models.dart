@@ -100,6 +100,8 @@ class AgentHost {
     this.capabilitiesKnown = false,
     this.agentInstall = false,
     this.identityState,
+    this.isolationState,
+    this.isolationReason,
   });
 
   final String id;
@@ -139,6 +141,15 @@ class AgentHost {
   bool get identityUnverified =>
       identityState != null && identityState != 'verified';
 
+  /// Its session isolation (decision 136j): state and reason; null from a
+  /// server that does not say.
+  final String? isolationState;
+  final String? isolationReason;
+
+  /// What the host row says about it; nothing while isolation is off.
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
+
   bool get online => status == 'online';
 
   bool get receivesClaudeLogin =>
@@ -173,6 +184,8 @@ class AgentHost {
       capabilitiesKnown: caps != null,
       agentInstall: caps?['agent_install'] == true,
       identityState: _identityState(j),
+      isolationState: _isolation(j).$1,
+      isolationReason: _isolation(j).$2,
     );
   }
 }
@@ -181,6 +194,37 @@ String? _identityState(Map<String, dynamic> j) {
   final identity = j['identity'];
   return identity is Map ? '${identity['state'] ?? 'unavailable'}' : null;
 }
+
+(String?, String?) _isolation(Map<String, dynamic> j) {
+  final isolation = j['isolation'];
+  if (isolation is! Map) return (null, null);
+  final reason = isolation['reason'];
+  return (
+    '${isolation['state'] ?? 'unavailable'}',
+    reason is String ? reason : null,
+  );
+}
+
+/// What Storm says about a host's session isolation (decision 136j). Nothing
+/// where it is not on: off (the default), an older host, or a platform that
+/// has none. Anything but `verified` with isolation on refuses new sessions.
+String? isolationLabelFor(String? state, String? reason) {
+  if (state == null || state == 'unsupported') return null;
+  if (state == 'verified') return kIsolationVerified;
+  if (reason == null || reason == 'off' || reason == 'old_host') return null;
+  final why = switch (reason) {
+    'pending' => 'self-test running',
+    'self_test' => 'self-test failed',
+    'no_passt' => 'pasta missing',
+    'helper' => 'helper not answering',
+    'no_helper' => 'no isolation helper',
+    _ => reason.replaceAll('_', ' '),
+  };
+  return 'Session isolation unavailable ($why) — new sessions are refused';
+}
+
+/// A host whose sessions each run as their own user (decision 136j).
+const kIsolationVerified = 'Sessions isolated — each runs as its own user';
 
 /// What Storm says on a host or session whose identity is not verified
 /// (decision 135d).
@@ -349,6 +393,8 @@ class AgentSession {
     this.mcpSkipped = const [],
     this.mcpPluginLocal = const [],
     this.identityState,
+    this.isolationState,
+    this.isolationReason,
   }) : name = name ?? workspace;
 
   final String id;
@@ -405,6 +451,13 @@ class AgentSession {
   bool get identityUnverified =>
       identityState != null && identityState != 'verified';
 
+  /// Its host's session isolation (decision 136j).
+  final String? isolationState;
+  final String? isolationReason;
+
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
+
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
@@ -448,6 +501,10 @@ class AgentSession {
     'failed' => switch (endReason) {
       'host_restart' => 'host restarted',
       'host_revoked' => 'host revoked',
+      // Decision 136f: an isolated host had no credential it may use.
+      'credential_unavailable' => 'no credential this host may use',
+      // Decision 136j: the host's isolation was not verified.
+      'isolation_unavailable' => 'isolation unavailable on this host',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',
@@ -487,6 +544,8 @@ class AgentSession {
           mcpSkipped: mcpSkipped,
           mcpPluginLocal: mcpPluginLocal,
           identityState: identityState,
+          isolationState: isolationState,
+          isolationReason: isolationReason,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -534,6 +593,8 @@ class AgentSession {
       for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
     ],
     identityState: _identityState(j),
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
   );
 }
 

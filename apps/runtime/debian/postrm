@@ -3,7 +3,8 @@ set -e
 
 # Purge removes configuration, never /var/lib/storm-runtime: it holds the
 # host's identity and its workspaces — the operator's code. An operator who
-# wants them gone can say so with rm.
+# wants them gone can say so with rm. Nor /var/lib/storm-runtime-isolation:
+# its records are what `storm-runtime-isolation off` restores workspaces from.
 if [ "$1" = "purge" ]; then
     rm -f /etc/storm-runtime/runtime.toml
     if [ -d /run/systemd/system ]; then

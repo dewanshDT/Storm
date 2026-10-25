@@ -25,6 +25,10 @@ no user data and never learns who owns a session."""
 section = "devel"
 priority = "optional"
 depends = "$auto"
+# Per-session isolation's user-mode network (decision 136). Recommended, not
+# required: a host with isolation off never runs it, and
+# `storm-runtime-isolation on` refuses a host without it.
+recommends = "passt"
 maintainer-scripts = "debian/"
 conf-files = ["/etc/storm-runtime/runtime.toml"]
 assets = [
@@ -32,6 +36,13 @@ assets = [
     ["../../deploy/storm-runtime.service", "lib/systemd/system/", "644"],
     ["../../deploy/runtime.toml.example", "etc/storm-runtime/runtime.toml", "644"],
     ["../../LICENSE", "usr/share/doc/storm-runtime/", "644"],
+    # Per-session isolation's root side (decision 136): its own crate, built
+    # into isolation/target/release/ beside this one. The units ship
+    # disabled; only `storm-runtime-isolation on` enables them.
+    ["isolation/target/release/storm-runtime-isolation", "usr/sbin/", "755"],
+    ["../../deploy/storm-runtime-isolation.socket", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-runtime-isolation.service", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-runtime-isolation.sysusers", "usr/share/storm-runtime-isolation/sysusers.conf", "644"],
 ]
 
 # The provider contract has no dependencies at all (decision 77): PTY I/O is
@@ -73,7 +84,7 @@ libc = "0.2"
 # The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
 # the child's pre_exec stays async-signal-safe and the musl build needs no libc
 # shims.
-rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system"] }
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system", "net"] }
 
 # ConPTY, Job Objects, DACLs and the named pipe (D16, AM51–AM55), and the
 # Service Control Manager (AM50).
@@ -105,6 +116,13 @@ macos-identity-gate = []
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["test-util"] }
+
+# Only to check the host's requests and launches parse with the helper's own
+# parser, and that the two agree on shared lists (tests/isolation_wire.rs,
+# tests/packaging.rs, host tests); nothing of it is linked into
+# storm-runtime, and the helper is Linux only.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+storm-runtime-isolation = { path = "isolation" }
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1.5", features = ["process", "system"] }

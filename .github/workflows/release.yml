@@ -202,6 +202,16 @@ jobs:
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/storm-runtime \
             "dist/storm-runtime-${GITHUB_REF_NAME#v}-x86_64-linux"
+      # The isolation helper (decision 136): its own crate, shipped in the
+      # same .deb, built the same way.
+      - name: Build the isolation helper
+        working-directory: apps/runtime/isolation
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+          cargo zigbuild --release --target x86_64-unknown-linux-musl
+          mkdir -p target/release
+          cp target/x86_64-unknown-linux-musl/release/storm-runtime-isolation target/release/
       - name: Build .deb
         working-directory: apps/runtime
         run: |

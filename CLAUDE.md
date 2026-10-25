@@ -685,6 +685,64 @@ Specification*; the slices are decisions 81 and 81a onward):
   audited in `security_events` with codes only, never a URL or npm output.
   `tests/agent_install_gate.rs` (`STORM_AGENT_INSTALL_GATE=1`) proves every
   recipe against the real channels.
+- **Per-session isolation's root side is its own crate and unit, and the
+  host's unit never changes for it** (decision 136, `apps/runtime/isolation`).
+  `storm-runtime-isolation` is the only root code: the helper answers only
+  the host account's uid on the socket systemd binds, accepts only its fixed
+  operations with exactly their fields (a program, arguments or a uid in a
+  request is refused; a workspace must sit directly under a configured
+  root, with no symlink), and audits every request; its unit keeps
+  `CAP_DAC_READ_SEARCH`, `CAP_CHOWN` and `CAP_FOWNER`, each with its reason,
+  and a slice that needs another adds it there with its reason. **With
+  isolation on, no session is this host's child** (136-2): the host leases a
+  pool user, writes the session's arguments and variables (never a program)
+  to `<state>/launch/<id>.json` (`0600`, removed after `start`), keeps the
+  PTY master and sends the slave over `SCM_RIGHTS`; the helper checks it is
+  a devpts slave, resolves the program from `runtime.toml` itself and asks
+  systemd for `storm-session-<id>.service` (`units.rs` is the property set,
+  tested as data), and hands back the leader's pidfd. **Each session has its
+  own network namespace** (136-3, `net.rs`): `storm-session-<id>-net.service`
+  creates `/run/netns/storm-<id>` and runs `pasta` in it as a dynamic user
+  with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only; pasta's every forwarding
+  direction is set explicitly (each defaults to `auto`, which would publish
+  listeners both ways), `--no-map-gw` keeps the host's loopback out, and only
+  `runtime.toml` `isolation_host_ports` reach it; DNS goes through pasta's
+  forwarder, named in a bound `/etc/resolv.conf`. A session whose network
+  does not start is never started. Ending is the unit's
+  stop; at lease end (`release`) the helper hands back what the user wrote
+  and removes its home before the user is free, and leases are on disk so
+  a restarted helper revokes them first. **A session's home is a snapshot
+  of the account's config, never its credentials** (136-4, `home.rs`): a
+  per-profile allowlist copied at `start` through `O_NOFOLLOW` descriptors
+  (links copied, never followed), root's and read-only except the files an
+  agent rewrites; no credential file (`DENIED`), and of a provider's store
+  only its static API keys (`static_keys`). At lease end its conversations
+  move to the helper's `kept/<session>/`, and a resume copies only the named
+  conversation from the predecessor the server names, once that one has
+  ended. **An isolated session starts only on a credential 136f permits**
+  (`credential_paths.rs`: the synced token, an env-file key, a store's
+  static key) or fails `credential_unavailable`; never on a refreshable
+  login. **The agents prefix belongs to `storm-install`** (136g,
+  `agents.rs`): installs run through the helper's `agent_job` as the host's
+  own `storm-runtime agent-job`, in a unit that can write only the prefix.
+  **On an isolated host each session has its own bridge socket**
+  (136-5): `<state>/sessions/<id>/mcp.sock`, `0660`, bound before `start`
+  so the helper shares it with the session's group; a bridge or harness
+  connection is taken only on its session's own socket, from the uid the
+  lease named (`SO_PEERCRED`), and on a verified host also under the leader
+  the helper handed back (`wrong_socket`, `wrong_user`, then 135b). **No
+  isolated session starts before the self-test passes** (`isolation_probe.rs`:
+  two probe sessions of the helper's `storm-probe` provider, the host's own
+  `storm-runtime isolation-probe`; B must reach none of A's processes,
+  state, sockets, ports, `/tmp`, `/dev/shm`, IPC or the agents prefix, and
+  each probe's own controls must work); anything else is `isolation:
+  unavailable` and `isolation_unavailable`, and a helper that stops
+  answering or `no_passt` drops it at once. The operator's
+  `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
+  record every entry before changing any, and write `isolation` in
+  `runtime.toml` last. Nothing at install creates the pools or enables the
+  helper. `tests/packaging.rs` pins `storm-runtime.service` line for line
+  (G-136-6).
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

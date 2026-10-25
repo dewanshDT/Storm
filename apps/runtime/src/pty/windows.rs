@@ -111,6 +111,12 @@ impl Drop for Console {
 
 /// Starts `launch` on a new pseudoconsole at `size`, inside a new job.
 pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> {
+    if launch.isolated.is_some() {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "per-session isolation is Linux only",
+        ));
+    }
     let (out_read, out_write) = anonymous_pipe()?;
     let (in_ours, in_theirs) = input_pipe()?;
     let mut hpc: HPCON = 0 as HPCON;
@@ -140,6 +146,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
         },
         group: Group { job, console },
         leader: None,
+        user: None,
     })
 }
 

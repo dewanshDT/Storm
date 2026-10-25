@@ -18,6 +18,11 @@ mkdir -p /etc/storm-runtime
 
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
+    # The isolation helper (decision 136) ships disabled and runs only once
+    # `storm-runtime-isolation on` enabled it; an upgrade restarts it then.
+    if [ "$1" = "configure" ] && [ -n "$2" ] && systemctl is-active --quiet storm-runtime-isolation.service; then
+        systemctl restart storm-runtime-isolation.service || true
+    fi
     # On upgrade, pick up the new binary if it was running. A fresh install
     # stays stopped: it has nothing to connect to until it is enrolled.
     if [ "$1" = "configure" ] && [ -n "$2" ] && systemctl is-active --quiet storm-runtime; then

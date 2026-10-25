@@ -115,6 +115,10 @@ pub enum Command {
         /// the exemptions (134-8). Absent for every other session.
         #[serde(default)]
         spawn_asks: Option<SpawnStart>,
+        /// A resume's predecessor (decision 136e): on an isolated host its
+        /// kept conversation is what the new home gets.
+        #[serde(default)]
+        resumed_from: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -213,7 +217,14 @@ struct Events {
     /// The agent's own session id, as last reported (decision 89).
     harness: Mutex<Option<String>>,
     /// The session's leader once the provider has started it (decision 135).
-    leader: watch::Sender<Option<Arc<crate::platform::peer::Process>>>,
+    leader: watch::Sender<Option<Arc<Leader>>>,
+}
+
+/// A session's leader, and on an isolated host the uid it runs as: both
+/// what its bridge and harness connections are checked against.
+pub(crate) struct Leader {
+    process: crate::platform::peer::Process,
+    user: Option<u32>,
 }
 
 impl SessionEvents for Events {
@@ -230,8 +241,11 @@ impl SessionEvents for Events {
         self.wake.notify_one();
     }
 
-    fn leader(&self, leader: crate::platform::peer::Process) {
-        self.leader.send_replace(Some(Arc::new(leader)));
+    fn leader(&self, leader: crate::platform::peer::Process, user: Option<u32>) {
+        self.leader.send_replace(Some(Arc::new(Leader {
+            process: leader,
+            user,
+        })));
     }
 }
 
@@ -264,11 +278,14 @@ type Subscribers = HashMap<(String, String), Vec<tokio::sync::mpsc::Sender<serde
 type HarnessHandles = HashMap<String, (String, String, Arc<Events>)>;
 
 /// Each session's leader, by session id, from before it is started.
-type Leaders = HashMap<String, watch::Receiver<Option<Arc<crate::platform::peer::Process>>>>;
+type Leaders = HashMap<String, watch::Receiver<Option<Arc<Leader>>>>;
 
 /// How long a connection waits for its session's leader while the session
 /// is still starting: the agent can run a hook before `start` returns.
 const LEADER_WAIT: Duration = Duration::from_secs(5);
+
+/// How long an isolated start waits for the self-test still running.
+const ISOLATION_WAIT: Duration = Duration::from_secs(90);
 
 /// At most this many refusals a minute reach the server's audit (135-2).
 const REFUSALS_PER_MINUTE: u32 = 30;
@@ -327,6 +344,13 @@ pub struct Host {
     agents: Arc<crate::agents::Inventory>,
     /// Agents with a job running: one at a time each (133-4).
     agent_jobs: Mutex<std::collections::HashSet<String>>,
+    /// With isolation on, the helper: agent installs run through it under
+    /// the install identity (136g).
+    isolation: Option<crate::isolation::Link>,
+    /// Whether sessions here are isolated, as the self-test found (136j).
+    isolation_status: Arc<crate::isolation::Status>,
+    /// Each isolated session's own bridge socket's accept loop (136i).
+    session_sockets: Mutex<HashMap<String, tokio::task::AbortHandle>>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -340,14 +364,27 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
-        let providers = config.providers_with(&crate::agents::managed_bin(state_dir))?;
-        Self::with_providers(state_dir, config, providers)
+        let managed = crate::agents::managed_bin(state_dir);
+        // 136a: with isolation on, every session goes through the helper. A
+        // host that has none (not Linux, not the packaged state directory)
+        // keeps providers that cannot isolate, and so starts nothing.
+        let on = config.isolation == crate::config::Isolation::PerSession;
+        let status = Arc::new(crate::isolation::Status::new(on, cfg!(target_os = "linux")));
+        let link = on
+            .then(|| crate::isolation::Link::installed(state_dir, status.clone()))
+            .flatten();
+        let providers = match &link {
+            Some(link) => config.providers_isolated(&managed, link.clone())?,
+            None => config.providers_with(&managed)?,
+        };
+        Self::with_providers(state_dir, config, providers, link)
     }
 
     fn with_providers(
         state_dir: &Path,
         config: RuntimeConfig,
         providers: Vec<Arc<dyn Provider>>,
+        isolation: Option<crate::isolation::Link>,
     ) -> Result<Arc<Self>> {
         let identity = HostConfig::load(state_dir)?;
         let key = HostKey::load(state_dir, &identity.key_id)?;
@@ -365,6 +402,13 @@ impl Host {
                 "sessions from before this restart are gone; reporting them as host_restart"
             );
         }
+        let isolation_status = match &isolation {
+            Some(link) => link.status(),
+            None => Arc::new(crate::isolation::Status::new(
+                config.isolation == crate::config::Isolation::PerSession,
+                false,
+            )),
+        };
         Ok(Arc::new(Self {
             state_dir: state_dir.to_path_buf(),
             config,
@@ -383,6 +427,8 @@ impl Host {
             harness_handles: Mutex::new(HashMap::new()),
             peer_identity: crate::peer_identity::Identity::detect(),
             leaders: Mutex::new(HashMap::new()),
+            isolation_status,
+            session_sockets: Mutex::new(HashMap::new()),
             refusals_reported: Mutex::new((Instant::now(), 0)),
             #[cfg(test)]
             refused: Mutex::new(Vec::new()),
@@ -393,6 +439,7 @@ impl Host {
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
             agent_jobs: Mutex::default(),
+            isolation,
         }))
     }
 
@@ -419,6 +466,13 @@ impl Host {
             mechanism = identity.mechanism,
             reason = identity.reason,
             "bridge identity"
+        );
+        let isolation = self.isolation_status.report();
+        tracing::info!(
+            state = isolation.state.as_str(),
+            mechanism = isolation.mechanism,
+            reason = isolation.reason,
+            "session isolation"
         );
         for root in &self.config.workspace_roots {
             tracing::info!(root = %root.display(), "workspace root");
@@ -492,6 +546,9 @@ impl Host {
             // Whether bridge and harness connections are bound to their
             // session (decision 135d). A host without it is `old_host`.
             "identity": self.peer_identity.report().to_json(),
+            // Whether each session runs as its own identity, from the
+            // self-test (decision 136j). A host without it is `old_host`.
+            "isolation": self.isolation_status.report().to_json(),
         })
     }
 
@@ -590,12 +647,20 @@ impl Host {
         let step = move |s: &'static str| {
             let _ = tx.send(s);
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(600),
-            crate::install::run(&self.state_dir, &agent, op, path, &step),
-        )
-        .await
-        .unwrap_or(Err(Failure::Timeout));
+        let result = match (&self.isolation, self.config.isolation) {
+            // 136g: never this account; the helper runs it as the install
+            // identity, from the same recipes.
+            (link, crate::config::Isolation::PerSession) => {
+                step("Installing");
+                self.isolated_job(link.clone(), &agent, op).await
+            }
+            (_, crate::config::Isolation::Off) => tokio::time::timeout(
+                Duration::from_secs(600),
+                crate::install::run(&self.state_dir, &agent, op, path, &step),
+            )
+            .await
+            .unwrap_or(Err(Failure::Timeout)),
+        };
         drop(step);
         let _ = poster.await;
         self.agent_jobs.lock().unwrap().remove(&agent);
@@ -611,6 +676,34 @@ impl Host {
             self.agents.record_update(&agent, result.is_ok());
         }
         self.probe_agents();
+    }
+
+    async fn isolated_job(
+        &self,
+        link: Option<crate::isolation::Link>,
+        agent: &str,
+        op: crate::install::Op,
+    ) -> Result<Option<String>, crate::install::Failure> {
+        use crate::install::Failure;
+        let Some(link) = link else {
+            tracing::warn!(
+                agent,
+                "agent job: isolation is on and this host has no helper"
+            );
+            return Err(Failure::Blocked("isolation_unavailable"));
+        };
+        let (agent, action) = (agent.to_string(), op.name());
+        let answer = tokio::task::spawn_blocking(move || link.agent_job(&agent, action))
+            .await
+            .map_err(|_| Failure::Blocked("isolation_unavailable"))?;
+        match answer {
+            Ok(Ok(version)) => Ok(version),
+            Ok(Err(code)) => Err(Failure::from_code(&code)),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent job: the isolation helper did not run it");
+                Err(Failure::Blocked("isolation_unavailable"))
+            }
+        }
     }
 
     /// Once a day, from a random point in the first hour (133-5): learns
@@ -823,8 +916,12 @@ impl Host {
     /// Runs until revoked. Returns the refusal that ended it.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let listener = self.bind_socket()?;
-        tokio::spawn(self.clone().serve_socket(listener));
+        tokio::spawn(self.clone().serve_socket(listener, None));
         tokio::spawn(self.clone().auto_updates());
+        tokio::spawn(self.clone().report_isolation_changes());
+        if self.isolation_status.pending() {
+            tokio::spawn(self.clone().isolation_self_test());
+        }
         let mut backoff = Duration::from_secs(1);
         loop {
             match self.clone().connect_once().await {
@@ -848,6 +945,59 @@ impl Host {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
+    }
+
+    /// Runs the isolation self-test (136j) once one may run, and records
+    /// what it found.
+    async fn isolation_self_test(self: Arc<Self>) {
+        let Some(link) = self.isolation.clone() else {
+            return;
+        };
+        if !self.isolation_status.may_test() {
+            return;
+        }
+        tracing::info!("isolation self-test: two probe sessions");
+        let outcome = tokio::task::spawn_blocking(move || link.self_test())
+            .await
+            .unwrap_or(Err("self_test"));
+        match outcome {
+            Ok(()) => tracing::info!("isolation self-test passed: sessions are isolated"),
+            Err(reason) => tracing::error!(
+                reason,
+                "isolation self-test did not pass: new sessions are refused"
+            ),
+        }
+        self.isolation_status.settle(outcome);
+    }
+
+    /// Every change to isolation's state reaches the server at once (136j).
+    async fn report_isolation_changes(self: Arc<Self>) {
+        let mut changes = self.isolation_status.subscribe();
+        while changes.changed().await.is_ok() {
+            if *self.link_up.borrow() {
+                let _ = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await;
+            }
+        }
+    }
+
+    /// On an isolated host, whether a session may start (136j): only once
+    /// the self-test has passed. One still running is waited for; one that
+    /// failed is tried again, at most once a minute.
+    async fn isolation_ready(self: &Arc<Self>) -> Result<(), &'static str> {
+        let status = &self.isolation_status;
+        let deadline = Instant::now() + ISOLATION_WAIT;
+        while status.pending() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !status.verified() && !status.pending() {
+            self.clone().isolation_self_test().await;
+        }
+        if status.verified() {
+            return Ok(());
+        }
+        Err(status.report().reason.unwrap_or("unavailable"))
     }
 
     /// The orderly end of the host (AM37): every session's process group gets
@@ -1101,6 +1251,7 @@ impl Host {
                 resume,
                 provider_credential,
                 spawn_asks,
+                resumed_from,
             } => {
                 self.start(
                     session,
@@ -1110,7 +1261,7 @@ impl Host {
                     terminal,
                     mcp,
                     context,
-                    resume,
+                    resume.map(|r| (r, resumed_from)),
                     provider_credential,
                     spawn_asks,
                 )
@@ -1216,10 +1367,14 @@ impl Host {
         size: Size,
         mcp: Vec<crate::mcp::McpGrant>,
         context: bool,
-        resume: Option<String>,
+        resume: Option<(String, Option<String>)>,
         provider_credential: Option<String>,
         spawn_asks: Option<SpawnStart>,
     ) {
+        let (resume, resumed_from) = match resume {
+            Some((r, from)) => (Some(r), from),
+            None => (None, None),
+        };
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
         };
@@ -1244,6 +1399,12 @@ impl Host {
             refuse("no such provider");
             return self.post_start_failure(&id).await;
         };
+        // 136a: on an isolated host no session runs as this account: one
+        // its provider cannot start through the helper does not start.
+        if self.config.isolation == crate::config::Isolation::PerSession && !provider.isolated() {
+            refuse("isolation is on and this host cannot isolate a session");
+            return self.post_start_failure(&id).await;
+        }
         let Some(size) = TerminalSize::new(size.cols, size.rows) else {
             refuse("bad size");
             return self.post_start_failure(&id).await;
@@ -1253,6 +1414,50 @@ impl Host {
         {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
+        }
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        if isolated && let Err(reason) = self.isolation_ready().await {
+            // 136j: no session starts on a host whose isolation is not
+            // verified; those already running keep running.
+            tracing::warn!(session = %id, reason, "start refused: isolation_unavailable");
+            return self
+                .post_start_ended(&id, EndReason::IsolationUnavailable)
+                .await;
+        }
+        if isolated {
+            // 136f: only a path that cannot rotate the account's login, or
+            // nothing; never the account's own login.
+            let refused = {
+                let names = provider.env_names();
+                let env_set = |k: &str| names.iter().any(|(n, set)| *set && n == k);
+                let account_home = self.state_dir.join("home");
+                let codex_home = crate::codex::home(&self.state_dir);
+                let setup = crate::credential_paths::Setup {
+                    provider: &provider_id,
+                    synced: provider_credential.is_some(),
+                    env_set: &env_set,
+                    any_api_key: names.iter().any(|(n, set)| {
+                        *set && n.to_str().is_some_and(|n| n.ends_with("_API_KEY"))
+                    }),
+                    account_home: &account_home,
+                    codex_home: &codex_home,
+                };
+                crate::credential_paths::check(&setup).err()
+            };
+            if let Some(reason) = refused {
+                tracing::warn!(session = %id, reason, "start refused: credential_unavailable");
+                return self
+                    .post_start_ended(&id, EndReason::CredentialUnavailable)
+                    .await;
+            }
+            if resume.is_some()
+                && !resumed_from
+                    .as_deref()
+                    .is_some_and(crate::credential_paths::session_id_ok)
+            {
+                refuse("an isolated resume needs the session it resumes");
+                return self.post_start_failure(&id).await;
+            }
         }
         // Token sync (AM71): pulled before anything is written; any failure
         // ends the launch, never a fallback to this host's own login.
@@ -1272,6 +1477,12 @@ impl Host {
         // config cannot be written does not start rather than start without
         // its integrations.
         let session_dir = crate::mcp::session_dir(&self.state_dir, &id);
+        // 136i: an isolated session's bridge socket and inbox are its own,
+        // in its directory, made before `start` so the helper shares them.
+        if isolated && let Err(e) = self.clone().session_socket(&id) {
+            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not bind the session's bridge socket");
+            return self.post_start_failure(&id).await;
+        }
         let mut launch = match crate::mcp::provider_baseline(&provider_id, &session_dir, &dir) {
             Ok(extras) => extras,
             Err(e) => {
@@ -1435,13 +1646,28 @@ impl Host {
                 .secret_env
                 .push((crate::credential::TOKEN_ENV.into(), token));
         }
-        // Storm is the only thing that updates its own copy (133-2).
+        if isolated {
+            launch
+                .env_remove
+                .extend(crate::credential_paths::REFRESHABLE_ENV.map(Into::into));
+            if let (Some(conversation), Some(from)) = (&resume, &resumed_from) {
+                launch.resumed_from = Some((from.clone(), conversation.clone()));
+            }
+        }
+        // Storm is the only thing that updates its own copy (133-2); on an
+        // isolated host no session can write where agents live (136g).
         if provider_id == "claude-code"
-            && provider
-                .resolved()
-                .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm")
+            && (isolated
+                || provider
+                    .resolved()
+                    .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm"))
         {
             launch.env.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
+        }
+        if provider_id == "opencode" && isolated {
+            launch
+                .env
+                .push(("OPENCODE_DISABLE_AUTOUPDATE".into(), "true".into()));
         }
         // A resumed conversation has read its note already.
         let launch =
@@ -1543,11 +1769,15 @@ impl Host {
     }
 
     async fn post_start_failure(&self, id: &str) {
+        self.post_start_ended(id, EndReason::StartFailure).await
+    }
+
+    async fn post_start_ended(&self, id: &str, reason: EndReason) {
         self.forget_mcp(id);
         let _ = self
             .post(
                 &format!("/v1/runtime/sessions/{id}/status"),
-                &json!({ "status": "failed", "end_reason": EndReason::StartFailure.as_str() }),
+                &json!({ "status": "failed", "end_reason": reason.as_str() }),
             )
             .await;
     }
@@ -1707,7 +1937,7 @@ impl Host {
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the bridge")?;
-        let socket = self.socket_address();
+        let socket = self.socket_address_for(session);
         let mcp = crate::profile::get(provider).and_then(|p| p.mcp);
         let (extras, plan) = if matches!(mcp, Some(Mcp::Codex | Mcp::Cursor | Mcp::CommandCode)) {
             let grants: Vec<_> = grants
@@ -1825,7 +2055,7 @@ impl Host {
             provider,
             &crate::mcp::session_dir(&self.state_dir, session),
             &handle,
-            &self.socket_address(),
+            &self.socket_address_for(session),
             &exe,
             resume,
             synced,
@@ -1948,10 +2178,14 @@ impl Host {
         }
         let inbox =
             std::path::absolute(crate::mcp::session_dir(&self.state_dir, session).join(INBOX))?;
-        write_private(&inbox, &format!("{image}.{ext}"), &bytes)
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        write_image(&inbox, &format!("{image}.{ext}"), &bytes, isolated)
     }
 
     fn forget_mcp(&self, session: &str) {
+        if let Some(task) = self.session_sockets.lock().unwrap().remove(session) {
+            task.abort();
+        }
         self.handles.forget_session(session);
         self.leaders.lock().unwrap().remove(session);
         self.harness_handles
@@ -1980,11 +2214,62 @@ impl Host {
         crate::platform::ipc::address(&crate::mcp::socket_path(&self.state_dir)).into()
     }
 
-    async fn serve_socket(self: Arc<Self>, mut listener: crate::platform::ipc::Listener) {
+    /// The same for one session: on an isolated host, its own socket in its
+    /// own directory (136i), which no other session can reach.
+    fn socket_address_for(&self, session: &str) -> PathBuf {
+        if self.config.isolation == crate::config::Isolation::PerSession {
+            return crate::mcp::session_dir(&self.state_dir, session).join(crate::mcp::SOCKET);
+        }
+        self.socket_address()
+    }
+
+    /// An isolated session's own bridge socket and inbox (136i), made
+    /// before `start` so the helper shares them with the session's group.
+    /// The socket is served until the session is forgotten.
+    #[cfg(unix)]
+    fn session_socket(self: Arc<Self>, session: &str) -> Result<()> {
+        let dir = crate::mcp::session_dir(&self.state_dir, session);
+        crate::platform::create_private_dir(&dir)?;
+        crate::platform::create_private_dir(&dir.join(INBOX))?;
+        let listener = crate::isolation::bind_session_socket(&dir.join(crate::mcp::SOCKET))?;
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
+        let host = self.clone();
+        let id = session.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        tokio::spawn(host.clone().bridge_connection(stream, Some(id.clone())));
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "session socket accept failed");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+        self.session_sockets
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), task.abort_handle());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn session_socket(self: Arc<Self>, _: &str) -> Result<()> {
+        bail!("per-session isolation is Linux only")
+    }
+
+    async fn serve_socket(
+        self: Arc<Self>,
+        mut listener: crate::platform::ipc::Listener,
+        via: Option<String>,
+    ) {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
-                    tokio::spawn(self.clone().bridge_connection(stream));
+                    tokio::spawn(self.clone().bridge_connection(stream, via.clone()));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp socket accept failed");
@@ -1999,17 +2284,21 @@ impl Host {
     /// the connector must descend from the session's leader, and every
     /// failure — no leader, an error, a walk that does not arrive — refuses,
     /// audited on the session.
-    async fn admit(
-        &self,
-        peer: Option<io::Result<crate::platform::peer::Process>>,
-        session: &str,
-        kind: &'static str,
-    ) -> bool {
-        let Some(peer) = peer else {
-            return true;
+    ///
+    /// On an isolated host (136i), whatever the identity state, it must also
+    /// have come in on the session's own socket, from the user the session
+    /// was leased.
+    async fn admit(&self, peer: Peer, session: &str, kind: &'static str) -> bool {
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        let verdict = if isolated {
+            isolated_verdict(peer, session, self.leader_of(session).await).await
+        } else {
+            let Some(process) = peer.process else {
+                return true;
+            };
+            verdict(process, self.leader_of(session).await).await
         };
-        let leader = self.leader_of(session).await;
-        match verdict(peer, leader).await {
+        match verdict {
             Ok(()) => true,
             Err(why) => {
                 self.refuse(session, kind, why).await;
@@ -2067,7 +2356,7 @@ impl Host {
     }
 
     /// The session's leader, waiting a little for one still starting.
-    async fn leader_of(&self, session: &str) -> Option<Arc<crate::platform::peer::Process>> {
+    async fn leader_of(&self, session: &str) -> Option<Arc<Leader>> {
         let mut rx = self.leaders.lock().unwrap().get(session)?.clone();
         let found = tokio::time::timeout(LEADER_WAIT, rx.wait_for(Option::is_some)).await;
         found.ok()?.ok()?.clone()
@@ -2076,11 +2365,7 @@ impl Host {
     /// The agent's hook or plugin saying which conversation it is on. Only
     /// a handle this host gave out, and only an id its provider could have
     /// made, is taken.
-    async fn harness_reported(
-        &self,
-        report: crate::harness::HarnessLine,
-        peer: Option<io::Result<crate::platform::peer::Process>>,
-    ) {
+    async fn harness_reported(&self, report: crate::harness::HarnessLine, peer: Peer) {
         let Some(session) = self
             .harness_handles
             .lock()
@@ -2110,14 +2395,25 @@ impl Host {
     }
 
     /// One bridge connection: a message to forward, or a subscription.
-    async fn bridge_connection(self: Arc<Self>, stream: crate::platform::ipc::Stream) {
+    /// `via` is the session whose own socket it came in on (136i), or none
+    /// for the host's shared one.
+    async fn bridge_connection(
+        self: Arc<Self>,
+        stream: crate::platform::ipc::Stream,
+        via: Option<String>,
+    ) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
         // Who connected, asked before anything is read: the connector, even
         // if it hands the socket on (135b).
-        let peer = self
-            .peer_identity
-            .verified()
-            .then(|| crate::platform::peer::peer(&stream));
+        let peer = Peer {
+            process: self
+                .peer_identity
+                .verified()
+                .then(|| crate::platform::peer::peer(&stream)),
+            user: (self.config.isolation == crate::config::Isolation::PerSession)
+                .then(|| peer_uid(&stream)),
+            via,
+        };
         let (read, mut write) = tokio::io::split(stream);
         let mut line = String::new();
         let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
@@ -2197,21 +2493,67 @@ impl Host {
     }
 }
 
-/// The wire form of a session's status: running, or how it ended.
+/// Who is at the other end of a bridge or harness connection, as the kernel
+/// said when it was accepted.
+struct Peer {
+    /// The connecting process, on a host whose identity is `verified`.
+    process: Option<io::Result<crate::platform::peer::Process>>,
+    /// Its uid, on an isolated host.
+    user: Option<io::Result<u32>>,
+    /// The session whose own socket it came in on.
+    via: Option<String>,
+}
+
+#[cfg(unix)]
+fn peer_uid(stream: &crate::platform::ipc::Stream) -> io::Result<u32> {
+    stream.peer_cred().map(|c| c.uid())
+}
+
+#[cfg(windows)]
+fn peer_uid(_: &crate::platform::ipc::Stream) -> io::Result<u32> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 /// 135a's answer for one connection: any error, or no leader, refuses.
 async fn verdict(
     peer: io::Result<crate::platform::peer::Process>,
-    leader: Option<Arc<crate::platform::peer::Process>>,
+    leader: Option<Arc<Leader>>,
 ) -> Result<(), crate::peer_identity::Mismatch> {
     use crate::peer_identity::Mismatch;
     match (peer, leader) {
         (Err(e), _) => Err(Mismatch::from(e)),
         (_, None) => Err(Mismatch::LeaderGone),
         (Ok(peer), Some(leader)) => {
-            tokio::task::spawn_blocking(move || crate::peer_identity::check(&peer, &leader))
+            tokio::task::spawn_blocking(move || crate::peer_identity::check(&peer, &leader.process))
                 .await
                 .unwrap_or(Err(Mismatch::Error(io::ErrorKind::Other)))
         }
+    }
+}
+
+/// 136i's answer on an isolated host: the session's own socket, the
+/// session's leased user, and then, where identity is `verified`, 135b's
+/// walk to the leader the helper handed back.
+async fn isolated_verdict(
+    peer: Peer,
+    session: &str,
+    leader: Option<Arc<Leader>>,
+) -> Result<(), crate::peer_identity::Mismatch> {
+    use crate::peer_identity::Mismatch;
+    if peer.via.as_deref() != Some(session) {
+        return Err(Mismatch::WrongSocket);
+    }
+    let Some(leader) = leader else {
+        return Err(Mismatch::LeaderGone);
+    };
+    match (peer.user, leader.user) {
+        (Some(Ok(uid)), Some(leased)) if uid == leased => {}
+        (Some(Err(e)), _) => return Err(Mismatch::from(e)),
+        _ => return Err(Mismatch::WrongUser),
+    }
+    match peer.process {
+        Some(process) => verdict(process, Some(leader)).await,
+        None => Ok(()),
     }
 }
 
@@ -2243,18 +2585,32 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
 
 /// Writes `name` into `dir` as `0600`, through a temporary file and a rename,
 /// with `dir` and its parent `0700`. Returns the file's path.
-fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
+/// An image in a session's inbox, private to this account. On an isolated
+/// host the session runs as another user, so the image is readable to
+/// whoever can enter the inbox: the host and that session's group, which
+/// the helper shared it with at `start` (136i). Its modes are never
+/// tightened there, which would take the share back.
+fn write_image(dir: &Path, name: &str, bytes: &[u8], isolated: bool) -> Result<String> {
     use std::io::Write;
-    std::fs::create_dir_all(dir).context("creating the inbox")?;
-    for d in [dir.parent(), Some(dir)].into_iter().flatten() {
-        crate::platform::tighten_private_dir(d)?;
+    if isolated {
+        if !dir.is_dir() {
+            bail!("the session has no inbox");
+        }
+    } else {
+        std::fs::create_dir_all(dir).context("creating the inbox")?;
+        for d in [dir.parent(), Some(dir)].into_iter().flatten() {
+            crate::platform::tighten_private_dir(d)?;
+        }
     }
     let tmp = dir.join(format!(".{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = crate::platform::open_private(
-        &tmp,
-        std::fs::OpenOptions::new().write(true).create_new(true),
-    )
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut f = if isolated {
+        crate::platform::open_readable(&tmp, &mut options)
+    } else {
+        crate::platform::open_private(&tmp, &mut options)
+    }
     .context("creating the image file")?;
     f.write_all(bytes)?;
     f.sync_all()?;
@@ -2397,7 +2753,7 @@ mod tests {
     fn a_staged_image_is_private_and_whole() {
         let state = tempfile::tempdir().unwrap();
         let inbox = state.path().join("sessions/ags_X/inbox");
-        let path = write_private(&inbox, "img_A.png", b"\x89PNG").unwrap();
+        let path = write_image(&inbox, "img_A.png", b"\x89PNG", false).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
         crate::platform::assert_private(std::path::Path::new(&path), 0o600);
         crate::platform::assert_private(&inbox, 0o700);
@@ -2447,6 +2803,7 @@ mod tests {
                 resume: None,
                 provider_credential: None,
                 spawn_asks: None,
+                resumed_from: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -2550,7 +2907,7 @@ mod tests {
         }
         let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
         let listener = host.bind_socket().unwrap();
-        tokio::spawn(host.clone().serve_socket(listener));
+        tokio::spawn(host.clone().serve_socket(listener, None));
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
@@ -2577,6 +2934,7 @@ mod tests {
             resume: resume.map(str::to_string),
             provider_credential: None,
             spawn_asks: None,
+            resumed_from: None,
         }
     }
 
@@ -2932,7 +3290,10 @@ mod tests {
     #[tokio::test]
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn a_peer_that_cannot_be_read_is_refused() {
-        let me = Arc::new(crate::platform::peer::Process::open(std::process::id() as i32).unwrap());
+        let me = Arc::new(Leader {
+            process: crate::platform::peer::Process::open(std::process::id() as i32).unwrap(),
+            user: None,
+        });
         let r = verdict(Err(io::ErrorKind::InvalidInput.into()), Some(me)).await;
         assert_eq!(r.unwrap_err().as_str(), "error");
     }
@@ -3618,6 +3979,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 resume: None,
                 provider_credential: None,
                 spawn_asks: None,
+                resumed_from: None,
             })
             .await;
 
@@ -3711,6 +4073,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 resume: None,
                 provider_credential: None,
                 spawn_asks: None,
+                resumed_from: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -3785,6 +4148,18 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
+        test_host_with(providers, "").await
+    }
+
+    async fn test_host_with(
+        providers: Vec<Arc<dyn Provider>>,
+        extra_config: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
         let state = tempfile::tempdir().unwrap();
@@ -3802,14 +4177,725 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [{:?}]\nmax_sessions = 2",
+            "workspace_roots = [{:?}]\nmax_sessions = 2\n{extra_config}",
             roots.path().display().to_string()
         ))
         .unwrap();
-        let host = Host::with_providers(state.path(), config, providers).unwrap();
+        let host = Host::with_providers(state.path(), config, providers, None).unwrap();
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
+    }
+
+    /// 136a: with isolation on, a host that cannot isolate a session
+    /// starts none, rather than run it as its own account.
+    #[tokio::test]
+    async fn with_isolation_on_no_session_starts_as_the_host_account() {
+        let (host, seen, _state, _roots) = test_host_with(
+            vec![Arc::new(crate::fake::FakeProvider::new())],
+            "isolation = \"per-session\"",
+        )
+        .await;
+        host.dispatch(1, start("ags_ISO", "fake"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_iso") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_ISO").is_none());
+
+        let (host, _seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        host.dispatch(1, start("ags_OFF", "fake"));
+        eventually("with isolation off it starts", || {
+            host.session("ags_OFF").is_some()
+        })
+        .await;
+    }
+
+    /// A host whose `shell` runs `args` through a fake isolation helper,
+    /// which starts it on the terminal it is handed, as the helper would.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host(
+        program: &str,
+        args: &[&str],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), program);
+        let shell = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new("shell").unwrap(),
+            "/bin/sh",
+            args.iter().copied(),
+        )
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(shell)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
+        // As if its self-test had passed (136j); `run` reports changes.
+        helper.status.settle(Ok(()));
+        tokio::spawn(host.clone().report_isolation_changes());
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    /// A host whose one provider is `id`, with `env` from its env file,
+    /// started through a fake isolation helper running `/bin/sh -c 'sleep 30'`.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host_for(
+        id: &str,
+        env: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        isolated_host_with(id, "/bin/sleep", &[], env).await
+    }
+
+    /// An isolated host whose one provider is `id`: the fake helper runs
+    /// `program` with `args` and the launch's own arguments after them.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host_with(
+        id: &str,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), program);
+        let provider = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new(id).unwrap(),
+            "/bin/sh",
+            args.iter().copied(),
+        )
+        .with_env(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(provider)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
+        // As if its self-test had passed (136j); `run` reports changes.
+        helper.status.settle(Ok(()));
+        tokio::spawn(host.clone().report_isolation_changes());
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    /// An isolated host whose Claude Code runs `script` through the fake
+    /// helper, which leases `uid` (this account's when none), and which
+    /// also serves the host's shared socket.
+    #[cfg(target_os = "linux")]
+    async fn isolated_script_host(
+        script: &str,
+        uid: Option<u32>,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let fixture = isolated_host_with(
+            "claude-code",
+            "/bin/sh",
+            &["-c", script],
+            &[("ANTHROPIC_API_KEY", "sk")],
+        )
+        .await;
+        fixture.2.seen.lock().unwrap().lease_uid = uid;
+        let listener = fixture.0.bind_socket().unwrap();
+        tokio::spawn(fixture.0.clone().serve_socket(listener, None));
+        fixture
+    }
+
+    #[cfg(target_os = "linux")]
+    fn me() -> u32 {
+        rustix::process::getuid().as_raw()
+    }
+
+    /// A harness line with `handle` on `socket`, from this process: the
+    /// host itself, never one of a session's.
+    #[cfg(target_os = "linux")]
+    async fn report_from_here(socket: PathBuf, handle: String) {
+        tokio::task::spawn_blocking(move || {
+            let _ = crate::harness::send(
+                socket.into_os_string(),
+                handle,
+                "55555555-5555-4555-8555-555555555555".into(),
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    /// 136i, accepted: on an isolated host a session's own hook reaches the
+    /// host on the session's own socket, made in its directory before the
+    /// helper started it, from the user the session was leased and under
+    /// the leader the helper handed back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_sessions_own_hook_is_taken_on_its_own_socket() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let id = "44444444-4444-4444-8444-444444444444";
+        let script = format!("{}; exec sleep 1000", probe(&format!("send {id}"), false));
+        let (host, _seen, helper, state, _roots) = isolated_script_host(&script, None).await;
+        host.clone()
+            .handle(harness_start("ags_OWN", "claude-code", None, false))
+            .await;
+        wait_for("its id", || {
+            harness_id(&host, "ags_OWN").as_deref() == Some(id)
+        })
+        .await;
+        assert!(refusals(&host, "ags_OWN").is_empty());
+        let dir = state.path().join("sessions/ags_OWN");
+        let md = std::fs::symlink_metadata(dir.join("mcp.sock")).unwrap();
+        assert!(md.file_type().is_socket());
+        assert_eq!(md.permissions().mode() & 0o777, 0o660);
+        assert!(dir.join("inbox").is_dir(), "its inbox, made before start");
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let sock = dir.join("mcp.sock").display().to_string();
+        assert!(
+            launch["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kv| kv[0] == crate::mcp::SOCKET_ENV && kv[1] == sock.as_str()),
+            "{launch}"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// IT-8: a connection with the session's valid handle, from a user that
+    /// is not the one the session was leased, is refused as
+    /// `identity_mismatch` — even from inside the session's own tree.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_8_a_connection_from_another_user_is_refused() {
+        let id = "66666666-6666-4666-8666-666666666666";
+        let script = format!("{}; exec sleep 1000", probe(&format!("send {id}"), false));
+        let (host, seen, _helper, _state, _roots) =
+            isolated_script_host(&script, Some(me() + 1)).await;
+        host.clone()
+            .handle(harness_start("ags_USER", "claude-code", None, false))
+            .await;
+        wait_for("the refusal", || !refusals(&host, "ags_USER").is_empty()).await;
+        assert_eq!(refusals(&host, "ags_USER"), [("harness", "wrong_user")]);
+        assert_ne!(harness_id(&host, "ags_USER").as_deref(), Some(id));
+        wait_for("the server's audit row", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/sessions/ags_user/identity-refused") && b["reason"] == "wrong_user"
+            })
+        })
+        .await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 136i: a session's handle is good only on its own socket — not the
+    /// host's shared one, not another session's — and from the right user
+    /// it still has to descend from the session's leader (135b).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_handle_is_good_only_on_its_own_socket_and_under_its_leader() {
+        let (host, _seen, _helper, state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        for id in ["ags_SA", "ags_SB"] {
+            host.clone()
+                .handle(harness_start(id, "claude-code", None, false))
+                .await;
+            wait_for("started", || host.session(id).is_some()).await;
+        }
+        let (a, b) = (handle_of(&host, "ags_SA"), handle_of(&host, "ags_SB"));
+        let own = |s: &str| state.path().join("sessions").join(s).join("mcp.sock");
+        report_from_here(crate::mcp::socket_path(state.path()), a.clone()).await;
+        report_from_here(own("ags_SB"), a.clone()).await;
+        report_from_here(own("ags_SB"), b).await;
+        assert_eq!(
+            refusals(&host, "ags_SA"),
+            [("harness", "wrong_socket"), ("harness", "wrong_socket")]
+        );
+        // The right socket and the right user, but the host's own process.
+        assert_eq!(refusals(&host, "ags_SB"), [("harness", "reached_host")]);
+        for s in ["ags_SA", "ags_SB"] {
+            assert_ne!(
+                harness_id(&host, s).as_deref(),
+                Some("55555555-5555-4555-8555-555555555555")
+            );
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// IT-7, pasta and the helper: a failure the helper reports, or a
+    /// helper that stops answering, drops isolation to `unavailable` at
+    /// once and the server hears it; new sessions are refused with
+    /// `isolation_unavailable`; one already running keeps running.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_7_pasta_or_the_helper_gone_refuses_new_sessions_only() {
+        for broken in ["no_passt", "helper"] {
+            let (host, seen, helper, _state, _roots) =
+                isolated_script_host("exec sleep 1000", None).await;
+            assert_eq!(
+                host.capabilities()["isolation"],
+                json!({"state": "verified", "mechanism": "systemd_units", "reason": null})
+            );
+            host.clone()
+                .handle(harness_start("ags_RUN", "claude-code", None, false))
+                .await;
+            wait_for("running", || host.session("ags_RUN").is_some()).await;
+            match broken {
+                "no_passt" => helper.seen.lock().unwrap().no_passt = true,
+                _ => std::fs::remove_file(&helper.socket).unwrap(),
+            }
+            host.clone()
+                .handle(harness_start("ags_NEXT", "claude-code", None, false))
+                .await;
+            assert_eq!(
+                host.capabilities()["isolation"],
+                json!({"state": "unavailable", "mechanism": "systemd_units", "reason": broken}),
+                "{broken}"
+            );
+            eventually("the server told", || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.ends_with("/v1/runtime/inventory") && b["isolation"]["reason"] == broken
+                })
+            })
+            .await;
+            host.clone()
+                .handle(harness_start("ags_LATER", "claude-code", None, false))
+                .await;
+            eventually("refused", || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.contains("ags_later") && b["end_reason"] == "isolation_unavailable"
+                })
+            })
+            .await;
+            assert!(
+                !ops(&helper).iter().any(|o| o == "lease ags_LATER"),
+                "{broken}: nothing leased for a refused start"
+            );
+            let running = host.session("ags_RUN").expect("still there");
+            assert!(running.events.ended.lock().unwrap().is_none(), "{broken}");
+            host.shutdown(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// IT-7, the self-test: on a host that does not isolate (the fake
+    /// helper runs every session as this account) the real probes run and
+    /// the self-test fails, so isolation is `unavailable: self_test` and no
+    /// session starts.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_7_a_failing_self_test_refuses_every_start() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        helper.status.set_for_tests_pending();
+        assert_eq!(host.capabilities()["isolation"]["reason"], "pending");
+        host.clone().isolation_self_test().await;
+        assert_eq!(
+            host.capabilities()["isolation"],
+            json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"})
+        );
+        let probes = ops(&helper)
+            .iter()
+            .filter(|o| o.starts_with("start ags_isoprobe"))
+            .count();
+        assert_eq!(probes, 2, "both probes ran: {:?}", ops(&helper));
+        host.clone()
+            .handle(harness_start("ags_NONE", "claude-code", None, false))
+            .await;
+        eventually("refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.contains("ags_none") && b["end_reason"] == "isolation_unavailable")
+        })
+        .await;
+        assert!(!ops(&helper).iter().any(|o| o == "lease ags_NONE"));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// With isolation off nothing is isolated, and the host says so.
+    #[tokio::test]
+    async fn with_isolation_off_the_host_reports_isolation_off() {
+        let (host, _seen, _state, _roots) = test_host(Vec::new()).await;
+        assert_eq!(
+            host.capabilities()["isolation"],
+            if cfg!(target_os = "linux") {
+                json!({"state": "unavailable", "mechanism": null, "reason": "off"})
+            } else if cfg!(windows) {
+                json!({"state": "unsupported", "mechanism": null, "reason": "windows"})
+            } else {
+                json!({"state": "unsupported", "mechanism": null, "reason": "macos"})
+            }
+        );
+    }
+
+    /// 136i: a pasted image on an isolated host is readable through the
+    /// inbox the helper shared, whose modes are left as they are; off it,
+    /// as private as before.
+    #[test]
+    #[cfg(unix)]
+    fn an_isolated_sessions_image_is_readable_to_its_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let inbox = t.path().join("sessions/ags_I/inbox");
+        assert!(
+            write_image(&inbox, "img_A.png", b"x", true).is_err(),
+            "no inbox"
+        );
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = write_image(&inbox, "img_A.png", b"x", true).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(Path::new(&path)), 0o644);
+        assert_eq!(mode(&inbox), 0o750, "the share is kept");
+        let private = write_image(&t.path().join("other"), "img_B.png", b"x", false).unwrap();
+        assert_eq!(mode(Path::new(&private)), 0o600);
+    }
+
+    /// IT-5's half the host decides: on an isolated host a Claude Code
+    /// session with no synced token and no API key is refused with
+    /// `credential_unavailable`, before any lease: the account's own login
+    /// is never what it starts on.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_5_an_isolated_session_without_a_permitted_credential_never_starts() {
+        let (host, seen, helper, state, _roots) = isolated_host_for("claude-code", &[]).await;
+        std::fs::create_dir_all(state.path().join("home/.claude")).unwrap();
+        std::fs::write(
+            state.path().join("home/.claude/.credentials.json"),
+            br#"{"claudeAiOauth":{"refreshToken":"r"}}"#,
+        )
+        .unwrap();
+        host.dispatch(1, start("ags_NOCRED", "claude-code"));
+        eventually("refused", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_nocred") && b["end_reason"] == "credential_unavailable"
+            })
+        })
+        .await;
+        assert!(ops(&helper).is_empty(), "no lease, no start");
+        assert!(host.session("ags_NOCRED").is_none());
+    }
+
+    /// 136f: an isolated session gets its env file's key in its
+    /// environment only, never a refreshable login, never a key in argv,
+    /// and its agent's self-updater stays off (136g).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_session_gets_only_the_credentials_136f_permits() {
+        let (host, _seen, helper, _state, _roots) = isolated_host_for(
+            "claude-code",
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-ENVKEY"),
+                ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "sk-ant-ort01-REFRESH"),
+            ],
+        )
+        .await;
+        host.dispatch(1, start("ags_KEY", "claude-code"));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("ANTHROPIC_API_KEY".into(), "sk-ant-ENVKEY".into())));
+        assert!(env.contains(&("DISABLE_AUTOUPDATER".into(), "1".into())));
+        assert!(!launch.to_string().contains("REFRESH"), "{launch}");
+        let args = launch["args"].to_string();
+        assert!(!args.contains("sk-ant"), "{args}");
+        // The helper's own parser takes the launch the host wrote.
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert!(parsed.resume.is_none());
+        assert!(
+            parsed
+                .env
+                .iter()
+                .all(|(k, _)| k != "CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+        );
+    }
+
+    /// 136e: an isolated resume names the session that had the
+    /// conversation, so the helper copies it from that session's kept
+    /// files; without one it does not start.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_resume_names_its_predecessor() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        const C: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
+        let resumed = |session: &str, from: Option<&str>| {
+            let mut c = start(session, "claude-code");
+            if let Command::Start {
+                resume,
+                resumed_from,
+                ..
+            } = &mut c
+            {
+                *resume = Some(C.into());
+                *resumed_from = from.map(str::to_string);
+            }
+            c
+        };
+        host.dispatch(1, resumed("ags_NOFROM", None));
+        eventually("refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nofrom") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(ops(&helper).is_empty());
+        host.dispatch(2, resumed("ags_RES", Some("ags_OLD")));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        assert_eq!(
+            launch["resume"],
+            json!({"from": "ags_OLD", "conversation": C})
+        );
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.resume.unwrap().from, "ags_OLD");
+    }
+
+    /// 136g: with isolation on, an install never runs as this account; the
+    /// helper runs it as the install identity and the host reports what
+    /// came back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_host_installs_only_through_the_helper() {
+        let (host, seen, helper, state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        host.dispatch(
+            1,
+            Command::AgentInstall {
+                job: "agj_ONE".into(),
+                agent: "claude-code".into(),
+                op: crate::install::Op::Install,
+            },
+        );
+        eventually("reported", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.ends_with("/agents/jobs/agj_one") && b["done"]["version"] == "9.9.9"
+            })
+        })
+        .await;
+        assert_eq!(ops(&helper), ["agent_job claude-code install"]);
+        assert!(
+            !state.path().join("agents/managed").exists(),
+            "nothing was installed by this account"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ops(helper: &crate::isolation::fake::FakeHelper) -> Vec<String> {
+        helper.seen.lock().unwrap().ops.clone()
+    }
+
+    /// 136-2: with isolation on, a session starts through the helper, on a
+    /// terminal the host keeps the master of: input, output and resize work
+    /// as they do today (AC-F4), and the exit status is the helper's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn with_isolation_on_a_session_starts_through_the_helper() {
+        let (host, seen, helper, state, _roots) = isolated_host("/bin/sh", &[]).await;
+        host.dispatch(1, start("ags_ISO", "shell"));
+        eventually("the isolated session started", || {
+            host.session("ags_ISO").is_some()
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            ["lease ags_ISO", "prepare ags_ISO", "start ags_ISO"]
+        );
+        let s = host.session("ags_ISO").unwrap();
+        let said = || match s.events.ring.lock().unwrap().read(0, BATCH) {
+            Read::Data { bytes, .. } => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => String::new(),
+        };
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("STORM_RUNTIME_SESSION".into(), "ags_ISO".into())));
+        assert!(env.contains(&("TERM".into(), "xterm-256color".into())));
+        assert!(
+            !state.path().join("launch/ags_ISO.json").exists(),
+            "the launch is gone once the helper has read it"
+        );
+        host.dispatch(
+            2,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"echo iso-$((40+2))\n"),
+            },
+        );
+        eventually("the session answered its input", || {
+            said().contains("iso-42")
+        })
+        .await;
+        host.dispatch(
+            3,
+            Command::Resize {
+                session: "ags_ISO".into(),
+                cols: 101,
+                rows: 33,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        host.dispatch(
+            4,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"stty size; exit 3\n"),
+            },
+        );
+        eventually("the exit was reported with its code", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_iso") && b["status"] == "completed" && b["exit_code"] == 3
+            })
+        })
+        .await;
+        assert!(said().contains("33 101"), "{}", said());
+        eventually("the lease was released", || {
+            ops(&helper).last().map(String::as_str) == Some("release ags_ISO")
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_ISO",
+                "prepare ags_ISO",
+                "start ags_ISO",
+                "end ags_ISO",
+                "release ags_ISO"
+            ]
+        );
+    }
+
+    /// Ending an isolated session signals its unit through the helper,
+    /// never a process of this host's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_end_goes_through_the_helper() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/bin/sleep", &["1000"]).await;
+        host.dispatch(1, start("ags_END", "shell"));
+        eventually("started", || host.session("ags_END").is_some()).await;
+        host.dispatch(
+            2,
+            Command::End {
+                session: "ags_END".into(),
+            },
+        );
+        eventually("reported stopped", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_end") && b["status"] == "stopped")
+        })
+        .await;
+        eventually("released", || {
+            ops(&helper).contains(&"release ags_END".to_string())
+        })
+        .await;
+        let ops = ops(&helper);
+        // SIGHUP first; `sleep` ends on it, so no SIGKILL follows.
+        assert_eq!(
+            &ops[3..],
+            ["signal ags_END hup", "end ags_END", "release ags_END"]
+        );
+    }
+
+    /// A start the helper refuses fails, and its lease is given back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_refused_isolated_start_fails_and_releases_its_lease() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/nonexistent/agent", &[]).await;
+        host.dispatch(1, start("ags_NOPE", "shell"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nope") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_NOPE").is_none());
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_NOPE",
+                "prepare ags_NOPE",
+                "start ags_NOPE",
+                "release ags_NOPE"
+            ]
+        );
     }
 
     fn start(session: &str, provider: &str) -> Command {
@@ -3824,6 +4910,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resume: None,
             provider_credential: None,
             spawn_asks: None,
+            resumed_from: None,
         }
     }
 
@@ -4145,6 +5232,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resume: None,
             provider_credential: kind.map(str::to_string),
             spawn_asks: None,
+            resumed_from: None,
         }
     }
 

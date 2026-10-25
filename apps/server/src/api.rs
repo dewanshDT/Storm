@@ -7646,6 +7646,82 @@ pub(crate) mod tests {
         assert_eq!(view["identity"], downgraded);
     }
 
+    /// 136j on the server: a host's `isolation` is read from its `hello`
+    /// and inventory, kept per host, and on its host row and its sessions'
+    /// views; an old host is `unavailable: old_host`; the live link is what
+    /// `host_isolation` judges, offline is `Unavailable`.
+    #[tokio::test]
+    async fn a_hosts_isolation_is_on_its_row_and_its_sessions() {
+        let dir = tempdir::TempDir::new("storm-isolation-route").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let seen = |f: &GatewayFixture| {
+            let (app, bearer, host_id) = (f.app.clone(), f.owner_bearer.clone(), f.host_id.clone());
+            async move {
+                let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &bearer)).await;
+                let host = hosts
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|h| h["id"] == host_id)
+                    .unwrap()
+                    .clone();
+                host["isolation"].clone()
+            }
+        };
+        let old_host =
+            serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"});
+        assert_eq!(seen(&f).await, old_host);
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _start = f.link.try_recv().unwrap();
+        let view = |f: &GatewayFixture| {
+            let (app, bearer, session) = (f.app.clone(), f.owner_bearer.clone(), session.clone());
+            async move {
+                send(
+                    &app,
+                    get_with_auth(&format!("/v1/agent/sessions/{session}"), &bearer),
+                )
+                .await
+                .1["isolation"]
+                    .clone()
+            }
+        };
+        assert_eq!(view(&f).await, old_host);
+        assert_eq!(
+            f.state.agent.host_isolation(&f.host_id),
+            crate::agent::IsolationState::Unavailable
+        );
+
+        let verified =
+            serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+        let mut caps = host_caps(true);
+        caps["isolation"] = verified.clone();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        assert_eq!(seen(&f).await, verified);
+        assert_eq!(view(&f).await, verified);
+        assert_eq!(
+            f.state.agent.host_isolation(&f.host_id),
+            crate::agent::IsolationState::Verified
+        );
+
+        let generation = f.state.agent.connect_host(&f.host_id).0;
+        f.state.agent.disconnect_host(&f.host_id, generation);
+        assert_eq!(seen(&f).await, verified, "kept for the row");
+        assert_eq!(view(&f).await, verified);
+        assert_eq!(
+            f.state.agent.host_isolation(&f.host_id),
+            crate::agent::IsolationState::Unavailable,
+            "never judged by the stored copy"
+        );
+    }
+
     /// 135a: a connection the host refused is a security event on the
     /// session it named, and only the session's own host may say so.
     #[tokio::test]
