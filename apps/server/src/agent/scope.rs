@@ -200,6 +200,51 @@ impl AgentManager {
         child
     }
 
+    /// Test-only: a root `parent` and its child `child` on `host`, the
+    /// child in `status`, recorded as an approval records one.
+    #[cfg(test)]
+    pub fn child_session_for_tests(
+        &self,
+        owner: &str,
+        host: &str,
+        parent: &str,
+        child: &str,
+        status: &str,
+    ) {
+        let record = |id: &str, status: &str| SessionRecord {
+            id: id.into(),
+            owner_user_id: owner.into(),
+            host_id: host.into(),
+            workspace: "app".into(),
+            provider: "claude-code".into(),
+            provider_kind: "cli".into(),
+            interaction: "terminal".into(),
+            provider_fallback: None,
+            status: status.into(),
+            end_reason: None,
+            signal: None,
+            exit_code: None,
+            created_at: now(),
+            started_at: None,
+            ended_at: None,
+            last_activity: None,
+            egress: "host".into(),
+            cols: 80,
+            rows: 24,
+            title: None,
+            activity: None,
+            harness_session: None,
+            resumed_from: None,
+        };
+        let mut store = self.store.lock().unwrap();
+        if store.get(parent).unwrap().is_none() {
+            store.insert(&record(parent, "completed")).unwrap();
+        }
+        store
+            .insert_spawned(&record(child, status), parent, "a task", &now())
+            .unwrap();
+    }
+
     /// Test-only: the switch's row written as a person's enable writes it,
     /// past the route's checks (C0, WS-9).
     #[cfg(test)]

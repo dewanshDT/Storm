@@ -17,5 +17,44 @@
     "context": true,
     "spawn_asks": {"spawned": true},
     "child_of": "ags_PARENT"
+  },
+  "child_work": {
+    "about": "The integration of 137-3 with 134: once the child has ended, a person reads its work and applies it by its session. The server's test (api.rs, the_full_flow_applies_an_ended_childs_work_by_its_session) sends these commands and is answered with these answers; the host's test (host.rs, an_ended_childs_work_is_exported_and_applied_into_its_parent) runs these commands through a helper whose export and Apply are the helper's own code with real git, and checks its answers carry exactly these keys. `<base>` and `<tip>` stand for the commit the child started from and the one it ended at; `request` and `cmd_seq` are the server's to choose.",
+    "placeholders": {
+      "child": "ags_CHILD",
+      "parent": "ags_PARENT",
+      "base": "<base>",
+      "tip": "<tip>"
+    },
+    "list": {
+      "command": {"cmd_seq": 2, "type": "child.workspace", "request": "cwr_LIST", "op": "list"},
+      "answer": {
+        "children": [{"child": "ags_CHILD", "parent": "ags_PARENT", "parent_workspace": "w", "mode": "clone", "stage": "ended", "live": false, "commit": "<base>", "branch": "main", "applied": null}],
+        "orphans": [],
+        "unknown_entries": 0
+      }
+    },
+    "export": {
+      "command": {"cmd_seq": 3, "type": "child.workspace", "request": "cwr_EXPORT", "op": "export", "child": "ags_CHILD"},
+      "answer": {
+        "mode": "clone",
+        "tip": "<tip>",
+        "base": "<base>",
+        "base_found": true,
+        "commits": [{"id": "<tip>", "subject": "the child's work"}],
+        "more_commits": false,
+        "files": [{"path": "WORK.md", "added": 1, "removed": 0}],
+        "more_files": false,
+        "patch": "+done\n",
+        "patch_truncated": false,
+        "child": "ags_CHILD",
+        "parent": "ags_PARENT",
+        "parent_workspace": "w"
+      }
+    },
+    "import": {
+      "command": {"cmd_seq": 4, "type": "child.workspace", "request": "cwr_IMPORT", "op": "import", "child": "ags_CHILD", "parent": "ags_PARENT", "target": "storm/ags_CHILD"},
+      "answer": {"branch": "storm/ags_CHILD", "commit": "<tip>", "child": "ags_CHILD"}
+    }
   }
 }

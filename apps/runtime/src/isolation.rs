@@ -763,6 +763,18 @@ mod imp {
             /// Each child's workspace as made, which its `start` runs in, as
             /// the helper's unit's `WorkingDirectory=` is (137-1).
             pub made: HashMap<String, PathBuf>,
+            /// The helper's record of each child made under
+            /// `children_root`, for its listing, export and Apply (137-3).
+            pub records: HashMap<String, Record>,
+        }
+
+        pub struct Record {
+            pub parent: String,
+            pub parent_workspace: PathBuf,
+            pub made: Value,
+            pub ended: bool,
+            pub export: Option<serde_json::Map<String, Value>>,
+            pub applied: Option<String>,
         }
 
         pub struct FakeHelper {
@@ -862,6 +874,94 @@ mod imp {
             json!({"ok": true, "mode": "clone", "workspace": dest, "commit": commit, "branch": branch, "submodules": false, "large_files": false})
         }
 
+        /// 137-3's listing, export, Apply and delete for children made
+        /// under `children_root`: the helper's own export and Apply code
+        /// (`storm_runtime_isolation::review`) with real git, as this
+        /// account rather than `storm-review` in a unit.
+        fn review(op: &str, req: &Value, seen: &Mutex<Seen>) -> (Value, Option<OwnedFd>) {
+            use storm_runtime_isolation::{clone, review};
+            let refuse = |code: &str| (json!({"ok": false, "error": code}), None);
+            let mut seen = seen.lock().unwrap();
+            let root = seen.children_root.clone().unwrap();
+            if op == "child_list" {
+                let children: Vec<Value> = seen
+                    .records
+                    .iter()
+                    .map(|(child, r)| {
+                        json!({"child": child, "parent": r.parent,
+                            "parent_workspace": r.parent_workspace.display().to_string(),
+                            "mode": r.made["mode"], "stage": if r.ended { "ended" } else { "ready" },
+                            "live": !r.ended, "commit": r.made["commit"], "branch": r.made["branch"],
+                            "applied": r.applied})
+                    })
+                    .collect();
+                return (
+                    json!({"ok": true, "children": children, "orphans": [], "unknown_entries": 0}),
+                    None,
+                );
+            }
+            let child = req["child"].as_str().unwrap().to_string();
+            if op == "child_dispose" {
+                let removed = seen.records.remove(&child).is_some();
+                let _ = std::fs::remove_dir_all(root.join(&child));
+                return (
+                    json!({"ok": true, "removed": removed, "orphan": false}),
+                    None,
+                );
+            }
+            let Some(r) = seen.records.get_mut(&child) else {
+                return refuse("no_child");
+            };
+            if !r.ended {
+                return refuse("child_live");
+            }
+            let (git, home) = (Path::new(clone::GIT), Path::new(clone::HOME));
+            let dir = root.join(&child).join("review");
+            if r.export.is_none() {
+                std::fs::create_dir_all(&dir).unwrap();
+                let workspace = PathBuf::from(r.made["workspace"].as_str().unwrap());
+                let base = r.made["commit"].as_str().unwrap_or("-");
+                match review::export_clone(git, &workspace, &dir, base, 1 << 30, home) {
+                    Ok(Value::Object(v)) => r.export = Some(v),
+                    _ => return refuse("failed"),
+                }
+            }
+            let mut answer = r.export.clone().unwrap();
+            if op == "child_export" {
+                answer.insert("child".into(), child.clone().into());
+                answer.insert("parent".into(), r.parent.clone().into());
+                answer.insert(
+                    "parent_workspace".into(),
+                    r.parent_workspace.display().to_string().into(),
+                );
+                answer.insert("ok".into(), true.into());
+                return (Value::Object(answer), None);
+            }
+            if req["parent"] != r.parent.as_str() {
+                return refuse("wrong_parent");
+            }
+            let branch = format!("storm/{child}");
+            if req["target"] != branch.as_str() {
+                return refuse("bad_value");
+            }
+            if r.applied.is_some() {
+                return refuse("branch_exists");
+            }
+            let tip = answer["tip"].as_str().unwrap().to_string();
+            let bundle = dir.join(review::BUNDLE);
+            match review::import_clone(git, &r.parent_workspace, &bundle, &branch, &tip, home) {
+                Ok(v) if v["already"] == false => {
+                    r.applied = Some(branch.clone());
+                    (
+                        json!({"ok": true, "branch": branch, "commit": v["commit"], "child": child}),
+                        None,
+                    )
+                }
+                Ok(_) => refuse("branch_exists"),
+                Err(f) => refuse(f.code()),
+            }
+        }
+
         fn serve(stream: UnixStream, seen: &Mutex<Seen>, state_dir: &Path, program: &str) {
             let Ok((line, mut fds)) = recv_line(&stream, 64 * 1024) else {
                 return;
@@ -895,7 +995,13 @@ mod imp {
                 "self_test" => (json!({"ok": true}), None),
                 "prepare" | "release" => {
                     if op == "release" {
-                        seen.lock().unwrap().released.push(session.clone());
+                        let mut seen = seen.lock().unwrap();
+                        seen.released.push(session.clone());
+                        // Lease end: the child's workspace is kept, for its
+                        // review (137g).
+                        if let Some(r) = seen.records.get_mut(&session) {
+                            r.ended = true;
+                        }
                     }
                     (json!({"ok": true}), None)
                 }
@@ -1021,9 +1127,21 @@ mod imp {
                         (None, Some(root)) => {
                             let parent = Path::new(req["workspace"].as_str().unwrap());
                             let made = make_child(parent, &root.join(&session).join("workspace"));
-                            seen.lock().unwrap().made.insert(
+                            let mut seen = seen.lock().unwrap();
+                            seen.made.insert(
                                 session.clone(),
                                 PathBuf::from(made["workspace"].as_str().unwrap()),
+                            );
+                            seen.records.insert(
+                                session.clone(),
+                                Record {
+                                    parent: req["parent"].as_str().unwrap().to_string(),
+                                    parent_workspace: parent.to_path_buf(),
+                                    made: made.clone(),
+                                    ended: false,
+                                    export: None,
+                                    applied: None,
+                                },
                             );
                             (made, None)
                         }
@@ -1032,6 +1150,11 @@ mod imp {
                             None,
                         ),
                     }
+                }
+                "child_list" | "child_export" | "child_import" | "child_dispose"
+                    if seen.lock().unwrap().children_root.is_some() =>
+                {
+                    review(&op, &req, seen)
                 }
                 "child_list" => (
                     json!({"ok": true, "op": "child_list", "children": [{"child": "ags_C", "parent": "ags_P", "mode": "clone", "stage": "ended", "live": false}], "orphans": ["ags_LOST"], "unknown_entries": 0}),

@@ -501,6 +501,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}/children/{child}/apply",
             post(agent_apply_child),
         )
+        // The same by a spawned child's session (134-10's client).
+        .route(
+            "/v1/agent/sessions/{id}/child-work",
+            get(agent_session_child_work).delete(agent_session_delete_child),
+        )
+        .route(
+            "/v1/agent/sessions/{id}/child-work/apply",
+            post(agent_session_apply_child),
+        )
         .route(
             "/v1/agent/sessions",
             get(agent_list_sessions).post(agent_launch),
@@ -1987,6 +1996,38 @@ async fn agent_delete_child(
 ) -> ApiResult<Json<serde_json::Value>> {
     Ok(Json(
         crate::ops::delete_child(&state, &actor, &id, &child).await?,
+    ))
+}
+
+async fn agent_session_child_work(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ops::session_child_work(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_session_apply_child(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    body: Option<Json<ApplyChildRequest>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let name = body.and_then(|Json(b)| b.name);
+    Ok(Json(
+        crate::ops::session_apply_child(&state, &actor, &id, name.as_deref()).await?,
+    ))
+}
+
+async fn agent_session_delete_child(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ops::session_delete_child(&state, &actor, &id).await?,
     ))
 }
 
@@ -12691,6 +12732,10 @@ pub(crate) mod tests {
             .agent
             .hello(&host, serde_json::from_value(caps).unwrap())
             .unwrap();
+        // The listing's child, as 134 records one, ended (the cross-check).
+        state
+            .agent
+            .child_session_for_tests(&owner, &host, "ags_P1", "ags_C1", "completed");
         ChildFixture {
             app,
             state,
@@ -12769,12 +12814,16 @@ pub(crate) mod tests {
             serde_json::json!({"cmd_seq": sent["cmd_seq"], "type": "child.workspace",
                 "request": request, "op": "list"})
         );
-        // The review: the helper's export, as it was.
+        // The review: the helper's export, as it was, once its record and
+        // 134's lineage agree.
         let review = format!("{list}/ags_C1");
-        let ((status, body), sent) = tokio::join!(
-            send(&app, get_with_auth(&review, &bearer)),
+        let host = async {
+            f.host_answers(|_| child_listing("clone")).await;
             f.host_answers(|_| serde_json::json!({"answer": {"mode": "clone", "tip": "a".repeat(40), "patch": "+x"}}))
-        );
+                .await
+        };
+        let ((status, body), sent) =
+            tokio::join!(send(&app, get_with_auth(&review, &bearer)), host);
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["patch"], "+x");
         assert_eq!(
@@ -12831,10 +12880,13 @@ pub(crate) mod tests {
             )
         );
         // Delete.
-        let ((status, body), sent) = tokio::join!(
-            send(&app, delete_with_auth(&review, &bearer)),
+        let host = async {
+            f.host_answers(|_| child_listing("clone")).await;
             f.host_answers(|_| serde_json::json!({"answer": {"removed": true, "orphan": false}}))
-        );
+                .await
+        };
+        let ((status, body), sent) =
+            tokio::join!(send(&app, delete_with_auth(&review, &bearer)), host);
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(sent["op"], "dispose");
         // Applies and deletes are audited, codes and ids only.
@@ -15236,6 +15288,7 @@ pub(crate) mod tests {
             caps["isolation"] = serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
             caps["workspace_paths"] = paths;
             caps["resume"] = serde_json::json!(["claude-code"]);
+            caps["child_workspaces"] = serde_json::json!(true);
             caps
         }
 
@@ -15421,6 +15474,471 @@ pub(crate) mod tests {
                 .any(|(k, d)| k == "spawn_request" && d["kind"] == "start"),
             "{audit:?}"
         );
+    }
+
+    // ---- a child's work by its session (137-3 ⋈ 134) ----
+
+    impl GatewayFixture {
+        /// The host's side of one `child.workspace` request: what it was
+        /// sent, with its answer posted back as a host would. Anything else
+        /// sent down the link meanwhile is passed over.
+        async fn child_answers(
+            &mut self,
+            answer: impl Fn(&serde_json::Value) -> serde_json::Value,
+        ) -> serde_json::Value {
+            let sent = loop {
+                let sent = serde_json::to_value(self.link.recv().await.unwrap()).unwrap();
+                if sent["type"] == "child.workspace" {
+                    break sent;
+                }
+            };
+            let request = sent["request"].as_str().unwrap();
+            let (status, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/children/{request}"),
+                    answer(&sent),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            sent
+        }
+
+        fn child_requests(&mut self) -> Vec<serde_json::Value> {
+            self.sent()
+                .into_iter()
+                .filter(|m| m["type"] == "child.workspace")
+                .collect()
+        }
+
+        /// The host says it has child workspaces, with identity and
+        /// isolation verified (the C0 test hook keeps them).
+        async fn with_child_workspaces(&self) {
+            let (code, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/runtime/inventory",
+                    self.verified_caps(serde_json::json!({"storm": "/w/storm"})),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success());
+        }
+
+        async fn child_events(&self) -> Vec<serde_json::Value> {
+            security_events(&self.state)
+                .await
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_CHILD_WORKSPACE)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    /// The `child_work` vectors with this test's ids and commits in.
+    fn child_work_vector(child: &str, parent: &str, base: &str, tip: &str) -> serde_json::Value {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        let text = vector["child_work"]
+            .to_string()
+            .replace("ags_CHILD", child)
+            .replace("ags_PARENT", parent)
+            .replace("<base>", base)
+            .replace("<tip>", tip);
+        serde_json::from_str(&text).unwrap()
+    }
+
+    /// What the server sent is the vector's command, but for the request
+    /// id and sequence number it chose.
+    fn assert_child_command(sent: &serde_json::Value, want: &serde_json::Value) {
+        let mut want = want.clone();
+        want["request"] = sent["request"].clone();
+        want["cmd_seq"] = sent["cmd_seq"].clone();
+        assert_eq!(*sent, want);
+        assert!(sent["request"].as_str().unwrap().starts_with("cwr_"));
+    }
+
+    /// The integration of 137-3 with 134-5, the server's half (host.rs has
+    /// the host's, `an_ended_childs_work_is_exported_and_applied_into_its_parent`):
+    /// a child `start_agent` started and a person approved works and ends;
+    /// the person reads its work and applies it by the child's session.
+    /// The server checks the helper's record against 134's lineage first,
+    /// then sends the vector's commands, and answers what the host
+    /// answered. The Apply and the delete are audited.
+    #[tokio::test]
+    async fn the_full_flow_applies_an_ended_childs_work_by_its_session() {
+        let dir = tempdir::TempDir::new("storm-134-int2-flow").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        let asked = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "write the tests"}),
+            )
+            .await,
+        );
+        let request = asked["request_id"].as_str().unwrap().to_string();
+        let (status, decided) = f.decide(&request, "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        let child = decided["session"].as_str().unwrap().to_string();
+        let (base, tip) = ("b".repeat(40), "c".repeat(40));
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                serde_json::json!({"status": "running", "child_workspace": {"mode": "clone",
+                    "commit": base, "branch": "main", "submodules": false, "large_files": false}}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        f.sent();
+        let work = format!("/v1/agent/sessions/{child}/child-work");
+        let v = child_work_vector(&child, &parent, &base, &tip);
+
+        // While the child runs, nothing of its is read, and nothing is sent.
+        let (status, body) = send(&f.app, get_with_auth(&work, &f.owner_bearer)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "child_live"})
+            )
+        );
+        assert!(f.child_requests().is_empty());
+
+        f.report(&child, "completed").await;
+        f.sent();
+        let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
+        let host = async {
+            let list = f
+                .child_answers(|_| serde_json::json!({"answer": v["list"]["answer"]}))
+                .await;
+            let export = f
+                .child_answers(|_| serde_json::json!({"answer": v["export"]["answer"]}))
+                .await;
+            (list, export)
+        };
+        let ((status, body), (list, export)) =
+            tokio::join!(send(&app, get_with_auth(&work, &bearer)), host);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, v["export"]["answer"]);
+        assert_eq!(body["commits"][0]["id"], tip);
+        assert_child_command(&list, &v["list"]["command"]);
+        assert_child_command(&export, &v["export"]["command"]);
+
+        let host = async {
+            let list = f
+                .child_answers(|_| serde_json::json!({"answer": v["list"]["answer"]}))
+                .await;
+            let import = f
+                .child_answers(|_| serde_json::json!({"answer": v["import"]["answer"]}))
+                .await;
+            (list, import)
+        };
+        let ((status, body), (list, import)) = tokio::join!(
+            send(
+                &app,
+                post_json_with_auth(&format!("{work}/apply"), serde_json::json!({}), &bearer)
+            ),
+            host
+        );
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, v["import"]["answer"]);
+        assert_eq!(body["branch"], format!("storm/{child}"));
+        assert_child_command(&list, &v["list"]["command"]);
+        assert_child_command(&import, &v["import"]["command"]);
+
+        let host = async {
+            f.child_answers(|_| serde_json::json!({"answer": v["list"]["answer"]}))
+                .await;
+            f.child_answers(|_| serde_json::json!({"answer": {"removed": true, "orphan": false}}))
+                .await
+        };
+        let ((status, _), dispose) =
+            tokio::join!(send(&app, delete_with_auth(&work, &bearer)), host);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            (dispose["op"].clone(), dispose["child"].clone()),
+            ("dispose".into(), child.clone().into())
+        );
+        let host_id = f.host_id.clone();
+        assert_eq!(
+            f.child_events().await,
+            [
+                serde_json::json!({"op": "review", "host_id": host_id, "child": child, "result": "child_live"}),
+                serde_json::json!({"op": "apply", "host_id": host_id, "child": child, "result": "done"}),
+                serde_json::json!({"op": "delete", "host_id": host_id, "child": child, "result": "done"}),
+            ]
+        );
+    }
+
+    /// The lineage cross-check (decision 137, "As built in 137-3"), on both
+    /// kinds of route: a record whose parent is not the child's lineage, a
+    /// session that is no child, a child still running and a child on
+    /// another host are each 409 and audited; the server's own refusals
+    /// reach no host. A record or an orphan no session claims is deleted by
+    /// name, never read or applied.
+    #[tokio::test]
+    async fn the_cross_check_refuses_what_lineage_does_not_back() {
+        let dir = tempdir::TempDir::new("storm-134-int2-check").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.with_child_workspaces().await;
+        f.sent();
+        let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
+        let host_id = f.host_id.clone();
+        let by_host = |id: &str| format!("/v1/agent/hosts/{host_id}/children/{id}");
+        let conflict = |code: &str| (StatusCode::CONFLICT, serde_json::json!({"error": code}));
+        let listing = |child: &str, parent: &str| {
+            serde_json::json!({"answer": {"children": [{"child": child, "parent": parent,
+                "parent_workspace": "/w/storm", "mode": "clone", "stage": "ended", "live": false,
+                "commit": "b".repeat(40), "branch": "main", "applied": null}],
+                "orphans": ["ags_LOST"], "unknown_entries": 0}})
+        };
+
+        // A live child: every route refuses before asking the host.
+        for req in [
+            get_with_auth(&by_host(&child), &bearer),
+            post_json_with_auth(
+                &format!("{}/apply", by_host(&child)),
+                serde_json::json!({}),
+                &bearer,
+            ),
+            delete_with_auth(&by_host(&child), &bearer),
+            get_with_auth(&format!("/v1/agent/sessions/{child}/child-work"), &bearer),
+        ] {
+            assert_eq!(send(&app, req).await, conflict("child_live"));
+        }
+        assert!(f.child_requests().is_empty());
+
+        // A session that is no child.
+        let (status, body) = send(&app, get_with_auth(&by_host(&parent), &bearer)).await;
+        assert_eq!((status, body), conflict("lineage_mismatch"));
+        let (status, _) = send(
+            &app,
+            get_with_auth(&format!("/v1/agent/sessions/{parent}/child-work"), &bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(f.child_requests().is_empty());
+
+        // The helper names another parent than the child's lineage.
+        f.report(&child, "completed").await;
+        f.sent();
+        for req in [
+            get_with_auth(&by_host(&child), &bearer),
+            post_json_with_auth(
+                &format!("{}/apply", by_host(&child)),
+                serde_json::json!({}),
+                &bearer,
+            ),
+            delete_with_auth(&by_host(&child), &bearer),
+        ] {
+            let ((status, body), _) = tokio::join!(
+                send(&app, req),
+                f.child_answers(|_| listing(&child, "ags_SOMEONEELSE"))
+            );
+            assert_eq!((status, body), conflict("lineage_mismatch"));
+        }
+        assert!(f.child_requests().is_empty(), "nothing after the listing");
+
+        // Another host: its routes refuse this host's child, and neither
+        // host is asked.
+        let (other, other_token) = enroll_a_host(&app, &bearer).await;
+        let (_, mut other_link) = f.state.agent.connect_host(&other);
+        let (code, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/runtime/hello",
+                f.verified_caps(serde_json::json!({"storm": "/w/storm"})),
+                &format!("Bearer {other_token}"),
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        while other_link.try_recv().is_ok() {}
+        let elsewhere = format!("/v1/agent/hosts/{other}/children/{child}");
+        for req in [
+            get_with_auth(&elsewhere, &bearer),
+            post_json_with_auth(
+                &format!("{elsewhere}/apply"),
+                serde_json::json!({}),
+                &bearer,
+            ),
+            delete_with_auth(&elsewhere, &bearer),
+        ] {
+            assert_eq!(send(&app, req).await, conflict("wrong_host"));
+        }
+        assert!(other_link.try_recv().is_err());
+        assert!(f.child_requests().is_empty());
+
+        // A record no session claims: never read or applied, deleted by
+        // name; an orphan too.
+        let ((status, body), _) = tokio::join!(
+            send(&app, get_with_auth(&by_host("ags_NOSESSION"), &bearer)),
+            f.child_answers(|_| listing("ags_NOSESSION", &parent))
+        );
+        assert_eq!((status, body), conflict("lineage_mismatch"));
+        for (gone, answer) in [
+            ("ags_NOSESSION", listing("ags_NOSESSION", &parent)),
+            ("ags_LOST", listing(&child, &parent)),
+        ] {
+            let host = async {
+                f.child_answers(|_| answer.clone()).await;
+                f.child_answers(
+                    |_| serde_json::json!({"answer": {"removed": true, "orphan": true}}),
+                )
+                .await
+            };
+            let ((status, _), sent) =
+                tokio::join!(send(&app, delete_with_auth(&by_host(gone), &bearer)), host);
+            assert_eq!(status, StatusCode::OK, "{gone}");
+            assert_eq!(
+                (sent["op"].clone(), sent["child"].clone()),
+                ("dispose".into(), gone.into())
+            );
+        }
+
+        let results: Vec<(String, String)> = f
+            .child_events()
+            .await
+            .iter()
+            .map(|e| {
+                (
+                    e["op"].as_str().unwrap().into(),
+                    e["result"].as_str().unwrap().into(),
+                )
+            })
+            .collect();
+        let want: Vec<(String, String)> = [
+            ("review", "child_live"),
+            ("apply", "child_live"),
+            ("delete", "child_live"),
+            ("review", "child_live"),
+            ("review", "lineage_mismatch"),
+            ("review", "lineage_mismatch"),
+            ("apply", "lineage_mismatch"),
+            ("delete", "lineage_mismatch"),
+            ("review", "wrong_host"),
+            ("apply", "wrong_host"),
+            ("delete", "wrong_host"),
+            ("review", "lineage_mismatch"),
+            ("delete", "done"),
+            ("delete", "done"),
+        ]
+        .iter()
+        .map(|(a, b)| (a.to_string(), b.to_string()))
+        .collect();
+        assert_eq!(results, want);
+    }
+
+    /// The session-keyed routes are the signed-in owner's: an `stk_` key
+    /// and a host token never reach them, and a key's or an agent's actor
+    /// is refused before anything reaches the host.
+    #[tokio::test]
+    async fn a_childs_work_by_session_is_the_signed_in_owners_only() {
+        let dir = tempdir::TempDir::new("storm-134-int2-owner").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, child) = f.tree().await;
+        f.with_child_workspaces().await;
+        f.report(&child, "completed").await;
+        f.sent();
+        let (_, secret) = seed_key(&f.state).await;
+        let key = format!("Bearer {secret}");
+        let work = format!("/v1/agent/sessions/{child}/child-work");
+        for bearer in [&key, &f.host_bearer] {
+            for req in [
+                get_with_auth(&work, bearer),
+                post_json_with_auth(&format!("{work}/apply"), serde_json::json!({}), bearer),
+                delete_with_auth(&work, bearer),
+            ] {
+                let (status, _) = send(&f.app, req).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+        }
+        for actor in [
+            Actor::Key {
+                key_id: "k".into(),
+                user_id: f.owner.clone(),
+            },
+            Actor::Agent {
+                session_id: child.clone(),
+                host_id: f.host_id.clone(),
+                user_id: f.owner.clone(),
+                write_vault: None,
+            },
+        ] {
+            let refused = [
+                crate::ops::session_child_work(&f.state, &actor, &child)
+                    .await
+                    .unwrap_err(),
+                crate::ops::session_apply_child(&f.state, &actor, &child, None)
+                    .await
+                    .unwrap_err(),
+                crate::ops::session_delete_child(&f.state, &actor, &child)
+                    .await
+                    .unwrap_err(),
+            ];
+            for r in refused {
+                assert_eq!((r.0, r.1.as_str()), (StatusCode::FORBIDDEN, "owner_only"));
+            }
+        }
+        assert!(
+            f.child_requests().is_empty(),
+            "no refused request reached the host"
+        );
+        assert!(
+            !include_str!("mcp.rs").contains("child-work"),
+            "a child's work is never an MCP tool"
+        );
+    }
+
+    /// 137g: a child's workspace is kept until its tree is dismissed; the
+    /// dismissal deletes each child's on its host, audited.
+    #[tokio::test]
+    async fn dismissing_a_tree_deletes_its_childrens_workspaces() {
+        let dir = tempdir::TempDir::new("storm-134-int2-dismiss").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.with_child_workspaces().await;
+        f.report(&child, "completed").await;
+        f.report(&parent, "completed").await;
+        f.sent();
+        let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
+        let (status, body) = send(
+            &app,
+            delete_with_auth(&format!("/v1/agent/sessions/{parent}?tree=true"), &bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let sent = f
+            .child_answers(|_| serde_json::json!({"answer": {"removed": true, "orphan": false}}))
+            .await;
+        assert_eq!(
+            (sent["op"].clone(), sent["child"].clone()),
+            ("dispose".into(), child.clone().into())
+        );
+        let host_id = f.host_id.clone();
+        for _ in 0..100 {
+            if !f.child_events().await.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            f.child_events().await,
+            [
+                serde_json::json!({"op": "dismiss", "host_id": host_id, "child": child, "result": "done"})
+            ]
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(f.child_requests().is_empty(), "the parent is no child");
     }
 
     /// What `start_agent` refuses, and where: a blank task, a long or

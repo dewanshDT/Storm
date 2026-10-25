@@ -257,7 +257,9 @@ system user, `storm-review`, which `on` creates. You read what it did, and
 branch, `storm/<session>`, beside yours (Storm never merges, never moves an
 existing branch and never touches the branch you have checked out); anywhere
 else its files are copied into a new folder in your workspace that you name,
-never over one that exists. A kept workspace stays until you delete it, and
+never over one that exists. Storm reads or applies a workspace only for a
+session an agent started on that host, once it has ended. A kept workspace
+stays until you delete it or dismiss the sessions it came from, and
 anything under the children folder Storm has no record of is listed for you,
 never removed on its own. On a host turned on before this version, run
 `sudo storm-runtime-isolation on` again to create `storm-review`.

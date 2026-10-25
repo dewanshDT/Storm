@@ -27,6 +27,9 @@ pub struct Dismissal {
     pub sessions: Vec<String>,
     /// The crews it emptied, deleted with them (decision 138c).
     pub crews: Vec<Crew>,
+    /// Each dismissed child and its host: its workspace is kept until its
+    /// tree is dismissed (137g).
+    pub children: Vec<(String, String)>,
 }
 
 /// How far back a resume chain is followed for C3.
@@ -243,6 +246,7 @@ impl AgentManager {
             .chain(store.descendants(&root, false)?)
             .filter(|m| matches!(store.get(m), Ok(Some(_))))
             .collect();
+        let mut children = Vec::new();
         let crews = if members.len() <= 1 {
             members = vec![id.to_string()];
             store.delete(id)?.1.into_iter().collect()
@@ -257,6 +261,13 @@ impl AgentManager {
             }
             members.retain(|m| m != id);
             members.insert(0, id.to_string());
+            for m in &members {
+                if store.lineage(m)?.parent_session.is_some()
+                    && let Some(r) = store.get(m)?
+                {
+                    children.push((m.clone(), r.host_id));
+                }
+            }
             store.delete_all(&members)?
         };
         drop(store);
@@ -267,6 +278,7 @@ impl AgentManager {
         Ok(Dismissal {
             sessions: members,
             crews,
+            children,
         })
     }
 

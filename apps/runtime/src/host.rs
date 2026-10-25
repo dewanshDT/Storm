@@ -4899,6 +4899,173 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// One of the shared vector's `child.workspace` commands (137-3 ⋈ 134).
+    fn child_work(op: &str) -> (Command, serde_json::Value) {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        let v = &vector["child_work"][op];
+        let command = serde_json::from_value::<Envelope>(v["command"].clone())
+            .unwrap()
+            .command;
+        (command, v["answer"].clone())
+    }
+
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// The integration of 137-3 with 134-5, the host's half (api.rs has
+    /// the server's, `the_full_flow_applies_an_ended_childs_work_by_its_session`):
+    /// a child started by the server's `start` works in its W2 clone and
+    /// commits, then ends by itself; at its lease end the helper keeps its
+    /// workspace for review, and the vector's `child.workspace` commands
+    /// export its work and apply it as `storm/<child>` through the helper's
+    /// own export and Apply code with real git. The parent's every existing
+    /// ref, `HEAD`, index and working tree are as they were; a second Apply
+    /// is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_ended_childs_work_is_exported_and_applied_into_its_parent() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "printf 'done\\n' > WORK.md && /usr/bin/git add WORK.md && \
+             /usr/bin/git -c user.name=child -c user.email=c@c commit -q -m \"the child's work\" && \
+             /usr/bin/git rev-parse HEAD > {o}/tip; printf 'left over\\n' > UNCOMMITTED.md; exit 0"
+        );
+        let (host, seen, helper, _state, roots) = isolated_script_host(&script, None).await;
+        let parent = roots.path().join("w");
+        git(&parent, &["init", "-q", "-b", "main"]);
+        std::fs::write(parent.join("README.md"), "committed\n").unwrap();
+        git(&parent, &["add", "README.md"]);
+        let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q"];
+        git(&parent, &[&commit[..], &["-m", "one"]].concat());
+        git(&parent, &["branch", "feature"]);
+        git(&parent, &["tag", "v1"]);
+        let base = git(&parent, &["rev-parse", "HEAD"]);
+        std::fs::write(parent.join("README.md"), "uncommitted\n").unwrap();
+        std::fs::write(parent.join("untracked.txt"), "mine\n").unwrap();
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+        let refs = || {
+            git(
+                &parent,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            )
+        };
+        let state_of = || {
+            (
+                std::fs::read(parent.join(".git/HEAD")).unwrap(),
+                std::fs::read(parent.join(".git/index")).unwrap(),
+                std::fs::read_to_string(parent.join("README.md")).unwrap(),
+                std::fs::read_to_string(parent.join("untracked.txt")).unwrap(),
+            )
+        };
+        let (refs_before, state_before) = (refs(), state_of());
+
+        host.clone().handle(spawned_start()).await;
+        wait_for("the child's commit", || out.path().join("tip").exists()).await;
+        wait_for("its lease end", || {
+            helper.seen.lock().unwrap().released == ["ags_CHILD"]
+        })
+        .await;
+        let tip = std::fs::read_to_string(out.path().join("tip"))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_ne!(tip, base);
+
+        let answered = |request: &str| {
+            let path = format!("/v1/runtime/children/{}", request.to_lowercase());
+            let seen = seen.clone();
+            move || {
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|(p, _)| *p == path)
+                    .map(|(_, b)| b.clone())
+            }
+        };
+        let run = |op: &'static str| {
+            let host = host.clone();
+            let answered = &answered;
+            async move {
+                let (command, want) = child_work(op);
+                let Command::ChildWorkspace { request, .. } = &command else {
+                    unreachable!()
+                };
+                let got = answered(request);
+                let before = got().map(|b| b.to_string());
+                host.handle(command).await;
+                wait_for(op, || got().map(|b| b.to_string()) != before).await;
+                (got().unwrap(), want)
+            }
+        };
+
+        let (listed, want) = run("list").await;
+        let record = &listed["answer"]["children"][0];
+        assert_eq!(keys(record), keys(&want["children"][0]));
+        assert_eq!(
+            (
+                record["child"].clone(),
+                record["parent"].clone(),
+                record["stage"].clone()
+            ),
+            ("ags_CHILD".into(), "ags_PARENT".into(), "ended".into())
+        );
+        assert_eq!(record["commit"], base);
+
+        let (exported, want) = run("export").await;
+        let review = &exported["answer"];
+        assert_eq!(keys(review), keys(&want), "{review}");
+        assert_eq!(
+            (review["base"].clone(), review["tip"].clone()),
+            (base.clone().into(), tip.clone().into())
+        );
+        assert_eq!(
+            review["commits"],
+            serde_json::json!([{"id": tip, "subject": "the child's work"}])
+        );
+        assert_eq!(
+            review["files"],
+            serde_json::json!([{"path": "WORK.md", "added": 1, "removed": 0}])
+        );
+        let patch = review["patch"].as_str().unwrap();
+        assert!(patch.contains("+done"), "{patch}");
+        assert!(
+            !patch.contains("left over"),
+            "uncommitted work never leaves"
+        );
+        assert_eq!(
+            refs(),
+            refs_before,
+            "an export changes nothing of the parent's"
+        );
+
+        let (applied, want) = run("import").await;
+        assert_eq!(keys(&applied["answer"]), keys(&want), "{applied}");
+        assert_eq!(
+            applied["answer"],
+            serde_json::json!({"branch": "storm/ags_CHILD", "commit": tip, "child": "ags_CHILD"})
+        );
+        let mut refs_after: Vec<String> = refs().lines().map(str::to_string).collect();
+        refs_after.retain(|r| *r != format!("refs/heads/storm/ags_CHILD {tip}"));
+        assert_eq!(refs_after.join("\n"), refs_before, "no existing ref moved");
+        assert_eq!(
+            state_of(),
+            state_before,
+            "HEAD, index and working tree as they were"
+        );
+        assert_eq!(git(&parent, &["show", "storm/ags_CHILD:WORK.md"]), "done");
+
+        let (again, _) = run("import").await;
+        assert_eq!(again, serde_json::json!({"refused": "branch_exists"}));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     /// A child whose workspace the helper will not make never starts and
     /// ends with why (137f): its record names the cap.
     #[tokio::test(flavor = "multi_thread")]

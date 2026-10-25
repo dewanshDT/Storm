@@ -2884,8 +2884,8 @@ pub async fn stop_cascade_targets(state: &Shared, now: &str) {
 // A person's view of a spawned child's work, its Apply and its delete, on
 // the host's isolation helper. Owner only and session tier, like crews: an
 // `stk_` key, a host token, a key's or an agent's actor never reach them.
-// Which children a host has is the helper's record (137-3 runs before 134's
-// lineage meets it); the helper checks every field again.
+// The helper's record and 134's lineage must agree before anything of a
+// child's is read, applied or deleted; the helper checks every field again.
 
 use crate::agent::ChildOp;
 
@@ -2953,6 +2953,84 @@ pub async fn list_child_workspaces(
         .map_err(agent_error)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildUse {
+    /// An export or an Apply: only a child 134 started, ended, on its host.
+    Review,
+    /// A delete: an orphan or a record no session claims goes by name.
+    Delete,
+}
+
+impl ChildUse {
+    fn op(self, apply: bool) -> &'static str {
+        match (self, apply) {
+            (ChildUse::Delete, _) => "delete",
+            (ChildUse::Review, true) => "apply",
+            (ChildUse::Review, false) => "review",
+        }
+    }
+}
+
+/// 137-3's lineage cross-check where 134 meets it: `child` has lineage whose
+/// parent is the helper record's `parent`, its session is on `host_id`, and
+/// it has ended. A mismatch is 409, audited. The record, when the helper
+/// keeps one. Nothing is sent to the host before the server's own checks
+/// pass.
+async fn checked_child(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    child: &str,
+    using: ChildUse,
+    apply: bool,
+) -> ApiResult<Option<serde_json::Value>> {
+    let refuse = |code: &'static str| async move {
+        let failed = Err(crate::agent::AgentError::ChildRefused(code.into()));
+        audit_child(state, actor, using.op(apply), host_id, child, &failed).await;
+        ApiError(child_status(code), code.into())
+    };
+    let session = match state.agent.get(child) {
+        Ok(r) => Some(r),
+        Err(crate::agent::AgentError::NotFound(_)) => None,
+        Err(e) => return Err(agent_error(e)),
+    };
+    let parent = state
+        .agent
+        .lineage(child)
+        .map_err(agent_error)?
+        .parent_session;
+    let early = match &session {
+        Some(_) if parent.is_none() => Some("lineage_mismatch"),
+        Some(r) if r.host_id != host_id => Some("wrong_host"),
+        Some(r) if !r.is_ended() => Some("child_live"),
+        _ => None,
+    };
+    if let Some(code) = early {
+        return Err(refuse(code).await);
+    }
+    let listed = state
+        .agent
+        .child_workspace(host_id, ChildOp::List, None, None, None)
+        .await
+        .map_err(agent_error)?;
+    let record = listed["children"]
+        .as_array()
+        .and_then(|c| c.iter().find(|r| r["child"] == child))
+        .cloned();
+    let mismatch = match (&record, &parent) {
+        (Some(r), Some(p)) => r["parent"] != p.as_str(),
+        (None, _) if using == ChildUse::Review => {
+            return Err(ApiError(child_status("no_child"), "no_child".into()));
+        }
+        _ => false,
+    };
+    let unclaimed = session.is_none() && using == ChildUse::Review;
+    if mismatch || unclaimed {
+        return Err(refuse("lineage_mismatch").await);
+    }
+    Ok(record)
+}
+
 /// `GET /v1/agent/hosts/{id}/children/{child}`: an ended child's work as
 /// data, for the person to read before Apply (137e): a clone's commits
 /// since its base and their diff, or a scratch child's files.
@@ -2964,6 +3042,7 @@ pub async fn child_review(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
+    checked_child(state, actor, host_id, child, ChildUse::Review, false).await?;
     state
         .agent
         .child_workspace(host_id, ChildOp::Export, Some(child), None, None)
@@ -2985,15 +3064,8 @@ pub async fn apply_child(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
-    let listed = state
-        .agent
-        .child_workspace(host_id, ChildOp::List, None, None, None)
-        .await
-        .map_err(agent_error)?;
-    let record = listed["children"]
-        .as_array()
-        .and_then(|c| c.iter().find(|r| r["child"] == child))
-        .cloned()
+    let record = checked_child(state, actor, host_id, child, ChildUse::Review, true)
+        .await?
         .ok_or_else(|| ApiError(child_status("no_child"), "no_child".into()))?;
     let parent = record["parent"]
         .as_str()
@@ -3057,12 +3129,74 @@ pub async fn delete_child(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
+    checked_child(state, actor, host_id, child, ChildUse::Delete, false).await?;
     let result = state
         .agent
         .child_workspace(host_id, ChildOp::Dispose, Some(child), None, None)
         .await;
     audit_child(state, actor, "delete", host_id, child, &result).await;
     result.map_err(agent_error)
+}
+
+/// A spawned child's own session, the owner's, and its host: what 134-10's
+/// client names a child's work by.
+fn child_session(state: &Shared, actor: &Actor, id: &str) -> ApiResult<String> {
+    let (_, r) = owners_session(state, actor, id)?;
+    let lineage = state.agent.lineage(id).map_err(agent_error)?;
+    if lineage.parent_session.is_none() {
+        return Err(not_found("not a spawned child"));
+    }
+    Ok(r.host_id)
+}
+
+/// `GET /v1/agent/sessions/{id}/child-work`: [`child_review`] by the
+/// child's session.
+pub async fn session_child_work(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<serde_json::Value> {
+    let host = child_session(state, actor, id)?;
+    child_review(state, actor, &host, id).await
+}
+
+/// `POST /v1/agent/sessions/{id}/child-work/apply {name?}`: [`apply_child`]
+/// by the child's session.
+pub async fn session_apply_child(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    name: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    let host = child_session(state, actor, id)?;
+    apply_child(state, actor, &host, id, name).await
+}
+
+/// `DELETE /v1/agent/sessions/{id}/child-work`: [`delete_child`] by the
+/// child's session.
+pub async fn session_delete_child(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<serde_json::Value> {
+    let host = child_session(state, actor, id)?;
+    delete_child(state, actor, &host, id).await
+}
+
+/// A dismissed tree's children's workspaces are deleted with it (137g),
+/// each on its host once; an offline host's stays listed for a person's
+/// delete.
+fn dispose_dismissed(state: &Shared, actor: &Actor, children: Vec<(String, String)>) {
+    for (child, host) in children {
+        let (state, actor) = (state.clone(), actor.clone());
+        tokio::spawn(async move {
+            let result = state
+                .agent
+                .child_workspace(&host, ChildOp::Dispose, Some(&child), None, None)
+                .await;
+            audit_child(&state, &actor, "dismiss", &host, &child, &result).await;
+        });
+    }
 }
 
 async fn audit_child(
@@ -3894,6 +4028,7 @@ pub async fn dismiss_session(
 ) -> ApiResult<Dismissed> {
     let (owner, _) = owners_session(state, actor, id)?;
     let d = state.agent.dismiss_session(id, tree).map_err(agent_error)?;
+    dispose_dismissed(state, actor, d.children);
     let is_tree = d.sessions.len() > 1;
     if is_tree {
         record_spawn_event(
