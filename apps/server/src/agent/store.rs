@@ -1196,6 +1196,14 @@ pub mod spawn {
                  changed_at        TEXT NOT NULL
              );
 
+             -- 134-8: the session's start carried spawn_asks, so its CLI's
+             -- config holds the pinned asks. Only such a session's switch
+             -- turns on.
+             CREATE TABLE IF NOT EXISTS session_spawn_asks (
+                 session_id TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL
+             );
+
              -- 134f: a child's task, the exact text a person approved.
              CREATE TABLE IF NOT EXISTS session_task (
                  session_id TEXT PRIMARY KEY,
@@ -1636,6 +1644,28 @@ pub mod spawn {
                     params![session_id, from],
                 )
                 .unwrap();
+        }
+
+        /// Records that a session's start carried `spawn_asks` (134-8).
+        pub fn record_spawn_asks(&self, session_id: &str, now: &str) -> Result<()> {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO session_spawn_asks (session_id, created_at) VALUES (?1, ?2)",
+                params![session_id, now],
+            )?;
+            Ok(())
+        }
+
+        /// Whether a session's CLI config was written with the pinned asks.
+        pub fn spawn_asks(&self, session_id: &str) -> Result<bool> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM session_spawn_asks WHERE session_id = ?1",
+                    params![session_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
         }
 
         pub fn spawn_enabled(&self, session_id: &str) -> Result<bool> {
@@ -2722,6 +2752,7 @@ pub mod spawn {
         refuse_where(conn, "target = ?1", session_id, "target_gone", &now)?;
         for table in [
             "session_spawn",
+            "session_spawn_asks",
             "session_task",
             "session_result",
             "session_inbox",

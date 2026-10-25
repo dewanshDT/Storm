@@ -58,6 +58,15 @@ pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
 /// The adapters that may be a spawning parent (decision 134, "candidate").
 pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
 
+/// What a `start` tells the host about a session decision 134 may offer
+/// its tools (134-8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnStart {
+    /// A child, whose `session_context` is exempt too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spawned: bool,
+}
+
 /// A spawn switch a person set: the session, what it was, what it is now,
 /// and how many pending requests turning it off refused.
 #[derive(Debug)]
@@ -102,6 +111,12 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
+        /// The session may be offered decision 134's tools while it runs,
+        /// so its CLI's config gets the pinned asks and, on a verified host,
+        /// the A6 exemptions (134-8). Sent only where C0 holds, so omitted
+        /// on every host today.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_asks: Option<SpawnStart>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -1084,6 +1099,9 @@ impl AgentManager {
         // workspace cannot slip between them.
         let mut store = self.store.lock().unwrap();
         let was = store.spawn_enabled(session_id)?;
+        if enabled && !store.spawn_asks(session_id)? {
+            return Ok(Err("launched_without_asks"));
+        }
         if enabled
             && store.workspace_held(
                 &r.host_id,
@@ -1508,6 +1526,12 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
+        // 134-8: written now, since a switch turned on later cannot add asks
+        // to a config the CLI has already read.
+        let spawn_asks = (reads_storm
+            && SPAWN_PROVIDERS.contains(&provider.id.as_str())
+            && self.spawn_gate(&req.host_id).is_ok())
+        .then_some(SpawnStart::default());
         let launch = {
             let mut store = self.store.lock().unwrap();
             // WS-9: under the same lock as the insert, so a spawn switch
@@ -1538,6 +1562,9 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            if spawn_asks.is_some() {
+                store.record_spawn_asks(&record.id, &record.created_at)?;
+            }
             let integrations: Vec<store::SessionIntegration> = grants
                 .iter()
                 .filter(|g| g.id != crate::gateway::connections::BUILTIN_ID)
@@ -1574,6 +1601,7 @@ impl AgentManager {
                 context: reads_storm && launch.context.is_some(),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
+                spawn_asks,
             },
         );
         let mut record = record;
@@ -3669,7 +3697,7 @@ mod tests {
         assert_eq!(v["type"], "terminal.replay");
 
         // A native `start` is byte for byte what it was before token sync.
-        let start = |provider_credential: Option<String>| Envelope {
+        let start_with = |provider_credential: Option<String>, spawn_asks| Envelope {
             cmd_seq: 1,
             command: Command::Start {
                 session: "ags_X".into(),
@@ -3681,8 +3709,10 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
+                spawn_asks,
             },
         };
+        let start = |provider_credential| start_with(provider_credential, None);
         assert_eq!(
             serde_json::to_string(&start(None)).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24}}"#
@@ -3691,6 +3721,16 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
+        );
+        // 134-8: a start decision 134 may offer its tools to says so.
+        assert_eq!(
+            serde_json::to_string(&start_with(None, Some(SpawnStart::default()))).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"spawn_asks":{}}"#
+        );
+        assert!(
+            serde_json::to_string(&start_with(None, Some(SpawnStart { spawned: true })))
+                .unwrap()
+                .ends_with(r#""spawn_asks":{"spawned":true}}"#)
         );
     }
 

@@ -9368,6 +9368,17 @@ pub(crate) mod tests {
         assert_eq!(refused.0, StatusCode::NOT_FOUND);
         assert!(f.spawn_events().await.is_empty(), "nothing was changed");
         assert_eq!(list_changed(&f.sent()), 0);
+        // 134-8: started before C0 held, so its CLI has no pinned asks.
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::CONFLICT, Some("launched_without_asks"))
+        );
+        f.report(&session, "completed").await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let (status, body) = f.spawn(&session, true).await;
         assert_eq!(status, StatusCode::OK, "{body}");
     }

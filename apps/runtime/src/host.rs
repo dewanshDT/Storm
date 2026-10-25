@@ -77,6 +77,14 @@ const START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(30)
 };
 
+/// What a `start` says about a session decision 134 may offer its tools.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct SpawnStart {
+    /// A child: its `session_context` is exempt too.
+    #[serde(default)]
+    pub spawned: bool,
+}
+
 /// A command from the server (freeze §11.5).
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
@@ -102,6 +110,11 @@ pub enum Command {
         /// never its value.
         #[serde(default)]
         provider_credential: Option<String>,
+        /// The session may be offered decision 134's tools while it runs:
+        /// its CLI's config gets the pinned asks and, on a verified host,
+        /// the exemptions (134-8). Absent for every other session.
+        #[serde(default)]
+        spawn_asks: Option<SpawnStart>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -1087,6 +1100,7 @@ impl Host {
                 context,
                 resume,
                 provider_credential,
+                spawn_asks,
             } => {
                 self.start(
                     session,
@@ -1098,6 +1112,7 @@ impl Host {
                     context,
                     resume,
                     provider_credential,
+                    spawn_asks,
                 )
                 .await
             }
@@ -1203,6 +1218,7 @@ impl Host {
         context: bool,
         resume: Option<String>,
         provider_credential: Option<String>,
+        spawn_asks: Option<SpawnStart>,
     ) {
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
@@ -1282,6 +1298,8 @@ impl Host {
         let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
         let is_claude = crate::profile::get(&provider_id).and_then(|p| p.mcp)
             == Some(crate::profile::Mcp::ClaudeCode);
+        let is_opencode = crate::profile::get(&provider_id).and_then(|p| p.mcp)
+            == Some(crate::profile::Mcp::OpenCode);
         let plugin_plan = if codex_plan.is_some() {
             codex_plan
         } else if storm_only && !mcp.is_empty() && is_claude {
@@ -1310,6 +1328,24 @@ impl Host {
             storm_only,
             taken: &taken,
         };
+        // Only where the session reaches Storm's own tools; the exemptions
+        // only while this host's identity is verified (A6).
+        let spawn = spawn_asks
+            .filter(|_| mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION))
+            .map(|s| crate::mcp::SpawnAsks {
+                exempt: self.peer_identity.verified(),
+                spawned: s.spawned,
+            });
+        let opencode_account = match spawn {
+            Some(_) if is_opencode => match crate::mcp::opencode_account(storm_only) {
+                Ok(account) => Some(account),
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %format!("{e:#}"), "could not read the account's OpenCode config for the pinned asks");
+                    return self.post_start_failure(&id).await;
+                }
+            },
+            _ => None,
+        };
         let plugin_plan = match self.mcp_launch(
             &id,
             &provider_id,
@@ -1317,6 +1353,7 @@ impl Host {
             &mcp,
             &plugin_servers,
             &own,
+            spawn.as_ref().zip(opencode_account.as_ref()),
         ) {
             Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
@@ -1367,17 +1404,25 @@ impl Host {
             .unwrap()
             .insert(id.clone(), events.leader.subscribe());
         let pins = synced.as_ref().map(|(pins, _)| pins);
-        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins) {
+        let claude_asks = spawn.filter(|_| is_claude);
+        match self.harness_launch(
+            &id,
+            &provider_id,
+            resume.as_deref(),
+            &events,
+            pins,
+            claude_asks.as_ref(),
+        ) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
             }
             // A session that cannot report its id still runs; it only cannot
             // be resumed. A resume still names its conversation, and a synced
-            // session's pins live in the same file.
+            // session's pins and a spawn session's asks live in the same file.
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
-                if resume.is_some() || is_synced {
+                if resume.is_some() || is_synced || claude_asks.is_some() {
                     return self.post_start_failure(&id).await;
                 }
             }
@@ -1645,6 +1690,7 @@ const MCP_LINE_MAX: u64 = 4 * 1024 * 1024;
 
 impl Host {
     /// Writes a session's provider config and registers its handle.
+    #[allow(clippy::too_many_arguments)]
     fn mcp_launch(
         &self,
         session: &str,
@@ -1653,6 +1699,7 @@ impl Host {
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
         own: &crate::mcp::AgentServers,
+        spawn: Option<(&crate::mcp::SpawnAsks, &crate::mcp::OpencodeAccount)>,
     ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         use crate::profile::Mcp;
         if grants.is_empty() && !own.storm_only {
@@ -1722,6 +1769,7 @@ impl Host {
                     self.opencode_settings.as_ref(),
                     plugin_servers,
                     own,
+                    spawn,
                 )?,
                 None,
             )
@@ -1766,6 +1814,7 @@ impl Host {
         resume: Option<&str>,
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
+        spawn: Option<&crate::mcp::SpawnAsks>,
     ) -> Result<crate::mcp::LaunchExtras> {
         if !crate::profile::resumable(provider) {
             return Ok(Default::default());
@@ -1780,6 +1829,7 @@ impl Host {
             &exe,
             resume,
             synced,
+            spawn,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -2396,6 +2446,7 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -2525,6 +2576,7 @@ mod tests {
             context,
             resume: resume.map(str::to_string),
             provider_credential: None,
+            spawn_asks: None,
         }
     }
 
@@ -3565,6 +3617,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
             })
             .await;
 
@@ -3657,6 +3710,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -3769,6 +3823,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: None,
+            spawn_asks: None,
         }
     }
 
@@ -4089,6 +4144,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: kind.map(str::to_string),
+            spawn_asks: None,
         }
     }
 
@@ -4225,6 +4281,94 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap();
         assert!(settings.get("env").is_none() && settings.get("apiKeyHelper").is_none());
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-8: a start that may be offered decision 134's tools gives Claude
+    /// Code the pinned asks, and the exemptions only on a verified host; one
+    /// without the storm connection, or with no `spawn_asks`, gets the
+    /// settings it always did.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_spawn_start_pins_claude_codes_asks() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let storm = crate::mcp::McpGrant {
+            id: "storm".into(),
+            slug: "storm".into(),
+            plugin_origin: None,
+        };
+        let starts = [
+            (
+                "ags_SPAWN",
+                vec![storm.clone()],
+                Some(SpawnStart { spawned: true }),
+            ),
+            (
+                "ags_NOSTORM",
+                Vec::new(),
+                Some(SpawnStart { spawned: true }),
+            ),
+            ("ags_PLAIN", vec![storm], None),
+        ];
+        for (id, mcp, spawn_asks) in starts.clone() {
+            let mut start = synced_start(id, "claude-code", None);
+            if let Command::Start {
+                mcp: m,
+                spawn_asks: s,
+                ..
+            } = &mut start
+            {
+                *m = mcp;
+                *s = spawn_asks;
+            }
+            host.clone().handle(start).await;
+        }
+        let settings = |id: &str| -> serde_json::Value {
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            let at = lines.iter().position(|l| *l == "--settings").unwrap();
+            serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap()
+        };
+        for (id, ..) in &starts {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
+            })
+            .await;
+        }
+        let asks = crate::mcp::SpawnAsks {
+            exempt: host.peer_identity.verified(),
+            spawned: true,
+        };
+        assert_eq!(
+            settings("ags_SPAWN")["permissions"],
+            crate::mcp::claude_permissions(&asks)
+        );
+        assert!(settings("ags_NOSTORM").get("permissions").is_none());
+        assert!(settings("ags_PLAIN").get("permissions").is_none());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[test]
+    fn a_start_names_spawn_asks_only_when_the_server_says_so() {
+        let base = serde_json::json!({
+            "type": "start", "session": "ags_1", "workspace": "w", "provider": "claude-code",
+            "terminal": {"cols": 80, "rows": 24},
+        });
+        let parse = |extra: serde_json::Value| {
+            let mut v = base.clone();
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            match serde_json::from_value::<Command>(v).unwrap() {
+                Command::Start { spawn_asks, .. } => spawn_asks.map(|s| s.spawned),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(parse(serde_json::json!({})), None);
+        assert_eq!(parse(serde_json::json!({"spawn_asks": {}})), Some(false));
+        assert_eq!(
+            parse(serde_json::json!({"spawn_asks": {"spawned": true}})),
+            Some(true)
+        );
     }
 
     /// AC-TS11, AC-TS17: a synced start that cannot get its token, names a

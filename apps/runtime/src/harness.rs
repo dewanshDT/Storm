@@ -69,7 +69,9 @@ fn new_uuid() -> String {
 /// What a session's launch gains so its id reaches the host, and the id when
 /// it is known before the agent starts. `resume` must already be valid for
 /// `provider`. Nothing for any other provider. `synced` is merged into Claude
-/// Code's settings file and checked there (token sync, AM71).
+/// Code's settings file and checked there (token sync, AM71), and so are a
+/// spawn session's `permissions` (134-8).
+#[allow(clippy::too_many_arguments)]
 pub fn launch(
     provider: &str,
     dir: &Path,
@@ -78,6 +80,7 @@ pub fn launch(
     exe: &Path,
     resume: Option<&str>,
     synced: Option<&serde_json::Map<String, serde_json::Value>>,
+    spawn: Option<&crate::mcp::SpawnAsks>,
 ) -> Result<(LaunchExtras, Option<String>)> {
     let env = vec![
         (HANDLE_ENV.into(), handle.into()),
@@ -105,6 +108,9 @@ pub fn launch(
                     .expect("an object")
                     .extend(pins.clone());
             }
+            if let Some(asks) = spawn {
+                settings["permissions"] = crate::mcp::claude_permissions(asks);
+            }
             // A file, not inline JSON: npm installs Claude Code on Windows as
             // `claude.cmd`, and a batch file's arguments may hold no `"`
             // (AM53; found by the Windows acceptance run).
@@ -113,6 +119,9 @@ pub fn launch(
             write_private(&path, settings.to_string().as_bytes())?;
             if let Some(pins) = synced {
                 crate::credential::verify_settings(&std::fs::read(&path)?, pins)?;
+            }
+            if let Some(asks) = spawn {
+                crate::mcp::verify_claude_permissions(&std::fs::read(&path)?, asks)?;
             }
             args.extend(["--settings".into(), path.into_os_string()]);
             Ok((
@@ -330,6 +339,7 @@ mod tests {
             exe,
             None,
             None,
+            None,
         )
         .unwrap();
         let id = id.unwrap();
@@ -374,6 +384,7 @@ mod tests {
             Path::new("/x"),
             None,
             Some(&pins),
+            None,
         )
         .unwrap();
         let at = extras.args.iter().position(|a| a == "--settings").unwrap();
@@ -426,6 +437,7 @@ mod tests {
             exe,
             Some(uuid),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -443,6 +455,7 @@ mod tests {
             exe,
             Some(ses),
             None,
+            None,
         )
         .unwrap();
         assert_eq!(oc.args, ["-s", ses]);
@@ -458,6 +471,7 @@ mod tests {
             "h",
             Path::new("/s"),
             Path::new("/usr/bin/storm-runtime"),
+            None,
             None,
             None,
         )
@@ -484,6 +498,7 @@ mod tests {
                 "h",
                 Path::new("/s"),
                 Path::new("/x"),
+                None,
                 None,
                 None,
             )

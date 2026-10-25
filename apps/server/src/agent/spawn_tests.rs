@@ -1112,3 +1112,70 @@ fn workspaces_are_shared_when_one_is_inside_the_other() {
         assert!(!same_workspace(a, b), "{a} {b}");
     }
 }
+
+fn start_command(rx: &mut UnboundedReceiver<Envelope>, id: &str) -> serde_json::Value {
+    while let Ok(env) = rx.try_recv() {
+        let v = serde_json::to_value(&env).unwrap();
+        if v["type"] == "start" && v["session"] == id {
+            return v;
+        }
+    }
+    panic!("no start for {id}");
+}
+
+/// 134-8: a start says `spawn_asks` only where decision 134 could offer its
+/// tools — C0 holds, a spawning adapter, the storm connection — and only
+/// such a session's switch turns on, since a CLI reads its asks once.
+#[test]
+fn only_a_start_c0_held_for_carries_the_asks_and_only_it_can_spawn() {
+    // Every host today: no asks, and the bytes of every start unchanged.
+    let (m, _d, mut rx) = host(Some(VERIFIED));
+    let before = start(&m, "storm", "claude-code", None).unwrap();
+    let v = start_command(&mut rx, &before.id);
+    assert!(v.get("spawn_asks").is_none(), "{v}");
+    assert!(!m.store.lock().unwrap().spawn_asks(&before.id).unwrap());
+
+    m.verify_isolation_for_tests("hst_A");
+    assert_eq!(refusal(&m, &before.id, true), "launched_without_asks");
+    assert!(!m.spawn_enabled(&before.id).unwrap());
+    report(&m, &before.id, "completed", None);
+
+    for provider in ["claude-code", "opencode", "codex"] {
+        let s = start(&m, "storm", provider, None).unwrap();
+        let v = start_command(&mut rx, &s.id);
+        assert_eq!(v["spawn_asks"], serde_json::json!({}), "{provider}");
+        assert!(m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
+        m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
+        m.set_spawn(&s.id, false, Some("dev_A")).unwrap().unwrap();
+        report(&m, &s.id, "completed", None);
+    }
+    let shell = start(&m, "storm", "shell", None).unwrap();
+    assert!(
+        start_command(&mut rx, &shell.id)
+            .get("spawn_asks")
+            .is_none()
+    );
+    report(&m, &shell.id, "completed", None);
+
+    // Without the storm connection there is no Storm tool to ask about.
+    let launch: Launch = serde_json::from_value(serde_json::json!({
+        "host_id": "hst_A", "workspace": "storm", "provider": "claude-code",
+        "terminal": {"cols": 80, "rows": 24},
+    }))
+    .unwrap();
+    let (bare, ..) = m
+        .launch("usr_A", launch, LaunchMeta::default(), Vec::new())
+        .unwrap();
+    assert!(start_command(&mut rx, &bare.id).get("spawn_asks").is_none());
+    assert_eq!(refusal(&m, &bare.id, true), "launched_without_asks");
+}
+
+#[test]
+fn dismissing_a_session_takes_its_asks_record() {
+    let (m, _d, _rx) = verified_host();
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    assert!(m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
+    report(&m, &s.id, "completed", None);
+    m.dismiss(&s.id).unwrap();
+    assert!(!m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
+}

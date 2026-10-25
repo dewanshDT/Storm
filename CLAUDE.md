@@ -612,6 +612,20 @@ Specification*; the slices are decisions 81 and 81a onward):
   else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
+- **Decision 134's CLI asks are written at launch, never later** (134-8,
+  `mcp::PINNED_ASK_TOOLS`/`EXEMPT_TOOLS`, pinned in the host and checked
+  against the server's lists by a test). Only a `start` carrying
+  `spawn_asks` — sent where C0 holds, for a spawning adapter with the storm
+  connection — gets them, and only such a session's switch turns on
+  (`launched_without_asks`); every other config is byte for byte as before.
+  Claude Code: `permissions.ask` for `start_agent`, `send_message`,
+  `end_agent` and `allow` for the exemptions in its `--settings` file (an
+  ask beats any allow; G-134-5). OpenCode: each pinned ask under a key no
+  account config has (`storm_start_agent`, else with more `*`), so the merge
+  appends it after the account's keys, at the top level and in every agent
+  the account or `runtime.toml` defines; exemptions only where the account
+  names no such key. Exemptions only on a host whose own identity is
+  verified. Codex: nothing new, every Storm tool already prompts.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
