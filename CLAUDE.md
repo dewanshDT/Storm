@@ -697,7 +697,21 @@ Specification*; the slices are decisions 81 and 81a onward):
   does not start is never started. Ending is the unit's
   stop; at lease end (`release`) the helper hands back what the user wrote
   and removes its home before the user is free, and leases are on disk so
-  a restarted helper revokes them first. The operator's
+  a restarted helper revokes them first. **A session's home is a snapshot
+  of the account's config, never its credentials** (136-4, `home.rs`): a
+  per-profile allowlist copied at `start` through `O_NOFOLLOW` descriptors
+  (links copied, never followed), root's and read-only except the files an
+  agent rewrites; no credential file (`DENIED`), and of a provider's store
+  only its static API keys (`static_keys`). At lease end its conversations
+  move to the helper's `kept/<session>/`, and a resume copies only the named
+  conversation from the predecessor the server names, once that one has
+  ended. **An isolated session starts only on a credential 136f permits**
+  (`credential_paths.rs`: the synced token, an env-file key, a store's
+  static key) or fails `credential_unavailable`; never on a refreshable
+  login. **The agents prefix belongs to `storm-install`** (136g,
+  `agents.rs`): installs run through the helper's `agent_job` as the host's
+  own `storm-runtime agent-job`, in a unit that can write only the prefix.
+  The operator's
   `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
   record every entry before changing any, and write `isolation` in
   `runtime.toml` last. Nothing at install creates the pools or enables the

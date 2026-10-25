@@ -41,6 +41,8 @@ pub struct Paths {
     pub config: PathBuf,
     pub state: PathBuf,
     pub sysusers: PathBuf,
+    /// The host account's state, where the agents prefix is.
+    pub host_state: PathBuf,
 }
 
 impl Paths {
@@ -49,11 +51,17 @@ impl Paths {
             config: crate::RUNTIME_CONFIG.into(),
             state: crate::STATE_DIR.into(),
             sysusers: crate::SYSUSERS_FILE.into(),
+            host_state: crate::session::HOST_STATE.into(),
         }
     }
 
     pub fn manifests(&self) -> PathBuf {
         self.state.join("manifests")
+    }
+
+    /// The agents prefix's record (136g), apart from the workspaces'.
+    pub fn agents_manifests(&self) -> PathBuf {
+        self.state.join("agents-manifest")
     }
 }
 
@@ -100,18 +108,20 @@ pub fn on(
     let pool = Pool::resolve(accounts, crate::HOST_ACCOUNT)?;
     let workspaces = config::workspaces(&config.canonical_roots())?;
     let report = convert::on(&workspaces, &pool, &paths.manifests(), own)?;
+    let agents = crate::agents::on(&paths.host_state, &pool, &paths.agents_manifests(), own)?;
     m.run(&["systemctl", "daemon-reload"])?;
     m.run(&["systemctl", "enable", "--now", crate::SOCKET_UNIT])?;
     write_isolation(&paths.config, Isolation::PerSession)?;
     writeln!(
         out,
         "Isolation is on: {} pool users, {} workspaces converted ({} entries changed).\n\
-         This version cannot start isolated sessions yet, so the host refuses every\n\
-         session until it can; it never runs one as its own account (decision 136a).\n\
-         Start the host again: sudo systemctl start storm-runtime",
+         The agents Storm installs now belong to {} ({agents} entries changed).\n\
+         Every session now runs under its own user; none runs as the host's account\n\
+         (decision 136a). Start the host again: sudo systemctl start storm-runtime",
         pool.users.len(),
         report.workspaces,
-        report.changed
+        report.changed,
+        crate::pool::INSTALL_ACCOUNT,
     )?;
     Ok(())
 }
@@ -127,7 +137,8 @@ pub fn off(
     let pool = Pool::resolve(accounts, crate::HOST_ACCOUNT).context(
         "the isolation pools are not intact, so their files cannot be handed back safely",
     )?;
-    let uids: Vec<u32> = pool.users.values().copied().collect();
+    let mut uids: Vec<u32> = pool.users.values().copied().collect();
+    uids.extend(pool.install.map(|(uid, _)| uid));
     let left = m.processes_of(&uids);
     if !left.is_empty() {
         bail!(
@@ -145,10 +156,12 @@ pub fn off(
         crate::SERVICE_UNIT,
     ])?;
     let report = convert::off(&pool, &paths.manifests(), own)?;
+    let agents = crate::agents::off(&paths.host_state, &pool, &paths.agents_manifests(), own)?;
     write_isolation(&paths.config, Isolation::Off)?;
     writeln!(
         out,
-        "Isolation is off: {} workspaces restored ({} entries changed).",
+        "Isolation is off: {} workspaces restored ({} entries changed); the agents \
+         Storm installs are the host's again ({agents} entries changed).",
         report.workspaces, report.changed
     )?;
     for gone in &report.missing {
@@ -367,6 +380,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
+        std::fs::create_dir_all(base.join("host")).unwrap();
         let sysusers = base.join("sysusers.conf");
         std::fs::write(&sysusers, crate::pool::sysusers_conf()).unwrap();
         Setup {
@@ -374,6 +388,7 @@ mod tests {
                 config,
                 state: base.join("state"),
                 sysusers,
+                host_state: base.join("host"),
             },
             root,
             _t: t,

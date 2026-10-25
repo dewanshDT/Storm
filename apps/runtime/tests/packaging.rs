@@ -364,3 +364,42 @@ fn the_example_config_leaves_isolation_off() {
     assert_eq!(config.isolation, storm_runtime::config::Isolation::Off);
     assert!(text.contains("# isolation = \"off\""));
 }
+
+/// 136g: the helper installs only the agents the host has recipes for, by
+/// running the host's own binary where the package puts it.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_helper_runs_the_hosts_own_installs() {
+    assert_eq!(
+        storm_runtime_isolation::agents::MANAGEABLE,
+        storm_runtime::agents::MANAGEABLE
+    );
+    let unit = repo_file("deploy/storm-runtime.service");
+    let exec = unit_value(&unit, "ExecStart").unwrap();
+    assert!(
+        exec.starts_with(&format!(
+            "{} ",
+            storm_runtime_isolation::agents::STORM_RUNTIME
+        )),
+        "{exec}"
+    );
+    for action in storm_runtime_isolation::agents::ACTIONS {
+        assert!(
+            storm_runtime::install::Op::from_name(action).is_some(),
+            "{action}"
+        );
+    }
+    let sysusers = repo_file("deploy/storm-runtime-isolation.sysusers");
+    assert!(sysusers.contains("u storm-install - "));
+}
+
+/// 136f: the host and the helper agree on the refreshable variables a
+/// session never gets.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_host_and_the_helper_drop_the_same_refreshable_logins() {
+    assert_eq!(
+        storm_runtime_isolation::home::REFRESHABLE_ENV,
+        storm_runtime::credential_paths::REFRESHABLE_ENV
+    );
+}

@@ -129,3 +129,4 @@ g storm-w061 -
 g storm-w062 -
 g storm-w063 -
 g storm-w064 -
+u storm-install - "Storm agent installs" /nonexistent /usr/sbin/nologin

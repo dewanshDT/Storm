@@ -28,10 +28,11 @@ pub enum Op {
     ChildImport,
     ChildDispose,
     SelfTest,
+    AgentJob,
 }
 
 impl Op {
-    pub const ALL: [Op; 12] = [
+    pub const ALL: [Op; 13] = [
         Op::Lease,
         Op::Release,
         Op::Prepare,
@@ -44,6 +45,7 @@ impl Op {
         Op::ChildImport,
         Op::ChildDispose,
         Op::SelfTest,
+        Op::AgentJob,
     ];
 
     pub fn name(self) -> &'static str {
@@ -60,6 +62,7 @@ impl Op {
             Op::ChildImport => "child_import",
             Op::ChildDispose => "child_dispose",
             Op::SelfTest => "self_test",
+            Op::AgentJob => "agent_job",
         }
     }
 
@@ -76,6 +79,8 @@ impl Op {
             Op::ChildExport | Op::ChildDispose => &["child"],
             Op::ChildImport => &["child", "parent"],
             Op::SelfTest => &[],
+            // 136g: an agent by id and what to do; the recipe is the host's.
+            Op::AgentJob => &["agent", "action"],
         }
     }
 
@@ -130,6 +135,14 @@ pub enum Refusal {
     /// The provider's program is not on this host.
     ProviderUnavailable,
     BadLaunch,
+    /// A resume whose predecessor still holds its lease.
+    PredecessorRunning,
+    /// A resume whose predecessor kept no conversation.
+    NothingKept,
+    /// An agent Storm does not install, or an action it does not do.
+    BadAgent,
+    /// The host has no install identity yet (136g): `on` has to run again.
+    NoInstallIdentity,
     /// The workspace, a session directory or systemd failed the operation.
     Failed,
 }
@@ -164,6 +177,10 @@ impl Refusal {
             Refusal::Busy => "busy",
             Refusal::ProviderUnavailable => "provider_unavailable",
             Refusal::BadLaunch => "bad_launch",
+            Refusal::PredecessorRunning => "predecessor_running",
+            Refusal::NothingKept => "nothing_kept",
+            Refusal::BadAgent => "bad_agent",
+            Refusal::NoInstallIdentity => "no_install_identity",
             Refusal::Failed => "failed",
         }
     }

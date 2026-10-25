@@ -37,6 +37,9 @@ pub(crate) struct Launch {
     pub env_remove: Vec<OsString>,
     /// Set after everything else.
     pub secret_env: Vec<(OsString, crate::credential::SecretOsString)>,
+    /// On an isolated host, a resume's predecessor and conversation (136e).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub resumed_from: Option<(String, String)>,
     /// The session id, which marks everything the session starts. Unix
     /// finds what left the session by it; Windows' job holds everything
     /// already (AM52).

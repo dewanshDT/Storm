@@ -152,6 +152,9 @@ pub struct LaunchExtras {
     pub env_remove: Vec<std::ffi::OsString>,
     /// Like `env`, applied last, but never printed: `Debug` shows names only.
     pub secret_env: Vec<(std::ffi::OsString, crate::credential::SecretOsString)>,
+    /// On an isolated host, the conversation a resume reopens and the
+    /// session that had it (136e): the helper copies it into the new home.
+    pub resumed_from: Option<(String, String)>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.
@@ -212,6 +215,11 @@ pub trait Provider: Send + Sync {
     /// (decision 136). On an isolated host nothing else starts.
     fn isolated(&self) -> bool {
         false
+    }
+    /// The variables its env file sets, with their values' emptiness only:
+    /// whether a key decision 136f permits is there.
+    fn env_names(&self) -> Vec<(std::ffi::OsString, bool)> {
+        Vec::new()
     }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.

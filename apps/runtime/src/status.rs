@@ -54,6 +54,9 @@ impl SessionStatus {
 pub enum EndReason {
     /// It never got as far as running.
     StartFailure,
+    /// On an isolated host, its provider had no credential decision 136f
+    /// permits; it was never started on the account's own login.
+    CredentialUnavailable,
     /// A signal the owner did not send ended it.
     Signal(i32),
     /// Its host restarted; the session died with it.
@@ -69,6 +72,7 @@ impl EndReason {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::StartFailure => "start_failure",
+            Self::CredentialUnavailable => "credential_unavailable",
             Self::Signal(_) => "signal",
             Self::HostRestart => "host_restart",
             Self::HostRevoked => "host_revoked",

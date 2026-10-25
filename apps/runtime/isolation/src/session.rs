@@ -74,6 +74,30 @@ impl Layout {
     pub fn agents(&self) -> PathBuf {
         self.host_state.join("agents").join("managed")
     }
+    /// Ended sessions' conversations, kept for Resume (136e).
+    pub fn kept_root(&self) -> PathBuf {
+        self.state.join("kept")
+    }
+    pub fn kept(&self, session: &str) -> PathBuf {
+        self.kept_root().join(session)
+    }
+}
+
+/// The environment a session's unit gets from the host's launch: Codex's
+/// home is the session's own (136e), never the host's shared one.
+pub fn session_env(
+    provider: &str,
+    home: &Path,
+    mut env: Vec<(String, String)>,
+) -> Vec<(String, String)> {
+    env.retain(|(k, _)| k != "CODEX_HOME");
+    if provider == "codex" {
+        env.push((
+            "CODEX_HOME".into(),
+            home.join(".codex").to_string_lossy().into_owned(),
+        ));
+    }
+    env
 }
 
 pub struct State {
@@ -180,6 +204,7 @@ impl Helper {
                 self.release(session, req.get("user"))?;
                 none()
             }
+            Op::AgentJob => self.agent_job(req.get("agent"), req.get("action")),
             Op::ChildCreate
             | Op::ChildExport
             | Op::ChildImport
@@ -201,6 +226,7 @@ impl Helper {
         let record = LeaseRecord {
             session: session.to_string(),
             workspace: None,
+            provider: None,
         };
         // On disk before the host hears of it.
         if let Err(e) = files::save_lease(&self.layout.leases(), &user, &record) {
@@ -272,6 +298,9 @@ impl Helper {
             eprintln!("storm-runtime-isolation: the launch: {e:#}");
             Refusal::BadLaunch
         })?;
+        if let Some(resume) = &launch.resume {
+            self.check_resume(session, provider, resume)?;
+        }
         let own = self.deps.own.as_ref();
         let group = files::workspace_group(workspace, &self.pool, &self.layout.manifests(), own)
             .map_err(|e| failed("the workspace's group", e))?;
@@ -282,12 +311,29 @@ impl Helper {
             let record = LeaseRecord {
                 session: session.to_string(),
                 workspace: Some(workspace.to_path_buf()),
+                provider: Some(provider.to_string()),
             };
             files::save_lease(&self.layout.leases(), user, &record)
                 .map_err(|e| failed("recording the workspace", e))?;
             st.records.insert(user.to_string(), record);
         }
         let (uid, gid) = self.uid_gid(user);
+        let home = self.layout.home(session);
+        let kept = launch
+            .resume
+            .as_ref()
+            .map(|r| (r, self.layout.kept(&r.from)));
+        crate::home::populate(
+            &crate::home::Paths::new(&self.layout.host_state, &home),
+            provider,
+            session,
+            self.pool.host_uid,
+            uid,
+            gid,
+            kept.as_ref().map(|(r, p)| (*r, p.as_path())),
+            own,
+        )
+        .map_err(|e| failed("the session's home", e))?;
         let session_dir = self.layout.session_dir(session);
         let host_depth = self.layout.host_state.components().count();
         files::open_owned_dir(&session_dir, host_depth, self.pool.host_uid)
@@ -300,9 +346,10 @@ impl Helper {
             .tty
             .give(tty.as_fd(), uid)
             .map_err(|e| failed("giving the terminal", e.into()))?;
+        let env = session_env(provider, &home, launch.env);
         files::write_root_private(
             &self.layout.env_file(session),
-            files::env_file(&launch.env).as_bytes(),
+            files::env_file(&env).as_bytes(),
         )
         .map_err(|e| failed("writing the environment", e))?;
         files::write_root_readable(
@@ -317,7 +364,7 @@ impl Helper {
             workspace_group: group,
             workspace: workspace.to_path_buf(),
             session_dir,
-            home: self.layout.home(session),
+            home,
             hidden: self.hidden(),
             agents: Some(agents),
             tty: terminal.path,
@@ -365,6 +412,63 @@ impl Helper {
         // could not have named another terminal meanwhile.
         drop(tty);
         Ok((out, pidfd))
+    }
+
+    /// An install job under the install identity (136g), one per agent at
+    /// a time.
+    fn agent_job(&self, agent: &str, action: &str) -> Result<Answer, Refusal> {
+        if self.pool.install.is_none() {
+            return Err(Refusal::NoInstallIdentity);
+        }
+        let _busy = self.session_busy(&format!("agent:{agent}"))?;
+        let mut path = Vec::new();
+        for dir in &self.search {
+            if !path.contains(dir) {
+                path.push(dir.clone());
+            }
+        }
+        let spec = crate::agents::JobSpec {
+            agent: agent.to_string(),
+            action: action.to_string(),
+            managed: self.layout.agents(),
+            hidden: self.hidden(),
+            path,
+        };
+        let out = self
+            .deps
+            .units
+            .run_job(&spec)
+            .map_err(|e| failed("the agent job", e))?;
+        let fields =
+            crate::agents::parse_result(&out).map_err(|e| failed("the agent job's answer", e))?;
+        Ok((fields, None))
+    }
+
+    /// A resume names a predecessor that has ended, is not this session,
+    /// and kept a conversation of this provider's (136e).
+    fn check_resume(
+        &self,
+        session: &str,
+        provider: &str,
+        resume: &crate::home::Resume,
+    ) -> Result<(), Refusal> {
+        if resume.from == session || !crate::home::conversation_ok(provider, &resume.conversation) {
+            return Err(Refusal::BadLaunch);
+        }
+        if self
+            .state
+            .lock()
+            .unwrap()
+            .leases
+            .user_of(&resume.from)
+            .is_some()
+        {
+            return Err(Refusal::PredecessorRunning);
+        }
+        if !self.layout.kept(&resume.from).is_dir() {
+            return Err(Refusal::NothingKept);
+        }
+        Ok(())
     }
 
     /// The unit's main process, by a pidfd checked to be that process: its
@@ -471,7 +575,16 @@ impl Helper {
                 files::unshared(k, m, self.pool.host_gid)
             })?;
         }
-        files::remove_tree(&self.layout.home(session), own)?;
+        let home = self.layout.home(session);
+        if files::rootify(&home, own)? {
+            // What Resume needs leaves the home before it goes (136e).
+            if let Some(provider) = record.and_then(|r| r.provider.as_deref())
+                && crate::home::keep(&home, &self.layout.kept(session), provider, own)?
+            {
+                crate::home::prune(&self.layout.kept_root(), own)?;
+            }
+            own.remove_all(&home)?;
+        }
         files::remove_tree(&self.layout.private(session), own)?;
         Ok(())
     }
@@ -543,6 +656,8 @@ pub mod tests {
         pub fail_start: std::sync::atomic::AtomicBool,
         /// As if pasta were missing.
         pub fail_network: std::sync::atomic::AtomicBool,
+        pub jobs: Mutex<Vec<crate::agents::JobSpec>>,
+        pub job_output: Mutex<String>,
     }
 
     impl FakeUnits {
@@ -625,6 +740,15 @@ pub mod tests {
             Ok(())
         }
         fn reset_failed(&self, _unit: &str) {}
+        fn run_job(&self, spec: &crate::agents::JobSpec) -> Result<String> {
+            self.calls.lock().unwrap().push(format!(
+                "job {} {}",
+                crate::agents::job_unit_name(&spec.agent),
+                spec.action
+            ));
+            self.jobs.lock().unwrap().push(spec.clone());
+            Ok(self.job_output.lock().unwrap().clone())
+        }
     }
 
     pub fn fake_deps() -> (Deps, Arc<FakeUnits>, Own, Arc<crate::tty::Recorded>) {
@@ -678,8 +802,14 @@ pub mod tests {
             state: base.join("isolation"),
             host_state: base.join("host"),
         };
-        settings.commands = vec![("shell".into(), String::new())];
+        settings.commands = vec![
+            ("shell".into(), String::new()),
+            ("claude-code".into(), "/bin/sh".into()),
+            ("codex".into(), "/bin/sh".into()),
+        ];
+        settings.providers = vec!["shell".into(), "claude-code".into(), "codex".into()];
         let helper = Helper::new(pool, settings, deps);
+        std::fs::create_dir_all(helper.layout.host_state.join("home")).unwrap();
         std::fs::create_dir_all(helper.layout.launch_dir()).unwrap();
         Fixture {
             _t: t,
@@ -727,6 +857,26 @@ pub mod tests {
 
         /// lease → prepare → start, as the host does it.
         fn started(&self, session: &str) -> (String, Value, Option<OwnedFd>, OwnedFd) {
+            self.started_as(session, "shell", None)
+        }
+
+        fn started_as(
+            &self,
+            session: &str,
+            provider: &str,
+            resume: Option<Value>,
+        ) -> (String, Value, Option<OwnedFd>, OwnedFd) {
+            let (v, pidfd, master, user) = self.start_as(session, provider, resume);
+            assert_eq!(v["ok"], true, "{v}");
+            (user, v, pidfd, master)
+        }
+
+        fn start_as(
+            &self,
+            session: &str,
+            provider: &str,
+            resume: Option<Value>,
+        ) -> (Value, Option<OwnedFd>, OwnedFd, String) {
             let (v, _) = self.ok(json!({"op": "lease", "session": session}), vec![]);
             let user = v["user"].as_str().unwrap().to_string();
             self.ok(
@@ -734,12 +884,23 @@ pub mod tests {
                 vec![],
             );
             self.launch(session);
+            if let Some(resume) = resume {
+                let path = self
+                    .helper
+                    .layout
+                    .launch_dir()
+                    .join(format!("{session}.json"));
+                let mut launch: Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                launch["resume"] = resume;
+                std::fs::write(&path, launch.to_string()).unwrap();
+            }
             let (master, slave) = crate::tty::tests::pty();
-            let (v, pidfd) = self.ok(
-                json!({"op": "start", "session": session, "user": user, "provider": "shell", "workspace": self.workspace()}),
+            let (v, pidfd) = self.call(
+                json!({"op": "start", "session": session, "user": user, "provider": provider, "workspace": self.workspace()}),
                 vec![slave],
             );
-            (user, v, pidfd, master)
+            (v, pidfd, master, user)
         }
     }
 
@@ -855,6 +1016,10 @@ pub mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (v, _) = f.ok(json!({"op": "lease", "session": "ags_A"}), vec![]);
         let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_A", "user": user}),
+            vec![],
+        );
         f.launch("ags_A");
         let (_m, slave) = crate::tty::tests::pty();
         let (v, _) = f.call(
@@ -1150,6 +1315,10 @@ pub mod tests {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let (v, _) = f.ok(json!({"op": "lease", "session": "ags_A"}), vec![]);
         let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_A", "user": user}),
+            vec![],
+        );
         f.launch("ags_A");
         let (_m, slave) = crate::tty::tests::pty();
         let (v, _) = f.call(
@@ -1270,6 +1439,170 @@ pub mod tests {
         assert_eq!(answer["pid"].to_string(), pidfd_pid);
         println!("host-side pts={}", name.to_str().unwrap());
         println!("host-side pidfd-pid={pidfd_pid}");
+    }
+
+    /// 136e at start: the home is built from the account's config for the
+    /// session's provider before its unit starts, and Codex's home is the
+    /// session's own.
+    #[test]
+    fn a_start_builds_the_home_from_the_accounts_config() {
+        let f = fixture();
+        let account = f.helper.layout.host_state.join("home");
+        std::fs::create_dir_all(account.join(".claude")).unwrap();
+        std::fs::write(account.join(".claude/settings.json"), b"{}").unwrap();
+        std::fs::write(account.join(".claude/.credentials.json"), b"REFRESH").unwrap();
+        std::fs::write(account.join(".bashrc"), b"x").unwrap();
+        f.started_as("ags_A", "claude-code", None);
+        let home = f.helper.layout.home("ags_A");
+        assert!(home.join(".claude/settings.json").is_file());
+        assert!(home.join(".bashrc").is_file());
+        assert!(!home.join(".claude/.credentials.json").exists());
+        f.started_as("ags_X", "codex", None);
+        let env = std::fs::read_to_string(f.helper.layout.env_file("ags_X")).unwrap();
+        let home = f.helper.layout.home("ags_X");
+        assert!(
+            env.contains(&format!("CODEX_HOME={}/.codex\n", home.display())),
+            "{env}"
+        );
+        assert_eq!(
+            session_env(
+                "codex",
+                &home,
+                vec![(
+                    "CODEX_HOME".into(),
+                    "/var/lib/storm-runtime/agents/codex".into()
+                )]
+            ),
+            [(
+                "CODEX_HOME".to_string(),
+                format!("{}/.codex", home.display())
+            )]
+        );
+        assert_eq!(
+            session_env("shell", &home, vec![("CODEX_HOME".into(), "/x".into())]),
+            []
+        );
+    }
+
+    /// Resume (136e): a session ended keeps its conversations; a resume of
+    /// one names its predecessor, which must have ended, and gets only that
+    /// conversation.
+    #[test]
+    fn a_resume_waits_for_its_predecessor_and_gets_its_conversation() {
+        let f = fixture();
+        const C: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
+        let (user, ..) = f.started_as("ags_A", "claude-code", None);
+        let records = files::load_leases(&f.helper.layout.leases()).unwrap();
+        assert_eq!(records[&user].provider.as_deref(), Some("claude-code"));
+        let project = f.helper.layout.home("ags_A").join(".claude/projects/-w");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{C}.jsonl")), b"the conversation").unwrap();
+        let resume = json!({"from": "ags_A", "conversation": C});
+        let (v, ..) = f.start_as("ags_B", "claude-code", Some(resume.clone()));
+        assert_eq!(v["error"], "predecessor_running", "A still holds its lease");
+        f.ok(
+            json!({"op": "release", "session": "ags_A", "user": user}),
+            vec![],
+        );
+        assert!(
+            f.helper
+                .layout
+                .kept("ags_A")
+                .join("home/.claude/projects/-w")
+                .is_dir()
+        );
+        let (v, ..) = f.start_as("ags_C", "claude-code", Some(resume));
+        assert_eq!(v["ok"], true, "{v}");
+        let got = f
+            .helper
+            .layout
+            .home("ags_C")
+            .join(format!(".claude/projects/-w/{C}.jsonl"));
+        assert_eq!(std::fs::read(got).unwrap(), b"the conversation");
+        for (resume, code) in [
+            (
+                json!({"from": "ags_NONE", "conversation": C}),
+                "nothing_kept",
+            ),
+            (json!({"from": "ags_D", "conversation": C}), "bad_launch"),
+            (
+                json!({"from": "ags_A", "conversation": "../x"}),
+                "bad_launch",
+            ),
+            (json!({"from": "../ags_A", "conversation": C}), "bad_launch"),
+        ] {
+            let (v, ..) = f.start_as("ags_D", "claude-code", Some(resume.clone()));
+            assert_eq!(v["error"], code, "{resume}");
+            let st = f
+                .helper
+                .state
+                .lock()
+                .unwrap()
+                .leases
+                .user_of("ags_D")
+                .map(str::to_string);
+            f.ok(
+                json!({"op": "release", "session": "ags_D", "user": st.unwrap()}),
+                vec![],
+            );
+        }
+    }
+
+    /// IT-1 for 136g's operation, and the job it runs.
+    #[test]
+    fn an_agent_job_runs_under_the_install_identity() {
+        let f = fixture();
+        *f.units.job_output.lock().unwrap() = "{\"done\":{\"version\":\"1.18.34\"}}\n".into();
+        let (v, _) = f.ok(
+            json!({"op": "agent_job", "agent": "opencode", "action": "install"}),
+            vec![],
+        );
+        assert_eq!(v["version"], "1.18.34");
+        let job = f.units.jobs.lock().unwrap()[0].clone();
+        assert_eq!(job.managed, f.helper.layout.agents());
+        assert_eq!(job.hidden, f.helper.hidden());
+        for (request, code) in [
+            (
+                json!({"op": "agent_job", "agent": "evil", "action": "install"}),
+                "bad_agent",
+            ),
+            (
+                json!({"op": "agent_job", "agent": "shell", "action": "install"}),
+                "bad_agent",
+            ),
+            (
+                json!({"op": "agent_job", "agent": "codex", "action": "exec"}),
+                "bad_agent",
+            ),
+            (
+                json!({"op": "agent_job", "agent": "codex"}),
+                "missing_field",
+            ),
+            (
+                json!({"op": "agent_job", "agent": "codex", "action": "install", "url": "https://x"}),
+                "unexpected_field",
+            ),
+            (
+                json!({"op": "agent_job", "agent": "codex", "action": "install", "command": "/bin/sh"}),
+                "unexpected_field",
+            ),
+        ] {
+            let (v, _) = f.call(request.clone(), vec![]);
+            assert_eq!(v["error"], code, "{request}");
+        }
+        *f.units.job_output.lock().unwrap() = "Error: something with a token=abc\n".into();
+        let (v, _) = f.call(
+            json!({"op": "agent_job", "agent": "codex", "action": "update"}),
+            vec![],
+        );
+        assert_eq!(v["error"], "failed", "a job's text never reaches the host");
+        let mut g = fixture();
+        g.helper.pool.install = None;
+        let (v, _) = g.call(
+            json!({"op": "agent_job", "agent": "codex", "action": "update"}),
+            vec![],
+        );
+        assert_eq!(v["error"], "no_install_identity");
     }
 
     #[test]

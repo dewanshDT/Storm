@@ -188,6 +188,13 @@ impl Provider for CliProvider {
         self.isolation.is_some()
     }
 
+    fn env_names(&self) -> Vec<(OsString, bool)> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.clone(), !v.is_empty()))
+            .collect()
+    }
+
     fn helper_command(&self) -> Option<std::process::Command> {
         let program = pty::resolve(&self.command, self.path.as_deref())?;
         let mut command = std::process::Command::new(program);
@@ -244,6 +251,7 @@ impl Provider for CliProvider {
             env,
             env_remove: spec.launch.env_remove,
             secret_env: spec.launch.secret_env,
+            resumed_from: spec.launch.resumed_from,
             tag: spec.session_id.clone(),
             isolated: self
                 .isolation

@@ -448,6 +448,8 @@ class AgentSession {
     'failed' => switch (endReason) {
       'host_restart' => 'host restarted',
       'host_revoked' => 'host revoked',
+      // Decision 136f: an isolated host had no credential it may use.
+      'credential_unavailable' => 'no credential this host may use',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',

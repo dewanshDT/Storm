@@ -70,6 +70,7 @@ pub mod command_code;
 pub mod config;
 pub mod connection;
 pub mod credential;
+pub mod credential_paths;
 pub mod cursor;
 pub mod fake;
 pub mod fsutil;

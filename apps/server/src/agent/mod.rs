@@ -72,6 +72,11 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
+        /// A resume's predecessor (decision 136e): an isolated host copies
+        /// the conversation from that session's kept files, never from
+        /// another's. Omitted on a fresh launch; an old host ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resumed_from: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -1412,6 +1417,7 @@ impl AgentManager {
                 terminal: req.terminal,
                 mcp: grants,
                 context: reads_storm && launch.context.is_some(),
+                resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
             },
@@ -2308,6 +2314,8 @@ mod tests {
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert_eq!(wire["type"], "start");
         assert_eq!(wire["resume"], uuid);
+        // 136e: the host is told whose conversation it is.
+        assert_eq!(wire["resumed_from"], first.id.as_str());
         assert_eq!(
             m.get(&second.id).unwrap().resumed_from.as_deref(),
             Some(first.id.as_str())
@@ -3536,6 +3544,7 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
+                resumed_from: None,
             },
         };
         assert_eq!(

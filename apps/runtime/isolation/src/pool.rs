@@ -11,6 +11,10 @@ use crate::accounts::Accounts;
 /// How many session users and workspace groups there are (136b's default).
 pub const POOL_SIZE: u32 = 64;
 
+/// The install identity (136g): it owns the agents Storm installs, so no
+/// session and not the host account can write them.
+pub const INSTALL_ACCOUNT: &str = "storm-install";
+
 const USER_PREFIX: &str = "storm-s";
 const GROUP_PREFIX: &str = "storm-w";
 pub const NOLOGIN: &[&str] = &[
@@ -66,6 +70,9 @@ pub fn sysusers_conf() -> String {
     for n in 1..=POOL_SIZE {
         out.push_str(&format!("g {} -\n", group_name(n)));
     }
+    out.push_str(&format!(
+        "u {INSTALL_ACCOUNT} - \"Storm agent installs\" /nonexistent /usr/sbin/nologin\n"
+    ));
     out
 }
 
@@ -82,6 +89,10 @@ pub struct Pool {
     pub user_gids: HashSet<u32>,
     /// Session user name → its primary gid.
     pub primary: BTreeMap<String, u32>,
+    /// The install identity's uid and gid (136g). Absent on a host turned
+    /// on before 136-4 until `on` runs again; the helper refuses to serve
+    /// without it, and `off` still restores.
+    pub install: Option<(u32, u32)>,
 }
 
 impl Pool {
@@ -138,6 +149,30 @@ impl Pool {
         if !accounts.supplementary_groups(&host).is_empty() {
             bail!("the host account {host_account} must be in no other group (decision 77e)");
         }
+        let install = match accounts.user(INSTALL_ACCOUNT) {
+            None => None,
+            Some(u) => {
+                if u.uid == 0 || u.gid == 0 {
+                    bail!("{INSTALL_ACCOUNT} is root");
+                }
+                if u.uid == host.uid
+                    || u.gid == host.gid
+                    || uids.contains(&u.uid)
+                    || user_gids.contains(&u.gid)
+                    || gids.contains(&u.gid)
+                {
+                    bail!("{INSTALL_ACCOUNT} shares an id with another account");
+                }
+                if !NOLOGIN.contains(&u.shell.as_str()) {
+                    bail!("{INSTALL_ACCOUNT} has a login shell ({})", u.shell);
+                }
+                let extra = accounts.supplementary_groups(&u);
+                if !extra.is_empty() {
+                    bail!("{INSTALL_ACCOUNT} is in other groups: {}", extra.join(", "));
+                }
+                Some((u.uid, u.gid))
+            }
+        };
         Ok(Self {
             host_uid: host.uid,
             host_gid: host.gid,
@@ -145,6 +180,7 @@ impl Pool {
             groups,
             user_gids,
             primary,
+            install,
         })
     }
 
@@ -170,6 +206,7 @@ pub mod tests {
             a.add_user(&user_name(n), 2000 + n, 2000 + n, "/usr/sbin/nologin");
             a.groups.insert(group_name(n), 3000 + n);
         }
+        a.add_user(INSTALL_ACCOUNT, 4000, 4000, "/usr/sbin/nologin");
         a
     }
 
@@ -201,12 +238,10 @@ pub mod tests {
     fn the_declaration_has_every_member_once() {
         let conf = sysusers_conf();
         let lines: Vec<_> = conf.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(lines.len(), 2 * POOL_SIZE as usize);
-        assert!(
-            lines
-                .iter()
-                .all(|l| l.starts_with("u storm-s") || l.starts_with("g storm-w"))
-        );
+        assert_eq!(lines.len(), 2 * POOL_SIZE as usize + 1);
+        assert!(lines.iter().all(|l| l.starts_with("u storm-s")
+            || l.starts_with("g storm-w")
+            || l.starts_with("u storm-install ")));
         assert!(
             lines
                 .iter()
@@ -229,6 +264,17 @@ pub mod tests {
         assert_eq!(pool.groups["storm-w002"], 3002);
         assert!(pool.is_pool_uid(2010) && !pool.is_pool_uid(900));
         assert!(pool.is_pool_gid(3064) && pool.is_pool_gid(2001) && !pool.is_pool_gid(900));
+        assert_eq!(pool.install, Some((4000, 4000)));
+        assert!(
+            !pool.is_pool_uid(4000),
+            "the install identity is never leased"
+        );
+        let mut before = fixed();
+        before.users.remove(INSTALL_ACCOUNT);
+        assert_eq!(
+            Pool::resolve(&before, "storm-runtime").unwrap().install,
+            None
+        );
     }
 
     #[test]
@@ -269,6 +315,25 @@ pub mod tests {
             }),
             ("host missing", |a| {
                 a.users.remove("storm-runtime");
+            }),
+            ("install is root", |a| {
+                a.add_user(INSTALL_ACCOUNT, 0, 4000, "/usr/sbin/nologin")
+            }),
+            ("install is the host", |a| {
+                a.add_user(INSTALL_ACCOUNT, 900, 4000, "/usr/sbin/nologin")
+            }),
+            ("install is a session user", |a| {
+                a.add_user(INSTALL_ACCOUNT, 2003, 4000, "/usr/sbin/nologin")
+            }),
+            ("install shares a workspace group", |a| {
+                a.add_user(INSTALL_ACCOUNT, 4000, 3002, "/usr/sbin/nologin")
+            }),
+            ("install has a login shell", |a| {
+                a.add_user(INSTALL_ACCOUNT, 4000, 4000, "/bin/sh")
+            }),
+            ("install in a group", |a| {
+                a.memberships
+                    .insert(INSTALL_ACCOUNT.into(), vec!["storm-runtime".into()]);
             }),
         ];
         for (what, break_it) in cases {

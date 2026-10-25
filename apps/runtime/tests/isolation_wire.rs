@@ -73,6 +73,29 @@ fn every_request_the_host_sends_is_one_the_helper_accepts() {
     }
 }
 
+/// 136g's job, as the host asks for it.
+#[test]
+fn an_agent_job_is_one_the_helper_accepts() {
+    let rec = Arc::new(Recording::default());
+    let link = Link {
+        helper: rec.clone(),
+        state_dir: "/var/lib/storm-runtime".into(),
+    };
+    for action in ["install", "update", "remove"] {
+        link.agent_job("opencode", action).unwrap().unwrap();
+    }
+    for (request, with_fd) in rec.0.lock().unwrap().iter() {
+        let parsed = protocol::parse(request.to_string().as_bytes())
+            .unwrap_or_else(|e| panic!("{request}: {}", e.code()));
+        assert_eq!(parsed.op, protocol::Op::AgentJob);
+        assert!(!with_fd);
+    }
+    assert!(
+        storm_runtime_isolation::agents::ACTIONS
+            .contains(&storm_runtime::install::Op::Update.name())
+    );
+}
+
 #[test]
 fn a_refusal_is_an_error_naming_its_code() {
     struct No;

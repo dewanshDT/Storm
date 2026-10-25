@@ -59,6 +59,8 @@ mod imp {
     /// is not answering; only `end` waits longer, for the stop's grace.
     const IO_TIMEOUT: Duration = Duration::from_secs(10);
     const END_TIMEOUT: Duration = Duration::from_secs(30);
+    /// The job unit's own limit is 900 s (the helper's `agents.rs`).
+    const JOB_TIMEOUT: Duration = Duration::from_secs(960);
     const MAX_RESPONSE: usize = 16 * 1024;
 
     /// One request to the helper, and its answer.
@@ -80,7 +82,9 @@ mod imp {
             fd: Option<BorrowedFd<'_>>,
         ) -> io::Result<(Value, Option<OwnedFd>)> {
             let stream = UnixStream::connect(&self.0)?;
-            let wait = if request["op"] == "end" || request["op"] == "release" {
+            let wait = if request["op"] == "agent_job" {
+                JOB_TIMEOUT
+            } else if request["op"] == "end" || request["op"] == "release" {
                 END_TIMEOUT
             } else {
                 IO_TIMEOUT
@@ -260,6 +264,23 @@ mod imp {
             Ok((n("exit_code"), n("signal")))
         }
 
+        /// An install job under the install identity (136g): the version
+        /// now installed (none after a remove), or the job's failure code.
+        pub fn agent_job(
+            &self,
+            agent: &str,
+            action: &str,
+        ) -> io::Result<Result<Option<String>, String>> {
+            let (answer, _) = self.ask(
+                json!({"op": "agent_job", "agent": agent, "action": action}),
+                None,
+            )?;
+            if let Some(code) = answer["failed"].as_str() {
+                return Ok(Err(code.to_string()));
+            }
+            Ok(Ok(answer["version"].as_str().map(str::to_string)))
+        }
+
         pub fn release(&self, session: &str, user: &str) -> io::Result<()> {
             self.ask(
                 json!({"op": "release", "session": session, "user": user}),
@@ -339,9 +360,12 @@ mod imp {
             let req: Value = serde_json::from_slice(&line).unwrap();
             let op = req["op"].as_str().unwrap().to_string();
             let session = req["session"].as_str().unwrap_or("").to_string();
-            let what = match req["signal"].as_str() {
-                Some(signal) => format!("{op} {session} {signal}"),
-                None => format!("{op} {session}"),
+            let what = match (req["signal"].as_str(), req["agent"].as_str()) {
+                (Some(signal), _) => format!("{op} {session} {signal}"),
+                (None, Some(agent)) => {
+                    format!("{op} {agent} {}", req["action"].as_str().unwrap_or(""))
+                }
+                (None, None) => format!("{op} {session}"),
             };
             seen.lock().unwrap().ops.push(what);
             let (answer, fd): (Value, Option<OwnedFd>) = match op.as_str() {
@@ -432,6 +456,7 @@ mod imp {
                         None => (json!({"ok": false, "error": "not_started"}), None),
                     }
                 }
+                "agent_job" => (json!({"ok": true, "version": "9.9.9"}), None),
                 _ => (json!({"ok": false, "error": "not_built"}), None),
             };
             let mut line = answer.to_string().into_bytes();

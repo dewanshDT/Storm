@@ -111,9 +111,10 @@ windows-sys = { version = "0.61.2", features = [
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["test-util"] }
 
-# Only to check the host's requests parse with the helper's own parser
-# (tests/isolation_wire.rs); nothing of it is linked into storm-runtime, and
-# the helper is Linux only.
+# Only to check the host's requests and launches parse with the helper's own
+# parser, and that the two agree on shared lists (tests/isolation_wire.rs,
+# tests/packaging.rs, host tests); nothing of it is linked into
+# storm-runtime, and the helper is Linux only.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 storm-runtime-isolation = { path = "isolation" }
 

@@ -32,6 +32,9 @@ pub const MAX_LAUNCH: u64 = 1024 * 1024;
 pub struct Launch {
     pub args: Vec<OsString>,
     pub env: Vec<(String, String)>,
+    /// A resumed conversation (136e): the session that had it, and the
+    /// agent's id for it.
+    pub resume: Option<crate::home::Resume>,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +42,15 @@ pub struct Launch {
 struct LaunchFile {
     args: Vec<String>,
     env: Vec<(String, String)>,
+    #[serde(default)]
+    resume: Option<ResumeFile>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeFile {
+    from: String,
+    conversation: String,
 }
 
 /// Variables the helper sets itself: the session's home and identity.
@@ -63,7 +75,9 @@ pub fn parse_launch(bytes: &[u8]) -> Result<Launch> {
         if value.contains('\0') {
             bail!("a variable in the launch holds a NUL");
         }
-        if RESERVED_ENV.contains(&name.as_str()) {
+        if RESERVED_ENV.contains(&name.as_str())
+            || crate::home::REFRESHABLE_ENV.contains(&name.as_str())
+        {
             continue;
         }
         env.push((name, value));
@@ -71,9 +85,22 @@ pub fn parse_launch(bytes: &[u8]) -> Result<Launch> {
     if file.args.iter().any(|a| a.contains('\0')) {
         bail!("an argument in the launch holds a NUL");
     }
+    let resume = match file.resume {
+        None => None,
+        Some(r) => {
+            if !crate::policy::session_ok(&r.from) {
+                bail!("the launch resumes from a session id that is not one");
+            }
+            Some(crate::home::Resume {
+                from: r.from,
+                conversation: r.conversation,
+            })
+        }
+    };
     Ok(Launch {
         args: file.args.into_iter().map(OsString::from).collect(),
         env,
+        resume,
     })
 }
 
@@ -305,8 +332,17 @@ pub fn make_home(home: &Path, uid: u32, gid: u32, own: &dyn Ownership) -> Result
 /// Removes a tree a session's user wrote: everything becomes root's and
 /// searchable first, so nothing the user did to its modes can stop it.
 pub fn remove_tree(path: &Path, own: &dyn Ownership) -> Result<()> {
+    if !rootify(path, own)? {
+        return Ok(());
+    }
+    own.remove_all(path)
+}
+
+/// Makes every directory of `path` root's and `0700`; `false` when there is
+/// nothing there.
+pub fn rootify(path: &Path, own: &dyn Ownership) -> Result<bool> {
     match path.symlink_metadata() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(e) => return Err(e.into()),
         Ok(md) if !md.is_dir() => bail!("{} is not a directory", path.display()),
         Ok(_) => {}
@@ -318,7 +354,7 @@ pub fn remove_tree(path: &Path, own: &dyn Ownership) -> Result<()> {
         }
         Ok(())
     })?;
-    own.remove_all(path)
+    Ok(true)
 }
 
 /// The workspace's pool group (136h), converting a workspace made since
@@ -364,6 +400,9 @@ pub struct LeaseRecord {
     pub session: String,
     #[serde(default)]
     pub workspace: Option<PathBuf>,
+    /// The provider it started, so lease end knows what to keep for Resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 pub fn save_lease(dir: &Path, user: &str, record: &LeaseRecord) -> Result<()> {
@@ -466,12 +505,25 @@ mod tests {
             ],
             "HOME is the helper's to set"
         );
+        // 136f: a refreshable login never reaches a session, whatever the
+        // host wrote.
+        let l = parse_launch(
+            br#"{"args":[],"env":[["CLAUDE_CODE_OAUTH_REFRESH_TOKEN","r"],["ANTHROPIC_API_KEY","k"]]}"#,
+        )
+        .unwrap();
+        assert_eq!(l.env, [("ANTHROPIC_API_KEY".to_string(), "k".to_string())]);
+        let l =
+            parse_launch(br#"{"args":[],"env":[],"resume":{"from":"ags_A","conversation":"c"}}"#)
+                .unwrap();
+        assert_eq!(l.resume.unwrap().from, "ags_A");
         for bad in [
             &br#"{"args":[],"env":[],"program":"/bin/sh"}"#[..],
             br#"{"args":[],"env":[["1X","v"]]}"#,
             br#"{"args":[],"env":[["A=B","v"]]}"#,
             br#"{"args":["a\u0000b"],"env":[]}"#,
             br#"{"args":[1],"env":[]}"#,
+            br#"{"args":[],"env":[],"resume":{"from":"../x","conversation":"c"}}"#,
+            br#"{"args":[],"env":[],"resume":{"from":"ags_A","conversation":"c","path":"/"}}"#,
             b"not json",
         ] {
             assert!(
@@ -709,8 +761,17 @@ mod tests {
         let r = LeaseRecord {
             session: "ags_A".into(),
             workspace: Some("/w/app".into()),
+            provider: Some("claude-code".into()),
         };
         save_lease(&dir, "storm-s002", &r).unwrap();
+        // A record from before 136-4 has no provider.
+        std::fs::write(
+            dir.join("storm-s003.json"),
+            br#"{"session":"ags_B","workspace":null}"#,
+        )
+        .unwrap();
+        assert_eq!(load_leases(&dir).unwrap()["storm-s003"].provider, None);
+        std::fs::remove_file(dir.join("storm-s003.json")).unwrap();
         std::fs::write(dir.join("junk.json"), b"{}").unwrap();
         let all = load_leases(&dir).unwrap();
         assert_eq!(all.len(), 1);

@@ -19,11 +19,13 @@
 //! the units ship disabled and the pools are created only by `on`.
 
 pub mod accounts;
+pub mod agents;
 pub mod audit;
 pub mod config;
 pub mod convert;
 pub mod fdpass;
 pub mod files;
+pub mod home;
 pub mod leases;
 pub mod net;
 pub mod operator;

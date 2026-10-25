@@ -206,8 +206,23 @@ has its own network: it reaches the internet and resolves names through
 `pasta` (from `passt`), but not the host's loopback services nor another
 session's. If a session must reach a service on the host's loopback (a local
 model server, say), list its TCP port in `runtime.toml`:
-`isolation_host_ports = [11434]`. Storm's tools, Resume and the agents Storm
-installed are not there yet, so leave it off. A workspace root outside `/var/lib/storm-runtime`
+`isolation_host_ports = [11434]`.
+
+Each isolated session starts in a fresh home holding a copy of your agent's
+configuration: its settings, instructions, MCP servers, plugins, skills and
+your shell's start-up files. Most of it is read-only to the session, and
+nothing it changes there reaches your own configuration; edit yours, and the
+next session gets it. **Logins that refresh themselves are never copied**:
+Claude Code's own `/login`, Codex's ChatGPT login and OpenCode's OAuth
+logins would let one session rotate the tokens out from under another. An
+isolated Claude Code session needs a synced token or an API key in its env
+file; Codex an `OPENAI_API_KEY` there;
+OpenCode an API key, or one of its free models. A session with none of these
+fails with `credential_unavailable` rather than using your login. The agents
+Storm installs belong to a separate `storm-install` account while isolation
+is on: sessions can run them but not change them, and installs and updates
+from Settings › Agents run as that account. Storm's tools and Resume across
+isolated sessions are not finished yet, so leave isolation off. A workspace root outside `/var/lib/storm-runtime`
 needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 

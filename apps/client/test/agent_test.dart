@@ -102,6 +102,10 @@ void main() {
       expect(s('failed', r: 'host_restart').statusLabel, 'Failed');
       expect(s('failed', r: 'host_restart').endDetail, 'host restarted');
       expect(s('failed', r: 'host_revoked').endDetail, 'host revoked');
+      expect(
+        s('failed', r: 'credential_unavailable').endDetail,
+        'no credential this host may use',
+      );
       expect(s('failed', r: 'lost').endDetail, 'lost');
       expect(providerLabel('claude-code'), 'Claude Code');
     });

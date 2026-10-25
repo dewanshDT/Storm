@@ -116,6 +116,11 @@ enum Command {
     #[cfg(windows)]
     #[command(hide = true)]
     Service,
+    /// One agent install on an isolated host (decision 136g), run by the
+    /// isolation helper as the install identity, never by hand. Prints one
+    /// JSON line: the version, or the failure's code.
+    #[command(hide = true)]
+    AgentJob { agent: String, action: String },
 }
 
 #[tokio::main]
@@ -155,6 +160,16 @@ async fn main() -> Result<()> {
         }
         Command::HarnessSession { id } => {
             storm_runtime::harness::report(id);
+            Ok(())
+        }
+        Command::AgentJob { agent, action } => {
+            let line = storm_runtime::install::isolated_job(
+                std::path::Path::new(DEFAULT_STATE),
+                &agent,
+                &action,
+            )
+            .await;
+            println!("{line}");
             Ok(())
         }
         Command::Enroll { state, name, force } => {

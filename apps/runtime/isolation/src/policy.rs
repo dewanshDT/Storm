@@ -57,6 +57,12 @@ pub fn validate(req: &Request, cx: &Context) -> Result<(), Refusal> {
     if req.op == Op::Signal && !SIGNALS.contains(&req.get("signal")) {
         return Err(Refusal::BadSignal);
     }
+    if req.op == Op::AgentJob
+        && (!crate::agents::MANAGEABLE.contains(&req.get("agent"))
+            || !crate::agents::ACTIONS.contains(&req.get("action")))
+    {
+        return Err(Refusal::BadAgent);
+    }
     Ok(())
 }
 

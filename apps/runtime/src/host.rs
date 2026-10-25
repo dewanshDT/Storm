@@ -102,6 +102,10 @@ pub enum Command {
         /// never its value.
         #[serde(default)]
         provider_credential: Option<String>,
+        /// A resume's predecessor (decision 136e): on an isolated host its
+        /// kept conversation is what the new home gets.
+        #[serde(default)]
+        resumed_from: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -314,6 +318,9 @@ pub struct Host {
     agents: Arc<crate::agents::Inventory>,
     /// Agents with a job running: one at a time each (133-4).
     agent_jobs: Mutex<std::collections::HashSet<String>>,
+    /// With isolation on, the helper: agent installs run through it under
+    /// the install identity (136g).
+    isolation: Option<crate::isolation::Link>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -334,17 +341,18 @@ impl Host {
         let link = (config.isolation == crate::config::Isolation::PerSession)
             .then(|| crate::isolation::Link::installed(state_dir))
             .flatten();
-        let providers = match link {
-            Some(link) => config.providers_isolated(&managed, link)?,
+        let providers = match &link {
+            Some(link) => config.providers_isolated(&managed, link.clone())?,
             None => config.providers_with(&managed)?,
         };
-        Self::with_providers(state_dir, config, providers)
+        Self::with_providers(state_dir, config, providers, link)
     }
 
     fn with_providers(
         state_dir: &Path,
         config: RuntimeConfig,
         providers: Vec<Arc<dyn Provider>>,
+        isolation: Option<crate::isolation::Link>,
     ) -> Result<Arc<Self>> {
         let identity = HostConfig::load(state_dir)?;
         let key = HostKey::load(state_dir, &identity.key_id)?;
@@ -390,6 +398,7 @@ impl Host {
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
             agent_jobs: Mutex::default(),
+            isolation,
         }))
     }
 
@@ -587,12 +596,20 @@ impl Host {
         let step = move |s: &'static str| {
             let _ = tx.send(s);
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(600),
-            crate::install::run(&self.state_dir, &agent, op, path, &step),
-        )
-        .await
-        .unwrap_or(Err(Failure::Timeout));
+        let result = match (&self.isolation, self.config.isolation) {
+            // 136g: never this account; the helper runs it as the install
+            // identity, from the same recipes.
+            (link, crate::config::Isolation::PerSession) => {
+                step("Installing");
+                self.isolated_job(link.clone(), &agent, op).await
+            }
+            (_, crate::config::Isolation::Off) => tokio::time::timeout(
+                Duration::from_secs(600),
+                crate::install::run(&self.state_dir, &agent, op, path, &step),
+            )
+            .await
+            .unwrap_or(Err(Failure::Timeout)),
+        };
         drop(step);
         let _ = poster.await;
         self.agent_jobs.lock().unwrap().remove(&agent);
@@ -608,6 +625,34 @@ impl Host {
             self.agents.record_update(&agent, result.is_ok());
         }
         self.probe_agents();
+    }
+
+    async fn isolated_job(
+        &self,
+        link: Option<crate::isolation::Link>,
+        agent: &str,
+        op: crate::install::Op,
+    ) -> Result<Option<String>, crate::install::Failure> {
+        use crate::install::Failure;
+        let Some(link) = link else {
+            tracing::warn!(
+                agent,
+                "agent job: isolation is on and this host has no helper"
+            );
+            return Err(Failure::Blocked("isolation_unavailable"));
+        };
+        let (agent, action) = (agent.to_string(), op.name());
+        let answer = tokio::task::spawn_blocking(move || link.agent_job(&agent, action))
+            .await
+            .map_err(|_| Failure::Blocked("isolation_unavailable"))?;
+        match answer {
+            Ok(Ok(version)) => Ok(version),
+            Ok(Err(code)) => Err(Failure::from_code(&code)),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent job: the isolation helper did not run it");
+                Err(Failure::Blocked("isolation_unavailable"))
+            }
+        }
     }
 
     /// Once a day, from a random point in the first hour (133-5): learns
@@ -1097,6 +1142,7 @@ impl Host {
                 context,
                 resume,
                 provider_credential,
+                resumed_from,
             } => {
                 self.start(
                     session,
@@ -1106,7 +1152,7 @@ impl Host {
                     terminal,
                     mcp,
                     context,
-                    resume,
+                    resume.map(|r| (r, resumed_from)),
                     provider_credential,
                 )
                 .await
@@ -1211,9 +1257,13 @@ impl Host {
         size: Size,
         mcp: Vec<crate::mcp::McpGrant>,
         context: bool,
-        resume: Option<String>,
+        resume: Option<(String, Option<String>)>,
         provider_credential: Option<String>,
     ) {
+        let (resume, resumed_from) = match resume {
+            Some((r, from)) => (Some(r), from),
+            None => (None, None),
+        };
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
         };
@@ -1253,6 +1303,42 @@ impl Host {
         {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
+        }
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        if isolated {
+            // 136f: only a path that cannot rotate the account's login, or
+            // nothing; never the account's own login.
+            let refused = {
+                let names = provider.env_names();
+                let env_set = |k: &str| names.iter().any(|(n, set)| *set && n == k);
+                let account_home = self.state_dir.join("home");
+                let codex_home = crate::codex::home(&self.state_dir);
+                let setup = crate::credential_paths::Setup {
+                    provider: &provider_id,
+                    synced: provider_credential.is_some(),
+                    env_set: &env_set,
+                    any_api_key: names.iter().any(|(n, set)| {
+                        *set && n.to_str().is_some_and(|n| n.ends_with("_API_KEY"))
+                    }),
+                    account_home: &account_home,
+                    codex_home: &codex_home,
+                };
+                crate::credential_paths::check(&setup).err()
+            };
+            if let Some(reason) = refused {
+                tracing::warn!(session = %id, reason, "start refused: credential_unavailable");
+                return self
+                    .post_start_ended(&id, EndReason::CredentialUnavailable)
+                    .await;
+            }
+            if resume.is_some()
+                && !resumed_from
+                    .as_deref()
+                    .is_some_and(crate::credential_paths::session_id_ok)
+            {
+                refuse("an isolated resume needs the session it resumes");
+                return self.post_start_failure(&id).await;
+            }
         }
         // Token sync (AM71): pulled before anything is written; any failure
         // ends the launch, never a fallback to this host's own login.
@@ -1406,13 +1492,28 @@ impl Host {
                 .secret_env
                 .push((crate::credential::TOKEN_ENV.into(), token));
         }
-        // Storm is the only thing that updates its own copy (133-2).
+        if isolated {
+            launch
+                .env_remove
+                .extend(crate::credential_paths::REFRESHABLE_ENV.map(Into::into));
+            if let (Some(conversation), Some(from)) = (&resume, &resumed_from) {
+                launch.resumed_from = Some((from.clone(), conversation.clone()));
+            }
+        }
+        // Storm is the only thing that updates its own copy (133-2); on an
+        // isolated host no session can write where agents live (136g).
         if provider_id == "claude-code"
-            && provider
-                .resolved()
-                .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm")
+            && (isolated
+                || provider
+                    .resolved()
+                    .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm"))
         {
             launch.env.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
+        }
+        if provider_id == "opencode" && isolated {
+            launch
+                .env
+                .push(("OPENCODE_DISABLE_AUTOUPDATE".into(), "true".into()));
         }
         // A resumed conversation has read its note already.
         let launch =
@@ -1514,11 +1615,15 @@ impl Host {
     }
 
     async fn post_start_failure(&self, id: &str) {
+        self.post_start_ended(id, EndReason::StartFailure).await
+    }
+
+    async fn post_start_ended(&self, id: &str, reason: EndReason) {
         self.forget_mcp(id);
         let _ = self
             .post(
                 &format!("/v1/runtime/sessions/{id}/status"),
-                &json!({ "status": "failed", "end_reason": EndReason::StartFailure.as_str() }),
+                &json!({ "status": "failed", "end_reason": reason.as_str() }),
             )
             .await;
     }
@@ -2412,6 +2517,7 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential: None,
+                resumed_from: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -2541,6 +2647,7 @@ mod tests {
             context,
             resume: resume.map(str::to_string),
             provider_credential: None,
+            resumed_from: None,
         }
     }
 
@@ -3580,6 +3687,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 context: false,
                 resume: None,
                 provider_credential: None,
+                resumed_from: None,
             })
             .await;
 
@@ -3672,6 +3780,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 context: false,
                 resume: None,
                 provider_credential: None,
+                resumed_from: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -3779,7 +3888,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             roots.path().display().to_string()
         ))
         .unwrap();
-        let host = Host::with_providers(state.path(), config, providers).unwrap();
+        let host = Host::with_providers(state.path(), config, providers, None).unwrap();
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
@@ -3854,10 +3963,208 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             args.iter().copied(),
         )
         .isolated(helper.link(state.path()));
-        let host = Host::with_providers(state.path(), config, vec![Arc::new(shell)]).unwrap();
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(shell)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, helper, state, roots)
+    }
+
+    /// A host whose one provider is `id`, with `env` from its env file,
+    /// started through a fake isolation helper running `/bin/sh -c 'sleep 30'`.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host_for(
+        id: &str,
+        env: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), "/bin/sleep");
+        let provider = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new(id).unwrap(),
+            "/bin/sh",
+            Vec::<String>::new(),
+        )
+        .with_env(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(provider)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    /// IT-5's half the host decides: on an isolated host a Claude Code
+    /// session with no synced token and no API key is refused with
+    /// `credential_unavailable`, before any lease: the account's own login
+    /// is never what it starts on.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_5_an_isolated_session_without_a_permitted_credential_never_starts() {
+        let (host, seen, helper, state, _roots) = isolated_host_for("claude-code", &[]).await;
+        std::fs::create_dir_all(state.path().join("home/.claude")).unwrap();
+        std::fs::write(
+            state.path().join("home/.claude/.credentials.json"),
+            br#"{"claudeAiOauth":{"refreshToken":"r"}}"#,
+        )
+        .unwrap();
+        host.dispatch(1, start("ags_NOCRED", "claude-code"));
+        eventually("refused", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_nocred") && b["end_reason"] == "credential_unavailable"
+            })
+        })
+        .await;
+        assert!(ops(&helper).is_empty(), "no lease, no start");
+        assert!(host.session("ags_NOCRED").is_none());
+    }
+
+    /// 136f: an isolated session gets its env file's key in its
+    /// environment only, never a refreshable login, never a key in argv,
+    /// and its agent's self-updater stays off (136g).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_session_gets_only_the_credentials_136f_permits() {
+        let (host, _seen, helper, _state, _roots) = isolated_host_for(
+            "claude-code",
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-ENVKEY"),
+                ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "sk-ant-ort01-REFRESH"),
+            ],
+        )
+        .await;
+        host.dispatch(1, start("ags_KEY", "claude-code"));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("ANTHROPIC_API_KEY".into(), "sk-ant-ENVKEY".into())));
+        assert!(env.contains(&("DISABLE_AUTOUPDATER".into(), "1".into())));
+        assert!(!launch.to_string().contains("REFRESH"), "{launch}");
+        let args = launch["args"].to_string();
+        assert!(!args.contains("sk-ant"), "{args}");
+        // The helper's own parser takes the launch the host wrote.
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert!(parsed.resume.is_none());
+        assert!(
+            parsed
+                .env
+                .iter()
+                .all(|(k, _)| k != "CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+        );
+    }
+
+    /// 136e: an isolated resume names the session that had the
+    /// conversation, so the helper copies it from that session's kept
+    /// files; without one it does not start.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_resume_names_its_predecessor() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        const C: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
+        let resumed = |session: &str, from: Option<&str>| {
+            let mut c = start(session, "claude-code");
+            if let Command::Start {
+                resume,
+                resumed_from,
+                ..
+            } = &mut c
+            {
+                *resume = Some(C.into());
+                *resumed_from = from.map(str::to_string);
+            }
+            c
+        };
+        host.dispatch(1, resumed("ags_NOFROM", None));
+        eventually("refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nofrom") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(ops(&helper).is_empty());
+        host.dispatch(2, resumed("ags_RES", Some("ags_OLD")));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        assert_eq!(
+            launch["resume"],
+            json!({"from": "ags_OLD", "conversation": C})
+        );
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.resume.unwrap().from, "ags_OLD");
+    }
+
+    /// 136g: with isolation on, an install never runs as this account; the
+    /// helper runs it as the install identity and the host reports what
+    /// came back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_host_installs_only_through_the_helper() {
+        let (host, seen, helper, state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        host.dispatch(
+            1,
+            Command::AgentInstall {
+                job: "agj_ONE".into(),
+                agent: "claude-code".into(),
+                op: crate::install::Op::Install,
+            },
+        );
+        eventually("reported", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.ends_with("/agents/jobs/agj_one") && b["done"]["version"] == "9.9.9"
+            })
+        })
+        .await;
+        assert_eq!(ops(&helper), ["agent_job claude-code install"]);
+        assert!(
+            !state.path().join("agents/managed").exists(),
+            "nothing was installed by this account"
+        );
     }
 
     #[cfg(target_os = "linux")]
@@ -4013,6 +4320,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: None,
+            resumed_from: None,
         }
     }
 
@@ -4333,6 +4641,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: kind.map(str::to_string),
+            resumed_from: None,
         }
     }
 

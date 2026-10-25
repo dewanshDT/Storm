@@ -184,7 +184,11 @@ fn write_launch(path: &std::path::Path, launch: &Launch) -> io::Result<()> {
         .iter()
         .map(|a| text(a))
         .collect::<io::Result<Vec<_>>>()?;
-    let body = serde_json::json!({"args": args, "env": env}).to_string();
+    let mut body = serde_json::json!({"args": args, "env": env});
+    if let Some((from, conversation)) = &launch.resumed_from {
+        body["resume"] = serde_json::json!({"from": from, "conversation": conversation});
+    }
+    let body = body.to_string();
     let mut f = crate::platform::open_private(
         path,
         std::fs::OpenOptions::new()

@@ -271,6 +271,8 @@ pub trait Units: Send + Sync {
     fn stop(&self, unit: &str) -> Result<()>;
     /// Forgets a failed unit's record, so the name can be used again.
     fn reset_failed(&self, unit: &str);
+    /// Runs an install job to its end (136g) and returns what it printed.
+    fn run_job(&self, spec: &crate::agents::JobSpec) -> Result<String>;
 }
 
 pub struct Systemd;
@@ -278,6 +280,7 @@ pub struct Systemd;
 fn run(program: &str, args: &[OsString]) -> Result<String> {
     let out = Command::new(program)
         .args(args)
+        .stdin(std::process::Stdio::null())
         .env_clear()
         .env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin")
         .env("SYSTEMD_PAGER", "")
@@ -338,6 +341,13 @@ impl Units for Systemd {
 
     fn reset_failed(&self, unit: &str) {
         let _ = run(SYSTEMCTL, &["reset-failed".into(), unit.into()]);
+    }
+
+    fn run_job(&self, spec: &crate::agents::JobSpec) -> Result<String> {
+        if !Path::new(crate::agents::STORM_RUNTIME).is_file() {
+            bail!("{} is not installed", crate::agents::STORM_RUNTIME);
+        }
+        run(SYSTEMD_RUN, &spec.systemd_run_args()?)
     }
 }
 

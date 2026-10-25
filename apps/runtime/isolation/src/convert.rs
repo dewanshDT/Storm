@@ -343,7 +343,7 @@ pub fn restored_new(kind: Kind, m: Meta, pool: &Pool) -> Meta {
     Meta { uid, gid, mode }
 }
 
-fn apply(own: &dyn Ownership, e: &Entry, target: Meta) -> Result<bool> {
+pub(crate) fn apply(own: &dyn Ownership, e: &Entry, target: Meta) -> Result<bool> {
     let now = own.meta(e.key, e.seen);
     let mut changed = false;
     if (now.uid, now.gid) != (target.uid, target.gid) {
@@ -424,7 +424,7 @@ impl Manifest {
         let mut lines = text.lines();
         let header: Header = serde_json::from_str(lines.next().unwrap_or(""))
             .with_context(|| format!("{}: no header", path.display()))?;
-        if pool::group_index(&header.group).is_none() {
+        if pool::group_index(&header.group).is_none() && header.group != pool::INSTALL_ACCOUNT {
             bail!("{}: {} is not a pool group", path.display(), header.group);
         }
         let mut entries = BTreeMap::new();
@@ -442,7 +442,7 @@ impl Manifest {
 
     /// Written whole, synced, then renamed into place: a crash leaves the
     /// old record or the new one, never half of one.
-    fn save(&self, dir: &Path) -> Result<()> {
+    pub(crate) fn save(&self, dir: &Path) -> Result<()> {
         let path = Self::path(dir, &self.group);
         let tmp = path.with_extension("jsonl.tmp");
         let mut out = String::new();
@@ -473,10 +473,17 @@ impl Manifest {
         Ok(())
     }
 
-    fn remove(&self, dir: &Path) -> Result<()> {
+    pub(crate) fn remove(&self, dir: &Path) -> Result<()> {
         std::fs::remove_file(Self::path(dir, &self.group))?;
         Ok(())
     }
+}
+
+/// The workspaces' records; the prefix's (`agents.rs`) is never one.
+fn workspace_manifests(dir: &Path) -> Result<Vec<Manifest>> {
+    let mut all = Manifest::load_all(dir)?;
+    all.retain(|m| pool::group_index(&m.group).is_some());
+    Ok(all)
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -496,7 +503,7 @@ pub fn on(
     manifests: &Path,
     own: &dyn Ownership,
 ) -> Result<Report> {
-    let mut existing = Manifest::load_all(manifests)?;
+    let mut existing = workspace_manifests(manifests)?;
     let mut used: Vec<String> = existing.iter().map(|m| m.group.clone()).collect();
     let mut plan: Vec<Manifest> = Vec::new();
     for ws in workspaces {
@@ -552,7 +559,7 @@ pub fn on(
 /// restored, so an interrupted run can be repeated.
 pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report> {
     let mut report = Report::default();
-    for m in Manifest::load_all(manifests)? {
+    for m in workspace_manifests(manifests)? {
         match std::fs::symlink_metadata(&m.workspace) {
             Ok(md) if md.is_dir() => {}
             _ => {
