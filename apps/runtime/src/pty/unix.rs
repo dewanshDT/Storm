@@ -102,6 +102,12 @@ fn spawn_isolated(
     };
     let started = (|| -> io::Result<(i32, Option<OwnedFd>)> {
         link.prepare(session, &user)?;
+        // A spawned child's own workspace is made now (WS-4), from its
+        // parent's; the helper starts the child in it.
+        if let Some(parent) = &launch.child_of {
+            let made = link.child_create(parent, session, &workspace)?;
+            tracing::info!(session, parent, mode = ?made.mode, commit = ?made.commit, submodules = made.submodules, large_files = made.large_files, "isolation: the child's workspace is made");
+        }
         crate::platform::create_private_dir(&crate::mcp::session_dir(&link.state_dir, session))?;
         let dir = link.launch_dir();
         crate::platform::tighten_private_dir(&dir)?;
@@ -528,5 +534,79 @@ mod tests {
             .write(b"\x1b[A", Instant::now() + Duration::from_secs(5))
             .unwrap();
         assert_eq!(read.join().unwrap(), b"\x1b[A");
+    }
+
+    #[cfg(target_os = "linux")]
+    fn child_launch(cwd: &std::path::Path, link: crate::isolation::Link) -> Launch {
+        Launch {
+            program: "/bin/true".into(),
+            args: Vec::new(),
+            cwd: cwd.to_path_buf(),
+            env: Vec::new(),
+            env_remove: Vec::new(),
+            secret_env: Vec::new(),
+            resumed_from: None,
+            child_of: Some("ags_PARENT".into()),
+            tag: "ags_CHILD".into(),
+            isolated: Some(crate::isolation::Isolated {
+                link,
+                provider: "shell".into(),
+            }),
+        }
+    }
+
+    /// Decision 137, the host's half: a spawned child's workspace is made
+    /// after its lease and `prepare`, before its `start`, from the
+    /// parent's workspace, which is the launch's.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_childs_workspace_is_made_between_prepare_and_start() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), "/bin/true");
+        let launch = child_launch(ws.path(), helper.link(state.path()));
+        let size = TerminalSize::new(80, 24).unwrap();
+        let spawned = spawn(&launch, size).unwrap();
+        drop(spawned);
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            [
+                "lease ags_CHILD",
+                "prepare ags_CHILD",
+                "child_create ags_CHILD",
+                "start ags_CHILD"
+            ]
+        );
+    }
+
+    /// A child whose workspace cannot be made never starts, gives its
+    /// lease back, and says why: `workspace_cap` is 137f's `start_failed`.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_child_whose_workspace_is_refused_never_starts() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), "/bin/true");
+        helper.seen.lock().unwrap().child_refusal = Some("workspace_cap".into());
+        let launch = child_launch(ws.path(), helper.link(state.path()));
+        let e = spawn(&launch, TerminalSize::new(80, 24).unwrap())
+            .err()
+            .expect("refused");
+        assert_eq!(crate::isolation::child_failure(&e), Some("workspace_cap"));
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            [
+                "lease ags_CHILD",
+                "prepare ags_CHILD",
+                "child_create ags_CHILD",
+                "release ags_CHILD"
+            ]
+        );
+        // Any other refusal is not a child's.
+        let other = io::Error::other(crate::isolation::Refused {
+            op: "start".into(),
+            code: "workspace_cap".into(),
+        });
+        assert_eq!(crate::isolation::child_failure(&other), None);
     }
 }

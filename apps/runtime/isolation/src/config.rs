@@ -60,6 +60,22 @@ pub struct HelperConfig {
     /// The host's loopback ports an isolated session may reach (136d).
     #[serde(default)]
     pub isolation_host_ports: Vec<u16>,
+    /// The most one child workspace may take, in bytes (137f).
+    #[serde(default)]
+    pub child_workspace_max: Option<u64>,
+    /// The most every child workspace on the host may take together.
+    #[serde(default)]
+    pub children_max: Option<u64>,
+}
+
+pub const DEFAULT_CHILD_WORKSPACE_MAX: u64 = 2 << 30;
+pub const DEFAULT_CHILDREN_MAX: u64 = 20 << 30;
+
+/// 137f's two caps, in bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Caps {
+    pub child: u64,
+    pub children: u64,
 }
 
 impl HelperConfig {
@@ -104,6 +120,21 @@ impl HelperConfig {
                 .map(|(id, c)| (id.to_string(), c.to_string()))
                 .collect(),
         }
+    }
+
+    /// A cap of 0 would refuse every child, which is never what an
+    /// operator means: it is refused here rather than at every start.
+    pub fn caps(&self) -> Result<Caps> {
+        let caps = Caps {
+            child: self
+                .child_workspace_max
+                .unwrap_or(DEFAULT_CHILD_WORKSPACE_MAX),
+            children: self.children_max.unwrap_or(DEFAULT_CHILDREN_MAX),
+        };
+        if caps.child == 0 || caps.children == 0 {
+            anyhow::bail!("child_workspace_max and children_max must be above 0");
+        }
+        Ok(caps)
     }
 
     /// The roots as the system resolves them; one that does not exist is
@@ -170,6 +201,33 @@ mod tests {
         assert_eq!(c.isolation_host_ports, [11434, 5432]);
         assert!(HelperConfig::parse("isolation_host_ports = [70000]").is_err());
         assert!(HelperConfig::parse("isolation_host_ports = [\"80\"]").is_err());
+    }
+
+    #[test]
+    fn the_child_caps_default_to_2_and_20_gib() {
+        assert_eq!(
+            HelperConfig::parse("").unwrap().caps().unwrap(),
+            Caps {
+                child: 2 * 1024 * 1024 * 1024,
+                children: 20 * 1024 * 1024 * 1024,
+            }
+        );
+        let c = HelperConfig::parse("child_workspace_max = 1000\nchildren_max = 5000").unwrap();
+        assert_eq!(
+            c.caps().unwrap(),
+            Caps {
+                child: 1000,
+                children: 5000
+            }
+        );
+        assert!(
+            HelperConfig::parse("children_max = 0")
+                .unwrap()
+                .caps()
+                .is_err()
+        );
+        assert!(HelperConfig::parse("child_workspace_max = -1").is_err());
+        assert!(HelperConfig::parse("child_workspace_max = \"2G\"").is_err());
     }
 
     #[test]

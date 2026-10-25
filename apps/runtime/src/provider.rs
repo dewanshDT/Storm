@@ -155,6 +155,10 @@ pub struct LaunchExtras {
     /// On an isolated host, the conversation a resume reopens and the
     /// session that had it (136e): the helper copies it into the new home.
     pub resumed_from: Option<(String, String)>,
+    /// On an isolated host, a spawned child's parent session (decision
+    /// 137): the helper makes the child's own workspace from the parent's,
+    /// which is this session's `workspace`, before it starts.
+    pub child_of: Option<String>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.

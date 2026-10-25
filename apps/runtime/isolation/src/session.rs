@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde_json::{Map, Value, json};
 
+use crate::children::ChildMode;
 use crate::files::{self, LeaseRecord};
 use crate::leases::Leases;
 use crate::policy::{self, Context};
@@ -132,7 +133,7 @@ impl State {
 }
 
 /// Marks a session busy for one operation.
-struct Busy<'a> {
+pub(crate) struct Busy<'a> {
     helper: &'a Helper,
     session: String,
 }
@@ -143,15 +144,15 @@ impl Drop for Busy<'_> {
     }
 }
 
-fn failed(what: &str, e: anyhow::Error) -> Refusal {
+pub(crate) fn failed(what: &str, e: anyhow::Error) -> Refusal {
     eprintln!("storm-runtime-isolation: {what}: {e:#}");
     Refusal::Failed
 }
 
-type Answer = (Map<String, Value>, Option<OwnedFd>);
+pub(crate) type Answer = (Map<String, Value>, Option<OwnedFd>);
 
 impl Helper {
-    fn session_busy(&self, session: &str) -> Result<Busy<'_>, Refusal> {
+    pub(crate) fn session_busy(&self, session: &str) -> Result<Busy<'_>, Refusal> {
         let mut st = self.state.lock().unwrap();
         if !st.busy.insert(session.to_string()) {
             return Err(Refusal::Busy);
@@ -213,9 +214,13 @@ impl Helper {
             }
             Op::AgentJob => self.agent_job(req.get("agent"), req.get("action")),
             Op::SelfTest => self.self_test(),
-            Op::ChildCreate | Op::ChildExport | Op::ChildImport | Op::ChildDispose => {
-                Err(Refusal::NotBuilt)
-            }
+            Op::ChildCreate => self.child_create(
+                req.get("parent"),
+                req.get("child"),
+                Path::new(req.get("workspace")),
+            ),
+            // Apply and disposal are 137-3's.
+            Op::ChildExport | Op::ChildImport | Op::ChildDispose => Err(Refusal::NotBuilt),
         }
     }
 
@@ -274,7 +279,7 @@ impl Helper {
         files::resolve(command, &self.search).ok_or(Refusal::ProviderUnavailable)
     }
 
-    fn hidden(&self) -> Vec<PathBuf> {
+    pub(crate) fn hidden(&self) -> Vec<PathBuf> {
         let mut out = vec![self.layout.host_state.clone(), self.layout.state.clone()];
         for root in &self.roots {
             if !out.iter().any(|h| root.starts_with(h)) {
@@ -314,11 +319,22 @@ impl Helper {
             self.check_resume(session, provider, resume)?;
         }
         let own = self.deps.own.as_ref();
-        let group = if probe {
-            user.to_string()
+        // A spawned child (decision 137) works in its own workspace, made
+        // at approval from the one the host names here.
+        let child = if probe {
+            None
         } else {
-            files::workspace_group(workspace, &self.pool, &self.layout.manifests(), own)
-                .map_err(|e| failed("the workspace's group", e))?
+            self.child_record(session)
+        };
+        if let Some(c) = &child {
+            crate::children::startable(c, workspace)?;
+        }
+        let group = match &child {
+            _ if probe => user.to_string(),
+            Some(c) if c.mode == ChildMode::Clone => user.to_string(),
+            // A scratch child reads its parent's workspace through its group.
+            _ => files::workspace_group(workspace, &self.pool, &self.layout.manifests(), own)
+                .map_err(|e| failed("the workspace's group", e))?,
         };
         // The workspace is recorded before the session can write in it, so
         // whatever happens next, lease end knows what to hand back.
@@ -326,8 +342,9 @@ impl Helper {
             let mut st = self.state.lock().unwrap();
             let record = LeaseRecord {
                 session: session.to_string(),
-                // A probe's workspace is its home, which lease end removes.
-                workspace: (!probe).then(|| workspace.to_path_buf()),
+                // A probe's workspace is its home, which lease end removes; a
+                // child never writes its parent's, and its own is kept.
+                workspace: (!probe && child.is_none()).then(|| workspace.to_path_buf()),
                 provider: Some(provider.to_string()),
             };
             files::save_lease(&self.layout.leases(), user, &record)
@@ -379,7 +396,14 @@ impl Helper {
             session: session.to_string(),
             user: user.to_string(),
             workspace_group: group,
-            workspace: workspace.to_path_buf(),
+            workspace: match &child {
+                Some(_) => self.layout.child_workspace(session),
+                None => workspace.to_path_buf(),
+            },
+            parent_view: child
+                .as_ref()
+                .filter(|c| c.mode == ChildMode::Scratch)
+                .map(|c| c.parent_workspace.clone()),
             session_dir,
             home,
             hidden: self.hidden(),
@@ -585,6 +609,7 @@ impl Helper {
     }
 
     fn revoke(&self, session: &str, user: &str, record: Option<&LeaseRecord>) -> Result<()> {
+        self.child_ended(session)?;
         let own = self.deps.own.as_ref();
         let uid = self.pool.users[user];
         if let Some(workspace) = record.and_then(|r| r.workspace.as_ref())
@@ -630,6 +655,7 @@ impl Helper {
     /// What a previous helper left: every recorded lease is ended and
     /// revoked before this one answers.
     pub(crate) fn recover(&self) -> Result<()> {
+        self.recover_children()?;
         for (user, record) in files::load_leases(&self.layout.leases())? {
             if !self.pool.users.contains_key(&user) {
                 continue;
@@ -687,6 +713,13 @@ pub mod tests {
         pub no_passt: std::sync::atomic::AtomicBool,
         pub jobs: Mutex<Vec<crate::agents::JobSpec>>,
         pub job_output: Mutex<String>,
+        pub clones: Mutex<Vec<crate::children::CloneSpec>>,
+        /// What a clone prints instead of running one.
+        pub clone_output: Mutex<Option<String>>,
+        /// The `HOME` a clone runs with: an account's, for WT-7.
+        pub clone_home: Mutex<Option<PathBuf>>,
+        /// Bytes a faked clone writes into the child's workspace.
+        pub clone_fill: Mutex<Option<usize>>,
     }
 
     impl FakeUnits {
@@ -781,6 +814,34 @@ pub mod tests {
             self.jobs.lock().unwrap().push(spec.clone());
             Ok(self.job_output.lock().unwrap().clone())
         }
+        /// The real clone, with real git, as this test's user: everything
+        /// of the unit but its identity.
+        fn run_clone(&self, spec: &crate::children::CloneSpec) -> Result<String> {
+            self.calls.lock().unwrap().push(format!(
+                "clone {}",
+                crate::children::clone_unit_name(&spec.child)
+            ));
+            self.clones.lock().unwrap().push(spec.clone());
+            if let Some(out) = self.clone_output.lock().unwrap().clone() {
+                if let Some(n) = *self.clone_fill.lock().unwrap() {
+                    std::fs::write(spec.dest.join("fill"), vec![1u8; n])?;
+                }
+                return Ok(out);
+            }
+            let home = self
+                .clone_home
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| crate::clone::HOME.into());
+            Ok(crate::clone::line(&crate::clone::clone(
+                Path::new(crate::clone::GIT),
+                &spec.parent,
+                &spec.dest,
+                spec.budget,
+                &home,
+            )))
+        }
     }
 
     pub fn fake_deps() -> (Deps, Arc<FakeUnits>, Own, Arc<crate::tty::Recorded>) {
@@ -805,21 +866,21 @@ pub mod tests {
         )
     }
 
-    struct Fixture {
-        _t: tempfile::TempDir,
-        root: PathBuf,
-        helper: Helper,
-        units: Arc<FakeUnits>,
-        own: Own,
-        tty: Arc<crate::tty::Recorded>,
+    pub(crate) struct Fixture {
+        pub _t: tempfile::TempDir,
+        pub root: PathBuf,
+        pub helper: Helper,
+        pub units: Arc<FakeUnits>,
+        pub own: Own,
+        pub tty: Arc<crate::tty::Recorded>,
     }
 
-    fn me() -> u32 {
+    pub(crate) fn me() -> u32 {
         rustix::process::getuid().as_raw()
     }
 
     /// A host account with this test's uid, so the host's files are its.
-    fn fixture() -> Fixture {
+    pub(crate) fn fixture() -> Fixture {
         let t = tempfile::tempdir().unwrap();
         let base = t.path().canonicalize().unwrap();
         let root = base.join("workspaces");
@@ -854,7 +915,7 @@ pub mod tests {
     }
 
     impl Fixture {
-        fn call(&self, request: Value, fds: Vec<OwnedFd>) -> (Value, Option<OwnedFd>) {
+        pub(crate) fn call(&self, request: Value, fds: Vec<OwnedFd>) -> (Value, Option<OwnedFd>) {
             let mut lines: Vec<String> = Vec::new();
             let (line, fd) = self.helper.handle(
                 Some(me()),
@@ -865,17 +926,17 @@ pub mod tests {
             (serde_json::from_str(&line).unwrap(), fd)
         }
 
-        fn ok(&self, request: Value, fds: Vec<OwnedFd>) -> (Value, Option<OwnedFd>) {
+        pub(crate) fn ok(&self, request: Value, fds: Vec<OwnedFd>) -> (Value, Option<OwnedFd>) {
             let (v, fd) = self.call(request.clone(), fds);
             assert_eq!(v["ok"], true, "{request} → {v}");
             (v, fd)
         }
 
-        fn workspace(&self) -> String {
+        pub(crate) fn workspace(&self) -> String {
             self.root.join("app").to_str().unwrap().to_string()
         }
 
-        fn launch(&self, session: &str) {
+        pub(crate) fn launch(&self, session: &str) {
             let dir = self.helper.layout.session_dir(session);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("mcp.json"), b"{}").unwrap();
@@ -888,11 +949,11 @@ pub mod tests {
         }
 
         /// lease → prepare → start, as the host does it.
-        fn started(&self, session: &str) -> (String, Value, Option<OwnedFd>, OwnedFd) {
+        pub(crate) fn started(&self, session: &str) -> (String, Value, Option<OwnedFd>, OwnedFd) {
             self.started_as(session, "shell", None)
         }
 
-        fn started_as(
+        pub(crate) fn started_as(
             &self,
             session: &str,
             provider: &str,
@@ -903,7 +964,7 @@ pub mod tests {
             (user, v, pidfd, master)
         }
 
-        fn start_as(
+        pub(crate) fn start_as(
             &self,
             session: &str,
             provider: &str,

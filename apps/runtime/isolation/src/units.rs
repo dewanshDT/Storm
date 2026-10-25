@@ -39,6 +39,9 @@ pub struct UnitSpec {
     /// The workspace's pool group (136h).
     pub workspace_group: String,
     pub workspace: PathBuf,
+    /// A scratch child's parent workspace, shown read-only at its real
+    /// path (137c).
+    pub parent_view: Option<PathBuf>,
     /// The host's directory for this session (136i), shown read-only.
     pub session_dir: PathBuf,
     pub home: PathBuf,
@@ -84,6 +87,7 @@ impl UnitSpec {
         .map(PathBuf::as_path)
         .chain(self.hidden.iter().map(PathBuf::as_path))
         .chain(self.agents.as_deref())
+        .chain(self.parent_view.as_deref())
     }
 
     /// The unit's properties, in order. Read by the tests as the spec.
@@ -166,6 +170,9 @@ impl UnitSpec {
         }
         if self.workspace != self.home {
             out.push(format!("BindPaths={}", self.workspace.display()));
+        }
+        if let Some(parent) = &self.parent_view {
+            out.push(format!("BindReadOnlyPaths={}", parent.display()));
         }
         out.push(format!("BindPaths={}", self.home.display()));
         out.push(format!("BindReadOnlyPaths={}", self.session_dir.display()));
@@ -277,6 +284,8 @@ pub trait Units: Send + Sync {
     fn reset_failed(&self, unit: &str);
     /// Runs an install job to its end (136g) and returns what it printed.
     fn run_job(&self, spec: &crate::agents::JobSpec) -> Result<String>;
+    /// Runs a child's clone to its end (137b) and returns what it printed.
+    fn run_clone(&self, spec: &crate::children::CloneSpec) -> Result<String>;
 }
 
 pub struct Systemd;
@@ -357,6 +366,15 @@ impl Units for Systemd {
         }
         run(SYSTEMD_RUN, &spec.systemd_run_args()?)
     }
+
+    fn run_clone(&self, spec: &crate::children::CloneSpec) -> Result<String> {
+        for program in [crate::children::HELPER_BIN, crate::clone::GIT] {
+            if !Path::new(program).is_file() {
+                bail!("{program} is not installed");
+            }
+        }
+        run(SYSTEMD_RUN, &spec.systemd_run_args()?)
+    }
 }
 
 #[cfg(test)]
@@ -369,6 +387,7 @@ pub mod tests {
             user: "storm-s007".into(),
             workspace_group: "storm-w003".into(),
             workspace: "/var/lib/storm-runtime/workspaces/app".into(),
+            parent_view: None,
             session_dir: "/var/lib/storm-runtime/sessions/ags_A1".into(),
             home: "/var/lib/storm-runtime-isolation/homes/ags_A1".into(),
             hidden: vec![

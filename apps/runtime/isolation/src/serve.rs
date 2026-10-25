@@ -57,6 +57,8 @@ pub struct Helper {
     pub(crate) shell: PathBuf,
     /// The host's loopback ports sessions may reach (`net.rs`).
     pub(crate) host_ports: Vec<u16>,
+    /// 137f's caps on child workspaces.
+    pub(crate) caps: crate::config::Caps,
     pub(crate) layout: Layout,
     pub(crate) deps: Deps,
     pub(crate) state: Mutex<State>,
@@ -69,6 +71,7 @@ pub struct Settings {
     pub search: Vec<PathBuf>,
     pub shell: PathBuf,
     pub host_ports: Vec<u16>,
+    pub caps: crate::config::Caps,
     pub layout: Layout,
 }
 
@@ -97,6 +100,7 @@ impl Settings {
             search,
             shell,
             host_ports: crate::net::host_ports(&config.isolation_host_ports)?,
+            caps: config.caps()?,
             layout,
         })
     }
@@ -117,6 +121,7 @@ impl Helper {
             .filter(|s| !s.is_empty() && !crate::pool::NOLOGIN.contains(&s.as_str()))
             .unwrap_or_else(|| "/bin/sh".into());
         let settings = Settings::from_config(&config, Layout::installed(), shell.into())?;
+        crate::children::check_root(&settings.layout.children(), &settings.roots)?;
         let helper = Self::new(pool, settings, deps);
         helper.recover()?;
         Ok(helper)
@@ -132,6 +137,7 @@ impl Helper {
             search: settings.search,
             shell: settings.shell,
             host_ports: settings.host_ports,
+            caps: settings.caps,
             layout: settings.layout,
             deps,
             state: Mutex::new(state),
@@ -296,6 +302,10 @@ pub mod tests {
             search: vec![],
             shell: "/bin/sh".into(),
             host_ports: vec![],
+            caps: crate::config::Caps {
+                child: crate::config::DEFAULT_CHILD_WORKSPACE_MAX,
+                children: crate::config::DEFAULT_CHILDREN_MAX,
+            },
             layout: Layout {
                 state: root.join(".isolation"),
                 host_state: root.join(".host"),

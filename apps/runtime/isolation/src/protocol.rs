@@ -146,6 +146,17 @@ pub enum Refusal {
     /// pasta or `ip` is missing or does not run (136j): no session can
     /// have its network.
     NoPasst,
+    /// A child workspace above `child_workspace_max` or `children_max`
+    /// (137f); nothing of it is left behind.
+    WorkspaceCap,
+    /// The parent's repository could not be cloned: unreadable, corrupt,
+    /// or with no commit to start from (137h).
+    UnreadableRepository,
+    /// The named parent is not a live top-level session in that workspace.
+    WrongParent,
+    /// The child already has a workspace, made for another parent or
+    /// already ended.
+    ChildExists,
     /// The workspace, a session directory or systemd failed the operation.
     Failed,
 }
@@ -185,6 +196,10 @@ impl Refusal {
             Refusal::BadAgent => "bad_agent",
             Refusal::NoInstallIdentity => "no_install_identity",
             Refusal::NoPasst => "no_passt",
+            Refusal::WorkspaceCap => "workspace_cap",
+            Refusal::UnreadableRepository => "unreadable_repository",
+            Refusal::WrongParent => "wrong_parent",
+            Refusal::ChildExists => "child_exists",
             Refusal::Failed => "failed",
         }
     }

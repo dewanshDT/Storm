@@ -120,6 +120,67 @@ fn an_agent_job_is_one_the_helper_accepts() {
     );
 }
 
+/// 137-1: the host's `child_create` is one the helper accepts, and the
+/// helper's answer is one the host reads.
+#[test]
+fn a_child_workspace_is_asked_for_and_answered_in_one_shape() {
+    use storm_runtime_isolation::children::{ChildMode, ChildRecord, Stage, reply};
+    struct Child(Mutex<Vec<Value>>);
+    impl Helper for Child {
+        fn call(
+            &self,
+            request: &Value,
+            _: Option<BorrowedFd<'_>>,
+        ) -> io::Result<(Value, Option<OwnedFd>)> {
+            self.0.lock().unwrap().push(request.clone());
+            let record = ChildRecord {
+                child: "ags_C".into(),
+                parent: "ags_P".into(),
+                parent_workspace: "/var/lib/storm-runtime/workspaces/app".into(),
+                mode: ChildMode::Clone,
+                stage: Stage::Ready,
+                commit: Some("c".repeat(40)),
+                branch: Some("main".into()),
+                submodules: true,
+                large_files: false,
+            };
+            let workspace =
+                std::path::Path::new("/var/lib/storm-runtime-isolation/children/ags_C/workspace");
+            let line = protocol::ok_with(protocol::Op::ChildCreate, reply(&record, workspace));
+            Ok((serde_json::from_str(&line).unwrap(), None))
+        }
+    }
+    let rec = Arc::new(Child(Mutex::new(Vec::new())));
+    let link = Link {
+        helper: rec.clone(),
+        state_dir: "/var/lib/storm-runtime".into(),
+        homes: storm_runtime::isolation::HOMES.into(),
+        status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
+    };
+    let made = link
+        .child_create(
+            "ags_P",
+            "ags_C",
+            std::path::Path::new("/var/lib/storm-runtime/workspaces/app"),
+        )
+        .unwrap();
+    assert_eq!(
+        made,
+        storm_runtime::isolation::ChildWorkspace {
+            mode: storm_runtime::isolation::ChildMode::Clone,
+            path: "/var/lib/storm-runtime-isolation/children/ags_C/workspace".into(),
+            commit: Some("c".repeat(40)),
+            branch: Some("main".into()),
+            submodules: true,
+            large_files: false,
+        }
+    );
+    let sent = rec.0.lock().unwrap().clone();
+    let parsed = protocol::parse(sent[0].to_string().as_bytes()).unwrap();
+    assert_eq!(parsed.op, protocol::Op::ChildCreate);
+    assert_eq!(parsed.get("parent"), "ags_P");
+}
+
 #[test]
 fn a_refusal_is_an_error_naming_its_code() {
     struct No;

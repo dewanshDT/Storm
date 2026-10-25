@@ -238,6 +238,19 @@ refused; until then, or if the helper stops answering or `pasta` goes
 missing later, it reports `unavailable` with the reason, the app says so on
 the host row and in each session's Details, and **new sessions fail with
 "isolation unavailable on this host"** while running ones carry on.
+
+On an isolated host, an agent that starts another agent (agent spawning, not
+yet available) gives the new one **a workspace of its own**, made under the
+new session's user, in `/var/lib/storm-runtime-isolation/children/`, never
+inside a workspace root. In a git repository it is an independent clone of
+the commit you have checked out: only committed files, never your untracked,
+ignored or uncommitted ones, and nothing from the repository or your git
+configuration (hooks, filters, `core.fsmonitor`, includes) runs while it is
+made. Submodules and Git LFS files are not fetched. Anywhere else, the new
+session sees your workspace read-only and writes in a scratch directory.
+Two caps in `runtime.toml`, in bytes, keep clones from filling the disk:
+`child_workspace_max` (one child, default 2 GiB) and `children_max` (all of
+them, default 20 GiB); a child that would go over either does not start.
 Isolation is still being finished, so leave it off for now. A workspace root outside `/var/lib/storm-runtime`
 needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.

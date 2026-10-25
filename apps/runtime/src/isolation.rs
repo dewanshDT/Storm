@@ -14,6 +14,29 @@
 
 pub use imp::*;
 
+/// A spawned child's workspace, as the helper made it (decision 137): its
+/// own clone of the parent's `HEAD` (W2), or a scratch directory beside its
+/// parent's workspace shown read-only (W3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildWorkspace {
+    pub mode: ChildMode,
+    /// Where the child works, at this same path in its own view.
+    pub path: std::path::PathBuf,
+    /// The commit a clone starts from.
+    pub commit: Option<String>,
+    /// The branch it is on; none when the parent's `HEAD` was detached.
+    pub branch: Option<String>,
+    /// Submodules and large-file pointers are not materialized (137b).
+    pub submodules: bool,
+    pub large_files: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildMode {
+    Clone,
+    Scratch,
+}
+
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -233,6 +256,15 @@ mod imp {
         pub fn self_test(&self) -> Result<(), &'static str> {
             match self._never {}
         }
+
+        pub fn child_create(
+            &self,
+            _: &str,
+            _: &str,
+            _: &std::path::Path,
+        ) -> std::io::Result<super::ChildWorkspace> {
+            match self._never {}
+        }
     }
 }
 
@@ -283,6 +315,17 @@ mod imp {
             .map(|r| r.code.as_str())
     }
 
+    /// Why a child's workspace could not be made (137f, 137h), for the
+    /// child's `start_failed`: `workspace_cap`, `unreadable_repository`,
+    /// `wrong_parent`, `child_exists`, … None when `e` is not the helper
+    /// refusing `child_create`.
+    pub fn child_failure(e: &io::Error) -> Option<&str> {
+        e.get_ref()
+            .and_then(|e| e.downcast_ref::<Refused>())
+            .filter(|r| r.op == "child_create")
+            .map(|r| r.code.as_str())
+    }
+
     /// Why isolation cannot be had through the helper now (136j): it does
     /// not answer, or no session could have a network.
     pub fn unavailable_because(e: &io::Error) -> Option<&'static str> {
@@ -308,6 +351,8 @@ mod imp {
     const END_TIMEOUT: Duration = Duration::from_secs(30);
     /// The job unit's own limit is 900 s (the helper's `agents.rs`).
     const JOB_TIMEOUT: Duration = Duration::from_secs(960);
+    /// A child's clone unit's own limit is 600 s (`children.rs`).
+    const CHILD_TIMEOUT: Duration = Duration::from_secs(660);
     const MAX_RESPONSE: usize = 16 * 1024;
 
     /// One request to the helper, and its answer.
@@ -331,6 +376,8 @@ mod imp {
             let stream = UnixStream::connect(&self.0)?;
             let wait = if request["op"] == "agent_job" {
                 JOB_TIMEOUT
+            } else if request["op"] == "child_create" {
+                CHILD_TIMEOUT
             } else if request["op"] == "end" || request["op"] == "release" {
                 END_TIMEOUT
             } else {
@@ -565,6 +612,43 @@ mod imp {
             Ok(Ok(answer["version"].as_str().map(str::to_string)))
         }
 
+        /// Makes `child`'s workspace from `parent`'s, which is `workspace`
+        /// (decision 137): after `child`'s lease and `prepare`, before its
+        /// `start`. Asked again for the same parent, it answers the same.
+        pub fn child_create(
+            &self,
+            parent: &str,
+            child: &str,
+            workspace: &Path,
+        ) -> io::Result<super::ChildWorkspace> {
+            let workspace = workspace
+                .to_str()
+                .ok_or_else(|| io::Error::other("the workspace path is not UTF-8"))?;
+            let (answer, _) = self.ask(
+                json!({"op": "child_create", "parent": parent, "child": child, "workspace": workspace}),
+                None,
+            )?;
+            let mode = match answer["mode"].as_str() {
+                Some("clone") => super::ChildMode::Clone,
+                Some("scratch") => super::ChildMode::Scratch,
+                _ => return Err(io::Error::other("the helper named no workspace mode")),
+            };
+            let path = answer["workspace"]
+                .as_str()
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| io::Error::other("the helper named no child workspace"))?;
+            let text = |k: &str| answer[k].as_str().map(str::to_string);
+            Ok(super::ChildWorkspace {
+                mode,
+                path,
+                commit: text("commit"),
+                branch: text("branch"),
+                submodules: answer["submodules"] == true,
+                large_files: answer["large_files"] == true,
+            })
+        }
+
         pub fn release(&self, session: &str, user: &str) -> io::Result<()> {
             self.ask(
                 json!({"op": "release", "session": session, "user": user}),
@@ -602,6 +686,8 @@ mod imp {
             pub lease_uid: Option<u32>,
             /// As if pasta were missing (IT-7).
             pub no_passt: bool,
+            /// What `child_create` is refused with, if it is.
+            pub child_refusal: Option<String>,
         }
 
         pub struct FakeHelper {
@@ -653,7 +739,11 @@ mod imp {
             };
             let req: Value = serde_json::from_slice(&line).unwrap();
             let op = req["op"].as_str().unwrap().to_string();
-            let session = req["session"].as_str().unwrap_or("").to_string();
+            let session = req["session"]
+                .as_str()
+                .or(req["child"].as_str())
+                .unwrap_or("")
+                .to_string();
             let what = match (req["signal"].as_str(), req["agent"].as_str()) {
                 (Some(signal), _) => format!("{op} {session} {signal}"),
                 (None, Some(agent)) => {
@@ -789,6 +879,13 @@ mod imp {
                     }
                 }
                 "agent_job" => (json!({"ok": true, "version": "9.9.9"}), None),
+                "child_create" => match seen.lock().unwrap().child_refusal.clone() {
+                    Some(code) => refuse(&code),
+                    None => (
+                        json!({"ok": true, "mode": "clone", "workspace": format!("/var/lib/storm-runtime-isolation/children/{session}/workspace"), "commit": "a".repeat(40), "branch": "main", "submodules": false, "large_files": true}),
+                        None,
+                    ),
+                },
                 _ => (json!({"ok": false, "error": "not_built"}), None),
             };
             let mut line = answer.to_string().into_bytes();

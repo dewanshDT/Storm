@@ -67,6 +67,13 @@ pub struct RuntimeConfig {
     /// may reach from its own network (136d); the helper reads them.
     #[serde(default)]
     pub isolation_host_ports: Vec<u16>,
+    /// With isolation on, the most one spawned child's workspace may take,
+    /// in bytes (decision 137f; default 2 GiB); the helper reads it.
+    #[serde(default)]
+    pub child_workspace_max: Option<u64>,
+    /// And every child's on this host together (default 20 GiB).
+    #[serde(default)]
+    pub children_max: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -141,6 +148,8 @@ impl Default for RuntimeConfig {
             agent_updates: AgentUpdates::default(),
             isolation: Isolation::default(),
             isolation_host_ports: Vec::new(),
+            child_workspace_max: None,
+            children_max: None,
         }
     }
 }
@@ -185,6 +194,7 @@ impl RuntimeConfig {
         };
         config.check_roots()?;
         config.check_host_ports()?;
+        config.check_child_caps()?;
         Ok(config)
     }
 
@@ -199,6 +209,15 @@ impl RuntimeConfig {
         ports.dedup();
         if ports.len() > 64 {
             bail!("isolation_host_ports: at most 64 ports");
+        }
+        Ok(())
+    }
+
+    /// The helper's rule (`HelperConfig::caps`): a cap of 0 refuses every
+    /// child, which no operator means.
+    pub fn check_child_caps(&self) -> Result<()> {
+        if self.child_workspace_max == Some(0) || self.children_max == Some(0) {
+            bail!("child_workspace_max and children_max must be above 0");
         }
         Ok(())
     }
@@ -693,6 +712,21 @@ mod tests {
         ] {
             assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn the_child_caps_are_bytes_above_zero() {
+        let c: RuntimeConfig =
+            toml::from_str("child_workspace_max = 1073741824\nchildren_max = 10737418240").unwrap();
+        assert_eq!(
+            (c.child_workspace_max, c.children_max),
+            (Some(1 << 30), Some(10 << 30))
+        );
+        assert!(c.check_child_caps().is_ok());
+        assert!(RuntimeConfig::default().check_child_caps().is_ok());
+        let zero: RuntimeConfig = toml::from_str("children_max = 0").unwrap();
+        assert!(zero.check_child_caps().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("child_workspace_max = \"2 GiB\"").is_err());
     }
 
     #[test]

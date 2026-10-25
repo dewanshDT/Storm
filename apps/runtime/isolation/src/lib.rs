@@ -21,6 +21,8 @@
 pub mod accounts;
 pub mod agents;
 pub mod audit;
+pub mod children;
+pub mod clone;
 pub mod config;
 pub mod convert;
 pub mod fdpass;

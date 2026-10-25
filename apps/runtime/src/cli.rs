@@ -252,6 +252,7 @@ impl Provider for CliProvider {
             env_remove: spec.launch.env_remove,
             secret_env: spec.launch.secret_env,
             resumed_from: spec.launch.resumed_from,
+            child_of: spec.launch.child_of,
             tag: spec.session_id.clone(),
             isolated: self
                 .isolation

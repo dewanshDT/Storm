@@ -393,6 +393,70 @@ fn the_helper_runs_the_hosts_own_installs() {
     assert!(sysusers.contains("u storm-install - "));
 }
 
+/// 137-1: a child's workspace needs no capability the helper did not
+/// already keep. Its clone runs the helper's own binary, where the package
+/// puts it, as the child's user, in a unit of its own.
+#[test]
+#[cfg(target_os = "linux")]
+fn child_workspaces_add_no_capability_to_the_helper() {
+    let unit = repo_file(HELPER_UNIT);
+    assert_eq!(
+        unit_values(&unit, "CapabilityBoundingSet"),
+        ["CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER"]
+    );
+    let comments: String = unit.lines().filter(|l| l.starts_with('#')).collect();
+    for reason in [
+        "to measure a parent's repository",
+        "give a spawned child its own workspace",
+        "A child's clone runs as the child's user",
+    ] {
+        assert!(comments.contains(reason), "{reason}");
+    }
+    let exec = unit_value(&unit, "ExecStart").unwrap();
+    assert_eq!(
+        exec,
+        format!("{} serve", storm_runtime_isolation::children::HELPER_BIN)
+    );
+    let cargo = repo_file("apps/runtime/Cargo.toml");
+    let (dir, name) = storm_runtime_isolation::children::HELPER_BIN
+        .rsplit_once('/')
+        .unwrap();
+    assert!(cargo.contains(&format!(
+        r#"["isolation/target/release/{name}", "{}/", "755"]"#,
+        dir.trim_start_matches('/')
+    )));
+}
+
+/// 137f: the host accepts the caps the helper reads, and the example
+/// names both.
+#[test]
+fn the_host_and_the_helper_read_the_same_child_caps() {
+    let text = repo_file("deploy/runtime.toml.example");
+    for key in ["child_workspace_max", "children_max"] {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&format!("# {key} = ")))
+            .unwrap_or_else(|| panic!("{key}"));
+        let toml = line.trim_start_matches("# ");
+        let host: storm_runtime::config::RuntimeConfig = toml::from_str(toml).unwrap();
+        host.check_child_caps().unwrap();
+        #[cfg(target_os = "linux")]
+        {
+            let helper = storm_runtime_isolation::config::HelperConfig::parse(toml).unwrap();
+            let caps = helper.caps().unwrap();
+            let defaults = (
+                storm_runtime_isolation::config::DEFAULT_CHILD_WORKSPACE_MAX,
+                storm_runtime_isolation::config::DEFAULT_CHILDREN_MAX,
+            );
+            assert_eq!(
+                (caps.child, caps.children),
+                defaults,
+                "{key}: the example is the default"
+            );
+        }
+    }
+}
+
 /// 136f: the host and the helper agree on the refreshable variables a
 /// session never gets.
 #[test]

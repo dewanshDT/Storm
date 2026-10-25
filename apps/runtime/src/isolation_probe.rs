@@ -448,6 +448,7 @@ mod imp {
                 env_remove: Vec::new(),
                 secret_env: Vec::new(),
                 resumed_from: None,
+                child_of: None,
                 tag: self.id.clone(),
                 isolated: Some(Isolated {
                     link: link.clone(),

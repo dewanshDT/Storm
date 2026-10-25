@@ -40,6 +40,9 @@ pub(crate) struct Launch {
     /// On an isolated host, a resume's predecessor and conversation (136e).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub resumed_from: Option<(String, String)>,
+    /// On an isolated host, a spawned child's parent (decision 137).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub child_of: Option<String>,
     /// The session id, which marks everything the session starts. Unix
     /// finds what left the session by it; Windows' job holds everything
     /// already (AM52).
