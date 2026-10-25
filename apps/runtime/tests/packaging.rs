@@ -139,3 +139,198 @@ fn the_example_config_parses_and_points_inside_the_sandbox() {
         "the built-ins by default"
     );
 }
+
+// ---- per-session isolation (decision 136) -------------------------------
+
+const HELPER_UNIT: &str = "deploy/storm-runtime-isolation.service";
+const HELPER_SOCKET: &str = "deploy/storm-runtime-isolation.socket";
+
+/// G-136-6: isolation adds a separate helper and leaves the host's own unit
+/// exactly as it was. Every directive line of storm-runtime.service is
+/// pinned; changing one needs a decision, not a tidy-up.
+#[test]
+fn g_136_6_the_host_unit_is_unchanged_by_isolation() {
+    let unit = repo_file(UNIT);
+    let directives: Vec<&str> = code_lines(&unit).filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        directives,
+        [
+            "[Unit]",
+            "Description=Storm Runtime Host",
+            "Documentation=https://github.com/dewanshDT/Storm/blob/main/deploy/README.md",
+            "After=network-online.target",
+            "Wants=network-online.target",
+            "StartLimitIntervalSec=60",
+            "StartLimitBurst=5",
+            "[Service]",
+            "Type=exec",
+            "User=storm-runtime",
+            "Group=storm-runtime",
+            "Environment=HOME=/var/lib/storm-runtime/home",
+            "ExecStart=/usr/bin/storm-runtime serve --state /var/lib/storm-runtime --config /etc/storm-runtime/runtime.toml --exclusive-account",
+            "StateDirectory=storm-runtime",
+            "StateDirectoryMode=0700",
+            "Restart=on-failure",
+            "RestartSec=3",
+            "RestartPreventExitStatus=3",
+            "UMask=0027",
+            "NoNewPrivileges=true",
+            "PrivateTmp=true",
+            "PrivateDevices=true",
+            "ProtectSystem=strict",
+            "ProtectHome=true",
+            "ProtectKernelTunables=true",
+            "ProtectKernelModules=true",
+            "ProtectControlGroups=true",
+            "LockPersonality=true",
+            "RestrictNamespaces=true",
+            "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK",
+            "[Install]",
+            "WantedBy=multi-user.target",
+        ]
+    );
+}
+
+fn unit_values<'a>(unit: &'a str, key: &str) -> Vec<&'a str> {
+    let prefix = format!("{key}=");
+    code_lines(unit)
+        .filter_map(|l| l.strip_prefix(prefix.as_str()))
+        .collect()
+}
+
+/// G-136-2's half that a file can hold: the helper keeps one capability,
+/// runs nothing but its own binary, and is sandboxed in every way that
+/// does not stop it doing its job.
+#[test]
+fn the_helper_unit_keeps_only_what_it_needs() {
+    let unit = repo_file(HELPER_UNIT);
+    for (key, value) in [
+        ("ExecStart", "/usr/sbin/storm-runtime-isolation serve"),
+        ("User", "root"),
+        ("CapabilityBoundingSet", "CAP_DAC_READ_SEARCH"),
+        ("AmbientCapabilities", ""),
+        ("NoNewPrivileges", "true"),
+        ("PrivateNetwork", "true"),
+        ("RestrictAddressFamilies", "AF_UNIX"),
+        ("IPAddressDeny", "any"),
+        ("PrivateTmp", "true"),
+        ("PrivateDevices", "true"),
+        ("PrivateIPC", "true"),
+        ("ProtectSystem", "strict"),
+        ("ProtectHome", "true"),
+        ("ProtectKernelTunables", "true"),
+        ("ProtectKernelModules", "true"),
+        ("ProtectKernelLogs", "true"),
+        ("ProtectControlGroups", "true"),
+        ("ProtectProc", "invisible"),
+        ("RestrictNamespaces", "true"),
+        ("RestrictSUIDSGID", "true"),
+        ("LockPersonality", "true"),
+        ("MemoryDenyWriteExecute", "true"),
+        ("SystemCallArchitectures", "native"),
+        ("UMask", "0077"),
+        ("StateDirectoryMode", "0700"),
+        ("Requires", "storm-runtime-isolation.socket"),
+    ] {
+        assert_eq!(unit_values(&unit, key), [value], "{key}");
+    }
+    assert_eq!(
+        unit_values(&unit, "SystemCallFilter"),
+        ["@system-service", "~@privileged @resources @mount @chown"]
+    );
+    // Socket-activated only: never started at boot on its own, and never
+    // given a writable path beyond its own state.
+    assert!(!unit.contains("[Install]"));
+    for key in [
+        "ReadWritePaths",
+        "ExecStartPre",
+        "ExecStartPost",
+        "Environment",
+        "SupplementaryGroups",
+    ] {
+        assert!(unit_values(&unit, key).is_empty(), "{key}");
+    }
+}
+
+/// 136c: a socket only the host account and root can reach.
+#[test]
+fn the_helper_socket_is_the_host_accounts_alone() {
+    let unit = repo_file(HELPER_SOCKET);
+    for (key, value) in [
+        (
+            "ExecStartPre",
+            "/usr/bin/install -d -m 0710 -o root -g storm-runtime /run/storm-runtime-isolation",
+        ),
+        ("ListenStream", "/run/storm-runtime-isolation/helper.sock"),
+        ("SocketUser", "root"),
+        ("SocketGroup", "storm-runtime"),
+        ("SocketMode", "0660"),
+        ("DirectoryMode", "0710"),
+        ("Accept", "false"),
+    ] {
+        assert_eq!(unit_values(&unit, key), [value], "{key}");
+    }
+}
+
+#[test]
+fn the_package_ships_the_helper_disabled() {
+    let cargo = repo_file("apps/runtime/Cargo.toml");
+    for asset in [
+        r#"["isolation/target/release/storm-runtime-isolation", "usr/sbin/", "755"]"#,
+        r#"["../../deploy/storm-runtime-isolation.socket", "lib/systemd/system/", "644"]"#,
+        r#"["../../deploy/storm-runtime-isolation.service", "lib/systemd/system/", "644"]"#,
+        r#"["../../deploy/storm-runtime-isolation.sysusers", "usr/share/storm-runtime-isolation/sysusers.conf", "644"]"#,
+    ] {
+        assert!(cargo.contains(asset), "{asset}");
+    }
+    assert!(cargo.contains(r#"recommends = "passt""#));
+    // A host with isolation off has no pool accounts and no helper running:
+    // nothing at install creates the one or enables the other.
+    for script in ["postinst", "prerm", "postrm"] {
+        let text = repo_file(&format!("apps/runtime/debian/{script}"));
+        for line in code_lines(&text) {
+            assert!(!line.contains("sysusers"), "{script}: {line}");
+            assert!(
+                !line.contains("storm-s0") && !line.contains("storm-w0"),
+                "{script}: {line}"
+            );
+            assert!(
+                !line.contains("useradd") || line.contains("storm-runtime"),
+                "{script}: {line}"
+            );
+            if line.contains("storm-runtime-isolation") {
+                assert!(
+                    !line.contains("enable") || line.contains("disable"),
+                    "{script}: {line}"
+                );
+                assert!(!line.contains(" start "), "{script}: {line}");
+            }
+        }
+    }
+}
+
+/// The helper accepts a provider only by an id the operator's configuration
+/// has; with none configured, the built-ins. Its list is this crate's.
+#[test]
+fn the_helper_knows_the_same_built_in_providers() {
+    let helper = repo_file("apps/runtime/isolation/src/config.rs");
+    let start = helper
+        .find("pub const BUILT_IN_PROVIDERS")
+        .expect("BUILT_IN_PROVIDERS");
+    let list = &helper[start..start + helper[start..].find("];").unwrap()];
+    let list = &list[list.find('[').unwrap()..];
+    let ids: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    let ours: Vec<&str> = storm_runtime::profile::BUILT_IN
+        .iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(ids, ours);
+}
+
+#[test]
+fn the_example_config_leaves_isolation_off() {
+    let text = repo_file("deploy/runtime.toml.example");
+    let config: storm_runtime::config::RuntimeConfig = toml::from_str(&text).unwrap();
+    assert_eq!(config.isolation, storm_runtime::config::Isolation::Off);
+    assert!(text.contains("# isolation = \"off\""));
+}

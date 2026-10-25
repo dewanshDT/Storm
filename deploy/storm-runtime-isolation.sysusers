@@ -1,0 +1,131 @@
+# Storm Runtime Host isolation pools (decision 136b). Applied by
+# `storm-runtime-isolation on`, never at boot: the package installs this
+# file outside sysusers.d, so a host with isolation off has none of them.
+u storm-s001 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s002 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s003 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s004 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s005 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s006 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s007 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s008 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s009 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s010 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s011 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s012 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s013 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s014 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s015 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s016 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s017 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s018 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s019 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s020 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s021 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s022 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s023 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s024 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s025 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s026 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s027 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s028 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s029 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s030 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s031 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s032 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s033 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s034 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s035 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s036 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s037 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s038 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s039 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s040 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s041 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s042 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s043 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s044 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s045 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s046 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s047 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s048 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s049 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s050 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s051 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s052 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s053 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s054 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s055 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s056 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s057 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s058 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s059 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s060 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s061 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s062 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s063 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+u storm-s064 - "Storm isolated session" /nonexistent /usr/sbin/nologin
+g storm-w001 -
+g storm-w002 -
+g storm-w003 -
+g storm-w004 -
+g storm-w005 -
+g storm-w006 -
+g storm-w007 -
+g storm-w008 -
+g storm-w009 -
+g storm-w010 -
+g storm-w011 -
+g storm-w012 -
+g storm-w013 -
+g storm-w014 -
+g storm-w015 -
+g storm-w016 -
+g storm-w017 -
+g storm-w018 -
+g storm-w019 -
+g storm-w020 -
+g storm-w021 -
+g storm-w022 -
+g storm-w023 -
+g storm-w024 -
+g storm-w025 -
+g storm-w026 -
+g storm-w027 -
+g storm-w028 -
+g storm-w029 -
+g storm-w030 -
+g storm-w031 -
+g storm-w032 -
+g storm-w033 -
+g storm-w034 -
+g storm-w035 -
+g storm-w036 -
+g storm-w037 -
+g storm-w038 -
+g storm-w039 -
+g storm-w040 -
+g storm-w041 -
+g storm-w042 -
+g storm-w043 -
+g storm-w044 -
+g storm-w045 -
+g storm-w046 -
+g storm-w047 -
+g storm-w048 -
+g storm-w049 -
+g storm-w050 -
+g storm-w051 -
+g storm-w052 -
+g storm-w053 -
+g storm-w054 -
+g storm-w055 -
+g storm-w056 -
+g storm-w057 -
+g storm-w058 -
+g storm-w059 -
+g storm-w060 -
+g storm-w061 -
+g storm-w062 -
+g storm-w063 -
+g storm-w064 -

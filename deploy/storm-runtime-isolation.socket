@@ -1,0 +1,26 @@
+# Storm Runtime isolation helper's socket (decision 136c).
+#
+# Shipped disabled. `sudo storm-runtime-isolation on` enables it; `off`
+# disables it. A host with isolation off never listens here.
+#
+# Only the host account reaches it: the directory is root:storm-runtime 0710
+# (only those two can enter), the socket root:storm-runtime 0660, and the
+# helper still checks every peer's uid is storm-runtime's. systemd binds it,
+# so the helper never needs the right to chown a socket.
+
+[Unit]
+Description=Storm Runtime isolation helper socket
+Documentation=https://github.com/dewanshDT/Storm/blob/main/deploy/README.md
+
+[Socket]
+ExecStartPre=/usr/bin/install -d -m 0710 -o root -g storm-runtime /run/storm-runtime-isolation
+ListenStream=/run/storm-runtime-isolation/helper.sock
+SocketUser=root
+SocketGroup=storm-runtime
+SocketMode=0660
+DirectoryMode=0710
+RemoveOnStop=true
+Accept=false
+
+[Install]
+WantedBy=sockets.target

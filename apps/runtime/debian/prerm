@@ -8,6 +8,9 @@ case "$1" in
         if [ -d /run/systemd/system ]; then
             systemctl stop storm-runtime 2>/dev/null || true
             systemctl disable storm-runtime 2>/dev/null || true
+            # Its binary is going. Workspaces stay as they are; reinstall and
+            # run `storm-runtime-isolation off` to restore them (decision 136).
+            systemctl disable --now storm-runtime-isolation.socket storm-runtime-isolation.service 2>/dev/null || true
         fi
         ;;
 esac

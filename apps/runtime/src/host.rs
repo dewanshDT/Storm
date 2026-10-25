@@ -1211,6 +1211,12 @@ impl Host {
             refuse("unsupported interaction");
             return self.post_start_failure(&id).await;
         }
+        // 136a: on an isolated host no session runs as this account. Until
+        // this host can start one in its own unit (136-2), it starts none.
+        if self.config.isolation == crate::config::Isolation::PerSession {
+            refuse("isolation is on and this host cannot isolate a session");
+            return self.post_start_failure(&id).await;
+        }
         if self.sessions.lock().unwrap().len() >= self.config.max_sessions as usize {
             refuse("max_sessions reached");
             return self.post_start_failure(&id).await;
@@ -3730,6 +3736,18 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
+        test_host_with(providers, "").await
+    }
+
+    async fn test_host_with(
+        providers: Vec<Arc<dyn Provider>>,
+        extra_config: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
         let state = tempfile::tempdir().unwrap();
@@ -3747,7 +3765,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [{:?}]\nmax_sessions = 2",
+            "workspace_roots = [{:?}]\nmax_sessions = 2\n{extra_config}",
             roots.path().display().to_string()
         ))
         .unwrap();
@@ -3755,6 +3773,34 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
+    }
+
+    /// 136a: with isolation on, a host that cannot isolate a session
+    /// starts none, rather than run it as its own account.
+    #[tokio::test]
+    async fn with_isolation_on_no_session_starts_as_the_host_account() {
+        let (host, seen, _state, _roots) = test_host_with(
+            vec![Arc::new(crate::fake::FakeProvider::new())],
+            "isolation = \"per-session\"",
+        )
+        .await;
+        host.dispatch(1, start("ags_ISO", "fake"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_iso") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_ISO").is_none());
+
+        let (host, _seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        host.dispatch(1, start("ags_OFF", "fake"));
+        eventually("with isolation off it starts", || {
+            host.session("ags_OFF").is_some()
+        })
+        .await;
     }
 
     fn start(session: &str, provider: &str) -> Command {

@@ -191,6 +191,17 @@ sudo systemctl edit storm-runtime
 `MemoryDenyWriteExecute`, under which OpenCode cannot start. The unit's
 `RestartPreventExitStatus=3` keeps a revoked host stopped.
 
+**Per-session isolation is being built, and is off.** The package ships a
+second, separate root service, `storm-runtime-isolation`, disabled. When it
+is finished, `sudo storm-runtime-isolation on` will run each session as its
+own system user in its own sandbox, so sessions on one host cannot reach each
+other. Turning it on needs systemd 255 or newer and `passt`, stops nothing by
+itself (stop the host first), creates the user pools and gives each workspace
+a group; `sudo storm-runtime-isolation off` puts every workspace back as it
+was. Until a later release can start isolated sessions, a host with it on
+refuses every session rather than run one the old way, so leave it off.
+`storm-runtime.service` itself is unchanged either way.
+
 Remove it with `sudo apt remove storm-runtime`.
 
 ## macOS

@@ -33,6 +33,12 @@ scrollback_bytes = 4194304
 # gets its enabled plugins' local (stdio) MCP servers (decision 131b).
 # plugin_mcp = "allow"
 
+# Per-session isolation (decision 136): each session as its own OS user in
+# its own unit. Never set by hand: `sudo storm-runtime-isolation on` (and
+# `off`) also creates the user pools, converts the workspaces and enables the
+# helper, then sets this. Linux with systemd 255+ and passt only.
+# isolation = "off"
+
 # Omit [[providers]] entirely to offer every built-in (decision 130):
 # claude-code (the default), opencode, codex, cursor, command-code and shell.
 # One that is not installed is offered as not installed. claude-code,

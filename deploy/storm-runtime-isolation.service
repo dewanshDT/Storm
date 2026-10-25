@@ -1,0 +1,64 @@
+# Storm Runtime isolation helper (decision 136c): the one root service of
+# per-session isolation. Started by storm-runtime-isolation.socket, never
+# enabled on its own; a host with isolation off never runs it.
+#
+# It answers only the host account and only its fixed operations, and
+# refuses and audits anything else (to the journal). Every capability it
+# keeps is listed and justified here (gate G-136-2); a slice that needs
+# another adds it here with its reason, and tests/packaging.rs holds the
+# list.
+
+[Unit]
+Description=Storm Runtime isolation helper
+Documentation=https://github.com/dewanshDT/Storm/blob/main/deploy/README.md
+Requires=storm-runtime-isolation.socket
+After=storm-runtime-isolation.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/storm-runtime-isolation serve
+User=root
+Group=root
+Restart=on-failure
+RestartSec=3
+StateDirectory=storm-runtime-isolation
+StateDirectoryMode=0700
+UMask=0077
+
+# The only capability: CAP_DAC_READ_SEARCH, to check a requested workspace
+# path inside /var/lib/storm-runtime (0700, the host account's) without
+# being able to write anything there.
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=
+NoNewPrivileges=true
+
+# Its socket is passed in; it needs no network and no other socket family.
+PrivateNetwork=true
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+PrivateTmp=true
+PrivateDevices=true
+PrivateIPC=true
+DevicePolicy=closed
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+KeyringMode=private
+RemoveIPC=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @chown
+SystemCallErrorNumber=EPERM

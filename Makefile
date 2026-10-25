@@ -13,6 +13,8 @@ RELAY  := apps/relay
 CONFORMANCE := tools/relay-conformance
 RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
+# Per-session isolation's root helper (decision 136): its own small crate.
+ISOLATION := apps/runtime/isolation
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -70,6 +72,7 @@ fmt-check:
 	cd $(RELAY) && cargo fmt --check
 	cd $(CONFORMANCE) && cargo fmt --check
 	cd $(RUNTIME) && cargo fmt --check
+	cd $(ISOLATION) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, all must be clean
@@ -78,6 +81,7 @@ lint:
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
 	cd $(CONFORMANCE) && cargo clippy --all-targets -- -D warnings
 	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
+	cd $(ISOLATION) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
@@ -137,6 +141,21 @@ test-relay-cf:
 # (decision 77), so it is its own crate with its own target.
 test-runtime:
 	cd $(RUNTIME) && cargo test
+	cd $(ISOLATION) && cargo test
+
+## verify-isolation-units: systemd-analyze verify and security on the isolation helper's units (Linux)
+#
+# Unprivileged. The service's ExecStart is pointed at the debug build, since
+# verify refuses a unit whose binary is missing; security fails above an
+# exposure of 2.0 (the helper is root, so every sandbox setting counts).
+verify-isolation-units:
+	cd $(ISOLATION) && cargo build --quiet
+	d=$$(mktemp -d) && \
+	cp deploy/storm-runtime-isolation.socket deploy/storm-runtime-isolation.service "$$d"/ && \
+	sed -i "s#/usr/sbin/storm-runtime-isolation#$$PWD/$(ISOLATION)/target/debug/storm-runtime-isolation#" "$$d/storm-runtime-isolation.service" && \
+	systemd-analyze verify --man=no "$$d/storm-runtime-isolation.socket" "$$d/storm-runtime-isolation.service" && \
+	systemd-analyze security --offline=true --threshold=20 "$$d/storm-runtime-isolation.service" && \
+	rm -rf "$$d"
 
 ## test-client: Dart unit tests
 test-client:
@@ -364,6 +383,7 @@ fmt:
 	cd $(RELAY) && cargo fmt
 	cd $(CONFORMANCE) && cargo fmt
 	cd $(RUNTIME) && cargo fmt
+	cd $(ISOLATION) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------

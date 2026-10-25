@@ -671,6 +671,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   audited in `security_events` with codes only, never a URL or npm output.
   `tests/agent_install_gate.rs` (`STORM_AGENT_INSTALL_GATE=1`) proves every
   recipe against the real channels.
+- **Per-session isolation's root side is its own crate and unit, and the
+  host's unit never changes for it** (decision 136, `apps/runtime/isolation`).
+  `storm-runtime-isolation` is the only root code: the helper answers only
+  the host account's uid on the socket systemd binds, accepts only its fixed
+  operations with exactly their fields (a program, arguments or a uid in a
+  request is refused; a workspace must sit directly under a configured
+  root, with no symlink), and audits every request; its unit keeps one capability, and
+  a slice that needs another adds it there with its reason. The operator's
+  `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
+  record every entry before changing any, and write `isolation` in
+  `runtime.toml` last. Nothing at install creates the pools or enables the
+  helper. `tests/packaging.rs` pins `storm-runtime.service` line for line
+  (G-136-6).
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

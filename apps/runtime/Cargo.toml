@@ -25,6 +25,10 @@ no user data and never learns who owns a session."""
 section = "devel"
 priority = "optional"
 depends = "$auto"
+# Per-session isolation's user-mode network (decision 136). Recommended, not
+# required: a host with isolation off never runs it, and
+# `storm-runtime-isolation on` refuses a host without it.
+recommends = "passt"
 maintainer-scripts = "debian/"
 conf-files = ["/etc/storm-runtime/runtime.toml"]
 assets = [
@@ -32,6 +36,13 @@ assets = [
     ["../../deploy/storm-runtime.service", "lib/systemd/system/", "644"],
     ["../../deploy/runtime.toml.example", "etc/storm-runtime/runtime.toml", "644"],
     ["../../LICENSE", "usr/share/doc/storm-runtime/", "644"],
+    # Per-session isolation's root side (decision 136): its own crate, built
+    # into isolation/target/release/ beside this one. The units ship
+    # disabled; only `storm-runtime-isolation on` enables them.
+    ["isolation/target/release/storm-runtime-isolation", "usr/sbin/", "755"],
+    ["../../deploy/storm-runtime-isolation.socket", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-runtime-isolation.service", "lib/systemd/system/", "644"],
+    ["../../deploy/storm-runtime-isolation.sysusers", "usr/share/storm-runtime-isolation/sysusers.conf", "644"],
 ]
 
 # The provider contract has no dependencies at all (decision 77): PTY I/O is

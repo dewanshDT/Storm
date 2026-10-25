@@ -58,6 +58,19 @@ pub struct RuntimeConfig {
     /// and only while none of that agent's sessions runs (133-5).
     #[serde(default)]
     pub agent_updates: AgentUpdates,
+    /// Per-session isolation (decision 136a), set by `storm-runtime-isolation
+    /// on` and `off`, which also convert the workspaces. On, no session ever
+    /// runs as this host's account: one that cannot be isolated is refused.
+    #[serde(default)]
+    pub isolation: Isolation,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    #[default]
+    Off,
+    PerSession,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -122,6 +135,7 @@ impl Default for RuntimeConfig {
             agent_mcp: AgentMcp::default(),
             agent_install: AgentInstall::default(),
             agent_updates: AgentUpdates::default(),
+            isolation: Isolation::default(),
         }
     }
 }
@@ -622,6 +636,22 @@ mod tests {
             toml::from_str("agent_install = \"off\"\nagent_updates = \"manual\"").unwrap();
         assert_eq!(off.agent_install, AgentInstall::Off);
         assert_eq!(off.agent_updates, AgentUpdates::Manual);
+    }
+
+    /// Decision 136a: off unless the operator's command turned it on, and
+    /// only its two values parse.
+    #[test]
+    fn isolation_defaults_off() {
+        assert_eq!(RuntimeConfig::default().isolation, Isolation::Off);
+        let on: RuntimeConfig = toml::from_str("isolation = \"per-session\"").unwrap();
+        assert_eq!(on.isolation, Isolation::PerSession);
+        for bad in [
+            "isolation = \"on\"",
+            "isolation = true",
+            "isolation = \"per_session\"",
+        ] {
+            assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
