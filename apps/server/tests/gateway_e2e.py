@@ -316,6 +316,14 @@ args = ["-i"]
         check(f"the host row says its identity is {expected_identity} (135d)",
               host.get("identity", {}).get("state") == expected_identity
               and host["identity"] == host["capabilities"].get("identity"), host)
+        # Decision 136j: isolation is off on this host, and it says so.
+        expected_isolation = ({"state": "unavailable", "mechanism": None, "reason": "off"}
+                              if sys.platform.startswith("linux")
+                              else {"state": "unsupported", "mechanism": None,
+                                    "reason": "windows" if sys.platform == "win32" else "macos"})
+        check("the host row says isolation is off (136j)",
+              host.get("isolation") == expected_isolation
+              and host["capabilities"].get("isolation") == expected_isolation, host)
 
         def call_identities(session):
             db = sqlite3.connect(f"file:{os.path.join(STATE, 'gateway', 'gateway.db')}?mode=ro", uri=True)
@@ -386,6 +394,8 @@ args = ["-i"]
               not view.get("mcp_skipped"), view)
         check("the session view carries its host's identity (135d)",
               view.get("identity") == host["identity"], view)
+        check("and its host's isolation (136j)",
+              view.get("isolation") == host["isolation"], view)
         status, _ = call("POST", "/v1/integrations/suggestions/dismiss",
                          {"plugin": "e2eplug", "server": "remote", "url": "https://e2e-remote.example.com/mcp"},
                          auth=owner)

@@ -251,6 +251,13 @@ args = ["-i"]
               sorted(identity) == ["mechanism", "reason", "state"]
               and identity == caps.get("identity")
               and identity["state"] in ("verified", "unsupported", "unavailable"), host)
+        # Decision 136j: and its session isolation, off here.
+        isolation = host.get("isolation") or {}
+        check("the host row carries its isolation, as its capabilities say: off here",
+              sorted(isolation) == ["mechanism", "reason", "state"]
+              and isolation == caps.get("isolation")
+              and isolation["state"] in ("unsupported", "unavailable")
+              and isolation["reason"] in ("off", "macos", "windows"), host)
         status, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
         check("workspaces carry live counts", status == 200 and all("live_sessions" in w for w in wss), wss)
 
