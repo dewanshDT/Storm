@@ -100,7 +100,7 @@ pub struct LaunchRecord {
 }
 
 /// The note a session was started from. The title is a snapshot.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Context {
     pub vault_id: String,
     pub note_id: String,
@@ -451,8 +451,7 @@ impl Store {
             .optional()?)
     }
 
-    /// A session's live grants, for the record the owner sees.
-    #[cfg(test)]
+    /// A session's live grants: what a spawned child's start names.
     pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
         let mut stmt = self.conn.prepare(
             "SELECT connection_id, slug FROM session_mcp_grants
@@ -1254,6 +1253,18 @@ pub mod spawn {
                  created_at TEXT NOT NULL
              );
 
+             -- 134-5: a child's own workspace as its host made it (137-1):
+             -- the mode, and for a clone the commit it starts from.
+             CREATE TABLE IF NOT EXISTS session_child_workspace (
+                 session_id  TEXT PRIMARY KEY,
+                 mode        TEXT NOT NULL CHECK (mode IN ('clone', 'scratch')),
+                 base_commit TEXT,
+                 branch      TEXT,
+                 submodules  INTEGER NOT NULL,
+                 large_files INTEGER NOT NULL,
+                 created_at  TEXT NOT NULL
+             );
+
              -- 134f: a child's task, the exact text a person approved.
              CREATE TABLE IF NOT EXISTS session_task (
                  session_id TEXT PRIMARY KEY,
@@ -1472,6 +1483,11 @@ pub mod spawn {
     /// C4's hard caps. Counted here rather than held as constraints, so a
     /// revisit needs no migration.
     pub const MAX_DEPTH: i64 = 2;
+    /// The depth a start may reach today. A child's own workspace is its
+    /// user's alone (137-1), so the helper refuses a grandchild
+    /// (`wrong_parent`) and 137 does not say how one would read it; until a
+    /// decision does, a child starts none. Lower than C4's, never higher.
+    pub const BUILT_DEPTH: i64 = 1;
     pub const MAX_CHILDREN: i64 = 3;
     pub const MAX_TREE: i64 = 6;
     pub const MAX_PENDING: i64 = 2;
@@ -1497,6 +1513,10 @@ pub mod spawn {
             task: String,
             /// Another provider than the parent's: refused in V1 (B4).
             provider: Option<String>,
+            /// What the child is called; the workspace's name otherwise.
+            name: Option<String>,
+            /// A note the parent can read, the child's own context note.
+            context_note: Option<super::Context>,
         },
         Message {
             target: String,
@@ -1525,9 +1545,16 @@ pub mod spawn {
 
         fn payload(&self) -> String {
             match self {
-                Self::Start { task, provider } => serde_json::to_string(&StartPayload {
+                Self::Start {
+                    task,
+                    provider,
+                    name,
+                    context_note,
+                } => serde_json::to_string(&StartPayload {
                     task: task.clone(),
                     provider: provider.clone(),
+                    name: name.clone(),
+                    context_note: context_note.clone(),
                 }),
                 Self::Message { text, .. } => {
                     serde_json::to_string(&MessagePayload { text: text.clone() })
@@ -1544,6 +1571,10 @@ pub mod spawn {
         pub task: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub context_note: Option<super::Context>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1690,7 +1721,13 @@ pub mod spawn {
             let now = crate::index::now_rfc3339();
             let tx = self.conn.transaction()?;
             let parent = session_of(&tx, parent)?.expect("a parent");
-            let mut child = spawn_child(&tx, &parent, task, write_vault, &now)?;
+            let payload = StartPayload {
+                task: task.into(),
+                provider: None,
+                name: None,
+                context_note: None,
+            };
+            let mut child = spawn_child(&tx, &parent, &payload, write_vault, &now)?;
             child.status = "running".into();
             tx.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?1",
@@ -1709,6 +1746,53 @@ pub mod spawn {
                     params![session_id, from],
                 )
                 .unwrap();
+        }
+
+        /// A child's workspace as its host first reported it; never replaced.
+        pub fn record_child_workspace(
+            &self,
+            session_id: &str,
+            made: &crate::agent::ChildWorkspace,
+            now: &str,
+        ) -> Result<()> {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO session_child_workspace
+                     (session_id, mode, base_commit, branch, submodules, large_files, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    session_id,
+                    made.mode,
+                    made.commit,
+                    made.branch,
+                    made.submodules,
+                    made.large_files,
+                    now
+                ],
+            )?;
+            Ok(())
+        }
+
+        pub fn child_workspace(
+            &self,
+            session_id: &str,
+        ) -> Result<Option<crate::agent::ChildWorkspace>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT mode, base_commit, branch, submodules, large_files
+                     FROM session_child_workspace WHERE session_id = ?1",
+                    params![session_id],
+                    |r| {
+                        Ok(crate::agent::ChildWorkspace {
+                            mode: r.get(0)?,
+                            commit: r.get(1)?,
+                            branch: r.get(2)?,
+                            submodules: r.get(3)?,
+                            large_files: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?)
         }
 
         /// Records that a session's start carried `spawn_asks` (134-8).
@@ -2474,7 +2558,7 @@ pub mod spawn {
                 .count() as i64
         };
         let lineage = lineage_of(conn, &r.id)?;
-        if kind == "start" && lineage.depth + 1 > MAX_DEPTH {
+        if kind == "start" && lineage.depth + 1 > MAX_DEPTH.min(BUILT_DEPTH) {
             return Ok(Some("depth"));
         }
         let mine = open.iter().filter(|(_, q)| *q == r.id).count() as i64;
@@ -2567,29 +2651,39 @@ pub mod spawn {
         Ok(Act::Started(Box::new(spawn_child(
             conn,
             &r,
-            &payload.task,
+            &payload,
             write_vault,
             now,
         )?)))
     }
 
+    /// The workspace name a child is recorded under: its own directory,
+    /// which its host makes at its start (137-1) and then reports under
+    /// this name in `workspace_paths`, so WS-9 sees it apart from every
+    /// other. A name with a separator is never a listed workspace, so no
+    /// launch can name it.
+    pub fn child_workspace(child: &str) -> String {
+        format!("children/{child}")
+    }
+
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
     /// parent's write vault only when the person ticked it (D2). Spawn is
-    /// off: a child has no switch row. Its workspace is the parent's until
-    /// 137-1 makes one per child.
+    /// off: a child has no switch row, but its start carries the asks
+    /// (134-8), recorded here. Its workspace is its own (137-1).
     fn spawn_child(
         conn: &Connection,
         parent: &SessionRecord,
-        task: &str,
+        payload: &StartPayload,
         write_vault: bool,
         now: &str,
     ) -> Result<SessionRecord> {
+        let id = crate::auth::identity::random_id("ags_");
         let child = SessionRecord {
-            id: crate::auth::identity::random_id("ags_"),
+            workspace: child_workspace(&id),
+            id,
             owner_user_id: parent.owner_user_id.clone(),
             host_id: parent.host_id.clone(),
-            workspace: parent.workspace.clone(),
             provider: parent.provider.clone(),
             provider_kind: parent.provider_kind.clone(),
             interaction: parent.interaction.clone(),
@@ -2610,7 +2704,7 @@ pub mod spawn {
             harness_session: None,
             resumed_from: None,
         };
-        insert_spawned(conn, &child, &parent.id, task, now)?;
+        insert_spawned(conn, &child, &parent.id, &payload.task, now)?;
         let grants: Vec<McpGrant> = {
             let mut stmt = conn.prepare(
                 "SELECT connection_id, slug FROM session_mcp_grants
@@ -2645,16 +2739,26 @@ pub mod spawn {
             let rows = stmt.query_map([], |r| r.get(0))?;
             rows.collect::<rusqlite::Result<_>>()?
         };
+        let titled = payload
+            .name
+            .as_deref()
+            .or(payload.context_note.as_ref().map(|c| c.title.as_str()));
         insert_launch(
             conn,
             &LaunchRecord {
                 session_id: child.id.clone(),
-                name: crate::agent::session_name(None, &child.workspace, &live_names),
-                context: None,
+                name: crate::agent::session_name(titled, &parent.workspace, &live_names),
+                context: payload.context_note.clone(),
                 write_vault_id,
             },
             now,
         )?;
+        if reads_storm {
+            conn.execute(
+                "INSERT OR IGNORE INTO session_spawn_asks (session_id, created_at) VALUES (?1, ?2)",
+                params![child.id, now],
+            )?;
+        }
         let named: Vec<SessionIntegration> = {
             let mut stmt = conn.prepare(
                 "SELECT connection_id, slug, display_name FROM session_integrations
@@ -2819,6 +2923,7 @@ pub mod spawn {
         for table in [
             "session_spawn",
             "session_spawn_asks",
+            "session_child_workspace",
             "session_task",
             "session_result",
             "session_inbox",

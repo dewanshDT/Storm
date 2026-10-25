@@ -688,6 +688,12 @@ mod imp {
             pub no_passt: bool,
             /// What `child_create` is refused with, if it is.
             pub child_refusal: Option<String>,
+            /// Where `child_create` really makes a child's workspace, with
+            /// real git as this account; unset, it only answers.
+            pub children_root: Option<PathBuf>,
+            /// Each child's workspace as made, which its `start` runs in, as
+            /// the helper's unit's `WorkingDirectory=` is (137-1).
+            pub made: HashMap<String, PathBuf>,
         }
 
         pub struct FakeHelper {
@@ -731,6 +737,60 @@ mod imp {
                     status: self.status.clone(),
                 }
             }
+        }
+
+        /// What the helper's `child_create` does, as this account: W2, a
+        /// clone of a repository root's `HEAD` branch through git's own
+        /// transport with nothing pointing back; W3 otherwise, an empty
+        /// scratch directory.
+        fn make_child(parent: &Path, dest: &Path) -> Value {
+            std::fs::create_dir_all(dest).unwrap();
+            if !parent.join(".git").is_dir() {
+                return json!({"ok": true, "mode": "scratch", "workspace": dest, "commit": null, "branch": null, "submodules": false, "large_files": false});
+            }
+            let git = |dir: Option<&Path>, args: &[&str]| {
+                let mut c = std::process::Command::new("git");
+                if let Some(dir) = dir {
+                    c.arg("-C").arg(dir);
+                }
+                let out = c
+                    .args([
+                        "-c",
+                        "core.hooksPath=/dev/null",
+                        "-c",
+                        "protocol.file.allow=always",
+                    ])
+                    .args(args)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                    .output()
+                    .unwrap();
+                assert!(
+                    out.status.success(),
+                    "git {args:?}: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+                String::from_utf8(out.stdout).unwrap().trim().to_string()
+            };
+            let source = format!("file://{}", parent.display());
+            git(
+                None,
+                &[
+                    "clone",
+                    "--no-local",
+                    "--single-branch",
+                    "--no-tags",
+                    "--origin",
+                    "storm-parent",
+                    "--",
+                    &source,
+                    dest.to_str().unwrap(),
+                ],
+            );
+            git(Some(dest), &["remote", "remove", "storm-parent"]);
+            let commit = git(Some(dest), &["rev-parse", "HEAD"]);
+            let branch = git(Some(dest), &["symbolic-ref", "--short", "HEAD"]);
+            json!({"ok": true, "mode": "clone", "workspace": dest, "commit": commit, "branch": branch, "submodules": false, "large_files": false})
         }
 
         fn serve(stream: UnixStream, seen: &Mutex<Seen>, state_dir: &Path, program: &str) {
@@ -799,10 +859,13 @@ mod imp {
                         c.args(args.clone());
                         c
                     };
+                    let made = seen.lock().unwrap().made.get(&session).cloned();
                     let workspace = if probe {
                         let home = PathBuf::from(req["workspace"].as_str().unwrap());
                         std::fs::create_dir_all(&home).unwrap();
                         home
+                    } else if let Some(made) = made {
+                        made
                     } else {
                         PathBuf::from(req["workspace"].as_str().unwrap())
                     };
@@ -879,13 +942,28 @@ mod imp {
                     }
                 }
                 "agent_job" => (json!({"ok": true, "version": "9.9.9"}), None),
-                "child_create" => match seen.lock().unwrap().child_refusal.clone() {
-                    Some(code) => refuse(&code),
-                    None => (
-                        json!({"ok": true, "mode": "clone", "workspace": format!("/var/lib/storm-runtime-isolation/children/{session}/workspace"), "commit": "a".repeat(40), "branch": "main", "submodules": false, "large_files": true}),
-                        None,
-                    ),
-                },
+                "child_create" => {
+                    let (refusal, root) = {
+                        let seen = seen.lock().unwrap();
+                        (seen.child_refusal.clone(), seen.children_root.clone())
+                    };
+                    match (refusal, root) {
+                        (Some(code), _) => refuse(&code),
+                        (None, Some(root)) => {
+                            let parent = Path::new(req["workspace"].as_str().unwrap());
+                            let made = make_child(parent, &root.join(&session).join("workspace"));
+                            seen.lock().unwrap().made.insert(
+                                session.clone(),
+                                PathBuf::from(made["workspace"].as_str().unwrap()),
+                            );
+                            (made, None)
+                        }
+                        (None, None) => (
+                            json!({"ok": true, "mode": "clone", "workspace": format!("/var/lib/storm-runtime-isolation/children/{session}/workspace"), "commit": "a".repeat(40), "branch": "main", "submodules": false, "large_files": true}),
+                            None,
+                        ),
+                    }
+                }
                 _ => (json!({"ok": false, "error": "not_built"}), None),
             };
             let mut line = answer.to_string().into_bytes();

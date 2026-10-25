@@ -262,10 +262,26 @@ impl Provider for CliProvider {
                     provider: self.id.to_string(),
                 }),
         };
-        let spawned = pty::spawn(&launch, size)
-            .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
+        let spawned = pty::spawn(&launch, size).map_err(|e| {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::status::EndReason;
+                let why = match crate::isolation::child_failure(&e) {
+                    Some("workspace_cap") => Some(EndReason::WorkspaceCap),
+                    Some("unreadable_repository") => Some(EndReason::UnreadableRepository),
+                    _ => None,
+                };
+                if let Some(why) = why {
+                    return StartError::Ended(why, format!("the child's workspace: {e}"));
+                }
+            }
+            failed(&format!("starting {}", program.display()), e)
+        })?;
         if let Some(leader) = spawned.leader {
             events.leader(leader, spawned.user);
+        }
+        if let Some(made) = spawned.child_workspace {
+            events.child_workspace(made);
         }
 
         let shared = Arc::new(Shared {

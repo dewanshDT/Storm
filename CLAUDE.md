@@ -634,6 +634,17 @@ Specification*; the slices are decisions 81 and 81a onward):
   **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
   names for one directory, or one inside the other, are one workspace, and
   a name the host gives no directory for is shared with every other.
+- **An approved child is started in a workspace of its own, never its
+  parent's** (134-5): its `start` names the parent's workspace and
+  `child_of`, the host has the helper make the child's W2 clone or W3
+  scratch before it starts it (and refuses a child on a host without
+  isolation), and the child's record is `children/<id>`, which the host
+  reports in `workspace_paths` once made. Its grants are the parent's live
+  ones at approval, its agent the parent's (B4), its synced login only the
+  parent's; it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
+  starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
+  grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
+  holds the two crates' tests to one `start`.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets

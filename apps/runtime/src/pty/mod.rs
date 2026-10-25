@@ -66,6 +66,8 @@ pub(crate) struct Spawned {
     /// On an isolated host, the uid the helper leased the session (136i):
     /// its bridge connections must come from it.
     pub user: Option<u32>,
+    /// A spawned child's own workspace, made before it started (137-1).
+    pub child_workspace: Option<crate::isolation::ChildWorkspace>,
 }
 
 /// How the agent's own process ended.

@@ -648,8 +648,20 @@ fn lt11_a_resumed_child_is_a_new_top_level_session() {
     f.report(&c.id, "completed");
     // The parent turns its switch off so the workspace is free (WS-9).
     f.m.set_spawn(&p.id, false, Some("dev_A")).unwrap().unwrap();
-    let launch: Launch = serde_json::from_value(serde_json::json!({
+    // Its own workspace is no listed one: it resumes where its work began.
+    let origin = f.m.origin_workspace(&c.id).unwrap();
+    assert_eq!(origin, p.workspace);
+    let own: Launch = serde_json::from_value(serde_json::json!({
         "host_id": "hst_A", "workspace": c.workspace, "provider": "claude-code",
+        "terminal": {"cols": 80, "rows": 24}, "resume_of": c.id,
+    }))
+    .unwrap();
+    assert!(matches!(
+        f.m.launch("usr_A", own, LaunchMeta::default(), Vec::new()),
+        Err(AgentError::BadRequest(_))
+    ));
+    let launch: Launch = serde_json::from_value(serde_json::json!({
+        "host_id": "hst_A", "workspace": origin, "provider": "claude-code",
         "terminal": {"cols": 80, "rows": 24}, "resume_of": c.id,
     }))
     .unwrap();

@@ -290,6 +290,26 @@ pub struct ReportParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StartAgentParams {
+    /// What the new agent is to do: the exact text a person approves, and
+    /// what it reads first. At most 16 KiB.
+    pub task: String,
+    /// What to call it (one line, at most 80 characters).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// A note you can read, given to it as its context note.
+    #[serde(default)]
+    pub context_note: Option<NoteParams>,
+    /// Another agent than yours. Refused: a new agent runs your agent.
+    #[serde(default)]
+    pub provider: Option<String>,
+    /// Seconds to wait for the person's decision, capped as wait_agent is.
+    /// Without it the answer is at once.
+    #[serde(default)]
+    pub wait: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct MessageParams {
     /// The agent's session id (`ags_…`): one you started, or one it started.
     pub id: String,
@@ -354,7 +374,7 @@ pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
 /// Decision 134's tools for a session whose spawn switch is on (134c), offered
 /// by the gateway only while the switch is on and C0 holds. 134-4 built the
 /// reads (`list_agents`, `agent_status`, `list_children`, `wait_agent`),
-/// 134-6 `send_message` and 134-7 `end_agent`; `start_agent` is 134-5's.
+/// 134-5 `start_agent`, 134-6 `send_message` and 134-7 `end_agent`.
 pub const SPAWN_TOOLS: &[&str] = &[
     "list_agents",
     "start_agent",
@@ -694,6 +714,32 @@ impl Storm {
     }
 
     #[tool(
+        description = "Ask Storm to start another agent for a task. A person approves it first; the new agent runs your agent on your host, in its own copy of your workspace's committed history (or a scratch directory beside a read-only view of it), with no more access than yours. The answer is at once (or after wait seconds): pending, decided with started and the new agent's id, or refused with the reason. list_children shows a later decision."
+    )]
+    async fn start_agent(
+        &self,
+        Parameters(StartAgentParams {
+            task,
+            name,
+            context_note,
+            provider,
+            wait,
+        }): Parameters<StartAgentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let req = crate::ops::StartAgent {
+            task,
+            name,
+            context_note: context_note.map(|n| crate::agent::ContextRef {
+                vault_id: n.vault,
+                note_id: n.note_id,
+            }),
+            provider,
+            wait,
+        };
+        respond_object(crate::ops::start_agent(&self.state, self.actor()?, req).await)
+    }
+
+    #[tool(
         description = "Ask to send a message to an agent you started (or one it started). A person approves it before it reaches that agent's inbox; the answer is at once, and agent_status shows whether it was delivered and read."
     )]
     async fn send_message(
@@ -1001,10 +1047,10 @@ mod tests {
         );
     }
 
-    /// The 134 tools that exist, pinned: 134-5 changes this on purpose,
-    /// alongside the gateway's gate.
+    /// The 134 tools that exist, pinned: every one of them, since 134-5.
     const BUILT_134: &[&str] = &[
         "list_agents",
+        "start_agent",
         "agent_status",
         "list_children",
         "wait_agent",
@@ -1015,7 +1061,7 @@ mod tests {
     ];
 
     #[test]
-    fn every_spawn_tool_but_start_agent_exists() {
+    fn every_spawn_tool_exists() {
         let listed: Vec<String> = Storm::tool_router()
             .list_all()
             .into_iter()
@@ -1042,6 +1088,10 @@ mod tests {
         assert!(SPAWNED_TOOLS.contains(&"read_messages"));
         assert!(SPAWN_TOOLS.contains(&"send_message"));
         assert!(SPAWN_TOOLS.contains(&"end_agent"));
+        assert!(SPAWN_TOOLS.contains(&"start_agent"));
+        let mut every: Vec<&str> = SPAWN_TOOLS.iter().chain(SPAWNED_TOOLS).copied().collect();
+        every.sort_unstable();
+        assert_eq!(every, want, "nothing of 134 is left unbuilt");
     }
 
     #[test]

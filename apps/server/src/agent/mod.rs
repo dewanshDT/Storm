@@ -122,6 +122,11 @@ pub enum Command {
         /// another's. Omitted on a fresh launch; an old host ignores it.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         resumed_from: Option<String>,
+        /// A spawned child's parent (134-5): the host makes the child's own
+        /// workspace from `workspace`, the parent's, before it starts it
+        /// (137-1). Omitted for every other start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_of: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -471,6 +476,50 @@ pub struct StatusReport {
     /// The plugins' local servers it runs outside the gateway (131a).
     #[serde(default)]
     pub mcp_plugin_local: Option<Vec<String>>,
+    /// A spawned child's own workspace as its host made it (137-1); carried
+    /// by its first `running` report only.
+    #[serde(default)]
+    pub child_workspace: Option<ChildWorkspace>,
+}
+
+/// A spawned child's own workspace (decision 137): a clone of its parent's
+/// committed `HEAD` (W2) or a scratch directory beside a read-only view of
+/// the parent's (W3). Where it is stays the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildWorkspace {
+    /// `clone` or `scratch`.
+    pub mode: String,
+    /// The commit a clone starts from: the base an Apply's diff is against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Submodules and large-file pointers were not materialized (137b).
+    #[serde(default)]
+    pub submodules: bool,
+    #[serde(default)]
+    pub large_files: bool,
+}
+
+impl ChildWorkspace {
+    /// What a host may say, and nothing longer: a hex commit, a branch of
+    /// the clone's own characters.
+    fn valid(&self) -> bool {
+        let hex = |c: &str| matches!(c.len(), 40 | 64) && c.bytes().all(|b| b.is_ascii_hexdigit());
+        let branch = |b: &str| {
+            !b.is_empty()
+                && b.len() <= 255
+                && b.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._/-+@".contains(&c))
+        };
+        match self.mode.as_str() {
+            "clone" => {
+                self.commit.as_deref().is_some_and(hex) && self.branch.as_deref().is_none_or(branch)
+            }
+            "scratch" => self.commit.is_none() && self.branch.is_none(),
+            _ => false,
+        }
+    }
 }
 
 /// One server a session will not have (131a), by name only.
@@ -1094,6 +1143,36 @@ impl AgentManager {
         }
     }
 
+    /// Test-only: the host's inventory names each child's own directory, as
+    /// a host does once it has made it (134-5), so WS-9 sees them apart.
+    #[cfg(test)]
+    pub fn report_children_for_tests(&self, host_id: &str) {
+        let children: Vec<String> = self
+            .store
+            .lock()
+            .unwrap()
+            .for_host(host_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.workspace)
+            .filter(|w| w.starts_with("children/"))
+            .collect();
+        if let Some(mut caps) = self.host_live(host_id).capabilities {
+            for w in children {
+                caps.workspace_paths
+                    .insert(w.clone(), format!("/var/{w}/workspace"));
+            }
+            self.inventory(host_id, caps).unwrap();
+        }
+    }
+
+    /// Where a session's work began: its own workspace, or for a spawned
+    /// child, whose own is no listed workspace, its parent's (134-5). A
+    /// resumed child (C7) is a new top-level session there.
+    pub fn origin_workspace(&self, session_id: &str) -> AgentResult<String> {
+        Ok(origin_workspace(&self.store.lock().unwrap(), session_id)?)
+    }
+
     /// C0 (134r): nothing privileged unless the host checks every
     /// connection's identity and isolates its sessions, both as its live
     /// link says now. The refusal names the first that fails.
@@ -1431,9 +1510,29 @@ impl AgentManager {
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
         }
+        if let Some(made) = &report.child_workspace {
+            self.record_child_workspace(session_id, made)?;
+        }
         self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
+    }
+
+    /// A child's workspace as its host made it, kept once. Only a session
+    /// with a parent has one; anything else, or anything malformed, is
+    /// dropped.
+    fn record_child_workspace(&self, session_id: &str, made: &ChildWorkspace) -> AgentResult<()> {
+        let store = self.store.lock().unwrap();
+        if store.lineage(session_id)?.parent_session.is_none() || !made.valid() {
+            tracing::warn!(session = session_id, "a child workspace report was dropped");
+            return Ok(());
+        }
+        store.record_child_workspace(session_id, made, &now())?;
+        Ok(())
+    }
+
+    pub fn child_workspace_of(&self, session_id: &str) -> Result<Option<ChildWorkspace>> {
+        self.store.lock().unwrap().child_workspace(session_id)
     }
 
     /// The host's word on what the session will not have (131a): bounded, so
@@ -1690,6 +1789,7 @@ impl AgentManager {
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
                 spawn_asks,
+                child_of: None,
             },
         );
         let mut record = record;
@@ -1741,7 +1841,7 @@ impl AgentManager {
             ));
         };
         if req.host_id != r.host_id
-            || req.workspace != r.workspace
+            || req.workspace != origin_workspace(&store, &r.id)?
             || req.provider.as_deref() != Some(r.provider.as_str())
         {
             return Err(AgentError::BadRequest(
@@ -2258,6 +2358,22 @@ fn is_permutation(given: &[String], all: &[String]) -> bool {
     a == b
 }
 
+fn origin_workspace(store: &store::Store, session_id: &str) -> Result<String> {
+    let mut id = session_id.to_string();
+    // Lineage is at most C4's depth; the bound only guards a cycle no
+    // trigger allows.
+    for _ in 0..=store::spawn::MAX_DEPTH {
+        match store.lineage(&id)?.parent_session {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    store
+        .get(&id)?
+        .map(|r| r.workspace)
+        .ok_or_else(|| anyhow::anyhow!("no session {id}"))
+}
+
 pub fn session_name(title: Option<&str>, workspace: &str, live: &[String]) -> String {
     let taken = |name: &str| live.iter().any(|l| l == name);
     match title.map(slug).filter(|s| !s.is_empty()) {
@@ -2518,6 +2634,7 @@ mod tests {
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2649,6 +2766,7 @@ mod tests {
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3164,6 +3282,7 @@ mod tests {
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3181,6 +3300,7 @@ mod tests {
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3203,6 +3323,7 @@ mod tests {
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3289,6 +3410,7 @@ mod tests {
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3411,6 +3533,7 @@ mod tests {
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
+                        child_workspace: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -3444,6 +3567,7 @@ mod tests {
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
+            child_workspace: None,
             signal: None,
         }
     }
@@ -3746,6 +3870,7 @@ mod tests {
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
+                    child_workspace: None,
                 },
             )
             .unwrap();
@@ -3806,6 +3931,7 @@ mod tests {
                 provider_credential,
                 spawn_asks,
                 resumed_from: None,
+                child_of: None,
             },
         };
         let start = |provider_credential| start_with(provider_credential, None);

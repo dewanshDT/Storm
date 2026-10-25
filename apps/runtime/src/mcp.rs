@@ -701,18 +701,35 @@ pub fn write_provider_config(
 pub const OPENING_PROMPT: &str =
     "Read your context note with the storm session_context tool, then wait for my instructions.";
 
-/// Adds the opening prompt, as each CLI takes one, to a session started from
-/// a note. Nothing for any other provider, `shell` and `fake` included.
+/// The opening prompt of a session another agent started (decision 134f):
+/// as constant as [`OPENING_PROMPT`]. Its task, and any note, come only
+/// through `session_context`; nothing ever reaches its terminal, so it is
+/// told where its parent's messages are (134-6) and how it reports.
+pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. Check the storm read_messages tool for messages from the agent that started you, and report your result with the storm report_result tool.";
+
+/// Which opening prompt a session gets: a spawned child's, else a note's.
+pub fn opening_prompt(context: bool, spawned: bool) -> Option<&'static str> {
+    if spawned {
+        Some(SPAWNED_OPENING_PROMPT)
+    } else if context {
+        Some(OPENING_PROMPT)
+    } else {
+        None
+    }
+}
+
+/// Adds an opening prompt, as each CLI takes one. Nothing for any other
+/// provider, `shell` and `fake` included.
 pub fn with_opening_prompt(
     mut extras: LaunchExtras,
     provider: &str,
-    context: bool,
+    prompt: Option<&'static str>,
 ) -> LaunchExtras {
     use crate::profile::Prompt;
-    if context {
+    if let Some(prompt) = prompt {
         match crate::profile::get(provider).and_then(|p| p.prompt) {
-            Some(Prompt::Positional) => extras.args.push(OPENING_PROMPT.into()),
-            Some(Prompt::Flag(flag)) => extras.args.extend([flag.into(), OPENING_PROMPT.into()]),
+            Some(Prompt::Positional) => extras.args.push(prompt.into()),
+            Some(Prompt::Flag(flag)) => extras.args.extend([flag.into(), prompt.into()]),
             None => {}
         }
     }
@@ -1257,8 +1274,8 @@ mod tests {
                 .unwrap()
             };
             let plain = config("plain");
-            assert_eq!(with_opening_prompt(config("plain"), provider, false), plain);
-            let with = with_opening_prompt(config("context"), provider, true);
+            assert_eq!(with_opening_prompt(config("plain"), provider, None), plain);
+            let with = with_opening_prompt(config("context"), provider, Some(OPENING_PROMPT));
             assert_eq!(
                 with.env.len(),
                 plain.env.len(),
@@ -1272,9 +1289,23 @@ mod tests {
             };
             assert_eq!(added, expected, "{provider}");
         }
-        // Nothing can ever be interpolated into it.
-        for c in ['{', '}', '$', '%', '`', '\n'] {
+        // Nothing can ever be interpolated into either.
+        for c in ['{', '}', '$', '%', '`', '\n', '"', '\''] {
             assert!(!OPENING_PROMPT.contains(c), "{c:?}");
+            assert!(!SPAWNED_OPENING_PROMPT.contains(c), "{c:?}");
+        }
+    }
+
+    /// 134f: a spawned child gets its own prompt, whatever else it was
+    /// started with; a note's session the note's; any other none.
+    #[test]
+    fn a_spawned_child_gets_the_spawned_opening_prompt() {
+        assert_eq!(opening_prompt(false, false), None);
+        assert_eq!(opening_prompt(true, false), Some(OPENING_PROMPT));
+        assert_eq!(opening_prompt(false, true), Some(SPAWNED_OPENING_PROMPT));
+        assert_eq!(opening_prompt(true, true), Some(SPAWNED_OPENING_PROMPT));
+        for tool in ["session_context", "read_messages", "report_result"] {
+            assert!(SPAWNED_OPENING_PROMPT.contains(tool), "{tool}");
         }
     }
 

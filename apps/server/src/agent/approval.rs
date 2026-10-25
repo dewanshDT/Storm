@@ -2,8 +2,8 @@
 //! wait for a person's decision (134o, A5), under P-1…P-6 of "Decision 134 —
 //! dependencies".
 //!
-//! Dark: C0 refuses on every host until 136-5 reports isolation, and no
-//! start is requested before 134-5.
+//! Dark: C0 refuses on every host until a host's own report says its
+//! identity and isolation are verified.
 
 use std::time::{Duration, Instant};
 
@@ -126,6 +126,11 @@ impl AgentManager {
         Ok(decision)
     }
 
+    /// Every request a session made, oldest first.
+    pub fn requests_of(&self, requester: &str) -> AgentResult<Vec<Request>> {
+        Ok(self.store.lock().unwrap().requests_of(requester)?)
+    }
+
     /// The sweeper's pass (P-5): the requests it expired.
     pub fn expire_requests(&self) -> AgentResult<Vec<Request>> {
         let swept = self.store.lock().unwrap().expire_requests(&now())?;
@@ -219,20 +224,87 @@ impl AgentManager {
         }
     }
 
-    /// The host is told of an approved child after commit (P-3). Launching
-    /// one, in a workspace of its own (137-1), is 134-5's: until then the
-    /// start fails here, which frees its slot, and nothing reaches a host.
+    /// The host is told of an approved child after commit (P-3): its start
+    /// names the parent's workspace and the parent, so the host makes the
+    /// child's own workspace from it (137-1) before it starts; the child
+    /// runs its parent's agent (B4) with its narrowed grants, the spawned
+    /// opening prompt and the asks (134-8). The decision cannot change once
+    /// made, so a start that fails here or on the host is the child's own
+    /// `failed`, and the request keeps `started`.
     fn dispatch_spawned(&self, child: &SessionRecord) -> AgentResult<()> {
+        let parent = self
+            .store
+            .lock()
+            .unwrap()
+            .lineage(&child.id)?
+            .parent_session;
+        let parent = parent.map(|p| self.get(&p)).transpose()?;
+        let start = parent.and_then(|parent| {
+            let caps = self.host_live(&child.host_id).capabilities?;
+            let (mcp, asks) = {
+                let store = self.store.lock().unwrap();
+                (
+                    store.grants_of(&child.id).ok()?,
+                    store.spawn_asks(&child.id).ok()?,
+                )
+            };
+            let reads_storm = mcp
+                .iter()
+                .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
+            // The parent's own synced login, never one it did not have.
+            let credential = super::credential::decide(
+                &child.provider,
+                self.requested_credential(&parent.id),
+                &caps,
+            );
+            Some((
+                credential.kind(),
+                super::Command::Start {
+                    session: child.id.clone(),
+                    workspace: parent.workspace.clone(),
+                    provider: child.provider.clone(),
+                    interaction: child.interaction.clone(),
+                    terminal: super::TerminalSize {
+                        cols: child.cols,
+                        rows: child.rows,
+                    },
+                    mcp,
+                    context: reads_storm,
+                    resume: None,
+                    provider_credential: credential.kind().map(Into::into),
+                    spawn_asks: asks.then_some(super::SpawnStart { spawned: true }),
+                    resumed_from: None,
+                    child_of: Some(parent.id.clone()),
+                },
+            ))
+        });
+        let sent = match start {
+            Some((credential, command)) => {
+                let mut session_live = super::SessionLive::new();
+                session_live.credential = credential;
+                self.live
+                    .lock()
+                    .unwrap()
+                    .sessions
+                    .insert(child.id.clone(), session_live);
+                self.send(&child.host_id, command).is_ok()
+            }
+            None => false,
+        };
         let mut r = child.clone();
-        r.status = "failed".into();
-        r.end_reason = Some("start_failure".into());
-        r.ended_at = Some(now());
+        if sent {
+            r.status = "starting".into();
+        } else {
+            r.status = "failed".into();
+            r.end_reason = Some("start_failure".into());
+            r.ended_at = Some(now());
+            tracing::warn!(
+                session = r.id,
+                "spawned session not started: its host is away"
+            );
+        }
         self.store.lock().unwrap().update(&r)?;
         self.bump(&r.id);
-        tracing::info!(
-            session = r.id,
-            "spawned session not started: launching children is 134-5's"
-        );
         Ok(())
     }
 

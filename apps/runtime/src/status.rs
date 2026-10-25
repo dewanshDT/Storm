@@ -60,6 +60,11 @@ pub enum EndReason {
     /// On an isolated host whose isolation is not verified (decision 136j):
     /// no session starts there until the self-test passes.
     IsolationUnavailable,
+    /// A spawned child's workspace would pass a cap (137f).
+    WorkspaceCap,
+    /// A spawned child's parent repository could not be cloned: unreadable,
+    /// or with no commit to start from (137h).
+    UnreadableRepository,
     /// A signal the owner did not send ended it.
     Signal(i32),
     /// Its host restarted; the session died with it.
@@ -77,6 +82,8 @@ impl EndReason {
             Self::StartFailure => "start_failure",
             Self::CredentialUnavailable => "credential_unavailable",
             Self::IsolationUnavailable => "isolation_unavailable",
+            Self::WorkspaceCap => "workspace_cap",
+            Self::UnreadableRepository => "unreadable_repository",
             Self::Signal(_) => "signal",
             Self::HostRestart => "host_restart",
             Self::HostRevoked => "host_revoked",

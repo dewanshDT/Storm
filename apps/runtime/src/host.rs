@@ -71,6 +71,12 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const LINK_IDLE: Duration = Duration::from_secs(45);
 /// How often a host looks for newer agent CLIs (133-5).
 const AUTO_UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// A child's: the helper's 660 s for its workspace, then a start's own.
+const CHILD_START_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_secs(690)
+};
 const START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
@@ -119,6 +125,10 @@ pub enum Command {
         /// kept conversation is what the new home gets.
         #[serde(default)]
         resumed_from: Option<String>,
+        /// A spawned child's parent (134-5): `workspace` is the parent's, and
+        /// the helper makes the child's own from it before it starts (137-1).
+        #[serde(default)]
+        child_of: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -218,6 +228,8 @@ struct Events {
     harness: Mutex<Option<String>>,
     /// The session's leader once the provider has started it (decision 135).
     leader: watch::Sender<Option<Arc<Leader>>>,
+    /// A spawned child's own workspace, as the helper made it (137-1).
+    child: Mutex<Option<crate::isolation::ChildWorkspace>>,
 }
 
 /// A session's leader, and on an isolated host the uid it runs as: both
@@ -246,6 +258,10 @@ impl SessionEvents for Events {
             process: leader,
             user,
         })));
+    }
+
+    fn child_workspace(&self, made: crate::isolation::ChildWorkspace) {
+        *self.child.lock().unwrap() = Some(made);
     }
 }
 
@@ -351,6 +367,9 @@ pub struct Host {
     isolation_status: Arc<crate::isolation::Status>,
     /// Each isolated session's own bridge socket's accept loop (136i).
     session_sockets: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Each live spawned child's own workspace directory (137-1), reported
+    /// in `workspace_paths` under the name its record has (137-2).
+    child_paths: Mutex<HashMap<String, PathBuf>>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -429,6 +448,7 @@ impl Host {
             leaders: Mutex::new(HashMap::new()),
             isolation_status,
             session_sockets: Mutex::new(HashMap::new()),
+            child_paths: Mutex::new(HashMap::new()),
             refusals_reported: Mutex::new((Instant::now(), 0)),
             #[cfg(test)]
             refused: Mutex::new(Vec::new()),
@@ -483,6 +503,16 @@ impl Host {
         );
     }
 
+    /// Each listed workspace's directory, and each live child's own under
+    /// the name the server records it by (`children/<id>`, 134-5).
+    fn workspace_paths(&self) -> HashMap<String, String> {
+        let mut paths = workspace_paths(&self.config.workspace_roots);
+        for (child, dir) in self.child_paths.lock().unwrap().iter() {
+            paths.insert(format!("children/{child}"), dir.display().to_string());
+        }
+        paths
+    }
+
     fn capabilities(&self) -> serde_json::Value {
         let providers: Vec<_> = self
             .providers
@@ -508,7 +538,7 @@ impl Host {
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
-            "workspace_paths": workspace_paths(&self.config.workspace_roots),
+            "workspace_paths": self.workspace_paths(),
             // Where a workspace goes, so an empty host can say where to put
             // one.
             "workspace_roots": self
@@ -1260,6 +1290,7 @@ impl Host {
                 provider_credential,
                 spawn_asks,
                 resumed_from,
+                child_of,
             } => {
                 self.start(
                     session,
@@ -1272,6 +1303,7 @@ impl Host {
                     resume.map(|r| (r, resumed_from)),
                     provider_credential,
                     spawn_asks,
+                    child_of,
                 )
                 .await
             }
@@ -1378,6 +1410,7 @@ impl Host {
         resume: Option<(String, Option<String>)>,
         provider_credential: Option<String>,
         spawn_asks: Option<SpawnStart>,
+        child_of: Option<String>,
     ) {
         let (resume, resumed_from) = match resume {
             Some((r, from)) => (Some(r), from),
@@ -1424,6 +1457,19 @@ impl Host {
             return self.post_start_failure(&id).await;
         }
         let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        if let Some(parent) = &child_of {
+            // A child's workspace is its own user's (WS-1): only the helper
+            // can make one, so a host without it starts no child at all.
+            if !isolated {
+                refuse("a spawned session starts only on an isolated host");
+                return self.post_start_failure(&id).await;
+            }
+            if !crate::credential_paths::session_id_ok(parent) || *parent == id || resume.is_some()
+            {
+                refuse("not a parent this session can have");
+                return self.post_start_failure(&id).await;
+            }
+        }
         if isolated && let Err(reason) = self.isolation_ready().await {
             // 136j: no session starts on a host whose isolation is not
             // verified; those already running keep running.
@@ -1556,6 +1602,7 @@ impl Host {
                 exempt: self.spawn_exempt(),
                 spawned: s.spawned,
             });
+        let spawned = child_of.is_some() && spawn.is_some_and(|s| s.spawned);
         let opencode_account = match spawn {
             Some(_) if is_opencode => match crate::mcp::opencode_account(storm_only) {
                 Ok(account) => Some(account),
@@ -1585,7 +1632,7 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
-        let start_report = match &plugin_plan {
+        let mut start_report = match &plugin_plan {
             Some(plan) => {
                 {
                     let mut found = self.launch_remote.lock().unwrap();
@@ -1618,6 +1665,7 @@ impl Host {
             titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             harness: Mutex::new(None),
             leader: watch::channel(None).0,
+            child: Mutex::new(None),
         });
         self.leaders
             .lock()
@@ -1655,6 +1703,7 @@ impl Host {
                 .secret_env
                 .push((crate::credential::TOKEN_ENV.into(), token));
         }
+        launch.child_of = child_of.clone();
         if isolated {
             launch
                 .env_remove
@@ -1679,8 +1728,11 @@ impl Host {
                 .push(("OPENCODE_DISABLE_AUTOUPDATE".into(), "true".into()));
         }
         // A resumed conversation has read its note already.
-        let launch =
-            crate::mcp::with_opening_prompt(launch, &provider_id, context && resume.is_none());
+        let launch = crate::mcp::with_opening_prompt(
+            launch,
+            &provider_id,
+            crate::mcp::opening_prompt(context && resume.is_none(), spawned),
+        );
         let spec = SessionSpec {
             session_id: id.clone(),
             workspace: dir,
@@ -1693,12 +1745,19 @@ impl Host {
             let events: Arc<dyn SessionEvents> = events.clone();
             tokio::task::spawn_blocking(move || provider.start(spec, events))
         };
-        let started = match tokio::time::timeout(START_DEADLINE, &mut provider_start).await {
+        // A child's start includes its clone, which the helper allows
+        // 660 s (137-1).
+        let deadline = if child_of.is_some() {
+            CHILD_START_DEADLINE
+        } else {
+            START_DEADLINE
+        };
+        let started = match tokio::time::timeout(deadline, &mut provider_start).await {
             Ok(started) => started,
             Err(_) => {
                 tracing::warn!(
                     session = %id,
-                    deadline_s = START_DEADLINE.as_secs(),
+                    deadline_s = deadline.as_secs(),
                     "start did not return in time; reporting it failed"
                 );
                 // Whatever it returns now has no session to belong to.
@@ -1712,6 +1771,10 @@ impl Host {
         };
         let session = match started {
             Ok(Ok(session)) => session,
+            Ok(Err(crate::provider::StartError::Ended(reason, e))) => {
+                tracing::warn!(session = %id, error = %e, "start failed");
+                return self.post_start_ended(&id, reason).await;
+            }
             Ok(Err(e)) => {
                 tracing::warn!(session = %id, error = %e, "start failed");
                 return self.post_start_failure(&id).await;
@@ -1721,6 +1784,34 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
+        // A child's own workspace: its record says what it starts from, and
+        // WS-9 is told its directory under the name the server gave it.
+        let made = events.child.lock().unwrap().take();
+        if let (Some(_), Some(made)) = (&child_of, made) {
+            if !start_report.is_object() {
+                start_report = json!({});
+            }
+            start_report["child_workspace"] = json!({
+                "mode": match made.mode {
+                    crate::isolation::ChildMode::Clone => "clone",
+                    crate::isolation::ChildMode::Scratch => "scratch",
+                },
+                "commit": made.commit,
+                "branch": made.branch,
+                "submodules": made.submodules,
+                "large_files": made.large_files,
+            });
+            self.child_paths
+                .lock()
+                .unwrap()
+                .insert(id.clone(), made.path.clone());
+            let host = self.clone();
+            tokio::spawn(async move {
+                let _ = host
+                    .post("/v1/runtime/inventory", &host.capabilities())
+                    .await;
+            });
+        }
         let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let host_session = Arc::new(HostSession {
             id: id.clone(),
@@ -2195,6 +2286,7 @@ impl Host {
         if let Some(task) = self.session_sockets.lock().unwrap().remove(session) {
             task.abort();
         }
+        self.child_paths.lock().unwrap().remove(session);
         self.handles.forget_session(session);
         self.leaders.lock().unwrap().remove(session);
         self.harness_handles
@@ -2813,6 +2905,7 @@ mod tests {
                 provider_credential: None,
                 spawn_asks: None,
                 resumed_from: None,
+                child_of: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -2944,6 +3037,7 @@ mod tests {
             provider_credential: None,
             spawn_asks: None,
             resumed_from: None,
+            child_of: None,
         }
     }
 
@@ -3276,6 +3370,7 @@ mod tests {
             titles: false,
             harness: Mutex::new(None),
             leader: watch::channel(None).0,
+            child: Mutex::new(None),
         });
         host.harness_handles.lock().unwrap().insert(
             "h_ORPHAN".into(),
@@ -3989,6 +4084,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 provider_credential: None,
                 spawn_asks: None,
                 resumed_from: None,
+                child_of: None,
             })
             .await;
 
@@ -4083,6 +4179,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 provider_credential: None,
                 spawn_asks: None,
                 resumed_from: None,
+                child_of: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -4437,6 +4534,245 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             "{launch}"
         );
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// The start the server sends an approved child (134-5), as the shared
+    /// vector pins it.
+    fn spawned_start() -> Command {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        serde_json::from_value::<Envelope>(vector["start"].clone())
+            .unwrap()
+            .command
+    }
+
+    #[cfg(target_os = "linux")]
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// 134-5, the host's half of the full flow (api.rs has the server's):
+    /// the start the server sends an approved child reaches an isolated
+    /// host, the helper makes the child a W2 clone of its parent's
+    /// workspace with real git between `prepare` and `start`, and the child
+    /// runs in it, at the parent's `HEAD`, without the parent's uncommitted
+    /// files, with the spawned opening prompt. Its first `running` report
+    /// says what it starts from, and the host's next inventory names its
+    /// directory under the name the server records it by (WS-9).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_approved_childs_start_runs_it_in_its_own_clone() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "pwd > {o}/pwd; /usr/bin/git rev-parse HEAD > {o}/head; ls -A > {o}/ls; \
+             /usr/bin/git remote > {o}/remotes; printf '%s\\n' \"$@\" > {o}/args; exec sleep 1000"
+        );
+        let (host, seen, helper, _state, roots) = isolated_script_host(&script, None).await;
+        let parent = roots.path().join("w");
+        git(&parent, &["init", "-q", "-b", "main"]);
+        std::fs::write(parent.join("README.md"), "committed\n").unwrap();
+        git(&parent, &["add", "README.md"]);
+        git(
+            &parent,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "one",
+            ],
+        );
+        let head = git(&parent, &["rev-parse", "HEAD"]);
+        std::fs::write(parent.join("untracked.txt"), "never copied\n").unwrap();
+        std::fs::write(parent.join("README.md"), "uncommitted\n").unwrap();
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+
+        host.clone().handle(spawned_start()).await;
+        wait_for("the child's arguments", || out.path().join("args").exists()).await;
+        wait_for("its first running report", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/sessions/ags_child/status") && b["status"] == "running")
+        })
+        .await;
+        let read = |f: &str| std::fs::read_to_string(out.path().join(f)).unwrap();
+        let made = children.path().join("ags_CHILD/workspace");
+        assert_eq!(read("pwd").trim(), made.display().to_string());
+        assert_eq!(read("head").trim(), head);
+        let mut ls: Vec<String> = read("ls").lines().map(str::to_string).collect();
+        ls.sort();
+        assert_eq!(ls, [".git", "README.md"], "only committed history");
+        assert_eq!(
+            std::fs::read_to_string(made.join("README.md")).unwrap(),
+            "committed\n"
+        );
+        assert_eq!(
+            read("remotes").trim(),
+            "",
+            "nothing points back at the parent"
+        );
+        assert_eq!(
+            read("args").lines().last(),
+            Some(crate::mcp::SPAWNED_OPENING_PROMPT)
+        );
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            [
+                "lease ags_CHILD",
+                "prepare ags_CHILD",
+                "child_create ags_CHILD",
+                "start ags_CHILD"
+            ]
+        );
+        let running = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(p, b)| p.ends_with("/sessions/ags_child/status") && b["status"] == "running")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(
+            running["child_workspace"],
+            serde_json::json!({"mode": "clone", "commit": head, "branch": "main",
+                "submodules": false, "large_files": false})
+        );
+        wait_for("an inventory naming its directory", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p == "/v1/runtime/inventory"
+                    && b["workspace_paths"]["children/ags_CHILD"] == made.display().to_string()
+            })
+        })
+        .await;
+        assert_eq!(
+            host.capabilities()["workspaces"],
+            serde_json::json!(["w"]),
+            "no launch can name a child's workspace"
+        );
+        host.clone()
+            .handle(Command::End {
+                session: "ags_CHILD".into(),
+            })
+            .await;
+        wait_for("its end", || host.session("ags_CHILD").is_none()).await;
+        assert!(
+            host.capabilities()["workspace_paths"]
+                .get("children/ags_CHILD")
+                .is_none(),
+            "an ended child is not reported"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A child whose workspace the helper will not make never starts and
+    /// ends with why (137f): its record names the cap.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_over_its_cap_ends_workspace_cap() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        helper.seen.lock().unwrap().child_refusal = Some("workspace_cap".into());
+        host.clone().handle(spawned_start()).await;
+        wait_for("its failure", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/sessions/ags_child/status")
+                    && b["status"] == "failed"
+                    && b["end_reason"] == "workspace_cap"
+            })
+        })
+        .await;
+        assert!(host.session("ags_CHILD").is_none());
+        assert!(
+            helper
+                .seen
+                .lock()
+                .unwrap()
+                .released
+                .contains(&"ags_CHILD".to_string())
+        );
+    }
+
+    /// A child's workspace is its own user's (WS-1), which only the helper
+    /// makes: a host without isolation starts no child, whatever the
+    /// server says, and a parent that is no session is refused too.
+    #[tokio::test]
+    async fn a_child_starts_only_on_an_isolated_host() {
+        let (host, seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        let mut start = spawned_start();
+        if let Command::Start { provider, .. } = &mut start {
+            *provider = "fake".into();
+        }
+        host.dispatch(1, start);
+        eventually("the start was reported failed", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.ends_with("/sessions/ags_child/status") && b["end_reason"] == "start_failure"
+            })
+        })
+        .await;
+        assert!(host.session("ags_CHILD").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_needs_a_parent_that_is_a_session() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        // Not a session id, none, itself, and a resume (which is never a
+        // child's: C7).
+        let cases = [
+            ("ags_C0", "../etc", false),
+            ("ags_C1", "", false),
+            ("ags_C2", "ags_C2", false),
+            ("ags_C3", "ags_PARENT", true),
+        ];
+        for (id, parent, resumes) in cases {
+            let mut start = spawned_start();
+            if let Command::Start {
+                session,
+                child_of,
+                resume,
+                ..
+            } = &mut start
+            {
+                *session = id.into();
+                *child_of = Some(parent.into());
+                if resumes {
+                    *resume = Some("11111111-1111-4111-8111-111111111111".into());
+                }
+            }
+            host.clone().handle(start).await;
+        }
+        let failed = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, b)| p.contains("/sessions/ags_c") && b["end_reason"] == "start_failure")
+            .count();
+        assert_eq!(failed, 4);
+        assert!(
+            helper.seen.lock().unwrap().ops.is_empty(),
+            "no lease was taken"
+        );
     }
 
     /// IT-8: a connection with the session's valid handle, from a user that
@@ -4920,6 +5256,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             provider_credential: None,
             spawn_asks: None,
             resumed_from: None,
+            child_of: None,
         }
     }
 
@@ -5242,6 +5579,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             provider_credential: kind.map(str::to_string),
             spawn_asks: None,
             resumed_from: None,
+            child_of: None,
         }
     }
 

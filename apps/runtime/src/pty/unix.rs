@@ -77,6 +77,7 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
         }),
         leader: process,
         user: None,
+        child_workspace: None,
     })
 }
 
@@ -100,6 +101,7 @@ fn spawn_isolated(
     } else {
         launch.cwd.canonicalize()?
     };
+    let mut child_workspace = None;
     let started = (|| -> io::Result<(i32, Option<OwnedFd>)> {
         link.prepare(session, &user)?;
         // A spawned child's own workspace is made now (WS-4), from its
@@ -107,6 +109,7 @@ fn spawn_isolated(
         if let Some(parent) = &launch.child_of {
             let made = link.child_create(parent, session, &workspace)?;
             tracing::info!(session, parent, mode = ?made.mode, commit = ?made.commit, submodules = made.submodules, large_files = made.large_files, "isolation: the child's workspace is made");
+            child_workspace = Some(made);
         }
         crate::platform::create_private_dir(&crate::mcp::session_dir(&link.state_dir, session))?;
         let dir = link.launch_dir();
@@ -163,6 +166,7 @@ fn spawn_isolated(
         group: Group(GroupKind::Unit(unit)),
         leader,
         user: Some(uid),
+        child_workspace,
     })
 }
 

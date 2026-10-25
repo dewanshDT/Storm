@@ -9630,7 +9630,7 @@ pub(crate) mod tests {
             serde_json::json!({"enabled": true, "refused_requests": 0})
         );
         assert_eq!(list_changed(&f.sent()), 1);
-        // The list gains exactly the built parent tools (134-5 adds start).
+        // The list gains exactly the parent tools.
         for name in SPAWN_134 {
             assert!(!before.contains(&name.to_string()), "{name} listed");
         }
@@ -9710,6 +9710,8 @@ pub(crate) mod tests {
                 crate::agent::store::spawn::NewRequest::Start {
                     task: "write the tests".into(),
                     provider: None,
+                    name: None,
+                    context_note: None,
                 },
             )
             .await
@@ -13555,8 +13557,9 @@ pub(crate) mod tests {
 
     /// What a parent is offered once 134-7 is built: 134-4's reads,
     /// `send_message` and `end_agent`, in `SPAWN_134`'s order.
-    const PARENT_BUILT: [&str; 6] = [
+    const PARENT_BUILT: [&str; 7] = [
         "list_agents",
+        "start_agent",
         "agent_status",
         "list_children",
         "wait_agent",
@@ -13636,6 +13639,7 @@ pub(crate) mod tests {
                     "wait_agent" => serde_json::json!({"ids": [child]}),
                     "send_message" => serde_json::json!({"id": child, "text": "hi"}),
                     "end_agent" => serde_json::json!({"id": child}),
+                    "start_agent" => serde_json::json!({"task": "count the tests"}),
                     "report_result" => serde_json::json!({"outcome": "succeeded", "summary": "s"}),
                     _ => serde_json::json!({}),
                 };
@@ -13737,7 +13741,7 @@ pub(crate) mod tests {
         );
         assert_eq!(
             listed["limits"],
-            serde_json::json!({"depth": 2, "children": 3, "tree": 6, "pending": 2})
+            serde_json::json!({"depth": 1, "children": 3, "tree": 6, "pending": 2})
         );
         assert_eq!(listed["start_refused"], serde_json::Value::Null);
         assert_eq!(listed["wait_cap_secs"], 30);
@@ -14750,5 +14754,307 @@ pub(crate) mod tests {
                 .iter()
                 .any(|n| n.contains("cascade") || n == "end_children")
         );
+    }
+
+    // ---- start_agent (decision 134-5) ----
+
+    impl GatewayFixture {
+        /// The host's capabilities as a host whose identity and isolation
+        /// self-test both passed sends them, naming `paths` too.
+        fn verified_caps(&self, paths: serde_json::Value) -> serde_json::Value {
+            let mut caps = host_caps(true);
+            caps["identity"] = serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd", "reason": null});
+            caps["isolation"] = serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+            caps["workspace_paths"] = paths;
+            caps["resume"] = serde_json::json!(["claude-code"]);
+            caps
+        }
+
+        /// A real `hello` saying both are verified (the integration slice's
+        /// path), then a running parent with spawn on and its storm
+        /// connection initialized.
+        async fn spawning_parent(&mut self) -> String {
+            let mut hello = self.verified_caps(serde_json::json!({"storm": "/w/storm"}));
+            hello["sessions"] = serde_json::json!([]);
+            let (code, _) = send(
+                &self.app,
+                post_json_with_auth("/v1/runtime/hello", hello, &self.host_bearer),
+            )
+            .await;
+            assert!(code.is_success(), "{code}");
+            let parent = self.launch("claude-code", false).await["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let (status, body) = self.spawn(&parent, true).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            self.initialize(&parent, "storm").await;
+            self.sent();
+            parent
+        }
+    }
+
+    /// 134-5's server half of the full flow, through the real routes and
+    /// gateway on a host C0 holds for by a real `hello`: an agent asks with
+    /// `start_agent`, a person approves on the session tier, and the host is
+    /// sent the start the shared vector pins (the host's half,
+    /// `an_approved_childs_start_runs_it_in_its_own_clone`, runs that start
+    /// through a helper on a real socket into a W2 clone made by real git).
+    /// The host then reports the child running with what its workspace
+    /// starts from, and its inventory names the child's directory: the
+    /// child reads its task, has the spawned tools, and holds nothing of
+    /// its parent's workspace (WS-9).
+    #[tokio::test]
+    async fn the_full_flow_starts_an_approved_child_in_its_own_workspace() {
+        let dir = tempdir::TempDir::new("storm-134-5-flow").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        assert!(
+            f.storm_tools(&parent)
+                .await
+                .contains(&"start_agent".to_string()),
+            "offered with the switch and C0"
+        );
+        let asked = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "write the tests", "name": "Test writer"}),
+            )
+            .await,
+        );
+        assert_eq!(asked["state"], "pending", "{asked}");
+        let request = asked["request_id"].as_str().unwrap().to_string();
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing reaches the host before a person decides"
+        );
+
+        let (status, decided) = f.decide(&request, "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        assert_eq!(decided["outcome"], "started", "{decided}");
+        let child = decided["session"].as_str().unwrap().to_string();
+
+        let sent = f.sent();
+        let mut start = sent
+            .iter()
+            .find(|m| m["type"] == "start")
+            .unwrap_or_else(|| panic!("{sent:?}"))
+            .clone();
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        let mut want = vector["start"].clone();
+        want["session"] = child.clone().into();
+        want["child_of"] = parent.clone().into();
+        want["workspace"] = "storm".into();
+        want["terminal"] = start["terminal"].clone();
+        let grants = start["mcp"].clone();
+        want["mcp"] = grants.clone();
+        start["cmd_seq"] = want["cmd_seq"].clone();
+        assert_eq!(start, want);
+        let ids: Vec<&str> = grants
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| g["id"].as_str().unwrap())
+            .collect();
+        assert!(
+            ids.contains(&"storm") && ids.contains(&f.connection.as_str()),
+            "{grants}"
+        );
+
+        // The host's half answers: running in its clone, at this commit.
+        let commit = "c".repeat(40);
+        let (code, body) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                serde_json::json!({"status": "running", "child_workspace": {"mode": "clone",
+                    "commit": commit, "branch": "main", "submodules": false, "large_files": false}}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success(), "{code} {body}");
+        let workspace = format!("children/{child}");
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/runtime/inventory",
+                f.verified_caps(serde_json::json!({"storm": "/w/storm",
+                    workspace.clone(): format!("/var/lib/storm-runtime-isolation/{workspace}/workspace")})),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["status"], "running");
+        assert_eq!(view["workspace"], workspace);
+        assert_eq!(view["name"], "test-writer");
+        assert_eq!(view["parent_session"], parent);
+        assert_eq!(view["depth"], 1);
+        assert_eq!(
+            view["child_workspace"],
+            serde_json::json!({"mode": "clone", "commit": commit, "branch": "main",
+                "submodules": false, "large_files": false})
+        );
+
+        f.initialize(&child, "storm").await;
+        let tools = f.storm_tools(&child).await;
+        assert_eq!(spawn_134(&tools), CHILD_BUILT.to_vec(), "{tools:?}");
+        let context = structured(
+            &f.tool(&child, "session_context", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(context["task"], "write the tests", "{context}");
+
+        let children = structured(
+            &f.tool(&parent, "list_children", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(children["agents"][0]["id"], child);
+        assert_eq!(children["starts"][0]["id"], request.as_str());
+        assert_eq!(children["starts"][0]["outcome"], "started");
+        assert_eq!(children["starts"][0]["session"], child);
+
+        // WS-9: the child is apart from its parent's workspace.
+        assert_eq!(f.spawn(&parent, false).await.0, StatusCode::OK);
+        let (status, body) = f.spawn(&parent, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // C7: resumed, the child is a top-level session where its work
+        // began, its parent's workspace; the parent's switch is off so the
+        // workspace is free (WS-9).
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                serde_json::json!({"status": "completed", "exit_code": 0,
+                    "harness_session": "7c9e6679-7425-40de-944b-e07fc1f90ae7"}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        assert_eq!(f.spawn(&parent, false).await.0, StatusCode::OK);
+        let (status, resumed) = f
+            .launch_body(serde_json::json!({"resume_of": child, "workspace": workspace}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{resumed}");
+        assert_eq!(resumed["workspace"], "storm");
+        assert_eq!(resumed["depth"], 0);
+        assert_eq!(resumed["resumed_from"], child);
+        let audit = f.request_events().await;
+        assert!(
+            audit
+                .iter()
+                .any(|(k, d)| k == "spawn_request" && d["kind"] == "start"),
+            "{audit:?}"
+        );
+    }
+
+    /// What `start_agent` refuses, and where: a blank task, a long or
+    /// multi-line name and a note the caller cannot read are the caller's
+    /// errors; another agent is refused at once (B4), as is a start from a
+    /// child (no grandchild today); a wait answers within its bound; and
+    /// without the switch or C0 the tool is neither listed nor callable.
+    #[tokio::test]
+    async fn start_agent_refuses_what_it_must() {
+        let dir = tempdir::TempDir::new("storm-134-5-refusals").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        for args in [
+            serde_json::json!({"task": "  "}),
+            serde_json::json!({"task": "t", "name": "x".repeat(81)}),
+            serde_json::json!({"task": "t", "name": "two\nlines"}),
+            serde_json::json!({"task": "t", "context_note": {"vault": "vlt_NOPE", "note_id": "n"}}),
+            serde_json::json!({"task": "x".repeat(16 * 1024 + 1)}),
+        ] {
+            tool_error(&f.tool(&parent, "start_agent", args.clone()).await);
+        }
+        let other = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "provider": "opencode"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            other,
+            serde_json::json!({"request_id": null, "state": "refused", "reason": "not_permitted"})
+        );
+        assert!(f.sent().iter().all(|m| m["type"] != "start"));
+
+        // A context note the caller reads becomes the child's.
+        let vault = f.vault("Work").await;
+        let note = f.note(&vault, "Brief.md", "# Brief\n\nthe plan\n").await;
+        let t = std::time::Instant::now();
+        let asked = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "wait": 1,
+                    "context_note": {"vault": vault, "note_id": note["id"]}}),
+            )
+            .await,
+        );
+        assert_eq!(asked["state"], "pending", "{asked}");
+        assert!(
+            t.elapsed() >= std::time::Duration::from_millis(900),
+            "it waited"
+        );
+        let (_, decided) = f
+            .decide(
+                asked["request_id"].as_str().unwrap(),
+                "approve",
+                &f.owner_bearer,
+            )
+            .await;
+        let child = decided["session"].as_str().unwrap().to_string();
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["context"]["title"], "Brief", "{view}");
+        assert_eq!(view["name"], "brief");
+        f.report(&child, "running").await;
+        f.initialize(&child, "storm").await;
+        let context = structured(
+            &f.tool(&child, "session_context", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(context["task"], "t");
+        assert!(
+            context["content"].as_str().unwrap().contains("the plan"),
+            "{context}"
+        );
+
+        // A child with a person's switch on starts nothing (BUILT_DEPTH).
+        f.state.agent.force_spawn_for_tests(&child);
+        let deeper = structured(
+            &f.tool(&child, "start_agent", serde_json::json!({"task": "t"}))
+                .await,
+        );
+        assert_eq!(
+            deeper,
+            serde_json::json!({"request_id": null, "state": "refused", "reason": "limit", "cap": "depth"})
+        );
+
+        // Off, it is gone from the list and refused if named.
+        f.sent();
+        assert_eq!(f.spawn(&parent, false).await.0, StatusCode::OK);
+        assert!(
+            !f.storm_tools(&parent)
+                .await
+                .contains(&"start_agent".to_string())
+        );
+        let refused = f
+            .tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
+            .await;
+        assert_eq!(
+            refused.last().unwrap()["message"]["error"]["message"],
+            "tool_not_allowed",
+            "{refused:?}"
+        );
+        assert!(f.sent().iter().all(|m| m["type"] != "start"));
     }
 }

@@ -2012,7 +2012,7 @@ pub struct ApproveRequest {
 }
 
 /// A request as its decision left it.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestView {
     pub id: String,
     pub kind: String,
@@ -2419,7 +2419,7 @@ pub struct ListAgents {
 /// `list_agents`: what the calling parent may ask to start, and how close it
 /// is to its caps.
 pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents> {
-    use crate::agent::store::spawn::{MAX_CHILDREN, MAX_DEPTH, MAX_PENDING, MAX_TREE};
+    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_PENDING, MAX_TREE};
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.get(&caller).map_err(agent_error)?;
     Ok(ListAgents {
@@ -2429,7 +2429,7 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
             provider: r.provider,
         }],
         limits: SpawnLimits {
-            depth: MAX_DEPTH,
+            depth: MAX_DEPTH.min(BUILT_DEPTH),
             children: MAX_CHILDREN,
             tree: MAX_TREE,
             pending: MAX_PENDING,
@@ -2460,7 +2460,14 @@ pub struct Children {
     pub agents: Vec<AgentView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub predecessor_results: Vec<PredecessorResult>,
+    /// The caller's own start requests, newest first: how a parent learns
+    /// what a person decided after `start_agent` answered.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub starts: Vec<RequestView>,
 }
+
+/// How many of its start requests `list_children` shows a parent.
+const STARTS_SHOWN: usize = 10;
 
 /// `list_children`: the caller's own children, oldest first, and the
 /// results its resumed predecessors' children reported (C3).
@@ -2491,9 +2498,136 @@ pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Children>
             result: result.into(),
         });
     }
+    let starts = state
+        .agent
+        .requests_of(&caller)
+        .map_err(agent_error)?
+        .into_iter()
+        .rev()
+        .filter(|r| r.kind == "start")
+        .take(STARTS_SHOWN)
+        .map(|r| RequestView::of(r, None))
+        .collect();
     Ok(Children {
         agents,
         predecessor_results,
+        starts,
+    })
+}
+
+/// The longest name a parent may give a child, in characters.
+pub const MAX_AGENT_NAME_CHARS: usize = 80;
+
+/// What `start_agent` asks a person to approve (134o).
+#[derive(Debug, Clone)]
+pub struct StartAgent {
+    pub task: String,
+    pub name: Option<String>,
+    pub context_note: Option<crate::agent::ContextRef>,
+    pub provider: Option<String>,
+    /// Seconds to wait for the person's decision, capped as `wait_agent`
+    /// is; none answers at once.
+    pub wait: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StartRequested {
+    /// What a person decides on; none when Storm refused it at once.
+    pub request_id: Option<String>,
+    /// `pending`, `decided`, or `refused` when Storm refused it at once.
+    pub state: &'static str,
+    /// Once decided: `started`, `denied`, `expired` or `refused`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For `refused: limit` at once, the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<&'static str>,
+    /// For `started`, the new agent's id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+}
+
+/// `start_agent {task, name?, context_note?, provider?, wait?}` (134-5):
+/// asks a person to approve a new agent on the caller's host, in its own
+/// workspace, running the caller's agent with no more than the caller's
+/// grants (134e). Answered at once, or after at most `wait` seconds below
+/// the caller's tool-call timeout (134i); `list_children` shows a decision
+/// that comes later.
+pub async fn start_agent(
+    state: &Shared,
+    actor: &Actor,
+    req: StartAgent,
+) -> ApiResult<StartRequested> {
+    use crate::agent::store::spawn::NewRequest;
+    let caller = spawning_caller(state, actor)?;
+    if req.task.trim().is_empty() {
+        return Err(bad_request("a start needs a task"));
+    }
+    let name = match req.name.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(n) if n.chars().count() > MAX_AGENT_NAME_CHARS || n.chars().any(char::is_control) => {
+            return Err(bad_request(format!(
+                "a name is one line of at most {MAX_AGENT_NAME_CHARS} characters"
+            )));
+        }
+        Some(n) => Some(n.to_string()),
+    };
+    // Read as the caller: a child is never handed a note its parent cannot
+    // read, and its own grants are narrower still.
+    let context_note = match &req.context_note {
+        None => None,
+        Some(c) => {
+            let note = get_note(state, actor, &c.vault_id, &c.note_id).await?;
+            Some(crate::agent::store::Context {
+                vault_id: c.vault_id.clone(),
+                note_id: note.note.id,
+                title: note.note.title,
+            })
+        }
+    };
+    let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
+    let new = NewRequest::Start {
+        task: req.task,
+        provider: req.provider,
+        name,
+        context_note,
+    };
+    let created = match create_spawn_request(state, &caller, new).await? {
+        Ok(r) => r,
+        Err(refusal) => {
+            return Ok(StartRequested {
+                request_id: None,
+                state: "refused",
+                outcome: None,
+                reason: Some(refusal.reason.into()),
+                cap: refusal.cap,
+                agent: None,
+            });
+        }
+    };
+    let bound = crate::agent::scope::wait_bound(
+        &provider,
+        Some(std::time::Duration::from_secs(req.wait.unwrap_or(0))),
+    );
+    let r = if bound.is_zero() {
+        state.agent.request(&created.id).map_err(agent_error)?
+    } else {
+        state
+            .agent
+            .wait_request(&created.id, bound)
+            .await
+            .map_err(agent_error)?
+    };
+    let decided = r.state == "decided";
+    Ok(StartRequested {
+        request_id: Some(r.id),
+        state: if decided { "decided" } else { "pending" },
+        outcome: r.outcome,
+        reason: r.reason,
+        cap: None,
+        agent: r.session,
     })
 }
 
@@ -2898,6 +3032,10 @@ pub struct SessionView {
     /// Its host's session isolation (decision 136j): whether it runs as its
     /// own identity there.
     pub isolation: Option<crate::agent::Isolation>,
+    /// A spawned child's own workspace (134-5, 137-1), once its host has
+    /// made it: the mode and the commit a clone starts from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_workspace: Option<crate::agent::ChildWorkspace>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -2932,6 +3070,10 @@ fn session_view(
         .agent
         .host_isolation_report(&session.host_id)
         .map_err(internal)?;
+    let child_workspace = state
+        .agent
+        .child_workspace_of(&session.id)
+        .map_err(internal)?;
     let role = state
         .agent
         .role_of(&session.id)
@@ -2960,6 +3102,7 @@ fn session_view(
         identity,
         lineage,
         isolation,
+        child_workspace,
     })
 }
 
@@ -3020,8 +3163,8 @@ pub async fn launch_session(
         Some(old) => {
             let r = state.agent.get(&old).map_err(agent_error)?;
             let l = state.agent.launch_of(&old).map_err(internal)?;
+            req.workspace = state.agent.origin_workspace(&r.id).map_err(agent_error)?;
             req.host_id = r.host_id;
-            req.workspace = r.workspace;
             req.provider = Some(r.provider);
             req.context = None;
             req.allow_vault_writes = false;
@@ -3176,6 +3319,7 @@ pub async fn launch_session(
                 depth: 0,
             },
             isolation,
+            child_workspace: None,
         },
         mcp: LaunchMcp {
             connections,

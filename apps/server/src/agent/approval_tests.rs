@@ -124,6 +124,8 @@ impl Fixture {
                 .set_spawn(id, true, Some("dev_A"), "2026-10-25T10:00:00Z")
                 .unwrap();
         }
+        drop(store);
+        self.m.report_children_for_tests("hst_A");
         id.into()
     }
 
@@ -134,13 +136,17 @@ impl Fixture {
                 NewRequest::Start {
                     task: "write the tests".into(),
                     provider: None,
+                    name: None,
+                    context_note: None,
                 },
             )
             .unwrap()
     }
 
     fn approve(&self, id: &str, device: &str) -> Decision {
-        self.m.approve_request(id, device, false).unwrap()
+        let d = self.m.approve_request(id, device, false).unwrap();
+        self.m.report_children_for_tests("hst_A");
+        d
     }
 
     fn stored(&self, id: &str) -> Request {
@@ -274,6 +280,8 @@ fn a_request_is_pending_for_ten_minutes_with_the_exact_task() {
         NewRequest::Start {
             task: "x".repeat(16 * 1024 + 1),
             provider: None,
+            name: None,
+            context_note: None,
         },
         NewRequest::Message {
             target: "ags_X".into(),
@@ -303,6 +311,8 @@ fn creation_needs_c0_spawn_on_a_live_requester_and_a_descendant_target() {
         NewRequest::Start {
             task: "t".into(),
             provider: Some("opencode".into()),
+            name: None,
+            context_note: None,
         },
     );
     assert_eq!(other.unwrap(), Err(because("not_permitted")));
@@ -311,6 +321,8 @@ fn creation_needs_c0_spawn_on_a_live_requester_and_a_descendant_target() {
         NewRequest::Start {
             task: "t".into(),
             provider: Some("claude-code".into()),
+            name: None,
+            context_note: None,
         },
     );
     assert!(same.unwrap().is_ok());
@@ -371,16 +383,19 @@ fn creation_needs_c0_spawn_on_a_live_requester_and_a_descendant_target() {
 
 #[test]
 fn each_cap_refuses_at_its_boundary_and_names_itself() {
-    // Depth 2: a grandchild cannot start one.
+    // Depth: C4 allows 2, but no child starts one until a decision says
+    // how a grandchild reads its parent's own workspace (BUILT_DEPTH).
     let f = fixture(16);
     let p = f.parent();
     let c = f.child(&p.id, "ags_C", true);
     let g = f.child(&c, "ags_G", true);
-    assert!(
-        f.start(&c).is_ok(),
-        "a child may start a depth-2 grandchild"
+    assert_eq!(
+        f.start(&c),
+        Err(limit("depth")),
+        "a child starts none today"
     );
     assert_eq!(f.start(&g), Err(limit("depth")));
+    assert!(f.start(&p.id).is_ok());
 
     // Pending per parent: 2.
     let f = fixture(16);
@@ -408,16 +423,17 @@ fn each_cap_refuses_at_its_boundary_and_names_itself() {
     f.report("ags_C1", "completed");
     assert!(f.start(&p.id).is_ok());
 
-    // Live sessions per tree: 6, the root included.
+    // Live sessions per tree: 6, the root included. The grandchildren are
+    // written past the caps: no start makes one today.
     let f = fixture(16);
     let p = f.parent();
-    let c1 = f.child(&p.id, "ags_C1", true);
-    let c2 = f.child(&p.id, "ags_C2", true);
+    let c1 = f.child(&p.id, "ags_C1", false);
     f.child(&c1, "ags_G1", false);
     f.child(&c1, "ags_G2", false);
-    // Five live; one pending start makes six.
-    f.start(&c1).unwrap();
-    assert_eq!(f.start(&c2), Err(limit("tree")));
+    // Four live; one pending start makes five, a second six.
+    f.start(&p.id).unwrap();
+    f.child(&c1, "ags_G3", false);
+    assert_eq!(f.start(&p.id), Err(limit("tree")));
     let other_tree = f.parent_in("other");
     assert!(f.start(&other_tree).is_ok(), "another tree is not counted");
 
@@ -472,15 +488,16 @@ fn ap1_concurrent_requests_take_exactly_the_free_slots() {
             (
                 |f| {
                     let p = f.parent();
-                    let c: Vec<String> = (0..3)
-                        .map(|i| f.child(&p.id, &format!("ags_C{i}"), true))
-                        .collect();
-                    // Four live: two free in the tree. Two requests each, so
-                    // the pending cap never binds first.
-                    (0..6).map(|i| c[i % 3].clone()).collect()
+                    let c = f.child(&p.id, "ags_C1", false);
+                    for g in ["ags_G1", "ags_G2", "ags_G3"] {
+                        f.child(&c, g, false);
+                    }
+                    // Five live: one free in the tree, two under the
+                    // children and pending caps.
+                    vec![p.id; RACERS]
                 },
                 16,
-                MAX_TREE - 4,
+                MAX_TREE - 5,
                 "tree",
             ),
             (
@@ -497,8 +514,7 @@ fn ap1_concurrent_requests_take_exactly_the_free_slots() {
                 |f| {
                     let p = f.parent();
                     let c = f.child(&p.id, "ags_C", true);
-                    let g = f.child(&c, "ags_G", true);
-                    vec![g; RACERS]
+                    vec![c; RACERS]
                 },
                 16,
                 0,
@@ -589,11 +605,16 @@ fn an_approved_start_records_the_child_narrowed_under_its_parent() {
         store.grant(&child.id, "storm"),
         Ok(Some((_, false)))
     ));
-    // Launching a child is 134-5's: until then the start fails, which
-    // frees its slot, and nothing reaches the host.
+    // 134-5: it is started in its own workspace, which its host makes from
+    // the parent's.
     assert_eq!(
         (c.status.as_str(), c.end_reason.as_deref()),
-        ("failed", Some("start_failure"))
+        ("starting", None)
+    );
+    assert_eq!(c.workspace, format!("children/{}", child.id));
+    assert!(
+        store.spawn_asks(&child.id).unwrap(),
+        "its start carries the asks"
     );
 }
 
@@ -627,6 +648,7 @@ fn ap7_a_grant_the_parent_lost_before_approval_never_reaches_the_child() {
     drop(store);
 
     // A parent without a write vault gives none, ticked or not.
+    f.m.report_children_for_tests("hst_A");
     let q = f.parent_in("other");
     let r = f.start(&q).unwrap();
     let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true).unwrap());
@@ -1110,15 +1132,15 @@ fn every_way_of_deciding_a_request_races_to_exactly_one_winner() {
             "round {round}: {r:?}"
         );
         // AP-2, AP-3: a child exists only if it was started before the
-        // revocation or the end committed, and none is left live.
-        assert!(
-            f.m.store
-                .lock()
-                .unwrap()
-                .descendants(&p.id, true)
-                .unwrap()
-                .is_empty()
-        );
+        // revocation or the end committed, and its parent's end has it in
+        // a cascade: none outlives it.
+        let store = f.m.store.lock().unwrap();
+        for child in store.descendants(&p.id, true).unwrap() {
+            assert!(
+                store.doomed(&child).unwrap(),
+                "round {round}: {child} outlives its parent"
+            );
+        }
     }
 }
 
@@ -1143,4 +1165,282 @@ async fn a_waiter_hears_the_decision_or_times_out_pending() {
     let decided = decided.unwrap();
     assert_eq!(decided.outcome.as_deref(), Some("denied"));
     assert!(t.elapsed() < Duration::from_secs(2));
+}
+
+// ---- 134-5: the approved child's start ----------------------------------------
+
+impl Fixture {
+    /// The `start` commands sent down the host's link since the last look.
+    fn starts(&mut self) -> Vec<serde_json::Value> {
+        std::iter::from_fn(|| self.link.try_recv().ok())
+            .map(|e| serde_json::to_value(e).unwrap())
+            .filter(|m| m["type"] == "start")
+            .collect()
+    }
+
+    fn start_as(&self, requester: &str, provider: Option<&str>) -> Result<Request, Refusal> {
+        self.m
+            .create_request(
+                requester,
+                NewRequest::Start {
+                    task: "write the tests".into(),
+                    provider: provider.map(Into::into),
+                    name: Some("Test writer".into()),
+                    context_note: None,
+                },
+            )
+            .unwrap()
+    }
+}
+
+/// 134e and the checks table's narrowing row, on the wire: the host is told
+/// to start the child with exactly the parent's live grants (AP-7: one
+/// revoked between request and approval is not among them), the parent's
+/// agent, on the parent's host, from the parent's workspace into one of
+/// its own, as the parent's child, with the asks and the spawned prompt's
+/// flag, and nothing else. Spawn is off and the write vault is D2's.
+#[test]
+fn an_approved_child_is_started_narrowed_in_its_own_workspace() {
+    let mut f = fixture(16);
+    let p = f.parent();
+    f.starts();
+    let r = f.start_as(&p.id, None).unwrap();
+    f.m.revoke_grants_for("con_X").unwrap();
+    let (request, child, _) = decided(f.m.approve_request(&r.id, "dev_A", false).unwrap());
+    let child = child.unwrap();
+    assert_eq!(outcome(&request), ("decided", Some("started"), None));
+    let starts = f.starts();
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    let mut start = starts[0].clone();
+    start.as_object_mut().unwrap().remove("cmd_seq");
+    assert_eq!(
+        start,
+        serde_json::json!({
+            "type": "start", "session": child.id, "workspace": "storm",
+            "provider": "claude-code", "interaction": "terminal",
+            "terminal": {"cols": 80, "rows": 24},
+            "mcp": [{"id": "storm", "slug": "storm"}],
+            "context": true, "spawn_asks": {"spawned": true}, "child_of": p.id,
+        })
+    );
+    let c = f.m.get(&child.id).unwrap();
+    assert_eq!(
+        (c.host_id.as_str(), c.provider.as_str(), c.status.as_str()),
+        ("hst_A", "claude-code", "starting")
+    );
+    assert_eq!(c.workspace, format!("children/{}", child.id));
+    assert!(!f.m.spawn_enabled(&c.id).unwrap(), "spawn is off");
+    let launch = f.m.launch_of(&c.id).unwrap().unwrap();
+    assert_eq!(launch.write_vault_id, None, "D2: unticked, none");
+    assert_eq!(launch.name, "test-writer");
+    // Its record is apart from its parent's workspace once its host says
+    // where it is (WS-9), so the parent's switch can be turned on again.
+    f.m.set_spawn(&p.id, false, Some("dev_A")).unwrap().unwrap();
+    assert_eq!(
+        f.m.set_spawn(&p.id, true, Some("dev_A")).unwrap().err(),
+        Some("workspace_held"),
+        "a child the host has not placed may be anywhere"
+    );
+    f.m.report_children_for_tests("hst_A");
+    assert!(f.m.set_spawn(&p.id, true, Some("dev_A")).unwrap().is_ok());
+
+    // Ticked: the parent's own write vault, and only it.
+    let r = f.start_as(&p.id, None).unwrap();
+    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true).unwrap());
+    let launch = f.m.launch_of(&child.unwrap().id).unwrap().unwrap();
+    assert_eq!(launch.write_vault_id.as_deref(), Some("vlt_W"));
+}
+
+/// B4, the checks table's provider row: another agent than the parent's is
+/// refused when it is asked for and again at approval; naming the parent's
+/// own is a same-provider start.
+#[test]
+fn b4_a_child_runs_its_parents_agent_or_nothing() {
+    let mut f = fixture(16);
+    let p = f.parent();
+    for other in ["opencode", "codex", "shell", "Claude-Code"] {
+        assert_eq!(
+            f.start_as(&p.id, Some(other)),
+            Err(because("not_permitted")),
+            "{other}"
+        );
+    }
+    let same = f.start_as(&p.id, Some("claude-code")).unwrap();
+    let (request, ..) = decided(f.approve(&same.id, "dev_A"));
+    assert_eq!(request.outcome.as_deref(), Some("started"));
+
+    raw_request_with(
+        &f,
+        "agr_B4",
+        "start",
+        &p.id,
+        None,
+        &stamp(60_000),
+        r#"{"task":"t","provider":"opencode"}"#,
+    );
+    f.starts();
+    let (request, child, _) = decided(f.approve("agr_B4", "dev_A"));
+    assert_eq!(
+        outcome(&request),
+        ("decided", Some("refused"), Some("not_permitted"))
+    );
+    assert!(child.is_none());
+    assert!(f.starts().is_empty(), "nothing reaches the host");
+}
+
+/// A decided request cannot change: a child whose host takes no command
+/// after commit is its own `failed: start_failure`, and the request keeps
+/// `started` (134-3's reading).
+#[test]
+fn a_child_its_host_cannot_be_told_of_fails_on_its_own_record() {
+    let mut f = fixture(16);
+    let p = f.parent();
+    let r = f.start_as(&p.id, None).unwrap();
+    let (_, gone) = tokio::sync::mpsc::unbounded_channel();
+    drop(std::mem::replace(&mut f.link, gone));
+    let (request, child, _) = decided(f.approve(&r.id, "dev_A"));
+    assert_eq!(request.outcome.as_deref(), Some("started"));
+    let c = f.m.get(&child.unwrap().id).unwrap();
+    assert_eq!(
+        (c.status.as_str(), c.end_reason.as_deref()),
+        ("failed", Some("start_failure"))
+    );
+    // The slot it held is free again.
+    assert!(f.start_as(&p.id, None).is_ok());
+}
+
+/// 137f, 137h: a child whose workspace its host could not make ends with
+/// why, on its own record.
+#[test]
+fn a_child_whose_workspace_was_refused_ends_with_why() {
+    let f = fixture(16);
+    let p = f.parent();
+    let r = f.start_as(&p.id, None).unwrap();
+    let (_, child, _) = decided(f.approve(&r.id, "dev_A"));
+    let child = child.unwrap();
+    let report = serde_json::from_value(
+        serde_json::json!({"status": "failed", "end_reason": "workspace_cap"}),
+    )
+    .unwrap();
+    f.m.host_status("hst_A", &child.id, &report).unwrap();
+    let c = f.m.get(&child.id).unwrap();
+    assert_eq!(
+        (c.status.as_str(), c.end_reason.as_deref()),
+        ("failed", Some("workspace_cap"))
+    );
+    assert_eq!(
+        f.stored(&r.id).outcome.as_deref(),
+        Some("started"),
+        "the decision stands"
+    );
+}
+
+/// What a child's host says it made is kept on the child's record once:
+/// only for a session with a parent, and only in the shape a helper
+/// answers (a hex commit, a branch of the clone's own characters).
+#[test]
+fn a_childs_workspace_is_kept_as_its_host_made_it() {
+    let f = fixture(16);
+    let p = f.parent();
+    let r = f.start_as(&p.id, None).unwrap();
+    let (_, child, _) = decided(f.approve(&r.id, "dev_A"));
+    let child = child.unwrap().id;
+    let report = |id: &str, made: serde_json::Value| {
+        let report = serde_json::from_value(
+            serde_json::json!({"status": "running", "child_workspace": made}),
+        )
+        .unwrap();
+        f.m.host_status("hst_A", id, &report).unwrap();
+    };
+    for bad in [
+        serde_json::json!({"mode": "clone", "commit": "not-hex"}),
+        serde_json::json!({"mode": "clone"}),
+        serde_json::json!({"mode": "clone", "commit": "a".repeat(40), "branch": "x;rm -rf"}),
+        serde_json::json!({"mode": "scratch", "commit": "a".repeat(40)}),
+        serde_json::json!({"mode": "worktree", "commit": "a".repeat(40)}),
+    ] {
+        report(&child, bad);
+        assert_eq!(f.m.child_workspace_of(&child).unwrap(), None);
+    }
+    let made = serde_json::json!({"mode": "clone", "commit": "b".repeat(40),
+        "branch": "feat/x-1", "submodules": true, "large_files": false});
+    report(&child, made.clone());
+    let kept = f.m.child_workspace_of(&child).unwrap().unwrap();
+    assert_eq!(serde_json::to_value(&kept).unwrap(), made);
+    report(&child, serde_json::json!({"mode": "scratch"}));
+    assert_eq!(
+        f.m.child_workspace_of(&child).unwrap(),
+        Some(kept),
+        "kept once"
+    );
+    // A top-level session has none, whatever its host says.
+    report(&p.id, serde_json::json!({"mode": "scratch"}));
+    assert_eq!(f.m.child_workspace_of(&p.id).unwrap(), None);
+}
+
+/// Token sync (decision 124) narrows too: a child pulls its parent's synced
+/// login only when the parent had one, and never one the parent did not.
+#[test]
+fn a_child_gets_its_parents_synced_login_and_no_other() {
+    const KIND: &str = "claude_subscription_token";
+    let dir = tempdir::TempDir::new("storm-start-credential").unwrap();
+    let m = AgentManager::open(dir.path()).unwrap();
+    let (_, mut link) = m.connect_host("hst_A");
+    let mut hello = caps(VERIFIED, 16);
+    hello.capabilities.provider_credentials = vec![KIND.into()];
+    m.hello("hst_A", hello).unwrap();
+    for synced in [true, false] {
+        let launch: Launch = serde_json::from_value(serde_json::json!({
+            "host_id": "hst_A", "workspace": if synced { "storm" } else { "other" },
+            "provider": "claude-code", "terminal": {"cols": 80, "rows": 24},
+        }))
+        .unwrap();
+        let meta = LaunchMeta {
+            provider_credential: synced.then_some(KIND),
+            ..LaunchMeta::default()
+        };
+        let (p, ..) = m
+            .launch("usr_A", launch, meta, vec![grant("storm")])
+            .unwrap();
+        let running = serde_json::from_value(serde_json::json!({"status": "running"})).unwrap();
+        m.host_status("hst_A", &p.id, &running).unwrap();
+        m.set_spawn(&p.id, true, Some("dev_A")).unwrap().unwrap();
+        while link.try_recv().is_ok() {}
+        let r = m
+            .create_request(
+                &p.id,
+                NewRequest::Start {
+                    task: "t".into(),
+                    provider: None,
+                    name: None,
+                    context_note: None,
+                },
+            )
+            .unwrap()
+            .unwrap();
+        let (_, child, _) = decided(m.approve_request(&r.id, "dev_A", false).unwrap());
+        let child = child.unwrap().id;
+        let start = serde_json::to_value(link.try_recv().unwrap()).unwrap();
+        assert_eq!(start["type"], "start");
+        assert_eq!(
+            start.get("provider_credential").and_then(|k| k.as_str()),
+            synced.then_some(KIND),
+            "{start}"
+        );
+        assert_eq!(m.requested_credential(&child), synced.then_some(KIND));
+        m.report_children_for_tests("hst_A");
+    }
+}
+
+/// C7 with 134-5: a child's own workspace is no listed one, so a resumed
+/// child is a top-level session where its work began, its parent's.
+#[test]
+fn a_childs_work_began_in_its_parents_workspace() {
+    let f = fixture(16);
+    let p = f.parent();
+    let r = f.start_as(&p.id, None).unwrap();
+    let (_, child, _) = decided(f.approve(&r.id, "dev_A"));
+    let child = child.unwrap();
+    assert_eq!(f.m.origin_workspace(&child.id).unwrap(), "storm");
+    assert_eq!(f.m.origin_workspace(&p.id).unwrap(), "storm");
 }

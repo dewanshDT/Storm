@@ -190,11 +190,14 @@ impl AgentManager {
     /// records one.
     #[cfg(test)]
     pub fn spawn_child_for_tests(&self, parent: &str, task: &str) -> SessionRecord {
-        self.store
+        let child = self
+            .store
             .lock()
             .unwrap()
             .spawn_child_for_tests(parent, task, false)
-            .unwrap()
+            .unwrap();
+        self.report_children_for_tests(&child.host_id);
+        child
     }
 
     /// Test-only: the switch's row written as a person's enable writes it,

@@ -175,6 +175,9 @@ pub trait SessionEvents: Send + Sync {
     /// On an isolated host it comes with the uid the session runs as, which
     /// its connections must come from too (decision 136i).
     fn leader(&self, _leader: crate::platform::peer::Process, _user: Option<u32>) {}
+    /// A spawned child's own workspace, as the isolation helper made it
+    /// before the child started (decision 137).
+    fn child_workspace(&self, _made: crate::isolation::ChildWorkspace) {}
 }
 
 /// Why a session could not be started.
@@ -185,13 +188,16 @@ pub enum StartError {
     /// Anything else, with the reason for the host's log and the session's
     /// `start_failure`.
     Failed(String),
+    /// A failure the session's record names (137f, 137h: a child's
+    /// workspace over a cap, or a repository that cannot be cloned).
+    Ended(crate::status::EndReason, String),
 }
 
 impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotAvailable => f.write_str("provider not installed on this host"),
-            Self::Failed(reason) => write!(f, "could not start: {reason}"),
+            Self::Failed(reason) | Self::Ended(_, reason) => write!(f, "could not start: {reason}"),
         }
     }
 }

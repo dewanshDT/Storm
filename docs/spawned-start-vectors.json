@@ -1,0 +1,21 @@
+{
+  "about": "Decision 134-5: the start storm-server sends a Runtime Host for an approved child. The server's test (apps/server/src/api.rs, the_full_flow_starts_an_approved_child_in_its_own_workspace) makes one through the real routes and compares it with `start`, after putting its own ids, workspace, grants and size in for the placeholders; the host's test (apps/runtime/src/host.rs, an_approved_childs_start_runs_it_in_its_own_clone) dispatches `start` itself to an isolated host. Neither crate depends on the other: this file is what keeps the two halves of the flow on one wire shape.",
+  "placeholders": {
+    "session": "ags_CHILD",
+    "child_of": "ags_PARENT",
+    "workspace": "w"
+  },
+  "start": {
+    "cmd_seq": 1,
+    "type": "start",
+    "session": "ags_CHILD",
+    "workspace": "w",
+    "provider": "claude-code",
+    "interaction": "terminal",
+    "terminal": {"cols": 80, "rows": 24},
+    "mcp": [{"id": "storm", "slug": "storm"}],
+    "context": true,
+    "spawn_asks": {"spawned": true},
+    "child_of": "ags_PARENT"
+  }
+}
