@@ -120,6 +120,21 @@ pub enum Command {
         agent: String,
         op: String,
     },
+    /// A person's look at, Apply of or delete of a child's workspace
+    /// (decision 137e, 137g). The host carries it to its isolation helper,
+    /// which checks every field, and answers on
+    /// `/v1/runtime/children/{request}`.
+    #[serde(rename = "child.workspace")]
+    ChildWorkspace {
+        request: String,
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
 }
 
 impl Command {
@@ -135,6 +150,7 @@ impl Command {
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
+            Self::ChildWorkspace { .. } => "child.workspace",
         }
     }
 
@@ -148,7 +164,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } => None,
+            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
         }
     }
 }
@@ -212,6 +228,10 @@ pub struct Capabilities {
     /// and is never sent one.
     #[serde(default)]
     pub agent_install: bool,
+    /// The host carries `child.workspace` to its isolation helper (decision
+    /// 137-3). Only an isolated host says so; any other is never sent one.
+    #[serde(default)]
+    pub child_workspaces: bool,
     /// Whether the host checks who connects for a session (decision 135d).
     /// An old host does not say, and is `unavailable: old_host`.
     #[serde(default, deserialize_with = "identity_or_unavailable")]
@@ -530,6 +550,9 @@ pub enum AgentError {
     Timeout,
     /// The host could not stage it, and said why (502).
     HostFailed(String),
+    /// The isolation helper refused a child workspace request, or the host
+    /// could not carry it (decision 137-3). The code is the helper's.
+    ChildRefused(String),
     Internal(anyhow::Error),
 }
 
@@ -596,6 +619,8 @@ pub struct AgentManager {
     live: Mutex<Live>,
     images: Mutex<images::Images>,
     jobs: Mutex<jobs::Jobs>,
+    /// `child.workspace` requests waiting for their host's answer.
+    children: Mutex<HashMap<String, ChildPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
 }
@@ -606,6 +631,40 @@ const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_secs(30)
 };
+
+/// How long a child workspace request waits for its host: an export or an
+/// Apply runs in a unit whose own limit is 600 s, and the host waits 660 s
+/// for the helper.
+const CHILD_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(700)
+};
+
+struct ChildPending {
+    host: String,
+    done: tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>,
+}
+
+/// What a `child.workspace` request does on the host's helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildOp {
+    List,
+    Export,
+    Import,
+    Dispose,
+}
+
+impl ChildOp {
+    fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Export => "export",
+            Self::Import => "import",
+            Self::Dispose => "dispose",
+        }
+    }
+}
 
 /// A staged image: the path the client pastes.
 #[derive(Debug, Clone, Serialize)]
@@ -649,6 +708,7 @@ impl AgentManager {
             live: Mutex::new(Live::default()),
             images: Mutex::new(images::Images::default()),
             jobs: Mutex::new(jobs::Jobs::default()),
+            children: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
         })
@@ -1799,6 +1859,74 @@ impl AgentManager {
         Ok(())
     }
 
+    /// One request to a host's isolation helper about its child workspaces
+    /// (decision 137-3), and the helper's answer. A host that does not say
+    /// it has child workspaces is never sent one.
+    pub async fn child_workspace(
+        &self,
+        host_id: &str,
+        op: ChildOp,
+        child: Option<&str>,
+        parent: Option<&str>,
+        target: Option<&str>,
+    ) -> AgentResult<serde_json::Value> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.is_some_and(|c| c.child_workspaces) {
+            return Err(AgentError::ChildRefused("isolation_off".into()));
+        }
+        let request = crate::auth::identity::random_id("cwr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.children.lock().unwrap().insert(
+            request.clone(),
+            ChildPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::ChildWorkspace {
+            request: request.clone(),
+            op: op.name().into(),
+            child: child.map(str::to_string),
+            parent: parent.map(str::to_string),
+            target: target.map(str::to_string),
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(CHILD_DEADLINE, rx).await,
+            Err(e) => {
+                self.children.lock().unwrap().remove(&request);
+                return Err(e);
+            }
+        };
+        self.children.lock().unwrap().remove(&request);
+        match outcome {
+            Ok(Ok(Ok(answer))) => Ok(answer),
+            Ok(Ok(Err(code))) => Err(AgentError::ChildRefused(code)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::ChildRefused("timeout".into())),
+        }
+    }
+
+    /// A host's answer to its own `child.workspace` request, never
+    /// another's.
+    pub fn child_answered(
+        &self,
+        host_id: &str,
+        request: &str,
+        outcome: std::result::Result<serde_json::Value, String>,
+    ) -> AgentResult<()> {
+        let mut children = self.children.lock().unwrap();
+        match children.get(request) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = children.remove(request) {
+            let _ = p.done.send(outcome);
+        }
+        Ok(())
+    }
+
     /// Raw input. At most once: refused while the host is offline, never
     /// queued (freeze §11.3).
     pub fn input(&self, id: &str, bytes: &[u8]) -> AgentResult<()> {
@@ -2222,6 +2350,7 @@ mod tests {
             provider_credentials: Vec::new(),
             plugin_mcp_remote: Vec::new(),
             agent_install: false,
+            child_workspaces: false,
             identity: Identity::default(),
             isolation: Isolation::default(),
         }

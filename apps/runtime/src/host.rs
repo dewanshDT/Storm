@@ -145,6 +145,29 @@ pub enum Command {
         blake3: String,
         ext: String,
     },
+    /// A person's look at, Apply of or delete of a child's workspace
+    /// (decision 137e, 137g), carried to the isolation helper. The host
+    /// answers on `/v1/runtime/children/<request>`.
+    #[serde(rename = "child.workspace")]
+    ChildWorkspace {
+        request: String,
+        op: ChildOp,
+        #[serde(default)]
+        child: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildOp {
+    List,
+    Export,
+    Import,
+    Dispose,
 }
 
 impl Command {
@@ -160,6 +183,7 @@ impl Command {
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
+            Self::ChildWorkspace { .. } => "child.workspace",
         }
     }
 
@@ -173,7 +197,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } => None,
+            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
         }
     }
 }
@@ -491,7 +515,7 @@ impl Host {
                 cap
             })
             .collect();
-        json!({
+        let mut caps = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
@@ -536,7 +560,72 @@ impl Host {
             // Whether each session runs as its own identity, from the
             // self-test (decision 136j). A host without it is `old_host`.
             "isolation": self.isolation_status.report().to_json(),
+        });
+        // It carries `child.workspace` to the helper (decision 137-3). Only
+        // an isolated host has child workspaces; every other host's bytes
+        // are unchanged.
+        if self.isolation.is_some() {
+            caps["child_workspaces"] = json!(true);
+        }
+        caps
+    }
+
+    /// One `child.workspace` command (decision 137e, 137g): the helper's
+    /// answer, or its refusal's code, posted back for the person who asked.
+    /// The host decides nothing: the helper checks every field.
+    async fn child_workspace(
+        self: Arc<Self>,
+        request: String,
+        op: ChildOp,
+        child: Option<String>,
+        parent: Option<String>,
+        target: Option<String>,
+    ) {
+        let request_ok = request.len() <= 64
+            && request.starts_with("cwr_")
+            && request[4..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !request_ok {
+            tracing::warn!(request = %request, "child workspace: a malformed request id, ignored");
+            return;
+        }
+        let report = format!("/v1/runtime/children/{request}");
+        let Some(link) = self.isolation.clone() else {
+            let _ = self
+                .post(&report, &json!({ "refused": "isolation_off" }))
+                .await;
+            return;
+        };
+        let answered = tokio::task::spawn_blocking(move || {
+            let child = child.unwrap_or_default();
+            match op {
+                ChildOp::List => link.child_list(),
+                ChildOp::Export => link.child_export(&child),
+                ChildOp::Import => link.child_import(
+                    &child,
+                    parent.as_deref().unwrap_or_default(),
+                    target.as_deref().unwrap_or_default(),
+                ),
+                ChildOp::Dispose => link.child_dispose(&child),
+            }
         })
+        .await;
+        let body = match answered {
+            Ok(Ok(answer)) => json!({ "answer": answer }),
+            Ok(Err(e)) => match crate::isolation::refusal(&e) {
+                Some(code) => json!({ "refused": code }),
+                None => {
+                    tracing::warn!(error = %e, "child workspace: the helper did not answer");
+                    json!({ "refused": "helper" })
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "child workspace: the call panicked");
+                json!({ "refused": "failed" })
+            }
+        };
+        if let Err(e) = self.post(&report, &body).await {
+            tracing::warn!(error = %e, "child workspace: could not post the answer");
+        }
     }
 
     /// An installable agent's version, where it came from, and whether this
@@ -1208,7 +1297,10 @@ impl Host {
                     host.starting.lock().unwrap().remove(&id);
                 });
             }
-            Command::Refresh | Command::TerminalImage { .. } | Command::AgentInstall { .. } => {
+            Command::Refresh
+            | Command::TerminalImage { .. }
+            | Command::AgentInstall { .. }
+            | Command::ChildWorkspace { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -1269,6 +1361,16 @@ impl Host {
                 tokio::spawn(self.stage_image(session, image, size, blake3, ext));
             }
             Command::AgentInstall { job, agent, op } => self.agent_job(job, agent, op).await,
+            Command::ChildWorkspace {
+                request,
+                op,
+                child,
+                parent,
+                target,
+            } => {
+                self.child_workspace(request, op, child, parent, target)
+                    .await
+            }
             command => self.handle_now(command),
         }
     }
@@ -1281,7 +1383,8 @@ impl Host {
             Command::Start { .. }
             | Command::Refresh
             | Command::TerminalImage { .. }
-            | Command::AgentInstall { .. } => {
+            | Command::AgentInstall { .. }
+            | Command::ChildWorkspace { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -3653,6 +3756,117 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 .unwrap()
                 .iter()
                 .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    fn child_command(
+        request: &str,
+        op: ChildOp,
+        child: Option<&str>,
+        target: Option<&str>,
+    ) -> Command {
+        Command::ChildWorkspace {
+            request: request.into(),
+            op,
+            child: child.map(Into::into),
+            parent: Some("ags_P".into()),
+            target: target.map(Into::into),
+        }
+    }
+
+    fn child_answer(
+        seen: &Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        request: &str,
+    ) -> Option<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .find(|(p, _)| p.ends_with(&format!("/v1/runtime/children/{request}")))
+            .map(|(_, b)| b.clone())
+    }
+
+    /// Decision 137-3: a host carries `child.workspace` to its helper and
+    /// posts the helper's answer, or its refusal's code, back; it decides
+    /// nothing itself. Only an isolated host says it can.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_workspace_command_is_carried_to_the_helper_and_answered() {
+        let (host, seen, helper, _state, _roots) = isolated_host_for("shell", &[]).await;
+        assert_eq!(host.capabilities()["child_workspaces"], json!(true));
+        host.clone()
+            .handle(child_command("cwr_1", ChildOp::List, None, None))
+            .await;
+        let v = child_answer(&seen, "cwr_1").unwrap();
+        assert_eq!(v["answer"]["orphans"], json!(["ags_LOST"]));
+        assert!(v["answer"].get("ok").is_none() && v["answer"].get("op").is_none());
+        host.clone()
+            .handle(child_command("cwr_2", ChildOp::Export, Some("ags_C"), None))
+            .await;
+        let v = child_answer(&seen, "cwr_2").unwrap();
+        assert_eq!(
+            v["answer"]["patch"].as_str().unwrap().len(),
+            200 << 10,
+            "a whole diff"
+        );
+        host.clone()
+            .handle(child_command(
+                "cwr_3",
+                ChildOp::Import,
+                Some("ags_C"),
+                Some("storm/ags_C"),
+            ))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_3").unwrap()["answer"]["branch"],
+            "storm/ags_C"
+        );
+        host.clone()
+            .handle(child_command("cwr_4", ChildOp::Export, Some("ags_X"), None))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_4").unwrap(),
+            json!({"refused": "no_child"})
+        );
+        host.clone()
+            .handle(child_command(
+                "cwr_5",
+                ChildOp::Dispose,
+                Some("ags_C"),
+                None,
+            ))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_5").unwrap()["answer"]["removed"],
+            true
+        );
+        let ops = helper.seen.lock().unwrap().ops.clone();
+        for want in [
+            "child_list ",
+            "child_export ags_C",
+            "child_import ags_C",
+            "child_dispose ags_C",
+        ] {
+            assert!(ops.iter().any(|o| o == want), "{want} in {ops:?}");
+        }
+        host.clone()
+            .handle(child_command("../evil", ChildOp::List, None, None))
+            .await;
+        assert!(!seen.lock().unwrap().iter().any(|(p, _)| p.contains("evil")));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_host_without_isolation_has_no_child_workspaces() {
+        let (host, seen, _state, _roots) = harness_host("exec sleep 1000").await;
+        assert!(host.capabilities().get("child_workspaces").is_none());
+        host.clone()
+            .handle(child_command("cwr_1", ChildOp::List, None, None))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_1").unwrap(),
+            json!({"refused": "isolation_off"})
         );
         host.shutdown(Duration::from_millis(200)).await;
     }

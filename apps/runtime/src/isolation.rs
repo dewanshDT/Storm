@@ -265,6 +265,32 @@ mod imp {
         ) -> std::io::Result<super::ChildWorkspace> {
             match self._never {}
         }
+
+        pub fn child_list(&self) -> std::io::Result<serde_json::Value> {
+            match self._never {}
+        }
+
+        pub fn child_export(&self, _: &str) -> std::io::Result<serde_json::Value> {
+            match self._never {}
+        }
+
+        pub fn child_import(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> std::io::Result<serde_json::Value> {
+            match self._never {}
+        }
+
+        pub fn child_dispose(&self, _: &str) -> std::io::Result<serde_json::Value> {
+            match self._never {}
+        }
+    }
+
+    /// No helper off Linux, so never its refusal.
+    pub fn refusal(_: &std::io::Error) -> Option<&str> {
+        None
     }
 }
 
@@ -354,6 +380,7 @@ mod imp {
     /// A child's clone unit's own limit is 600 s (`children.rs`).
     const CHILD_TIMEOUT: Duration = Duration::from_secs(660);
     const MAX_RESPONSE: usize = 16 * 1024;
+    const MAX_CHILD_RESPONSE: usize = 2 << 20;
 
     /// One request to the helper, and its answer.
     pub trait Helper: Send + Sync {
@@ -374,9 +401,10 @@ mod imp {
             fd: Option<BorrowedFd<'_>>,
         ) -> io::Result<(Value, Option<OwnedFd>)> {
             let stream = UnixStream::connect(&self.0)?;
-            let wait = if request["op"] == "agent_job" {
+            let op = request["op"].as_str().unwrap_or_default();
+            let wait = if op == "agent_job" {
                 JOB_TIMEOUT
-            } else if request["op"] == "child_create" {
+            } else if op.starts_with("child_") {
                 CHILD_TIMEOUT
             } else if request["op"] == "end" || request["op"] == "release" {
                 END_TIMEOUT
@@ -388,7 +416,14 @@ mod imp {
             let mut line = request.to_string().into_bytes();
             line.push(b'\n');
             send_line(&stream, &line, fd)?;
-            let (bytes, mut fds) = recv_line(&stream, MAX_RESPONSE)?;
+            // An export carries the child's diff (decision 137e), bounded by
+            // the helper; every other answer is small.
+            let max = if op == "child_export" || op == "child_list" {
+                MAX_CHILD_RESPONSE
+            } else {
+                MAX_RESPONSE
+            };
+            let (bytes, mut fds) = recv_line(&stream, max)?;
             let answer: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "the helper's answer"))?;
             Ok((answer, fds.pop()))
@@ -649,6 +684,40 @@ mod imp {
             })
         }
 
+        /// The helper's answer, without its `ok` and `op`.
+        fn answer(&self, request: Value) -> io::Result<Value> {
+            let (mut answer, _) = self.ask(request, None)?;
+            if let Some(map) = answer.as_object_mut() {
+                map.remove("ok");
+                map.remove("op");
+            }
+            Ok(answer)
+        }
+
+        /// Every child workspace the helper keeps, and the orphans
+        /// (decision 137g).
+        pub fn child_list(&self) -> io::Result<Value> {
+            self.answer(json!({"op": "child_list"}))
+        }
+
+        /// An ended child's work as data (137e): its commits and diff, or
+        /// its scratch files.
+        pub fn child_export(&self, child: &str) -> io::Result<Value> {
+            self.answer(json!({"op": "child_export", "child": child}))
+        }
+
+        /// Apply (137e): `storm/<child>`, or a new directory `target`.
+        pub fn child_import(&self, child: &str, parent: &str, target: &str) -> io::Result<Value> {
+            self.answer(
+                json!({"op": "child_import", "child": child, "parent": parent, "target": target}),
+            )
+        }
+
+        /// A person's delete of a child's workspace or an orphan (137g).
+        pub fn child_dispose(&self, child: &str) -> io::Result<Value> {
+            self.answer(json!({"op": "child_dispose", "child": child}))
+        }
+
         pub fn release(&self, session: &str, user: &str) -> io::Result<()> {
             self.ask(
                 json!({"op": "release", "session": session, "user": user}),
@@ -886,6 +955,25 @@ mod imp {
                         None,
                     ),
                 },
+                "child_list" => (
+                    json!({"ok": true, "op": "child_list", "children": [{"child": "ags_C", "parent": "ags_P", "mode": "clone", "stage": "ended", "live": false}], "orphans": ["ags_LOST"], "unknown_entries": 0}),
+                    None,
+                ),
+                // A whole diff's worth, so the answer is larger than any
+                // other the helper gives.
+                "child_export" if req["child"] == "ags_C" => (
+                    json!({"ok": true, "op": "child_export", "child": "ags_C", "mode": "clone", "tip": "a".repeat(40), "patch": "+".repeat(200 << 10)}),
+                    None,
+                ),
+                "child_import" if req["child"] == "ags_C" => (
+                    json!({"ok": true, "op": "child_import", "child": "ags_C", "branch": req["target"], "commit": "a".repeat(40)}),
+                    None,
+                ),
+                "child_dispose" => (
+                    json!({"ok": true, "op": "child_dispose", "removed": true}),
+                    None,
+                ),
+                "child_export" | "child_import" => refuse("no_child"),
                 _ => (json!({"ok": false, "error": "not_built"}), None),
             };
             let mut line = answer.to_string().into_bytes();

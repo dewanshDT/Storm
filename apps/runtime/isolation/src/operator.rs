@@ -138,7 +138,12 @@ pub fn off(
         "the isolation pools are not intact, so their files cannot be handed back safely",
     )?;
     let mut uids: Vec<u32> = pool.users.values().copied().collect();
-    uids.extend(pool.install.map(|(uid, _)| uid));
+    uids.extend(
+        pool.install
+            .into_iter()
+            .chain(pool.review)
+            .map(|(uid, _)| uid),
+    );
     let left = m.processes_of(&uids);
     if !left.is_empty() {
         bail!(

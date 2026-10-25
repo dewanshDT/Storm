@@ -37,6 +37,23 @@ pub fn session_ok(id: &str) -> bool {
     })
 }
 
+/// The branch a W2 Apply creates (137e): always this one, never a name a
+/// request chose.
+pub fn apply_branch(child: &str) -> String {
+    format!("storm/{child}")
+}
+
+/// The name of the directory a W3 Apply makes in the parent's workspace
+/// (137e, 138p): one path component a person can type, never a dot-file
+/// (`.git` among them) or something an option parser would read.
+pub fn directory_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && !name.starts_with(['.', '-'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
 pub fn validate(req: &Request, cx: &Context) -> Result<(), Refusal> {
     for field in ["session", "parent", "child"] {
         if let Some(id) = req.fields.get(field)
@@ -65,6 +82,12 @@ pub fn validate(req: &Request, cx: &Context) -> Result<(), Refusal> {
     }
     if req.op == Op::Signal && !SIGNALS.contains(&req.get("signal")) {
         return Err(Refusal::BadSignal);
+    }
+    if req.op == Op::ChildImport {
+        let target = req.get("target");
+        if target != apply_branch(req.get("child")) && !directory_name_ok(target) {
+            return Err(Refusal::BadValue("target"));
+        }
     }
     if req.op == Op::AgentJob
         && (!crate::agents::MANAGEABLE.contains(&req.get("agent"))
@@ -309,5 +332,47 @@ mod tests {
         for bad in ["stop", "9", "SIGKILL", "usr1"] {
             assert_eq!(validate(&sig(bad), &cx), Err(Refusal::BadSignal), "{bad}");
         }
+    }
+
+    /// 137e: a W2 Apply names only `storm/<child>`; a W3 Apply names one
+    /// plain directory, never a path, a dot-file or an option.
+    #[test]
+    fn an_apply_target_is_the_childs_branch_or_one_plain_name() {
+        let pool = pool();
+        let leases = Leases::new(pool.users.keys().cloned());
+        let cx = Context {
+            pool: &pool,
+            roots: &[],
+            providers: &[],
+            leases: &leases,
+            homes: Path::new("/h"),
+        };
+        let import = |t: &str| {
+            let line = serde_json::json!({"op": "child_import", "child": "ags_C1", "parent": "ags_P1", "target": t});
+            validate(&parse(line.to_string().as_bytes()).unwrap(), &cx)
+        };
+        for good in ["storm/ags_C1", "app-ags_C1", "notes", "a.b_c-1"] {
+            assert_eq!(import(good), Ok(()), "{good}");
+        }
+        for bad in [
+            "storm/ags_C2",
+            "storm/ags_C1/x",
+            "refs/heads/main",
+            ".git",
+            ".storm-apply-ags_C1",
+            "..",
+            "-rf",
+            "a/b",
+            "a b",
+            "/etc",
+            "é",
+            &"x".repeat(129),
+        ] {
+            assert_eq!(import(bad), Err(Refusal::BadValue("target")), "{bad}");
+        }
+        assert!(
+            directory_name_ok("main"),
+            "a plain name; the helper decides by mode"
+        );
     }
 }

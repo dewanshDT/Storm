@@ -22,8 +22,12 @@
 //! children on the host. The clone itself stops before its checkout if the
 //! checkout would cross the budget, and the helper measures what was made.
 //! A creation that fails leaves nothing behind (137h). At the child's lease
-//! end its workspace is kept, root's, marked ended, until 137-3's review
-//! identity takes it.
+//! end its workspace is kept, marked ended, and given to the review
+//! identity (137g), which runs every later export and Apply in a unit of
+//! its own (`review.rs`): Apply writes only `storm/<child>` (W2) or a new
+//! directory (W3) in the parent's workspace, and never merges (137e). A
+//! human deletes it (`child_dispose`), and directories no record claims are
+//! listed as orphans, never removed unasked.
 
 use std::ffi::OsString;
 use std::os::fd::OwnedFd;
@@ -91,6 +95,17 @@ pub struct ChildRecord {
     pub submodules: bool,
     #[serde(default)]
     pub large_files: bool,
+    /// An Apply under way or made (137e): what it creates in the parent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<Applied>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Applied {
+    pub target: String,
+    /// False while it runs: a helper that finds it so after a restart lets
+    /// the same Apply finish, and refuses any other.
+    pub done: bool,
 }
 
 /// W2 when the workspace is a repository root: its `.git` is a directory
@@ -234,34 +249,10 @@ impl CloneSpec {
             format!("TimeoutStopSec={STOP_GRACE_SECS}"),
             // No file it writes can be larger than the whole budget.
             format!("LimitFSIZE={}", self.budget),
-            p("NoNewPrivileges=yes"),
-            p("CapabilityBoundingSet="),
-            p("AmbientCapabilities="),
-            p("RestrictSUIDSGID=yes"),
-            p("ProtectSystem=strict"),
-            p("ProtectHome=yes"),
-            p("PrivateTmp=yes"),
-            p("PrivateDevices=yes"),
-            p("PrivateIPC=yes"),
-            // A local clone needs no network: a repository that names a
-            // remote reaches nothing.
-            p("PrivateNetwork=yes"),
-            p("RestrictAddressFamilies=AF_UNIX"),
-            p("IPAddressDeny=any"),
-            p("ProtectProc=invisible"),
-            p("ProtectKernelTunables=yes"),
-            p("ProtectKernelModules=yes"),
-            p("ProtectKernelLogs=yes"),
-            p("ProtectControlGroups=yes"),
-            p("ProtectClock=yes"),
-            p("ProtectHostname=yes"),
-            p("LockPersonality=yes"),
-            p("MemoryDenyWriteExecute=yes"),
-            p("RestrictRealtime=yes"),
-            p("RestrictNamespaces=yes"),
-            p("KeyringMode=private"),
-            p("SystemCallArchitectures=native"),
         ];
+        // A local clone needs no network: a repository that names a remote
+        // reaches nothing.
+        out.extend(sandbox());
         for hidden in &self.hidden {
             out.push(format!("TemporaryFileSystem={}:ro", hidden.display()));
         }
@@ -320,6 +311,154 @@ impl CloneSpec {
     }
 }
 
+pub fn review_unit_name(child: &str) -> String {
+    format!("storm-child-{child}-review.service")
+}
+
+/// The unit an export or an Apply runs in (137e, 137g): the review
+/// identity, never a session's user, the host account or root; no network,
+/// no capability; only the paths it reads shown, read-only, and the one it
+/// writes. An Apply also has the parent workspace's group, to write there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReviewSpec {
+    pub child: String,
+    pub parent_group: Option<String>,
+    pub read_only: Vec<PathBuf>,
+    pub writable: Vec<PathBuf>,
+    pub hidden: Vec<PathBuf>,
+    pub budget: u64,
+    /// `child-review`'s own arguments (`review::main`).
+    pub args: Vec<String>,
+}
+
+impl ReviewSpec {
+    pub fn properties(&self) -> Result<Vec<String>> {
+        if let Some(bad) = self
+            .read_only
+            .iter()
+            .chain(&self.writable)
+            .chain(&self.hidden)
+            .find(|p| !property_safe(p))
+        {
+            bail!("{} cannot be written into a unit property", bad.display());
+        }
+        let user = crate::pool::REVIEW_ACCOUNT;
+        let mut out = vec![
+            format!("Description=Storm child workspace review {}", self.child),
+            "Type=exec".to_string(),
+            format!("User={user}"),
+            format!("Group={user}"),
+        ];
+        if let Some(group) = &self.parent_group {
+            out.push(format!("SupplementaryGroups={group}"));
+        }
+        out.extend([
+            "WorkingDirectory=/".to_string(),
+            format!("Environment=HOME={}", crate::clone::HOME),
+            // What an Apply writes is the workspace group's to use, as the
+            // conversion makes everything there; it is handed back after.
+            if self.parent_group.is_some() {
+                "UMask=0007".to_string()
+            } else {
+                "UMask=0077".to_string()
+            },
+            format!("RuntimeMaxSec={CLONE_MAX_SECS}"),
+            format!("TimeoutStopSec={STOP_GRACE_SECS}"),
+            format!("LimitFSIZE={}", self.budget),
+        ]);
+        out.extend(sandbox());
+        for hidden in &self.hidden {
+            out.push(format!("TemporaryFileSystem={}:ro", hidden.display()));
+        }
+        for p in &self.read_only {
+            out.push(format!("BindReadOnlyPaths={}", p.display()));
+        }
+        for p in &self.writable {
+            out.push(format!("BindPaths={}", p.display()));
+        }
+        Ok(out)
+    }
+
+    pub fn exec(&self) -> Vec<OsString> {
+        let mut out: Vec<OsString> = vec![HELPER_BIN.into(), "child-review".into()];
+        out.extend(self.args.iter().map(OsString::from));
+        out
+    }
+
+    pub fn systemd_run_args(&self) -> Result<Vec<OsString>> {
+        let mut out: Vec<OsString> = vec![
+            format!("--unit={}", review_unit_name(&self.child)).into(),
+            "--quiet".into(),
+            "--no-ask-password".into(),
+            "--expand-environment=no".into(),
+            "--wait".into(),
+            "--pipe".into(),
+            "--collect".into(),
+        ];
+        for property in self.properties()? {
+            out.push("-p".into());
+            out.push(property.into());
+        }
+        out.push("--".into());
+        out.extend(self.exec());
+        Ok(out)
+    }
+
+    pub fn unit_file(&self) -> Result<String> {
+        let mut service = String::from("[Service]\n");
+        for property in self.properties()? {
+            if !property.starts_with("Description=") {
+                service.push_str(&property);
+                service.push('\n');
+            }
+        }
+        let exec: Vec<String> = self
+            .exec()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        service.push_str(&format!("ExecStart={}\n", exec.join(" ")));
+        Ok(format!(
+            "[Unit]\nDescription=Storm child workspace review {}\n\n{service}",
+            self.child
+        ))
+    }
+}
+
+/// What every unit the helper runs for a child's workspace has: no
+/// capability, no network, nothing of the system writable.
+fn sandbox() -> Vec<String> {
+    [
+        "NoNewPrivileges=yes",
+        "CapabilityBoundingSet=",
+        "AmbientCapabilities=",
+        "RestrictSUIDSGID=yes",
+        "ProtectSystem=strict",
+        "ProtectHome=yes",
+        "PrivateTmp=yes",
+        "PrivateDevices=yes",
+        "PrivateIPC=yes",
+        "PrivateNetwork=yes",
+        "RestrictAddressFamilies=AF_UNIX",
+        "IPAddressDeny=any",
+        "ProtectProc=invisible",
+        "ProtectKernelTunables=yes",
+        "ProtectKernelModules=yes",
+        "ProtectKernelLogs=yes",
+        "ProtectControlGroups=yes",
+        "ProtectClock=yes",
+        "ProtectHostname=yes",
+        "LockPersonality=yes",
+        "MemoryDenyWriteExecute=yes",
+        "RestrictRealtime=yes",
+        "RestrictNamespaces=yes",
+        "KeyringMode=private",
+        "SystemCallArchitectures=native",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
 impl crate::session::Layout {
     pub fn children(&self) -> PathBuf {
         self.state.join("children")
@@ -333,6 +472,14 @@ impl crate::session::Layout {
     /// The child's workspace, at this same path in its own view.
     pub fn child_workspace(&self, child: &str) -> PathBuf {
         self.child(child).join("workspace")
+    }
+    /// The review identity's own: where an export leaves its bundle.
+    pub fn child_review(&self, child: &str) -> PathBuf {
+        self.child(child).join("review")
+    }
+    /// What the last export found, the helper's.
+    pub fn child_export(&self, child: &str) -> PathBuf {
+        self.child(child).join("export.json")
     }
 }
 
@@ -440,6 +587,7 @@ impl Helper {
             branch: None,
             submodules: false,
             large_files: false,
+            applied: None,
         };
         let made = self.make_child(&mut record, &user, budget);
         if let Err(why) = made {
@@ -526,7 +674,8 @@ impl Helper {
     }
 
     /// At the child's lease end: its workspace stays, but no longer its
-    /// user's to reach, since that user goes back to the pool.
+    /// user's to reach, since that user goes back to the pool. It becomes
+    /// the review identity's (137g), or root's on a host that has none yet.
     pub(crate) fn child_ended(&self, child: &str) -> Result<()> {
         let Some(mut r) = self.child_record(child) else {
             return Ok(());
@@ -534,7 +683,12 @@ impl Helper {
         match r.stage {
             Stage::Creating => self.abandon(child),
             Stage::Ready | Stage::Ended => {
-                files::rootify(&self.layout.child_workspace(child), self.deps.own.as_ref())?;
+                let workspace = self.layout.child_workspace(child);
+                let own = self.deps.own.as_ref();
+                match self.pool.review {
+                    Some((uid, gid)) => files::give_tree(&workspace, uid, gid, own)?,
+                    None => files::rootify(&workspace, own)?,
+                };
                 if r.stage == Stage::Ready {
                     r.stage = Stage::Ended;
                     self.save_child(&r)?;
@@ -542,6 +696,344 @@ impl Helper {
                 Ok(())
             }
         }
+    }
+
+    fn stop_review(&self, child: &str) -> Result<()> {
+        let unit = review_unit_name(child);
+        let units = &self.deps.units;
+        if units.show(&unit).is_ok_and(|s| s.loaded) {
+            units.stop(&unit)?;
+            units.reset_failed(&unit);
+        }
+        Ok(())
+    }
+
+    /// A child that has ended: its lease gone, its workspace kept.
+    fn ended_child(&self, child: &str) -> Result<ChildRecord, Refusal> {
+        let r = self.child_record(child).ok_or(Refusal::NoChild)?;
+        if self.state.lock().unwrap().leases.user_of(child).is_some() {
+            return Err(Refusal::ChildLive);
+        }
+        match r.stage {
+            Stage::Ended => Ok(r),
+            Stage::Ready | Stage::Creating => Err(Refusal::ChildLive),
+        }
+    }
+
+    /// The child's workspace and the review's own directory, the review
+    /// identity's (again, on a host whose identity came after the child
+    /// ended).
+    fn give_to_review(&self, child: &str) -> Result<(u32, u32), Refusal> {
+        let (uid, gid) = self.pool.review()?;
+        let own = self.deps.own.as_ref();
+        let dir = self.layout.child_review(child);
+        let made = (|| -> Result<()> {
+            files::give_tree(&self.layout.child_workspace(child), uid, gid, own)?;
+            if dir.symlink_metadata().is_err() {
+                std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+            }
+            files::give_tree(&dir, uid, gid, own)?;
+            Ok(())
+        })();
+        made.map_err(|e| failed("giving the child's workspace to its review", e))?;
+        Ok((uid, gid))
+    }
+
+    fn review_answer(r: &ChildRecord, mut review: Map<String, Value>) -> Answer {
+        review.insert("child".into(), r.child.clone().into());
+        review.insert("parent".into(), r.parent.clone().into());
+        review.insert(
+            "parent_workspace".into(),
+            r.parent_workspace.display().to_string().into(),
+        );
+        if let Some(a) = &r.applied
+            && a.done
+        {
+            review.insert("applied".into(), a.target.clone().into());
+        }
+        (review, None)
+    }
+
+    /// `child_export {child}` (137e): an ended child's work as data, for
+    /// the person to read before Apply. Made once, by the review identity
+    /// in its own unit; asked again, the same answer.
+    pub(crate) fn child_export(&self, child: &str) -> Result<Answer, Refusal> {
+        let _busy = self.session_busy(child)?;
+        let r = self.ended_child(child)?;
+        let review = self.export(&r)?;
+        Ok(Self::review_answer(&r, review))
+    }
+
+    fn export(&self, r: &ChildRecord) -> Result<Map<String, Value>, Refusal> {
+        let child = &r.child;
+        if let Ok(bytes) = std::fs::read(self.layout.child_export(child))
+            && let Ok(Value::Object(cached)) = serde_json::from_slice(&bytes)
+        {
+            return Ok(cached);
+        }
+        self.give_to_review(child)?;
+        let used =
+            disk_usage(&self.layout.children()).map_err(|e| failed("measuring the children", e))?;
+        let budget = self.caps.child.min(self.caps.children.saturating_sub(used));
+        if budget == 0 {
+            return Err(Refusal::WorkspaceCap);
+        }
+        let (workspace, dir) = (
+            self.layout.child_workspace(child),
+            self.layout.child_review(child),
+        );
+        let spec = ReviewSpec {
+            child: child.clone(),
+            parent_group: None,
+            read_only: vec![workspace.clone()],
+            writable: vec![dir.clone()],
+            hidden: self.hidden(),
+            budget,
+            args: crate::review::export_args(
+                r.mode,
+                &workspace,
+                &dir,
+                r.commit.as_deref().unwrap_or("-"),
+                budget,
+            ),
+        };
+        let out = self
+            .deps
+            .units
+            .run_review(&spec)
+            .map_err(|e| failed("the child's export", e));
+        let parsed = out.and_then(|out| match crate::review::parse_export(&out) {
+            Some(Ok(Value::Object(v))) => Ok(v),
+            Some(Ok(_)) | None => Err(failed(
+                "the child's export",
+                anyhow::anyhow!("its answer did not parse"),
+            )),
+            Some(Err(code)) => Err(refusal_of(code)),
+        });
+        let review = match parsed {
+            Ok(v) => v,
+            Err(why) => {
+                let own = self.deps.own.as_ref();
+                if let Err(e) = files::remove_tree(&dir, own) {
+                    eprintln!("storm-runtime-isolation: clearing {child}'s review: {e:#}");
+                }
+                return Err(why);
+            }
+        };
+        files::write_root_private(
+            &self.layout.child_export(child),
+            &serde_json::to_vec(&review).map_err(|e| failed("recording the export", e.into()))?,
+        )
+        .map_err(|e| failed("recording the export", e))?;
+        Ok(review)
+    }
+
+    /// `child_import {child, parent, target}` (137e): Apply. A W2 child's
+    /// `HEAD` becomes the new branch `storm/<child>` in the parent's
+    /// repository, a W3 child's scratch files a new directory `target` in
+    /// the parent's workspace. Written by the review identity with the
+    /// workspace's group, then handed back to the workspace's owner;
+    /// nothing existing is overwritten, nothing is merged, and a second
+    /// Apply is refused.
+    pub(crate) fn child_import(
+        &self,
+        child: &str,
+        parent: &str,
+        target: &str,
+    ) -> Result<Answer, Refusal> {
+        let _busy = self.session_busy(child)?;
+        let mut r = self.ended_child(child)?;
+        if r.parent != parent {
+            return Err(Refusal::WrongParent);
+        }
+        let workspace = r.parent_workspace.clone();
+        let ws = workspace.to_str().ok_or(Refusal::PathOutsideRoots)?;
+        crate::policy::check_workspace(ws, &self.roots)?;
+        let branch = crate::policy::apply_branch(child);
+        match r.mode {
+            ChildMode::Clone if target != branch => return Err(Refusal::BadValue("target")),
+            ChildMode::Scratch if target == branch => return Err(Refusal::BadValue("target")),
+            ChildMode::Clone if parent_mode(&workspace) != ChildMode::Clone => {
+                return Err(Refusal::UnreadableRepository);
+            }
+            _ => {}
+        }
+        // A second Apply is refused; one a restart interrupted may finish.
+        let resuming = match &r.applied {
+            Some(a) if a.done => {
+                return Err(match r.mode {
+                    ChildMode::Clone => Refusal::BranchExists,
+                    ChildMode::Scratch => Refusal::TargetExists,
+                });
+            }
+            Some(a) => a.target == target,
+            None => false,
+        };
+        let review = self.export(&r)?;
+        let (uid, _) = self.give_to_review(child)?;
+        let own = self.deps.own.as_ref();
+        let group = files::workspace_group(&workspace, &self.pool, &self.layout.manifests(), own)
+            .map_err(|e| failed("the parent workspace's group", e))?;
+        let (read_only, args) = match r.mode {
+            ChildMode::Clone => {
+                let tip = review
+                    .get("tip")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| failed("the export", anyhow::anyhow!("it has no tip")))?;
+                let dir = self.layout.child_review(child);
+                let bundle = dir.join(crate::review::BUNDLE);
+                (
+                    vec![dir],
+                    crate::review::import_clone_args(&workspace, &bundle, &branch, tip),
+                )
+            }
+            ChildMode::Scratch => {
+                let scratch = self.layout.child_workspace(child);
+                (
+                    vec![scratch.clone()],
+                    crate::review::import_scratch_args(&scratch, &workspace, child, target),
+                )
+            }
+        };
+        r.applied = Some(Applied {
+            target: target.to_string(),
+            done: false,
+        });
+        self.save_child(&r)
+            .map_err(|e| failed("recording the Apply", e))?;
+        let spec = ReviewSpec {
+            child: child.to_string(),
+            parent_group: Some(group),
+            read_only,
+            writable: vec![workspace.clone()],
+            hidden: self.hidden(),
+            budget: self.caps.child,
+            args,
+        };
+        let out = self
+            .deps
+            .units
+            .run_review(&spec)
+            .map_err(|e| failed("the child's Apply", e));
+        // Whatever it wrote is the workspace owner's, as a session's is at
+        // its lease end, before anyone is answered.
+        if let Err(e) = files::hand_back(&workspace, uid, own) {
+            eprintln!("storm-runtime-isolation: handing back {child}'s Apply: {e:#}");
+        }
+        let parsed = out.and_then(|out| match crate::review::parse_import(&out) {
+            Some(Ok(Value::Object(v))) => Ok(v),
+            Some(Ok(_)) | None => Err(failed(
+                "the child's Apply",
+                anyhow::anyhow!("its answer did not parse"),
+            )),
+            Some(Err(code)) => Err(refusal_of(code)),
+        });
+        let made = match parsed {
+            // A branch that was already there at the child's tip is this
+            // Apply's own only when a restart interrupted it.
+            Ok(v) if v.get("already") == Some(&Value::Bool(true)) && !resuming => {
+                Err(Refusal::BranchExists)
+            }
+            other => other,
+        };
+        match made {
+            Ok(mut v) => {
+                r.applied = Some(Applied {
+                    target: target.to_string(),
+                    done: true,
+                });
+                self.save_child(&r)
+                    .map_err(|e| failed("recording the Apply", e))?;
+                v.remove("already");
+                v.insert("child".into(), child.into());
+                Ok((v, None))
+            }
+            Err(why) => {
+                r.applied = None;
+                self.save_child(&r)
+                    .map_err(|e| failed("recording the Apply", e))?;
+                Err(why)
+            }
+        }
+    }
+
+    /// `child_dispose {child}` (137g, WS-6): a human's delete of an ended
+    /// child's workspace, or of an orphan named by the listing. Nothing
+    /// there is no error: a repeated cleanup does nothing.
+    pub(crate) fn child_dispose(&self, child: &str) -> Result<Answer, Refusal> {
+        let _busy = self.session_busy(child)?;
+        if self.state.lock().unwrap().leases.user_of(child).is_some() {
+            return Err(Refusal::ChildLive);
+        }
+        let dir = self.layout.child(child);
+        let record = self.child_record(child);
+        let mut out = Map::new();
+        if dir.symlink_metadata().is_err() {
+            out.insert("removed".into(), false.into());
+            return Ok((out, None));
+        }
+        self.stop_review(child)
+            .map_err(|e| failed("stopping the child's review", e))?;
+        self.abandon(child)
+            .map_err(|e| failed("removing the child's workspace", e))?;
+        out.insert("removed".into(), true.into());
+        out.insert("orphan".into(), record.is_none().into());
+        Ok((out, None))
+    }
+
+    /// `child_list` (137g): every child workspace the helper keeps, and
+    /// every directory under the children root that no record claims.
+    pub(crate) fn child_list(&self) -> Result<Answer, Refusal> {
+        let mut children = Vec::new();
+        let (mut orphans, mut unknown) = (Vec::new(), 0u64);
+        let entries = match std::fs::read_dir(self.layout.children()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            other => Some(other.map_err(|e| failed("listing the children", e.into()))?),
+        };
+        let leased: Vec<String> = {
+            let st = self.state.lock().unwrap();
+            st.records.values().map(|l| l.session.clone()).collect()
+        };
+        for entry in entries.into_iter().flatten() {
+            let entry = entry.map_err(|e| failed("listing the children", e.into()))?;
+            let Some(name) = entry
+                .file_name()
+                .to_str()
+                .filter(|n| crate::policy::session_ok(n))
+                .map(str::to_string)
+            else {
+                unknown += 1;
+                continue;
+            };
+            match self.child_record(&name) {
+                None => orphans.push(Value::from(name)),
+                Some(r) => {
+                    let stage = match r.stage {
+                        Stage::Creating => "creating",
+                        Stage::Ready => "ready",
+                        Stage::Ended => "ended",
+                    };
+                    children.push(serde_json::json!({
+                        "child": r.child,
+                        "parent": r.parent,
+                        "parent_workspace": r.parent_workspace.display().to_string(),
+                        "mode": r.mode.name(),
+                        "stage": stage,
+                        "live": leased.contains(&r.child),
+                        "commit": r.commit,
+                        "branch": r.branch,
+                        "applied": r.applied.as_ref().filter(|a| a.done).map(|a| a.target.clone()),
+                    }));
+                }
+            }
+        }
+        children.sort_by(|a, b| a["child"].as_str().cmp(&b["child"].as_str()));
+        orphans.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+        let mut out = Map::new();
+        out.insert("children".into(), children.into());
+        out.insert("orphans".into(), orphans.into());
+        out.insert("unknown_entries".into(), unknown.into());
+        Ok((out, None))
     }
 
     /// What a previous helper left half made is abandoned before this one
@@ -556,14 +1048,29 @@ impl Helper {
             let Some(child) = name.to_str().filter(|n| crate::policy::session_ok(n)) else {
                 continue;
             };
-            if self
-                .child_record(child)
-                .is_some_and(|r| r.stage == Stage::Creating)
-            {
+            let Some(r) = self.child_record(child) else {
+                continue;
+            };
+            if r.stage == Stage::Creating {
                 self.abandon(child)?;
+                continue;
             }
+            // An export or an Apply the last helper did not see end: its
+            // unit goes, and the same request can be made again (G-137-2).
+            self.stop_review(child)?;
         }
         Ok(())
+    }
+}
+
+/// The refusal for a code a review unit printed.
+fn refusal_of(code: &str) -> Refusal {
+    match code {
+        "workspace_cap" => Refusal::WorkspaceCap,
+        "unreadable_repository" => Refusal::UnreadableRepository,
+        "branch_exists" => Refusal::BranchExists,
+        "target_exists" => Refusal::TargetExists,
+        _ => Refusal::Failed,
     }
 }
 
@@ -579,7 +1086,7 @@ pub fn startable(r: &ChildRecord, workspace: &Path) -> Result<(), Refusal> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clone::tests::{hostile_at, repo};
+    use crate::clone::tests::{git, hostile_at, repo};
     use crate::convert::{Key, Meta, Ownership};
     use crate::session::tests::{Fixture, fixture};
     use serde_json::json;
@@ -1018,10 +1525,14 @@ mod tests {
         let dest = f.helper.layout.child_workspace("ags_C");
         assert!(dest.join("README").exists());
         assert_eq!(f.helper.child_record("ags_C").unwrap().stage, Stage::Ended);
+        // The review identity's now (137g), and nobody else's.
+        let review = f.helper.pool.review.unwrap();
         let m = meta(&f, &dest);
-        assert_eq!((m.uid, m.mode), (0, 0o700));
+        assert_eq!((m.uid, m.gid, m.mode), (review.0, review.1, 0o700));
         let m = meta(&f, &dest.join(".git"));
-        assert_eq!((m.uid, m.mode), (0, 0o700));
+        assert_eq!((m.uid, m.mode), (review.0, 0o700));
+        let m = meta(&f, &dest.join("README"));
+        assert_eq!((m.uid, m.mode & 0o077), (review.0, 0));
         // An ended child is never started again.
         let (v, _) = f.ok(json!({"op": "lease", "session": "ags_C"}), vec![]);
         assert_eq!(
@@ -1040,6 +1551,528 @@ mod tests {
             f.helper.layout.child("ags_C").exists(),
             "an ended one stays"
         );
+    }
+
+    /// A W2 child that committed work and ended, as 134-5 will leave one.
+    fn ended_clone_child(f: &Fixture) -> (String, String) {
+        git_workspace(f);
+        let (_, child_user) = parent_and_child(f);
+        assert_eq!(create(f)["ok"], true);
+        assert_eq!(start_child(f, &child_user)["ok"], true);
+        let dest = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(dest.join("README"), "the child's\n").unwrap();
+        git(&dest, &["commit", "-q", "-am", "child work"]);
+        let tip = git(&dest, &["rev-parse", "HEAD"]);
+        std::fs::write(dest.join("README"), "uncommitted\n").unwrap();
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": child_user}),
+            vec![],
+        );
+        (child_user, tip)
+    }
+
+    fn export_child(f: &Fixture) -> Value {
+        f.call(json!({"op": "child_export", "child": "ags_C"}), vec![])
+            .0
+    }
+
+    fn apply(f: &Fixture, target: &str) -> Value {
+        f.call(
+            json!({"op": "child_import", "child": "ags_C", "parent": "ags_P", "target": target}),
+            vec![],
+        )
+        .0
+    }
+
+    /// WT-3 through the helper: an ended child's committed work reaches the
+    /// parent's workspace only through Apply, as `storm/<child>`; its
+    /// uncommitted work never does; the export and the Apply each run as
+    /// the review identity in a unit that sees only what it reads, and
+    /// writes only what it must.
+    #[test]
+    fn wt_3_a_childs_work_reaches_its_parent_only_through_apply() {
+        let f = fixture();
+        let (_, tip) = ended_clone_child(&f);
+        let parent = PathBuf::from(f.workspace());
+        let branches = || {
+            git(
+                &parent,
+                &["for-each-ref", "--format=%(refname)", "refs/heads"],
+            )
+        };
+        assert_eq!(branches(), "refs/heads/main", "nothing before Apply");
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            (v["mode"].clone(), v["tip"].clone()),
+            (json!("clone"), json!(tip))
+        );
+        assert_eq!(
+            (v["child"].clone(), v["parent"].clone()),
+            (json!("ags_C"), json!("ags_P"))
+        );
+        assert_eq!(v["commits"][0]["subject"], "child work");
+        assert!(v["patch"].as_str().unwrap().contains("+the child's"));
+        assert!(!v["patch"].as_str().unwrap().contains("uncommitted"));
+        assert_eq!(branches(), "refs/heads/main", "an export changes nothing");
+        // Asked again, the same answer, and no second unit.
+        assert_eq!(export_child(&f), v);
+        assert_eq!(f.units.reviews.lock().unwrap().len(), 1);
+        let export = f.units.reviews.lock().unwrap()[0].clone();
+        let review_dir = f.helper.layout.child_review("ags_C");
+        let child_ws = f.helper.layout.child_workspace("ags_C");
+        assert_eq!(export.read_only, std::slice::from_ref(&child_ws));
+        assert_eq!(export.writable, std::slice::from_ref(&review_dir));
+        assert_eq!(export.parent_group, None);
+        let props = export.properties().unwrap();
+        assert!(props.contains(&"User=storm-review".to_string()));
+        assert!(
+            !props.iter().any(|p| p.contains(&f.workspace())),
+            "{props:#?}"
+        );
+        let before = std::fs::read(parent.join("README")).unwrap();
+        let v = apply(&f, "storm/ags_C");
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            (v["branch"].clone(), v["commit"].clone()),
+            (json!("storm/ags_C"), json!(tip))
+        );
+        assert_eq!(git(&parent, &["rev-parse", "refs/heads/storm/ags_C"]), tip);
+        assert_eq!(git(&parent, &["symbolic-ref", "HEAD"]), "refs/heads/main");
+        assert_eq!(std::fs::read(parent.join("README")).unwrap(), before);
+        assert_eq!(git(&parent, &["status", "--porcelain"]), "");
+        let import = f.units.reviews.lock().unwrap()[1].clone();
+        assert_eq!(import.read_only, [review_dir]);
+        assert_eq!(import.writable, std::slice::from_ref(&parent));
+        let group = import.parent_group.clone().unwrap();
+        assert!(group.starts_with("storm-w"), "{group}");
+        let props = import.properties().unwrap();
+        for want in [
+            "User=storm-review".to_string(),
+            format!("SupplementaryGroups={group}"),
+            "UMask=0007".into(),
+            "PrivateNetwork=yes".into(),
+            "CapabilityBoundingSet=".into(),
+        ] {
+            assert!(props.contains(&want), "{want}");
+        }
+        assert!(!props.iter().any(|p| p.contains("children/ags_C/workspace")));
+        // WT-6: a second Apply is refused, and changes nothing.
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "branch_exists");
+        assert_eq!(git(&parent, &["rev-parse", "refs/heads/storm/ags_C"]), tip);
+        let listed = f.ok(json!({"op": "child_list"}), vec![]).0;
+        assert_eq!(listed["children"][0]["applied"], "storm/ags_C");
+        assert_eq!(listed["children"][0]["stage"], "ended");
+    }
+
+    /// What an Apply wrote in the parent's workspace is the workspace
+    /// owner's again, in its group, before anyone is answered, as a
+    /// session's files are at its lease end.
+    #[test]
+    fn what_an_apply_wrote_is_handed_back() {
+        let f = fixture();
+        ended_clone_child(&f);
+        let (uid, gid) = f.helper.pool.review.unwrap();
+        *f.units.review_owner.lock().unwrap() = Some((f.own.clone(), uid, gid));
+        assert_eq!(apply(&f, "storm/ags_C")["ok"], true);
+        let parent = PathBuf::from(f.workspace());
+        let made = parent.join(".git/refs/heads/storm/ags_C");
+        let m = meta(&f, &made);
+        let top = std::fs::symlink_metadata(&parent).unwrap();
+        assert_eq!(
+            (m.uid, m.gid),
+            (top.uid(), top.gid()),
+            "the workspace owner's"
+        );
+        let rec = f.own.0.lock().unwrap();
+        assert!(
+            !rec.overlay
+                .borrow()
+                .values()
+                .any(|m| m.uid == uid && m.gid != uid),
+            "nothing in the parent is left the review identity's"
+        );
+    }
+
+    /// The child's work is its own while it holds its lease (137g), and
+    /// only the parent it was made from is applied to.
+    #[test]
+    fn a_live_child_an_unknown_one_and_the_wrong_parent_are_refused() {
+        let f = fixture();
+        git_workspace(&f);
+        let (_, child_user) = parent_and_child(&f);
+        assert_eq!(export_child(&f)["error"], "no_child");
+        assert_eq!(create(&f)["ok"], true);
+        assert_eq!(start_child(&f, &child_user)["ok"], true);
+        assert_eq!(export_child(&f)["error"], "child_live");
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "child_live");
+        let (v, _) = f.call(json!({"op": "child_dispose", "child": "ags_C"}), vec![]);
+        assert_eq!(v["error"], "child_live");
+        assert!(f.helper.layout.child_workspace("ags_C").exists());
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": child_user}),
+            vec![],
+        );
+        let (v, _) = f.call(
+            json!({"op": "child_import", "child": "ags_C", "parent": "ags_Q", "target": "storm/ags_C"}),
+            vec![],
+        );
+        assert_eq!(v["error"], "wrong_parent");
+        assert_eq!(
+            apply(&f, "app-ags_C")["error"],
+            "bad_value",
+            "a clone is applied as its branch"
+        );
+        // Leased again under the same id, it is live again; a record that
+        // never reached its end is not ended.
+        f.ok(json!({"op": "lease", "session": "ags_C"}), vec![]);
+        assert_eq!(export_child(&f)["error"], "child_live");
+        let user = f
+            .helper
+            .state
+            .lock()
+            .unwrap()
+            .leases
+            .user_of("ags_C")
+            .unwrap()
+            .to_string();
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": user}),
+            vec![],
+        );
+        let mut r = f.helper.child_record("ags_C").unwrap();
+        r.stage = Stage::Ready;
+        f.helper.save_child(&r).unwrap();
+        assert_eq!(export_child(&f)["error"], "child_live");
+        assert!(f.units.reviews.lock().unwrap().is_empty(), "nothing ran");
+    }
+
+    #[test]
+    fn without_the_review_identity_nothing_is_exported_and_a_child_stays_roots() {
+        let mut f = fixture();
+        f.helper.pool.review = None;
+        ended_clone_child(&f);
+        let m = meta(&f, &f.helper.layout.child_workspace("ags_C"));
+        assert_eq!((m.uid, m.mode), (0, 0o700));
+        assert_eq!(export_child(&f)["error"], "no_review_identity");
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "no_review_identity");
+    }
+
+    /// W3 (137e, 138p): Apply copies the scratch files into a new directory
+    /// the person names in the parent's workspace; an existing name is
+    /// refused, and so is a second Apply.
+    #[test]
+    fn a_scratch_childs_apply_is_a_new_directory_the_person_names() {
+        let f = fixture();
+        let (_, child_user) = parent_and_child(&f);
+        assert_eq!(create(&f)["ok"], true);
+        assert_eq!(start_child(&f, &child_user)["ok"], true);
+        let scratch = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(scratch.join("out.md"), "result\n").unwrap();
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": child_user}),
+            vec![],
+        );
+        let v = export_child(&f);
+        assert_eq!(
+            (v["mode"].clone(), v["files"][0]["path"].clone()),
+            (json!("scratch"), json!("out.md"))
+        );
+        let parent = PathBuf::from(f.workspace());
+        assert_eq!(apply(&f, "README")["error"], "target_exists");
+        assert_eq!(std::fs::read(parent.join("README")).unwrap(), b"x");
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "bad_value");
+        let v = apply(&f, "app-ags_C");
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            v["directory"],
+            parent.join("app-ags_C").display().to_string()
+        );
+        assert_eq!(
+            std::fs::read_to_string(parent.join("app-ags_C/out.md")).unwrap(),
+            "result\n"
+        );
+        assert_eq!(apply(&f, "app-ags_C2")["error"], "target_exists", "once");
+        assert!(!parent.join("app-ags_C2").exists());
+    }
+
+    /// WT-4: the parent, the child or the host ends mid-work. The child's
+    /// workspace is intact and marked; a delete removes it; the second does
+    /// nothing.
+    #[test]
+    fn wt_4_an_end_mid_work_leaves_the_workspace_and_cleanup_twice_does_nothing() {
+        let f = fixture();
+        git_workspace(&f);
+        let (parent_user, child_user) = parent_and_child(&f);
+        assert_eq!(create(&f)["ok"], true);
+        assert_eq!(start_child(&f, &child_user)["ok"], true);
+        let dest = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(dest.join("half-done"), "wip").unwrap();
+        // The parent ends first: the child's workspace is not the parent's.
+        f.ok(
+            json!({"op": "release", "session": "ags_P", "user": parent_user}),
+            vec![],
+        );
+        assert_eq!(f.helper.child_record("ags_C").unwrap().stage, Stage::Ready);
+        assert!(dest.join("half-done").exists());
+        // The host restarts mid-work: the helper's recovery ends the child,
+        // and the new helper holds no lease in memory.
+        f.helper.recover().unwrap();
+        {
+            let mut st = f.helper.state.lock().unwrap();
+            st.leases.release("ags_C", &child_user);
+            st.records.remove(&child_user);
+            st.started.remove("ags_C");
+        }
+        let r = f.helper.child_record("ags_C").unwrap();
+        assert_eq!(r.stage, Stage::Ended, "marked");
+        assert_eq!(std::fs::read(dest.join("half-done")).unwrap(), b"wip");
+        let leases = files::load_leases(&f.helper.layout.leases()).unwrap();
+        assert!(!leases.values().any(|l| l.session == "ags_C"), "revoked");
+        // Cleanup run twice: still intact, still marked.
+        f.helper.recover().unwrap();
+        f.helper.child_ended("ags_C").unwrap();
+        assert!(dest.join("half-done").exists());
+        assert_eq!(f.helper.child_record("ags_C").unwrap().stage, Stage::Ended);
+        // A human's delete, twice.
+        let (v, _) = f.ok(json!({"op": "child_dispose", "child": "ags_C"}), vec![]);
+        assert_eq!(
+            (v["removed"].clone(), v["orphan"].clone()),
+            (json!(true), json!(false))
+        );
+        nothing_left(&f);
+        let (v, _) = f.ok(json!({"op": "child_dispose", "child": "ags_C"}), vec![]);
+        assert_eq!(v["removed"], false);
+        assert_eq!(export_child(&f)["error"], "no_child");
+    }
+
+    /// WS-6: directories under the children root that no record claims are
+    /// listed, never removed by the helper on its own; a human's delete
+    /// names one.
+    #[test]
+    fn orphans_are_listed_and_never_removed_unasked() {
+        let f = fixture();
+        ended_clone_child(&f);
+        let orphan = f.helper.layout.child("ags_LOST");
+        std::fs::create_dir_all(orphan.join("workspace")).unwrap();
+        std::fs::write(orphan.join("workspace/x"), "y").unwrap();
+        std::fs::create_dir_all(f.helper.layout.children().join("not-a-session")).unwrap();
+        let (v, _) = f.ok(json!({"op": "child_list"}), vec![]);
+        assert_eq!(v["orphans"], json!(["ags_LOST"]));
+        assert_eq!(v["unknown_entries"], 1);
+        assert_eq!(v["children"].as_array().unwrap().len(), 1);
+        assert_eq!(v["children"][0]["child"], "ags_C");
+        assert_eq!(v["children"][0]["live"], false);
+        f.helper.recover().unwrap();
+        f.ok(json!({"op": "child_list"}), vec![]);
+        assert!(orphan.join("workspace/x").exists(), "recovery leaves it");
+        let (v, _) = f.ok(json!({"op": "child_dispose", "child": "ags_LOST"}), vec![]);
+        assert_eq!(
+            (v["removed"].clone(), v["orphan"].clone()),
+            (json!(true), json!(true))
+        );
+        assert!(!orphan.exists());
+        assert!(
+            f.helper.layout.child("ags_C").exists(),
+            "only the one named"
+        );
+    }
+
+    /// G-137-2's helper half: an Apply a restart interrupted is finished
+    /// by the same request, once; an export a restart interrupted is redone;
+    /// the units the last helper left are stopped first.
+    #[test]
+    fn g_137_2_an_interrupted_export_or_apply_is_finished_once() {
+        let f = fixture();
+        let (_, tip) = ended_clone_child(&f);
+        // An export unit still loaded when the helper restarted.
+        f.units.units.lock().unwrap().insert(
+            review_unit_name("ags_C"),
+            (
+                crate::units::UnitState {
+                    loaded: true,
+                    running: true,
+                    ..Default::default()
+                },
+                None,
+            ),
+        );
+        f.helper.recover().unwrap();
+        let calls = f.units.calls.lock().unwrap().clone();
+        assert!(calls.contains(&"stop storm-child-ags_C-review.service".to_string()));
+        assert_eq!(export_child(&f)["ok"], true);
+        // The Apply made the branch, then the helper died before it was
+        // recorded: the same Apply finishes; nothing else is let through.
+        let parent = PathBuf::from(f.workspace());
+        let mut r = f.helper.child_record("ags_C").unwrap();
+        r.applied = Some(Applied {
+            target: "storm/ags_C".into(),
+            done: false,
+        });
+        f.helper.save_child(&r).unwrap();
+        let bundle = f
+            .helper
+            .layout
+            .child_review("ags_C")
+            .join(crate::review::BUNDLE);
+        git(
+            &parent,
+            &["fetch", "-q", bundle.to_str().unwrap(), "refs/heads/export"],
+        );
+        git(&parent, &["update-ref", "refs/heads/storm/ags_C", &tip]);
+        f.helper.recover().unwrap();
+        let v = apply(&f, "storm/ags_C");
+        assert_eq!(v["ok"], true, "{v}");
+        assert!(
+            f.helper
+                .child_record("ags_C")
+                .unwrap()
+                .applied
+                .unwrap()
+                .done
+        );
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "branch_exists");
+        // Without an interrupted Apply of its own, a branch already there is
+        // never taken as this child's.
+        let mut r = f.helper.child_record("ags_C").unwrap();
+        r.applied = None;
+        f.helper.save_child(&r).unwrap();
+        assert_eq!(apply(&f, "storm/ags_C")["error"], "branch_exists");
+        assert_eq!(f.helper.child_record("ags_C").unwrap().applied, None);
+    }
+
+    /// A failed or unparsable export leaves no review behind and says why.
+    #[test]
+    fn a_failed_export_is_its_reason_and_leaves_no_review() {
+        let f = fixture();
+        ended_clone_child(&f);
+        for (out, code) in [
+            (
+                r#"{"failed":"unreadable_repository"}"#,
+                "unreadable_repository",
+            ),
+            (r#"{"failed":"workspace_cap"}"#, "workspace_cap"),
+            ("garbage", "failed"),
+            (r#"{"done":{"mode":"clone"}}"#, "failed"),
+        ] {
+            *f.units.review_output.lock().unwrap() = Some(out.into());
+            assert_eq!(export_child(&f)["error"], code, "{out}");
+            assert!(!f.helper.layout.child_review("ags_C").exists());
+            assert!(!f.helper.layout.child_export("ags_C").exists());
+        }
+    }
+
+    /// G-137-3 at unit level: a W3 child's view, every mount of it. The
+    /// parent's workspace is bound read-only and nothing under it is
+    /// writable; the only writable paths are the child's own.
+    #[test]
+    fn g_137_3_no_mount_in_a_scratch_childs_view_writes_its_parent() {
+        let f = fixture();
+        let (_, child_user) = parent_and_child(&f);
+        assert_eq!(create(&f)["ok"], true);
+        assert_eq!(start_child(&f, &child_user)["ok"], true);
+        let specs = f.units.specs.lock().unwrap().clone();
+        let child = specs.iter().find(|s| s.session == "ags_C").unwrap();
+        let props = child.properties().unwrap();
+        let parent = f.workspace();
+        assert!(props.contains(&"ProtectSystem=strict".to_string()));
+        assert!(props.contains(&format!("BindReadOnlyPaths={parent}")));
+        for p in &props {
+            let writable = p.starts_with("BindPaths=") || p.starts_with("ReadWritePaths=");
+            if writable {
+                let path = p.split_once('=').unwrap().1;
+                assert!(
+                    !Path::new(path).starts_with(&parent) && !Path::new(&parent).starts_with(path),
+                    "{p} writes the parent's workspace"
+                );
+                assert!(
+                    path.starts_with(&f.helper.layout.state.display().to_string())
+                        || path.starts_with(&f.helper.layout.host_state.display().to_string()),
+                    "{p} is not the child's own"
+                );
+            }
+            assert!(
+                !p.starts_with("TemporaryFileSystem=") || p.ends_with(":ro"),
+                "{p}"
+            );
+        }
+    }
+
+    /// The review unit as data, and as systemd reads it.
+    #[test]
+    fn the_review_unit_is_the_review_identity_with_nothing_but_its_paths() {
+        let spec = ReviewSpec {
+            child: "ags_C1".into(),
+            parent_group: Some("storm-w002".into()),
+            read_only: vec!["/var/lib/storm-runtime-isolation/children/ags_C1/review".into()],
+            writable: vec!["/var/lib/storm-runtime/workspaces/app".into()],
+            hidden: vec![
+                "/var/lib/storm-runtime".into(),
+                "/var/lib/storm-runtime-isolation".into(),
+            ],
+            budget: 1 << 30,
+            args: vec!["import".into(), "clone".into()],
+        };
+        let props = spec.properties().unwrap();
+        for want in [
+            "User=storm-review",
+            "Group=storm-review",
+            "SupplementaryGroups=storm-w002",
+            "NoNewPrivileges=yes",
+            "CapabilityBoundingSet=",
+            "PrivateNetwork=yes",
+            "ProtectSystem=strict",
+            "ProtectHome=yes",
+            "TemporaryFileSystem=/var/lib/storm-runtime:ro",
+            "TemporaryFileSystem=/var/lib/storm-runtime-isolation:ro",
+            "BindReadOnlyPaths=/var/lib/storm-runtime-isolation/children/ags_C1/review",
+            "BindPaths=/var/lib/storm-runtime/workspaces/app",
+        ] {
+            assert!(props.iter().any(|p| p == want), "{want} in {props:#?}");
+        }
+        let writable: Vec<&String> = props
+            .iter()
+            .filter(|p| p.starts_with("BindPaths=") || p.starts_with("ReadWritePaths="))
+            .collect();
+        assert_eq!(writable.len(), 1);
+        let args: Vec<String> = spec
+            .systemd_run_args()
+            .unwrap()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--unit=storm-child-ags_C1-review.service".to_string()));
+        let tail = &args[args.iter().position(|a| a == "--").unwrap()..];
+        assert_eq!(tail, ["--", HELPER_BIN, "child-review", "import", "clone"]);
+        let mut export = spec.clone();
+        export.parent_group = None;
+        let props = export.properties().unwrap();
+        assert!(props.contains(&"UMask=0077".to_string()));
+        assert!(!props.iter().any(|p| p.starts_with("SupplementaryGroups=")));
+        let mut bad = spec.clone();
+        bad.writable = vec!["/w/a b".into()];
+        assert!(bad.properties().is_err());
+        let Some(analyze) = crate::units::tests::which("systemd-analyze") else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("storm-child-ags_C1-review.service");
+        std::fs::write(&path, spec.unit_file().unwrap()).unwrap();
+        let out = std::process::Command::new(analyze)
+            .args(["verify", "--man=no", "--recursive-errors=no"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for line in stderr.lines() {
+            assert!(
+                !line.contains("Unknown key")
+                    && !line.contains("Failed to parse")
+                    && !line.contains("Invalid")
+                    && !line.contains("Unknown section"),
+                "{stderr}"
+            );
+        }
     }
 
     /// The host names the parent's workspace at `start`, and it must be

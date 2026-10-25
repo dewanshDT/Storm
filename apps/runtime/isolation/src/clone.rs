@@ -105,12 +105,47 @@ pub fn environment(home: &Path) -> Vec<(&'static str, String)> {
     ]
 }
 
+/// Every hook event git has (githooks(5)). A repository's configuration
+/// can name a command for any of them (`hook.<name>.command` and
+/// `.event`) under a name of its choosing, which `core.hooksPath` does not
+/// reach; only switching each event off does.
+pub const HOOK_EVENTS: &[&str] = &[
+    "applypatch-msg",
+    "pre-applypatch",
+    "post-applypatch",
+    "pre-commit",
+    "pre-merge-commit",
+    "prepare-commit-msg",
+    "commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "pre-push",
+    "pre-receive",
+    "update",
+    "proc-receive",
+    "post-receive",
+    "post-update",
+    "reference-transaction",
+    "push-to-checkout",
+    "pre-auto-gc",
+    "post-rewrite",
+    "sendemail-validate",
+    "fsmonitor-watchman",
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+    "p4-pre-submit",
+    "post-index-change",
+];
+
 /// Given on every git call's command line. git treats it as protected
 /// configuration and hands it to the git processes it starts, the
 /// upload-pack in the parent's repository included.
 pub fn protections(parent: &Path) -> Vec<String> {
     let parent = parent.display();
-    vec![
+    let mut out: Vec<String> = vec![
         "core.hooksPath=/dev/null".into(),
         "core.fsmonitor=false".into(),
         "core.attributesFile=/dev/null".into(),
@@ -124,21 +159,32 @@ pub fn protections(parent: &Path) -> Vec<String> {
         "gc.auto=0".into(),
         "maintenance.auto=false".into(),
         "advice.detachedHead=false".into(),
+        // A repository with alternates runs this to list their refs.
+        "core.alternateRefsCommand=".into(),
+        "transfer.bundleURI=false".into(),
+        "fetch.bundleURI=".into(),
+        "log.showSignature=false".into(),
         // The parent's repository is another user's; it is read, never
         // trusted, and this is the only one git is told to read.
         format!("safe.directory={parent}"),
         format!("safe.directory={parent}/.git"),
-    ]
+    ];
+    out.extend(
+        HOOK_EVENTS
+            .iter()
+            .map(|e| format!("hook.{e}.enabled=false")),
+    );
+    out
 }
 
-struct Git<'a> {
-    git: &'a Path,
-    env: Vec<(&'static str, String)>,
-    config: Vec<String>,
+pub(crate) struct Git<'a> {
+    pub git: &'a Path,
+    pub env: Vec<(&'static str, String)>,
+    pub config: Vec<String>,
 }
 
 impl Git<'_> {
-    fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
+    fn command(&self, dir: &Path, args: &[&str]) -> Command {
         let mut command = Command::new(self.git);
         command
             .env_clear()
@@ -151,7 +197,11 @@ impl Git<'_> {
             command.arg("-c").arg(c);
         }
         command.args(args);
-        match command.output() {
+        command
+    }
+
+    pub(crate) fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, ()> {
+        match self.command(dir, args).output() {
             Ok(out) if out.status.success() => Ok(out.stdout),
             Ok(out) => {
                 eprintln!(
@@ -163,6 +213,43 @@ impl Git<'_> {
             }
             Err(e) => {
                 eprintln!("running git: {e}");
+                Err(())
+            }
+        }
+    }
+
+    /// At most `limit` bytes of what it prints, and whether there was more:
+    /// a diff of a large workspace never has to fit in memory. A git that
+    /// was cut short is killed, never waited out.
+    pub(crate) fn run_limited(
+        &self,
+        dir: &Path,
+        args: &[&str],
+        limit: usize,
+    ) -> Result<(Vec<u8>, bool), ()> {
+        use std::io::Read;
+        let mut child = self
+            .command(dir, args)
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| eprintln!("running git: {e}"))?;
+        let mut out = Vec::new();
+        let stdout = child.stdout.take().ok_or(())?;
+        let got = stdout
+            .take(limit as u64 + 1)
+            .read_to_end(&mut out)
+            .map_err(|_| ())?;
+        let truncated = got > limit;
+        if truncated {
+            out.truncate(limit);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok((out, true));
+        }
+        match child.wait() {
+            Ok(status) if status.success() => Ok((out, false)),
+            _ => {
+                eprintln!("git {} failed", args.first().unwrap_or(&""));
                 Err(())
             }
         }
@@ -389,36 +476,7 @@ pub mod tests {
     use std::path::PathBuf;
 
     /// Every hook git runs (githooks(5)).
-    pub const HOOKS: &[&str] = &[
-        "applypatch-msg",
-        "pre-applypatch",
-        "post-applypatch",
-        "pre-commit",
-        "pre-merge-commit",
-        "prepare-commit-msg",
-        "commit-msg",
-        "post-commit",
-        "pre-rebase",
-        "post-checkout",
-        "post-merge",
-        "pre-push",
-        "pre-receive",
-        "update",
-        "proc-receive",
-        "post-receive",
-        "post-update",
-        "reference-transaction",
-        "push-to-checkout",
-        "pre-auto-gc",
-        "post-rewrite",
-        "sendemail-validate",
-        "fsmonitor-watchman",
-        "p4-changelist",
-        "p4-prepare-changelist",
-        "p4-post-changelist",
-        "p4-pre-submit",
-        "post-index-change",
-    ];
+    pub const HOOKS: &[&str] = HOOK_EVENTS;
 
     /// git for building fixtures: nothing of this machine's configuration,
     /// and no hook of the fixture's own.
@@ -544,6 +602,20 @@ pub mod tests {
         pub commit: String,
     }
 
+    /// A command for every hook event under a name of the repository's
+    /// own (`hook.<name>.command`), which `core.hooksPath` does not reach.
+    pub fn config_hooks(plants: &Plants, prefix: &str) -> String {
+        let mut out = String::new();
+        for event in HOOKS {
+            let name = format!("{prefix}-{event}");
+            out.push_str(&format!(
+                "[hook \"{name}\"]\n\tcommand = {}\n\tevent = {event}\n",
+                plants.evil(&name).display()
+            ));
+        }
+        out
+    }
+
     pub fn hostile(base: &Path) -> Hostile {
         hostile_at(base, &base.join("parent"))
     }
@@ -627,6 +699,7 @@ pub mod tests {
         );
         let mut text = std::fs::read_to_string(dot.join("config")).unwrap();
         text.push_str(&config);
+        text.push_str(&config_hooks(&plants, "repo-config-hook"));
         std::fs::write(dot.join("config"), text).unwrap();
         // The account's own configuration, which a child must not inherit.
         let home = base.join("home");
@@ -746,6 +819,8 @@ pub mod tests {
             "repo-hook-pre-commit",
             "repo-hook-post-commit",
             "repo-fsmonitor",
+            "repo-config-hook-pre-commit",
+            "repo-config-hook-reference-transaction",
         ] {
             assert!(ran.contains(&want.to_string()), "{want} in {ran:?}");
         }

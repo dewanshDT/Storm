@@ -407,16 +407,28 @@ pub mod tests {
     }
 
     #[test]
-    fn the_operations_137_builds_are_still_refused() {
+    fn every_child_operation_is_built() {
         let t = tempfile::tempdir().unwrap();
         let h = helper(t.path());
-        for request in [
-            &br#"{"op":"child_dispose","child":"ags_C"}"#[..],
-            br#"{"op":"child_export","child":"ags_C"}"#,
+        for (request, code) in [
+            (&br#"{"op":"child_dispose","child":"ags_C"}"#[..], None),
+            (
+                br#"{"op":"child_export","child":"ags_C"}"#,
+                Some("no_child"),
+            ),
+            (
+                br#"{"op":"child_import","child":"ags_C","parent":"ags_P","target":"storm/ags_C"}"#,
+                Some("no_child"),
+            ),
+            (br#"{"op":"child_list"}"#, None),
         ] {
             let mut lines = Vec::new();
             let (response, _) = h.handle(Some(900), request, vec![], &mut lines);
-            assert!(response.contains("not_built"), "{response}");
+            assert!(!response.contains("not_built"), "{response}");
+            match code {
+                Some(code) => assert!(response.contains(code), "{response}"),
+                None => assert!(response.contains("\"ok\":true"), "{response}"),
+            }
         }
     }
 
