@@ -4900,6 +4900,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
     }
 
     /// One of the shared vector's `child.workspace` commands (137-3 ⋈ 134).
+    #[cfg(target_os = "linux")]
     fn child_work(op: &str) -> (Command, serde_json::Value) {
         let vector: serde_json::Value =
             serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
@@ -4910,6 +4911,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         (command, v["answer"].clone())
     }
 
+    #[cfg(target_os = "linux")]
     fn keys(v: &serde_json::Value) -> Vec<String> {
         let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
         k.sort();
