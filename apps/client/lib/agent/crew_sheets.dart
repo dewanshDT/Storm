@@ -4,12 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart' show promptForText;
-import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'crew_changes.dart';
 import 'crew_screen.dart' show endAllPlan, endAllRunning;
 import 'crew_widgets.dart';
 import 'session_crew.dart' show sessionReadsStorm;
@@ -105,35 +105,18 @@ class CrewRoleSections extends ConsumerStatefulWidget {
 }
 
 class _CrewRoleSectionsState extends ConsumerState<CrewRoleSections> {
-  // What this sheet just picked, shown until the list agrees.
-  (String?,)? _crew;
-  (RoleRef?,)? _role;
-
-  void _toast(String text) => ScaffoldMessenger.maybeOf(
-    context,
-  )?.showSnackBar(SnackBar(content: Text(text)));
-
   void _reload(String id) {
-    ref.invalidate(agentOverviewProvider);
-    ref.invalidate(sessionDetailProvider(id));
+    if (mounted) ref.invalidate(sessionDetailProvider(id));
   }
 
   Future<void> _moveTo(AgentSession s, String? crewId) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(() => _crew = (crewId,));
-    try {
-      final change = await api.moveToCrew(s.id, crewId);
-      for (final c in change.removedCrews) {
-        _toast('${c.name} was removed: its last session left it.');
-      }
-    } catch (e) {
-      if (mounted) setState(() => _crew = null);
-      _toast("Couldn't move ${s.displayName}: ${describeFailure(e)}");
-    } finally {
-      api.dispose();
-      if (mounted) _reload(s.id);
-    }
+    await sendCrewChange(
+      context,
+      what: 'move ${s.displayName}',
+      patch: movePatch(s.id, crewId),
+      send: (api) => api.moveToCrew(s.id, crewId),
+    );
+    _reload(s.id);
   }
 
   Future<void> _newCrew(AgentSession s) async {
@@ -144,47 +127,18 @@ class _CrewRoleSectionsState extends ConsumerState<CrewRoleSections> {
       initial: 'New crew',
     ))?.trim();
     if (name == null || name.isEmpty || !mounted) return;
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      final change = await api.createCrew(name, sessionIds: [s.id]);
-      if (mounted && change.crew != null) {
-        setState(() => _crew = (change.crew!.id,));
-      }
-      for (final c in change.removedCrews) {
-        _toast('${c.name} was removed: its last session left it.');
-      }
-    } catch (e) {
-      _toast("Couldn't make the crew: ${describeFailure(e)}");
-    } finally {
-      api.dispose();
-      if (mounted) _reload(s.id);
-    }
+    await sendCrewChange(
+      context,
+      what: 'make the crew',
+      patch: newCrewPatch(name, [s.id]),
+      send: (api) => api.createCrew(name, sessionIds: [s.id]),
+    );
+    _reload(s.id);
   }
 
   Future<void> _label(AgentSession s, RoleNote? r) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(
-      () => _role = (
-        r == null
-            ? null
-            : RoleRef(vaultId: r.vaultId, noteId: r.noteId, title: r.title),
-      ),
-    );
-    try {
-      if (r == null) {
-        await api.clearRole(s.id);
-      } else {
-        await api.setRole(s.id, r.vaultId, r.noteId);
-      }
-    } catch (e) {
-      if (mounted) setState(() => _role = null);
-      _toast("Couldn't change the label: ${describeFailure(e)}");
-    } finally {
-      api.dispose();
-      if (mounted) _reload(s.id);
-    }
+    await sendLabelChange(context, s.id, r);
+    _reload(s.id);
   }
 
   @override
@@ -194,8 +148,8 @@ class _CrewRoleSectionsState extends ConsumerState<CrewRoleSections> {
     final roles = ref.watch(rolesProvider).value ?? const <RoleNote>[];
     final s = o?.byId(widget.session.id) ?? widget.session;
     final crews = o?.crews;
-    final crewId = (_crew ?? (s.crew?.id,)).$1;
-    final role = (_role ?? (s.role,)).$1;
+    final crewId = s.crew?.id;
+    final role = s.role;
     final launch = s.launchRole;
     final groups = roleGroups(roles);
 

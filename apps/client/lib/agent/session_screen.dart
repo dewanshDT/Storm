@@ -24,6 +24,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
+import 'crew_changes.dart';
 import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
@@ -112,9 +113,20 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   Future<void> _dismiss() async {
     final api = agentApi(ref);
     if (api == null) return;
+    final c = ProviderScope.containerOf(context, listen: false);
+    final before = ref.read(agentOverviewProvider).value;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      await api.dismiss(_id);
+      final removed = await api.dismiss(_id);
       ref.invalidate(agentOverviewProvider);
+      if (removed != null) {
+        announceRemovedCrew(
+          c,
+          removedCrewFrom(before, removed),
+          why: 'its last session was dismissed',
+          fallback: messenger,
+        );
+      }
       if (mounted) context.go(Routes.agents);
     } catch (e) {
       _say(describeFailure(e));
@@ -181,7 +193,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         final record = detail.value ?? overview?.byId(_id);
         final live = controller?.session;
         _catchUpAtEnd(record, live);
-        final s = record?.withLive(live) ?? live;
+        final seen = record?.withLive(live) ?? live;
+        // A crew or label change still pending is ahead of the record.
+        final s = seen == null ? null : overview?.labelsOf(seen) ?? seen;
         final wide = context.isExpanded;
         if (s == null) {
           final settled =

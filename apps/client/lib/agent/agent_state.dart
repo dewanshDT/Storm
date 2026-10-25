@@ -61,6 +61,7 @@ class AgentOverview {
     required this.hosts,
     this.crews,
     this.unreachable = false,
+    this.pending = const {},
   });
 
   /// The server could not be asked. **A state, not an error** — Storm's
@@ -70,7 +71,8 @@ class AgentOverview {
     : sessions = const [],
       hosts = const [],
       crews = null,
-      unreachable = true;
+      unreachable = true,
+      pending = const {};
 
   /// Newest first.
   final List<AgentSession> sessions;
@@ -80,6 +82,31 @@ class AgentOverview {
   /// before decision 138. Nothing is drawn as a crew while null.
   final List<Crew>? crews;
   final bool unreachable;
+
+  /// Sessions under a crew or label change this device made and the server
+  /// has not answered yet (138j): their crew and role here are ahead of any
+  /// other copy of them.
+  final Set<String> pending;
+
+  AgentOverview copyWith({
+    List<AgentSession>? sessions,
+    List<Crew>? crews,
+    Set<String>? pending,
+  }) => AgentOverview(
+    sessions: sessions ?? this.sessions,
+    hosts: hosts,
+    crews: crews ?? this.crews,
+    unreachable: unreachable,
+    pending: pending ?? this.pending,
+  );
+
+  /// [s] with the crew and role this list has for it while a change of
+  /// either is pending, so a session's own record shows the change too.
+  AgentSession labelsOf(AgentSession s) {
+    if (!pending.contains(s.id)) return s;
+    final mine = byId(s.id);
+    return mine == null ? s : s.withCrew(mine.crew).withRole(mine.role);
+  }
 
   List<AgentSession> get live => [
     for (final s in sessions)
@@ -100,7 +127,7 @@ class AgentOverview {
 
   /// The crew [s] is drawn in, if any.
   Crew? crewOf(AgentSession s) {
-    final id = s.crew?.id;
+    final id = labelsOf(s).crew?.id;
     return id == null ? null : crews?.where((c) => c.id == id).firstOrNull;
   }
 
@@ -196,36 +223,80 @@ void _refreshEvery(Ref ref, Duration every) {
   });
 }
 
+/// One crew or label change this device made that the server has not
+/// answered yet (138j), drawn over the list until it does.
+class CrewPatch {
+  CrewPatch(this.apply, {this.sessions = const {}, this.crews = const {}});
+
+  final AgentOverview Function(AgentOverview o) apply;
+
+  /// What it changes, for the snap-back outline when it is refused.
+  final Set<String> sessions;
+  final Set<String> crews;
+}
+
+/// The changes in flight, oldest first. Kept apart from the list so a poll
+/// that lands meanwhile is drawn with them still applied.
+final crewPatchesProvider = StateProvider<List<CrewPatch>>((ref) => const []);
+
+AgentOverview _patched(AgentOverview o, List<CrewPatch> patches) {
+  if (o.unreachable || patches.isEmpty) return o;
+  var out = o;
+  for (final p in patches) {
+    out = p.apply(out);
+  }
+  return out.copyWith(pending: {for (final p in patches) ...p.sessions});
+}
+
 /// The overview, refreshed every [agentRefreshInterval] while it is on screen
-/// and the app is in front.
+/// and the app is in front, with this device's pending crew changes drawn
+/// over it ([crewPatchesProvider]).
 ///
 /// It never throws. Riverpod 3 retries a failed provider on its own
 /// schedule, which would be a second, unbounded poll alongside this one.
-final agentOverviewProvider = FutureProvider.autoDispose<AgentOverview>((
-  ref,
-) async {
-  _refreshEvery(ref, agentRefreshInterval);
-  final api = ref.watch(agentApiFactoryProvider)?.call();
-  if (api == null) return const AgentOverview.unreachable();
-  try {
-    // Independent, so together: one round trip, not two, which is the
-    // difference that shows over the relay.
-    final (sessions, hosts, crews) = await (
-      api.sessions(),
-      api.hosts(),
-      _crewsOrNull(api),
-    ).wait;
-    return AgentOverview(
-      sessions: sessions.reversed.toList(),
-      hosts: hosts,
-      crews: crews,
+final agentOverviewProvider =
+    AsyncNotifierProvider.autoDispose<AgentOverviewNotifier, AgentOverview>(
+      AgentOverviewNotifier.new,
     );
-  } catch (_) {
-    return const AgentOverview.unreachable();
-  } finally {
-    api.dispose();
+
+class AgentOverviewNotifier extends AsyncNotifier<AgentOverview> {
+  AgentOverview? _server;
+
+  @override
+  Future<AgentOverview> build() async {
+    _refreshEvery(ref, agentRefreshInterval);
+    ref.listen(crewPatchesProvider, (_, patches) {
+      final server = _server;
+      if (server != null) state = AsyncData(_patched(server, patches));
+    });
+    final o = await _fetch();
+    _server = o;
+    return _patched(o, ref.read(crewPatchesProvider));
   }
-});
+
+  Future<AgentOverview> _fetch() async {
+    final api = ref.watch(agentApiFactoryProvider)?.call();
+    if (api == null) return const AgentOverview.unreachable();
+    try {
+      // Independent, so together: one round trip, not two, which is the
+      // difference that shows over the relay.
+      final (sessions, hosts, crews) = await (
+        api.sessions(),
+        api.hosts(),
+        _crewsOrNull(api),
+      ).wait;
+      return AgentOverview(
+        sessions: sessions.reversed.toList(),
+        hosts: hosts,
+        crews: crews,
+      );
+    } catch (_) {
+      return const AgentOverview.unreachable();
+    } finally {
+      api.dispose();
+    }
+  }
+}
 
 /// A server before decision 138 has no crews route; its sessions still show.
 Future<List<Crew>?> _crewsOrNull(AgentApi api) async {

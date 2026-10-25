@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -148,6 +149,13 @@ class FakeAgentServer {
 
   /// Refuses the next crew or role change with this status and code.
   (int, String)? refuseCrewChange;
+
+  /// While set, crew and role changes are answered only once it completes:
+  /// what a client draws before the server has answered.
+  Completer<void>? holdCrewChanges;
+
+  /// While set, the session list is answered only once it completes.
+  Completer<void>? holdSessionList;
 
   final requests = <http.Request>[];
 
@@ -305,9 +313,10 @@ class FakeAgentServer {
       for (final (i, id) in (body['session_ids'] as List? ?? []).indexed) {
         session(id as String)?['crew'] = {'id': made['id'], 'order': i};
       }
-      return Future.value(
-        _json({'crew': made, 'removed_crews': _dropEmpty()}, 201),
-      );
+      // A crew made empty stays; only the crews its sessions left go.
+      final emptied = _dropEmpty()..remove(made);
+      if (!crews.contains(made)) crews.add(made);
+      return Future.value(_json({'crew': made, 'removed_crews': emptied}, 201));
     }
     if (path == '/v1/agent/crews/order') {
       final ids = (jsonDecode(req.body) as Map)['ids'] as List;
@@ -347,7 +356,10 @@ class FakeAgentServer {
     final path = req.url.path;
     final seg = req.url.pathSegments;
     final crewAnswer = _crewRoute(req);
-    if (crewAnswer != null) return crewAnswer;
+    if (crewAnswer != null) {
+      if (req.method != 'GET') await holdCrewChanges?.future;
+      return crewAnswer;
+    }
     if (path == '/v1/agent/hosts') return _json(hosts);
     if (path == '/v1/config') return _json({'agent_writes': agentWrites});
     if (path == '/v1/config/agent') {
@@ -397,6 +409,7 @@ class FakeAgentServer {
       ]);
     }
     if (path == '/v1/agent/sessions' && req.method == 'GET') {
+      await holdSessionList?.future;
       return _json(sessions);
     }
     if (path == '/v1/agent/sessions' && req.method == 'POST') {

@@ -790,9 +790,10 @@ void main() {
       expect(find.byKey(const Key('agent-card-claude-code')), findsOneWidget);
       expect(find.byKey(const Key('agent-card-shell')), findsOneWidget);
       expect(find.textContaining('1 of 2 hosts online'), findsOneWidget);
-      // The sidebar's row: only the workspace gives way (decision 138l).
+      // The sidebar's row: only the workspace gives way (decision 138l),
+      // all of it where even "…" has no room.
       expect(
-        find.textContaining(RegExp(r'^mac-mini · \S* · failed$')),
+        find.textContaining(RegExp(r'^mac-mini · (\S* · )?failed$')),
         findsOneWidget,
       );
       await tester.tap(find.byKey(const Key('work-ags_site')));

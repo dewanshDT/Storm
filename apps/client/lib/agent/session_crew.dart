@@ -10,6 +10,7 @@ import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem;
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'crew_changes.dart';
 import 'crew_widgets.dart';
 
 /// A session's crew and role where the session view shows them (decision
@@ -122,11 +123,6 @@ class _AboutCrewRoleState extends ConsumerState<AboutCrewRole> {
     context,
   )?.showSnackBar(SnackBar(content: Text(text)));
 
-  void _reload() {
-    ref.invalidate(agentOverviewProvider);
-    ref.invalidate(sessionDetailProvider(_s.id));
-  }
-
   Future<void> _move(List<Crew> crews) async {
     final t = context.tokens;
     final current = _s.crew?.id;
@@ -156,61 +152,52 @@ class _AboutCrewRoleState extends ConsumerState<AboutCrewRole> {
       ),
     );
     if (picked == null || picked.$1 == current || !mounted) return;
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      final change = await api.moveToCrew(_s.id, picked.$1);
-      for (final c in change.removedCrews) {
-        _toast('${c.name} was removed: its last session left it.');
-      }
-    } catch (e) {
-      _toast("Couldn't move ${_s.displayName}: ${describeFailure(e)}");
-    } finally {
-      api.dispose();
-      _reload();
-    }
+    await sendCrewChange(
+      context,
+      what: 'move ${_s.displayName}',
+      patch: movePatch(_s.id, picked.$1),
+      send: (api) => api.moveToCrew(_s.id, picked.$1),
+    );
+    if (mounted) ref.invalidate(sessionDetailProvider(_s.id));
   }
 
   Future<void> _relabel() async {
     final t = context.tokens;
     final api = agentApi(ref);
     if (api == null) return;
+    final List<RoleNote> roles;
     try {
-      final roles = await api.roles();
-      if (!mounted) return;
-      final label = _s.role;
-      final picked = await showStormPopover<(RoleNote?,)>(
-        context: context,
-        anchorKey: _roleAnchor,
-        width: t.sp * 40,
-        builder: (popover) => RoleMenu(
-          roles: roles,
-          room: popoverRoom(context, _roleAnchor),
-          selected: label == null
-              ? null
-              : (vaultId: label.vaultId, noteId: label.noteId),
-          noneLabel: 'No label',
-          noneDetail: _s.launchRole == null
-              ? 'No role'
-              : 'The launch role stays what the agent read',
-          onPick: (r) => Navigator.of(popover).pop((r,)),
-        ),
-      );
-      if (picked == null || !mounted) return;
-      final r = picked.$1;
-      if (r == null) {
-        if (label == null) return;
-        await api.clearRole(_s.id);
-      } else {
-        if (label != null && label.noteId == r.noteId) return;
-        await api.setRole(_s.id, r.vaultId, r.noteId);
-      }
+      roles = await api.roles();
     } catch (e) {
       _toast("Couldn't change the label: ${describeFailure(e)}");
+      return;
     } finally {
       api.dispose();
-      _reload();
     }
+    if (!mounted) return;
+    final label = _s.role;
+    final picked = await showStormPopover<(RoleNote?,)>(
+      context: context,
+      anchorKey: _roleAnchor,
+      width: t.sp * 40,
+      builder: (popover) => RoleMenu(
+        roles: roles,
+        room: popoverRoom(context, _roleAnchor),
+        selected: label == null
+            ? null
+            : (vaultId: label.vaultId, noteId: label.noteId),
+        noneLabel: 'No label',
+        noneDetail: _s.launchRole == null
+            ? 'No role'
+            : 'The launch role stays what the agent read',
+        onPick: (r) => Navigator.of(popover).pop((r,)),
+      ),
+    );
+    if (picked == null || !mounted) return;
+    final r = picked.$1;
+    if (r == null ? label == null : label?.noteId == r.noteId) return;
+    await sendLabelChange(context, _s.id, r);
+    if (mounted) ref.invalidate(sessionDetailProvider(_s.id));
   }
 
   @override

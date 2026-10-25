@@ -242,6 +242,9 @@ class SessionSubLine extends StatelessWidget {
             fits(line('${ws.substring(0, mid)}…')) ? lo = mid : hi = mid - 1;
           }
           text = line('${ws.substring(0, lo)}…');
+          // No room for even a cut workspace: it goes, so the host and age
+          // stay whole (the overview card at 900).
+          if (lo == 0 && !fits(text)) text = '$host · $when';
         }
         return Text(
           text,

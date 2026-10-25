@@ -7,11 +7,13 @@ import '../router.dart';
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/shell/sidebar_frame.dart';
+import '../ui/states.dart' show SkeletonRows;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart';
+import 'crew_changes.dart';
 import 'crew_gestures.dart';
 import 'crew_prefs.dart';
 import 'crew_widgets.dart';
@@ -116,11 +118,14 @@ class AgentsSidebar extends ConsumerWidget {
 
     Widget row(AgentSession s) => CrewDraggable<SessionDrag>(
       data: SessionDrag(s),
-      child: SessionRow(
-        session: s,
-        host: o?.hostName(s.hostId) ?? 'host',
-        selected: s.id == selected || selection.contains(s.id),
-        onTap: () => click(s),
+      child: SnapBackOutline(
+        id: s.id,
+        child: SessionRow(
+          session: s,
+          host: o?.hostName(s.hostId) ?? 'host',
+          selected: s.id == selected || selection.contains(s.id),
+          onTap: () => click(s),
+        ),
       ),
     );
 
@@ -210,23 +215,26 @@ class AgentsSidebar extends ConsumerWidget {
           child: ZoneDropTarget<SessionDrag>(
             zoneOf: (d, _) => d.session.crew?.id == c.id ? null : DropZone.onto,
             onDrop: (d, _) => placeInCrew(context, ref, d.session, c.id),
-            child: CrewHeader(
-              crew: c,
-              members: o!.membersOf(c),
-              collapsed: prefs.collapsed(c.id),
-              selected: c.id == selectedCrew,
-              nameField: renaming == c.id
-                  ? CrewNameField(crew: c, style: crewHeaderNameStyle(t))
-                  : null,
-              onToggle: () =>
-                  ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
-              onOpen: () => context.go(Routes.agentCrew(c.id)),
-              onMenu: (anchor) => showCrewMenu(
-                context,
-                ref,
-                anchor: anchor,
+            child: SnapBackOutline(
+              id: c.id,
+              child: CrewHeader(
                 crew: c,
-                overview: o,
+                members: o!.membersOf(c),
+                collapsed: prefs.collapsed(c.id),
+                selected: c.id == selectedCrew,
+                nameField: renaming == c.id
+                    ? CrewNameField(crew: c, style: crewHeaderNameStyle(t))
+                    : null,
+                onToggle: () =>
+                    ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+                onOpen: () => context.go(Routes.agentCrew(c.id)),
+                onMenu: (anchor) => showCrewMenu(
+                  context,
+                  ref,
+                  anchor: anchor,
+                  crew: c,
+                  overview: o,
+                ),
               ),
             ),
           ),
@@ -310,6 +318,8 @@ class AgentsSidebar extends ConsumerWidget {
             child: ListView(
               padding: EdgeInsets.fromLTRB(t.sp, 0, t.sp, t.sp * 1.5),
               children: [
+                // Nothing is drawn as a crew until crews have loaded.
+                if (o == null) const SkeletonRows(rows: 3),
                 if (crews.isNotEmpty) crewsSection(),
                 // While a member is dragged RUNNING is always there to drop
                 // it on, even with no loose session running.

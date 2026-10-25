@@ -6,13 +6,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
 
 import '../ui/controls.dart';
-import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem;
-import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'crew_changes.dart';
 import 'crew_prefs.dart';
 import 'crew_widgets.dart';
 
@@ -112,39 +111,6 @@ SessionSelection selectWith(
   );
 }
 
-void _toast(BuildContext context, String text) => ScaffoldMessenger.maybeOf(
-  context,
-)?.showSnackBar(SnackBar(content: Text(text)));
-
-/// Runs a crew change, toasts a refusal, and asks for the list again.
-Future<T?> _change<T>(
-  BuildContext context,
-  WidgetRef ref,
-  String what,
-  Future<T> Function(AgentApi api) f,
-) async {
-  final api = agentApi(ref);
-  if (api == null) return null;
-  try {
-    return await f(api);
-  } catch (e) {
-    if (context.mounted) {
-      _toast(context, "Couldn't $what: ${describeFailure(e)}");
-    }
-    return null;
-  } finally {
-    api.dispose();
-    if (context.mounted) ref.invalidate(agentOverviewProvider);
-  }
-}
-
-void _removed(BuildContext context, CrewChange? change) {
-  if (!context.mounted) return;
-  for (final c in change?.removedCrews ?? const <Crew>[]) {
-    _toast(context, '${c.name} was removed: its last session left it.');
-  }
-}
-
 /// Makes a crew named "New crew" of [ids], in that order, and opens its
 /// name for editing with the text selected (138n, Q3).
 Future<void> makeCrew(
@@ -152,19 +118,19 @@ Future<void> makeCrew(
   WidgetRef ref,
   List<String> ids,
 ) async {
-  final change = await _change(
-    context,
-    ref,
-    'make a crew',
-    (api) => api.createCrew('New crew', sessionIds: ids),
-  );
-  final made = change?.crew;
-  if (made == null || !context.mounted) return;
+  // Unfolded first, so the crew being made is seen being made.
   if (ref.read(crewPrefsProvider).value?.section ?? false) {
     ref.read(crewPrefsProvider.notifier).toggleSection();
   }
+  final change = await sendCrewChange(
+    context,
+    what: 'make a crew',
+    patch: newCrewPatch('New crew', ids),
+    send: (api) => api.createCrew('New crew', sessionIds: ids),
+  );
+  final made = change?.crew;
+  if (made == null || !context.mounted) return;
   ref.read(crewRenameProvider.notifier).state = made.id;
-  if (context.mounted) _removed(context, change);
 }
 
 /// Puts [s] in [crewId] in front of [before], or last ([reorder] moves it
@@ -181,13 +147,12 @@ Future<void> placeInCrew(
   if (before == s.id) return;
   // Joining a crew it is already in changes nothing; only a gap reorders.
   if (s.crew?.id == crewId && before == null && !reorder) return;
-  final change = await _change(
+  await sendCrewChange(
     context,
-    ref,
-    'move ${s.displayName}',
-    (api) => api.moveToCrew(s.id, crewId, before: before),
+    what: 'move ${s.displayName}',
+    patch: movePatch(s.id, crewId, before: before),
+    send: (api) => api.moveToCrew(s.id, crewId, before: before),
   );
-  if (context.mounted) _removed(context, change);
 }
 
 /// Takes [s] out of its crew.
@@ -197,13 +162,12 @@ Future<void> leaveCrew(
   AgentSession s,
 ) async {
   if (s.crew == null) return;
-  final change = await _change(
+  await sendCrewChange(
     context,
-    ref,
-    'move ${s.displayName}',
-    (api) => api.moveToCrew(s.id, null),
+    what: 'move ${s.displayName}',
+    patch: movePatch(s.id, null),
+    send: (api) => api.moveToCrew(s.id, null),
   );
-  if (context.mounted) _removed(context, change);
 }
 
 /// Moves [dragged] in front of [before] (last when null) among [crews].
@@ -222,11 +186,11 @@ Future<void> reorderCrew(
   final at = before == null ? ids.length : ids.indexOf(before);
   ids.insert(at < 0 ? ids.length : at, dragged.id);
   if (ids.indexed.every((e) => crews[e.$1].id == e.$2)) return;
-  await _change(
+  await sendCrewChange(
     context,
-    ref,
-    'reorder the crews',
-    (api) => api.reorderCrews(ids),
+    what: 'reorder the crews',
+    patch: crewOrderPatch(ids, moved: dragged.id),
+    send: (api) => api.reorderCrews(ids),
   );
 }
 
@@ -472,16 +436,18 @@ class _SelectionBarState extends ConsumerState<SelectionBar> {
       for (final id in _ids) ?widget.overview.byId(id),
     ].where((s) => s.crew?.id != to).toList();
     _clear();
-    final change = await _change(context, ref, 'move the sessions', (
-      api,
-    ) async {
-      final removed = <Crew>[];
-      for (final s in sessions) {
-        removed.addAll((await api.moveToCrew(s.id, to)).removedCrews);
-      }
-      return CrewChange(removedCrews: removed);
-    });
-    if (mounted) _removed(context, change);
+    await sendCrewChange(
+      context,
+      what: 'move the sessions',
+      patch: moveAllPatch([for (final s in sessions) s.id], to),
+      send: (api) async {
+        final removed = <Crew>[];
+        for (final s in sessions) {
+          removed.addAll((await api.moveToCrew(s.id, to)).removedCrews);
+        }
+        return CrewChange(removedCrews: removed);
+      },
+    );
   }
 
   @override
@@ -591,11 +557,11 @@ class _CrewNameFieldState extends ConsumerState<CrewNameField> {
     final c = widget.crew;
     _finish();
     if (name.isEmpty || name == c.name) return;
-    await _change(
+    await sendCrewChange(
       context,
-      ref,
-      'rename ${c.name}',
-      (api) => api.updateCrew(c.id, name: name),
+      what: 'rename ${c.name}',
+      patch: crewPatch(c.id, name: name),
+      send: (api) => api.updateCrew(c.id, name: name),
     );
   }
 

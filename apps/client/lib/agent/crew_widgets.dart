@@ -10,15 +10,14 @@ import 'package:go_router/go_router.dart';
 import '../router.dart';
 import '../ui/accents.dart';
 import '../ui/settings/settings_widgets.dart' show promptForText;
-import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem, PopoverTone;
-import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
+import 'crew_changes.dart';
 import 'crew_prefs.dart';
 
 /// The pieces crews are drawn with (decision 138, plan §4.2): one role tag,
@@ -846,28 +845,13 @@ Future<void> runCrewAction(
   required AgentOverview overview,
 }) async {
   final members = overview.membersOf(crew);
-  void toast(String text) => ScaffoldMessenger.maybeOf(
-    context,
-  )?.showSnackBar(SnackBar(content: Text(text)));
-
-  Future<void> call(String what, Future<void> Function(AgentApi api) f) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      await f(api);
-    } catch (e) {
-      toast("Couldn't $what: ${describeFailure(e)}");
-    } finally {
-      api.dispose();
-      ref.invalidate(agentOverviewProvider);
-    }
-  }
-
   switch (picked) {
     case Accent a when a != crew.accent:
-      await call(
-        'recolour ${crew.name}',
-        (api) => api.updateCrew(crew.id, color: a.name),
+      await sendCrewChange(
+        context,
+        what: 'recolour ${crew.name}',
+        patch: crewPatch(crew.id, color: a.name),
+        send: (api) => api.updateCrew(crew.id, color: a.name),
       );
     case CrewAction.rename:
       final name = await promptForText(
@@ -878,22 +862,28 @@ Future<void> runCrewAction(
       );
       final trimmed = name?.trim() ?? '';
       if (trimmed.isEmpty || trimmed == crew.name || !context.mounted) return;
-      await call(
-        'rename ${crew.name}',
-        (api) => api.updateCrew(crew.id, name: trimmed),
+      await sendCrewChange(
+        context,
+        what: 'rename ${crew.name}',
+        patch: crewPatch(crew.id, name: trimmed),
+        send: (api) => api.updateCrew(crew.id, name: trimmed),
       );
     case CrewAction.collapse:
       ref.read(crewPrefsProvider.notifier).toggleCrew(crew.id);
     case CrewAction.dismissEnded:
-      Crew? removed;
-      await call('dismiss every ended session in ${crew.name}', (api) async {
-        for (final s in members.where((s) => s.ended)) {
-          removed = await api.dismiss(s.id) ?? removed;
-        }
-      });
-      if (removed != null) {
-        toast('${removed!.name} was removed: its last session was dismissed.');
-      }
+      await sendCrewChange(
+        context,
+        what: 'dismiss every ended session in ${crew.name}',
+        why: 'its last session was dismissed',
+        removed: (crew) => [?crew],
+        send: (api) async {
+          Crew? removed;
+          for (final s in members.where((s) => s.ended)) {
+            removed = await api.dismiss(s.id) ?? removed;
+          }
+          return removed;
+        },
+      );
     case CrewAction.openPage:
       context.go(Routes.agentCrew(crew.id));
     case CrewAction.newSession:

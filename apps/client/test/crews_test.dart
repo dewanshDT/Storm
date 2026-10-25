@@ -498,6 +498,13 @@ void main() {
         find.text('mac-mini · relay-bench-with-a-long-name · failed'),
         findsOneWidget,
       );
+      // Too narrow for even "…": the workspace goes, host and age stay.
+      await pumpIn(
+        t,
+        SessionSubLine(session: s, host: 'mac-mini', style: style),
+        width: 95,
+      );
+      expect(find.text('mac-mini · failed'), findsOneWidget);
     });
   });
 

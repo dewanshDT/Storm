@@ -124,6 +124,37 @@ for `personal` happens at sign-in, before any agent wrote, so its baseline is
 empty and the loop's writes still dot BOARD and the log note. A device whose
 first look comes after the writes shows no dots for them, by design.
 
+## Agent crews (decision 138, `--set crews`)
+
+```sh
+(cd apps/server && cargo build) && (cd apps/runtime && cargo build)
+(cd apps/client && flutter build web --release)
+python3 docs/design/acceptance/storm-v2/harness/shoot.py --set crews
+```
+
+`crews/` holds Round 4's frames (handoff `design_handoff_storm_crews/`,
+4a–4l) on a real server and two real `storm-runtime` hosts, seeded by
+`harness/crews.py` through the server's API: sessions launched with a role
+and a crew, crews made around sessions, a label changed after launch, and
+`mac-mini` killed under a live member. The run also checks, and prints, what
+the server can see: 17 checks, and the run fails if one does.
+
+| Shot | Frame | What it shows |
+|---|---|---|
+| `desktop-4a-overview`, `-4b-overview-light`, `-4c-overview-earth` | 4a–4c | sidebar CREWS and overview cards, in each preset |
+| `desktop-4d-crew-page`, `-4d-end-all-banner`, `-4d-end-all-done` | 4d | crew page; End all running lists Stops, Can't reach now (mac-mini) and Already ended, then ends what it can reach |
+| `desktop-4e-session-roles` | 4e | About: launched as Storm Reviewer, labelled Storm Lead since |
+| `desktop-4f-launcher`, `-4g-launcher-shell` | 4f, 4g | the Role picker; Role off for Shell with its reason |
+| `desktop900-4h-narrow` | 4h | 900 wide, the crew menu from a right-click |
+| `desktop-4i-sync-in` | 4i | a crew made through the API appears without a reload (about 11 s, one poll) |
+| `desktop-4i-refused` | 4i | a reorder refused because another device deleted a crew meanwhile: the order snaps back, outlined, with the server's reason |
+| `desktop-4i-removed-undo`, `-4i-undone` | 4i | Dismiss ended removes Kit cleanup with Undo; Undo brings it back in its colour and place |
+| `phone-4j-list`, `phone-4k-sheet`, `phone-4l-end-all` | 4j–4l | the phone list, the long-press Crew and Role sheet, the End all sheet |
+
+Captured 2026-10-25 on `feat/138-6-crews-finish`. The scripted agent stands
+in for Claude Code (and so every agent mark is Claude Code's); the 4l frame's
+sheet also lists Already ended (decision note, As built in 138-5).
+
 ## Deliberate, documented deltas
 
 Filled in as slices land (for example: the real xterm surface instead of the

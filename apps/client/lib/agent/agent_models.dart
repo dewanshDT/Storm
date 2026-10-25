@@ -595,6 +595,46 @@ class AgentSession {
           launchRole: launchRole,
         );
 
+  /// This record in [crew] (null: none), as a change not yet confirmed
+  /// draws it.
+  AgentSession withCrew(SessionCrew? crew) => _relabeled(crew, role);
+
+  /// This record with the label [role] (null: none).
+  AgentSession withRole(RoleRef? role) => _relabeled(crew, role);
+
+  AgentSession _relabeled(SessionCrew? crew, RoleRef? role) => AgentSession(
+    id: id,
+    hostId: hostId,
+    workspace: workspace,
+    provider: provider,
+    status: status,
+    endReason: endReason,
+    exitCode: exitCode,
+    signal: signal,
+    cols: cols,
+    rows: rows,
+    createdAt: createdAt,
+    fallback: fallback,
+    startedAt: startedAt,
+    endedAt: endedAt,
+    name: name,
+    context: context,
+    writeVaultId: writeVaultId,
+    wroteCount: wroteCount,
+    integrations: integrations,
+    launchNotice: launchNotice,
+    credential: credential,
+    title: title,
+    activity: activity,
+    harnessSession: harnessSession,
+    resumedFrom: resumedFrom,
+    mcpSkipped: mcpSkipped,
+    mcpPluginLocal: mcpPluginLocal,
+    crew: crew,
+    role: role,
+    launchRole: launchRole,
+  );
+
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
     hostId: j['host_id'] as String,

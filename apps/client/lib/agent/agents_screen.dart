@@ -17,6 +17,7 @@ import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'crew_changes.dart';
 import 'crew_prefs.dart';
 import 'crew_sheets.dart';
 import 'crew_widgets.dart';
@@ -703,6 +704,12 @@ class _Overview extends ConsumerWidget {
                   ],
                   SizedBox(height: t.sp * 1.5),
                 ],
+                // Until the first crew exists, and only once crews have
+                // loaded from a server that has them.
+                if (o.crews != null && crews.isEmpty) ...[
+                  const _NoCrewsHint(),
+                  SizedBox(height: t.sp * 2.5),
+                ],
                 if (crews.isEmpty || groups.isNotEmpty) ...[
                   AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
                   SizedBox(height: t.sp * 1.5),
@@ -729,6 +736,84 @@ class _Overview extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// How crews are made, on the desk overview while there are none (handoff
+/// §5, Round 3's 3j).
+class _NoCrewsHint extends StatelessWidget {
+  const _NoCrewsHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return CustomPaint(
+      key: const Key('no-crews-hint'),
+      painter: _DashedOutline(
+        color: t.border,
+        width: t.bw,
+        radius: t.rControl,
+        dash: t.sp * 0.5,
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: t.sp * 1.75,
+          vertical: t.sp * 1.5,
+        ),
+        child: Text(
+          'Working on one thing across several sessions? Drag one session '
+          'onto another to make a crew, or pick a crew when you launch.',
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.codeSize,
+            height: 1.5,
+            color: t.text2,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedOutline extends CustomPainter {
+  _DashedOutline({
+    required this.color,
+    required this.width,
+    required this.radius,
+    required this.dash,
+  });
+
+  final Color color;
+  final double width;
+  final double radius;
+  final double dash;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final inset = width / 2;
+    final outline = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(inset, inset, size.width - width, size.height - width),
+          Radius.circular(radius),
+        ),
+      );
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = width
+      ..style = PaintingStyle.stroke;
+    for (final m in outline.computeMetrics()) {
+      for (var d = 0.0; d < m.length; d += dash * 2) {
+        canvas.drawPath(m.extractPath(d, d + dash), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedOutline old) =>
+      old.color != color ||
+      old.width != width ||
+      old.radius != radius ||
+      old.dash != dash;
 }
 
 class _WorkCard extends StatelessWidget {
@@ -982,12 +1067,15 @@ class _PhoneList extends ConsumerWidget {
     final o = overview;
     final crews = o.crews ?? const <Crew>[];
     final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
-    Widget row(AgentSession s) => SessionRow(
-      session: s,
-      host: o.hostName(s.hostId),
-      phone: true,
-      onTap: () => openAgentSession(context, s.id),
-      onLongPress: () => showSessionCrewSheet(context, ref, s),
+    Widget row(AgentSession s) => SnapBackOutline(
+      id: s.id,
+      child: SessionRow(
+        session: s,
+        host: o.hostName(s.hostId),
+        phone: true,
+        onTap: () => openAgentSession(context, s.id),
+        onLongPress: () => showSessionCrewSheet(context, ref, s),
+      ),
     );
     Widget section(String label, List<AgentSession> list, double top) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1011,15 +1099,18 @@ class _PhoneList extends ConsumerWidget {
           ),
           if (!prefs.section)
             for (final c in crews) ...[
-              PhoneCrewHeader(
-                crew: c,
-                members: o.membersOf(c),
-                collapsed: prefs.collapsed(c.id),
-                onToggle: () =>
-                    ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
-                onOpen: () => context.go(Routes.agentCrew(c.id)),
-                onActions: () =>
-                    showCrewSheet(context, ref, crew: c, overview: o),
+              SnapBackOutline(
+                id: c.id,
+                child: PhoneCrewHeader(
+                  crew: c,
+                  members: o.membersOf(c),
+                  collapsed: prefs.collapsed(c.id),
+                  onToggle: () =>
+                      ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+                  onOpen: () => context.go(Routes.agentCrew(c.id)),
+                  onActions: () =>
+                      showCrewSheet(context, ref, crew: c, overview: o),
+                ),
               ),
               if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty)
                 CrewMembers(
