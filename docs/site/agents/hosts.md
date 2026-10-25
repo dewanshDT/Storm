@@ -198,9 +198,14 @@ own system user in its own sandbox, so sessions on one host cannot reach each
 other. Turning it on needs systemd 255 or newer and `passt`, stops nothing by
 itself (stop the host first), creates the user pools and gives each workspace
 a group; `sudo storm-runtime-isolation off` puts every workspace back as it
-was. Until a later release can start isolated sessions, a host with it on
-refuses every session rather than run one the old way, so leave it off.
-`storm-runtime.service` itself is unchanged either way.
+was. With it on, the host starts each session through the helper, in its own
+systemd unit (`storm-session-<id>.service`) under a leased pool user, with
+its own `/tmp`, `/dev/shm` and IPC, its own home, and only its own workspace
+and session files visible; it never runs one the old way. Storm's tools,
+Resume, the agents Storm installed and a session's own network are not
+there yet, so leave it off. A workspace root outside `/var/lib/storm-runtime`
+needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
+`storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 
 Remove it with `sudo apt remove storm-runtime`.
 

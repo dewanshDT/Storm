@@ -22,13 +22,18 @@ pub mod accounts;
 pub mod audit;
 pub mod config;
 pub mod convert;
+pub mod fdpass;
+pub mod files;
 pub mod leases;
 pub mod operator;
 pub mod policy;
 pub mod pool;
 pub mod protocol;
 pub mod serve;
+pub mod session;
 pub mod toml_edit;
+pub mod tty;
+pub mod units;
 
 /// The Runtime Host's own account (decision 77e), the only peer the helper
 /// answers.

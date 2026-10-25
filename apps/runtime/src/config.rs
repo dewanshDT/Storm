@@ -270,18 +270,38 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
-        self.providers_on(self.search_path()?)
+        self.providers_on(self.search_path()?, None)
     }
 
     /// [`Self::providers`] on [`Self::search_path_with`] `managed`.
     pub fn providers_with(&self, managed: &Path) -> Result<Vec<Arc<dyn Provider>>> {
-        self.providers_on(Some(self.search_path_with(managed)?))
+        self.providers_on(Some(self.search_path_with(managed)?), None)
     }
 
-    fn providers_on(&self, path: Option<OsString>) -> Result<Vec<Arc<dyn Provider>>> {
-        let on_path = |p: CliProvider| match &path {
-            Some(path) => p.with_path(path.clone()),
-            None => p,
+    /// [`Self::providers_with`], each `cli` provider's sessions started by
+    /// the isolation helper (decision 136).
+    pub fn providers_isolated(
+        &self,
+        managed: &Path,
+        link: crate::isolation::Link,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        self.providers_on(Some(self.search_path_with(managed)?), Some(link))
+    }
+
+    fn providers_on(
+        &self,
+        path: Option<OsString>,
+        isolation: Option<crate::isolation::Link>,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        let on_path = |p: CliProvider| {
+            let p = match &path {
+                Some(path) => p.with_path(path.clone()),
+                None => p,
+            };
+            match &isolation {
+                Some(link) => p.isolated(link.clone()),
+                None => p,
+            }
         };
         // With no list, every built-in (decision 130): one that is not
         // installed is offered as such, and the launcher says so.

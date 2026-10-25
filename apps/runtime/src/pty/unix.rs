@@ -25,8 +25,12 @@ use rustix::termios::Winsize;
 use super::{Exit, Launch, Spawned};
 use crate::provider::TerminalSize;
 
-/// Starts `launch` on a new PTY at `size`.
+/// Starts `launch` on a new PTY at `size`: as a child of this process, or,
+/// on an isolated host, through the isolation helper (decision 136).
 pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> {
+    if let Some(isolated) = &launch.isolated {
+        return spawn_isolated(launch, size, isolated);
+    }
     let (master, slave) = open(size)?;
     let mut command = Command::new(&launch.program);
     command
@@ -53,17 +57,179 @@ pub(crate) fn spawn(launch: &Launch, size: TerminalSize) -> io::Result<Spawned> 
         rustix::fs::fcntl_getfl(&master)? | OFlags::NONBLOCK,
     )?;
     Ok(Spawned {
-        child: Child(child),
+        child: Child(ChildKind::Local(child)),
         output: Output(File::from(master.try_clone()?)),
         input: Input {
             writer: File::from(master),
         },
-        group: Group {
+        group: Group(GroupKind::Local {
             leader,
             tag: launch.tag.clone(),
-        },
+        }),
         leader: process,
     })
+}
+
+/// A session in its own unit (136d). The host keeps the master; the slave
+/// goes to the helper and is closed here once the unit has it, so the
+/// master sees end-of-file when the session's last process lets go.
+/// Linux only in practice: elsewhere no host has a link (136k).
+fn spawn_isolated(
+    launch: &Launch,
+    size: TerminalSize,
+    isolated: &crate::isolation::Isolated,
+) -> io::Result<Spawned> {
+    let link = &isolated.link;
+    let session = launch.tag.as_str();
+    let (master, slave) = open(size)?;
+    let user = link.lease(session)?;
+    let started = (|| -> io::Result<(i32, Option<OwnedFd>)> {
+        link.prepare(session, &user)?;
+        crate::platform::create_private_dir(&crate::mcp::session_dir(&link.state_dir, session))?;
+        let dir = link.launch_dir();
+        crate::platform::tighten_private_dir(&dir)?;
+        let file = dir.join(format!("{session}.json"));
+        let written = write_launch(&file, launch);
+        let result = written.and_then(|()| {
+            link.start(
+                session,
+                &user,
+                &isolated.provider,
+                &launch.cwd.canonicalize()?,
+                slave.as_fd(),
+            )
+        });
+        // It holds the session's secrets; the helper has read it.
+        let _ = std::fs::remove_file(&file);
+        result
+    })();
+    drop(slave);
+    let (pid, pidfd) = match started {
+        Ok(started) => started,
+        Err(e) => {
+            if let Err(release) = link.release(session, &user) {
+                tracing::warn!(session, error = %release, "isolation: could not release a lease after a failed start");
+            }
+            return Err(e);
+        }
+    };
+    rustix::fs::fcntl_setfl(
+        &master,
+        rustix::fs::fcntl_getfl(&master)? | OFlags::NONBLOCK,
+    )?;
+    #[cfg(target_os = "linux")]
+    let leader = match &pidfd {
+        Some(fd) => Some(crate::platform::peer::Process::from_pidfd(
+            pid,
+            fd.try_clone()?,
+        )),
+        None => None,
+    };
+    #[cfg(not(target_os = "linux"))]
+    let leader = {
+        let _ = pid;
+        None
+    };
+    let unit = std::sync::Arc::new(Unit {
+        link: link.clone(),
+        session: session.to_string(),
+        user,
+        pidfd,
+        ended: std::sync::atomic::AtomicBool::new(false),
+    });
+    Ok(Spawned {
+        child: Child(ChildKind::Unit(unit.clone())),
+        output: Output(File::from(master.try_clone()?)),
+        input: Input {
+            writer: File::from(master),
+        },
+        group: Group(GroupKind::Unit(unit)),
+        leader,
+    })
+}
+
+/// The session's arguments and environment for the helper, `0600`: the
+/// program is the operator's, so it is not here. The variables are what the
+/// session would have been given on top of the host's own: the helper's
+/// unit starts from systemd's environment, not this process's.
+fn write_launch(path: &std::path::Path, launch: &Launch) -> io::Result<()> {
+    let text = |s: &std::ffi::OsStr| {
+        s.to_str()
+            .map(str::to_string)
+            .ok_or_else(|| io::Error::other("a launch value is not UTF-8"))
+    };
+    let mut env: Vec<(String, String)> = Vec::new();
+    let mut set = |k: String, v: String| {
+        env.retain(|(name, _)| *name != k);
+        env.push((k, v));
+    };
+    for (k, v) in &launch.env {
+        set(text(k)?, text(v)?);
+    }
+    for k in &launch.env_remove {
+        let k = text(k)?;
+        env.retain(|(name, _)| *name != k);
+    }
+    for (k, v) in &launch.secret_env {
+        let mut env_v = text(v.expose())?;
+        env.retain(|(name, _)| *name != text(k).unwrap_or_default());
+        env.push((text(k)?, std::mem::take(&mut env_v)));
+    }
+    let args = launch
+        .args
+        .iter()
+        .map(|a| text(a))
+        .collect::<io::Result<Vec<_>>>()?;
+    let body = serde_json::json!({"args": args, "env": env}).to_string();
+    let mut f = crate::platform::open_private(
+        path,
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true),
+    )?;
+    f.write_all(body.as_bytes())
+}
+
+/// A session the helper started, shared by its child and its group.
+pub(crate) struct Unit {
+    link: crate::isolation::Link,
+    session: String,
+    user: String,
+    pidfd: Option<OwnedFd>,
+    /// The unit has been stopped: nothing of the session is left.
+    ended: std::sync::atomic::AtomicBool,
+}
+
+impl Unit {
+    fn signal(&self, signal: &str) {
+        if self.ended.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        if let Err(e) = self.link.signal(&self.session, signal) {
+            tracing::debug!(session = %self.session, error = %e, "isolation: signal not delivered");
+        }
+    }
+
+    /// Waits for the leader to exit, then ends the unit and the lease.
+    fn wait(&self) -> io::Result<Exit> {
+        if let Some(fd) = &self.pidfd {
+            loop {
+                let mut fds = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
+                match rustix::event::poll(&mut fds, None) {
+                    Ok(n) if n > 0 => break,
+                    Ok(_) | Err(rustix::io::Errno::INTR) => continue,
+                    Err(e) => return Err(e.into()),
+                }
+            }
+        }
+        let (code, signal) = self.link.end(&self.session)?;
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Err(e) = self.link.release(&self.session, &self.user) {
+            tracing::warn!(session = %self.session, error = %e, "isolation: the lease was not released");
+        }
+        Ok(Exit { code, signal })
+    }
 }
 
 /// A new PTY pair at `size`: the master the runtime keeps, and the slave the
@@ -143,15 +309,25 @@ pub(crate) fn resolve(command: &OsStr, path: Option<&OsStr>) -> Option<std::path
         .find(|candidate| executable(candidate))
 }
 
-pub(crate) struct Child(std::process::Child);
+pub(crate) struct Child(ChildKind);
+
+enum ChildKind {
+    Local(std::process::Child),
+    Unit(std::sync::Arc<Unit>),
+}
 
 impl Child {
-    pub fn wait(mut self) -> io::Result<Exit> {
-        let status = self.0.wait()?;
-        Ok(Exit {
-            code: status.code(),
-            signal: status.signal(),
-        })
+    pub fn wait(self) -> io::Result<Exit> {
+        match self.0 {
+            ChildKind::Local(mut child) => {
+                let status = child.wait()?;
+                Ok(Exit {
+                    code: status.code(),
+                    signal: status.signal(),
+                })
+            }
+            ChildKind::Unit(unit) => unit.wait(),
+        }
     }
 }
 
@@ -215,61 +391,83 @@ impl Input {
     }
 }
 
-/// The agent's process group and session, and what carries its tag.
-pub(crate) struct Group {
-    /// The agent's pid: its process group's id and its session's.
-    leader: Pid,
-    /// The session id, which every process it started carries in
-    /// [`crate::platform::SESSION_TAG`].
-    tag: String,
+/// Everything a session started: the agent's process group and session,
+/// and what carries its tag; or, on an isolated host, its unit, whose
+/// control group holds all of it (136d).
+pub(crate) struct Group(GroupKind);
+
+enum GroupKind {
+    Local {
+        /// The agent's pid: its process group's id and its session's.
+        leader: Pid,
+        /// The session id, which every process it started carries in
+        /// [`crate::platform::SESSION_TAG`].
+        tag: String,
+    },
+    Unit(std::sync::Arc<Unit>),
 }
 
 impl Group {
-    /// SIGHUP to the agent's process group.
+    /// SIGHUP to the agent's process group; to the whole unit when isolated.
     pub fn hang_up(&self) {
-        // ESRCH just means the group is already gone.
-        let _ = rustix::process::kill_process_group(self.leader, Signal::HUP);
+        match &self.0 {
+            // ESRCH just means the group is already gone.
+            GroupKind::Local { leader, .. } => {
+                let _ = rustix::process::kill_process_group(*leader, Signal::HUP);
+            }
+            GroupKind::Unit(unit) => unit.signal("hup"),
+        }
     }
 
     /// SIGHUP to everything still in the session, or carrying its tag.
     pub fn hang_up_rest(&self) {
-        signal_each(&self.stragglers(), Signal::HUP);
+        match &self.0 {
+            GroupKind::Local { leader, tag } => signal_each(&stragglers(*leader, tag), Signal::HUP),
+            GroupKind::Unit(unit) => unit.signal("hup"),
+        }
     }
 
     /// SIGKILL to the group and to every other member of the session the
     /// agent leads (its pid is both ids): a job-control shell's jobs have
-    /// groups of their own.
+    /// groups of their own. To the whole unit when isolated.
     pub fn kill(&self) {
-        let _ = rustix::process::kill_process_group(self.leader, Signal::KILL);
-        signal_each(&self.stragglers(), Signal::KILL);
+        match &self.0 {
+            GroupKind::Local { leader, tag } => {
+                let _ = rustix::process::kill_process_group(*leader, Signal::KILL);
+                signal_each(&stragglers(*leader, tag), Signal::KILL);
+            }
+            GroupKind::Unit(unit) => unit.signal("kill"),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.stragglers().is_empty()
-    }
-
-    /// Everything the session started that is still alive: the members of
-    /// the session the leader leads, and whatever left it but carries the
-    /// session's tag. If they cannot be listed, none: the group signals still
-    /// went out.
-    fn stragglers(&self) -> Vec<Pid> {
-        let mut all: Vec<Pid> =
-            crate::platform::session_members(self.leader.as_raw_nonzero().get())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(Pid::from_raw)
-                .collect();
-        for pid in crate::platform::tagged_processes(&self.tag)
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(Pid::from_raw)
-        {
-            if !all.contains(&pid) {
-                all.push(pid);
-            }
+        match &self.0 {
+            GroupKind::Local { leader, tag } => stragglers(*leader, tag).is_empty(),
+            GroupKind::Unit(unit) => unit.ended.load(std::sync::atomic::Ordering::SeqCst),
         }
-        all
     }
+}
+
+/// Everything the session started that is still alive: the members of
+/// the session the leader leads, and whatever left it but carries the
+/// session's tag. If they cannot be listed, none: the group signals still
+/// went out.
+fn stragglers(leader: Pid, tag: &str) -> Vec<Pid> {
+    let mut all: Vec<Pid> = crate::platform::session_members(leader.as_raw_nonzero().get())
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+        .collect();
+    for pid in crate::platform::tagged_processes(tag)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(Pid::from_raw)
+    {
+        if !all.contains(&pid) {
+            all.push(pid);
+        }
+    }
+    all
 }
 
 fn signal_each(pids: &[Pid], signal: Signal) {

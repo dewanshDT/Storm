@@ -327,7 +327,17 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
-        let providers = config.providers_with(&crate::agents::managed_bin(state_dir))?;
+        let managed = crate::agents::managed_bin(state_dir);
+        // 136a: with isolation on, every session goes through the helper. A
+        // host that has none (not Linux, not the packaged state directory)
+        // keeps providers that cannot isolate, and so starts nothing.
+        let link = (config.isolation == crate::config::Isolation::PerSession)
+            .then(|| crate::isolation::Link::installed(state_dir))
+            .flatten();
+        let providers = match link {
+            Some(link) => config.providers_isolated(&managed, link)?,
+            None => config.providers_with(&managed)?,
+        };
         Self::with_providers(state_dir, config, providers)
     }
 
@@ -1211,12 +1221,6 @@ impl Host {
             refuse("unsupported interaction");
             return self.post_start_failure(&id).await;
         }
-        // 136a: on an isolated host no session runs as this account. Until
-        // this host can start one in its own unit (136-2), it starts none.
-        if self.config.isolation == crate::config::Isolation::PerSession {
-            refuse("isolation is on and this host cannot isolate a session");
-            return self.post_start_failure(&id).await;
-        }
         if self.sessions.lock().unwrap().len() >= self.config.max_sessions as usize {
             refuse("max_sessions reached");
             return self.post_start_failure(&id).await;
@@ -1234,6 +1238,12 @@ impl Host {
             refuse("no such provider");
             return self.post_start_failure(&id).await;
         };
+        // 136a: on an isolated host no session runs as this account: one
+        // its provider cannot start through the helper does not start.
+        if self.config.isolation == crate::config::Isolation::PerSession && !provider.isolated() {
+            refuse("isolation is on and this host cannot isolate a session");
+            return self.post_start_failure(&id).await;
+        }
         let Some(size) = TerminalSize::new(size.cols, size.rows) else {
             refuse("bad size");
             return self.post_start_failure(&id).await;
@@ -3801,6 +3811,195 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             host.session("ags_OFF").is_some()
         })
         .await;
+    }
+
+    /// A host whose `shell` runs `args` through a fake isolation helper,
+    /// which starts it on the terminal it is handed, as the helper would.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host(
+        program: &str,
+        args: &[&str],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), program);
+        let shell = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new("shell").unwrap(),
+            "/bin/sh",
+            args.iter().copied(),
+        )
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(state.path(), config, vec![Arc::new(shell)]).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ops(helper: &crate::isolation::fake::FakeHelper) -> Vec<String> {
+        helper.seen.lock().unwrap().ops.clone()
+    }
+
+    /// 136-2: with isolation on, a session starts through the helper, on a
+    /// terminal the host keeps the master of: input, output and resize work
+    /// as they do today (AC-F4), and the exit status is the helper's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn with_isolation_on_a_session_starts_through_the_helper() {
+        let (host, seen, helper, state, _roots) = isolated_host("/bin/sh", &[]).await;
+        host.dispatch(1, start("ags_ISO", "shell"));
+        eventually("the isolated session started", || {
+            host.session("ags_ISO").is_some()
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            ["lease ags_ISO", "prepare ags_ISO", "start ags_ISO"]
+        );
+        let s = host.session("ags_ISO").unwrap();
+        let said = || match s.events.ring.lock().unwrap().read(0, BATCH) {
+            Read::Data { bytes, .. } => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => String::new(),
+        };
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("STORM_RUNTIME_SESSION".into(), "ags_ISO".into())));
+        assert!(env.contains(&("TERM".into(), "xterm-256color".into())));
+        assert!(
+            !state.path().join("launch/ags_ISO.json").exists(),
+            "the launch is gone once the helper has read it"
+        );
+        host.dispatch(
+            2,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"echo iso-$((40+2))\n"),
+            },
+        );
+        eventually("the session answered its input", || {
+            said().contains("iso-42")
+        })
+        .await;
+        host.dispatch(
+            3,
+            Command::Resize {
+                session: "ags_ISO".into(),
+                cols: 101,
+                rows: 33,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        host.dispatch(
+            4,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"stty size; exit 3\n"),
+            },
+        );
+        eventually("the exit was reported with its code", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_iso") && b["status"] == "completed" && b["exit_code"] == 3
+            })
+        })
+        .await;
+        assert!(said().contains("33 101"), "{}", said());
+        eventually("the lease was released", || {
+            ops(&helper).last().map(String::as_str) == Some("release ags_ISO")
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_ISO",
+                "prepare ags_ISO",
+                "start ags_ISO",
+                "end ags_ISO",
+                "release ags_ISO"
+            ]
+        );
+    }
+
+    /// Ending an isolated session signals its unit through the helper,
+    /// never a process of this host's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_end_goes_through_the_helper() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/bin/sleep", &["1000"]).await;
+        host.dispatch(1, start("ags_END", "shell"));
+        eventually("started", || host.session("ags_END").is_some()).await;
+        host.dispatch(
+            2,
+            Command::End {
+                session: "ags_END".into(),
+            },
+        );
+        eventually("reported stopped", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_end") && b["status"] == "stopped")
+        })
+        .await;
+        eventually("released", || {
+            ops(&helper).contains(&"release ags_END".to_string())
+        })
+        .await;
+        let ops = ops(&helper);
+        // SIGHUP first; `sleep` ends on it, so no SIGKILL follows.
+        assert_eq!(
+            &ops[3..],
+            ["signal ags_END hup", "end ags_END", "release ags_END"]
+        );
+    }
+
+    /// A start the helper refuses fails, and its lease is given back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_refused_isolated_start_fails_and_releases_its_lease() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/nonexistent/agent", &[]).await;
+        host.dispatch(1, start("ags_NOPE", "shell"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nope") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_NOPE").is_none());
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_NOPE",
+                "prepare ags_NOPE",
+                "start ags_NOPE",
+                "release ags_NOPE"
+            ]
+        );
     }
 
     fn start(session: &str, provider: &str) -> Command {

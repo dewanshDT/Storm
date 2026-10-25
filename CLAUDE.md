@@ -677,8 +677,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   the host account's uid on the socket systemd binds, accepts only its fixed
   operations with exactly their fields (a program, arguments or a uid in a
   request is refused; a workspace must sit directly under a configured
-  root, with no symlink), and audits every request; its unit keeps one capability, and
-  a slice that needs another adds it there with its reason. The operator's
+  root, with no symlink), and audits every request; its unit keeps
+  `CAP_DAC_READ_SEARCH`, `CAP_CHOWN` and `CAP_FOWNER`, each with its reason,
+  and a slice that needs another adds it there with its reason. **With
+  isolation on, no session is this host's child** (136-2): the host leases a
+  pool user, writes the session's arguments and variables (never a program)
+  to `<state>/launch/<id>.json` (`0600`, removed after `start`), keeps the
+  PTY master and sends the slave over `SCM_RIGHTS`; the helper checks it is
+  a devpts slave, resolves the program from `runtime.toml` itself and asks
+  systemd for `storm-session-<id>.service` (`units.rs` is the property set,
+  tested as data), and hands back the leader's pidfd. Ending is the unit's
+  stop; at lease end (`release`) the helper hands back what the user wrote
+  and removes its home before the user is free, and leases are on disk so
+  a restarted helper revokes them first. The operator's
   `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
   record every entry before changing any, and write `isolation` in
   `runtime.toml` last. Nothing at install creates the pools or enables the

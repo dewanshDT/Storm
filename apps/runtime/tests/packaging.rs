@@ -198,16 +198,21 @@ fn unit_values<'a>(unit: &'a str, key: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// G-136-2's half that a file can hold: the helper keeps one capability,
-/// runs nothing but its own binary, and is sandboxed in every way that
-/// does not stop it doing its job.
+/// G-136-2's half that a file can hold: the helper keeps three
+/// capabilities, each with its reason in the unit, runs nothing but its
+/// own binary and systemd's tools, and is sandboxed in every way that does
+/// not stop it doing its job.
 #[test]
 fn the_helper_unit_keeps_only_what_it_needs() {
     let unit = repo_file(HELPER_UNIT);
     for (key, value) in [
         ("ExecStart", "/usr/sbin/storm-runtime-isolation serve"),
         ("User", "root"),
-        ("CapabilityBoundingSet", "CAP_DAC_READ_SEARCH"),
+        (
+            "CapabilityBoundingSet",
+            "CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER",
+        ),
+        ("ReadWritePaths", "/var/lib/storm-runtime"),
         ("AmbientCapabilities", ""),
         ("NoNewPrivileges", "true"),
         ("PrivateNetwork", "true"),
@@ -224,7 +229,6 @@ fn the_helper_unit_keeps_only_what_it_needs() {
         ("ProtectControlGroups", "true"),
         ("ProtectProc", "invisible"),
         ("RestrictNamespaces", "true"),
-        ("RestrictSUIDSGID", "true"),
         ("LockPersonality", "true"),
         ("MemoryDenyWriteExecute", "true"),
         ("SystemCallArchitectures", "native"),
@@ -236,13 +240,26 @@ fn the_helper_unit_keeps_only_what_it_needs() {
     }
     assert_eq!(
         unit_values(&unit, "SystemCallFilter"),
-        ["@system-service", "~@privileged @resources @mount @chown"]
+        [
+            "@system-service",
+            "~@privileged @resources @mount",
+            "@chown"
+        ]
     );
+    // Each capability is named in a comment that says what it is for.
+    let comments: String = unit.lines().filter(|l| l.starts_with('#')).collect();
+    for cap in ["CAP_DAC_READ_SEARCH", "CAP_CHOWN", "CAP_FOWNER"] {
+        assert!(
+            comments.contains(&format!("# - {cap}:")),
+            "{cap} has no reason"
+        );
+    }
+    assert!(comments.contains("Not RestrictSUIDSGID"));
     // Socket-activated only: never started at boot on its own, and never
-    // given a writable path beyond its own state.
+    // given a writable path beyond its own state and the host's.
     assert!(!unit.contains("[Install]"));
     for key in [
-        "ReadWritePaths",
+        "RestrictSUIDSGID",
         "ExecStartPre",
         "ExecStartPost",
         "Environment",
@@ -325,6 +342,19 @@ fn the_helper_knows_the_same_built_in_providers() {
         .map(|p| p.id)
         .collect();
     assert_eq!(ids, ours);
+    // And what each runs: the helper resolves the program itself (136c).
+    let start = helper
+        .find("pub const BUILT_IN_COMMANDS")
+        .expect("BUILT_IN_COMMANDS");
+    let list = &helper[start..start + helper[start..].find("];").unwrap()];
+    let list = &list[list.find('[').unwrap()..];
+    let quoted: Vec<&str> = list.split('"').skip(1).step_by(2).collect();
+    let commands: Vec<(&str, &str)> = quoted.chunks(2).map(|c| (c[0], c[1])).collect();
+    let ours: Vec<(&str, &str)> = storm_runtime::profile::BUILT_IN
+        .iter()
+        .map(|p| (p.id, p.command))
+        .collect();
+    assert_eq!(commands, ours);
 }
 
 #[test]

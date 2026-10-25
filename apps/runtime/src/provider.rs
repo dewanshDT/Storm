@@ -208,6 +208,11 @@ pub trait Provider: Send + Sync {
     fn resolved(&self) -> Option<std::path::PathBuf> {
         None
     }
+    /// Whether its sessions run isolated, each under its own identity
+    /// (decision 136). On an isolated host nothing else starts.
+    fn isolated(&self) -> bool {
+        false
+    }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.
     fn start(

@@ -50,6 +50,12 @@ mod imp {
             Ok(Self { pid, fd })
         }
 
+        /// A pidfd someone else opened: the isolation helper's for a
+        /// session's leader (decision 136i).
+        pub fn from_pidfd(pid: i32, fd: OwnedFd) -> Self {
+            Self { pid, fd }
+        }
+
         /// Its pid as the pidfd was opened for, or as the kernel reports it
         /// for a peer: `0` or less once it is gone or outside this pid
         /// namespace.

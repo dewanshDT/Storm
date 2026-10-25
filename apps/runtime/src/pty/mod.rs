@@ -42,6 +42,9 @@ pub(crate) struct Launch {
     /// already (AM52).
     #[cfg_attr(windows, allow(dead_code))]
     pub tag: String,
+    /// On an isolated host (decision 136): the helper starts the session in
+    /// its own unit, under its own user, and this process never runs it.
+    pub isolated: Option<crate::isolation::Isolated>,
 }
 
 /// A started session's ends.

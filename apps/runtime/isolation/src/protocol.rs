@@ -117,6 +117,21 @@ pub enum Refusal {
     PathOutsideRoots,
     BadSignal,
     NotBuilt,
+    /// `start` without a terminal, or a descriptor with anything else.
+    NoTerminal,
+    UnexpectedDescriptor,
+    NotATerminal,
+    PoolExhausted,
+    AlreadyLeased,
+    AlreadyStarted,
+    NotStarted,
+    /// Another operation for the same session is in flight.
+    Busy,
+    /// The provider's program is not on this host.
+    ProviderUnavailable,
+    BadLaunch,
+    /// The workspace, a session directory or systemd failed the operation.
+    Failed,
 }
 
 impl Refusal {
@@ -139,6 +154,17 @@ impl Refusal {
             Refusal::PathOutsideRoots => "path_outside_roots",
             Refusal::BadSignal => "bad_signal",
             Refusal::NotBuilt => "not_built",
+            Refusal::NoTerminal => "no_terminal",
+            Refusal::UnexpectedDescriptor => "unexpected_descriptor",
+            Refusal::NotATerminal => "not_a_terminal",
+            Refusal::PoolExhausted => "pool_exhausted",
+            Refusal::AlreadyLeased => "already_leased",
+            Refusal::AlreadyStarted => "already_started",
+            Refusal::NotStarted => "not_started",
+            Refusal::Busy => "busy",
+            Refusal::ProviderUnavailable => "provider_unavailable",
+            Refusal::BadLaunch => "bad_launch",
+            Refusal::Failed => "failed",
         }
     }
 
@@ -226,7 +252,15 @@ pub fn parse(bytes: &[u8]) -> Result<Request, Refusal> {
 }
 
 pub fn ok(op: Op) -> String {
-    format!("{}\n", serde_json::json!({"ok": true, "op": op.name()}))
+    ok_with(op, serde_json::Map::new())
+}
+
+/// A success with the operation's own answer: `lease`'s user, `start`'s
+/// leader pid, `end`'s exit status or signal.
+pub fn ok_with(op: Op, mut fields: serde_json::Map<String, serde_json::Value>) -> String {
+    fields.insert("ok".into(), true.into());
+    fields.insert("op".into(), op.name().into());
+    format!("{}\n", serde_json::Value::Object(fields))
 }
 
 pub fn refused(r: &Refusal) -> String {

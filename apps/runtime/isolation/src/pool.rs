@@ -80,6 +80,8 @@ pub struct Pool {
     pub groups: BTreeMap<String, u32>,
     /// Every session user's primary gid.
     pub user_gids: HashSet<u32>,
+    /// Session user name → its primary gid.
+    pub primary: BTreeMap<String, u32>,
 }
 
 impl Pool {
@@ -94,6 +96,7 @@ impl Pool {
             bail!("the host account {host_account} is root");
         }
         let mut users = BTreeMap::new();
+        let mut primary = BTreeMap::new();
         let mut user_gids = HashSet::new();
         let mut uids = HashSet::new();
         for n in 1..=POOL_SIZE {
@@ -117,6 +120,7 @@ impl Pool {
             if !uids.insert(u.uid) || !user_gids.insert(u.gid) {
                 bail!("pool user {name} shares an id with another pool user");
             }
+            primary.insert(name.clone(), u.gid);
             users.insert(name, u.uid);
         }
         let mut groups = BTreeMap::new();
@@ -140,6 +144,7 @@ impl Pool {
             users,
             groups,
             user_gids,
+            primary,
         })
     }
 

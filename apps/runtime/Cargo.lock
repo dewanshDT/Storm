@@ -1427,6 +1427,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "socket2",
+ "storm-runtime-isolation",
  "tempfile",
  "tokio",
  "tokio-tungstenite",
@@ -1436,6 +1437,18 @@ dependencies = [
  "vte",
  "windows-service",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "storm-runtime-isolation"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rustix",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]

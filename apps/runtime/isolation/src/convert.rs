@@ -74,6 +74,8 @@ pub trait Ownership {
     fn meta(&self, key: Key, seen: Meta) -> Meta;
     fn chown(&self, e: &Entry, uid: u32, gid: u32) -> Result<()>;
     fn chmod(&self, e: &Entry, mode: u32) -> Result<()>;
+    /// Removes a tree whose directories are already root's.
+    fn remove_all(&self, path: &Path) -> Result<()>;
 }
 
 /// The real thing, for root.
@@ -105,6 +107,10 @@ impl Ownership for Real {
         }
         Ok(())
     }
+
+    fn remove_all(&self, path: &Path) -> Result<()> {
+        std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
+    }
 }
 
 /// Records changes instead of making them; `fail_after` makes the n-th
@@ -114,6 +120,7 @@ pub struct Recorded {
     pub overlay: RefCell<HashMap<Key, Meta>>,
     pub changes: RefCell<usize>,
     pub fail_after: Option<usize>,
+    pub removed: RefCell<Vec<PathBuf>>,
 }
 
 impl Recorded {
@@ -142,6 +149,10 @@ impl Ownership for Recorded {
     }
     fn chmod(&self, e: &Entry, mode: u32) -> Result<()> {
         self.change(e.key, e.seen, |m| m.mode = mode)
+    }
+    fn remove_all(&self, path: &Path) -> Result<()> {
+        self.removed.borrow_mut().push(path.to_path_buf());
+        Ok(())
     }
 }
 

@@ -27,9 +27,22 @@ pub enum Isolation {
     PerSession,
 }
 
+/// What each built-in runs (storm-runtime's `profile::BUILT_IN`; pinned by
+/// its packaging tests). `shell` is the host account's login shell.
+pub const BUILT_IN_COMMANDS: &[(&str, &str)] = &[
+    ("claude-code", "claude"),
+    ("opencode", "opencode"),
+    ("codex", "codex"),
+    ("cursor", "cursor-agent"),
+    ("command-code", "command-code"),
+    ("shell", ""),
+];
+
 #[derive(Debug, Clone, Deserialize)]
 struct Provider {
     id: String,
+    #[serde(default)]
+    command: Option<String>,
 }
 
 /// The fields the helper needs; the rest of the file is the host's.
@@ -41,6 +54,9 @@ pub struct HelperConfig {
     pub isolation: Isolation,
     #[serde(default)]
     providers: Option<Vec<Provider>>,
+    /// Where agent CLIs are looked for (the host's `path`).
+    #[serde(default)]
+    pub path: Option<Vec<PathBuf>>,
 }
 
 impl HelperConfig {
@@ -60,6 +76,30 @@ impl HelperConfig {
         match &self.providers {
             Some(list) => list.iter().map(|p| p.id.clone()).collect(),
             None => BUILT_IN_PROVIDERS.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Each provider id with the command it runs: the operator's, or the
+    /// built-in's. An empty command is the login shell.
+    pub fn provider_commands(&self) -> Vec<(String, String)> {
+        let built_in = |id: &str| {
+            BUILT_IN_COMMANDS
+                .iter()
+                .find(|(b, _)| *b == id)
+                .map(|(_, c)| c.to_string())
+        };
+        match &self.providers {
+            Some(list) => list
+                .iter()
+                .filter_map(|p| {
+                    let command = p.command.clone().or_else(|| built_in(&p.id))?;
+                    Some((p.id.clone(), command))
+                })
+                .collect(),
+            None => BUILT_IN_COMMANDS
+                .iter()
+                .map(|(id, c)| (id.to_string(), c.to_string()))
+                .collect(),
         }
     }
 
@@ -122,6 +162,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(c.provider_ids(), ["shell"]);
+        assert_eq!(
+            c.provider_commands(),
+            [("shell".to_string(), "/bin/bash".to_string())]
+        );
+        let built = HelperConfig::parse("[[providers]]\nid = \"claude-code\"\n").unwrap();
+        assert_eq!(
+            built.provider_commands(),
+            [("claude-code".to_string(), "claude".to_string())]
+        );
+        assert_eq!(
+            BUILT_IN_COMMANDS
+                .iter()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>(),
+            BUILT_IN_PROVIDERS
+        );
         assert_eq!(
             HelperConfig::parse("").unwrap().provider_ids().len(),
             BUILT_IN_PROVIDERS.len()

@@ -14,10 +14,11 @@ repository = "https://github.com/dewanshDT/Storm"
 [dependencies]
 anyhow = "1.0.104"
 libc = "0.2"
-rustix = { version = "1.1.5", features = ["fs", "net", "process"] }
+rustix = { version = "1.1.5", features = ["fs", "net", "process", "termios"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "1.1.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+rustix = { version = "1.1.5", features = ["pty"] }

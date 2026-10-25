@@ -25,12 +25,26 @@ StateDirectory=storm-runtime-isolation
 StateDirectoryMode=0700
 UMask=0077
 
-# The only capability: CAP_DAC_READ_SEARCH, to check a requested workspace
-# path inside /var/lib/storm-runtime (0700, the host account's) without
-# being able to write anything there.
-CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+# Its capabilities, each for one part of 136b/136d (136-2):
+# - CAP_DAC_READ_SEARCH: to reach and read inside /var/lib/storm-runtime
+#   (0700, the host account's): a workspace, a session's launch, its
+#   Storm directory, and what a session's user wrote, without the right to
+#   write anything there.
+# - CAP_CHOWN: to give a session its home and its terminal, its group a
+#   share of its Storm directory, and at lease end to hand back to the
+#   workspace's owner everything the session's user wrote.
+# - CAP_FOWNER: to set the modes that go with those owners (group read on
+#   the session's Storm files, the workspace's group-writable modes) on
+#   files neither root nor the helper owns.
+# It never sends a signal or starts a process under another user itself:
+# systemd does both, for the units it asks for (systemd-run, systemctl).
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER
 AmbientCapabilities=
 NoNewPrivileges=true
+# Where it hands files back and shares a session's directory: the host's
+# state, which holds the default workspace root. A workspace root outside
+# it needs the same ReadWritePaths drop-in as storm-runtime.service.
+ReadWritePaths=/var/lib/storm-runtime
 
 # Its socket is passed in; it needs no network and no other socket family.
 PrivateNetwork=true
@@ -53,12 +67,17 @@ ProtectProc=invisible
 ProcSubset=pid
 RestrictNamespaces=true
 RestrictRealtime=true
-RestrictSUIDSGID=true
+# Not RestrictSUIDSGID: a workspace's directories carry the setgid bit
+# that makes new files inherit its group (136h), and the helper sets it on
+# a workspace made since `on` and on a session's directories at lease end.
+# It never sets setuid, and drops setuid and setgid from every file.
 LockPersonality=true
 MemoryDenyWriteExecute=true
 KeyringMode=private
 RemoveIPC=true
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
-SystemCallFilter=~@privileged @resources @mount @chown
+SystemCallFilter=~@privileged @resources @mount
+# @privileged includes @chown; the capabilities above are what it is for.
+SystemCallFilter=@chown
 SystemCallErrorNumber=EPERM

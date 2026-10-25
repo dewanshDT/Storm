@@ -84,7 +84,7 @@ libc = "0.2"
 # The PTY carrier and process-group signals (decision 77a). Raw syscalls, so
 # the child's pre_exec stays async-signal-safe and the musl build needs no libc
 # shims.
-rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system"] }
+rustix = { version = "1.1.5", features = ["pty", "process", "termios", "fs", "event", "system", "net"] }
 
 # ConPTY, Job Objects, DACLs and the named pipe (D16, AM51–AM55), and the
 # Service Control Manager (AM50).
@@ -110,6 +110,12 @@ windows-sys = { version = "0.61.2", features = [
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["test-util"] }
+
+# Only to check the host's requests parse with the helper's own parser
+# (tests/isolation_wire.rs); nothing of it is linked into storm-runtime, and
+# the helper is Linux only.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+storm-runtime-isolation = { path = "isolation" }
 
 [target.'cfg(unix)'.dev-dependencies]
 rustix = { version = "1.1.5", features = ["process", "system"] }
