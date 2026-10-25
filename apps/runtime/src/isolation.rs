@@ -157,7 +157,9 @@ mod status_tests {
         }
     }
 
+    /// Linux only: elsewhere there is no isolation to test (136k).
     #[test]
+    #[cfg(target_os = "linux")]
     fn only_a_passing_self_test_verifies_and_any_failure_drops_it() {
         let s = Status::new(true, true);
         let changes = s.subscribe();
