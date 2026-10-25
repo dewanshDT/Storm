@@ -2817,7 +2817,7 @@ mod tests {
         }
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn refusals(host: &Host, session: &str) -> Vec<(&'static str, &'static str)> {
         host.refused
             .lock()
@@ -2828,7 +2828,7 @@ mod tests {
             .collect()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn harness_id(host: &Host, session: &str) -> Option<String> {
         host.session(session)?
             .events
@@ -2838,7 +2838,7 @@ mod tests {
             .clone()
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn handle_of(host: &Host, session: &str) -> String {
         host.harness_handles
             .lock()
@@ -2850,7 +2850,7 @@ mod tests {
     }
 
     /// A script that does `cases` by session id, then stays up.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn by_session(cases: &[(&str, String)]) -> String {
         let arms: String = cases
             .iter()
@@ -2865,7 +2865,7 @@ mod tests {
     /// G-135-1, accepted: the session's own processes — its leader, a hook
     /// under it, and a tool command in a process session of its own.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn g_135_1_the_sessions_own_processes_are_accepted() {
         let ids = [
             ("ags_LEAD", "11111111-1111-4111-8111-111111111111"),
@@ -2913,7 +2913,7 @@ mod tests {
     /// a connector that exited and left its socket to a child. None of them
     /// changes a session's id.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn g_135_1_a_real_handle_from_outside_the_session_is_refused() {
         let id = "44444444-4444-4444-8444-444444444444";
         let script = by_session(&[
@@ -2969,7 +2969,7 @@ mod tests {
     /// 135a: a handle whose session has no leader on record — none was ever
     /// started, or it has gone — takes nothing, whoever sends it.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn a_session_without_a_leader_takes_no_connection() {
         let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
         let events = Arc::new(Events {
@@ -3001,7 +3001,7 @@ mod tests {
     /// 135a: a connector the kernel would not name is refused like any other
     /// failure, never waved through.
     #[tokio::test]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn a_peer_that_cannot_be_read_is_refused() {
         let me = Arc::new(crate::platform::peer::Process::open(std::process::id() as i32).unwrap());
         let r = verdict(Err(io::ErrorKind::InvalidInput.into()), Some(me)).await;
@@ -3011,10 +3011,11 @@ mod tests {
     /// 135d: a precondition that stops holding while the host runs drops it
     /// to `unavailable` at once, and the server is told straight away.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn a_lost_precondition_downgrades_the_host_at_once() {
         let (host, seen, _state, _roots) = harness_host("exec sleep 1000").await;
         assert!(host.peer_identity.verified());
+        let mechanism = host.peer_identity.report().mechanism;
         host.refuse(
             "ags_X",
             "bridge",
@@ -3032,7 +3033,7 @@ mod tests {
             .expect("an inventory was posted");
         assert_eq!(
             inventory["identity"],
-            json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"})
+            json!({"state": "unavailable", "mechanism": mechanism, "reason": "ptrace_scope"})
         );
         host.shutdown(Duration::from_millis(200)).await;
     }
@@ -3041,7 +3042,7 @@ mod tests {
     /// same handle from outside is answered `identity_mismatch`, audited,
     /// and never reaches the server.
     #[tokio::test(flavor = "multi_thread")]
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn g_135_1_a_bridge_line_from_outside_is_never_forwarded() {
         use std::io::{Read, Write};
         // The probe finds the session's MCP config in its own arguments.

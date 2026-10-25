@@ -107,6 +107,12 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_System_Threading",
 ] }
 
+[features]
+# G-135-4 only (decision 135c): a macOS host that checks bridge identity before
+# the gate has passed on a real Mac. `make gate-bridge-identity` builds it on
+# macOS; a release never does.
+macos-identity-gate = []
+
 [dev-dependencies]
 tempfile = "3.27.0"
 tokio = { version = "1.53.2", features = ["test-util"] }

@@ -166,10 +166,10 @@ test-gateway-mutations:
 	@cd $(SERVER) && cargo build --quiet
 	@python3 $(SERVER)/tests/gateway_mutations.py
 
-## gate-bridge-identity: G-135-2 against the real, signed-in agent CLIs on this Linux host (never CI)
+## gate-bridge-identity: G-135-2 (Linux) or G-135-4 (macOS) against the real, signed-in agent CLIs on this host (never CI)
 gate-bridge-identity:
 	@cd $(SERVER) && cargo build --quiet
-	@cd $(RUNTIME) && cargo build --quiet
+	@cd $(RUNTIME) && cargo build --quiet $(if $(filter Darwin,$(shell uname -s)),--features macos-identity-gate)
 	@STORM_BRIDGE_IDENTITY_GATE=1 \
 		SERVER_BIN="$$PWD/$(SERVER)/target/debug/storm-server" \
 		RUNTIME_BIN="$$PWD/$(RUNTIME)/target/debug/storm-runtime" \
