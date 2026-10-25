@@ -369,13 +369,15 @@ void main() {
     });
   });
 
-  group('below 900 nothing changes', () {
-    testWidgets('the phone list has no crews or roles yet', (t) async {
+  group('both sides of 900', () {
+    testWidgets('the phone list has crews and roles too (138-5), with no '
+        'sidebar', (t) async {
       final c = await open(t, crewServer(), size: phone);
-      expect(find.byKey(const Key('crews-section')), findsNothing);
+      expect(find.byKey(const Key('crews-section')), findsOneWidget);
       expect(find.byKey(const Key('crew-card-crw_1')), findsNothing);
+      expect(find.byKey(const Key('agents-overview')), findsNothing);
       expect(find.byKey(const Key('session-ags_impl')), findsOneWidget);
-      expect(find.byKey(const Key('role-tag-k_coder')), findsNothing);
+      expect(find.byKey(const Key('role-tag-k_coder')), findsOneWidget);
       expect(find.text('RUNNING'), findsOneWidget);
       await disposeShell(t, c);
     });

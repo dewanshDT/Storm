@@ -18,6 +18,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'crew_prefs.dart';
+import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 import 'launcher.dart';
 
@@ -966,17 +967,28 @@ class _AgentCards extends ConsumerWidget {
   }
 }
 
-/// The phone list: Running, then Ended, then the infrastructure line. No
-/// work grouping — the rows already carry the workspace (handoff §2.8).
-class _PhoneList extends StatelessWidget {
+/// The phone list: CREWS as on the desk, then Running and Ended with the
+/// sessions in no crew, then the infrastructure line. No work grouping, the
+/// rows already carry the workspace (handoff §2.8; crews 4j). A long-press
+/// on any row is its Crew and Role sheet; there is no drag on a phone.
+class _PhoneList extends ConsumerWidget {
   const _PhoneList({required this.overview});
 
   final AgentOverview overview;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final o = overview;
+    final crews = o.crews ?? const <Crew>[];
+    final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
+    Widget row(AgentSession s) => SessionRow(
+      session: s,
+      host: o.hostName(s.hostId),
+      phone: true,
+      onTap: () => openAgentSession(context, s.id),
+      onLongPress: () => showSessionCrewSheet(context, ref, s),
+    );
     Widget section(String label, List<AgentSession> list, double top) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -984,20 +996,42 @@ class _PhoneList extends StatelessWidget {
           padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
           child: AgentsLabel(label),
         ),
-        for (final s in list)
-          SessionRow(
-            session: s,
-            host: o.hostName(s.hostId),
-            phone: true,
-            onTap: () => openAgentSession(context, s.id),
-          ),
+        for (final s in list) row(s),
       ],
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (o.live.isNotEmpty) section('Running', o.live, t.sp * 1.75),
-        if (o.ended.isNotEmpty) section('Ended', o.ended, t.sp * 2.75),
+        if (crews.isNotEmpty) ...[
+          CrewsSectionLabel(
+            count: crews.length,
+            collapsed: prefs.section,
+            phone: true,
+            onTap: () => ref.read(crewPrefsProvider.notifier).toggleSection(),
+          ),
+          if (!prefs.section)
+            for (final c in crews) ...[
+              PhoneCrewHeader(
+                crew: c,
+                members: o.membersOf(c),
+                collapsed: prefs.collapsed(c.id),
+                onToggle: () =>
+                    ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+                onOpen: () => context.go(Routes.agentCrew(c.id)),
+                onActions: () =>
+                    showCrewSheet(context, ref, crew: c, overview: o),
+              ),
+              if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty)
+                CrewMembers(
+                  phone: true,
+                  children: [for (final s in liveFirst(o.membersOf(c))) row(s)],
+                ),
+            ],
+        ],
+        if (o.looseLive.isNotEmpty)
+          section('Running', o.looseLive, t.sp * (crews.isEmpty ? 1.75 : 2)),
+        if (o.looseEnded.isNotEmpty)
+          section('Ended', o.looseEnded, t.sp * 2.75),
         Padding(
           padding: EdgeInsets.only(top: t.sp * 2.25),
           child: _InfraLine(overview: o, phone: true),

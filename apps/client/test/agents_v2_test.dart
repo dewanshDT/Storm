@@ -246,6 +246,9 @@ void main() {
       await tester.tap(find.byKey(const Key('session-header')));
       await tester.pumpAndSettle();
       expect(find.text('AGENT'), findsOneWidget);
+      // Below Crew and Role (138-5), so it may need scrolling to.
+      await tester.ensureVisible(find.byKey(const Key('end-session')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('end-session')));
       await tester.pumpAndSettle();
       expect(
@@ -254,6 +257,8 @@ void main() {
         ),
         findsOneWidget,
       );
+      await tester.ensureVisible(find.byKey(const Key('confirm-action')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('confirm-action')));
       await tester.pumpAndSettle();
       expect(agents.count('POST', '/v1/agent/sessions/ags_1/end'), 1);

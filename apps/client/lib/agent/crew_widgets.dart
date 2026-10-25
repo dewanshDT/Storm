@@ -247,20 +247,26 @@ class CrewSquare extends StatelessWidget {
 
 /// A 9px square and the crew's name, ellipsized past 220.
 class CrewChip extends StatelessWidget {
-  const CrewChip({super.key, required this.crew});
+  const CrewChip({super.key, required this.crew, this.maxWidth});
 
   final Crew crew;
+
+  /// All the room it has, square included, where that is under 220.
+  final double? maxWidth;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final room = maxWidth == null
+        ? t.sp * 27.5
+        : math.min(t.sp * 27.5, math.max(0.0, maxWidth! - t.sp * 1.875));
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         CrewSquare(accent: crew.accent, size: t.sp * 1.125),
         SizedBox(width: t.sp * 0.75),
         ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: t.sp * 27.5),
+          constraints: BoxConstraints(maxWidth: room),
           child: Text(
             crew.name,
             key: Key('crew-chip-${crew.id}'),
@@ -292,10 +298,14 @@ class CrewHeader extends StatefulWidget {
     required this.onOpen,
     required this.onMenu,
     this.selected = false,
+    this.nameField,
   });
 
   final Crew crew;
   final List<AgentSession> members;
+
+  /// Drawn in place of the name while it is being edited.
+  final Widget? nameField;
   final bool collapsed;
   final VoidCallback onToggle;
   final VoidCallback onOpen;
@@ -350,62 +360,173 @@ class _CrewHeaderState extends State<CrewHeader> {
                   horizontal: t.sp,
                   vertical: t.sp * 0.875,
                 ),
-                child: Row(
-                  children: [
-                    GestureDetector(
-                      key: Key('crew-chevron-${c.id}'),
-                      behavior: HitTestBehavior.opaque,
-                      onTap: widget.onToggle,
-                      child: SizedBox(
-                        width: t.sp * 1.5,
-                        child: Icon(
-                          widget.collapsed
-                              ? LucideIcons.chevron_right
-                              : LucideIcons.chevron_down,
-                          size: t.labelSize,
+                // As tall as the hover ··· so it showing never moves a row.
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(minHeight: t.sp * 2.5),
+                  child: Row(
+                    children: [
+                      GestureDetector(
+                        key: Key('crew-chevron-${c.id}'),
+                        behavior: HitTestBehavior.opaque,
+                        onTap: widget.onToggle,
+                        child: SizedBox(
+                          width: t.sp * 1.5,
+                          child: Icon(
+                            widget.collapsed
+                                ? LucideIcons.chevron_right
+                                : LucideIcons.chevron_down,
+                            size: t.labelSize,
+                            color: t.text3,
+                          ),
+                        ),
+                      ),
+                      SizedBox(width: t.sp),
+                      CrewSquare(accent: c.accent, size: t.sp * 1.25),
+                      SizedBox(width: t.sp),
+                      Expanded(
+                        child:
+                            widget.nameField ??
+                            Text(
+                              c.name,
+                              key: Key('crew-name-${c.id}'),
+                              maxLines: 1,
+                              softWrap: false,
+                              overflow: TextOverflow.ellipsis,
+                              style: crewHeaderNameStyle(t),
+                            ),
+                      ),
+                      SizedBox(width: t.sp),
+                      Text(
+                        count,
+                        key: Key('crew-count-${c.id}'),
+                        style: TextStyle(
+                          fontFamily: StormTokens.monoFamily,
+                          fontSize: t.labelSize,
                           color: t.text3,
                         ),
                       ),
-                    ),
-                    SizedBox(width: t.sp),
-                    CrewSquare(accent: c.accent, size: t.sp * 1.25),
-                    SizedBox(width: t.sp),
-                    Expanded(
-                      child: Text(
-                        c.name,
-                        key: Key('crew-name-${c.id}'),
-                        maxLines: 1,
-                        softWrap: false,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: t.codeSize,
-                          fontWeight: FontWeight.w500,
-                          color: t.text,
+                      if (_hover) ...[
+                        SizedBox(width: t.sp * 0.5),
+                        CrewDots(
+                          key: Key('crew-menu-${c.id}'),
+                          onTap: () => widget.onMenu(_anchor),
                         ),
-                      ),
-                    ),
-                    SizedBox(width: t.sp),
-                    Text(
-                      count,
-                      key: Key('crew-count-${c.id}'),
-                      style: TextStyle(
-                        fontFamily: StormTokens.monoFamily,
-                        fontSize: t.labelSize,
-                        color: t.text3,
-                      ),
-                    ),
-                    if (_hover) ...[
-                      SizedBox(width: t.sp * 0.5),
-                      CrewDots(
-                        key: Key('crew-menu-${c.id}'),
-                        onTap: () => widget.onMenu(_anchor),
-                      ),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+TextStyle crewHeaderNameStyle(StormTokens t) => TextStyle(
+  fontFamily: StormTokens.sansFamily,
+  fontSize: t.codeSize,
+  fontWeight: FontWeight.w500,
+  color: t.text,
+);
+
+/// A crew in the phone list (4j): square, name, count and a chevron that
+/// folds it. A tap opens the crew page; a long-press, its actions sheet.
+class PhoneCrewHeader extends StatelessWidget {
+  const PhoneCrewHeader({
+    super.key,
+    required this.crew,
+    required this.members,
+    required this.collapsed,
+    required this.onToggle,
+    required this.onOpen,
+    required this.onActions,
+  });
+
+  final Crew crew;
+  final List<AgentSession> members;
+  final bool collapsed;
+  final VoidCallback onToggle;
+  final VoidCallback onOpen;
+  final VoidCallback onActions;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final c = crew;
+    final count = crewCount(members, collapsed: collapsed);
+    return Semantics(
+      button: true,
+      expanded: !collapsed,
+      label: '${c.name}, crew, $count',
+      excludeSemantics: true,
+      onTap: onOpen,
+      onLongPress: onActions,
+      customSemanticsActions: {
+        CustomSemanticsAction(label: collapsed ? 'Expand' : 'Collapse'):
+            onToggle,
+      },
+      child: InkWell(
+        key: Key('crew-${c.id}'),
+        onTap: onOpen,
+        onLongPress: onActions,
+        child: Container(
+          padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
+          decoration: BoxDecoration(
+            border: Border(
+              bottom: BorderSide(color: t.border, width: t.bw),
+            ),
+          ),
+          child: Row(
+            children: [
+              CrewSquare(accent: c.accent, size: t.sp * 1.5),
+              SizedBox(width: t.sp * 1.25),
+              Expanded(
+                child: Text(
+                  c.name,
+                  key: Key('crew-name-${c.id}'),
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize * 1.05,
+                    fontWeight: FontWeight.w500,
+                    color: t.text,
+                  ),
+                ),
+              ),
+              SizedBox(width: t.sp * 1.25),
+              Text(
+                count,
+                key: Key('crew-count-${c.id}'),
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  color: t.text3,
+                ),
+              ),
+              GestureDetector(
+                key: Key('crew-chevron-${c.id}'),
+                behavior: HitTestBehavior.opaque,
+                onTap: onToggle,
+                child: SizedBox(
+                  width: t.sp * 4,
+                  height: t.sp * 3,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Icon(
+                      collapsed
+                          ? LucideIcons.chevron_right
+                          : LucideIcons.chevron_down,
+                      size: t.labelSize,
+                      color: t.text3,
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
         ),
       ),
@@ -468,16 +589,19 @@ class CrewDots extends StatelessWidget {
 
 /// A crew's members behind its solid left edge (handoff §3).
 class CrewMembers extends StatelessWidget {
-  const CrewMembers({super.key, required this.children});
+  const CrewMembers({super.key, required this.children, this.phone = false});
 
   final List<Widget> children;
+
+  /// The phone list's: 5 in, 12 of padding, rows with their own hairlines.
+  final bool phone;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     return Container(
-      margin: EdgeInsets.only(left: t.sp * 1.625),
-      padding: EdgeInsets.only(left: t.sp * 0.75),
+      margin: EdgeInsets.only(left: t.sp * (phone ? 0.625 : 1.625)),
+      padding: EdgeInsets.only(left: t.sp * (phone ? 1.5 : 0.75)),
       decoration: BoxDecoration(
         border: Border(
           left: BorderSide(color: t.border, width: t.bw),
@@ -487,7 +611,7 @@ class CrewMembers extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           for (final (i, c) in children.indexed) ...[
-            if (i > 0) SizedBox(height: t.sp * 0.25),
+            if (i > 0 && !phone) SizedBox(height: t.sp * 0.25),
             c,
           ],
         ],
@@ -508,12 +632,20 @@ class CrewMenu extends StatelessWidget {
     required this.collapsed,
     required this.ended,
     required this.running,
+    this.sheet = false,
+    this.onPage = false,
   });
 
   final Crew crew;
   final bool collapsed;
   final int ended;
   final int running;
+
+  /// The phone's: the same items in a sheet, without the popover's card.
+  final bool sheet;
+
+  /// Opened on the crew's own page, which needs no Open crew page.
+  final bool onPage;
 
   @override
   Widget build(BuildContext context) {
@@ -543,50 +675,58 @@ class CrewMenu extends StatelessWidget {
       );
     }
 
+    final children = [
+      if (!onPage) item(CrewAction.openPage, 'Open crew page'),
+      item(CrewAction.rename, 'Rename'),
+      Padding(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 0.75,
+          t.sp * 0.75,
+          t.sp * 0.75,
+          t.sp,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Colour',
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                color: t.text,
+              ),
+            ),
+            SizedBox(height: t.sp * 0.875),
+            CrewSwatches(
+              selected: crew.accent,
+              onSelected: (a) => Navigator.pop(context, a),
+            ),
+          ],
+        ),
+      ),
+      item(CrewAction.collapse, collapsed ? 'Expand' : 'Collapse'),
+      const PopoverDivider(),
+      item(CrewAction.newSession, 'New session in crew'),
+      item(CrewAction.dismissEnded, 'Dismiss ended', count: ended),
+      item(
+        CrewAction.endAll,
+        'End all running…',
+        count: running,
+        tone: PopoverTone.danger,
+      ),
+    ];
+    if (sheet) {
+      return Column(
+        key: const Key('crew-menu'),
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: children,
+      );
+    }
     return StormPopover(
       key: const Key('crew-menu'),
       width: t.sp * 27.5,
       padding: t.sp * 0.75,
-      children: [
-        item(CrewAction.openPage, 'Open crew page'),
-        item(CrewAction.rename, 'Rename'),
-        Padding(
-          padding: EdgeInsets.fromLTRB(
-            t.sp * 0.75,
-            t.sp * 0.75,
-            t.sp * 0.75,
-            t.sp,
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Colour',
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  color: t.text,
-                ),
-              ),
-              SizedBox(height: t.sp * 0.875),
-              CrewSwatches(
-                selected: crew.accent,
-                onSelected: (a) => Navigator.pop(context, a),
-              ),
-            ],
-          ),
-        ),
-        item(CrewAction.collapse, collapsed ? 'Expand' : 'Collapse'),
-        const PopoverDivider(),
-        item(CrewAction.newSession, 'New session in crew'),
-        item(CrewAction.dismissEnded, 'Dismiss ended', count: ended),
-        item(
-          CrewAction.endAll,
-          'End all running…',
-          count: running,
-          tone: PopoverTone.danger,
-        ),
-      ],
+      children: children,
     );
   }
 }
@@ -665,6 +805,47 @@ Future<void> showCrewMenu(
     ),
   );
   if (picked == null || !context.mounted) return;
+  await runCrewAction(context, ref, picked, crew: crew, overview: overview);
+}
+
+/// The crew actions as a sheet, on a phone (handoff §3 Phone: ··· opens
+/// the actions as a sheet).
+Future<void> showCrewSheet(
+  BuildContext context,
+  WidgetRef ref, {
+  required Crew crew,
+  required AgentOverview overview,
+  bool onPage = false,
+}) async {
+  final members = overview.membersOf(crew);
+  final collapsed =
+      ref.read(crewPrefsProvider).value?.collapsed(crew.id) ?? false;
+  final picked = await showStormSheet<Object>(
+    context: context,
+    title: crew.name,
+    heightFactor: 0.86,
+    builder: (_) => CrewMenu(
+      crew: crew,
+      collapsed: collapsed,
+      ended: members.where((s) => s.ended).length,
+      running: members.where((s) => !s.ended).length,
+      sheet: true,
+      onPage: onPage,
+    ),
+  );
+  if (picked == null || !context.mounted) return;
+  await runCrewAction(context, ref, picked, crew: crew, overview: overview);
+}
+
+/// Does what the crew menu or sheet was closed with.
+Future<void> runCrewAction(
+  BuildContext context,
+  WidgetRef ref,
+  Object picked, {
+  required Crew crew,
+  required AgentOverview overview,
+}) async {
+  final members = overview.membersOf(crew);
   void toast(String text) => ScaffoldMessenger.maybeOf(
     context,
   )?.showSnackBar(SnackBar(content: Text(text)));
@@ -1137,3 +1318,57 @@ double popoverRoom(BuildContext context, GlobalKey anchor) {
 List<String> crewHosts(AgentOverview o, List<AgentSession> members) => [
   ...{for (final s in members) o.hostName(s.hostId)},
 ];
+
+/// CREWS, with its chevron; folded, "CREWS · n" (138m).
+class CrewsSectionLabel extends StatelessWidget {
+  const CrewsSectionLabel({
+    super.key,
+    required this.count,
+    required this.collapsed,
+    required this.onTap,
+    this.phone = false,
+  });
+
+  final int count;
+  final bool collapsed;
+  final VoidCallback onTap;
+
+  /// The phone list's: flush with the rows.
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Semantics(
+      button: true,
+      expanded: !collapsed,
+      label: 'Crews, $count',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: GestureDetector(
+        key: const Key('crews-section'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Padding(
+          padding: phone
+              ? EdgeInsets.only(top: t.sp * 1.75, bottom: t.sp * 0.5)
+              : EdgeInsets.fromLTRB(t.sp, t.sp * 1.5, t.sp, t.sp * 0.75),
+          child: Row(
+            children: [
+              Expanded(
+                child: AgentsLabel(collapsed ? 'Crews · $count' : 'Crews'),
+              ),
+              Icon(
+                collapsed
+                    ? LucideIcons.chevron_right
+                    : LucideIcons.chevron_down,
+                size: t.labelSize,
+                color: t.text3,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}

@@ -109,6 +109,7 @@ class SessionRow extends StatelessWidget {
     required this.onTap,
     this.selected = false,
     this.phone = false,
+    this.onLongPress,
   });
 
   final AgentSession session;
@@ -116,6 +117,9 @@ class SessionRow extends StatelessWidget {
   final VoidCallback onTap;
   final bool selected;
   final bool phone;
+
+  /// The phone's crew and role sheet (decision 138n).
+  final VoidCallback? onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -137,8 +141,7 @@ class SessionRow extends StatelessWidget {
             children: [
               RoleTagRow(
                 name: s.displayName,
-                // The phone list gains roles with its crew sheet (138-5).
-                role: phone ? null : s.role,
+                role: s.role,
                 launchRole: s.launchRole,
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
@@ -167,6 +170,7 @@ class SessionRow extends StatelessWidget {
       label: sessionSpoken(s, host),
       excludeSemantics: true,
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Material(
         color: selected ? t.surface2 : Colors.transparent,
         borderRadius: radius,
@@ -174,6 +178,7 @@ class SessionRow extends StatelessWidget {
           key: Key('session-${s.id}'),
           borderRadius: radius,
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Container(
             padding: phone
                 ? EdgeInsets.symmetric(vertical: t.sp * 1.5)
@@ -294,9 +299,16 @@ class NoteContextChip extends StatelessWidget {
 
 /// *＋ New session*, the phone list's one labelled primary in the pill.
 class NewSessionPill extends StatelessWidget {
-  const NewSessionPill({super.key, required this.onTap});
+  const NewSessionPill({
+    super.key,
+    required this.onTap,
+    this.label = 'New session',
+  });
 
   final VoidCallback onTap;
+
+  /// "New session in crew" on a phone's crew page.
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -308,7 +320,7 @@ class NewSessionPill extends StatelessWidget {
         child: StormPill(
           child: Semantics(
             button: true,
-            label: 'New session',
+            label: label,
             excludeSemantics: true,
             onTap: onTap,
             child: Material(
@@ -331,7 +343,7 @@ class NewSessionPill extends StatelessWidget {
                       ),
                       SizedBox(width: t.sp),
                       Text(
-                        'New session',
+                        label,
                         style: TextStyle(
                           fontFamily: StormTokens.sansFamily,
                           fontSize: t.bodySize,

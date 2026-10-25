@@ -15,6 +15,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
+import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 
 /// One crew at `/agents/c/:id` (decision 138, handoff §3 Crew page, 4d): its
@@ -89,20 +90,51 @@ class _CrewScreenState extends ConsumerState<CrewScreen> {
         ),
       );
     }
-    // The phone's crew screen is pushed over the list; its sheets and
-    // gestures are 138-5's.
+    // The phone's crew screen is pushed over the list, Back in the corner;
+    // End all running is a sheet here, raised once its request lands.
+    if (crew != null && ref.watch(crewEndAllProvider) == crew.id) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || ref.read(crewEndAllProvider) != crew.id) return;
+        ref.read(crewEndAllProvider.notifier).state = null;
+        final now = ref.read(agentOverviewProvider).value ?? o!;
+        showEndAllSheet(
+          context,
+          ref,
+          crew: crew,
+          members: liveFirst(now.membersOf(crew)),
+          overview: now,
+        );
+      });
+    }
     return Scaffold(
       body: StormChrome(
         showNav: false,
         onBack: () => context.go(Routes.agents),
-        child: ListView(
-          padding: EdgeInsets.fromLTRB(
-            StormChrome.contentInset(context),
-            0,
-            StormChrome.contentInset(context),
-            StormChrome.navClearance(context),
-          ),
-          children: [body],
+        child: Stack(
+          children: [
+            Positioned.fill(
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(
+                  StormChrome.contentInset(context),
+                  0,
+                  StormChrome.contentInset(context),
+                  StormChrome.navClearance(context),
+                ),
+                children: [body],
+              ),
+            ),
+            if (crew != null && o != null && o.online.isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: NewSessionPill(
+                  key: const Key('crew-new-session-pill'),
+                  label: 'New session in crew',
+                  onTap: () => launchAgentSession(context, ref, crew: crew),
+                ),
+              ),
+          ],
         ),
       ),
     );
@@ -134,6 +166,10 @@ class _CrewPage extends ConsumerWidget {
       if (hosts.isNotEmpty) hosts.join(', '),
     ].join(' · ');
 
+    void menu() => wide
+        ? showCrewMenu(context, ref, anchor: menuKey, crew: crew, overview: o)
+        : showCrewSheet(context, ref, crew: crew, overview: o, onPage: true);
+
     final started = _StartedFrom(members: members);
     final wrote = _Wrote(members: members, overview: o);
 
@@ -141,53 +177,57 @@ class _CrewPage extends ConsumerWidget {
       key: Key('crew-page-${crew.id}'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: EdgeInsets.only(top: t.sp * 1.125),
-              child: CrewSquare(accent: crew.accent, size: t.sp * 2.25),
-            ),
-            SizedBox(width: t.sp * 1.5),
-            Expanded(
-              // Wraps, never ellipsizes (handoff §5, a 40-character name).
-              child: Text(
-                crew.name,
-                key: const Key('crew-page-name'),
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.titleSize,
-                  fontWeight: FontWeight.w600,
-                  height: 1.3,
-                  color: t.text,
+        GestureDetector(
+          // Right-click opens the same menu as ··· (138n, Q4).
+          onSecondaryTapUp: wide ? (_) => menu() : null,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: EdgeInsets.only(top: t.sp * (wide ? 1.125 : 0.75)),
+                child: CrewSquare(
+                  accent: crew.accent,
+                  size: t.sp * (wide ? 2.25 : 2),
                 ),
               ),
-            ),
-            SizedBox(width: t.sp * 1.5),
-            StormButton.soft(
-              key: const Key('crew-new-session'),
-              label: 'New session in crew',
-              icon: LucideIcons.plus,
-              onPressed: o.online.isEmpty
-                  ? null
-                  : () => launchAgentSession(context, ref, crew: crew),
-            ),
-            SizedBox(width: t.sp),
-            KeyedSubtree(
-              key: menuKey,
-              child: CrewDots(
-                key: const Key('crew-page-menu'),
-                page: true,
-                onTap: () => showCrewMenu(
-                  context,
-                  ref,
-                  anchor: menuKey,
-                  crew: crew,
-                  overview: o,
+              SizedBox(width: t.sp * (wide ? 1.5 : 1.25)),
+              Expanded(
+                // Wraps, never ellipsizes (handoff §5, a 40-character name).
+                child: Text(
+                  crew.name,
+                  key: const Key('crew-page-name'),
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.titleSize,
+                    fontWeight: FontWeight.w600,
+                    height: wide ? 1.3 : 1.2,
+                    color: t.text,
+                  ),
                 ),
               ),
-            ),
-          ],
+              SizedBox(width: t.sp * 1.5),
+              // On a phone it is the pill at the foot (4l).
+              if (wide) ...[
+                StormButton.soft(
+                  key: const Key('crew-new-session'),
+                  label: 'New session in crew',
+                  icon: LucideIcons.plus,
+                  onPressed: o.online.isEmpty
+                      ? null
+                      : () => launchAgentSession(context, ref, crew: crew),
+                ),
+                SizedBox(width: t.sp),
+              ],
+              KeyedSubtree(
+                key: menuKey,
+                child: CrewDots(
+                  key: const Key('crew-page-menu'),
+                  page: true,
+                  onTap: menu,
+                ),
+              ),
+            ],
+          ),
         ),
         SizedBox(height: t.sp * 0.75),
         Text(
@@ -199,35 +239,53 @@ class _CrewPage extends ConsumerWidget {
             color: t.text3,
           ),
         ),
-        if (endAll) ...[
+        if (endAll && wide) ...[
           SizedBox(height: t.sp * 2.5),
           EndAllBanner(crew: crew, members: members, overview: o),
         ],
-        SizedBox(height: t.sp * 2.5),
-        Container(
-          key: const Key('crew-page-members'),
-          padding: EdgeInsets.symmetric(
-            horizontal: t.sp * 1.25,
-            vertical: t.sp * 1.5,
-          ),
-          decoration: BoxDecoration(
-            color: t.surface,
-            borderRadius: BorderRadius.circular(t.rCard),
-            border: Border.all(color: t.border, width: t.bw),
-          ),
-          child: Column(
+        SizedBox(height: t.sp * (wide ? 2.5 : 1)),
+        if (wide)
+          Container(
+            key: const Key('crew-page-members'),
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 1.25,
+              vertical: t.sp * 1.5,
+            ),
+            decoration: BoxDecoration(
+              color: t.surface,
+              borderRadius: BorderRadius.circular(t.rCard),
+              border: Border.all(color: t.border, width: t.bw),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final s in members)
+                  CrewCardRow(
+                    session: s,
+                    host: o.hostName(s.hostId),
+                    showContext: false,
+                    onTap: () => openAgentSession(context, s.id),
+                  ),
+              ],
+            ),
+          )
+        else
+          // The phone's rows, as in its list (4l); a long-press is the
+          // session's Crew and Role sheet.
+          Column(
+            key: const Key('crew-page-members'),
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               for (final s in members)
-                CrewCardRow(
+                SessionRow(
                   session: s,
                   host: o.hostName(s.hostId),
-                  showContext: false,
+                  phone: true,
                   onTap: () => openAgentSession(context, s.id),
+                  onLongPress: () => showSessionCrewSheet(context, ref, s),
                 ),
             ],
           ),
-        ),
         SizedBox(height: t.sp * 3),
         if (wide)
           Row(
@@ -578,36 +636,47 @@ endAllPlan(AgentOverview o, List<AgentSession> members) {
   );
 }
 
+/// Ends each of [stops] with the one-session call, in order; every failure
+/// gets its own toast line.
+Future<void> endAllRunning(
+  BuildContext context,
+  WidgetRef ref,
+  List<AgentSession> stops,
+) async {
+  final api = agentApi(ref);
+  if (api == null) return;
+  final failed = <String>[];
+  try {
+    for (final s in stops) {
+      try {
+        await api.end(s.id);
+      } catch (e) {
+        failed.add("Couldn't end ${s.displayName}: ${describeFailure(e)}");
+      }
+    }
+  } finally {
+    api.dispose();
+  }
+  if (!context.mounted) return;
+  ref.invalidate(agentOverviewProvider);
+  if (failed.isNotEmpty) {
+    ScaffoldMessenger.maybeOf(
+      context,
+    )?.showSnackBar(SnackBar(content: Text(failed.join('\n'))));
+  }
+}
+
 class _EndAllBannerState extends ConsumerState<EndAllBanner> {
   bool _ending = false;
 
   void _close() => ref.read(crewEndAllProvider.notifier).state = null;
 
   Future<void> _end(List<AgentSession> stops) async {
-    final api = agentApi(ref);
-    if (api == null) return;
     setState(() => _ending = true);
-    final failed = <String>[];
-    try {
-      for (final s in stops) {
-        try {
-          await api.end(s.id);
-        } catch (e) {
-          failed.add("Couldn't end ${s.displayName}: ${describeFailure(e)}");
-        }
-      }
-    } finally {
-      api.dispose();
-    }
-    ref.invalidate(agentOverviewProvider);
+    await endAllRunning(context, ref, stops);
     if (!mounted) return;
     setState(() => _ending = false);
     _close();
-    if (failed.isNotEmpty) {
-      ScaffoldMessenger.maybeOf(
-        context,
-      )?.showSnackBar(SnackBar(content: Text(failed.join('\n'))));
-    }
   }
 
   @override

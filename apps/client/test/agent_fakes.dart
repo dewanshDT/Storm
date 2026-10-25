@@ -267,7 +267,21 @@ class FakeAgentServer {
       if (to == null) {
         s.remove('crew');
       } else {
-        s['crew'] = {'id': to, 'order': sessions.length};
+        // In front of `before`, else last, renumbered as the server does.
+        final members =
+            [
+              for (final m in sessions)
+                if ((m['crew'] as Map?)?['id'] == to && m != s) m,
+            ]..sort(
+              (a, b) => ((a['crew'] as Map)['order'] as int).compareTo(
+                (b['crew'] as Map)['order'] as int,
+              ),
+            );
+        final at = members.indexWhere((m) => m['id'] == body['before']);
+        members.insert(at < 0 ? members.length : at, s);
+        for (final (i, m) in members.indexed) {
+          m['crew'] = {'id': to, 'order': i};
+        }
       }
       return Future.value(
         _json({

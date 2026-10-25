@@ -24,6 +24,8 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
+import 'crew_sheets.dart' show CrewRoleSections;
+import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
@@ -823,17 +825,18 @@ String phoneHeaderMeta(AgentSession s) => [
 /// The phone session's header, between the corner bubbles: status dot, name
 /// and caret over a mono line. A tap opens the details sheet, where the full
 /// name wraps.
-class _PhoneHeader extends StatelessWidget {
+class _PhoneHeader extends ConsumerWidget {
   const _PhoneHeader({required this.session, required this.onTap});
 
   final AgentSession session;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final s = session;
     final meta = phoneHeaderMeta(s);
+    final crew = ref.watch(agentOverviewProvider).value?.crewOf(s);
     return Semantics(
       button: true,
       label: '${s.displayName}, $meta, details',
@@ -874,13 +877,41 @@ class _PhoneHeader extends StatelessWidget {
               ],
             ),
             SizedBox(height: t.sp * 0.25),
-            Text(
-              meta,
-              key: const Key('session-meta'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: _mono(t, 11).copyWith(height: 1.3),
+            // The crew chip and role tag ride the meta line (138-5); each
+            // gives way in proportion when the three don't fit.
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  flex: 4,
+                  child: Text(
+                    meta,
+                    key: const Key('session-meta'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: _mono(t, 11).copyWith(height: 1.3),
+                  ),
+                ),
+                if (crew != null) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 3,
+                    child: LayoutBuilder(
+                      key: const Key('phone-crew-chip'),
+                      builder: (context, box) =>
+                          CrewChip(crew: crew, maxWidth: box.maxWidth),
+                    ),
+                  ),
+                ],
+                if (s.role case final role?) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 2,
+                    child: RoleTag(role: role, launchRole: s.launchRole),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
@@ -1505,6 +1536,8 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
               ),
         ],
       ),
+      // The same Crew and Role a long-press on its row raises (138n).
+      CrewRoleSections(session: s),
       KeyValueList(rows: rows),
       AddSkippedToIntegrations(session: s),
       if (!s.ended) ...[
