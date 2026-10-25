@@ -278,6 +278,7 @@ pub struct MacProbe {
 
 impl MacProbe {
     /// Reads every precondition and runs the self-test on this machine.
+    #[cfg(unix)]
     pub fn run() -> Self {
         let me = std::process::id() as i32;
         // A token whose pid version is not this process's reads as gone.
