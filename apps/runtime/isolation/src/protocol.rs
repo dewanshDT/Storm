@@ -27,12 +27,13 @@ pub enum Op {
     ChildExport,
     ChildImport,
     ChildDispose,
+    ChildList,
     SelfTest,
     AgentJob,
 }
 
 impl Op {
-    pub const ALL: [Op; 13] = [
+    pub const ALL: [Op; 14] = [
         Op::Lease,
         Op::Release,
         Op::Prepare,
@@ -44,6 +45,7 @@ impl Op {
         Op::ChildExport,
         Op::ChildImport,
         Op::ChildDispose,
+        Op::ChildList,
         Op::SelfTest,
         Op::AgentJob,
     ];
@@ -61,6 +63,7 @@ impl Op {
             Op::ChildExport => "child_export",
             Op::ChildImport => "child_import",
             Op::ChildDispose => "child_dispose",
+            Op::ChildList => "child_list",
             Op::SelfTest => "self_test",
             Op::AgentJob => "agent_job",
         }
@@ -77,8 +80,10 @@ impl Op {
             Op::Signal => &["session", "signal"],
             Op::ChildCreate => &["parent", "child", "workspace"],
             Op::ChildExport | Op::ChildDispose => &["child"],
-            Op::ChildImport => &["child", "parent"],
-            Op::SelfTest => &[],
+            // 137e: the parent it is applied to, and what is made there:
+            // `storm/<child>` for a clone, a directory's name for scratch.
+            Op::ChildImport => &["child", "parent", "target"],
+            Op::ChildList | Op::SelfTest => &[],
             // 136g: an agent by id and what to do; the recipe is the host's.
             Op::AgentJob => &["agent", "action"],
         }
@@ -157,6 +162,18 @@ pub enum Refusal {
     /// The child already has a workspace, made for another parent or
     /// already ended.
     ChildExists,
+    /// No child workspace is recorded under that id (137-3).
+    NoChild,
+    /// The child still holds its lease: its workspace is its own until it
+    /// ends (137g).
+    ChildLive,
+    /// Apply never overwrites a ref (137e): `storm/<child>` already exists,
+    /// or is a branch the parent has checked out.
+    BranchExists,
+    /// Apply never overwrites a directory (137e).
+    TargetExists,
+    /// The host has no review identity yet (137g): `on` has to run again.
+    NoReviewIdentity,
     /// The workspace, a session directory or systemd failed the operation.
     Failed,
 }
@@ -200,6 +217,11 @@ impl Refusal {
             Refusal::UnreadableRepository => "unreadable_repository",
             Refusal::WrongParent => "wrong_parent",
             Refusal::ChildExists => "child_exists",
+            Refusal::NoChild => "no_child",
+            Refusal::ChildLive => "child_live",
+            Refusal::BranchExists => "branch_exists",
+            Refusal::TargetExists => "target_exists",
+            Refusal::NoReviewIdentity => "no_review_identity",
             Refusal::Failed => "failed",
         }
     }
@@ -292,7 +314,7 @@ pub fn ok(op: Op) -> String {
 }
 
 /// A success with the operation's own answer: `lease`'s user, `start`'s
-/// leader pid, `end`'s exit status or signal.
+/// leader pid, `end`'s exit status or signal, `child_export`'s review.
 pub fn ok_with(op: Op, mut fields: serde_json::Map<String, serde_json::Value>) -> String {
     fields.insert("ok".into(), true.into());
     fields.insert("op".into(), op.name().into());

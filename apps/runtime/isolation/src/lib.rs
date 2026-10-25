@@ -34,6 +34,7 @@ pub mod operator;
 pub mod policy;
 pub mod pool;
 pub mod protocol;
+pub mod review;
 pub mod serve;
 pub mod session;
 pub mod toml_edit;

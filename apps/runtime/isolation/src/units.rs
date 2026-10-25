@@ -286,6 +286,9 @@ pub trait Units: Send + Sync {
     fn run_job(&self, spec: &crate::agents::JobSpec) -> Result<String>;
     /// Runs a child's clone to its end (137b) and returns what it printed.
     fn run_clone(&self, spec: &crate::children::CloneSpec) -> Result<String>;
+    /// Runs an export or an Apply to its end (137e) and returns what it
+    /// printed.
+    fn run_review(&self, spec: &crate::children::ReviewSpec) -> Result<String>;
 }
 
 pub struct Systemd;
@@ -368,6 +371,15 @@ impl Units for Systemd {
     }
 
     fn run_clone(&self, spec: &crate::children::CloneSpec) -> Result<String> {
+        for program in [crate::children::HELPER_BIN, crate::clone::GIT] {
+            if !Path::new(program).is_file() {
+                bail!("{program} is not installed");
+            }
+        }
+        run(SYSTEMD_RUN, &spec.systemd_run_args()?)
+    }
+
+    fn run_review(&self, spec: &crate::children::ReviewSpec) -> Result<String> {
         for program in [crate::children::HELPER_BIN, crate::clone::GIT] {
             if !Path::new(program).is_file() {
                 bail!("{program} is not installed");

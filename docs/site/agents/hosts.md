@@ -251,6 +251,16 @@ session sees your workspace read-only and writes in a scratch directory.
 Two caps in `runtime.toml`, in bytes, keep clones from filling the disk:
 `child_workspace_max` (one child, default 2 GiB) and `children_max` (all of
 them, default 20 GiB); a child that would go over either does not start.
+When the new session ends its workspace is kept, and belongs to a separate
+system user, `storm-review`, which `on` creates. You read what it did, and
+**Apply** it if you want it: in a git repository its commits become a new
+branch, `storm/<session>`, beside yours (Storm never merges, never moves an
+existing branch and never touches the branch you have checked out); anywhere
+else its files are copied into a new folder in your workspace that you name,
+never over one that exists. A kept workspace stays until you delete it, and
+anything under the children folder Storm has no record of is listed for you,
+never removed on its own. On a host turned on before this version, run
+`sudo storm-runtime-isolation on` again to create `storm-review`.
 Isolation is still being finished, so leave it off for now. A workspace root outside `/var/lib/storm-runtime`
 needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.

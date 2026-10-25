@@ -1869,6 +1869,7 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
             S::BAD_GATEWAY,
             format!("the host could not take the image: {m}"),
         ),
+        E::ChildRefused(code) => ApiError(child_status(&code), code),
         E::Internal(e) => internal(e),
     }
 }
@@ -2876,6 +2877,252 @@ pub async fn stop_cascade_targets(state: &Shared, now: &str) {
         };
         record_spawn_event(state, kind, Some(&r.owner_user_id), None, &detail).await;
     }
+}
+
+// ---- child workspaces (decision 137-3) ----------------------------------
+//
+// A person's view of a spawned child's work, its Apply and its delete, on
+// the host's isolation helper. Owner only and session tier, like crews: an
+// `stk_` key, a host token, a key's or an agent's actor never reach them.
+// Which children a host has is the helper's record (137-3 runs before 134's
+// lineage meets it); the helper checks every field again.
+
+use crate::agent::ChildOp;
+
+/// The audit row of an Apply or a delete: codes and ids only, never a path
+/// or anything of the child's.
+pub const EVENT_CHILD_WORKSPACE: &str = "child_workspace";
+
+fn child_id_ok(id: &str) -> bool {
+    id.strip_prefix("ags_").is_some_and(|rest| {
+        (1..=64).contains(&rest.len()) && rest.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+/// A W3 Apply's directory (137e, 138p): one plain path component, the rule
+/// the helper applies too.
+fn child_directory_ok(name: &str) -> bool {
+    (1..=128).contains(&name.len())
+        && !name.starts_with(['.', '-'])
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+}
+
+/// The status for a helper's code, which is also the answer's `error`.
+fn child_status(code: &str) -> axum::http::StatusCode {
+    use axum::http::StatusCode as S;
+    match code {
+        "no_child" => S::NOT_FOUND,
+        "bad_value" | "bad_session" => S::BAD_REQUEST,
+        "timeout" => S::GATEWAY_TIMEOUT,
+        "helper" | "failed" => S::BAD_GATEWAY,
+        _ => S::CONFLICT,
+    }
+}
+
+async fn child_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
+    crews_owner(actor)?;
+    let auth_db = state.auth_db.lock().await;
+    match auth_db.host_by_id(host_id).map_err(internal)? {
+        Some(h) if !h.is_revoked() => Ok(()),
+        _ => Err(not_found("no such host")),
+    }
+}
+
+fn child_id(child: &str) -> ApiResult<()> {
+    if child_id_ok(child) {
+        Ok(())
+    } else {
+        Err(bad_request("not a session id"))
+    }
+}
+
+/// `GET /v1/agent/hosts/{id}/children`: every child workspace the host's
+/// helper keeps, and the directories no record claims (orphans, WS-6).
+pub async fn list_child_workspaces(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+) -> ApiResult<serde_json::Value> {
+    child_host(state, actor, host_id).await?;
+    state
+        .agent
+        .child_workspace(host_id, ChildOp::List, None, None, None)
+        .await
+        .map_err(agent_error)
+}
+
+/// `GET /v1/agent/hosts/{id}/children/{child}`: an ended child's work as
+/// data, for the person to read before Apply (137e): a clone's commits
+/// since its base and their diff, or a scratch child's files.
+pub async fn child_review(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    child: &str,
+) -> ApiResult<serde_json::Value> {
+    child_host(state, actor, host_id).await?;
+    child_id(child)?;
+    state
+        .agent
+        .child_workspace(host_id, ChildOp::Export, Some(child), None, None)
+        .await
+        .map_err(agent_error)
+}
+
+/// `POST /v1/agent/hosts/{id}/children/{child}/apply {name?}` (137e): a
+/// clone's work becomes the new branch `storm/<child>` in its parent's
+/// repository; a scratch child's files a new directory in its parent's
+/// workspace, named by the person (`<workspace>-<child>` when not). Never a
+/// merge, never over anything that exists.
+pub async fn apply_child(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    child: &str,
+    name: Option<&str>,
+) -> ApiResult<serde_json::Value> {
+    child_host(state, actor, host_id).await?;
+    child_id(child)?;
+    let listed = state
+        .agent
+        .child_workspace(host_id, ChildOp::List, None, None, None)
+        .await
+        .map_err(agent_error)?;
+    let record = listed["children"]
+        .as_array()
+        .and_then(|c| c.iter().find(|r| r["child"] == child))
+        .cloned()
+        .ok_or_else(|| ApiError(child_status("no_child"), "no_child".into()))?;
+    let parent = record["parent"]
+        .as_str()
+        .filter(|p| child_id_ok(p))
+        .ok_or_else(|| internal(anyhow::anyhow!("the helper named no parent")))?;
+    let target = match record["mode"].as_str() {
+        Some("clone") => {
+            let branch = format!("storm/{child}");
+            if name.is_some_and(|n| n != branch) {
+                return Err(bad_request(
+                    "a git child's work is applied as its own branch, storm/<child>",
+                ));
+            }
+            branch
+        }
+        Some("scratch") => {
+            let target = match name {
+                Some(n) => n.to_string(),
+                None => {
+                    let ws = record["parent_workspace"].as_str().unwrap_or_default();
+                    let base = std::path::Path::new(ws)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("workspace");
+                    format!("{base}-{child}")
+                }
+            };
+            if !child_directory_ok(&target) {
+                return Err(bad_request(
+                    "name one new directory: letters, digits, '.', '_' and '-', not starting with '.' or '-'",
+                ));
+            }
+            target
+        }
+        _ => return Err(internal(anyhow::anyhow!("the helper named no mode"))),
+    };
+    let result = state
+        .agent
+        .child_workspace(
+            host_id,
+            ChildOp::Import,
+            Some(child),
+            Some(parent),
+            Some(&target),
+        )
+        .await;
+    audit_child(state, actor, "apply", host_id, child, &result).await;
+    let answer = result.map_err(agent_error)?;
+    tracing::info!(host = host_id, child, "a child's work was applied");
+    Ok(answer)
+}
+
+/// `DELETE /v1/agent/hosts/{id}/children/{child}` (137g): a person's
+/// delete of an ended child's workspace, or of an orphan the listing named.
+/// Nothing there is no error: a second delete does nothing.
+pub async fn delete_child(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    child: &str,
+) -> ApiResult<serde_json::Value> {
+    child_host(state, actor, host_id).await?;
+    child_id(child)?;
+    let result = state
+        .agent
+        .child_workspace(host_id, ChildOp::Dispose, Some(child), None, None)
+        .await;
+    audit_child(state, actor, "delete", host_id, child, &result).await;
+    result.map_err(agent_error)
+}
+
+async fn audit_child(
+    state: &Shared,
+    actor: &Actor,
+    op: &str,
+    host_id: &str,
+    child: &str,
+    result: &Result<serde_json::Value, crate::agent::AgentError>,
+) {
+    let outcome = match result {
+        Ok(_) => "done".to_string(),
+        Err(crate::agent::AgentError::ChildRefused(code)) => code.clone(),
+        Err(crate::agent::AgentError::HostOffline) => "host_offline".into(),
+        Err(_) => "failed".into(),
+    };
+    let detail = serde_json::json!({
+        "op": op,
+        "host_id": host_id,
+        "child": child,
+        "result": outcome,
+    });
+    let now = crate::index::now_rfc3339();
+    let auth_db = state.auth_db.lock().await;
+    if let Err(e) = auth_db.record_event(
+        EVENT_CHILD_WORKSPACE,
+        Some(actor.user_id()),
+        None,
+        &now,
+        &detail.to_string(),
+    ) {
+        tracing::warn!(error = %e, child, "could not record a child workspace event");
+    }
+}
+
+/// A host's answer to `child.workspace`: `{answer}` or `{refused}`.
+pub fn runtime_child_answered(
+    state: &Shared,
+    host_id: &str,
+    request: &str,
+    body: serde_json::Value,
+) -> ApiResult<()> {
+    let outcome = match (body.get("answer"), body.get("refused")) {
+        (Some(answer), None) if answer.is_object() => Ok(answer.clone()),
+        (None, Some(code)) => {
+            let code = code
+                .as_str()
+                .filter(|c| {
+                    (1..=64).contains(&c.len())
+                        && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+                })
+                .ok_or_else(|| bad_request("an unusable refusal code"))?;
+            Err(code.to_string())
+        }
+        _ => return Err(bad_request("an answer or a refusal")),
+    };
+    state
+        .agent
+        .child_answered(host_id, request, outcome)
+        .map_err(agent_error)
 }
 
 // ---- Agent installs (decision 133) ------------------------------------

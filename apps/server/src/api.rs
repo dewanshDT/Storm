@@ -394,6 +394,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         // automatic update (133-5).
         .route("/v1/runtime/agents/jobs", post(runtime_start_agent_job))
         .route("/v1/runtime/agents/jobs/{job}", post(runtime_agent_job))
+        // Child workspaces (decision 137-3): the helper's answer to a
+        // `child.workspace` request this host was sent.
+        .route(
+            "/v1/runtime/children/{request}",
+            post(runtime_child_answered)
+                .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -483,6 +490,17 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         // Agent installs (decision 133): owner only, never an `stk_` key.
         .route("/v1/agent/hosts/{id}/agents/{agent}", post(agent_start_job))
         .route("/v1/agent/hosts/{id}/agents/jobs/{job}", get(agent_get_job))
+        // Child workspaces (decision 137-3): a person's view of a spawned
+        // child's work, its Apply and its delete. Owner only, in ops.
+        .route("/v1/agent/hosts/{id}/children", get(agent_list_children))
+        .route(
+            "/v1/agent/hosts/{id}/children/{child}",
+            get(agent_child_review).delete(agent_delete_child),
+        )
+        .route(
+            "/v1/agent/hosts/{id}/children/{child}/apply",
+            post(agent_apply_child),
+        )
         .route(
             "/v1/agent/sessions",
             get(agent_list_sessions).post(agent_launch),
@@ -1921,6 +1939,64 @@ async fn runtime_agent_job(
     Json(body): Json<crate::agent::jobs::ReportBody>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_agent_job(&state, &auth.host.id, &job, body).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn agent_list_children(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ops::list_child_workspaces(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_child_review(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((id, child)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ops::child_review(&state, &actor, &id, &child).await?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct ApplyChildRequest {
+    #[serde(default)]
+    name: Option<String>,
+}
+
+async fn agent_apply_child(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((id, child)): Path<(String, String)>,
+    body: Option<Json<ApplyChildRequest>>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let name = body.and_then(|Json(b)| b.name);
+    Ok(Json(
+        crate::ops::apply_child(&state, &actor, &id, &child, name.as_deref()).await?,
+    ))
+}
+
+async fn agent_delete_child(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((id, child)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    Ok(Json(
+        crate::ops::delete_child(&state, &actor, &id, &child).await?,
+    ))
+}
+
+async fn runtime_child_answered(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(request): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_child_answered(&state, &auth.host.id, &request, body)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -12589,6 +12665,399 @@ pub(crate) mod tests {
         let debug = format!("{pulled:?}");
         assert!(!debug.contains("CANARY"), "{debug}");
         assert!(serde_json::to_string(&pulled).unwrap().contains(CANARY));
+    }
+
+    // ---- child workspaces (decision 137-3) ---------------------------------
+
+    struct ChildFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+        host: String,
+        host_bearer: String,
+        link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+        generation: u64,
+    }
+
+    async fn child_fixture(dir: &FsPath, child_workspaces: bool) -> ChildFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, token) = enroll_a_host(&app, &owner_bearer).await;
+        let (generation, link) = state.agent.connect_host(&host);
+        let mut caps = install_caps(false);
+        caps["child_workspaces"] = serde_json::json!(child_workspaces);
+        state
+            .agent
+            .hello(&host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        ChildFixture {
+            app,
+            state,
+            owner_bearer,
+            host,
+            host_bearer: format!("Bearer {token}"),
+            link,
+            generation,
+        }
+    }
+
+    impl ChildFixture {
+        /// The host's side of one request: what it was sent, and its answer
+        /// posted back as a host would.
+        async fn host_answers(
+            &mut self,
+            answer: impl Fn(&serde_json::Value) -> serde_json::Value,
+        ) -> serde_json::Value {
+            let sent = self.link.recv().await.unwrap();
+            let sent = serde_json::to_value(sent).unwrap();
+            let request = sent["request"].as_str().unwrap().to_string();
+            let (status, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/children/{request}"),
+                    answer(&sent),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            sent
+        }
+
+        fn children(&self) -> String {
+            format!("/v1/agent/hosts/{}/children", self.host)
+        }
+
+        async fn child_events(&self) -> Vec<serde_json::Value> {
+            security_events(&self.state)
+                .await
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_CHILD_WORKSPACE)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    fn child_listing(mode: &str) -> serde_json::Value {
+        serde_json::json!({"answer": {
+            "children": [{"child": "ags_C1", "parent": "ags_P1", "mode": mode,
+                "parent_workspace": "/var/lib/storm-runtime/workspaces/app",
+                "stage": "ended", "live": false}],
+            "orphans": ["ags_LOST"], "unknown_entries": 0}})
+    }
+
+    /// 137-3: the owner lists a host's child workspaces, reads a child's
+    /// work, applies it and deletes it; each goes to the host as
+    /// `child.workspace` and comes back as the helper answered.
+    #[tokio::test]
+    async fn the_owner_reads_applies_and_deletes_a_childs_work_through_its_host() {
+        let dir = tempdir::TempDir::new("storm-children").unwrap();
+        let mut f = child_fixture(dir.path(), true).await;
+        let app = f.app.clone();
+        let (list, bearer) = (f.children(), f.owner_bearer.clone());
+        let ((status, body), sent) = tokio::join!(
+            send(&app, get_with_auth(&list, &bearer)),
+            f.host_answers(|_| child_listing("clone"))
+        );
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["orphans"], serde_json::json!(["ags_LOST"]));
+        let request = sent["request"].as_str().unwrap();
+        assert!(request.starts_with("cwr_"), "{sent}");
+        assert_eq!(
+            sent,
+            serde_json::json!({"cmd_seq": sent["cmd_seq"], "type": "child.workspace",
+                "request": request, "op": "list"})
+        );
+        // The review: the helper's export, as it was.
+        let review = format!("{list}/ags_C1");
+        let ((status, body), sent) = tokio::join!(
+            send(&app, get_with_auth(&review, &bearer)),
+            f.host_answers(|_| serde_json::json!({"answer": {"mode": "clone", "tip": "a".repeat(40), "patch": "+x"}}))
+        );
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["patch"], "+x");
+        assert_eq!(
+            (sent["op"].clone(), sent["child"].clone()),
+            ("export".into(), "ags_C1".into())
+        );
+        // Apply: the server reads the helper's record for the parent and the
+        // mode, then asks for exactly `storm/<child>`.
+        let apply = format!("{review}/apply");
+        let owner = async {
+            send(
+                &app,
+                post_json_with_auth(&apply, serde_json::json!({}), &bearer),
+            )
+            .await
+        };
+        let host = async {
+            f.host_answers(|_| child_listing("clone")).await;
+            f.host_answers(|sent| {
+                serde_json::json!({"answer": {"branch": sent["target"], "commit": "a".repeat(40), "child": "ags_C1"}})
+            })
+            .await
+        };
+        let ((status, body), sent) = tokio::join!(owner, host);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["branch"], "storm/ags_C1");
+        assert_eq!(
+            (
+                sent["op"].clone(),
+                sent["parent"].clone(),
+                sent["target"].clone()
+            ),
+            ("import".into(), "ags_P1".into(), "storm/ags_C1".into())
+        );
+        // A refusal is the helper's code, with its status.
+        let owner = async {
+            send(
+                &app,
+                post_json_with_auth(&apply, serde_json::json!({}), &bearer),
+            )
+            .await
+        };
+        let host = async {
+            f.host_answers(|_| child_listing("clone")).await;
+            f.host_answers(|_| serde_json::json!({"refused": "branch_exists"}))
+                .await
+        };
+        let ((status, body), _) = tokio::join!(owner, host);
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "branch_exists"})
+            )
+        );
+        // Delete.
+        let ((status, body), sent) = tokio::join!(
+            send(&app, delete_with_auth(&review, &bearer)),
+            f.host_answers(|_| serde_json::json!({"answer": {"removed": true, "orphan": false}}))
+        );
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(sent["op"], "dispose");
+        // Applies and deletes are audited, codes and ids only.
+        let events = f.child_events().await;
+        assert_eq!(
+            events,
+            [
+                serde_json::json!({"op": "apply", "host_id": f.host, "child": "ags_C1", "result": "done"}),
+                serde_json::json!({"op": "apply", "host_id": f.host, "child": "ags_C1", "result": "branch_exists"}),
+                serde_json::json!({"op": "delete", "host_id": f.host, "child": "ags_C1", "result": "done"}),
+            ]
+        );
+    }
+
+    /// 137e, 138p: a scratch child's Apply is a new directory the person
+    /// names, `<workspace>-<child>` when they do not; a clone's is only its
+    /// own branch.
+    #[tokio::test]
+    async fn an_apply_names_its_directory_or_its_branch() {
+        let dir = tempdir::TempDir::new("storm-children-apply").unwrap();
+        let mut f = child_fixture(dir.path(), true).await;
+        let app = f.app.clone();
+        let (apply, bearer) = (
+            format!("{}/ags_C1/apply", f.children()),
+            f.owner_bearer.clone(),
+        );
+        for (body, want) in [
+            (serde_json::json!({}), "app-ags_C1"),
+            (serde_json::json!({"name": "results"}), "results"),
+        ] {
+            let owner = async { send(&app, post_json_with_auth(&apply, body, &bearer)).await };
+            let host = async {
+                f.host_answers(|_| child_listing("scratch")).await;
+                f.host_answers(|sent| serde_json::json!({"answer": {"directory": format!("/w/app/{}", sent["target"].as_str().unwrap())}}))
+                    .await
+            };
+            let ((status, _), sent) = tokio::join!(owner, host);
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(sent["target"], want);
+        }
+        for (mode, name) in [
+            ("scratch", "../up"),
+            ("scratch", ".git"),
+            ("scratch", "a/b"),
+            ("clone", "main"),
+            ("clone", "storm/ags_C2"),
+        ] {
+            let owner = async {
+                send(
+                    &app,
+                    post_json_with_auth(&apply, serde_json::json!({"name": name}), &bearer),
+                )
+                .await
+            };
+            let ((status, _), _) = tokio::join!(owner, f.host_answers(|_| child_listing(mode)));
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{mode} {name}");
+        }
+        // A child the helper does not keep is not found, and never asked to
+        // apply.
+        let other = format!("{}/ags_C9/apply", f.children());
+        let owner = async {
+            send(
+                &app,
+                post_json_with_auth(&other, serde_json::json!({}), &bearer),
+            )
+            .await
+        };
+        let ((status, body), _) = tokio::join!(owner, f.host_answers(|_| child_listing("clone")));
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::NOT_FOUND,
+                serde_json::json!({"error": "no_child"})
+            )
+        );
+        assert!(f.link.try_recv().is_err(), "nothing more was sent");
+    }
+
+    #[tokio::test]
+    async fn child_workspaces_are_the_signed_in_owners_never_a_keys_or_a_hosts() {
+        let dir = tempdir::TempDir::new("storm-children-tiers").unwrap();
+        let mut f = child_fixture(dir.path(), true).await;
+        let (_, secret) = seed_key(&f.state).await;
+        let key = format!("Bearer {secret}");
+        let list = f.children();
+        let one = format!("{list}/ags_C1");
+        for bearer in [&key, &f.host_bearer] {
+            for req in [
+                get_with_auth(&list, bearer),
+                get_with_auth(&one, bearer),
+                post_json_with_auth(&format!("{one}/apply"), serde_json::json!({}), bearer),
+                delete_with_auth(&one, bearer),
+            ] {
+                let (status, _) = send(&f.app, req).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED);
+            }
+        }
+        // The owner's bearer cannot answer for a host.
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/runtime/children/cwr_x",
+                serde_json::json!({"refused": "x"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        // And the ops refuse a key's or an agent's actor.
+        for actor in [
+            Actor::Key {
+                key_id: "k".into(),
+                user_id: "u".into(),
+            },
+            Actor::Agent {
+                session_id: "ags_X".into(),
+                host_id: f.host.clone(),
+                user_id: "u".into(),
+                write_vault: None,
+            },
+        ] {
+            let host = f.host.clone();
+            let refused = [
+                crate::ops::list_child_workspaces(&f.state, &actor, &host)
+                    .await
+                    .unwrap_err(),
+                crate::ops::child_review(&f.state, &actor, &host, "ags_C1")
+                    .await
+                    .unwrap_err(),
+                crate::ops::apply_child(&f.state, &actor, &host, "ags_C1", None)
+                    .await
+                    .unwrap_err(),
+                crate::ops::delete_child(&f.state, &actor, &host, "ags_C1")
+                    .await
+                    .unwrap_err(),
+            ];
+            for r in refused {
+                assert_eq!((r.0, r.1.as_str()), (StatusCode::FORBIDDEN, "owner_only"));
+            }
+        }
+        assert!(
+            f.link.try_recv().is_err(),
+            "no refused request reached the host"
+        );
+        assert!(
+            !include_str!("mcp.rs").contains("apply_child"),
+            "Apply is never an MCP tool"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_child_request_is_refused_without_a_host_that_has_children() {
+        let dir = tempdir::TempDir::new("storm-children-none").unwrap();
+        let mut f = child_fixture(dir.path(), false).await;
+        let (status, body) = send(&f.app, get_with_auth(&f.children(), &f.owner_bearer)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "isolation_off"})
+            )
+        );
+        assert!(f.link.try_recv().is_err());
+        let (status, _) = send(
+            &f.app,
+            get_with_auth("/v1/agent/hosts/hst_nope/children", &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            &f.app,
+            get_with_auth(&format!("{}/not-a-session", f.children()), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        f.state.agent.disconnect_host(&f.host, f.generation);
+        let (status, _) = send(&f.app, get_with_auth(&f.children(), &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A host answers only its own requests, and a host that never answers
+    /// is a timeout, not a hang.
+    #[tokio::test]
+    async fn a_host_answers_only_its_own_request_and_silence_times_out() {
+        let dir = tempdir::TempDir::new("storm-children-own").unwrap();
+        let mut f = child_fixture(dir.path(), true).await;
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (_, _other_link) = f.state.agent.connect_host(&other);
+        let app = f.app.clone();
+        let (list, bearer) = (f.children(), f.owner_bearer.clone());
+        let host = async {
+            let sent = serde_json::to_value(f.link.recv().await.unwrap()).unwrap();
+            let request = sent["request"].as_str().unwrap().to_string();
+            let path = format!("/v1/runtime/children/{request}");
+            let (status, _) = send(
+                &app,
+                post_json_with_auth(
+                    &path,
+                    serde_json::json!({"answer": {}}),
+                    &format!("Bearer {other_token}"),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "another host's request");
+            let (status, _) = send(
+                &app,
+                post_json_with_auth(
+                    &path,
+                    serde_json::json!({"refused": "Not A Code"}),
+                    &f.host_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        };
+        let ((status, body), ()) = tokio::join!(send(&app, get_with_auth(&list, &bearer)), host);
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                serde_json::json!({"error": "timeout"})
+            )
+        );
     }
 
     // ---- agent installs (decision 133) ------------------------------------

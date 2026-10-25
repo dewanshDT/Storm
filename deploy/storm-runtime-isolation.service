@@ -34,12 +34,15 @@ UMask=0077
 # - CAP_CHOWN: to give a session its home and its terminal, its group a
 #   share of its Storm directory, and at lease end to hand back to the
 #   workspace's owner everything the session's user wrote; and (137-1) to
-#   give a spawned child its own workspace, and take it back at lease end.
+#   give a spawned child its own workspace, and take it back at lease end;
+#   and (137-3) to give an ended child's workspace to the review identity,
+#   and hand back to the workspace's owner what an Apply wrote.
 # - CAP_FOWNER: to set the modes that go with those owners (group read on
 #   the session's Storm files, the workspace's group-writable modes) on
 #   files neither root nor the helper owns.
-# A child's clone runs as the child's user, in a unit systemd starts
-# (137-1); the helper reads none of the repository's contents itself.
+# A child's clone runs as the child's user, and its export and Apply as
+# the review identity (storm-review), each in a unit systemd starts (137-1,
+# 137-3); the helper reads none of the repository's contents itself.
 # It never sends a signal or starts a process under another user itself:
 # systemd does both, for the units it asks for (systemd-run, systemctl).
 CapabilityBoundingSet=CAP_DAC_READ_SEARCH CAP_CHOWN CAP_FOWNER

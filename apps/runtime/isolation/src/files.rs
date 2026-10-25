@@ -357,6 +357,37 @@ pub fn rootify(path: &Path, own: &dyn Ownership) -> Result<bool> {
     Ok(true)
 }
 
+/// Gives `path` and everything under it to `uid`:`gid` alone (137g, the
+/// review identity): directories `0700`, files readable and writable by
+/// that owner only, setuid and setgid gone; nothing followed. `false` when
+/// there is nothing there.
+pub fn give_tree(path: &Path, uid: u32, gid: u32, own: &dyn Ownership) -> Result<bool> {
+    match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e.into()),
+        Ok(md) if !md.is_dir() => bail!("{} is not a directory", path.display()),
+        Ok(_) => {}
+    }
+    convert::walk(path, &mut |e| {
+        let now = own.meta(e.key, e.seen);
+        if (now.uid, now.gid) != (uid, gid) {
+            own.chown(&e, uid, gid)?;
+        }
+        let mode = match e.kind {
+            Kind::Dir => Some(0o700),
+            Kind::File => Some((now.mode & 0o700) | 0o600),
+            Kind::Link | Kind::Other => None,
+        };
+        if let Some(mode) = mode
+            && mode != now.mode
+        {
+            own.chmod(&e, mode)?;
+        }
+        Ok(())
+    })?;
+    Ok(true)
+}
+
 /// The workspace's pool group (136h), converting a workspace made since
 /// isolation was turned on, as `on` would have.
 pub fn workspace_group(

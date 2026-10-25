@@ -391,6 +391,7 @@ fn the_helper_runs_the_hosts_own_installs() {
     }
     let sysusers = repo_file("deploy/storm-runtime-isolation.sysusers");
     assert!(sysusers.contains("u storm-install - "));
+    assert!(sysusers.contains("u storm-review - "));
 }
 
 /// 137-1: a child's workspace needs no capability the helper did not
@@ -409,6 +410,8 @@ fn child_workspaces_add_no_capability_to_the_helper() {
         "to measure a parent's repository",
         "give a spawned child its own workspace",
         "A child's clone runs as the child's user",
+        "the review identity (storm-review)",
+        "give an ended child's workspace to the review identity",
     ] {
         assert!(comments.contains(reason), "{reason}");
     }

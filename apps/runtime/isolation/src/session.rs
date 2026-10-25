@@ -219,8 +219,12 @@ impl Helper {
                 req.get("child"),
                 Path::new(req.get("workspace")),
             ),
-            // Apply and disposal are 137-3's.
-            Op::ChildExport | Op::ChildImport | Op::ChildDispose => Err(Refusal::NotBuilt),
+            Op::ChildExport => self.child_export(req.get("child")),
+            Op::ChildImport => {
+                self.child_import(req.get("child"), req.get("parent"), req.get("target"))
+            }
+            Op::ChildDispose => self.child_dispose(req.get("child")),
+            Op::ChildList => self.child_list(),
         }
     }
 
@@ -720,6 +724,14 @@ pub mod tests {
         pub clone_home: Mutex<Option<PathBuf>>,
         /// Bytes a faked clone writes into the child's workspace.
         pub clone_fill: Mutex<Option<usize>>,
+        pub reviews: Mutex<Vec<crate::children::ReviewSpec>>,
+        /// What a review prints instead of running one.
+        pub review_output: Mutex<Option<String>>,
+        /// The `HOME` a review runs with: an account's, for the plants.
+        pub review_home: Mutex<Option<PathBuf>>,
+        /// What an Apply makes is this owner's, as the review identity's
+        /// would be in its unit.
+        pub review_owner: Mutex<Option<(Own, u32, u32)>>,
     }
 
     impl FakeUnits {
@@ -841,6 +853,91 @@ pub mod tests {
                 spec.budget,
                 &home,
             )))
+        }
+        fn run_review(&self, spec: &crate::children::ReviewSpec) -> Result<String> {
+            self.calls.lock().unwrap().push(format!(
+                "review {}",
+                crate::children::review_unit_name(&spec.child)
+            ));
+            self.reviews.lock().unwrap().push(spec.clone());
+            if let Some(out) = self.review_output.lock().unwrap().clone() {
+                return Ok(out);
+            }
+            let keys = |dir: &Path| {
+                let mut out = Vec::new();
+                let _ = crate::convert::walk(dir, &mut |e| {
+                    out.push((e.key, e.seen));
+                    Ok(())
+                });
+                out
+            };
+            let owner = self.review_owner.lock().unwrap().clone();
+            let target = spec
+                .writable
+                .first()
+                .filter(|_| spec.parent_group.is_some());
+            let before = target.map(|t| keys(t)).unwrap_or_default();
+            let out = self.review(spec);
+            if let (Some((own, uid, gid)), Some(t)) = (owner, target) {
+                let rec = own.0.lock().unwrap();
+                for (key, seen) in keys(t) {
+                    if !before.iter().any(|(k, _)| *k == key) {
+                        rec.overlay.borrow_mut().insert(
+                            key,
+                            crate::convert::Meta {
+                                uid,
+                                gid,
+                                mode: seen.mode,
+                            },
+                        );
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+
+    impl FakeUnits {
+        /// The real review, with real git, as this test's user: everything
+        /// of the unit but its identity and its view.
+        pub fn review(&self, spec: &crate::children::ReviewSpec) -> String {
+            let home = self
+                .review_home
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or_else(|| crate::clone::HOME.into());
+            let a: Vec<&str> = spec.args.iter().map(String::as_str).collect();
+            let git = Path::new(crate::clone::GIT);
+            let result = match a[..] {
+                ["export", "clone", child, dir, base, budget] => crate::review::export_clone(
+                    git,
+                    Path::new(child),
+                    Path::new(dir),
+                    base,
+                    budget.parse().unwrap(),
+                    &home,
+                ),
+                ["export", "scratch", child] => crate::review::export_scratch(Path::new(child)),
+                ["import", "clone", parent, bundle, branch, tip] => crate::review::import_clone(
+                    git,
+                    Path::new(parent),
+                    Path::new(bundle),
+                    branch,
+                    tip,
+                    &home,
+                ),
+                ["import", "scratch", scratch, parent, child, name] => {
+                    crate::review::import_scratch(
+                        Path::new(scratch),
+                        Path::new(parent),
+                        child,
+                        name,
+                    )
+                }
+                _ => panic!("no such review: {a:?}"),
+            };
+            crate::review::line(&result)
         }
     }
 

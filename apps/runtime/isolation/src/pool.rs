@@ -15,6 +15,11 @@ pub const POOL_SIZE: u32 = 64;
 /// session and not the host account can write them.
 pub const INSTALL_ACCOUNT: &str = "storm-install";
 
+/// The review identity (137g): an ended child's workspace is its, so every
+/// export and Apply runs as an account that is neither a session nor the
+/// host.
+pub const REVIEW_ACCOUNT: &str = "storm-review";
+
 const USER_PREFIX: &str = "storm-s";
 const GROUP_PREFIX: &str = "storm-w";
 pub const NOLOGIN: &[&str] = &[
@@ -73,7 +78,39 @@ pub fn sysusers_conf() -> String {
     out.push_str(&format!(
         "u {INSTALL_ACCOUNT} - \"Storm agent installs\" /nonexistent /usr/sbin/nologin\n"
     ));
+    out.push_str(&format!(
+        "u {REVIEW_ACCOUNT} - \"Storm child workspace review\" /nonexistent /usr/sbin/nologin\n"
+    ));
     out
+}
+
+/// One of the helper's own system identities (136g, 137g): none of its ids
+/// is root's, the host's, a pool member's or another identity's, it has no
+/// login shell, and it is in no other group. Absent is `None`.
+fn own_identity(
+    accounts: &dyn Accounts,
+    name: &str,
+    (uids, gids): &mut (HashSet<u32>, HashSet<u32>),
+) -> Result<Option<(u32, u32)>> {
+    let Some(u) = accounts.user(name) else {
+        return Ok(None);
+    };
+    if u.uid == 0 || u.gid == 0 {
+        bail!("{name} is root");
+    }
+    if uids.contains(&u.uid) || gids.contains(&u.gid) {
+        bail!("{name} shares an id with another account");
+    }
+    if !NOLOGIN.contains(&u.shell.as_str()) {
+        bail!("{name} has a login shell ({})", u.shell);
+    }
+    let extra = accounts.supplementary_groups(&u);
+    if !extra.is_empty() {
+        bail!("{name} is in other groups: {}", extra.join(", "));
+    }
+    uids.insert(u.uid);
+    gids.insert(u.gid);
+    Ok(Some((u.uid, u.gid)))
 }
 
 /// The pools as the system has them, every member checked.
@@ -93,6 +130,10 @@ pub struct Pool {
     /// on before 136-4 until `on` runs again; the helper refuses to serve
     /// without it, and `off` still restores.
     pub install: Option<(u32, u32)>,
+    /// The review identity's (137g), absent likewise on a host turned on
+    /// before 137-3: children's workspaces then stay root's, and nothing is
+    /// exported or applied until `on` runs again.
+    pub review: Option<(u32, u32)>,
 }
 
 impl Pool {
@@ -149,30 +190,13 @@ impl Pool {
         if !accounts.supplementary_groups(&host).is_empty() {
             bail!("the host account {host_account} must be in no other group (decision 77e)");
         }
-        let install = match accounts.user(INSTALL_ACCOUNT) {
-            None => None,
-            Some(u) => {
-                if u.uid == 0 || u.gid == 0 {
-                    bail!("{INSTALL_ACCOUNT} is root");
-                }
-                if u.uid == host.uid
-                    || u.gid == host.gid
-                    || uids.contains(&u.uid)
-                    || user_gids.contains(&u.gid)
-                    || gids.contains(&u.gid)
-                {
-                    bail!("{INSTALL_ACCOUNT} shares an id with another account");
-                }
-                if !NOLOGIN.contains(&u.shell.as_str()) {
-                    bail!("{INSTALL_ACCOUNT} has a login shell ({})", u.shell);
-                }
-                let extra = accounts.supplementary_groups(&u);
-                if !extra.is_empty() {
-                    bail!("{INSTALL_ACCOUNT} is in other groups: {}", extra.join(", "));
-                }
-                Some((u.uid, u.gid))
-            }
-        };
+        let mut taken_uids = uids.clone();
+        taken_uids.insert(host.uid);
+        let mut taken_gids: HashSet<u32> = user_gids.union(&gids).copied().collect();
+        taken_gids.insert(host.gid);
+        let mut taken = (taken_uids, taken_gids);
+        let install = own_identity(accounts, INSTALL_ACCOUNT, &mut taken)?;
+        let review = own_identity(accounts, REVIEW_ACCOUNT, &mut taken)?;
         Ok(Self {
             host_uid: host.uid,
             host_gid: host.gid,
@@ -181,7 +205,14 @@ impl Pool {
             user_gids,
             primary,
             install,
+            review,
         })
+    }
+
+    /// The review identity, or `no_review_identity`.
+    pub fn review(&self) -> Result<(u32, u32), crate::protocol::Refusal> {
+        self.review
+            .ok_or(crate::protocol::Refusal::NoReviewIdentity)
     }
 
     pub fn is_pool_uid(&self, uid: u32) -> bool {
@@ -207,6 +238,7 @@ pub mod tests {
             a.groups.insert(group_name(n), 3000 + n);
         }
         a.add_user(INSTALL_ACCOUNT, 4000, 4000, "/usr/sbin/nologin");
+        a.add_user(REVIEW_ACCOUNT, 4100, 4100, "/usr/sbin/nologin");
         a
     }
 
@@ -238,10 +270,11 @@ pub mod tests {
     fn the_declaration_has_every_member_once() {
         let conf = sysusers_conf();
         let lines: Vec<_> = conf.lines().filter(|l| !l.starts_with('#')).collect();
-        assert_eq!(lines.len(), 2 * POOL_SIZE as usize + 1);
+        assert_eq!(lines.len(), 2 * POOL_SIZE as usize + 2);
         assert!(lines.iter().all(|l| l.starts_with("u storm-s")
             || l.starts_with("g storm-w")
-            || l.starts_with("u storm-install ")));
+            || l.starts_with("u storm-install ")
+            || l.starts_with("u storm-review ")));
         assert!(
             lines
                 .iter()
@@ -274,6 +307,18 @@ pub mod tests {
         assert_eq!(
             Pool::resolve(&before, "storm-runtime").unwrap().install,
             None
+        );
+        assert_eq!(pool.review, Some((4100, 4100)));
+        assert!(
+            !pool.is_pool_uid(4100),
+            "the review identity is never leased"
+        );
+        let mut before = fixed();
+        before.users.remove(REVIEW_ACCOUNT);
+        let pool = Pool::resolve(&before, "storm-runtime").unwrap();
+        assert_eq!(
+            pool.review(),
+            Err(crate::protocol::Refusal::NoReviewIdentity)
         );
     }
 
@@ -334,6 +379,25 @@ pub mod tests {
             ("install in a group", |a| {
                 a.memberships
                     .insert(INSTALL_ACCOUNT.into(), vec!["storm-runtime".into()]);
+            }),
+            ("review is root", |a| {
+                a.add_user(REVIEW_ACCOUNT, 0, 4100, "/usr/sbin/nologin")
+            }),
+            ("review is the install identity", |a| {
+                a.add_user(REVIEW_ACCOUNT, 4000, 4100, "/usr/sbin/nologin")
+            }),
+            ("review is a session user", |a| {
+                a.add_user(REVIEW_ACCOUNT, 2004, 4100, "/usr/sbin/nologin")
+            }),
+            ("review shares a workspace group", |a| {
+                a.add_user(REVIEW_ACCOUNT, 4100, 3003, "/usr/sbin/nologin")
+            }),
+            ("review has a login shell", |a| {
+                a.add_user(REVIEW_ACCOUNT, 4100, 4100, "/bin/bash")
+            }),
+            ("review in a group", |a| {
+                a.memberships
+                    .insert(REVIEW_ACCOUNT.into(), vec!["storm-w001".into()]);
             }),
         ];
         for (what, break_it) in cases {

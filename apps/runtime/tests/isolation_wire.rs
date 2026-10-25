@@ -143,6 +143,7 @@ fn a_child_workspace_is_asked_for_and_answered_in_one_shape() {
                 branch: Some("main".into()),
                 submodules: true,
                 large_files: false,
+                applied: None,
             };
             let workspace =
                 std::path::Path::new("/var/lib/storm-runtime-isolation/children/ags_C/workspace");
@@ -237,4 +238,46 @@ fn a_lease_without_a_usable_uid_is_refused() {
         };
         assert!(link.lease("ags_A").is_err(), "{answer}");
     }
+}
+
+/// 137-3: list, export, Apply and delete are each one the helper accepts,
+/// with exactly their fields, and the host hands on the helper's answer
+/// without its `ok` and `op`.
+#[test]
+fn the_child_operations_the_host_sends_are_ones_the_helper_accepts() {
+    let rec = Arc::new(Recording::default());
+    let link = Link {
+        helper: rec.clone(),
+        state_dir: "/var/lib/storm-runtime".into(),
+        homes: storm_runtime::isolation::HOMES.into(),
+        status: Arc::new(storm_runtime::isolation::Status::new(true, true)),
+    };
+    assert_eq!(link.child_list().unwrap(), json!({}));
+    link.child_export("ags_C").unwrap();
+    link.child_import("ags_C", "ags_P", "storm/ags_C").unwrap();
+    link.child_import("ags_C", "ags_P", "app-ags_C").unwrap();
+    link.child_dispose("ags_C").unwrap();
+    let ops: Vec<protocol::Op> = rec
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(request, with_fd)| {
+            assert!(!with_fd);
+            protocol::parse(request.to_string().as_bytes())
+                .unwrap_or_else(|e| panic!("{request}: {}", e.code()))
+                .op
+        })
+        .collect();
+    use protocol::Op::*;
+    assert_eq!(
+        ops,
+        [
+            ChildList,
+            ChildExport,
+            ChildImport,
+            ChildImport,
+            ChildDispose
+        ]
+    );
 }
