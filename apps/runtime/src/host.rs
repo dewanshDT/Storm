@@ -3775,6 +3775,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         }
     }
 
+    #[cfg(unix)]
     fn child_answer(
         seen: &Arc<Mutex<Vec<(String, serde_json::Value)>>>,
         request: &str,
