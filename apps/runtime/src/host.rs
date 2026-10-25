@@ -3760,6 +3760,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    #[cfg(unix)]
     fn child_command(
         request: &str,
         op: ChildOp,
