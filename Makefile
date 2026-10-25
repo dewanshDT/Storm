@@ -147,6 +147,15 @@ test-gateway-mutations:
 	@cd $(SERVER) && cargo build --quiet
 	@python3 $(SERVER)/tests/gateway_mutations.py
 
+## gate-bridge-identity: G-135-2 against the real, signed-in agent CLIs on this Linux host (never CI)
+gate-bridge-identity:
+	@cd $(SERVER) && cargo build --quiet
+	@cd $(RUNTIME) && cargo build --quiet
+	@STORM_BRIDGE_IDENTITY_GATE=1 \
+		SERVER_BIN="$$PWD/$(SERVER)/target/debug/storm-server" \
+		RUNTIME_BIN="$$PWD/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 $(RUNTIME)/tests/bridge_identity_gate.py
+
 ## test-migration: boot this build on a v5 auth.db made by the pre-v6 server (decision 82)
 # Builds PRE_V6_REF in .dev/pre-v6 (kept between runs) to make the v5 database.
 PRE_V6_REF ?= c9131b4
@@ -562,7 +571,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

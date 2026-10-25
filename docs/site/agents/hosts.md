@@ -52,6 +52,15 @@ and Windows hosts `unsupported`; both keep working as before. This binds a
 connection to its session's processes. It does not isolate sessions of one
 host from each other: they share an account and its files.
 
+**Known limit: code running inside a session passes as that session.** One
+session can get code run inside another's process tree through the files
+the account shares — the agent's settings and hooks, the agent's own
+install, its global config, a workspace and its git hooks. That code is a
+descendant of the other session, so the host accepts it as that session.
+On a `verified` host this check stops a session's handle being replayed
+from outside it; it does not prove that a request comes from the session's
+agent.
+
 A host that is not `verified` — macOS, Windows, a Linux host missing a
 precondition, or a runtime too old to say — shows *"Session identity not
 verified — sessions on this host can act as each other"* on its row in
