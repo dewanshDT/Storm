@@ -283,7 +283,10 @@ impl MacProbe {
         // A token whose pid version is not this process's reads as gone.
         let local_peertoken = peer::socketpair_peer().is_ok_and(|p| p.pid() == me);
         Self {
-            proc_readable: peer::parent(me).is_ok_and(|p| p > 0),
+            // Checked against the C library's own answer, which also checks
+            // the hand-laid `kinfo_proc` this reads.
+            proc_readable: peer::parent(me)
+                .is_ok_and(|p| p > 0 && p as u32 == std::os::unix::process::parent_id()),
             local_peertoken,
             self_test: local_peertoken && self_test(&Os, me).is_ok(),
         }

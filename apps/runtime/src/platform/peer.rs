@@ -1,7 +1,7 @@
 //! What the OS says about the process at the other end of the bridge socket
 //! and the processes above it (decision 135b, 135c). Linux has it:
 //! `SO_PEERPIDFD`, `pidfd_open` and `/proc`. macOS has `LOCAL_PEERTOKEN` and
-//! `proc_pidinfo`, built but not yet reported (G-135-4). Windows has neither,
+//! `sysctl`'s process table, built but not yet reported (G-135-4). Windows has neither,
 //! and [`support`] says how the host reports each (135d).
 
 pub use imp::{Process, parent, peer, ptrace_scope, socketpair_peer};
@@ -21,7 +21,7 @@ pub fn support() -> Support {
     imp::SUPPORT
 }
 
-/// macOS's mechanism: the peer's audit token, then `proc_pidinfo` for each
+/// macOS's mechanism: the peer's audit token, then the process table for each
 /// ancestor, checked by start time (135c).
 pub const MACOS_MECHANISM: &str = "local_peertoken";
 
@@ -188,7 +188,8 @@ mod imp {
     }
 
     /// `proc_pidinfo` of `flavor` into a `T`; `None` once there is no
-    /// process with that number.
+    /// process with that number. `PROC_PIDUNIQIDENTIFIERINFO` is one of the
+    /// flavors it answers for any account's process.
     fn pidinfo<T>(pid: i32, flavor: libc::c_int) -> io::Result<Option<T>> {
         if pid <= 0 {
             return Err(io::ErrorKind::InvalidInput.into());
@@ -211,21 +212,60 @@ mod imp {
         Ok(Some(unsafe { buf.assume_init() }))
     }
 
-    /// `PROC_PIDTBSDINFO`, which answers for any process, root's included:
-    /// a walk that leaves the host's account still has to reach launchd.
+    /// `struct kinfo_proc` on 64-bit macOS, which `libc` lacks: its size and
+    /// the offsets of `kp_proc.p_starttime`, `kp_proc.p_stat`,
+    /// `kp_proc.p_pid` and `kp_eproc.e_ppid`.
+    const KINFO_PROC_SIZE: usize = 648;
+    const P_STARTTIME: usize = 0;
+    const P_STAT: usize = 36;
+    const P_PID: usize = 40;
+    const E_PPID: usize = 560;
+
+    /// `sysctl` `KERN_PROC_PID`, what `ps` reads: it answers for any
+    /// process, root's included, where `proc_pidinfo`'s full BSD info is
+    /// refused past the account — and a walk that leaves the host's account
+    /// still has to reach launchd.
     fn info(pid: i32) -> io::Result<Option<Info>> {
-        Ok(
-            pidinfo::<libc::proc_bsdinfo>(pid, libc::PROC_PIDTBSDINFO)?.map(|b| Info {
-                ppid: b.pbi_ppid as i32,
-                zombie: b.pbi_status == libc::SZOMB,
-                start: (b.pbi_start_tvsec, b.pbi_start_tvusec),
-            }),
-        )
+        if pid <= 0 {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+        let mut buf = [0u8; KINFO_PROC_SIZE];
+        let mut len = buf.len();
+        // SAFETY: `mib`, `buf` and `len` are valid for the sizes given.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if len == 0 {
+            return Ok(None);
+        }
+        let i32_at = |o: usize| i32::from_ne_bytes(buf[o..o + 4].try_into().unwrap());
+        if len != KINFO_PROC_SIZE || i32_at(P_PID) != pid {
+            return Err(io::ErrorKind::InvalidData.into());
+        }
+        let sec = i64::from_ne_bytes(buf[P_STARTTIME..P_STARTTIME + 8].try_into().unwrap());
+        let usec = i32_at(P_STARTTIME + 8);
+        Ok(Some(Info {
+            ppid: i32_at(E_PPID),
+            zombie: u32::from(buf[P_STAT]) == libc::SZOMB,
+            start: (sec as u64, usec as u64),
+        }))
     }
 
     /// The pid version an audit token for `pid` would carry now.
     fn idversion(pid: i32) -> io::Result<Option<i32>> {
-        Ok(pidinfo::<UniqIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?.map(|u| u.p_idversion))
+        let u = pidinfo::<UniqIdentifierInfo>(pid, PROC_PIDUNIQIDENTIFIERINFO)?;
+        Ok(u.map(|u| u.p_idversion))
     }
 
     /// A process as the host saw it: its number and when it started. There
