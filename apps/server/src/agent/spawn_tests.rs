@@ -657,7 +657,7 @@ fn dismissing_a_session_takes_its_spawn_state_and_keeps_history() {
     s.set_result(
         "ags_C",
         &SpawnResult {
-            outcome: "done".into(),
+            outcome: "succeeded".into(),
             summary: "s".into(),
             details: None,
             reported_at: NOW.into(),
@@ -697,7 +697,7 @@ fn a_later_result_replaces_an_earlier_one() {
     tree(&mut s);
     for (outcome, at) in [
         ("blocked", "2026-10-25T10:00:00Z"),
-        ("done", "2026-10-25T10:05:00Z"),
+        ("succeeded", "2026-10-25T10:05:00Z"),
     ] {
         s.set_result(
             "ags_C",
@@ -713,7 +713,7 @@ fn a_later_result_replaces_an_earlier_one() {
     let r = s.result("ags_C").unwrap().unwrap();
     assert_eq!(
         (r.outcome.as_str(), r.reported_at.as_str()),
-        ("done", "2026-10-25T10:05:00Z")
+        ("succeeded", "2026-10-25T10:05:00Z")
     );
     assert!(
         s.set_result(

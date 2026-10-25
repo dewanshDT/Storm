@@ -23,10 +23,13 @@ pub mod cache;
 pub mod credential;
 pub mod images;
 pub mod jobs;
+pub mod scope;
 pub mod store;
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod scope_tests;
 #[cfg(test)]
 mod spawn_tests;
 

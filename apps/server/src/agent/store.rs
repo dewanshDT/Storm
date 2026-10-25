@@ -1127,6 +1127,13 @@ pub mod spawn {
     pub const MAX_TASK_BYTES: usize = 16 * 1024;
     pub const MAX_MESSAGE_BYTES: usize = 8 * 1024;
 
+    /// What `report_result` may say a session's work came to (134h, fixed in
+    /// 134-4). Checked here as well as by the tool, since this is the only
+    /// writer; the schema's CHECK stays "non-empty" so no table is rebuilt.
+    pub const RESULT_OUTCOMES: &[&str] = &["succeeded", "partial", "failed", "blocked"];
+    pub const MAX_SUMMARY_BYTES: usize = 4 * 1024;
+    pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
+
     pub(super) fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch(
             "-- 134d: who started a session. A top-level session has no row.
@@ -1511,6 +1518,65 @@ pub mod spawn {
             descendants_of(&self.conn, session_id, live_only)
         }
 
+        /// Whether `target` is a recorded descendant of `ancestor` (L-2),
+        /// walked up `target`'s own lineage. A session is never its own.
+        pub fn is_descendant(&self, ancestor: &str, target: &str) -> Result<bool> {
+            if session_of(&self.conn, target)?.is_none() {
+                return Ok(false);
+            }
+            let mut at = lineage_of(&self.conn, target)?;
+            while let Some(parent) = at.parent_session {
+                if parent == ancestor {
+                    return Ok(true);
+                }
+                at = lineage_of(&self.conn, &parent)?;
+            }
+            Ok(false)
+        }
+
+        /// A session's own children that still have a record, oldest first.
+        pub fn children(&self, parent: &str) -> Result<Vec<SessionRecord>> {
+            let mut stmt = self.conn.prepare(&format!(
+                "SELECT {COLUMNS} FROM sessions WHERE id IN
+                     (SELECT session_id FROM session_lineage WHERE parent_session = ?1)
+                 ORDER BY created_at, id"
+            ))?;
+            let rows = stmt.query_map(params![parent], from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+
+        /// The cap a start by `requester` would hit now, counted as P-2
+        /// counts it. Advisory: creation counts again (P-6).
+        pub fn start_cap(
+            &self,
+            requester: &SessionRecord,
+            max_sessions: u32,
+        ) -> Result<Option<&'static str>> {
+            over_cap(&self.conn, requester, "start", max_sessions, "")
+        }
+
+        /// Test-only: a child recorded exactly as an approval records one,
+        /// with the parent's grants, left `running` instead of failed.
+        #[cfg(test)]
+        pub fn spawn_child_for_tests(
+            &mut self,
+            parent: &str,
+            task: &str,
+            write_vault: bool,
+        ) -> Result<SessionRecord> {
+            let now = crate::index::now_rfc3339();
+            let tx = self.conn.transaction()?;
+            let parent = session_of(&tx, parent)?.expect("a parent");
+            let mut child = spawn_child(&tx, &parent, task, write_vault, &now)?;
+            child.status = "running".into();
+            tx.execute(
+                "UPDATE sessions SET status = 'running' WHERE id = ?1",
+                params![child.id],
+            )?;
+            tx.commit()?;
+            Ok(child)
+        }
+
         pub fn spawn_enabled(&self, session_id: &str) -> Result<bool> {
             Ok(self
                 .conn
@@ -1590,6 +1656,9 @@ pub mod spawn {
 
         /// The session's own result; a later report replaces an earlier one.
         pub fn set_result(&self, session_id: &str, r: &SpawnResult) -> Result<()> {
+            if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
+                bail!("{} is not a result outcome", r.outcome);
+            }
             self.conn.execute(
                 "INSERT INTO session_result (session_id, outcome, summary, details, reported_at)
                  VALUES (?1, ?2, ?3, ?4, ?5)
