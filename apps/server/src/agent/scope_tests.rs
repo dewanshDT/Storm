@@ -155,7 +155,9 @@ fn an_ended_descendant_is_still_seen_and_a_dismissed_one_is_gone() {
     let c = f.child(&p.id);
     f.report(&c.id, "completed");
     assert_eq!(f.m.descendant(&p.id, &c.id).unwrap().status, "completed");
-    f.m.dismiss(&c.id).unwrap();
+    // A tree is dismissed as a unit, once every member has ended (C8).
+    f.report(&p.id, "completed");
+    f.m.dismiss_session(&c.id, true).unwrap();
     assert!(not_found(f.m.descendant(&p.id, &c.id)));
 }
 

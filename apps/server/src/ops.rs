@@ -2131,7 +2131,6 @@ fn decided(decision: crate::agent::store::spawn::Decision) -> ApiResult<RequestV
         D::Decided { request, cap, .. } => Ok(RequestView::of(request, cap)),
         // Single use (P-3, P-6): what the app showed is stale.
         D::Taken(_) => Err(conflict("already_decided")),
-        D::NotBuilt(_) => Err(conflict("not_built")),
     }
 }
 
@@ -2431,16 +2430,57 @@ pub async fn agent_status(state: &Shared, actor: &Actor, id: &str) -> ApiResult<
     agent_view(state, r, Some(&caller))
 }
 
-/// `list_children`: the caller's own children, oldest first.
-pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Vec<AgentView>> {
+/// A result from a child of a session the caller resumes (C3): read-only,
+/// and nothing else of that child is in the caller's scope (LT-9).
+#[derive(Debug, Clone, Serialize)]
+pub struct PredecessorResult {
+    pub id: String,
+    pub name: String,
+    /// The resumed session whose child it was.
+    pub predecessor: String,
+    pub result: ResultView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Children {
+    pub agents: Vec<AgentView>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub predecessor_results: Vec<PredecessorResult>,
+}
+
+/// `list_children`: the caller's own children, oldest first, and the
+/// results its resumed predecessors' children reported (C3).
+pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Children> {
     let caller = spawning_caller(state, actor)?;
-    state
+    let agents = state
         .agent
         .children_of(&caller)
         .map_err(agent_error)?
         .into_iter()
         .map(|r| agent_view(state, r, None))
-        .collect()
+        .collect::<ApiResult<_>>()?;
+    let mut predecessor_results = Vec::new();
+    for (predecessor, child, result) in state
+        .agent
+        .predecessor_results(&caller)
+        .map_err(agent_error)?
+    {
+        let name = state
+            .agent
+            .launch_of(&child.id)
+            .map_err(internal)?
+            .map_or_else(|| child.workspace.clone(), |l| l.name);
+        predecessor_results.push(PredecessorResult {
+            id: child.id,
+            name,
+            predecessor,
+            result: result.into(),
+        });
+    }
+    Ok(Children {
+        agents,
+        predecessor_results,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2568,6 +2608,34 @@ pub async fn send_message(
     }
 }
 
+/// `end_agent {id}` (134-7): asks a person to approve ending one of the
+/// caller's descendants. Answered at once like `send_message`; approved, the
+/// target is sent `end`, and its own descendants follow it (C1).
+pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<MessageSent> {
+    use crate::agent::store::spawn::NewRequest;
+    let caller = spawning_caller(state, actor)?;
+    let new = NewRequest::End {
+        target: id.to_string(),
+    };
+    match create_spawn_request(state, &caller, new).await? {
+        Ok(r) => Ok(MessageSent {
+            request_id: Some(r.id),
+            state: "pending",
+            reason: None,
+            cap: None,
+        }),
+        Err(refusal) if refusal.reason == "not_found" => {
+            Err(not_found("no such agent among your descendants"))
+        }
+        Err(refusal) => Ok(MessageSent {
+            request_id: None,
+            state: "refused",
+            reason: Some(refusal.reason),
+            cap: refusal.cap,
+        }),
+    }
+}
+
 /// A message as its child reads it. `sender` is the parent's session id, or
 /// `storm` for C9's notice; a parent's text is its own words, untrusted.
 #[derive(Debug, Clone, Serialize)]
@@ -2624,34 +2692,41 @@ pub async fn read_messages(
     })
 }
 
-/// C9's stop pass at `now`: children whose parent ended by itself 30 s
-/// before are sent `end`, each audited once.
-pub async fn stop_notified_children(state: &Shared, now: &str) {
-    let stopped = match state.agent.stop_notified_children(now) {
-        Ok(stopped) => stopped,
+/// The cascade stop pass at `now` (L-3, L-8): every target whose stop is
+/// due is sent `end`, each audited once per send. A child whose parent
+/// ended by itself keeps 134-6's row.
+pub async fn stop_cascade_targets(state: &Shared, now: &str) {
+    let stops = match state.agent.stop_cascade_targets(now) {
+        Ok(stops) => stops,
         Err(e) => {
-            tracing::warn!(error = ?e, "could not stop notified children");
+            tracing::warn!(error = ?e, "could not stop cascade targets");
             return;
         }
     };
-    for (session, sent) in stopped {
-        let Ok(r) = state.agent.get(&session) else {
+    for stop in stops {
+        let Ok(r) = state.agent.get(&stop.session_id) else {
             continue;
         };
-        let parent = state
-            .agent
-            .lineage(&session)
-            .ok()
-            .and_then(|l| l.parent_session);
-        record_spawn_event(
-            state,
-            EVENT_SPAWN_PARENT_ENDED,
-            Some(&r.owner_user_id),
-            None,
-            &serde_json::json!({"session_id": session, "host_id": r.host_id,
-                "parent_session": parent, "end": if sent { "sent" } else { "unreachable" }}),
-        )
-        .await;
+        let end = if stop.sent { "sent" } else { "unreachable" };
+        let (kind, detail) = if stop.cause == "parent_end" {
+            let parent = state
+                .agent
+                .lineage(&stop.session_id)
+                .ok()
+                .and_then(|l| l.parent_session);
+            (
+                EVENT_SPAWN_PARENT_ENDED,
+                serde_json::json!({"session_id": stop.session_id, "host_id": stop.host_id,
+                    "parent_session": parent, "end": end}),
+            )
+        } else {
+            (
+                EVENT_SPAWN_CASCADE_STOP,
+                serde_json::json!({"session_id": stop.session_id, "host_id": stop.host_id,
+                    "cascade_id": stop.cascade_id, "cause": stop.cause, "end": end}),
+            )
+        };
+        record_spawn_event(state, kind, Some(&r.owner_user_id), None, &detail).await;
     }
 }
 
@@ -3163,21 +3238,260 @@ pub async fn session_writes(
     Ok(out)
 }
 
-pub async fn end_session(state: &Shared, id: &str) -> ApiResult<()> {
-    state.agent.end(id).map_err(agent_error)
+// ---- Ending and cascades (decision 134-7) --------------------------------
+//
+// A person's end of a parent stops its live descendants (C1), "End all
+// children" stops them and leaves the parent running (C5), and a tree is
+// dismissed only as a unit (C8). Session tier, owner only.
+
+/// A person's end of a session with live descendants, or "End all
+/// children", opened a cascade (134n). Metadata only.
+pub const EVENT_SPAWN_CASCADE: &str = "spawn_cascade";
+/// A descendant was sent `end` for a person's cascade, or found away.
+pub const EVENT_SPAWN_CASCADE_STOP: &str = "spawn_cascade_stop";
+/// A tree was dismissed as a unit.
+pub const EVENT_SPAWN_TREE_DISMISSED: &str = "spawn_tree_dismissed";
+
+/// The owner's session, or 404: `actor` is a signed-in device.
+fn owners_session(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<(String, crate::agent::store::SessionRecord)> {
+    let owner = crews_owner(actor)?.to_string();
+    match state.agent.get(id) {
+        Ok(r) if r.owner_user_id == owner => Ok((owner, r)),
+        Ok(_) => Err(not_found("no such session")),
+        Err(e) => Err(agent_error(e)),
+    }
+}
+
+/// `POST /v1/agent/sessions/{id}/end`'s body, all optional: a session with
+/// live descendants needs `descendants`, the ids the person confirmed (C1).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndSession {
+    #[serde(default)]
+    pub descendants: Option<Vec<String>>,
+    /// C9's "let children report first": the notice and 30 s.
+    #[serde(default)]
+    pub report_first: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EndChildren {
+    pub descendants: Vec<String>,
+    #[serde(default)]
+    pub report_first: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CascadeTarget {
+    pub session: String,
+    /// `pending`, `unreachable` (retrying when its host is back), `ended`
+    /// or `already_ended`.
+    pub state: String,
+}
+
+/// One cascade (C1's outcome): never done while a target is still live.
+#[derive(Debug, Clone, Serialize)]
+pub struct CascadeView {
+    pub id: String,
+    pub cause: String,
+    pub parent_session: String,
+    pub parent_end_reason: Option<String>,
+    pub report_first: bool,
+    pub created_at: String,
+    pub completed_at: Option<String>,
+    pub done: bool,
+    pub targets: Vec<CascadeTarget>,
+}
+
+impl From<crate::agent::store::spawn::Cascade> for CascadeView {
+    fn from(c: crate::agent::store::spawn::Cascade) -> Self {
+        Self {
+            done: c.completed_at.is_some(),
+            id: c.id,
+            cause: c.cause,
+            parent_session: c.parent_session,
+            parent_end_reason: c.parent_end_reason,
+            report_first: c.report_first,
+            created_at: c.created_at,
+            completed_at: c.completed_at,
+            targets: c
+                .targets
+                .into_iter()
+                .map(|(session, state)| CascadeTarget { session, state })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Ended {
+    /// The cascade over its live descendants, when it had any.
+    pub cascade: Option<CascadeView>,
+}
+
+async fn opened_cascade(
+    state: &Shared,
+    owner: &str,
+    device: Option<&str>,
+    cascade: crate::agent::store::spawn::Cascade,
+) -> ApiResult<CascadeView> {
+    record_spawn_event(
+        state,
+        EVENT_SPAWN_CASCADE,
+        Some(owner),
+        device,
+        &serde_json::json!({"cascade_id": cascade.id, "cause": cascade.cause,
+            "parent_session": cascade.parent_session, "report_first": cascade.report_first,
+            "targets": cascade.targets.len()}),
+    )
+    .await;
+    // The person's stops go at once, not on the next pass.
+    stop_cascade_targets(state, &crate::index::now_rfc3339()).await;
+    Ok(state
+        .agent
+        .cascade(&cascade.id)
+        .map_err(agent_error)?
+        .into())
+}
+
+/// A person ends a session. With live descendants it is C1: they must be
+/// confirmed, and they are stopped with it as `cascade`.
+pub async fn end_session(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    id: &str,
+    req: EndSession,
+) -> ApiResult<Ended> {
+    let (owner, _) = owners_session(state, actor, id)?;
+    let cascade = state
+        .agent
+        .end_by_person(id, req.descendants.as_deref(), req.report_first)
+        .map_err(agent_error)?;
+    Ok(Ended {
+        cascade: match cascade {
+            Some(c) => Some(opened_cascade(state, &owner, device, c).await?),
+            None => None,
+        },
+    })
+}
+
+/// "End all children" (C5): the parent keeps running.
+pub async fn end_children(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    id: &str,
+    req: EndChildren,
+) -> ApiResult<CascadeView> {
+    let (owner, _) = owners_session(state, actor, id)?;
+    let cascade = state
+        .agent
+        .end_children(id, &req.descendants, req.report_first)
+        .map_err(agent_error)?;
+    opened_cascade(state, &owner, device, cascade).await
+}
+
+pub async fn cascade(state: &Shared, actor: &Actor, id: &str) -> ApiResult<CascadeView> {
+    let c = state.agent.cascade(id).map_err(agent_error)?;
+    owners_session(state, actor, &c.parent_session).map_err(|_| not_found("no such cascade"))?;
+    Ok(c.into())
+}
+
+/// A descendant as C1's confirmation lists it.
+#[derive(Debug, Clone, Serialize)]
+pub struct DescendantView {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
+    #[serde(flatten)]
+    pub lineage: LineageView,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Descendants {
+    pub running: Vec<DescendantView>,
+    pub ended: Vec<DescendantView>,
+}
+
+/// `GET /v1/agent/sessions/{id}/descendants`: what ending it, or ending its
+/// children, would stop (C1, C5), running apart from ended.
+pub async fn session_descendants(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+) -> ApiResult<Descendants> {
+    owners_session(state, actor, id)?;
+    let (running, ended) = state.agent.descendants_of(id).map_err(agent_error)?;
+    let view = |r: crate::agent::store::SessionRecord| -> ApiResult<DescendantView> {
+        let name = state
+            .agent
+            .launch_of(&r.id)
+            .map_err(internal)?
+            .map_or_else(|| r.workspace.clone(), |l| l.name);
+        Ok(DescendantView {
+            lineage: state.agent.lineage(&r.id).map_err(agent_error)?.into(),
+            id: r.id,
+            name,
+            status: r.status,
+            end_reason: r.end_reason,
+        })
+    };
+    Ok(Descendants {
+        running: running.into_iter().map(view).collect::<ApiResult<_>>()?,
+        ended: ended.into_iter().map(view).collect::<ApiResult<_>>()?,
+    })
 }
 
 /// What dismissing a session did beyond removing it.
 #[derive(Debug, Clone, Serialize)]
 pub struct Dismissed {
     /// The crew it was the last member of, now deleted (decision 138c). The
-    /// client offers Undo by creating it again.
+    /// client offers Undo by creating it again. For a tree, the first such
+    /// crew.
     pub removed_crew: Option<crate::agent::Crew>,
+    /// A tree's dismissal (C8): every crew it emptied.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub removed_crews: Vec<crate::agent::Crew>,
+    /// A tree's dismissal: every session it removed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dismissed: Vec<String>,
 }
 
-pub async fn dismiss_session(state: &Shared, id: &str) -> ApiResult<Dismissed> {
-    let removed_crew = state.agent.dismiss(id).map_err(agent_error)?;
-    Ok(Dismissed { removed_crew })
+/// `DELETE /v1/agent/sessions/{id}[?tree=true]`. A session in a tree goes
+/// only with its whole tree, once every member has ended, and only with
+/// `tree` (C8, LT-12).
+pub async fn dismiss_session(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    tree: bool,
+) -> ApiResult<Dismissed> {
+    let (owner, _) = owners_session(state, actor, id)?;
+    let d = state.agent.dismiss_session(id, tree).map_err(agent_error)?;
+    let is_tree = d.sessions.len() > 1;
+    if is_tree {
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_TREE_DISMISSED,
+            Some(&owner),
+            None,
+            &serde_json::json!({"session_id": id, "sessions": d.sessions.len()}),
+        )
+        .await;
+    }
+    Ok(Dismissed {
+        removed_crew: d.crews.first().cloned(),
+        removed_crews: if is_tree { d.crews } else { Vec::new() },
+        dismissed: if is_tree { d.sessions } else { Vec::new() },
+    })
 }
 
 // ---- crews and role labels (decision 138) --------------------------------

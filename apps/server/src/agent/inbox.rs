@@ -7,7 +7,7 @@
 use std::time::{Duration, Instant};
 
 use super::store::spawn::Message;
-use super::{AgentError, AgentManager, AgentResult, Command};
+use super::{AgentError, AgentManager, AgentResult};
 
 impl AgentManager {
     /// `read_messages` (134j): at least once, bounded like `wait_agent`
@@ -66,40 +66,5 @@ impl AgentManager {
     #[cfg(test)]
     pub fn inbox_of(&self, session_id: &str) -> AgentResult<Vec<Message>> {
         Ok(self.store.lock().unwrap().inbox(session_id)?)
-    }
-
-    /// C9's stop: every child whose parent ended by itself at least the
-    /// grace ago is sent `end` once. A child whose host is away is marked
-    /// `unreachable`; retrying it on the host's return is 134-7's. Returns
-    /// each child with whether its `end` was sent.
-    pub fn stop_notified_children(&self, now: &str) -> AgentResult<Vec<(String, bool)>> {
-        let due = self.store.lock().unwrap().due_stops(now)?;
-        let mut stopped = Vec::new();
-        for (cascade, session) in due {
-            if !self.live.lock().unwrap().stopping.insert(session.clone()) {
-                continue;
-            }
-            let r = self.get(&session)?;
-            match self.send(
-                &r.host_id,
-                Command::End {
-                    session: session.clone(),
-                },
-            ) {
-                Ok(()) => stopped.push((session, true)),
-                Err(AgentError::HostOffline) => {
-                    self.live.lock().unwrap().stopping.remove(&session);
-                    self.store.lock().unwrap().set_cascade_target(
-                        &cascade,
-                        &session,
-                        "unreachable",
-                        now,
-                    )?;
-                    stopped.push((session, false));
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(stopped)
     }
 }

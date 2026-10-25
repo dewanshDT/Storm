@@ -492,6 +492,16 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(agent_get_session).delete(agent_dismiss_session),
         )
         .route("/v1/agent/sessions/{id}/end", post(agent_end_session))
+        // Ending and cascades (decision 134-7): owner only, checked in ops.
+        .route(
+            "/v1/agent/sessions/{id}/descendants",
+            get(agent_session_descendants),
+        )
+        .route(
+            "/v1/agent/sessions/{id}/end-children",
+            post(agent_end_children),
+        )
+        .route("/v1/agent/cascades/{id}", get(agent_cascade))
         // Crews and role labels (decision 138): owner only, checked in ops.
         .route("/v1/agent/crews", get(crews_list).post(crews_create))
         .route("/v1/agent/crews/order", put(crews_reorder))
@@ -1953,21 +1963,75 @@ async fn vault_agent_writes(
     ))
 }
 
+/// The body is optional: the app has always sent an empty one with a JSON
+/// content type, which `Json` would refuse.
 async fn agent_end_session(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
     Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
-    crate::ops::end_session(&state, &id).await?;
-    Ok(StatusCode::ACCEPTED)
+    body: axum::body::Bytes,
+) -> ApiResult<(StatusCode, Json<crate::ops::Ended>)> {
+    let req = if body.iter().all(u8::is_ascii_whitespace) {
+        crate::ops::EndSession::default()
+    } else {
+        serde_json::from_slice(&body)
+            .map_err(|e| ApiError(StatusCode::BAD_REQUEST, e.to_string()))?
+    };
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    let ended = crate::ops::end_session(&state, &actor, device, &id, req).await?;
+    Ok((StatusCode::ACCEPTED, Json(ended)))
+}
+
+async fn agent_session_descendants(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::Descendants>> {
+    Ok(Json(
+        crate::ops::session_descendants(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_end_children(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::EndChildren>,
+) -> ApiResult<Json<crate::ops::CascadeView>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::end_children(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+async fn agent_cascade(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::CascadeView>> {
+    Ok(Json(crate::ops::cascade(&state, &actor, &id).await?))
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DismissQuery {
+    /// The person confirmed dismissing the session's whole tree (C8).
+    #[serde(default)]
+    tree: bool,
 }
 
 /// DELETE a session: 200 with what else it removed (decision 138c). Older
 /// clients ignore the body.
 async fn agent_dismiss_session(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
+    Query(q): Query<DismissQuery>,
 ) -> ApiResult<Json<crate::ops::Dismissed>> {
-    Ok(Json(crate::ops::dismiss_session(&state, &id).await?))
+    Ok(Json(
+        crate::ops::dismiss_session(&state, &actor, &id, q.tree).await?,
+    ))
 }
 
 async fn crews_list(
@@ -13315,14 +13379,15 @@ pub(crate) mod tests {
 
     // ---- the read and report tools (decision 134-4) ----
 
-    /// What a parent is offered once 134-6 is built: 134-4's reads and
-    /// `send_message`, in `SPAWN_134`'s order.
-    const PARENT_BUILT: [&str; 5] = [
+    /// What a parent is offered once 134-7 is built: 134-4's reads,
+    /// `send_message` and `end_agent`, in `SPAWN_134`'s order.
+    const PARENT_BUILT: [&str; 6] = [
         "list_agents",
         "agent_status",
         "list_children",
         "wait_agent",
         "send_message",
+        "end_agent",
     ];
     const CHILD_BUILT: [&str; 2] = ["report_result", "read_messages"];
 
@@ -13396,6 +13461,7 @@ pub(crate) mod tests {
                     "agent_status" => serde_json::json!({"id": child}),
                     "wait_agent" => serde_json::json!({"ids": [child]}),
                     "send_message" => serde_json::json!({"id": child, "text": "hi"}),
+                    "end_agent" => serde_json::json!({"id": child}),
                     "report_result" => serde_json::json!({"outcome": "succeeded", "summary": "s"}),
                     _ => serde_json::json!({}),
                 };
@@ -13439,6 +13505,13 @@ pub(crate) mod tests {
         );
         assert_eq!(
             crate::ops::send_message(&f.state, &p, &child, "hi")
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            crate::ops::end_agent(&f.state, &p, &child)
                 .await
                 .unwrap_err()
                 .0,
@@ -14000,9 +14073,9 @@ pub(crate) mod tests {
         .await;
 
         let at = |secs: i64| crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -secs);
-        crate::ops::stop_notified_children(&f.state, &at(NOTICE_GRACE_SECS - 1)).await;
+        crate::ops::stop_cascade_targets(&f.state, &at(NOTICE_GRACE_SECS - 1)).await;
         assert!(f.sent().is_empty(), "nothing before the grace is over");
-        crate::ops::stop_notified_children(&f.state, &at(NOTICE_GRACE_SECS + 1)).await;
+        crate::ops::stop_cascade_targets(&f.state, &at(NOTICE_GRACE_SECS + 1)).await;
         let sent = f.sent();
         no_terminal_input(&sent);
         assert_eq!(
@@ -14042,6 +14115,466 @@ pub(crate) mod tests {
                 serde_json::json!({"session_id": child, "host_id": f.host_id,
                 "parent_session": parent, "end": "sent"})
             ]
+        );
+    }
+
+    // ---- ending and cascades (decision 134-7) ----
+
+    fn post_empty(path: &str, auth: &str) -> axum::http::Request<axum::body::Body> {
+        // What the app sends: a JSON content type and no body.
+        axum::http::Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", auth)
+            .header("content-type", "application/json")
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn ends_of(sent: &[serde_json::Value]) -> Vec<String> {
+        no_terminal_input(sent);
+        sent.iter()
+            .filter(|m| m["type"] == "end")
+            .map(|m| m["session"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// C1 and LT-1 through the routes: the confirmation lists running and
+    /// ended descendants; an unconfirmed end changes nothing; a confirmed
+    /// one stops the parent and every live descendant at once, with one
+    /// cascade id, its outcome per child, and audit rows without text.
+    #[tokio::test]
+    async fn a_persons_end_of_a_parent_is_confirmed_and_cascades() {
+        let dir = tempdir::TempDir::new("storm-134-7-end").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        let done = f
+            .state
+            .agent
+            .spawn_child_for_tests(&parent, "already done")
+            .id;
+        f.report(&done, "completed").await;
+        f.sent();
+
+        let (status, list) = f
+            .get(&format!("/v1/agent/sessions/{parent}/descendants"))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{list}");
+        assert_eq!(list["running"][0]["id"], child);
+        assert_eq!(list["running"][0]["parent_session"], parent);
+        assert_eq!(list["ended"][0]["id"], done);
+        assert_eq!(list["ended"][0]["status"], "completed");
+
+        let end = format!("/v1/agent/sessions/{parent}/end");
+        let (status, body) = f.ask(post_empty(&end, &f.owner_bearer)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "confirm_descendants"})
+            )
+        );
+        assert!(f.sent().is_empty(), "nothing was ended");
+
+        let (status, body) = f
+            .ask(post_json_with_auth(
+                &end,
+                serde_json::json!({"descendants": [child, done]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+        let cascade = &body["cascade"];
+        assert_eq!(cascade["cause"], "human_end");
+        assert_eq!(cascade["done"], false);
+        assert_eq!(
+            cascade["targets"],
+            serde_json::json!([{"session": child, "state": "pending"}])
+        );
+        assert_eq!(
+            ends_of(&f.sent()),
+            [parent.clone(), child.clone()],
+            "at once"
+        );
+
+        f.report(&parent, "stopped").await;
+        f.report(&child, "stopped").await;
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(
+            (&view["status"], &view["end_reason"]),
+            (&serde_json::json!("stopped"), &serde_json::json!("cascade"))
+        );
+        let id = cascade["id"].as_str().unwrap();
+        let (status, after) = f.get(&format!("/v1/agent/cascades/{id}")).await;
+        assert_eq!(status, StatusCode::OK, "{after}");
+        assert_eq!(after["done"], true);
+        assert_eq!(after["targets"][0]["state"], "ended");
+        let other = Actor::Session {
+            user_id: "usr_SOMEONE".into(),
+        };
+        assert_eq!(
+            crate::ops::cascade(&f.state, &other, id)
+                .await
+                .unwrap_err()
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        let kinds: Vec<(String, serde_json::Value)> = f
+            .spawn_events()
+            .await
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("spawn_cascade"))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                (
+                    "spawn_cascade".to_string(),
+                    serde_json::json!({"cascade_id": id, "cause": "human_end",
+                        "parent_session": parent, "report_first": false, "targets": 1})
+                ),
+                (
+                    "spawn_cascade_stop".to_string(),
+                    serde_json::json!({"session_id": child, "host_id": f.host_id,
+                        "cascade_id": id, "cause": "human_end", "end": "sent"})
+                ),
+            ]
+        );
+
+        // A session with no live descendants ends as it always did.
+        let (status, body) = f
+            .ask(post_empty(
+                &format!("/v1/agent/sessions/{done}/end"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}: it has ended");
+    }
+
+    /// C5 and LT-8 through the route: the parent keeps running.
+    #[tokio::test]
+    async fn end_all_children_stops_them_and_leaves_the_parent_running() {
+        let dir = tempdir::TempDir::new("storm-134-7-children").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.sent();
+        let path = format!("/v1/agent/sessions/{parent}/end-children");
+        let (status, body) = f
+            .ask(post_json_with_auth(
+                &path,
+                serde_json::json!({"descendants": []}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "descendants_changed"})
+            )
+        );
+        let (status, body) = f
+            .ask(post_json_with_auth(
+                &path,
+                serde_json::json!({"descendants": [child], "report_first": true}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (
+                &body["cause"],
+                &body["report_first"],
+                &body["parent_end_reason"]
+            ),
+            (
+                &serde_json::json!("end_all_children"),
+                &serde_json::json!(true),
+                &serde_json::Value::Null
+            )
+        );
+        assert!(ends_of(&f.sent()).is_empty(), "the grace first");
+        let read = structured(&f.tool(&child, "read_messages", serde_json::json!({})).await);
+        assert_eq!(read["messages"][0]["sender"], "storm");
+        let at = |secs: i64| crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -secs);
+        crate::ops::stop_cascade_targets(&f.state, &at(31)).await;
+        assert_eq!(ends_of(&f.sent()), std::slice::from_ref(&child));
+        f.report(&child, "stopped").await;
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{parent}")).await;
+        assert_eq!(view["status"], "running");
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["end_reason"], "cascade");
+        // Its tools are still there: the switch is unchanged.
+        assert!(
+            f.storm_tools(&parent)
+                .await
+                .contains(&"end_agent".to_string())
+        );
+    }
+
+    /// `end_agent` through the gateway: a request a person approves, then
+    /// the target's `end`; scope as for every parent tool.
+    #[tokio::test]
+    async fn end_agent_waits_for_a_person_then_ends_its_target() {
+        let dir = tempdir::TempDir::new("storm-134-7-end-agent").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        for id in [parent.as_str(), "ags_NOPE"] {
+            let err = tool_error(
+                &f.tool(&parent, "end_agent", serde_json::json!({"id": id}))
+                    .await,
+            );
+            assert!(err.contains("no such agent"), "{err}");
+        }
+        assert_eq!(
+            error_code(
+                &f.tool(&child, "end_agent", serde_json::json!({"id": parent}))
+                    .await
+            )
+            .as_deref(),
+            Some("tool_not_allowed")
+        );
+        f.sent();
+        let asked = structured(
+            &f.tool(&parent, "end_agent", serde_json::json!({"id": child}))
+                .await,
+        );
+        assert_eq!(asked["state"], "pending", "{asked}");
+        assert!(f.sent().is_empty(), "nothing before a person decides");
+        let id = asked["request_id"].as_str().unwrap().to_string();
+        let (code, body) = f.decide(&id, "approve", &f.owner_bearer).await;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        assert_eq!(
+            (&body["outcome"], &body["target"]),
+            (&serde_json::json!("ended"), &serde_json::json!(child))
+        );
+        assert_eq!(ends_of(&f.sent()), std::slice::from_ref(&child));
+        f.report(&child, "stopped").await;
+        let status = structured(
+            &f.tool(&parent, "agent_status", serde_json::json!({"id": child}))
+                .await,
+        );
+        assert_eq!(status["status"], "stopped");
+        assert_eq!(status["settled"], true);
+    }
+
+    /// C8 and LT-12 through the route, with crews: one member of a live
+    /// tree is refused; the ended tree needs `tree=true` and goes as one,
+    /// naming every crew it emptied.
+    #[tokio::test]
+    async fn a_tree_is_dismissed_as_a_unit_through_the_route() {
+        let dir = tempdir::TempDir::new("storm-134-7-dismiss").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        for (name, session) in [("Parent's crew", &parent), ("Child's crew", &child)] {
+            let (status, body) = f
+                .ask(post_json_with_auth(
+                    "/v1/agent/crews",
+                    serde_json::json!({"name": name, "session_ids": [session]}),
+                    &f.owner_bearer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::CREATED, "{body}");
+        }
+        f.report(&child, "completed").await;
+        let path = format!("/v1/agent/sessions/{child}");
+        let (status, body) = f.ask(delete_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "tree_live"})
+            )
+        );
+        f.report(&parent, "completed").await;
+        let (status, body) = f.ask(delete_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "confirm_tree"})
+            )
+        );
+        let (status, body) = f
+            .ask(delete_with_auth(
+                &format!("{path}?tree=true"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["dismissed"], serde_json::json!([child, parent]));
+        assert_eq!(body["removed_crew"]["name"], "Child's crew");
+        assert_eq!(
+            body["removed_crews"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|c| c["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["Child's crew", "Parent's crew"]
+        );
+        for session in [&parent, &child] {
+            let (status, _) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+        }
+        assert!(f.crew_ids().await.is_empty());
+        let (kind, detail) = f
+            .spawn_events()
+            .await
+            .into_iter()
+            .find(|(k, _)| k == crate::ops::EVENT_SPAWN_TREE_DISMISSED)
+            .unwrap();
+        assert_eq!(kind, "spawn_tree_dismissed");
+        assert_eq!(
+            detail,
+            serde_json::json!({"session_id": child, "sessions": 2})
+        );
+    }
+
+    /// C3 and LT-9 through the tools: a resumed parent's `list_children`
+    /// carries its predecessor's children's results, and every other tool
+    /// finds them not found.
+    #[tokio::test]
+    async fn a_resumed_parent_reads_its_predecessors_results_through_list_children() {
+        let dir = tempdir::TempDir::new("storm-134-7-resume").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        let list = structured(
+            &f.tool(&parent, "list_children", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(list["agents"][0]["id"], child);
+        assert!(list.get("predecessor_results").is_none(), "{list}");
+        f.tool(
+            &child,
+            "report_result",
+            serde_json::json!({"outcome": "succeeded", "summary": "all green"}),
+        )
+        .await;
+        f.report(&child, "completed").await;
+        f.report(&parent, "completed").await;
+        // A resume, as the host would have recorded it.
+        let resumed = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.state.agent.set_resumed_from_for_tests(&resumed, &parent);
+        f.state.agent.force_spawn_for_tests(&resumed);
+        f.initialize(&resumed, "storm").await;
+        let list = structured(
+            &f.tool(&resumed, "list_children", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(list["agents"], serde_json::json!([]));
+        assert_eq!(
+            list["predecessor_results"],
+            serde_json::json!([{"id": child, "name": list["predecessor_results"][0]["name"],
+                "predecessor": parent, "result": {"outcome": "succeeded", "summary": "all green",
+                "reported_at": list["predecessor_results"][0]["result"]["reported_at"]}}])
+        );
+        for (tool, args) in [
+            ("agent_status", serde_json::json!({"id": child})),
+            ("wait_agent", serde_json::json!({"ids": [child]})),
+            (
+                "send_message",
+                serde_json::json!({"id": child, "text": "hi"}),
+            ),
+            ("end_agent", serde_json::json!({"id": child})),
+        ] {
+            let err = tool_error(&f.tool(&resumed, tool, args).await);
+            assert!(err.contains("no such agent"), "{tool}: {err}");
+        }
+    }
+
+    /// The new routes are the signed-in owner's: a key and the host's token
+    /// get 401, an agent and a key's actor 403 in ops, another account 404.
+    #[tokio::test]
+    async fn ending_and_dismissing_trees_is_owner_only() {
+        let dir = tempdir::TempDir::new("storm-134-7-owner").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            for req in [
+                get_with_auth(&format!("/v1/agent/sessions/{parent}/descendants"), bearer),
+                post_json_with_auth(
+                    &format!("/v1/agent/sessions/{parent}/end-children"),
+                    serde_json::json!({"descendants": [child]}),
+                    bearer,
+                ),
+                post_empty(&format!("/v1/agent/sessions/{parent}/end"), bearer),
+                get_with_auth("/v1/agent/cascades/spc_X", bearer),
+                delete_with_auth(&format!("/v1/agent/sessions/{child}?tree=true"), bearer),
+            ] {
+                let uri = req.uri().to_string();
+                let (status, _) = f.ask(req).await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
+            }
+        }
+        let agent = f.agent(&parent);
+        let key_actor = Actor::Key {
+            key_id: "key_X".into(),
+            user_id: f.owner.clone(),
+        };
+        let other = Actor::Session {
+            user_id: "usr_SOMEONE".into(),
+        };
+        for (actor, want) in [
+            (&agent, StatusCode::FORBIDDEN),
+            (&key_actor, StatusCode::FORBIDDEN),
+            (&other, StatusCode::NOT_FOUND),
+        ] {
+            let refused = [
+                crate::ops::session_descendants(&f.state, actor, &parent)
+                    .await
+                    .unwrap_err(),
+                crate::ops::end_children(
+                    &f.state,
+                    actor,
+                    None,
+                    &parent,
+                    crate::ops::EndChildren {
+                        descendants: vec![child.clone()],
+                        report_first: false,
+                    },
+                )
+                .await
+                .unwrap_err(),
+                crate::ops::end_session(
+                    &f.state,
+                    actor,
+                    None,
+                    &parent,
+                    crate::ops::EndSession::default(),
+                )
+                .await
+                .unwrap_err(),
+                crate::ops::dismiss_session(&f.state, actor, &child, true)
+                    .await
+                    .unwrap_err(),
+            ];
+            for r in refused {
+                assert_eq!(r.0, want, "{}", r.1);
+            }
+        }
+        f.sent();
+        assert!(f.sent().is_empty());
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["status"], "running", "nothing was ended");
+        // No agent tool ends anything without a person (G-134-6).
+        let names = f.storm_tools(&parent).await;
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.contains("cascade") || n == "end_children")
         );
     }
 }

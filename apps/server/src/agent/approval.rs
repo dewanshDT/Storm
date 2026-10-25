@@ -2,8 +2,8 @@
 //! wait for a person's decision (134o, A5), under P-1…P-6 of "Decision 134 —
 //! dependencies".
 //!
-//! Dark: no tool creates a request before 134-5, and C0 refuses on every host
-//! until 136-5 reports isolation.
+//! Dark: C0 refuses on every host until 136-5 reports isolation, and no
+//! start is requested before 134-5.
 
 use std::time::{Duration, Instant};
 
@@ -94,11 +94,19 @@ impl AgentManager {
             if let Some(child) = child {
                 self.dispatch_spawned(child)?;
             }
-            // A delivered message wakes the child's read (134-6).
-            if let (Some("delivered"), Some(target)) =
-                (request.outcome.as_deref(), request.target.as_deref())
-            {
-                self.bump(target);
+            match (request.outcome.as_deref(), request.target.as_deref()) {
+                // A delivered message wakes the child's read (134-6).
+                (Some("delivered"), Some(target)) => self.bump(target),
+                // An approved end (134-7). Its own descendants are stopped
+                // when its end is recorded (`human_end`, C1); a host that
+                // dropped since the re-check leaves it running, and the
+                // parent may ask again.
+                (Some("ended"), Some(target)) => {
+                    if let Err(e) = self.send_end(target) {
+                        tracing::warn!(session = target, error = ?e, "approved end not sent");
+                    }
+                }
+                _ => {}
             }
             self.requests_changed();
         }
@@ -226,6 +234,16 @@ impl AgentManager {
             "spawned session not started: launching children is 134-5's"
         );
         Ok(())
+    }
+
+    fn send_end(&self, session: &str) -> AgentResult<()> {
+        let r = self.get(session)?;
+        self.send(
+            &r.host_id,
+            super::Command::End {
+                session: r.id.clone(),
+            },
+        )
     }
 
     /// Test-only: a request written as it is, past every check.

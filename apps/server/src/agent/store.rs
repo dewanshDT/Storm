@@ -682,15 +682,22 @@ impl Store {
     /// still resolves; so is its lineage (decision 134, L-1).
     pub fn delete(&mut self, id: &str) -> Result<(bool, Option<Crew>)> {
         let tx = self.conn.transaction()?;
-        let gone = tx.execute("DELETE FROM sessions WHERE id = ?1", params![id])? > 0;
-        let crew = leave_crew(&tx, id)?;
-        tx.execute(
-            "DELETE FROM session_role WHERE session_id = ?1",
-            params![id],
-        )?;
-        spawn::forget(&tx, id)?;
+        let removed = delete_in(&tx, id)?;
         tx.commit()?;
-        Ok((gone, crew))
+        Ok(removed)
+    }
+
+    /// Dismisses a whole tree in one transaction (decision 134, C8): every
+    /// member as `delete` removes one. Returns the crews it emptied, in the
+    /// order they emptied.
+    pub fn delete_all(&mut self, ids: &[String]) -> Result<Vec<Crew>> {
+        let tx = self.conn.transaction()?;
+        let mut emptied = Vec::new();
+        for id in ids {
+            emptied.extend(delete_in(&tx, id)?.1);
+        }
+        tx.commit()?;
+        Ok(emptied)
     }
 
     // ---- crews (decision 138) ---------------------------------------------
@@ -1044,6 +1051,17 @@ fn members_of(conn: &Connection, crew_id: &str) -> Result<Vec<String>> {
     )?;
     let rows = stmt.query_map(params![crew_id], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
+    let gone = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])? > 0;
+    let crew = leave_crew(conn, id)?;
+    conn.execute(
+        "DELETE FROM session_role WHERE session_id = ?1",
+        params![id],
+    )?;
+    spawn::forget(conn, id)?;
+    Ok((gone, crew))
 }
 
 /// Takes a session out of its crew, deleting the crew if that empties it.
@@ -1498,9 +1516,6 @@ pub mod spawn {
             /// the reason only.
             cap: Option<&'static str>,
         },
-        /// Approved, but acting on its kind is a later slice's (134-7).
-        /// Nothing was written: it stays pending.
-        NotBuilt(Request),
     }
 
     enum Act {
@@ -1508,7 +1523,22 @@ pub mod spawn {
         Refused(Refusal),
         Started(Box<SessionRecord>),
         Delivered,
-        NotBuilt,
+        /// An approved end: its target is sent `end` after commit.
+        Ended,
+    }
+
+    /// A cascade target whose stop is due (L-3, L-8): immediate for a
+    /// person's end, after the grace for a parent's own end or when the
+    /// person let children report first.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct DueStop {
+        pub cascade_id: String,
+        pub cause: String,
+        pub session_id: String,
+        pub host_id: String,
+        /// `pending`, or `unreachable` when an earlier stop found its host
+        /// away.
+        pub state: String,
     }
 
     impl Store {
@@ -1595,6 +1625,17 @@ pub mod spawn {
             )?;
             tx.commit()?;
             Ok(child)
+        }
+
+        /// Test-only: a session recorded as resuming `from`.
+        #[cfg(test)]
+        pub fn set_resumed_from_for_tests(&self, session_id: &str, from: &str) {
+            self.conn
+                .execute(
+                    "UPDATE sessions SET resumed_from = ?2 WHERE id = ?1",
+                    params![session_id, from],
+                )
+                .unwrap();
         }
 
         pub fn spawn_enabled(&self, session_id: &str) -> Result<bool> {
@@ -1807,48 +1848,78 @@ pub mod spawn {
             Ok(read)
         }
 
-        /// The C9 stops that are due at `now`: each live target of a
-        /// `parent_end` cascade opened at least the grace ago, with its
-        /// cascade.
-        pub fn due_stops(&self, now: &str) -> Result<Vec<(String, String)>> {
+        /// Every cascade target whose stop is due at `now`, oldest cascade
+        /// first: still live, `pending` or `unreachable`, and either its
+        /// cascade stops at once or its grace is over.
+        pub fn due_stops(&self, now: &str) -> Result<Vec<DueStop>> {
             let mut stmt = self.conn.prepare(&format!(
-                "SELECT c.id, c.created_at, t.session_id
+                "SELECT c.id, c.cause, c.report_first, c.created_at, t.session_id, s.host_id,
+                     t.state
                  FROM spawn_cascades c
                  JOIN spawn_cascade_targets t ON t.cascade_id = c.id
                  JOIN sessions s ON s.id = t.session_id
-                 WHERE c.cause = 'parent_end' AND c.completed_at IS NULL
-                   AND t.state = 'pending' AND s.status NOT IN {ENDED}
+                 WHERE c.completed_at IS NULL AND t.state IN ('pending', 'unreachable')
+                   AND s.status NOT IN {ENDED}
                  ORDER BY c.created_at, c.rowid, t.rowid"
             ))?;
             let rows = stmt.query_map([], |r| {
                 Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
+                    DueStop {
+                        cascade_id: r.get(0)?,
+                        cause: r.get(1)?,
+                        session_id: r.get(4)?,
+                        host_id: r.get(5)?,
+                        state: r.get(6)?,
+                    },
+                    r.get::<_, bool>(2)?,
+                    r.get::<_, String>(3)?,
                 ))
             })?;
             Ok(rows
                 .collect::<rusqlite::Result<Vec<_>>>()?
                 .into_iter()
-                .filter(|(_, at, _)| grace_over(now, at))
-                .map(|(id, _, session)| (id, session))
+                .filter(|(d, report_first, at)| stop_due(&d.cause, *report_first, now, at))
+                .map(|(d, ..)| d)
                 .collect())
         }
 
-        /// Whether Storm is stopping `session_id` for C9 now: it is still a
-        /// target of a `parent_end` cascade whose grace is over. Its end is
-        /// then `parent_ended`, whatever the host says it was.
-        pub fn stopping(&self, session_id: &str, now: &str) -> Result<bool> {
+        /// The end reason Storm's stop gives `session_id` (L-4), when the
+        /// host's report of its end is that stop: it is still a target of
+        /// an open cascade, and Storm sent the `end` (`sent`) or, after a
+        /// restart, the stop is due. The first cascade that named it wins.
+        pub fn stop_reason(
+            &self,
+            session_id: &str,
+            now: &str,
+            sent: bool,
+        ) -> Result<Option<String>> {
             let mut stmt = self.conn.prepare(
-                "SELECT c.created_at FROM spawn_cascades c
+                "SELECT c.cause, c.report_first, c.created_at FROM spawn_cascades c
                  JOIN spawn_cascade_targets t ON t.cascade_id = c.id
-                 WHERE t.session_id = ?1 AND c.cause = 'parent_end'
-                   AND t.state IN ('pending', 'unreachable')",
+                 WHERE t.session_id = ?1 AND t.state IN ('pending', 'unreachable')",
             )?;
-            let opened = stmt
-                .query_map(params![session_id], |r| r.get::<_, String>(0))?
+            let open = stmt
+                .query_map(params![session_id], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, bool>(1)?,
+                        r.get::<_, String>(2)?,
+                    ))
+                })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(opened.iter().any(|at| grace_over(now, at)))
+            let due = open
+                .iter()
+                .any(|(cause, report_first, at)| sent || stop_due(cause, *report_first, now, at));
+            if !due {
+                return Ok(None);
+            }
+            Ok(self.end_cause(session_id)?.map(|c| c.end_reason))
+        }
+
+        /// Whether `session_id` is ending or doomed: a live target of an
+        /// open cascade, or the parent of a person's end not yet recorded.
+        pub fn doomed(&self, session_id: &str) -> Result<bool> {
+            doomed(&self.conn, session_id)
         }
 
         /// Opens a cascade (L-3): in one transaction, the cause, the parent and
@@ -2073,7 +2144,7 @@ pub mod spawn {
                     Act::Refused(r) => ("refused", Some(r.reason), r.cap, None),
                     Act::Started(child) => ("started", None, None, Some(child)),
                     Act::Delivered => ("delivered", None, None, None),
-                    Act::NotBuilt => return Ok(Some(Decision::NotBuilt(request))),
+                    Act::Ended => ("ended", None, None, None),
                 };
             let session = child.as_ref().map(|c| c.id.as_str());
             decide(&tx, id, outcome, reason, session, Some(device), now)?;
@@ -2259,7 +2330,9 @@ pub mod spawn {
             tracing::warn!(error = %e, "a spawn request's check failed");
             Refusal::because("not_permitted")
         };
-        if r.is_ended() {
+        // Being ended asks for nothing more: a request it made now could
+        // add a child its cascade never snapshotted (AP-3).
+        if r.is_ended() || doomed(conn, &r.id).map_err(fail)? {
             return Err(Refusal::because("requester_ended"));
         }
         if !spawn_on(conn, &r.id).map_err(fail)? {
@@ -2384,7 +2457,8 @@ pub mod spawn {
                 deliver(conn, request, target, now)?;
                 return Ok(Act::Delivered);
             }
-            _ => return Ok(Act::NotBuilt),
+            ("end", Some(_)) => return Ok(Act::Ended),
+            (kind, _) => bail!("a {kind} request without its target"),
         }
         let payload: StartPayload = serde_json::from_str(&request.payload)?;
         if payload.provider.as_ref().is_some_and(|p| *p != r.provider) {
@@ -2803,6 +2877,32 @@ pub mod spawn {
         expired(now, &plus_secs(opened, NOTICE_GRACE_SECS))
     }
 
+    /// C9 and C1: a parent's own end, or a person who let children report
+    /// first, gives the grace; any other person's end stops at once.
+    fn stop_due(cause: &str, report_first: bool, now: &str, opened: &str) -> bool {
+        if cause == "parent_end" || report_first {
+            grace_over(now, opened)
+        } else {
+            true
+        }
+    }
+
+    fn doomed(conn: &Connection, session_id: &str) -> Result<bool> {
+        let target = conn
+            .prepare(
+                "SELECT 1 FROM spawn_cascade_targets t JOIN spawn_cascades c ON c.id = t.cascade_id
+                 WHERE t.session_id = ?1 AND c.completed_at IS NULL
+                   AND t.state IN ('pending', 'unreachable')",
+            )?
+            .exists(params![session_id])?;
+        let ending = conn
+            .prepare(
+                "SELECT 1 FROM spawn_cascades WHERE parent_session = ?1 AND cause = 'human_end'",
+            )?
+            .exists(params![session_id])?;
+        Ok(target || ending)
+    }
+
     fn open_cascade_in(
         conn: &Connection,
         id: &str,
@@ -2833,6 +2933,10 @@ pub mod spawn {
                  VALUES (?1, ?2, 'pending', ?3)",
                 params![id, t, now],
             )?;
+            // L-8: a grace always comes with the notice that explains it.
+            if cause == "parent_end" || report_first {
+                queue_notice(conn, t, now)?;
+            }
         }
         if cause != "end_all_children" {
             refuse_where(conn, "requester = ?1", parent, "requester_ended", now)?;
@@ -2867,10 +2971,12 @@ pub mod spawn {
     /// - its messages never read are `undeliverable` (L-7);
     /// - as a cascade's target it is `ended` when Storm stopped it, else
     ///   `already_ended`, its own reason kept (L-4);
-    /// - a parent that ended by itself (`completed` or `failed`, not a
-    ///   person's stop and not a host restart) opens a `parent_end` cascade
-    ///   over its live descendants (L-3), and each gets C9's notice (L-8).
-    ///   The stop after the grace is the manager's.
+    /// - with live descendants no cascade covers yet, it opens one over
+    ///   them (L-3): `parent_end` when it ended by itself (`completed` or
+    ///   `failed`), with C9's notice (L-8); `human_end` when a person
+    ///   stopped it (`stopped`), immediate (C1). A host restart opens
+    ///   nothing (L-4), and neither does Storm's own stop, whose cascade
+    ///   already holds its descendants. The stops are the manager's.
     pub(super) fn on_ended(conn: &Connection, r: &SessionRecord, now: &str) -> Result<()> {
         conn.execute(
             "UPDATE session_inbox SET state = 'undeliverable'
@@ -2890,16 +2996,27 @@ pub mod spawn {
             let state = if by_storm { "ended" } else { "already_ended" };
             set_target_in(conn, &c, &r.id, state, now)?;
         }
-        let by_itself = matches!(r.status.as_str(), "completed" | "failed")
-            && r.end_reason.as_deref() != Some("host_restart");
-        if !by_itself || descendants_of(conn, &r.id, true)?.is_empty() {
+        if r.end_reason.as_deref() == Some("host_restart") || by_storm {
+            return Ok(());
+        }
+        let cause = match r.status.as_str() {
+            "completed" | "failed" => "parent_end",
+            "stopped" => "human_end",
+            _ => return Ok(()),
+        };
+        let mut uncovered = false;
+        for d in descendants_of(conn, &r.id, true)? {
+            if !doomed(conn, &d)? {
+                uncovered = true;
+                break;
+            }
+        }
+        if !uncovered {
             return Ok(());
         }
         let reason = r.end_reason.as_deref().unwrap_or(&r.status);
         let id = crate::auth::identity::random_id("spc_");
-        for target in open_cascade_in(conn, &id, "parent_end", &r.id, Some(reason), false, now)? {
-            queue_notice(conn, &target, now)?;
-        }
+        open_cascade_in(conn, &id, cause, &r.id, Some(reason), false, now)?;
         Ok(())
     }
 }

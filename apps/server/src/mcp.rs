@@ -353,8 +353,8 @@ pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
 
 /// Decision 134's tools for a session whose spawn switch is on (134c), offered
 /// by the gateway only while the switch is on and C0 holds. 134-4 built the
-/// reads (`list_agents`, `agent_status`, `list_children`, `wait_agent`) and
-/// 134-6 `send_message`; `start_agent` and `end_agent` are 134-5's and 134-7's.
+/// reads (`list_agents`, `agent_status`, `list_children`, `wait_agent`),
+/// 134-6 `send_message` and 134-7 `end_agent`; `start_agent` is 134-5's.
 pub const SPAWN_TOOLS: &[&str] = &[
     "list_agents",
     "start_agent",
@@ -654,13 +654,10 @@ impl Storm {
     }
 
     #[tool(
-        description = "The agents you started, oldest first, with their states and reported results. Takes no arguments."
+        description = "The agents you started, oldest first, with their states and reported results. If this session resumes an earlier one, predecessor_results holds what that session's agents reported: read-only. Takes no arguments."
     )]
     async fn list_children(&self) -> Result<CallToolResult, ErrorData> {
-        respond(
-            crate::ops::list_children(&self.state, self.actor()?).await,
-            Some("agents"),
-        )
+        respond_object(crate::ops::list_children(&self.state, self.actor()?).await)
     }
 
     #[tool(
@@ -704,6 +701,16 @@ impl Storm {
         Parameters(MessageParams { id, text }): Parameters<MessageParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond_object(crate::ops::send_message(&self.state, self.actor()?, &id, &text).await)
+    }
+
+    #[tool(
+        description = "Ask to end an agent you started (or one it started), and every agent it started. A person approves it first; the answer is at once, and agent_status shows when it has ended."
+    )]
+    async fn end_agent(
+        &self,
+        Parameters(AgentParams { id }): Parameters<AgentParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::end_agent(&self.state, self.actor()?, &id).await)
     }
 
     #[tool(
@@ -994,20 +1001,21 @@ mod tests {
         );
     }
 
-    /// The 134 tools that exist, pinned: 134-5 and 134-7 change this on
-    /// purpose, alongside the gateway's gate.
+    /// The 134 tools that exist, pinned: 134-5 changes this on purpose,
+    /// alongside the gateway's gate.
     const BUILT_134: &[&str] = &[
         "list_agents",
         "agent_status",
         "list_children",
         "wait_agent",
         "send_message",
+        "end_agent",
         "report_result",
         "read_messages",
     ];
 
     #[test]
-    fn only_the_read_report_and_inbox_spawn_tools_exist() {
+    fn every_spawn_tool_but_start_agent_exists() {
         let listed: Vec<String> = Storm::tool_router()
             .list_all()
             .into_iter()
@@ -1033,6 +1041,7 @@ mod tests {
         assert!(SPAWNED_TOOLS.contains(&"report_result"));
         assert!(SPAWNED_TOOLS.contains(&"read_messages"));
         assert!(SPAWN_TOOLS.contains(&"send_message"));
+        assert!(SPAWN_TOOLS.contains(&"end_agent"));
     }
 
     #[test]

@@ -160,6 +160,15 @@ fn after_secs(secs: i64) -> String {
     crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -secs)
 }
 
+/// The stop pass, as each child and whether its `end` was sent.
+fn stops(m: &AgentManager, now: &str) -> Vec<(String, bool)> {
+    m.stop_cascade_targets(now)
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.session_id, s.sent))
+        .collect()
+}
+
 fn no_terminal_input(sent: &[Command]) {
     for c in sent {
         assert!(
@@ -458,18 +467,18 @@ async fn a_parent_that_ends_by_itself_notices_then_stops_its_children() {
 
     // No stop before the grace, and nothing went down the link.
     let early = after_secs(NOTICE_GRACE_SECS - 1);
-    assert!(f.m.stop_notified_children(&early).unwrap().is_empty());
+    assert!(stops(&f.m, &early).is_empty());
     assert!(f.sent().is_empty(), "the notice reaches no terminal");
 
     let due = after_secs(NOTICE_GRACE_SECS + 1);
-    let stopped = f.m.stop_notified_children(&due).unwrap();
+    let stopped = stops(&f.m, &due);
     assert_eq!(
         stopped,
         [(c.id.clone(), true), (g.id.clone(), true)],
         "nearest first"
     );
     // Once each: a second pass sends nothing.
-    assert!(f.m.stop_notified_children(&due).unwrap().is_empty());
+    assert!(stops(&f.m, &due).is_empty());
     let sent = f.sent();
     no_terminal_input(&sent);
     assert_eq!(
@@ -520,7 +529,7 @@ fn a_child_that_ends_in_its_grace_keeps_its_own_end() {
     assert_eq!(f.m.inbox_of(&g.id).unwrap().len(), 1);
     let due = after_secs(NOTICE_GRACE_SECS + 1);
     assert_eq!(
-        f.m.stop_notified_children(&due).unwrap(),
+        stops(&f.m, &due),
         [(d.id.clone(), true), (g.id.clone(), true)]
     );
     let r = f.m.get(&c.id).unwrap();
@@ -536,34 +545,33 @@ fn a_child_that_ends_in_its_grace_keeps_its_own_end() {
 }
 
 #[test]
-fn a_persons_stop_and_a_host_restart_give_no_notice() {
-    let f = fixture();
-    for ending in ["stopped", "host_restart"] {
-        let p = f.parent(if ending == "stopped" {
-            "storm"
-        } else {
-            "other"
-        });
-        let c = f.child(&p.id);
-        if ending == "stopped" {
-            f.report(&p.id, "stopped");
-        } else {
-            let report = serde_json::from_value(
-                serde_json::json!({"status": "failed", "end_reason": "host_restart"}),
-            )
-            .unwrap();
-            f.m.host_status("hst_A", &p.id, &report).unwrap();
-        }
-        assert!(f.m.inbox_of(&c.id).unwrap().is_empty(), "{ending}");
-        assert!(
-            f.m.stop_notified_children(&after_secs(NOTICE_GRACE_SECS + 1))
-                .unwrap()
-                .is_empty(),
-            "{ending}"
-        );
-        // Ending the child here frees the next round's workspace.
-        f.report(&c.id, "completed");
-    }
+fn a_persons_stop_gives_no_notice_and_a_host_restart_nothing() {
+    let mut f = fixture();
+    // A person's stop (134-7's C1): no notice, and the child is stopped at
+    // once, not after a grace.
+    let p = f.parent("storm");
+    let c = f.child(&p.id);
+    f.report(&p.id, "stopped");
+    assert!(f.m.inbox_of(&c.id).unwrap().is_empty());
+    f.sent();
+    assert_eq!(stops(&f.m, &after_secs(0)), [(c.id.clone(), true)]);
+    f.report(&c.id, "stopped");
+    let r = f.m.get(&c.id).unwrap();
+    assert_eq!(
+        (r.status.as_str(), r.end_reason.as_deref()),
+        ("stopped", Some("cascade"))
+    );
+
+    let p = f.parent("other");
+    let c = f.child(&p.id);
+    let report = serde_json::from_value(
+        serde_json::json!({"status": "failed", "end_reason": "host_restart"}),
+    )
+    .unwrap();
+    f.m.host_status("hst_A", &p.id, &report).unwrap();
+    assert!(f.m.inbox_of(&c.id).unwrap().is_empty());
+    assert!(stops(&f.m, &after_secs(NOTICE_GRACE_SECS + 1)).is_empty());
+    f.report(&c.id, "completed");
     assert!(
         f.m.store
             .lock()
@@ -582,9 +590,7 @@ fn a_child_whose_host_is_away_at_the_stop_is_unreachable() {
     f.report(&p.id, "completed");
     f.sent();
     f.m.disconnect_host("hst_A", f.generation);
-    let stopped =
-        f.m.stop_notified_children(&after_secs(NOTICE_GRACE_SECS + 1))
-            .unwrap();
+    let stopped = stops(&f.m, &after_secs(NOTICE_GRACE_SECS + 1));
     assert_eq!(stopped, [(c.id.clone(), false)]);
     let store = f.m.store.lock().unwrap();
     let open = store.open_cascades().unwrap();

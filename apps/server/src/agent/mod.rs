@@ -20,6 +20,7 @@
 #[allow(dead_code)]
 pub mod approval;
 pub mod cache;
+pub mod cascade;
 pub mod credential;
 pub mod images;
 pub mod inbox;
@@ -29,6 +30,8 @@ pub mod store;
 
 #[cfg(test)]
 mod approval_tests;
+#[cfg(test)]
+mod cascade_tests;
 #[cfg(test)]
 mod inbox_tests;
 #[cfg(test)]
@@ -592,8 +595,8 @@ struct Live {
     /// Whether C0 held for each host when its agents were last told, so a
     /// flip sends `list_changed` once (134-3). Kept across links.
     c0: HashMap<String, bool>,
-    /// Children a C9 stop has been sent to in this run (134-6), so each
-    /// is sent one `end`.
+    /// Cascade targets sent their `end` in this run (134-6, 134-7), so each
+    /// is sent one.
     stopping: std::collections::HashSet<String>,
 }
 
@@ -902,6 +905,11 @@ impl AgentManager {
                 Some(rep) => {
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
+                        // An end Storm sent before a restart (LT-6).
+                        if let Some(reason) = self.storm_stop(&r)? {
+                            r.status = "stopped".into();
+                            r.end_reason = Some(reason);
+                        }
                         self.store.lock().unwrap().update(&r)?;
                         self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
@@ -1301,13 +1309,10 @@ impl AgentManager {
         }
         let before = r.status.clone();
         apply_report(&mut r, report)?;
-        if r.is_ended()
-            && (self.live.lock().unwrap().stopping.contains(&r.id)
-                || self.store.lock().unwrap().stopping(&r.id, &now())?)
-        {
-            // C9: Storm stopped it after its parent ended (L-4, LT-13).
+        if let Some(reason) = self.storm_stop(&r)? {
+            // Storm stopped it for a cascade (L-4, LT-1, LT-13).
             r.status = "stopped".into();
-            r.end_reason = Some("parent_ended".into());
+            r.end_reason = Some(reason);
         }
         if r.status != before || r.is_ended() {
             tracing::info!(
@@ -1920,26 +1925,11 @@ impl AgentManager {
         Ok(())
     }
 
-    /// Asks the host to end the session. Its status changes when the host
-    /// reports it.
-    pub fn end(&self, id: &str) -> AgentResult<()> {
-        let r = self.live_record(id)?;
-        self.send(&r.host_id, Command::End { session: r.id })
-    }
-
-    /// Removes an ended session from the list (freeze §7.4), with its crew
-    /// membership and role label. Returns the crew this emptied, which is
-    /// deleted with it (decision 138c).
+    /// Test-only: a session outside any tree dismissed, and the crew it
+    /// emptied (decision 138c).
+    #[cfg(test)]
     pub fn dismiss(&self, id: &str) -> AgentResult<Option<Crew>> {
-        let r = self.get(id)?;
-        if !r.is_ended() {
-            return Err(AgentError::Conflict(
-                "only an ended session can be dismissed".into(),
-            ));
-        }
-        let (_, emptied) = self.store.lock().unwrap().delete(id)?;
-        self.live.lock().unwrap().sessions.remove(id);
-        Ok(emptied)
+        Ok(self.dismiss_session(id, false)?.crews.into_iter().next())
     }
 
     // ---- crews and role labels (decision 138) ------------------------------

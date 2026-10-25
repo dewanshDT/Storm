@@ -791,7 +791,7 @@ fn a_denial_is_recorded_with_its_device_and_never_acts() {
 }
 
 #[test]
-fn acting_on_an_end_waits_for_its_slice() {
+fn an_approved_end_is_decided_ended() {
     let f = fixture(16);
     let p = f.parent();
     let c = f.child(&p.id, "ags_C", false);
@@ -799,14 +799,13 @@ fn acting_on_an_end_waits_for_its_slice() {
         f.m.create_request(&p.id, NewRequest::End { target: c })
             .unwrap()
             .unwrap();
-    assert!(matches!(f.approve(&r.id, "dev_A"), Decision::NotBuilt(_)));
-    assert_eq!(
-        outcome(&f.stored(&r.id)),
-        ("pending", None, None),
-        "nothing was written"
-    );
-    let (denied, ..) = decided(f.m.deny_request(&r.id, "dev_A").unwrap());
-    assert_eq!(denied.outcome.as_deref(), Some("denied"));
+    let (request, child, _) = decided(f.approve(&r.id, "dev_A"));
+    assert_eq!(child, None);
+    assert_eq!(outcome(&request), ("decided", Some("ended"), None));
+    assert!(matches!(
+        f.m.deny_request(&r.id, "dev_A").unwrap(),
+        Decision::Taken(_)
+    ));
 }
 
 // ---- P-5: expiry -------------------------------------------------------------

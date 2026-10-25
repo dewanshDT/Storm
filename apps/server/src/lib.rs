@@ -1206,15 +1206,16 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         });
     }
 
-    // C9: a child whose parent ended by itself is stopped once its grace is
-    // over. Checked every second, so the stop lands within a second of it.
+    // Cascades (134-6, 134-7): each target is stopped once its stop is due,
+    // at once for a person's end and after C9's grace otherwise, and an
+    // unreachable one once its host is back. Checked every second.
     {
         let state = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 tick.tick().await;
-                ops::stop_notified_children(&state, &crate::index::now_rfc3339()).await;
+                ops::stop_cascade_targets(&state, &crate::index::now_rfc3339()).await;
             }
         });
     }
