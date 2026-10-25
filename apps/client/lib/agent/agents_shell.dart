@@ -12,6 +12,8 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart';
+import 'crew_prefs.dart';
+import 'crew_widgets.dart';
 
 /// The session a location shows, or null on the overview.
 String? sessionIdOf(Uri location) {
@@ -46,8 +48,9 @@ class AgentsShell extends StatelessWidget {
   }
 }
 
-/// Title, ＋ New session while a host is online, Overview, then RUNNING and
-/// ENDED (handoff §2.6).
+/// Title, ＋ New session while a host is online, Overview, then CREWS,
+/// RUNNING and ENDED (handoff §2.6; crews Round 4 §3). RUNNING and ENDED
+/// list only sessions in no crew.
 class AgentsSidebar extends ConsumerWidget {
   const AgentsSidebar({super.key, this.selected});
 
@@ -59,9 +62,18 @@ class AgentsSidebar extends ConsumerWidget {
     final t = context.tokens;
     final o = ref.watch(agentOverviewProvider).value;
     final sessions = o?.sessions ?? const <AgentSession>[];
-    final live = o?.live ?? const <AgentSession>[];
-    final ended = o?.ended ?? const <AgentSession>[];
+    final live = o?.looseLive ?? const <AgentSession>[];
+    final ended = o?.looseEnded ?? const <AgentSession>[];
+    final crews = o?.crews ?? const <Crew>[];
+    final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
     final overview = selected == null;
+
+    Widget row(AgentSession s) => SessionRow(
+      session: s,
+      host: o?.hostName(s.hostId) ?? 'host',
+      selected: s.id == selected,
+      onTap: () => openAgentSession(context, s.id),
+    );
 
     Widget section(String label, List<AgentSession> list, double top) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -72,13 +84,43 @@ class AgentsSidebar extends ConsumerWidget {
         ),
         for (final (i, s) in list.indexed) ...[
           if (i > 0) SizedBox(height: t.sp * 0.25),
-          SessionRow(
-            session: s,
-            host: o?.hostName(s.hostId) ?? 'host',
-            selected: s.id == selected,
-            onTap: () => openAgentSession(context, s.id),
-          ),
+          row(s),
         ],
+      ],
+    );
+
+    Widget crewsSection() => Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _CrewsLabel(
+          count: crews.length,
+          collapsed: prefs.section,
+          onTap: () => ref.read(crewPrefsProvider.notifier).toggleSection(),
+        ),
+        if (!prefs.section)
+          for (final (i, c) in crews.indexed) ...[
+            if (i > 0) SizedBox(height: t.sp * 0.25),
+            CrewHeader(
+              crew: c,
+              members: o!.membersOf(c),
+              collapsed: prefs.collapsed(c.id),
+              onToggle: () =>
+                  ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+              onMenu: (anchor) => showCrewMenu(
+                context,
+                ref,
+                anchor: anchor,
+                crew: c,
+                overview: o,
+              ),
+            ),
+            if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty) ...[
+              SizedBox(height: t.sp * 0.25),
+              CrewMembers(
+                children: [for (final s in liveFirst(o.membersOf(c))) row(s)],
+              ),
+            ],
+          ],
       ],
     );
 
@@ -136,7 +178,9 @@ class AgentsSidebar extends ConsumerWidget {
             child: ListView(
               padding: EdgeInsets.fromLTRB(t.sp, 0, t.sp, t.sp * 1.5),
               children: [
-                if (live.isNotEmpty) section('Running', live, t.sp * 1.5),
+                if (crews.isNotEmpty) crewsSection(),
+                if (live.isNotEmpty)
+                  section('Running', live, t.sp * (crews.isEmpty ? 1.5 : 2)),
                 if (ended.isNotEmpty) section('Ended', ended, t.sp * 2),
               ],
             ),
@@ -191,6 +235,53 @@ class _OverviewRow extends StatelessWidget {
                 color: current ? t.text : t.text2,
               ),
             ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// CREWS, with its chevron; folded, "CREWS · n" (138m).
+class _CrewsLabel extends StatelessWidget {
+  const _CrewsLabel({
+    required this.count,
+    required this.collapsed,
+    required this.onTap,
+  });
+
+  final int count;
+  final bool collapsed;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Semantics(
+      button: true,
+      expanded: !collapsed,
+      label: 'Crews, $count',
+      excludeSemantics: true,
+      onTap: onTap,
+      child: GestureDetector(
+        key: const Key('crews-section'),
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(t.sp, t.sp * 1.5, t.sp, t.sp * 0.75),
+          child: Row(
+            children: [
+              Expanded(
+                child: AgentsLabel(collapsed ? 'Crews · $count' : 'Crews'),
+              ),
+              Icon(
+                collapsed
+                    ? LucideIcons.chevron_right
+                    : LucideIcons.chevron_down,
+                size: t.labelSize,
+                color: t.text3,
+              ),
+            ],
           ),
         ),
       ),

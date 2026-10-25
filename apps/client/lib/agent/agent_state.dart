@@ -53,12 +53,13 @@ final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
 /// An [AgentApi] for the signed-in session, or null without one.
 AgentApi? agentApi(WidgetRef ref) => ref.read(agentApiFactoryProvider)?.call();
 
-/// Sessions and hosts, as the rail, the sidebar and the Agents screens show
-/// them.
+/// Sessions, hosts and crews, as the rail, the sidebar and the Agents screens
+/// show them.
 class AgentOverview {
   const AgentOverview({
     required this.sessions,
     required this.hosts,
+    this.crews,
     this.unreachable = false,
   });
 
@@ -68,11 +69,16 @@ class AgentOverview {
   const AgentOverview.unreachable()
     : sessions = const [],
       hosts = const [],
+      crews = null,
       unreachable = true;
 
   /// Newest first.
   final List<AgentSession> sessions;
   final List<AgentHost> hosts;
+
+  /// In the owner's order; null until they have loaded, or from a server
+  /// before decision 138. Nothing is drawn as a crew while null.
+  final List<Crew>? crews;
   final bool unreachable;
 
   List<AgentSession> get live => [
@@ -80,15 +86,45 @@ class AgentOverview {
       if (!s.ended) s,
   ];
 
+  Set<String> get _resumed => {for (final s in sessions) ?s.resumedFrom};
+
   /// Less any session a later one resumed: that conversation is listed
   /// once, under its latest session.
   List<AgentSession> get ended {
-    final resumed = {for (final s in sessions) ?s.resumedFrom};
+    final resumed = _resumed;
     return [
       for (final s in sessions)
         if (s.ended && !resumed.contains(s.id)) s,
     ];
   }
+
+  /// The crew [s] is drawn in, if any.
+  Crew? crewOf(AgentSession s) {
+    final id = s.crew?.id;
+    return id == null ? null : crews?.where((c) => c.id == id).firstOrNull;
+  }
+
+  /// [crew]'s members in their order, resumed predecessors left out as in
+  /// [ended].
+  List<AgentSession> membersOf(Crew crew) {
+    final resumed = _resumed;
+    return [
+      for (final s in sessions)
+        if (s.crew?.id == crew.id && !(s.ended && resumed.contains(s.id))) s,
+    ]..sort((a, b) => a.crew!.order.compareTo(b.crew!.order));
+  }
+
+  /// Sessions in no crew this overview knows: what RUNNING, ENDED and NOT IN
+  /// A CREW list.
+  List<AgentSession> get looseLive => [
+    for (final s in live)
+      if (crewOf(s) == null) s,
+  ];
+
+  List<AgentSession> get looseEnded => [
+    for (final s in ended)
+      if (crewOf(s) == null) s,
+  ];
 
   List<AgentHost> get online => [
     for (final h in hosts)
@@ -174,10 +210,42 @@ final agentOverviewProvider = FutureProvider.autoDispose<AgentOverview>((
   try {
     // Independent, so together: one round trip, not two, which is the
     // difference that shows over the relay.
-    final (sessions, hosts) = await (api.sessions(), api.hosts()).wait;
-    return AgentOverview(sessions: sessions.reversed.toList(), hosts: hosts);
+    final (sessions, hosts, crews) = await (
+      api.sessions(),
+      api.hosts(),
+      _crewsOrNull(api),
+    ).wait;
+    return AgentOverview(
+      sessions: sessions.reversed.toList(),
+      hosts: hosts,
+      crews: crews,
+    );
   } catch (_) {
     return const AgentOverview.unreachable();
+  } finally {
+    api.dispose();
+  }
+});
+
+/// A server before decision 138 has no crews route; its sessions still show.
+Future<List<Crew>?> _crewsOrNull(AgentApi api) async {
+  try {
+    return (await api.crews())..sort((a, b) => a.order.compareTo(b.order));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Kit's role notes (138e), re-read on the list's tick while something that
+/// offers them is open; null when they cannot be asked for.
+final rolesProvider = FutureProvider.autoDispose<List<RoleNote>?>((ref) async {
+  _refreshEvery(ref, agentRefreshInterval);
+  final api = ref.watch(agentApiFactoryProvider)?.call();
+  if (api == null) return null;
+  try {
+    return await api.roles();
+  } catch (_) {
+    return null;
   } finally {
     api.dispose();
   }

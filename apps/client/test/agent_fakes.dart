@@ -47,6 +47,9 @@ Map<String, dynamic> agentSession(
   String? harnessSession,
   String? resumedFrom,
   String? activity,
+  (String, int)? crew,
+  Map<String, dynamic>? role,
+  Map<String, dynamic>? launchRole,
 }) => {
   'id': id,
   'host_id': hostId,
@@ -72,6 +75,23 @@ Map<String, dynamic> agentSession(
   'activity': ?activity,
   'harness_session': harnessSession,
   'resumed_from': resumedFrom,
+  if (crew != null) 'crew': {'id': crew.$1, 'order': crew.$2},
+  'role': ?role,
+  'launch_role': ?launchRole,
+};
+
+Map<String, dynamic> agentCrew(
+  String id, {
+  String name = 'Gateway release',
+  String color = 'sage',
+  int order = 0,
+}) => {'id': id, 'name': name, 'color': color, 'order': order};
+
+/// A role label or launch role: a Kit note by id, `title` null once deleted.
+Map<String, dynamic> roleRef(String noteId, String? title) => {
+  'vault_id': 'v-kit',
+  'note_id': noteId,
+  'title': title,
 };
 
 class FakeAgentServer {
@@ -82,9 +102,14 @@ class FakeAgentServer {
     this.agentWrites = true,
     this.defaultProvider = 'claude-code',
     this.down = false,
+    List<Map<String, dynamic>>? crews,
+    List<Map<String, dynamic>>? roles,
+    this.crewsSupported = true,
   }) : hosts = hosts ?? [],
        sessions = sessions ?? [],
-       writes = writes ?? {};
+       writes = writes ?? {},
+       crews = crews ?? [],
+       roles = roles ?? [];
 
   final List<Map<String, dynamic>> hosts;
 
@@ -94,6 +119,18 @@ class FakeAgentServer {
   bool agentWrites;
   String defaultProvider;
   bool down;
+
+  /// Decision 138's crews, as `GET /v1/agent/crews` lists them.
+  final List<Map<String, dynamic>> crews;
+
+  /// Kit's role notes (`GET /v1/agent/roles`).
+  final List<Map<String, dynamic>> roles;
+
+  /// False: a server before decision 138, with no crew or role routes.
+  bool crewsSupported;
+
+  /// Refuses the next crew or role change with this status and code.
+  (int, String)? refuseCrewChange;
 
   final requests = <http.Request>[];
 
@@ -161,11 +198,125 @@ class FakeAgentServer {
   http.Response _json(Object body, [int status = 200]) =>
       http.Response(jsonEncode(body), status);
 
+  Map<String, dynamic>? crew(String id) =>
+      crews.where((c) => c['id'] == id).firstOrNull;
+
+  /// The crews the last change emptied, removed as the server would (138c).
+  List<Map<String, dynamic>> _dropEmpty() {
+    final emptied = [
+      for (final c in crews)
+        if (!sessions.any((s) => (s['crew'] as Map?)?['id'] == c['id'])) c,
+    ];
+    crews.removeWhere(emptied.contains);
+    return emptied;
+  }
+
+  Future<http.Response>? _crewRoute(http.Request req) {
+    final path = req.url.path;
+    final seg = req.url.pathSegments;
+    final crewPath = seg.length >= 3 && seg[2] == 'crews';
+    final rolePath = path == '/v1/agent/roles';
+    final sessionLabel =
+        seg.length == 5 &&
+        seg[2] == 'sessions' &&
+        (seg[4] == 'crew' || seg[4] == 'role');
+    if (!crewPath && !rolePath && !sessionLabel) return null;
+    if (!crewsSupported) return Future.value(_json({'error': 'nope'}, 404));
+    if (req.method != 'GET' && refuseCrewChange != null) {
+      final (status, code) = refuseCrewChange!;
+      refuseCrewChange = null;
+      return Future.value(_json({'error': code}, status));
+    }
+    if (rolePath) return Future.value(_json(roles));
+    if (sessionLabel) {
+      final s = session(seg[3]);
+      if (s == null) {
+        return Future.value(_json({'error': 'no such session'}, 404));
+      }
+      if (seg[4] == 'role') {
+        if (req.method == 'DELETE') {
+          s.remove('role');
+        } else {
+          final body = jsonDecode(req.body) as Map<String, dynamic>;
+          final note = roles
+              .where((r) => r['note_id'] == body['note_id'])
+              .firstOrNull;
+          s['role'] = {...body, 'title': note?['title']};
+        }
+        return Future.value(http.Response('', 204));
+      }
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      final to = body['crew_id'] as String?;
+      if (to == null) {
+        s.remove('crew');
+      } else {
+        s['crew'] = {'id': to, 'order': sessions.length};
+      }
+      return Future.value(
+        _json({
+          'crew': to == null ? null : crew(to),
+          'removed_crews': _dropEmpty(),
+        }),
+      );
+    }
+    if (path == '/v1/agent/crews' && req.method == 'GET') {
+      return Future.value(_json(crews));
+    }
+    if (path == '/v1/agent/crews' && req.method == 'POST') {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      final made = agentCrew(
+        'crw_new${crews.length}',
+        name: body['name'] as String,
+        color: body['color'] as String? ?? 'sky',
+        order: crews.length,
+      );
+      crews.add(made);
+      for (final (i, id) in (body['session_ids'] as List? ?? []).indexed) {
+        session(id as String)?['crew'] = {'id': made['id'], 'order': i};
+      }
+      return Future.value(
+        _json({'crew': made, 'removed_crews': _dropEmpty()}, 201),
+      );
+    }
+    if (path == '/v1/agent/crews/order') {
+      final ids = (jsonDecode(req.body) as Map)['ids'] as List;
+      for (final (i, id) in ids.indexed) {
+        crew(id as String)?['order'] = i;
+      }
+      return Future.value(http.Response('', 204));
+    }
+    final c = crew(seg[3]);
+    if (c == null) return Future.value(_json({'error': 'no such crew'}, 404));
+    if (seg.length == 6 && seg[4] == 'members') {
+      final ids = (jsonDecode(req.body) as Map)['ids'] as List;
+      for (final (i, id) in ids.indexed) {
+        session(id as String)?['crew'] = {'id': c['id'], 'order': i};
+      }
+      return Future.value(http.Response('', 204));
+    }
+    if (req.method == 'PATCH') {
+      final body = jsonDecode(req.body) as Map<String, dynamic>;
+      if (body['name'] != null) c['name'] = body['name'];
+      if (body['color'] != null) c['color'] = body['color'];
+      return Future.value(_json(c));
+    }
+    if (req.method == 'DELETE') {
+      crews.remove(c);
+      for (final s in sessions) {
+        if ((s['crew'] as Map?)?['id'] == c['id']) s.remove('crew');
+      }
+      return Future.value(http.Response('', 204));
+    }
+    return Future.value(_json({'error': 'nope'}, 404));
+  }
+
   Future<http.Response> _handle(http.Request req) async {
     requests.add(req);
     if (down) return http.Response('', 503);
     final path = req.url.path;
     final seg = req.url.pathSegments;
+    final crewAnswer = _crewRoute(req);
+    if (crewAnswer != null) return crewAnswer;
     if (path == '/v1/agent/hosts') return _json(hosts);
     if (path == '/v1/config') return _json({'agent_writes': agentWrites});
     if (path == '/v1/config/agent') {
@@ -256,7 +407,9 @@ class FakeAgentServer {
       }
       if (seg.length == 4 && req.method == 'DELETE') {
         sessions.remove(s);
-        return http.Response('', 204);
+        if (!crewsSupported) return http.Response('', 204);
+        final removed = _dropEmpty();
+        return _json({'removed_crew': removed.firstOrNull});
       }
       if (seg.length == 4) return _json(s);
       return http.Response('', 204);

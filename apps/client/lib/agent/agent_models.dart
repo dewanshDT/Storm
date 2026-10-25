@@ -2,6 +2,7 @@
 /// 77d). Field names are the server's; nothing here is invented.
 library;
 
+import '../ui/accents.dart';
 import 'claude_login_api.dart' show claudeCredentialNotice;
 
 /// A provider a host offers.
@@ -297,6 +298,117 @@ class SkippedServer {
   );
 }
 
+/// A crew (decision 138a): a named, coloured group of sessions. A label on
+/// the server; it changes how the Agents page is organised and nothing else.
+class Crew {
+  const Crew({
+    required this.id,
+    required this.name,
+    required this.color,
+    required this.order,
+  });
+
+  final String id;
+  final String name;
+
+  /// A vault palette word; anything else reads as no colour.
+  final String color;
+  final int order;
+
+  Accent get accent => Accent.parse(color);
+
+  factory Crew.fromJson(Map<String, dynamic> j) => Crew(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    color: j['color'] as String? ?? 'none',
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// The crew a session is in and its place there.
+class SessionCrew {
+  const SessionCrew({required this.id, required this.order});
+
+  final String id;
+  final int order;
+
+  factory SessionCrew.fromJson(Map<String, dynamic> j) => SessionCrew(
+    id: j['id'] as String,
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// A Kit note used as a role (138d, 138f), by id. The label's [title] is read
+/// live, so it follows a rename; null once the note is deleted.
+class RoleRef {
+  const RoleRef({required this.vaultId, required this.noteId, this.title});
+
+  final String vaultId;
+  final String noteId;
+  final String? title;
+
+  bool get deleted => title == null;
+
+  bool sameNote(RoleRef? other) =>
+      other != null && other.vaultId == vaultId && other.noteId == noteId;
+
+  factory RoleRef.fromJson(Map<String, dynamic> j) => RoleRef(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String?,
+  );
+}
+
+/// A note the role picker offers (`GET /v1/agent/roles`, 138e).
+class RoleNote {
+  const RoleNote({
+    required this.vaultId,
+    required this.noteId,
+    required this.title,
+    required this.path,
+    required this.folder,
+    this.summary,
+  });
+
+  final String vaultId;
+  final String noteId;
+  final String title;
+  final String path;
+
+  /// `agents` or `projects/<name>/agents`: what the picker groups by.
+  final String folder;
+  final String? summary;
+
+  factory RoleNote.fromJson(Map<String, dynamic> j) => RoleNote(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String? ?? '',
+    path: j['path'] as String? ?? '',
+    folder: j['folder'] as String? ?? 'agents',
+    summary: j['summary'] as String?,
+  );
+}
+
+/// A crew change, with the crews it emptied and so deleted (138c).
+class CrewChange {
+  const CrewChange({this.crew, this.removedCrews = const []});
+
+  final Crew? crew;
+  final List<Crew> removedCrews;
+
+  factory CrewChange.fromJson(Map<String, dynamic>? j) => CrewChange(
+    crew: j?['crew'] is Map<String, dynamic>
+        ? Crew.fromJson(j!['crew'] as Map<String, dynamic>)
+        : null,
+    removedCrews: [
+      for (final c in j?['removed_crews'] as List? ?? const [])
+        if (c is Map<String, dynamic>) Crew.fromJson(c),
+    ],
+  );
+}
+
+Map<String, dynamic>? _map(Object? v) => v is Map<String, dynamic> ? v : null;
+
 class AgentSession {
   AgentSession({
     required this.id,
@@ -326,6 +438,9 @@ class AgentSession {
     this.resumedFrom,
     this.mcpSkipped = const [],
     this.mcpPluginLocal = const [],
+    this.crew,
+    this.role,
+    this.launchRole,
   }) : name = name ?? workspace;
 
   final String id;
@@ -374,6 +489,15 @@ class AgentSession {
   /// Its plugins' local MCP servers, which run on the host outside Storm's
   /// integrations (131a).
   final List<String> mcpPluginLocal;
+
+  /// Its crew, null when loose or from a server before decision 138.
+  final SessionCrew? crew;
+
+  /// Its role label (138d), set by a person; a later change moves only this.
+  final RoleRef? role;
+
+  /// The role note it was launched with, titled as then (138f). Fixed.
+  final RoleRef? launchRole;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -456,6 +580,9 @@ class AgentSession {
           resumedFrom: resumedFrom,
           mcpSkipped: mcpSkipped,
           mcpPluginLocal: mcpPluginLocal,
+          crew: crew,
+          role: role,
+          launchRole: launchRole,
         );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -502,6 +629,13 @@ class AgentSession {
     mcpPluginLocal: [
       for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
     ],
+    crew: _map(j['crew']) == null
+        ? null
+        : SessionCrew.fromJson(_map(j['crew'])!),
+    role: _map(j['role']) == null ? null : RoleRef.fromJson(_map(j['role'])!),
+    launchRole: _map(j['launch_role']) == null
+        ? null
+        : RoleRef.fromJson(_map(j['launch_role'])!),
   );
 }
 

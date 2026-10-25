@@ -6,6 +6,7 @@ import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
+import 'crew_widgets.dart' show RoleTagRow;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -134,10 +135,11 @@ class SessionRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                s.displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              RoleTagRow(
+                name: s.displayName,
+                // The phone list gains roles with its crew sheet (138-5).
+                role: phone ? null : s.role,
+                launchRole: s.launchRole,
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
                   fontSize: phone ? t.uiSize : t.codeSize,
@@ -145,10 +147,9 @@ class SessionRow extends StatelessWidget {
                 ),
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
-              Text(
-                sessionSub(s, host),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              SessionSubLine(
+                session: s,
+                host: host,
                 style: TextStyle(
                   fontFamily: StormTokens.monoFamily,
                   fontSize: t.labelSize,
@@ -195,11 +196,68 @@ class SessionRow extends StatelessWidget {
   }
 }
 
+/// "build-vm · storm · 40m", where only the workspace gives way: the host
+/// and the age are never cut (decision 138l).
+class SessionSubLine extends StatelessWidget {
+  const SessionSubLine({
+    super.key,
+    required this.session,
+    required this.host,
+    required this.style,
+  });
+
+  final AgentSession session;
+  final String host;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final dir = Directionality.of(context);
+    // What the Text below draws with, letter spacing included.
+    final drawn = DefaultTextStyle.of(context).style.merge(style);
+    final ws = session.workspace;
+    final when = sessionWhen(session);
+    return LayoutBuilder(
+      builder: (context, box) {
+        String line(String w) => '$host · $w · $when';
+        bool fits(String text) =>
+            (TextPainter(
+              text: TextSpan(text: text, style: drawn),
+              textDirection: dir,
+              textScaler: scaler,
+              maxLines: 1,
+            )..layout()).width <=
+            box.maxWidth;
+        var text = line(ws);
+        if (box.hasBoundedWidth && !fits(text)) {
+          var lo = 0, hi = ws.length;
+          while (lo < hi) {
+            final mid = (lo + hi + 1) ~/ 2;
+            fits(line('${ws.substring(0, mid)}…')) ? lo = mid : hi = mid - 1;
+          }
+          text = line('${ws.substring(0, lo)}…');
+        }
+        return Text(
+          text,
+          maxLines: 1,
+          softWrap: false,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+      },
+    );
+  }
+}
+
 /// The note a session started from: a file icon and its title, outlined.
 class NoteContextChip extends StatelessWidget {
-  const NoteContextChip({super.key, required this.title});
+  const NoteContextChip({super.key, required this.title, this.maxWidth});
 
   final String title;
+
+  /// The title's room; 160 by default.
+  final double? maxWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -216,7 +274,7 @@ class NoteContextChip extends StatelessWidget {
           Icon(LucideIcons.file, size: t.labelSize, color: t.text2),
           SizedBox(width: t.sp * 0.625),
           ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: t.sp * 20),
+            constraints: BoxConstraints(maxWidth: maxWidth ?? t.sp * 20),
             child: Text(
               title,
               maxLines: 1,

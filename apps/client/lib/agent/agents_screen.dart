@@ -17,6 +17,8 @@ import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'crew_prefs.dart';
+import 'crew_widgets.dart';
 import 'launcher.dart';
 
 /// Agents at `/agents` (handoff §2.7, §2.8).
@@ -638,8 +640,9 @@ class _InfraLine extends ConsumerWidget {
   }
 }
 
-/// The desk overview: work by (workspace, host), the agents you can start,
-/// and the infrastructure line (handoff §2.7).
+/// The desk overview: CREWS, then the sessions in none by (workspace, host),
+/// the agents you can start, and the infrastructure line (handoff §2.7;
+/// crews Round 4 §3). With no crew it is the overview before crews.
 class _Overview extends ConsumerWidget {
   const _Overview({required this.overview});
 
@@ -649,9 +652,11 @@ class _Overview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final o = overview;
+    final crews = o.crews ?? const <Crew>[];
+    final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
     final groups = <(String, String), List<AgentSession>>{};
     for (final s in o.sessions) {
-      (groups[(s.workspace, s.hostId)] ??= []).add(s);
+      if (o.crewOf(s) == null) (groups[(s.workspace, s.hostId)] ??= []).add(s);
     }
 
     return SingleChildScrollView(
@@ -677,8 +682,24 @@ class _Overview extends ConsumerWidget {
                   size: t.uiSize,
                 ),
                 SizedBox(height: t.sp * 3),
-                const AgentsLabel('Work'),
-                SizedBox(height: t.sp * 1.5),
+                if (crews.isNotEmpty) ...[
+                  const AgentsLabel('Crews'),
+                  SizedBox(height: t.sp * 1.5),
+                  for (final c in crews) ...[
+                    CrewCard(
+                      crew: c,
+                      overview: o,
+                      collapsed: prefs.collapsed(c.id),
+                      onOpenSession: (s) => openAgentSession(context, s.id),
+                    ),
+                    SizedBox(height: t.sp * 1.5),
+                  ],
+                  SizedBox(height: t.sp * 1.5),
+                ],
+                if (crews.isEmpty || groups.isNotEmpty) ...[
+                  AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
+                  SizedBox(height: t.sp * 1.5),
+                ],
                 for (final MapEntry(key: (ws, host), value: rows)
                     in groups.entries) ...[
                   _WorkCard(
@@ -801,10 +822,10 @@ class _WorkRow extends StatelessWidget {
                   child: Row(
                     children: [
                       Flexible(
-                        child: Text(
-                          s.displayName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        child: RoleTagRow(
+                          name: s.displayName,
+                          role: s.role,
+                          launchRole: s.launchRole,
                           style: TextStyle(
                             fontFamily: StormTokens.sansFamily,
                             fontSize: t.uiSize,
