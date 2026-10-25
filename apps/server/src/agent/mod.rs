@@ -267,6 +267,11 @@ pub struct Capabilities {
     /// server does not know is never `verified`.
     #[serde(default, deserialize_with = "identity_or_unavailable")]
     pub isolation: Isolation,
+    /// Each listed workspace's canonical directory, so WS-9 can tell two
+    /// names for one directory apart from two directories (137-2). An old
+    /// host does not say, and then any two of its workspaces may be one.
+    #[serde(default)]
+    pub workspace_paths: HashMap<String, String>,
 }
 
 /// A host's session isolation (decision 136j), shaped as [`Identity`] is.
@@ -595,8 +600,9 @@ struct HostLink {
     last_seen: std::time::Instant,
     /// Bumped on every inventory the host reports.
     inventory: watch::Sender<u64>,
-    /// No host reports `isolation` before 136-5: only a test sets this.
-    isolation_verified: bool,
+    /// This link has sent `hello` or an inventory. What it carried over
+    /// from an earlier link says nothing about now, so C0 waits for this.
+    reported: bool,
 }
 
 struct SessionLive {
@@ -749,7 +755,7 @@ impl AgentManager {
                 capabilities,
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
-                isolation_verified: false,
+                reported: false,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -930,6 +936,7 @@ impl AgentManager {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(hello.capabilities);
+            link.reported = true;
         }
         self.record_identity(host_id, &identity);
         self.record_isolation(host_id, &isolation);
@@ -1009,6 +1016,7 @@ impl AgentManager {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(capabilities);
+            link.reported = true;
             link.inventory.send_modify(|v| *v += 1);
         }
         self.record_identity(host_id, &identity);
@@ -1065,26 +1073,25 @@ impl AgentManager {
             .is_some_and(|caps| caps.identity.verified())
     }
 
-    /// Whether the host's link says it isolates its sessions (136, IG-7).
-    /// No host says so yet: `isolation` arrives in `hello` with 136-5, and
-    /// until then this is false on every host.
+    /// Whether the host's link says it isolates its sessions (136j, IG-7):
+    /// `verified` only, fail closed.
     pub fn host_isolated(&self, host_id: &str) -> bool {
-        self.live
-            .lock()
-            .unwrap()
-            .hosts
-            .get(host_id)
-            .is_some_and(|link| link.isolation_verified)
+        self.host_isolation(host_id) == IsolationState::Verified
     }
 
-    /// Test-only: the host's link says `isolation: verified`. There is no
-    /// production path to this.
+    /// Test-only: the host sends an inventory saying `isolation: verified`,
+    /// through the same path a real one takes.
     #[cfg(test)]
     pub fn verify_isolation_for_tests(&self, host_id: &str) {
-        if let Some(link) = self.live.lock().unwrap().hosts.get_mut(host_id) {
-            link.isolation_verified = true;
+        let caps = self.host_live(host_id).capabilities;
+        if let Some(mut caps) = caps {
+            caps.isolation = Isolation {
+                state: IDENTITY_VERIFIED.into(),
+                mechanism: Some("systemd_units".into()),
+                reason: None,
+            };
+            self.inventory(host_id, caps).unwrap();
         }
-        self.reassess_spawn_gate(host_id);
     }
 
     /// C0 (134r): nothing privileged unless the host checks every
@@ -1140,6 +1147,11 @@ impl AgentManager {
                 return Ok(Err(code));
             }
         }
+        let paths = self
+            .host_live(&r.host_id)
+            .capabilities
+            .map(|caps| caps.workspace_paths)
+            .unwrap_or_default();
         // One lock for the WS-9 check and the write, so a launch into the
         // workspace cannot slip between them.
         let mut store = self.store.lock().unwrap();
@@ -1152,6 +1164,7 @@ impl AgentManager {
                 &r.host_id,
                 &r.workspace,
                 store::spawn::Claim::Spawn(session_id),
+                &paths,
             )?
         {
             return Ok(Err("workspace_held"));
@@ -1167,14 +1180,14 @@ impl AgentManager {
 
     /// The host's session isolation (decision 136j) as its live link says
     /// it now. Offline, or never said: `Unavailable`. Only this is what a
-    /// privileged operation may be judged by; never the stored copy.
-    // C0 reads it where the agent-spawning chain (134-2) meets this one.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// privileged operation may be judged by; never the stored copy, nor
+    /// what a new link carried over before it said anything itself.
     pub fn host_isolation(&self, host_id: &str) -> IsolationState {
         let live = self.live.lock().unwrap();
         let state = live
             .hosts
             .get(host_id)
+            .filter(|link| link.reported)
             .and_then(|link| link.capabilities.as_ref())
             .map(|caps| caps.isolation.state.clone());
         match state.as_deref() {
@@ -1613,6 +1626,7 @@ impl AgentManager {
                 &record.host_id,
                 &record.workspace,
                 store::spawn::Claim::Launch,
+                &caps.workspace_paths,
             )? {
                 return Err(AgentError::Conflict("workspace_held".into()));
             }
@@ -2397,6 +2411,10 @@ mod tests {
             agent_install: false,
             identity: Identity::default(),
             isolation: Isolation::default(),
+            workspace_paths: [("storm", "/work/storm"), ("site", "/work/site")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
         }
     }
 

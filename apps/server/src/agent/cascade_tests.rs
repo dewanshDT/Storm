@@ -19,6 +19,7 @@ fn hello(sessions: Vec<ReportedSession>) -> Hello {
     let mut hello: Hello = serde_json::from_value(serde_json::json!({
         "providers": [{"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true}],
         "workspaces": ["storm", "other", "third"],
+        "workspace_paths": {"storm": "/w/storm", "other": "/w/other", "third": "/w/third"},
         "max_sessions": 0,
         "mcp_bridge": true,
         "resume": ["claude-code"],

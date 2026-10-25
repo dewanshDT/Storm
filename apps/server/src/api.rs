@@ -7722,6 +7722,93 @@ pub(crate) mod tests {
         );
     }
 
+    /// C0 where 134 meets 136-5: a host's `hello`, posted to the real route,
+    /// that says identity and isolation are both `verified` opens the spawn
+    /// switch for a session launched after it, whose `start` carries the
+    /// asks. Either alone, or neither, keeps it shut and the start plain.
+    #[tokio::test]
+    async fn c0_opens_only_on_a_hello_saying_identity_and_isolation_verified() {
+        let identity =
+            serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd", "reason": null});
+        let isolation =
+            serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+        let no_identity = serde_json::json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"});
+        let no_isolation = serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"});
+        let cases = [
+            (Some(&identity), Some(&isolation), None),
+            (Some(&identity), None, Some("isolation_unverified")),
+            (
+                Some(&identity),
+                Some(&no_isolation),
+                Some("isolation_unverified"),
+            ),
+            (None, Some(&isolation), Some("identity_unverified")),
+            (
+                Some(&no_identity),
+                Some(&isolation),
+                Some("identity_unverified"),
+            ),
+            (None, None, Some("identity_unverified")),
+        ];
+        for (identity, isolation, refused) in cases {
+            let dir = tempdir::TempDir::new("storm-c0-hello").unwrap();
+            let mut f = gateway_fixture(dir.path()).await;
+            let mut hello = host_caps(true);
+            if let Some(identity) = identity {
+                hello["identity"] = identity.clone();
+            }
+            if let Some(isolation) = isolation {
+                hello["isolation"] = isolation.clone();
+            }
+            hello["sessions"] = serde_json::json!([]);
+            let (code, _) = send(
+                &f.app,
+                post_json_with_auth("/v1/runtime/hello", hello, &f.host_bearer),
+            )
+            .await;
+            assert!(code.is_success(), "{code}");
+            f.sent();
+            let session = f.launch("claude-code", false).await["id"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let sent = f.sent();
+            let start = sent
+                .iter()
+                .find(|m| m["type"] == "start")
+                .unwrap_or_else(|| panic!("{sent:?}"));
+            assert_eq!(
+                start.get("spawn_asks").is_some(),
+                refused.is_none(),
+                "{refused:?} {start}"
+            );
+            f.initialize(&session, "storm").await;
+            let (status, body) = f.spawn(&session, true).await;
+            match refused {
+                None => {
+                    assert_eq!(status, StatusCode::OK, "{body}");
+                    assert_eq!(body["enabled"], true);
+                    assert!(
+                        f.storm_tools(&session)
+                            .await
+                            .iter()
+                            .any(|t| t == "list_agents")
+                    );
+                }
+                Some(code) => {
+                    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+                    assert_eq!(body["error"], code);
+                    assert!(
+                        !f.storm_tools(&session)
+                            .await
+                            .iter()
+                            .any(|t| t == "list_agents")
+                    );
+                }
+            }
+        }
+    }
+
     /// 135a: a connection the host refused is a security event on the
     /// session it named, and only the session's own host may say so.
     #[tokio::test]

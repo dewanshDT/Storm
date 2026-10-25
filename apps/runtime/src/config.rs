@@ -442,6 +442,20 @@ pub fn list_workspaces(roots: &[PathBuf]) -> Vec<String> {
     names
 }
 
+/// Each listed workspace's canonical directory, as a session would start in
+/// it, so the server's WS-9 check (137-2) sees two names for one directory
+/// (overlapping roots) as one. A name that no longer resolves is left out,
+/// which the server reads as possibly any workspace.
+pub fn workspace_paths(roots: &[PathBuf]) -> HashMap<String, String> {
+    list_workspaces(roots)
+        .into_iter()
+        .filter_map(|name| {
+            let dir = resolve_workspace(roots, &name)?;
+            Some((name, dir.display().to_string()))
+        })
+        .collect()
+}
+
 /// Resolves a workspace name to its directory, **inside a root only**: a name
 /// is never a path, and a symlink that leads out of the root is refused.
 pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
@@ -492,6 +506,26 @@ mod tests {
         let listed = list_workspaces(&roots);
         assert!(listed.contains(&"storm".to_string()));
         assert!(!listed.contains(&".hidden".to_string()));
+    }
+
+    /// 137-2: a root inside another lists one directory under two names;
+    /// their reported directories are what tells the server so.
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_roots_report_one_directory_for_both_names() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outer.path().join("storm/site")).unwrap();
+        std::fs::create_dir(outer.path().join("other")).unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outer.path(), linked.path().join("root")).unwrap();
+        // The same root through a symlink first, then a root inside it.
+        let roots = vec![linked.path().join("root"), outer.path().join("storm")];
+        let paths = workspace_paths(&roots);
+        let real = outer.path().canonicalize().unwrap();
+        assert_eq!(paths["storm"], real.join("storm").display().to_string());
+        assert_eq!(paths["site"], real.join("storm/site").display().to_string());
+        assert_eq!(paths["other"], real.join("other").display().to_string());
+        assert_eq!(paths.len(), list_workspaces(&roots).len());
     }
 
     /// A scratch directory a workspace root may be in: on Windows, the

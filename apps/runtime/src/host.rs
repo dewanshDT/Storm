@@ -41,7 +41,7 @@ use tokio::sync::{Notify, RwLock, watch};
 
 use crate::cli::DEFAULT_GRACE;
 use crate::client::{Refused, ServerClient};
-use crate::config::{RuntimeConfig, list_workspaces, resolve_workspace};
+use crate::config::{RuntimeConfig, list_workspaces, resolve_workspace, workspace_paths};
 use crate::identity::{HostConfig, HostKey};
 use crate::provider::{
     Availability, Interaction, InteractionSpec, Provider, ProviderSession, SessionEvents,
@@ -508,6 +508,7 @@ impl Host {
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
+            "workspace_paths": workspace_paths(&self.config.workspace_roots),
             // Where a workspace goes, so an empty host can say where to put
             // one.
             "workspace_roots": self
@@ -980,6 +981,13 @@ impl Host {
                     .await;
             }
         }
+    }
+
+    /// Whether a spawn session's CLI may skip the prompt for 134's read and
+    /// report tools (A6): only on a host that checks every connection's
+    /// identity and has passed its isolation self-test.
+    fn spawn_exempt(&self) -> bool {
+        self.peer_identity.verified() && self.isolation_status.verified()
     }
 
     /// On an isolated host, whether a session may start (136j): only once
@@ -1540,11 +1548,12 @@ impl Host {
             taken: &taken,
         };
         // Only where the session reaches Storm's own tools; the exemptions
-        // only while this host's identity is verified (A6).
+        // only while this host's identity is verified and its isolation
+        // self-test has passed (A6, C0).
         let spawn = spawn_asks
             .filter(|_| mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION))
             .map(|s| crate::mcp::SpawnAsks {
-                exempt: self.peer_identity.verified(),
+                exempt: self.spawn_exempt(),
                 spawned: s.spawned,
             });
         let opencode_account = match spawn {
@@ -5422,8 +5431,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             })
             .await;
         }
+        // Isolation is off here, so no exemption, whatever the identity.
         let asks = crate::mcp::SpawnAsks {
-            exempt: host.peer_identity.verified(),
+            exempt: false,
             spawned: true,
         };
         assert_eq!(
@@ -5432,6 +5442,45 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         );
         assert!(settings("ags_NOSTORM").get("permissions").is_none());
         assert!(settings("ags_PLAIN").get("permissions").is_none());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 137-2: the inventory names each workspace's canonical directory.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn the_inventory_names_each_workspaces_directory() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let caps = host.capabilities();
+        let names = caps["workspaces"].as_array().unwrap();
+        assert!(!names.is_empty());
+        for name in names {
+            let name = name.as_str().unwrap();
+            let real = roots.path().join(name).canonicalize().unwrap();
+            assert_eq!(caps["workspace_paths"][name], real.display().to_string());
+        }
+        assert_eq!(
+            caps["workspace_paths"].as_object().unwrap().len(),
+            names.len()
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-8 on the integration branch: A6's exemptions need the host's
+    /// identity verified **and** its isolation self-test passed; either
+    /// alone writes only the asks.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn the_exemptions_need_identity_and_isolation_both() {
+        let (host, _seen, _state, _roots) = synced_host(&[]).await;
+        assert!(host.peer_identity.verified());
+        assert!(!host.isolation_status.verified());
+        assert!(!host.spawn_exempt(), "identity alone");
+        host.isolation_status.settle(Ok(()));
+        assert!(host.spawn_exempt());
+        host.peer_identity.downgrade("ptrace_scope");
+        assert!(!host.spawn_exempt(), "isolation alone");
+        host.isolation_status.settle(Err("self_test"));
+        assert!(!host.spawn_exempt());
         host.shutdown(Duration::from_millis(200)).await;
     }
 

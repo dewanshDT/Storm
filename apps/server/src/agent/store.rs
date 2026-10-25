@@ -1435,8 +1435,23 @@ pub mod spawn {
         Spawn(&'a str),
     }
 
-    /// The same directory, or one inside the other. The host reports
-    /// workspaces as it found them, so only separators are normalized here.
+    /// Whether two of a host's workspaces may share files (WS-9, 137-2): by
+    /// the canonical directories the host reports for both, and otherwise
+    /// yes, since two names can be one directory (a symlinked or nested
+    /// root) and nothing here can rule it out.
+    pub fn shares_workspace(
+        a: &str,
+        b: &str,
+        paths: &std::collections::HashMap<String, String>,
+    ) -> bool {
+        match (paths.get(a), paths.get(b)) {
+            (Some(a), Some(b)) => same_workspace(a, b),
+            _ => true,
+        }
+    }
+
+    /// The same directory, or one inside the other. Only separators are
+    /// normalized: the paths are the host's own canonical ones.
     pub fn same_workspace(a: &str, b: &str) -> bool {
         let sep = |c: char| c == '/' || c == '\\';
         let (a, b) = (a.trim_end_matches(sep), b.trim_end_matches(sep));
@@ -1768,9 +1783,10 @@ pub mod spawn {
             host_id: &str,
             workspace: &str,
             claim: Claim<'_>,
+            paths: &std::collections::HashMap<String, String>,
         ) -> Result<bool> {
             for r in self.for_host(host_id)? {
-                if r.is_ended() || !same_workspace(&r.workspace, workspace) {
+                if r.is_ended() || !shares_workspace(&r.workspace, workspace, paths) {
                     continue;
                 }
                 let held = match claim {

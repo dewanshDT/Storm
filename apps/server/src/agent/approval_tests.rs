@@ -16,7 +16,19 @@ use super::{AgentManager, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
 const UNAVAILABLE: &str = r#"{"state": "unavailable", "reason": "self_test"}"#;
 
+/// A host isolating its sessions, with `identity` as given.
 fn caps(identity: &str, max_sessions: u32) -> Hello {
+    let mut hello = unisolated(identity, max_sessions);
+    hello.capabilities.isolation = crate::agent::Isolation {
+        state: "verified".into(),
+        mechanism: Some("systemd_units".into()),
+        reason: None,
+    };
+    hello
+}
+
+/// A host that does not say it isolates its sessions.
+fn unisolated(identity: &str, max_sessions: u32) -> Hello {
     let providers: Vec<_> = ["claude-code", "opencode", "shell"]
         .iter()
         .map(|id| serde_json::json!({"id": id, "kind": "cli", "interactions": ["terminal"], "available": true}))
@@ -24,6 +36,13 @@ fn caps(identity: &str, max_sessions: u32) -> Hello {
     serde_json::from_value(serde_json::json!({
         "providers": providers,
         "workspaces": ["storm", "other"],
+        // The test children's own directories too: WS-9 counts a workspace
+        // with no reported directory as shared with every other.
+        "workspace_paths": {
+            "storm": "/w/storm", "other": "/w/other",
+            "children/ags_C1": "/c/ags_C1", "children/ags_C2": "/c/ags_C2",
+            "children/ags_G1": "/c/ags_G1", "children/ags_G2": "/c/ags_G2",
+        },
         "max_sessions": max_sessions,
         "mcp_bridge": true,
         "identity": serde_json::from_str::<serde_json::Value>(identity).unwrap(),
@@ -37,13 +56,12 @@ struct Fixture {
     link: UnboundedReceiver<Envelope>,
 }
 
-/// A host whose identity is verified and, by the test-only hook, isolated.
+/// A host whose hello says its identity is verified and it is isolated.
 fn fixture(max_sessions: u32) -> Fixture {
     let dir = tempdir::TempDir::new("storm-approval").unwrap();
     let m = AgentManager::open(dir.path()).unwrap();
     let (_, link) = m.connect_host("hst_A");
     m.hello("hst_A", caps(VERIFIED, max_sessions)).unwrap();
-    m.verify_isolation_for_tests("hst_A");
     Fixture { m, _dir: dir, link }
 }
 
@@ -657,13 +675,18 @@ fn approval_rechecks_current_state() {
         ),
         (
             |f, _, _| {
+                // Between the request and its approval, with no reassessment:
+                // the approval's own re-check must see it.
                 f.m.live
                     .lock()
                     .unwrap()
                     .hosts
                     .get_mut("hst_A")
                     .unwrap()
-                    .isolation_verified = false;
+                    .capabilities
+                    .as_mut()
+                    .unwrap()
+                    .isolation = crate::agent::Isolation::unavailable("helper");
             },
             "isolation_unverified",
         ),
@@ -943,7 +966,7 @@ fn p4_a_host_downgrade_refuses_pending_requests_and_tells_spawning_agents() {
     f.m.lose_isolation_for_tests("hst_A");
     assert_eq!(outcome(&f.stored(&r3.id)), ("pending", None, None));
     let (_, mut link) = f.m.connect_host("hst_A");
-    let mut hello = caps(VERIFIED, 16);
+    let mut hello = unisolated(VERIFIED, 16);
     hello.sessions =
         vec![serde_json::from_value(serde_json::json!({"id": p.id, "status": "running"})).unwrap()];
     f.m.hello("hst_A", hello).unwrap();

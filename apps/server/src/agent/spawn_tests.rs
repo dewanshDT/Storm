@@ -815,10 +815,14 @@ fn the_oldest_database_reaches_134() {
 
 // ---- 134-2: the spawn switch ------------------------------------------------
 
-use super::store::spawn::{Claim, same_workspace};
+use super::store::spawn::{Claim, same_workspace, shares_workspace};
 use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
+
+fn isolated() -> serde_json::Value {
+    serde_json::json!({"isolation": {"state": "verified", "mechanism": "systemd_units", "reason": null}})
+}
 
 fn hello(identity: Option<&str>) -> Hello {
     hello_with(identity, serde_json::json!({}))
@@ -832,6 +836,7 @@ fn hello_with(identity: Option<&str>, extra: serde_json::Value) -> Hello {
     let mut caps = serde_json::json!({
         "providers": providers,
         "workspaces": ["storm", "storm/site", "other"],
+        "workspace_paths": {"storm": "/w/storm", "storm/site": "/w/storm/site", "other": "/w/other"},
         "max_sessions": 16,
         "mcp_bridge": true,
         "resume": ["claude-code"],
@@ -918,19 +923,91 @@ fn c0_refuses_an_old_host_and_unverified_identity_or_isolation() {
         assert_eq!(refusal(&m, &s.id, true), "identity_unverified", "{state}");
     }
 
-    // Verified identity, isolation absent: every host today. A host saying
-    // it is isolated is not believed before 136-5 reads it.
+    // Verified identity, isolation absent (an old host), or anything but
+    // exactly `verified`.
     let (m, _d, _rx) = host(Some(VERIFIED));
     let s = start(&m, "storm", "claude-code", None).unwrap();
     assert_eq!(refusal(&m, &s.id, true), "isolation_unverified");
-    let claims = hello_with(
-        Some(VERIFIED),
-        serde_json::json!({"isolation": {"state": "verified", "mechanism": "units"}}),
-    );
-    m.inventory("hst_A", claims.capabilities).unwrap();
-    assert_eq!(refusal(&m, &s.id, true), "isolation_unverified");
+    for isolation in [
+        serde_json::json!(null),
+        serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"}),
+        serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "off"}),
+        serde_json::json!({"state": "unsupported", "mechanism": null, "reason": "windows"}),
+        serde_json::json!({"state": "VERIFIED", "mechanism": "systemd_units"}),
+        serde_json::json!({"state": "isolated", "mechanism": "systemd_units"}),
+        serde_json::json!({"mechanism": "systemd_units"}),
+        serde_json::json!(true),
+    ] {
+        let claims = hello_with(
+            Some(VERIFIED),
+            serde_json::json!({ "isolation": isolation }),
+        );
+        m.inventory("hst_A", claims.capabilities).unwrap();
+        assert_eq!(
+            refusal(&m, &s.id, true),
+            "isolation_unverified",
+            "{isolation}"
+        );
+        assert_eq!(m.spawn_gate("hst_A"), Err("isolation_unverified"));
+    }
+    // Isolation verified without identity is no better.
+    let (m, _d, _rx) = host(None);
+    m.inventory("hst_A", hello_with(None, isolated()).capabilities)
+        .unwrap();
+    assert_eq!(m.host_isolation("hst_A"), super::IsolationState::Verified);
+    assert_eq!(m.spawn_gate("hst_A"), Err("identity_unverified"));
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
     assert!(!m.spawn_enabled(&s.id).unwrap(), "a refusal writes nothing");
     assert!(!m.spawn_offered(&s.id));
+}
+
+/// The integration of 134 with 136-5: a host whose `hello` says identity
+/// and isolation are both verified, parsed as the route parses it, opens
+/// C0; the session it is judged for is one launched once it held.
+#[test]
+fn a_verified_isolation_report_opens_c0() {
+    let (m, _d, _rx) = host(Some(VERIFIED));
+    let before = start(&m, "storm", "claude-code", None).unwrap();
+    let hello: Hello = serde_json::from_str(
+        r#"{"providers": [{"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true}],
+            "workspaces": ["storm", "other"], "workspace_paths": {"storm": "/w/storm", "other": "/w/other"},
+            "max_sessions": 16, "mcp_bridge": true,
+            "identity": {"state": "verified", "mechanism": "so_peerpidfd", "reason": null},
+            "isolation": {"state": "verified", "mechanism": "systemd_units", "reason": null},
+            "sessions": [{"id": "BEFORE", "status": "running"}], "last_cmd_seq": 0}"#
+            .replace("BEFORE", &before.id)
+            .as_str(),
+    )
+    .unwrap();
+    m.hello("hst_A", hello).unwrap();
+    assert_eq!(m.spawn_gate("hst_A"), Ok(()));
+    // Its CLI was configured before C0 held, so it never gets the tools.
+    assert_eq!(refusal(&m, &before.id, true), "launched_without_asks");
+    report(&m, &before.id, "completed", None);
+    let s = start(&m, "storm", "claude-code", None).unwrap();
+    m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
+    assert!(m.spawn_offered(&s.id));
+
+    // A downgrade in the inventory shuts it at once; a new report reopens it.
+    let down = serde_json::json!({"isolation":
+        {"state": "unavailable", "mechanism": "systemd_units", "reason": "no_passt"}});
+    m.inventory("hst_A", hello_with(Some(VERIFIED), down).capabilities)
+        .unwrap();
+    assert!(!m.spawn_offered(&s.id));
+    assert_eq!(m.spawn_gate("hst_A"), Err("isolation_unverified"));
+    m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
+        .unwrap();
+    assert!(m.spawn_offered(&s.id));
+
+    // A new link carries the last report over, but has said nothing yet.
+    let (_generation, _rx2) = m.connect_host("hst_A");
+    assert_eq!(m.spawn_gate("hst_A"), Err("isolation_unverified"));
+    assert!(!m.spawn_offered(&s.id));
+    // Its own inventory counts as its word.
+    m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
+        .unwrap();
+    assert!(m.spawn_offered(&s.id));
 }
 
 #[test]
@@ -949,7 +1026,7 @@ fn c0_holds_only_while_the_live_link_says_so() {
     .unwrap();
     assert!(!m.spawn_offered(&s.id));
     assert!(m.spawn_enabled(&s.id).unwrap());
-    m.inventory("hst_A", hello(Some(VERIFIED)).capabilities)
+    m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
         .unwrap();
     assert!(m.spawn_offered(&s.id));
 
@@ -1083,7 +1160,7 @@ fn ws9_a_spawning_session_holds_its_workspace_alone() {
         m.store
             .lock()
             .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch)
+            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
             .unwrap()
     );
     m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
@@ -1091,9 +1168,90 @@ fn ws9_a_spawning_session_holds_its_workspace_alone() {
         !m.store
             .lock()
             .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch)
+            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
             .unwrap()
     );
+}
+
+fn paths(m: &AgentManager) -> std::collections::HashMap<String, String> {
+    m.host_live("hst_A").capabilities.unwrap().workspace_paths
+}
+
+/// WT-8 (137-2): WS-9 both ways, judged by the directories the host
+/// reports. Two names for one directory, or one inside the other, are one
+/// workspace; a name the host gives no directory for may be any of them.
+#[test]
+fn wt8_a_shared_workspace_refuses_launch_and_spawn_both_ways() {
+    let (m, _d, _rx) = host(Some(VERIFIED));
+    let layout = |paths: serde_json::Value| {
+        let mut extra = isolated();
+        extra["workspaces"] = serde_json::json!(["storm", "alias", "site", "other", "bare"]);
+        extra["workspace_paths"] = paths;
+        hello_with(Some(VERIFIED), extra).capabilities
+    };
+    let paths = serde_json::json!({
+        "storm": "/w/storm", "alias": "/w/storm/", "site": "/w/storm/site", "other": "/w/other",
+    });
+    m.inventory("hst_A", layout(paths.clone())).unwrap();
+    let held = |r: Result<SessionRecord, AgentError>| matches!(r, Err(AgentError::Conflict(ref c)) if c == "workspace_held");
+
+    for beside in ["storm", "alias", "site", "bare"] {
+        // Spawn on, then a launch beside it.
+        let a = start(&m, "storm", "claude-code", None).unwrap();
+        m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
+        assert!(held(start(&m, beside, "claude-code", None)), "{beside}");
+        assert!(!held(start(&m, "other", "shell", None)), "{beside}");
+        report(&m, &a.id, "completed", None);
+        // A live session beside it, then spawn on.
+        let b = start(&m, beside, "claude-code", None).unwrap();
+        let a = start(&m, "storm", "claude-code", None).unwrap();
+        assert_eq!(refusal(&m, &a.id, true), "workspace_held", "{beside}");
+        report(&m, &b.id, "completed", None);
+        m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
+        report(&m, &a.id, "completed", None);
+    }
+    let live: Vec<_> = m.store.lock().unwrap().for_host("hst_A").unwrap();
+    for r in live.into_iter().filter(|r| !r.is_ended()) {
+        report(&m, &r.id, "completed", None);
+    }
+
+    // A host that reports no directories: every pair may be one.
+    m.inventory("hst_A", layout(serde_json::json!({}))).unwrap();
+    let a = start(&m, "storm", "claude-code", None).unwrap();
+    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
+    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
+    report(&m, &elsewhere.id, "completed", None);
+    m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
+    assert!(held(start(&m, "other", "claude-code", None)));
+    // Once it does, the two are apart.
+    m.inventory("hst_A", layout(paths)).unwrap();
+    assert!(!held(start(&m, "other", "claude-code", None)));
+}
+
+#[test]
+fn workspaces_are_shared_by_their_directories_or_when_unknown() {
+    let paths: std::collections::HashMap<String, String> = [
+        ("storm", "/w/storm"),
+        ("alias", "/w/storm"),
+        ("site", "/w/storm/site"),
+        ("other", "/w/other"),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.into(), v.into()))
+    .collect();
+    for (a, b) in [
+        ("storm", "storm"),
+        ("storm", "alias"),
+        ("site", "storm"),
+        ("storm", "site"),
+        ("storm", "gone"),
+        ("gone", "other"),
+    ] {
+        assert!(shares_workspace(a, b, &paths), "{a} {b}");
+    }
+    assert!(!shares_workspace("storm", "other", &paths));
+    assert!(!shares_workspace("site", "other", &paths));
+    assert!(shares_workspace("storm", "other", &Default::default()));
 }
 
 #[test]

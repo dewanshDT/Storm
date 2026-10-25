@@ -252,11 +252,13 @@ impl AgentManager {
         self.store.lock().unwrap().insert_request(r).unwrap();
     }
 
+    /// Test-only: the host's inventory says its isolation dropped, as a
+    /// helper that stops answering makes it say (136j).
     #[cfg(test)]
     pub fn lose_isolation_for_tests(&self, host_id: &str) {
-        if let Some(link) = self.live.lock().unwrap().hosts.get_mut(host_id) {
-            link.isolation_verified = false;
+        if let Some(mut caps) = self.host_live(host_id).capabilities {
+            caps.isolation = super::Isolation::unavailable("helper");
+            self.inventory(host_id, caps).unwrap();
         }
-        self.reassess_spawn_gate(host_id);
     }
 }

@@ -625,7 +625,15 @@ Specification*; the slices are decisions 81 and 81a onward):
   appends it after the account's keys, at the top level and in every agent
   the account or `runtime.toml` defines; exemptions only where the account
   names no such key. Exemptions only on a host whose own identity is
-  verified. Codex: nothing new, every Storm tool already prompts.
+  verified and whose isolation self-test has passed. Codex: nothing new,
+  every Storm tool already prompts.
+- **C0 is the live link's word, both halves** (134r): `spawn_gate` needs
+  `identity` and `isolation` exactly `verified` in what the host's current
+  link has itself sent (`hello` or an inventory; a new link's carried-over
+  copy does not count), and `reassess_spawn_gate` runs after every one.
+  **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
+  names for one directory, or one inside the other, are one workspace, and
+  a name the host gives no directory for is shared with every other.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets

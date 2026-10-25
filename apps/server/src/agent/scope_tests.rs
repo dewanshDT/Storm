@@ -24,6 +24,7 @@ fn fixture() -> Fixture {
     let hello: Hello = serde_json::from_value(serde_json::json!({
         "providers": [{"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true}],
         "workspaces": ["storm", "other"],
+        "workspace_paths": {"storm": "/w/storm", "other": "/w/other"},
         "max_sessions": 0,
         "mcp_bridge": true,
         "identity": serde_json::from_str::<serde_json::Value>(VERIFIED).unwrap(),
