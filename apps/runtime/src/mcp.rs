@@ -289,50 +289,66 @@ pub fn opencode_account_in(dirs: &[PathBuf], extra: Option<PathBuf>) -> Result<O
     Ok(account)
 }
 
-/// JSONC as OpenCode reads it: comments and trailing commas dropped.
+/// JSONC as OpenCode reads it: each comment becomes a space, so no two
+/// tokens join, then a comma before a `}` or `]` is dropped.
 fn strip_jsonc(s: &str) -> String {
     let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
+    let mut bare = Vec::with_capacity(b.len());
     let mut i = 0;
-    let mut in_str = false;
     while i < b.len() {
-        let c = b[i];
-        if in_str {
-            out.push(c);
-            if c == b'\\' && i + 1 < b.len() {
-                out.push(b[i + 1]);
-                i += 1;
-            } else if c == b'"' {
-                in_str = false;
-            }
-            i += 1;
-        } else if c == b'"' {
-            in_str = true;
-            out.push(c);
-            i += 1;
+        if b[i] == b'"' {
+            let end = string_end(b, i);
+            bare.extend_from_slice(&b[i..end]);
+            i = end;
         } else if b[i..].starts_with(b"//") {
             while i < b.len() && b[i] != b'\n' {
                 i += 1;
             }
+            bare.push(b' ');
         } else if b[i..].starts_with(b"/*") {
-            i += 2;
-            while i < b.len() && !b[i..].starts_with(b"*/") {
-                i += 1;
-            }
-            i += 2;
-        } else if c == b','
-            && b[i + 1..]
-                .iter()
-                .find(|x| !x.is_ascii_whitespace())
-                .is_some_and(|x| *x == b'}' || *x == b']')
-        {
-            i += 1;
+            i = b[i + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(b.len(), |at| i + 2 + at + 2);
+            bare.push(b' ');
         } else {
-            out.push(c);
+            bare.push(b[i]);
             i += 1;
         }
     }
+    let mut out = Vec::with_capacity(bare.len());
+    let mut i = 0;
+    while i < bare.len() {
+        if bare[i] == b'"' {
+            let end = string_end(&bare, i);
+            out.extend_from_slice(&bare[i..end]);
+            i = end;
+            continue;
+        }
+        let trailing = bare[i] == b','
+            && bare[i + 1..]
+                .iter()
+                .find(|x| !x.is_ascii_whitespace())
+                .is_some_and(|x| *x == b'}' || *x == b']');
+        if !trailing {
+            out.push(bare[i]);
+        }
+        i += 1;
+    }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Just past the string that opens at `start`, or the end of `b`.
+fn string_end(b: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    b.len()
 }
 
 /// OpenCode's own wildcard match (`Wildcard.match`): `*` is any run, `?` any

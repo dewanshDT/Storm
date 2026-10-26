@@ -573,6 +573,60 @@ fn jsonc_comments_and_trailing_commas_are_dropped_but_strings_kept() {
     );
 }
 
+fn jsonc(s: &str) -> serde_json::Result<Value> {
+    serde_json::from_str(&strip_jsonc(s))
+}
+
+#[test]
+fn a_trailing_comma_before_a_comment_is_dropped() {
+    assert_eq!(jsonc("{\"a\":1, // c\n}").unwrap(), json!({"a": 1}));
+    assert_eq!(jsonc("[1, /* c */]").unwrap(), json!([1]));
+    assert_eq!(
+        jsonc("{\"a\":1,/*x*/ /*y*/\n// z\n}").unwrap(),
+        json!({"a": 1})
+    );
+}
+
+#[test]
+fn jsonc_strings_are_kept_as_they_are() {
+    let v = jsonc(r#"{"a": ",}", "b": "//", "c": "/*", "d": "\"//", "e": ",]",}"#).unwrap();
+    assert_eq!(
+        v,
+        json!({"a": ",}", "b": "//", "c": "/*", "d": "\"//", "e": ",]"})
+    );
+}
+
+#[test]
+fn a_quote_inside_a_comment_is_not_a_string() {
+    assert_eq!(
+        jsonc("{\"a\": 1, // say \"hi\n \"b\": /* \" */ 2}").unwrap(),
+        json!({"a": 1, "b": 2})
+    );
+}
+
+#[test]
+fn a_comment_never_joins_two_tokens() {
+    assert!(jsonc("1/**/2").is_err());
+    assert!(jsonc("[1/**/2]").is_err());
+}
+
+#[test]
+fn an_opencode_config_ending_in_a_commented_out_entry_is_read() {
+    let t = tempfile::tempdir().unwrap();
+    let global = t.path().join("opencode");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(
+        global.join("opencode.jsonc"),
+        "{\n  \"agent\": {\n    \"review\": {},\n    \"build\": {},\n    // \"old\": {},\n  },\n}\n",
+    )
+    .unwrap();
+    let a = opencode_account_in(std::slice::from_ref(&global), None).unwrap();
+    assert_eq!(
+        a.agents.iter().map(String::as_str).collect::<Vec<_>>(),
+        ["build", "review"]
+    );
+}
+
 /// The host learns no tool names from the server (C0 keeps them unlisted),
 /// so its pinned lists must be the server's: every one of decision 134's
 /// tools is either pinned or exempt, and no other.

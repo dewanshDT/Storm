@@ -94,6 +94,12 @@ fn spawn_isolated(
     let session = launch.tag.as_str();
     let (master, slave) = open(size)?;
     let (user, uid) = link.lease(session)?;
+    let lease = LeaseGuard {
+        link,
+        session,
+        user,
+        armed: true,
+    };
     // A self-test probe works in its own home, which this account cannot
     // look into; a session's workspace is checked as it resolves.
     let workspace = if isolated.provider == crate::isolation::PROBE {
@@ -103,7 +109,7 @@ fn spawn_isolated(
     };
     let mut child_workspace = None;
     let started = (|| -> io::Result<(i32, Option<OwnedFd>)> {
-        link.prepare(session, &user)?;
+        link.prepare(session, &lease.user)?;
         // A spawned child's own workspace is made now (WS-4), from its
         // parent's; the helper starts the child in it.
         if let Some(parent) = &launch.child_of {
@@ -119,7 +125,7 @@ fn spawn_isolated(
         let result = written.and_then(|()| {
             link.start(
                 session,
-                &user,
+                &lease.user,
                 &isolated.provider,
                 &workspace,
                 slave.as_fd(),
@@ -130,15 +136,7 @@ fn spawn_isolated(
         result
     })();
     drop(slave);
-    let (pid, pidfd) = match started {
-        Ok(started) => started,
-        Err(e) => {
-            if let Err(release) = link.release(session, &user) {
-                tracing::warn!(session, error = %release, "isolation: could not release a lease after a failed start");
-            }
-            return Err(e);
-        }
-    };
+    let (pid, pidfd) = started?;
     rustix::fs::fcntl_setfl(
         &master,
         rustix::fs::fcntl_getfl(&master)? | OFlags::NONBLOCK,
@@ -150,6 +148,8 @@ fn spawn_isolated(
         )),
         None => None,
     };
+    let output = File::from(master.try_clone()?);
+    let user = lease.disarm();
     let unit = std::sync::Arc::new(Unit {
         link: link.clone(),
         session: session.to_string(),
@@ -159,7 +159,7 @@ fn spawn_isolated(
     });
     Ok(Spawned {
         child: Child(ChildKind::Unit(unit.clone())),
-        output: Output(File::from(master.try_clone()?)),
+        output: Output(output),
         input: Input {
             writer: File::from(master),
         },
@@ -218,6 +218,35 @@ fn write_launch(path: &std::path::Path, launch: &Launch) -> io::Result<()> {
     f.write_all(body.as_bytes())
 }
 
+/// A lease given back if the launch fails before its [`Unit`] exists. The
+/// helper's `release` also stops a unit already started.
+#[cfg(target_os = "linux")]
+struct LeaseGuard<'a> {
+    link: &'a crate::isolation::Link,
+    session: &'a str,
+    user: String,
+    armed: bool,
+}
+
+#[cfg(target_os = "linux")]
+impl LeaseGuard<'_> {
+    fn disarm(mut self) -> String {
+        self.armed = false;
+        std::mem::take(&mut self.user)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for LeaseGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed
+            && let Err(e) = self.link.release(self.session, &self.user)
+        {
+            tracing::warn!(session = self.session, error = %e, "isolation: could not release a lease after a failed start");
+        }
+    }
+}
+
 /// A session the helper started, shared by its child and its group.
 #[cfg(target_os = "linux")]
 pub(crate) struct Unit {
@@ -252,11 +281,12 @@ impl Unit {
                 }
             }
         }
-        let (code, signal) = self.link.end(&self.session)?;
-        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        let ended = self.link.end(&self.session);
         if let Err(e) = self.link.release(&self.session, &self.user) {
             tracing::warn!(session = %self.session, error = %e, "isolation: the lease was not released");
         }
+        self.ended.store(true, std::sync::atomic::Ordering::SeqCst);
+        let (code, signal) = ended?;
         Ok(Exit { code, signal })
     }
 }
@@ -612,5 +642,50 @@ mod tests {
             code: "workspace_cap".into(),
         });
         assert_eq!(crate::isolation::child_failure(&other), None);
+    }
+
+    /// F7: a workspace that vanished before the launch still gives the
+    /// lease back.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_launch_whose_workspace_is_gone_gives_its_lease_back() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let gone = ws.path().join("gone");
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), "/bin/true");
+        let mut launch = child_launch(&gone, helper.link(state.path()));
+        launch.child_of = None;
+        assert!(spawn(&launch, TerminalSize::new(80, 24).unwrap()).is_err());
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            ["lease ags_CHILD", "release ags_CHILD"]
+        );
+    }
+
+    /// F7: an `end` the helper refuses is reported, and the lease is still
+    /// released.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn an_end_the_helper_refuses_still_releases() {
+        let state = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), "/bin/true");
+        helper.seen.lock().unwrap().end_refusal = Some("failed".into());
+        let mut launch = child_launch(ws.path(), helper.link(state.path()));
+        launch.child_of = None;
+        let spawned = spawn(&launch, TerminalSize::new(80, 24).unwrap()).unwrap();
+        let group = spawned.group;
+        assert!(spawned.child.wait().is_err());
+        assert!(group.is_empty());
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            [
+                "lease ags_CHILD",
+                "prepare ags_CHILD",
+                "start ags_CHILD",
+                "end ags_CHILD",
+                "release ags_CHILD"
+            ]
+        );
     }
 }

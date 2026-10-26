@@ -757,6 +757,8 @@ mod imp {
             pub no_passt: bool,
             /// What `child_create` is refused with, if it is.
             pub child_refusal: Option<String>,
+            /// What `end` is refused with, if it is.
+            pub end_refusal: Option<String>,
             /// Where `child_create` really makes a child's workspace, with
             /// real git as this account; unset, it only answers.
             pub children_root: Option<PathBuf>,
@@ -1098,6 +1100,9 @@ mod imp {
                         }
                         None => (json!({"ok": false, "error": "not_started"}), None),
                     }
+                }
+                "end" if seen.lock().unwrap().end_refusal.is_some() => {
+                    refuse(&seen.lock().unwrap().end_refusal.clone().unwrap())
                 }
                 "end" => {
                     let child = seen.lock().unwrap().children.remove(&session);
