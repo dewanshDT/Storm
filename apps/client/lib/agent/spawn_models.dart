@@ -71,7 +71,17 @@ class SpawnSwitch {
 
 /// A child's own workspace (137b, 137c): a clone of its parent's last commit
 /// or a scratch folder beside a read-only view of the parent's.
-class ChildWorkspace {
+/// A child's workspace kind: `clone` (W2) or `scratch` (W3), which an
+/// older or partial answer leaves as `scratch`.
+mixin _WorkspaceMode {
+  String get mode;
+
+  bool get clone => mode == 'clone';
+}
+
+String _modeOf(Map<String, dynamic> j) => j['mode'] as String? ?? 'scratch';
+
+class ChildWorkspace with _WorkspaceMode {
   const ChildWorkspace({
     required this.mode,
     this.commit,
@@ -80,17 +90,15 @@ class ChildWorkspace {
     this.largeFiles = false,
   });
 
-  /// `clone` or `scratch`.
+  @override
   final String mode;
   final String? commit;
   final String? branch;
   final bool submodules;
   final bool largeFiles;
 
-  bool get clone => mode == 'clone';
-
   factory ChildWorkspace.fromJson(Map<String, dynamic> j) => ChildWorkspace(
-    mode: j['mode'] as String? ?? 'scratch',
+    mode: _modeOf(j),
     commit: j['commit'] as String?,
     branch: j['branch'] as String?,
     submodules: j['submodules'] == true,
@@ -243,7 +251,7 @@ class ChildFile {
 }
 
 /// An ended child's work as data (137e), for a person to read before Apply.
-class ChildWork {
+class ChildWork with _WorkspaceMode {
   const ChildWork({
     required this.mode,
     this.tip,
@@ -260,6 +268,7 @@ class ChildWork {
     this.skipped = 0,
   });
 
+  @override
   final String mode;
   final String? tip;
   final String? base;
@@ -274,10 +283,8 @@ class ChildWork {
   final int? bytes;
   final int skipped;
 
-  bool get clone => mode == 'clone';
-
   factory ChildWork.fromJson(Map<String, dynamic> j) => ChildWork(
-    mode: j['mode'] as String? ?? 'scratch',
+    mode: _modeOf(j),
     tip: j['tip'] as String?,
     base: j['base'] as String?,
     baseFound: j['base_found'] != false,

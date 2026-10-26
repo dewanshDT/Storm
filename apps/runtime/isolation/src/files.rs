@@ -10,14 +10,14 @@
 //! file someone else owns.
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{CString, OsString};
 use std::io::{Read, Write as _};
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rustix::fs::{FileType, Mode, OFlags};
+use rustix::fs::{Dir, FileType, Mode, OFlags};
 use serde::Deserialize;
 
 use crate::convert::{self, Kind, Meta, Ownership};
@@ -138,6 +138,26 @@ pub fn env_file(vars: &[(String, String)]) -> String {
     out
 }
 
+/// A directory, opened without following a link.
+pub const DIR_FLAGS: OFlags = OFlags::RDONLY
+    .union(OFlags::DIRECTORY)
+    .union(OFlags::NOFOLLOW)
+    .union(OFlags::CLOEXEC);
+
+/// A directory's entries but `.` and `..`, sorted.
+pub fn dir_names(dir: impl AsFd) -> rustix::io::Result<Vec<CString>> {
+    let mut out = Vec::new();
+    for entry in Dir::read_from(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_bytes() != b"." && name.to_bytes() != b".." {
+            out.push(name.to_owned());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// Opens `path` one component at a time from `/`, never following a link,
 /// and refuses unless every component from `trusted_depth` on is a
 /// directory owned by `owner`. Returns the last one's descriptor.
@@ -159,13 +179,8 @@ pub fn open_owned_dir(path: &Path, trusted_depth: usize, owner: u32) -> Result<O
             bail!("{} is not in its normal form", path.display());
         };
         depth += 1;
-        let next = rustix::fs::openat(
-            &fd,
-            name,
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .with_context(|| format!("opening {}", path.display()))?;
+        let next = rustix::fs::openat(&fd, name, DIR_FLAGS, Mode::empty())
+            .with_context(|| format!("opening {}", path.display()))?;
         if depth >= trusted_depth {
             let st = rustix::fs::fstat(&next)?;
             if st.st_uid != owner {
@@ -223,6 +238,22 @@ pub fn write_root_private(path: &Path, bytes: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// As `write_root_private`, written whole, synced, then renamed into place:
+/// a crash leaves the old record or the new one, never half of one.
+pub fn write_root_private_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("{} names no file", path.display());
+    };
+    let mut tmp_name = OsString::from(".");
+    tmp_name.push(name);
+    tmp_name.push(".tmp");
+    let tmp = dir.join(tmp_name);
+    write_root_private(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)?;
+    std::fs::File::open(dir)?.sync_all()?;
+    Ok(())
+}
+
 /// A root-owned file every user may read, which a unit shows read-only
 /// (the session's resolver). The helper's umask would narrow the mode, so
 /// it is set on the descriptor.
@@ -265,20 +296,6 @@ pub fn unshared(kind: Kind, m: Meta, host_gid: u32) -> Meta {
     }
 }
 
-fn apply(own: &dyn Ownership, e: &convert::Entry, target: Meta) -> Result<bool> {
-    let now = own.meta(e.key, e.seen);
-    let mut changed = false;
-    if (now.uid, now.gid) != (target.uid, target.gid) {
-        own.chown(e, target.uid, target.gid)?;
-        changed = true;
-    }
-    if matches!(e.kind, Kind::Dir | Kind::File) && (changed || now.mode != target.mode) {
-        own.chmod(e, target.mode)?;
-        changed = true;
-    }
-    Ok(changed)
-}
-
 /// Applies `f` to every entry of `dir` that `owner` owns. Returns how many
 /// changed.
 pub fn retarget(
@@ -290,7 +307,7 @@ pub fn retarget(
     let mut changed = 0;
     convert::walk(dir, &mut |e| {
         let now = own.meta(e.key, e.seen);
-        if now.uid == owner && apply(own, &e, f(e.kind, now))? {
+        if now.uid == owner && convert::apply(own, &e, f(e.kind, now))? {
             changed += 1;
         }
         Ok(())
@@ -437,10 +454,10 @@ pub struct LeaseRecord {
 }
 
 pub fn save_lease(dir: &Path, user: &str, record: &LeaseRecord) -> Result<()> {
-    let tmp = dir.join(format!(".{user}.tmp"));
-    write_root_private(&tmp, &serde_json::to_vec(record)?)?;
-    std::fs::rename(&tmp, dir.join(format!("{user}.json")))?;
-    Ok(())
+    write_root_private_atomic(
+        &dir.join(format!("{user}.json")),
+        &serde_json::to_vec(record)?,
+    )
 }
 
 pub fn remove_lease(dir: &Path, user: &str) -> Result<()> {
@@ -511,15 +528,9 @@ pub fn resolve(command: &str, search: &[PathBuf]) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::convert::Recorded;
+    use crate::pool::tests::pool;
+    use crate::session::tests::me;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
-    fn pool() -> Pool {
-        Pool::resolve(&crate::pool::tests::fixed(), "storm-runtime").unwrap()
-    }
-
-    fn me() -> u32 {
-        rustix::process::getuid().as_raw()
-    }
 
     #[test]
     fn a_launch_carries_arguments_and_variables_only() {

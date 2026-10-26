@@ -183,6 +183,10 @@ fn cli_kind() -> String {
 }
 
 impl RuntimeConfig {
+    pub fn isolated(&self) -> bool {
+        self.isolation == Isolation::PerSession
+    }
+
     /// Loads `path`, or the defaults when it does not exist.
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = match std::fs::read_to_string(path) {
@@ -442,16 +446,17 @@ pub fn list_workspaces(roots: &[PathBuf]) -> Vec<String> {
     names
 }
 
-/// Each listed workspace's canonical directory, as a session would start in
-/// it, so the server's WS-9 check (137-2) sees two names for one directory
+/// Each of `names`' canonical directory, as a session would start in it, so
+/// the server's WS-9 check (137-2) sees two names for one directory
 /// (overlapping roots) as one. A name that no longer resolves is left out,
 /// which the server reads as possibly any workspace.
-pub fn workspace_paths(roots: &[PathBuf]) -> HashMap<String, String> {
-    list_workspaces(roots)
-        .into_iter()
+pub fn workspace_paths(roots: &[PathBuf], names: &[String]) -> HashMap<String, String> {
+    let roots = canonical_roots(roots);
+    names
+        .iter()
         .filter_map(|name| {
-            let dir = resolve_workspace(roots, &name)?;
-            Some((name, dir.display().to_string()))
+            let dir = resolve_in(&roots, name)?;
+            Some((name.clone(), dir.display().to_string()))
         })
         .collect()
 }
@@ -468,19 +473,18 @@ pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        let candidate = root.join(name);
-        if let Ok(real) = candidate.canonicalize()
-            && real.starts_with(&root)
-            && real.is_dir()
-        {
-            return Some(real);
-        }
-    }
-    None
+    resolve_in(&canonical_roots(roots), name)
+}
+
+fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
+}
+
+fn resolve_in(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    roots.iter().find_map(|root| {
+        let real = root.join(name).canonicalize().ok()?;
+        (real.starts_with(root) && real.is_dir()).then_some(real)
+    })
 }
 
 #[cfg(test)]
@@ -520,7 +524,7 @@ mod tests {
         std::os::unix::fs::symlink(outer.path(), linked.path().join("root")).unwrap();
         // The same root through a symlink first, then a root inside it.
         let roots = vec![linked.path().join("root"), outer.path().join("storm")];
-        let paths = workspace_paths(&roots);
+        let paths = workspace_paths(&roots, &list_workspaces(&roots));
         let real = outer.path().canonicalize().unwrap();
         assert_eq!(paths["storm"], real.join("storm").display().to_string());
         assert_eq!(paths["site"], real.join("storm/site").display().to_string());

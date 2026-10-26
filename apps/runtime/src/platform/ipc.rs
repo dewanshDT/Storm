@@ -36,6 +36,13 @@ impl Listener {
     }
 }
 
+#[cfg(unix)]
+impl From<tokio::net::UnixListener> for Listener {
+    fn from(listener: tokio::net::UnixListener) -> Self {
+        Self(imp::Listener(listener))
+    }
+}
+
 /// The connecting end, a bridge's.
 pub type Client = imp::Client;
 
@@ -81,7 +88,7 @@ mod imp {
 
     pub type Stream = tokio::net::UnixStream;
 
-    pub struct Listener(tokio::net::UnixListener);
+    pub struct Listener(pub(super) tokio::net::UnixListener);
 
     impl Listener {
         pub fn bind(path: &Path) -> io::Result<Self> {

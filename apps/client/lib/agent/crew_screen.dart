@@ -20,7 +20,7 @@ import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 import 'spawn_api.dart';
 import 'spawn_models.dart' show DescendantRef, Descendants;
-import 'spawn_state.dart' show sessionDescendantsProvider;
+import 'spawn_state.dart' show childrenOf, sessionDescendantsProvider;
 
 /// One crew at `/agents/c/:id` (decision 138, handoff §3 Crew page, 4d): its
 /// header and hosts, End all running in place, its members, the notes they
@@ -615,20 +615,57 @@ class EndAllBanner extends ConsumerStatefulWidget {
   ConsumerState<EndAllBanner> createState() => _EndAllBannerState();
 }
 
-/// What End all running would do to [members] now.
-({
-  List<AgentSession> stops,
-  List<AgentSession> unreachable,
-  List<AgentSession> ended,
-})
-endAllPlan(AgentOverview o, List<AgentSession> members) {
-  bool reachable(AgentSession s) =>
-      o.hosts.where((h) => h.id == s.hostId).firstOrNull?.online ?? false;
-  return (
-    stops: [
-      for (final s in members)
-        if (!s.ended && reachable(s)) s,
-    ],
+/// What End all running would do to a crew's members now: the stops, those
+/// on a host Storm can't reach, those already ended, and what each stop
+/// takes with it.
+class EndAllPlan {
+  const EndAllPlan({
+    required this.stops,
+    required this.unreachable,
+    required this.ended,
+    required this.descendants,
+    required this.reaches,
+  });
+
+  final List<AgentSession> stops;
+  final List<AgentSession> unreachable;
+  final List<AgentSession> ended;
+
+  /// What each stop the list shows a child of would take with it (134-7's
+  /// C1); null while one is still being read. A stop whose read failed is
+  /// left out, and the server's 409 says so.
+  final Map<String, Descendants>? descendants;
+
+  /// The running sessions it reaches beyond its own stops, each with the
+  /// stop it ends with.
+  final List<(String, String)> reaches;
+
+  /// Something to end, and every stop's descendants read.
+  bool get ready => stops.isNotEmpty && descendants != null;
+}
+
+EndAllPlan watchEndAllPlan(
+  WidgetRef ref,
+  AgentOverview o,
+  List<AgentSession> members,
+) {
+  bool reachable(AgentSession s) => o.host(s.hostId)?.online ?? false;
+  final stops = [
+    for (final s in members)
+      if (!s.ended && reachable(s)) s,
+  ];
+  final descendants = <String, Descendants>{};
+  var loading = false;
+  for (final s in stops) {
+    if (childrenOf(o, s.id).isEmpty) continue;
+    final d = ref.watch(sessionDescendantsProvider(s.id));
+    if (d.isLoading) loading = true;
+    if (d.value case final v? when v.running.isNotEmpty) descendants[s.id] = v;
+  }
+  final read = loading ? null : descendants;
+  final own = {for (final s in stops) s.id};
+  return EndAllPlan(
+    stops: stops,
     unreachable: [
       for (final s in members)
         if (!s.ended && !reachable(s)) s,
@@ -637,40 +674,13 @@ endAllPlan(AgentOverview o, List<AgentSession> members) {
       for (final s in members)
         if (s.ended) s,
     ],
+    descendants: read,
+    reaches: [
+      for (final s in stops)
+        for (final r in read?[s.id]?.running ?? const <DescendantRef>[])
+          if (!own.contains(r.id)) (r.name, s.displayName),
+    ],
   );
-}
-
-/// What each of [stops] would take with it (134-7's C1), read for the stops
-/// the list shows a child of; null while one is still being read. A stop
-/// whose read failed is left out, and the server's 409 says so.
-Map<String, Descendants>? endAllDescendants(
-  WidgetRef ref,
-  AgentOverview o,
-  List<AgentSession> stops,
-) {
-  final out = <String, Descendants>{};
-  var loading = false;
-  for (final s in stops) {
-    if (!o.sessions.any((c) => c.spawn.parentSession == s.id)) continue;
-    final d = ref.watch(sessionDescendantsProvider(s.id));
-    if (d.isLoading) loading = true;
-    if (d.value case final v? when v.running.isNotEmpty) out[s.id] = v;
-  }
-  return loading ? null : out;
-}
-
-/// The running sessions End all reaches beyond its own stops, each with the
-/// stop it ends with.
-List<(String, String)> endAllReaches(
-  List<AgentSession> stops,
-  Map<String, Descendants> descendants,
-) {
-  final own = {for (final s in stops) s.id};
-  return [
-    for (final s in stops)
-      for (final r in descendants[s.id]?.running ?? const [])
-        if (!own.contains(r.id)) (r.name, s.displayName),
-  ];
 }
 
 /// Ends each of [stops] in order: with the descendants the person was shown
@@ -736,12 +746,14 @@ class _EndAllBannerState extends ConsumerState<EndAllBanner> {
 
   void _close() => ref.read(crewEndAllProvider.notifier).state = null;
 
-  Future<void> _end(
-    List<AgentSession> stops,
-    Map<String, Descendants> descendants,
-  ) async {
+  Future<void> _end(EndAllPlan plan) async {
     setState(() => _ending = true);
-    await endAllRunning(context, ref, stops, descendants: descendants);
+    await endAllRunning(
+      context,
+      ref,
+      plan.stops,
+      descendants: plan.descendants ?? const {},
+    );
     if (!mounted) return;
     setState(() => _ending = false);
     _close();
@@ -751,9 +763,7 @@ class _EndAllBannerState extends ConsumerState<EndAllBanner> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final o = widget.overview;
-    final plan = endAllPlan(o, widget.members);
-    final descendants = endAllDescendants(ref, o, plan.stops);
-    final reaches = endAllReaches(plan.stops, descendants ?? const {});
+    final plan = watchEndAllPlan(ref, o, widget.members);
     final n = plan.stops.length;
     final line = TextStyle(
       fontFamily: StormTokens.sansFamily,
@@ -804,9 +814,9 @@ class _EndAllBannerState extends ConsumerState<EndAllBanner> {
               for (final s in plan.stops)
                 '${s.displayName} · ${o.hostName(s.hostId)}',
             ]),
-          if (reaches.isNotEmpty)
+          if (plan.reaches.isNotEmpty)
             group('What they started', const Key('end-all-reaches'), [
-              for (final (child, parent) in reaches)
+              for (final (child, parent) in plan.reaches)
                 '$child · started by $parent',
             ]),
           if (plan.unreachable.isNotEmpty)
@@ -832,9 +842,7 @@ class _EndAllBannerState extends ConsumerState<EndAllBanner> {
               StormButton.danger(
                 key: const Key('end-all-confirm'),
                 label: n == 1 ? 'End 1 session' : 'End $n sessions',
-                onPressed: _ending || n == 0 || descendants == null
-                    ? null
-                    : () => _end(plan.stops, descendants),
+                onPressed: _ending || !plan.ready ? null : () => _end(plan),
               ),
             ],
           ),

@@ -21,7 +21,7 @@ import 'crew_widgets.dart';
 /// that agent, never by its name. A launch role means it could.
 bool sessionReadsStorm(AgentOverview? o, AgentSession s) {
   if (s.launchRole != null) return true;
-  final host = o?.hosts.where((h) => h.id == s.hostId).firstOrNull;
+  final host = o?.host(s.hostId);
   final cap = host?.providers.where((p) => p.id == s.provider).firstOrNull;
   return cap?.reachesStorm ?? !s.isShell;
 }

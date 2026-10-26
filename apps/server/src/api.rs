@@ -7830,10 +7830,7 @@ pub(crate) mod tests {
             }
         };
         assert_eq!(view(&f).await, old_host);
-        assert_eq!(
-            f.state.agent.host_isolation(&f.host_id),
-            crate::agent::IsolationState::Unavailable
-        );
+        assert!(!f.state.agent.host_isolated(&f.host_id));
 
         let verified =
             serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
@@ -7847,18 +7844,14 @@ pub(crate) mod tests {
         assert!(code.is_success());
         assert_eq!(seen(&f).await, verified);
         assert_eq!(view(&f).await, verified);
-        assert_eq!(
-            f.state.agent.host_isolation(&f.host_id),
-            crate::agent::IsolationState::Verified
-        );
+        assert!(f.state.agent.host_isolated(&f.host_id));
 
         let generation = f.state.agent.connect_host(&f.host_id).0;
         f.state.agent.disconnect_host(&f.host_id, generation);
         assert_eq!(seen(&f).await, verified, "kept for the row");
         assert_eq!(view(&f).await, verified);
-        assert_eq!(
-            f.state.agent.host_isolation(&f.host_id),
-            crate::agent::IsolationState::Unavailable,
+        assert!(
+            !f.state.agent.host_isolated(&f.host_id),
             "never judged by the stored copy"
         );
     }

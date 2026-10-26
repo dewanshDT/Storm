@@ -172,14 +172,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final messenger = ScaffoldMessenger.maybeOf(context);
     try {
       final removed = await api.dismiss(_id);
-      if (removed != null) {
-        announceRemovedCrew(
-          c,
-          removedCrewFrom(before, removed),
-          why: 'its last session was dismissed',
-          fallback: messenger,
-        );
-      }
+      announceDismissedCrews(c, before, removed, fallback: messenger);
       _gone();
     } catch (e) {
       if (e is AgentRefusal &&
@@ -393,7 +386,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ),
             child: Text(
               '${endedLine(s)} · scrollback kept until you dismiss it',
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
           ),
       ],
@@ -551,7 +544,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   key: const Key('session-meta'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: _mono(t, t.labelSize * 1.09),
+                  style: agentMono(t, size: t.labelSize * 1.09),
                 ),
               ),
               SessionMetaTags(session: s),
@@ -564,7 +557,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               key: const Key('resume-blocker'),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
           ],
           SpawnHeaderLine(
@@ -837,12 +830,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }
 }
 
-TextStyle _mono(StormTokens t, double size, [Color? color]) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: size,
-  color: color ?? t.text3,
-);
-
 /// Why input or the stream is not reaching the session, if it is not.
 class _Trouble extends StatelessWidget {
   const _Trouble({required this.controller});
@@ -1034,7 +1021,7 @@ class _PhoneHeader extends ConsumerWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     textAlign: TextAlign.center,
-                    style: _mono(t, 11).copyWith(height: 1.3),
+                    style: agentMono(t, size: 11).copyWith(height: 1.3),
                   ),
                 ),
                 if (crew != null) ...[
@@ -1192,7 +1179,7 @@ class _NotePanel extends ConsumerWidget {
                   n == null ? vault : noteCrumb(vault, n.meta.path),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: _mono(t, t.labelSize * 1.09),
+                  style: agentMono(t, size: t.labelSize * 1.09),
                 ),
               ),
               Flexible(
@@ -1232,7 +1219,7 @@ class _NotePanel extends ConsumerWidget {
             Text(
               panelVersionLine(n, sessionId),
               key: const Key('panel-version-line'),
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
             SizedBox(height: t.sp * 1.25),
             StormMarkdownView(markdown: fm.split(n.content).body),
@@ -1380,13 +1367,13 @@ class _WroteRow extends StatelessWidget {
                         noteCrumb(vault, w.path),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: _mono(t, t.labelSize),
+                        style: agentMono(t),
                       ),
                     ],
                   ),
                 ),
                 SizedBox(width: t.sp),
-                Text(_wroteMeta(w), style: _mono(t, t.labelSize)),
+                Text(_wroteMeta(w), style: agentMono(t)),
               ],
             ),
           ),
@@ -1711,7 +1698,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
                             ),
                           ),
                         ),
-                        Text(_wroteMeta(w), style: _mono(t, t.labelSize)),
+                        Text(_wroteMeta(w), style: agentMono(t)),
                       ],
                     ),
                   ),

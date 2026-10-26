@@ -954,7 +954,7 @@ fn c0_refuses_an_old_host_and_unverified_identity_or_isolation() {
     let (m, _d, _rx) = host(None);
     m.inventory("hst_A", hello_with(None, isolated()).capabilities)
         .unwrap();
-    assert_eq!(m.host_isolation("hst_A"), super::IsolationState::Verified);
+    assert!(m.host_isolated("hst_A"));
     assert_eq!(m.spawn_gate("hst_A"), Err("identity_unverified"));
     let s = start(&m, "storm", "claude-code", None).unwrap();
     assert_eq!(refusal(&m, &s.id, true), "identity_unverified");

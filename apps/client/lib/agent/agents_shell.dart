@@ -18,7 +18,7 @@ import 'crew_gestures.dart';
 import 'crew_prefs.dart';
 import 'crew_widgets.dart';
 import 'spawn_state.dart' show lineageOrder;
-import 'spawn_widgets.dart' show LineageIndent, lineageLine;
+import 'spawn_widgets.dart' show lineageIndented, lineageLine;
 
 /// The session a location shows, or null on the overview.
 String? sessionIdOf(Uri location) {
@@ -191,7 +191,7 @@ class AgentsSidebar extends ConsumerWidget {
         sectionLabel(label, top),
         for (final (i, s) in lineageOrder(list).indexed) ...[
           if (i > 0) SizedBox(height: t.sp * 0.25),
-          _maybeIndented(s, list, looseRow(s)),
+          lineageIndented(s, list, looseRow(s)),
         ],
       ],
     );
@@ -336,14 +336,6 @@ class AgentsSidebar extends ConsumerWidget {
       ),
     );
   }
-}
-
-/// A child listed under its parent sits on the dashed indent (134l).
-Widget _maybeIndented(AgentSession s, List<AgentSession> list, Widget row) {
-  final p = s.spawn.parentSession;
-  return p != null && list.any((o) => o.id == p)
-      ? LineageIndent(child: row)
-      : row;
 }
 
 class _OverviewRow extends StatelessWidget {

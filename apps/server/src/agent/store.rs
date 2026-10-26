@@ -357,14 +357,7 @@ impl Store {
     }
 
     pub fn get(&self, id: &str) -> Result<Option<SessionRecord>> {
-        Ok(self
-            .conn
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1"),
-                params![id],
-                from_row,
-            )
-            .optional()?)
+        get_in(&self.conn, id)
     }
 
     pub fn list(&self) -> Result<Vec<SessionRecord>> {
@@ -924,51 +917,16 @@ impl Store {
         Ok(())
     }
 
-    pub fn host_isolation(&self, host_id: &str) -> Result<Option<super::Isolation>> {
-        Ok(self
-            .conn
-            .query_row(
-                "SELECT state, mechanism, reason FROM host_isolation WHERE host_id = ?1",
-                params![host_id],
-                |r| {
-                    Ok(super::Isolation {
-                        state: r.get(0)?,
-                        mechanism: r.get(1)?,
-                        reason: r.get(2)?,
-                    })
-                },
-            )
-            .optional()?)
-    }
-
-    pub fn set_host_isolation(
+    pub fn host_label(
         &self,
+        kind: super::HostLabel,
         host_id: &str,
-        isolation: &super::Isolation,
-        now: &str,
-    ) -> Result<()> {
-        self.conn.execute(
-            "INSERT INTO host_isolation (host_id, state, mechanism, reason, reported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (host_id) DO UPDATE SET state = excluded.state,
-                 mechanism = excluded.mechanism, reason = excluded.reason,
-                 reported_at = excluded.reported_at",
-            params![
-                host_id,
-                isolation.state,
-                isolation.mechanism,
-                isolation.reason,
-                now
-            ],
-        )?;
-        Ok(())
-    }
-
-    pub fn host_identity(&self, host_id: &str) -> Result<Option<super::Identity>> {
+    ) -> Result<Option<super::Identity>> {
+        let table = label_table(kind);
         Ok(self
             .conn
             .query_row(
-                "SELECT state, mechanism, reason FROM host_identity WHERE host_id = ?1",
+                &format!("SELECT state, mechanism, reason FROM {table} WHERE host_id = ?1"),
                 params![host_id],
                 |r| {
                     Ok(super::Identity {
@@ -981,27 +939,32 @@ impl Store {
             .optional()?)
     }
 
-    pub fn set_host_identity(
+    pub fn set_host_label(
         &self,
+        kind: super::HostLabel,
         host_id: &str,
-        identity: &super::Identity,
+        label: &super::Identity,
         now: &str,
     ) -> Result<()> {
+        let table = label_table(kind);
         self.conn.execute(
-            "INSERT INTO host_identity (host_id, state, mechanism, reason, reported_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             ON CONFLICT (host_id) DO UPDATE SET state = excluded.state,
-                 mechanism = excluded.mechanism, reason = excluded.reason,
-                 reported_at = excluded.reported_at",
-            params![
-                host_id,
-                identity.state,
-                identity.mechanism,
-                identity.reason,
-                now
-            ],
+            &format!(
+                "INSERT INTO {table} (host_id, state, mechanism, reason, reported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (host_id) DO UPDATE SET state = excluded.state,
+                     mechanism = excluded.mechanism, reason = excluded.reason,
+                     reported_at = excluded.reported_at"
+            ),
+            params![host_id, label.state, label.mechanism, label.reason, now],
         )?;
         Ok(())
+    }
+}
+
+fn label_table(kind: super::HostLabel) -> &'static str {
+    match kind {
+        super::HostLabel::Identity => "host_identity",
+        super::HostLabel::Isolation => "host_isolation",
     }
 }
 
@@ -1125,6 +1088,16 @@ fn members_of(conn: &Connection, crew_id: &str) -> Result<Vec<String>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+fn get_in(conn: &Connection, id: &str) -> Result<Option<SessionRecord>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1"),
+            params![id],
+            from_row,
+        )
+        .optional()?)
+}
+
 fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
     let gone = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])? > 0;
     let crew = leave_crew(conn, id)?;
@@ -1208,9 +1181,9 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
 /// Agent spawning's records (decision 134): lineage, the spawn switch, task,
 /// result, approval requests, the inbox and cascades. Additive tables only;
 /// nothing older is altered.
-// Dark until 134-2…134-7: nothing outside the tests calls this yet.
-#[allow(dead_code)]
 pub mod spawn {
+    use std::sync::LazyLock;
+
     use anyhow::{Result, bail};
     use rusqlite::{Connection, OptionalExtension, params};
 
@@ -1218,7 +1191,7 @@ pub mod spawn {
 
     use super::{
         COLUMNS, LaunchRecord, McpGrant, SessionIntegration, SessionRecord, Store, from_row,
-        insert_grants, insert_integrations, insert_launch, insert_session,
+        get_in, insert_grants, insert_integrations, insert_launch, insert_session,
     };
 
     pub const MAX_TASK_BYTES: usize = 16 * 1024;
@@ -1335,6 +1308,8 @@ pub mod spawn {
              CREATE INDEX IF NOT EXISTS requests_by_requester
                  ON agent_requests(requester, state);
              CREATE INDEX IF NOT EXISTS requests_by_target ON agent_requests(target, state);
+             CREATE INDEX IF NOT EXISTS requests_pending
+                 ON agent_requests(created_at, id, expires_at) WHERE state = 'pending';
              -- What a person approves is what acts (T8, T9), and once.
              CREATE TRIGGER IF NOT EXISTS request_text_fixed
                  BEFORE UPDATE OF id, kind, requester, target, payload, created_at, expires_at
@@ -1370,6 +1345,8 @@ pub mod spawn {
                  completed_at      TEXT,
                  CHECK ((cause = 'end_all_children') = (parent_end_reason IS NULL))
              );
+             CREATE INDEX IF NOT EXISTS cascades_open
+                 ON spawn_cascades(created_at) WHERE completed_at IS NULL;
              CREATE TRIGGER IF NOT EXISTS cascade_fixed
                  BEFORE UPDATE OF id, cause, parent_session, parent_end_reason, report_first,
                      created_at ON spawn_cascades
@@ -1676,6 +1653,7 @@ pub mod spawn {
         /// Records a child at its approval, in one transaction: the session,
         /// its lineage under `parent` and its task. The only writer of
         /// lineage; nothing ever changes it after (L-1).
+        #[cfg(test)]
         pub fn insert_spawned(
             &mut self,
             child: &SessionRecord,
@@ -1698,7 +1676,7 @@ pub mod spawn {
         /// Whether `target` is a recorded descendant of `ancestor` (L-2),
         /// walked up `target`'s own lineage. A session is never its own.
         pub fn is_descendant(&self, ancestor: &str, target: &str) -> Result<bool> {
-            if session_of(&self.conn, target)?.is_none() {
+            if get_in(&self.conn, target)?.is_none() {
                 return Ok(false);
             }
             let mut at = lineage_of(&self.conn, target)?;
@@ -1743,7 +1721,7 @@ pub mod spawn {
         ) -> Result<SessionRecord> {
             let now = crate::index::now_rfc3339();
             let tx = self.conn.transaction()?;
-            let parent = session_of(&tx, parent)?.expect("a parent");
+            let parent = get_in(&tx, parent)?.expect("a parent");
             let payload = StartPayload {
                 task: task.into(),
                 provider: None,
@@ -1954,6 +1932,7 @@ pub mod spawn {
         }
 
         /// Records a new request, `pending`.
+        #[cfg(test)]
         pub fn insert_request(&self, r: &Request) -> Result<()> {
             self.conn.execute(
                 "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
@@ -1977,6 +1956,7 @@ pub mod spawn {
         }
 
         /// Refuses a requester's pending requests with `reason` (L-7, P-4).
+        #[cfg(test)]
         pub fn refuse_requests_of(
             &self,
             requester: &str,
@@ -1987,6 +1967,7 @@ pub mod spawn {
         }
 
         /// Puts a message in a session's inbox at the next sequence number.
+        #[cfg(test)]
         pub fn queue_message(
             &mut self,
             session_id: &str,
@@ -2002,6 +1983,7 @@ pub mod spawn {
             Ok(seq)
         }
 
+        #[cfg(test)]
         pub fn inbox(&self, session_id: &str) -> Result<Vec<Message>> {
             messages_where(&self.conn, "session_id = ?1", params![session_id])
         }
@@ -2055,16 +2037,19 @@ pub mod spawn {
         /// first: still live, `pending` or `unreachable`, and either its
         /// cascade stops at once or its grace is over.
         pub fn due_stops(&self, now: &str) -> Result<Vec<DueStop>> {
-            let mut stmt = self.conn.prepare(&format!(
-                "SELECT c.id, c.cause, c.report_first, c.created_at, t.session_id, s.host_id,
-                     t.state
-                 FROM spawn_cascades c
-                 JOIN spawn_cascade_targets t ON t.cascade_id = c.id
-                 JOIN sessions s ON s.id = t.session_id
-                 WHERE c.completed_at IS NULL AND t.state IN ('pending', 'unreachable')
-                   AND s.status NOT IN {ENDED}
-                 ORDER BY c.created_at, c.rowid, t.rowid"
-            ))?;
+            static SQL: LazyLock<String> = LazyLock::new(|| {
+                format!(
+                    "SELECT c.id, c.cause, c.report_first, c.created_at, t.session_id, s.host_id,
+                         t.state
+                     FROM spawn_cascades c
+                     JOIN spawn_cascade_targets t ON t.cascade_id = c.id
+                     JOIN sessions s ON s.id = t.session_id
+                     WHERE c.completed_at IS NULL AND t.state IN ('pending', 'unreachable')
+                       AND s.status NOT IN {ENDED}
+                     ORDER BY c.created_at, c.rowid, t.rowid"
+                )
+            });
+            let mut stmt = self.conn.prepare_cached(&SQL)?;
             let rows = stmt.query_map([], |r| {
                 Ok((
                     DueStop {
@@ -2121,6 +2106,7 @@ pub mod spawn {
 
         /// Whether `session_id` is ending or doomed: a live target of an
         /// open cascade, or the parent of a person's end not yet recorded.
+        #[cfg(test)]
         pub fn doomed(&self, session_id: &str) -> Result<bool> {
             doomed(&self.conn, session_id)
         }
@@ -2199,6 +2185,7 @@ pub mod spawn {
 
         /// Cascades not yet complete, oldest first: what resumes after a
         /// server restart (L-3).
+        #[cfg(test)]
         pub fn open_cascades(&self) -> Result<Vec<String>> {
             let mut stmt = self.conn.prepare(
                 "SELECT id FROM spawn_cascades WHERE completed_at IS NULL
@@ -2247,7 +2234,7 @@ pub mod spawn {
             host: HostCheck<'_>,
         ) -> Result<std::result::Result<Request, Refusal>> {
             let tx = self.conn.transaction()?;
-            let Some(r) = session_of(&tx, requester)? else {
+            let Some(r) = get_in(&tx, requester)? else {
                 bail!("no session {requester}");
             };
             if let Err(mut refusal) = may_request(&tx, &r, new.kind(), new.target(), host) {
@@ -2398,9 +2385,8 @@ pub mod spawn {
         /// The sweeper (P-5): every pending request past its expiry becomes
         /// `expired`. Returns those it expired.
         pub fn expire_requests(&mut self, now: &str) -> Result<Vec<Request>> {
-            let tx = self.conn.transaction()?;
             let due: Vec<String> = {
-                let mut stmt = tx.prepare(
+                let mut stmt = self.conn.prepare_cached(
                     "SELECT id, expires_at FROM agent_requests WHERE state = 'pending'
                      ORDER BY created_at, id",
                 )?;
@@ -2412,6 +2398,12 @@ pub mod spawn {
                     .map(|(id, _)| id)
                     .collect()
             };
+            // The store is held `&mut`, so nothing can decide these between the
+            // read and the write; most sweeps find none and write nothing.
+            if due.is_empty() {
+                return Ok(Vec::new());
+            }
+            let tx = self.conn.transaction()?;
             let mut swept = Vec::new();
             for id in due {
                 decide(&tx, &id, "expired", None, None, None, now)?;
@@ -2492,16 +2484,6 @@ pub mod spawn {
                 &format!("SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE id = ?1"),
                 params![id],
                 request_from_row,
-            )
-            .optional()?)
-    }
-
-    fn session_of(conn: &Connection, id: &str) -> Result<Option<SessionRecord>> {
-        Ok(conn
-            .query_row(
-                &format!("SELECT {COLUMNS} FROM sessions WHERE id = ?1"),
-                params![id],
-                from_row,
             )
             .optional()?)
     }
@@ -2622,7 +2604,7 @@ pub mod spawn {
         let members: Vec<String> = std::iter::once(root.clone())
             .chain(descendants_of(conn, root, false)?)
             .collect();
-        let root_live = session_of(conn, root)?.is_some_and(|s| !s.is_ended());
+        let root_live = get_in(conn, root)?.is_some_and(|s| !s.is_ended());
         let tree_live = root_live as i64 + descendants_of(conn, root, true)?.len() as i64;
         if tree_live + starts_by(&|q| members.iter().any(|m| m == q)) + 1 > MAX_TREE {
             return Ok(Some("tree"));
@@ -2656,7 +2638,7 @@ pub mod spawn {
         if expired(now, &request.expires_at) {
             return Ok(Act::Expired);
         }
-        let Some(r) = session_of(conn, &request.requester)? else {
+        let Some(r) = get_in(conn, &request.requester)? else {
             return Ok(Act::Refused(Refusal::because("requester_ended")));
         };
         if let Err(mut refusal) =

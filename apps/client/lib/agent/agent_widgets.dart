@@ -7,7 +7,7 @@ import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'crew_widgets.dart' show RoleTagRow;
-import 'spawn_widgets.dart' show AttentionTag;
+import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -53,11 +53,43 @@ String _ran(Duration d) {
   return m == 0 ? '${d.inHours} h' : '${d.inHours} h $m min';
 }
 
-String _clock(DateTime t) {
+/// "14:02": a moment as the agent surfaces say it, in local time.
+String clockAt(DateTime t) {
   final l = t.toLocal();
   String two(int n) => n.toString().padLeft(2, '0');
   return '${two(l.hour)}:${two(l.minute)}';
 }
+
+/// The agent surfaces' text styles: a mono sub-line, sans body text, a
+/// spaced mono key, and code or exact text as an agent sent it.
+TextStyle agentMono(StormTokens t, {Color? color, double? size}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: size ?? t.labelSize,
+  color: color ?? t.text3,
+);
+
+TextStyle agentSans(StormTokens t, {Color? color, FontWeight? weight}) =>
+    TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      height: 1.4,
+      fontWeight: weight,
+      color: color ?? t.text,
+    );
+
+TextStyle agentKey(StormTokens t, {Color? color}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: t.labelSize,
+  letterSpacing: t.labelSize * 0.08,
+  color: color ?? t.text3,
+);
+
+TextStyle agentCode(StormTokens t, {Color? color}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: t.labelSize * 1.09,
+  height: 1.45,
+  color: color ?? t.text2,
+);
 
 /// A live session's age, or an ended one's status in lower case.
 String sessionWhen(AgentSession s) =>
@@ -81,7 +113,7 @@ String endedLine(AgentSession s) {
   return [
     ended == null || s.status == 'failed'
         ? s.statusLabel
-        : '${s.statusLabel} ${_clock(ended)}',
+        : '${s.statusLabel} ${clockAt(ended)}',
     ?s.endDetail,
     if (ended != null && started != null && s.status != 'failed')
       'ran ${_ran(ended.difference(started))}',
@@ -131,11 +163,7 @@ class SessionRow extends StatelessWidget {
     final t = context.tokens;
     final s = session;
     final radius = BorderRadius.circular(phone ? 0 : t.rControl);
-    final subStyle = TextStyle(
-      fontFamily: StormTokens.monoFamily,
-      fontSize: t.labelSize,
-      color: t.text3,
-    );
+    final subStyle = agentMono(t);
     final content = Row(
       children: [
         AgentMark(
@@ -244,11 +272,7 @@ class SessionSubLine extends StatelessWidget {
     // A child's workspace is `children/<id>` on its host: named by what it
     // is instead, as its meta line does (134l).
     final ws = session.spawn.isChild
-        ? switch (session.spawn.childWorkspace?.mode) {
-            'clone' => 'own copy',
-            'scratch' => 'scratch folder',
-            _ => 'own workspace',
-          }
+        ? childWorkspaceLabel(session.spawn.childWorkspace)
         : session.workspace;
     final when = sessionWhen(session);
     return LayoutBuilder(
@@ -403,15 +427,7 @@ class AgentsLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Text(
-      text.toUpperCase(),
-      style: TextStyle(
-        fontFamily: StormTokens.monoFamily,
-        fontSize: t.labelSize,
-        letterSpacing: t.labelSize * 0.08,
-        color: t.text3,
-      ),
-    );
+    return Text(text.toUpperCase(), style: agentKey(t));
   }
 }
 

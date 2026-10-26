@@ -23,7 +23,7 @@ import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 import 'launcher.dart';
 import 'spawn_state.dart' show lineageOrder;
-import 'spawn_widgets.dart' show LineageIndent, lineageLine;
+import 'spawn_widgets.dart' show lineageIndented, lineageLine;
 
 /// Agents at `/agents` (handoff §2.7, §2.8).
 ///
@@ -1054,14 +1054,6 @@ class _AgentCards extends ConsumerWidget {
   }
 }
 
-/// A child listed under its parent sits on the dashed indent (134l).
-Widget _indentedChild(AgentSession s, List<AgentSession> list, Widget row) {
-  final p = s.spawn.parentSession;
-  return p != null && list.any((o) => o.id == p)
-      ? LineageIndent(child: row)
-      : row;
-}
-
 /// The phone list: CREWS as on the desk, then Running and Ended with the
 /// sessions in no crew, then the infrastructure line. No work grouping, the
 /// rows already carry the workspace (handoff §2.8; crews 4j). A long-press
@@ -1095,7 +1087,7 @@ class _PhoneList extends ConsumerWidget {
           padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
           child: AgentsLabel(label),
         ),
-        for (final s in lineageOrder(list)) _indentedChild(s, list, row(s)),
+        for (final s in lineageOrder(list)) lineageIndented(s, list, row(s)),
       ],
     );
     return Column(

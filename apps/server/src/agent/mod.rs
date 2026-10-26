@@ -16,8 +16,6 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
-// Dark until 134-5: no tool creates a request yet.
-#[allow(dead_code)]
 pub mod approval;
 pub mod attention;
 pub mod cache;
@@ -316,13 +314,20 @@ pub struct Capabilities {
 /// A host's session isolation (decision 136j), shaped as [`Identity`] is.
 pub type Isolation = Identity;
 
-/// A host's isolation state as calls are judged by it: what its live link
-/// says, `unavailable` for a host that is offline or has not said.
+/// Which of a host's two self-reported labels, alike in shape but kept apart.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsolationState {
-    Verified,
-    Unsupported,
-    Unavailable,
+pub enum HostLabel {
+    Identity,
+    Isolation,
+}
+
+impl HostLabel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Isolation => "isolation",
+        }
+    }
 }
 
 /// A host's bridge identity (decision 135d): `verified`, `unsupported` or
@@ -1106,8 +1111,8 @@ impl AgentManager {
             link.capabilities = Some(hello.capabilities);
             link.reported = true;
         }
-        self.record_identity(host_id, &identity);
-        self.record_isolation(host_id, &isolation);
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
         let reported: HashMap<String, ReportedSession> = hello
             .sessions
             .into_iter()
@@ -1187,64 +1192,61 @@ impl AgentManager {
             link.reported = true;
             link.inventory.send_modify(|v| *v += 1);
         }
-        self.record_identity(host_id, &identity);
-        self.record_isolation(host_id, &isolation);
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
         self.reassess_spawn_gate(host_id);
         Ok(())
     }
 
-    /// Never fails the report it came with, like [`Self::record_identity`].
-    fn record_isolation(&self, host_id: &str, isolation: &Isolation) {
-        let store = self.store.lock().unwrap();
-        let stored = store.host_isolation(host_id);
-        if matches!(&stored, Ok(Some(known)) if known == isolation) {
-            return;
-        }
-        tracing::info!(
-            host = host_id,
-            state = isolation.state,
-            reason = isolation.reason.as_deref(),
-            "runtime host isolation"
-        );
-        if let Err(e) = store.set_host_isolation(host_id, isolation, &now()) {
-            tracing::warn!(error = %e, host = host_id, "could not record a host's isolation");
-        }
-    }
-
     /// Never fails the report it came with: the label it keeps is for while
     /// the host is away, and the link's own copy is what calls are judged by.
-    fn record_identity(&self, host_id: &str, identity: &Identity) {
+    fn record_label(&self, kind: HostLabel, host_id: &str, label: &Identity) {
         let store = self.store.lock().unwrap();
-        let stored = store.host_identity(host_id);
-        if matches!(&stored, Ok(Some(known)) if known == identity) {
+        let stored = store.host_label(kind, host_id);
+        if matches!(&stored, Ok(Some(known)) if known == label) {
             return;
         }
         tracing::info!(
             host = host_id,
-            state = identity.state,
-            reason = identity.reason.as_deref(),
-            "runtime host identity"
+            state = label.state,
+            reason = label.reason.as_deref(),
+            "runtime host {}",
+            kind.name()
         );
-        if let Err(e) = store.set_host_identity(host_id, identity, &now()) {
-            tracing::warn!(error = %e, host = host_id, "could not record a host's identity");
+        if let Err(e) = store.set_host_label(kind, host_id, label, &now()) {
+            tracing::warn!(error = %e, host = host_id, "could not record a host's {}", kind.name());
         }
     }
 
-    /// Whether the host's link says it checks every connection (135d).
-    pub fn host_verified(&self, host_id: &str) -> bool {
+    /// Reads one thing from the host's live capabilities, under the lock.
+    fn with_live<T>(&self, host_id: &str, f: impl FnOnce(&Capabilities) -> T) -> Option<T> {
         self.live
             .lock()
             .unwrap()
             .hosts
             .get(host_id)
             .and_then(|link| link.capabilities.as_ref())
-            .is_some_and(|caps| caps.identity.verified())
+            .map(f)
     }
 
-    /// Whether the host's link says it isolates its sessions (136j, IG-7):
-    /// `verified` only, fail closed.
+    /// Whether the host's link says it checks every connection (135d).
+    pub fn host_verified(&self, host_id: &str) -> bool {
+        self.with_live(host_id, |caps| caps.identity.verified())
+            .unwrap_or(false)
+    }
+
+    /// Whether the host's session isolation (136j, IG-7) is `verified` as
+    /// its live link says it now; fail closed. Never the stored copy, nor
+    /// what a new link carried over before it said anything itself.
     pub fn host_isolated(&self, host_id: &str) -> bool {
-        self.host_isolation(host_id) == IsolationState::Verified
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.isolation.verified())
     }
 
     /// Test-only: the host sends an inventory saying `isolation: verified`,
@@ -1324,9 +1326,7 @@ impl AgentManager {
     }
 
     fn workspace_paths(&self, host_id: &str) -> HashMap<String, String> {
-        self.host_live(host_id)
-            .capabilities
-            .map(|caps| caps.workspace_paths)
+        self.with_live(host_id, |caps| caps.workspace_paths.clone())
             .unwrap_or_default()
     }
 
@@ -1365,12 +1365,12 @@ impl AgentManager {
     /// can still turn it off after a downgrade. Elsewhere `None`: a host
     /// that cannot offer spawning shows nothing of it.
     pub fn spawn_view(&self, r: &SessionRecord) -> Result<Option<SpawnView>> {
-        let paths = self.workspace_paths(&r.host_id);
         let store = self.store.lock().unwrap();
         let enabled = store.spawn_enabled(&r.id)?;
         if !enabled && self.spawn_gate(&r.host_id).is_err() {
             return Ok(None);
         }
+        let paths = self.workspace_paths(&r.host_id);
         Ok(Some(SpawnView {
             enabled,
             refused: self.enable_refusal(r, &store, &paths)?,
@@ -1405,42 +1405,18 @@ impl AgentManager {
         }))
     }
 
-    /// The host's session isolation (decision 136j) as its live link says
-    /// it now. Offline, or never said: `Unavailable`. Only this is what a
-    /// privileged operation may be judged by; never the stored copy, nor
-    /// what a new link carried over before it said anything itself.
-    pub fn host_isolation(&self, host_id: &str) -> IsolationState {
-        let live = self.live.lock().unwrap();
-        let state = live
-            .hosts
-            .get(host_id)
-            .filter(|link| link.reported)
-            .and_then(|link| link.capabilities.as_ref())
-            .map(|caps| caps.isolation.state.clone());
-        match state.as_deref() {
-            Some(IDENTITY_VERIFIED) => IsolationState::Verified,
-            Some(IDENTITY_UNSUPPORTED) => IsolationState::Unsupported,
-            _ => IsolationState::Unavailable,
+    /// The host's bridge identity (135d) or session isolation (136j) for
+    /// its views: what its link says now, else what it last said; `None`
+    /// for a host not heard from since that label was recorded.
+    pub fn host_label(&self, kind: HostLabel, host_id: &str) -> Result<Option<Identity>> {
+        let live = self.with_live(host_id, |caps| match kind {
+            HostLabel::Identity => caps.identity.clone(),
+            HostLabel::Isolation => caps.isolation.clone(),
+        });
+        if live.is_some() {
+            return Ok(live);
         }
-    }
-
-    /// The host's isolation for its views: what its link says now, else
-    /// what it last said; `None` for a host not heard from since 136-5.
-    pub fn host_isolation_report(&self, host_id: &str) -> Result<Option<Isolation>> {
-        if let Some(caps) = self.host_live(host_id).capabilities {
-            return Ok(Some(caps.isolation));
-        }
-        self.store.lock().unwrap().host_isolation(host_id)
-    }
-
-    /// The host's bridge identity (decision 135d): what its link says now,
-    /// else what it last said. `None` for a host not heard from since this
-    /// was recorded.
-    pub fn host_identity(&self, host_id: &str) -> Result<Option<Identity>> {
-        if let Some(caps) = self.host_live(host_id).capabilities {
-            return Ok(Some(caps.identity));
-        }
-        self.store.lock().unwrap().host_identity(host_id)
+        self.store.lock().unwrap().host_label(kind, host_id)
     }
 
     // ---- agent installs (decision 133) ----------------------------------
@@ -4459,7 +4435,7 @@ mod tests {
     #[test]
     fn a_hosts_identity_is_kept_while_it_is_away_and_its_link_wins() {
         let (m, _d) = manager();
-        assert_eq!(m.host_identity("hst_A").unwrap(), None);
+        assert_eq!(m.host_label(HostLabel::Identity, "hst_A").unwrap(), None);
         let verified = Identity {
             state: "verified".into(),
             mechanism: Some("so_peerpidfd".into()),
@@ -4481,7 +4457,10 @@ mod tests {
         assert!(m.host_verified("hst_A"));
         m.inventory("hst_A", caps(&[("shell", true)])).unwrap();
         assert!(!m.host_verified("hst_A"));
-        assert_eq!(m.host_identity("hst_A").unwrap(), Some(Identity::default()));
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(Identity::default())
+        );
         m.inventory(
             "hst_A",
             Capabilities {
@@ -4492,7 +4471,10 @@ mod tests {
         .unwrap();
         m.disconnect_host("hst_A", generation);
         assert!(!m.host_verified("hst_A"), "an offline host checks nothing");
-        assert_eq!(m.host_identity("hst_A").unwrap(), Some(verified));
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(verified)
+        );
     }
 
     /// 136j, read as 135-2 reads `identity`: an old host is
@@ -4532,14 +4514,14 @@ mod tests {
         assert_eq!(off.reason.as_deref(), Some("off"));
     }
 
-    /// `host_isolation` is the live link's alone: verified only while a
-    /// link says so, `Unavailable` offline whatever was stored, and the
+    /// `host_isolated` is the live link's alone: verified only while a
+    /// link says so, never offline whatever was stored, and the
     /// stored copy only labels views.
     #[test]
     fn a_hosts_isolation_is_its_live_links_and_kept_for_its_views() {
         let (m, _d) = manager();
-        assert_eq!(m.host_isolation("hst_A"), IsolationState::Unavailable);
-        assert_eq!(m.host_isolation_report("hst_A").unwrap(), None);
+        assert!(!m.host_isolated("hst_A"));
+        assert_eq!(m.host_label(HostLabel::Isolation, "hst_A").unwrap(), None);
         let verified = Isolation {
             state: "verified".into(),
             mechanism: Some("systemd_units".into()),
@@ -4558,7 +4540,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(m.host_isolation("hst_A"), IsolationState::Verified);
+        assert!(m.host_isolated("hst_A"));
         assert!(!m.host_verified("hst_A"), "identity is its own");
         // A downgrade in the inventory takes effect at once.
         let down = Isolation {
@@ -4574,7 +4556,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(m.host_isolation("hst_A"), IsolationState::Unavailable);
+        assert!(!m.host_isolated("hst_A"));
         m.inventory(
             "hst_A",
             Capabilities {
@@ -4584,12 +4566,14 @@ mod tests {
         )
         .unwrap();
         m.disconnect_host("hst_A", generation);
-        assert_eq!(
-            m.host_isolation("hst_A"),
-            IsolationState::Unavailable,
+        assert!(
+            !m.host_isolated("hst_A"),
             "an offline host isolates nothing new"
         );
-        assert_eq!(m.host_isolation_report("hst_A").unwrap(), Some(verified));
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_A").unwrap(),
+            Some(verified)
+        );
         let (_g, _rx) = m.connect_host("hst_B");
         m.hello(
             "hst_B",
@@ -4607,7 +4591,14 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(m.host_isolation("hst_B"), IsolationState::Unsupported);
+        assert!(!m.host_isolated("hst_B"));
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_B")
+                .unwrap()
+                .unwrap()
+                .state,
+            IDENTITY_UNSUPPORTED
+        );
     }
 
     #[test]

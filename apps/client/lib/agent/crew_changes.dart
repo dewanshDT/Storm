@@ -420,6 +420,21 @@ void announceRemovedCrew(
   fallback: fallback,
 );
 
+/// Undo for the crews a dismissal emptied, a session's or a tree's.
+void announceDismissedCrews(
+  ProviderContainer c,
+  AgentOverview? before,
+  List<Crew> removed, {
+  ScaffoldMessengerState? fallback,
+}) => announceRemovedCrews(
+  c,
+  [for (final gone in removed) removedCrewFrom(before, gone)],
+  why: removed.length == 1
+      ? 'its last session was dismissed'
+      : 'their last sessions were dismissed',
+  fallback: fallback,
+);
+
 /// "{a} and {b} were removed: [why]. Undo" for the crews one change emptied,
 /// a tree dismissal's (134-7's `removed_crews`). Undo restores every one of
 /// them, in their old order, one after another so each finds its place.

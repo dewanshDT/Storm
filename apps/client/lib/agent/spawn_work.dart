@@ -7,6 +7,7 @@ import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'agent_widgets.dart' show agentCode, agentKey, agentSans;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 import 'spawn_state.dart';
@@ -15,28 +16,6 @@ import 'spawn_state.dart';
 /// it has ended, then Applied into its parent's workspace as a new branch or
 /// a new folder the person names, or deleted. Nothing reaches the parent's
 /// workspace any other way, and nothing is ever merged or overwritten.
-
-TextStyle _sans(StormTokens t, {Color? color, FontWeight? weight}) => TextStyle(
-  fontFamily: StormTokens.sansFamily,
-  fontSize: t.codeSize,
-  height: 1.4,
-  fontWeight: weight,
-  color: color ?? t.text,
-);
-
-TextStyle _mono(StormTokens t, [Color? color]) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: t.labelSize * 1.09,
-  height: 1.45,
-  color: color ?? t.text2,
-);
-
-TextStyle _key(StormTokens t) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: t.labelSize,
-  letterSpacing: t.labelSize * 0.08,
-  color: t.text3,
-);
 
 /// What the person is told when the server refuses (137-3's codes).
 String childWorkRefusal(String? code, {String? target, required String ws}) =>
@@ -165,7 +144,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
       Text(
         text,
         key: key,
-        style: _sans(t, color: color ?? t.text2),
+        style: agentSans(t, color: color ?? t.text2),
       ),
     );
 
@@ -196,7 +175,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
         Text(
           _refused!,
           key: const Key('work-refusal'),
-          style: _sans(t, color: t.danger),
+          style: agentSans(t, color: t.danger),
         ),
       );
     }
@@ -218,7 +197,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
                       'Delete ${s.displayName}’s workspace? Its own copy or '
                       'scratch folder goes, with any of its work you haven’t '
                       'applied. This can’t be undone.',
-                      style: _sans(t),
+                      style: agentSans(t),
                     ),
                     SizedBox(height: t.sp),
                     Wrap(
@@ -285,7 +264,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
                   'new folder in $ws, named below. It never overwrites: a '
                   'name that exists is refused.',
         key: const Key('work-intro'),
-        style: _sans(t, color: t.text2),
+        style: agentSans(t, color: t.text2),
       ),
     );
     if (w.clone) {
@@ -297,36 +276,36 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
                 : 'It rewrote its history, so it is shown from its last '
                       'commit alone',
             key: const Key('work-base'),
-            style: _mono(t),
+            style: agentCode(t),
           ),
         );
       }
-      out.add(Text('COMMITS', style: _key(t)));
+      out.add(Text('COMMITS', style: agentKey(t)));
       out.add(
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             if (w.commits.isEmpty)
-              Text('No commits: it changed nothing.', style: _mono(t)),
+              Text('No commits: it changed nothing.', style: agentCode(t)),
             for (final c in w.commits)
               Text(
                 '${shortCommit(c.id)}  ${c.subject}',
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
-                style: _mono(t, t.text),
+                style: agentCode(t, color: t.text),
               ),
-            if (w.moreCommits) Text('… and more', style: _mono(t)),
+            if (w.moreCommits) Text('… and more', style: agentCode(t)),
           ],
         ),
       );
     }
-    out.add(Text(w.clone ? 'FILES' : 'ITS FILES', style: _key(t)));
+    out.add(Text(w.clone ? 'FILES' : 'ITS FILES', style: agentKey(t)));
     out.add(
       Column(
         key: const Key('work-files'),
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          if (w.files.isEmpty) Text('None.', style: _mono(t)),
+          if (w.files.isEmpty) Text('None.', style: agentCode(t)),
           for (final f in w.files)
             Row(
               children: [
@@ -335,7 +314,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
                     f.path,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: _mono(t, t.text),
+                    style: agentCode(t, color: t.text),
                   ),
                 ),
                 SizedBox(width: t.sp),
@@ -345,21 +324,21 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
                             ? 'binary'
                             : '+${f.added} −${f.removed ?? 0}'
                       : _size(f.size ?? 0),
-                  style: _mono(t),
+                  style: agentCode(t),
                 ),
               ],
             ),
-          if (w.moreFiles) Text('… and more', style: _mono(t)),
+          if (w.moreFiles) Text('… and more', style: agentCode(t)),
           if (w.skipped > 0)
             Text(
               '${w.skipped} links, devices or .git folders are left out.',
-              style: _mono(t),
+              style: agentCode(t),
             ),
         ],
       ),
     );
     if (w.clone && w.patch != null && w.patch!.isNotEmpty) {
-      out.add(Text('DIFF', style: _key(t)));
+      out.add(Text('DIFF', style: agentKey(t)));
       out.add(
         Container(
           key: const Key('work-patch'),
@@ -371,7 +350,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
           child: SelectableText(
             w.patch! +
                 (w.patchTruncated ? '\n… the rest is too long to show' : ''),
-            style: _mono(t, t.text),
+            style: agentCode(t, color: t.text),
           ),
         ),
       );
@@ -382,7 +361,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
           key: const Key('work-name'),
           controller: _name,
           enabled: !_busy,
-          style: _mono(t, t.text),
+          style: agentCode(t, color: t.text),
           decoration: InputDecoration(labelText: 'New folder in $ws'),
         ),
       );

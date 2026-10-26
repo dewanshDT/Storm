@@ -26,6 +26,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::agent::HostLabel;
 use crate::api::{ApiError, ApiResult, Shared, bad_request, conflict, not_found, vault_of};
 use crate::auth::authz::{Access, Actor};
 use crate::db::{NoteRow, RecentRow, SearchHit};
@@ -1634,16 +1635,19 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
     };
     let identity = match &live.capabilities {
         Some(caps) => Some(caps.identity.clone()),
-        None => state.agent.host_identity(&host.id).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, host = host.id, "could not read a host's identity");
-            None
-        }),
+        None => state
+            .agent
+            .host_label(HostLabel::Identity, &host.id)
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, host = host.id, "could not read a host's identity");
+                None
+            }),
     };
     let isolation = match &live.capabilities {
         Some(caps) => Some(caps.isolation.clone()),
         None => state
             .agent
-            .host_isolation_report(&host.id)
+            .host_label(HostLabel::Isolation, &host.id)
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, host = host.id, "could not read a host's isolation");
                 None
@@ -1950,11 +1954,7 @@ pub async fn set_session_spawn(
     id: &str,
     req: SetSpawn,
 ) -> ApiResult<SpawnSwitch> {
-    let owner = crews_owner(actor)?;
-    let record = state.agent.get(id).map_err(agent_error)?;
-    if record.owner_user_id != owner {
-        return Err(not_found("no such session"));
-    }
+    let (owner, record) = owners_session(state, actor, id)?;
     let outcome = state
         .agent
         .set_spawn(id, req.enabled, device)
@@ -1984,7 +1984,7 @@ pub async fn set_session_spawn(
         .await
         .record_event(
             kind,
-            Some(owner),
+            Some(&owner),
             device,
             &crate::index::now_rfc3339(),
             &detail.to_string(),
@@ -2010,12 +2010,9 @@ pub async fn set_session_spawn(
 // ---- Agent spawning: the approval engine (decision 134-3) -----------------
 //
 // A person's device decides on the session tier, owner only (A5): no key, no
-// agent, no host. Dark: no tool creates a request before 134-5, and C0
-// refuses on every host until 136-5.
+// agent, no host.
 
-#[allow(dead_code)] // 134-5's tools create requests.
 pub const EVENT_SPAWN_REQUEST: &str = "spawn_request";
-#[allow(dead_code)] // 134-5's tools create requests.
 pub const EVENT_SPAWN_REQUEST_REFUSED: &str = "spawn_request_refused";
 pub const EVENT_SPAWN_REQUEST_DECIDED: &str = "spawn_request_decided";
 pub const EVENT_SPAWN_REQUEST_EXPIRED: &str = "spawn_request_expired";
@@ -2401,6 +2398,15 @@ pub struct SentMessage {
     pub at: String,
 }
 
+/// A session's launch name, else its workspace.
+fn session_name(state: &Shared, r: &crate::agent::store::SessionRecord) -> ApiResult<String> {
+    Ok(state
+        .agent
+        .launch_of(&r.id)
+        .map_err(internal)?
+        .map_or_else(|| r.workspace.clone(), |l| l.name))
+}
+
 /// One descendant's view; `detail_for` names the asking ancestor when the
 /// view is `agent_status`'s, with the task and that ancestor's messages.
 fn agent_view(
@@ -2429,11 +2435,7 @@ fn agent_view(
         ),
         None => (None, None),
     };
-    let name = state
-        .agent
-        .launch_of(&r.id)
-        .map_err(internal)?
-        .map_or_else(|| r.workspace.clone(), |l| l.name);
+    let name = session_name(state, &r)?;
     Ok(AgentView {
         settled: crate::agent::scope::settled(&r, result.as_ref()),
         id: r.id,
@@ -2577,11 +2579,7 @@ pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Children>
         .predecessor_results(&caller)
         .map_err(agent_error)?
     {
-        let name = state
-            .agent
-            .launch_of(&child.id)
-            .map_err(internal)?
-            .map_or_else(|| child.workspace.clone(), |l| l.name);
+        let name = session_name(state, &child)?;
         predecessor_results.push(PredecessorResult {
             id: child.id,
             name,
@@ -2828,23 +2826,7 @@ pub async fn send_message(
         target: id.to_string(),
         text: text.to_string(),
     };
-    match create_spawn_request(state, &caller, new).await? {
-        Ok(r) => Ok(MessageSent {
-            request_id: Some(r.id),
-            state: "pending",
-            reason: None,
-            cap: None,
-        }),
-        Err(refusal) if refusal.reason == "not_found" => {
-            Err(not_found("no such agent among your descendants"))
-        }
-        Err(refusal) => Ok(MessageSent {
-            request_id: None,
-            state: "refused",
-            reason: Some(refusal.reason),
-            cap: refusal.cap,
-        }),
-    }
+    request_for_descendant(state, &caller, new).await
 }
 
 /// `end_agent {id}` (134-7): asks a person to approve ending one of the
@@ -2856,7 +2838,17 @@ pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<Mes
     let new = NewRequest::End {
         target: id.to_string(),
     };
-    match create_spawn_request(state, &caller, new).await? {
+    request_for_descendant(state, &caller, new).await
+}
+
+/// Asks a person to approve `new`, answered as `send_message` and
+/// `end_agent` answer.
+async fn request_for_descendant(
+    state: &Shared,
+    caller: &str,
+    new: crate::agent::store::spawn::NewRequest,
+) -> ApiResult<MessageSent> {
+    match create_spawn_request(state, caller, new).await? {
         Ok(r) => Ok(MessageSent {
             request_id: Some(r.id),
             state: "pending",
@@ -3045,18 +3037,20 @@ pub async fn list_child_workspaces(
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ChildUse {
-    /// An export or an Apply: only a child 134 started, ended, on its host.
+    /// An export: only a child 134 started, ended, on its host.
     Review,
+    /// An Apply: held to the same as a review.
+    Apply,
     /// A delete: an orphan or a record no session claims goes by name.
     Delete,
 }
 
 impl ChildUse {
-    fn op(self, apply: bool) -> &'static str {
-        match (self, apply) {
-            (ChildUse::Delete, _) => "delete",
-            (ChildUse::Review, true) => "apply",
-            (ChildUse::Review, false) => "review",
+    fn op(self) -> &'static str {
+        match self {
+            ChildUse::Review => "review",
+            ChildUse::Apply => "apply",
+            ChildUse::Delete => "delete",
         }
     }
 }
@@ -3072,11 +3066,10 @@ async fn checked_child(
     host_id: &str,
     child: &str,
     using: ChildUse,
-    apply: bool,
 ) -> ApiResult<Option<serde_json::Value>> {
     let refuse = |code: &'static str| async move {
         let failed = Err(crate::agent::AgentError::ChildRefused(code.into()));
-        audit_child(state, actor, using.op(apply), host_id, child, &failed).await;
+        audit_child(state, actor, using.op(), host_id, child, &failed).await;
         ApiError(child_status(code), code.into())
     };
     let session = match state.agent.get(child) {
@@ -3109,12 +3102,12 @@ async fn checked_child(
         .cloned();
     let mismatch = match (&record, &parent) {
         (Some(r), Some(p)) => r["parent"] != p.as_str(),
-        (None, _) if using == ChildUse::Review => {
+        (None, _) if using != ChildUse::Delete => {
             return Err(ApiError(child_status("no_child"), "no_child".into()));
         }
         _ => false,
     };
-    let unclaimed = session.is_none() && using == ChildUse::Review;
+    let unclaimed = session.is_none() && using != ChildUse::Delete;
     if mismatch || unclaimed {
         return Err(refuse("lineage_mismatch").await);
     }
@@ -3132,7 +3125,7 @@ pub async fn child_review(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
-    checked_child(state, actor, host_id, child, ChildUse::Review, false).await?;
+    checked_child(state, actor, host_id, child, ChildUse::Review).await?;
     state
         .agent
         .child_workspace(host_id, ChildOp::Export, Some(child), None, None)
@@ -3154,7 +3147,7 @@ pub async fn apply_child(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
-    let record = checked_child(state, actor, host_id, child, ChildUse::Review, true)
+    let record = checked_child(state, actor, host_id, child, ChildUse::Apply)
         .await?
         .ok_or_else(|| ApiError(child_status("no_child"), "no_child".into()))?;
     let parent = record["parent"]
@@ -3219,7 +3212,7 @@ pub async fn delete_child(
 ) -> ApiResult<serde_json::Value> {
     child_host(state, actor, host_id).await?;
     child_id(child)?;
-    checked_child(state, actor, host_id, child, ChildUse::Delete, false).await?;
+    checked_child(state, actor, host_id, child, ChildUse::Delete).await?;
     let result = state
         .agent
         .child_workspace(host_id, ChildOp::Dispose, Some(child), None, None)
@@ -3545,11 +3538,11 @@ fn session_view(
         .into();
     let identity = state
         .agent
-        .host_identity(&session.host_id)
+        .host_label(HostLabel::Identity, &session.host_id)
         .map_err(internal)?;
     let isolation = state
         .agent
-        .host_isolation_report(&session.host_id)
+        .host_label(HostLabel::Isolation, &session.host_id)
         .map_err(internal)?;
     let child_workspace = state
         .agent
@@ -3823,13 +3816,13 @@ pub async fn launch_session(
     let integrations = state.agent.integrations_of(&session.id).map_err(internal)?;
     let identity = state
         .agent
-        .host_identity(&session.host_id)
+        .host_label(HostLabel::Identity, &session.host_id)
         .map_err(internal)?;
     // A launch is always top-level: lineage is written only at approval.
     let top_level = session.id.clone();
     let isolation = state
         .agent
-        .host_isolation_report(&session.host_id)
+        .host_label(HostLabel::Isolation, &session.host_id)
         .map_err(internal)?;
     let spawn = state.agent.spawn_view(&session).map_err(internal)?;
     let crew = state.agent.membership(&session.id).map_err(internal)?;
@@ -4150,11 +4143,7 @@ pub async fn session_descendants(
     owners_session(state, actor, id)?;
     let (running, ended) = state.agent.descendants_of(id).map_err(agent_error)?;
     let view = |r: crate::agent::store::SessionRecord| -> ApiResult<DescendantView> {
-        let name = state
-            .agent
-            .launch_of(&r.id)
-            .map_err(internal)?
-            .map_or_else(|| r.workspace.clone(), |l| l.name);
+        let name = session_name(state, &r)?;
         Ok(DescendantView {
             lineage: state.agent.lineage(&r.id).map_err(agent_error)?.into(),
             id: r.id,

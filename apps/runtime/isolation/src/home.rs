@@ -35,10 +35,11 @@ use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, Mode, OFlags};
 use serde_json::Value;
 
-use crate::convert::{Entry, Key, Kind, Meta, Node, Ownership};
+use crate::convert::{Entry, Kind, Meta, Node, Ownership, key_of, kind_of, meta_of};
+use crate::files::{DIR_FLAGS, dir_names};
 
 /// How much one session's snapshot may copy.
 const MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -357,31 +358,6 @@ impl Paths {
     }
 }
 
-// `Stat`'s field types differ between architectures.
-#[allow(clippy::unnecessary_cast)]
-fn stat_meta(st: &rustix::fs::Stat) -> (Key, Meta) {
-    (
-        Key {
-            dev: st.st_dev as u64,
-            ino: st.st_ino as u64,
-        },
-        Meta {
-            uid: st.st_uid,
-            gid: st.st_gid,
-            mode: st.st_mode as u32 & 0o7777,
-        },
-    )
-}
-
-fn kind_of(st: &rustix::fs::Stat) -> Kind {
-    match FileType::from_raw_mode(st.st_mode as _) {
-        FileType::Directory => Kind::Dir,
-        FileType::RegularFile => Kind::File,
-        FileType::Symlink => Kind::Link,
-        _ => Kind::Other,
-    }
-}
-
 fn cname(name: &[u8]) -> Result<CString> {
     if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') {
         bail!("{} is not a file name", String::from_utf8_lossy(name));
@@ -389,14 +365,9 @@ fn cname(name: &[u8]) -> Result<CString> {
     Ok(CString::new(name)?)
 }
 
-const DIR_FLAGS: OFlags = OFlags::RDONLY
-    .union(OFlags::DIRECTORY)
-    .union(OFlags::NOFOLLOW)
-    .union(OFlags::CLOEXEC);
-
 /// Who owns an entry now, as [`Ownership`] sees it.
 fn owner_of(own: &dyn Ownership, st: &rustix::fs::Stat) -> u32 {
-    let (key, seen) = stat_meta(st);
+    let (key, seen) = (key_of(st), meta_of(st));
     own.meta(key, seen).uid
 }
 
@@ -489,7 +460,7 @@ impl<'a> Copier<'a> {
             (None, Some((dir, name))) => rustix::fs::statat(dir, name, AtFlags::SYMLINK_NOFOLLOW)?,
             _ => bail!("nothing to settle"),
         };
-        let (key, seen) = stat_meta(&st);
+        let (key, seen) = (key_of(&st), meta_of(&st));
         let node = match (fd, at) {
             (Some(fd), _) => Node::Fd(fd),
             (None, Some((dir, name))) => Node::At(dir, name),
@@ -605,7 +576,7 @@ impl<'a> Copier<'a> {
             return Ok(());
         }
         let kind = kind_of(&st);
-        let (_, seen) = stat_meta(&st);
+        let seen = meta_of(&st);
         let meta = self.target(access, kind, seen.mode);
         match kind {
             Kind::File => {
@@ -619,7 +590,7 @@ impl<'a> Copier<'a> {
                         | OFlags::NOCTTY,
                     Mode::empty(),
                 )?;
-                if stat_meta(&rustix::fs::fstat(&fd)?).0 != stat_meta(&st).0 {
+                if key_of(&rustix::fs::fstat(&fd)?) != key_of(&st) {
                     bail!("a file changed while it was being copied");
                 }
                 let bytes = Self::read_file(fd, MAX_BYTES - self.bytes.min(MAX_BYTES))?;
@@ -629,23 +600,14 @@ impl<'a> Copier<'a> {
             }
             Kind::Dir => {
                 let from = rustix::fs::openat(src, name, DIR_FLAGS, Mode::empty())?;
-                if stat_meta(&rustix::fs::fstat(&from)?).0 != stat_meta(&st).0 {
+                if key_of(&rustix::fs::fstat(&from)?) != key_of(&st) {
                     bail!("a directory changed while it was being copied");
                 }
                 self.count(0)?;
                 rustix::fs::mkdirat(dst, dst_name, Mode::from_raw_mode(0o700))
                     .with_context(|| format!("making {}", dst_name.to_string_lossy()))?;
                 let to = rustix::fs::openat(dst, dst_name, DIR_FLAGS, Mode::empty())?;
-                let mut names: Vec<CString> = Vec::new();
-                for entry in Dir::read_from(&from)? {
-                    let entry = entry?;
-                    let n = entry.file_name();
-                    if n.to_bytes() != b"." && n.to_bytes() != b".." {
-                        names.push(n.to_owned());
-                    }
-                }
-                names.sort();
-                for n in names {
+                for n in dir_names(&from)? {
                     let base = rel.len();
                     if !rel.is_empty() {
                         rel.push(b'/');
@@ -938,16 +900,10 @@ fn list(root: BorrowedFd<'_>, rel: &str, own: &dyn Ownership) -> Result<Vec<Vec<
     let Some(dir) = open_dir_under(root, rel, Some(0), own)? else {
         return Ok(Vec::new());
     };
-    let mut out = Vec::new();
-    for entry in Dir::read_from(&dir)? {
-        let entry = entry?;
-        let n = entry.file_name().to_bytes();
-        if n != b"." && n != b".." && !n.contains(&b'/') {
-            out.push(n.to_vec());
-        }
-    }
-    out.sort();
-    Ok(out)
+    Ok(dir_names(&dir)?
+        .into_iter()
+        .map(CString::into_bytes)
+        .collect())
 }
 
 /// Every regular file under `rel`, by its path and name.
@@ -1058,7 +1014,8 @@ pub fn prune(kept_root: &Path, own: &dyn Ownership) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convert::Recorded;
+    use crate::convert::{Key, Recorded};
+    use crate::session::tests::me;
     use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
@@ -1067,10 +1024,6 @@ mod tests {
     const GID: u32 = 2007;
     const A: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
     const B: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000002";
-
-    fn me() -> u32 {
-        rustix::process::getuid().as_raw()
-    }
 
     struct Fx {
         _t: tempfile::TempDir,

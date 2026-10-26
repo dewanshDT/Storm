@@ -149,11 +149,8 @@ pub fn check_workspace(path: &str, roots: &[PathBuf]) -> Result<PathBuf, Refusal
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::tests::pool;
     use crate::protocol::parse;
-
-    fn pool() -> Pool {
-        Pool::resolve(&crate::pool::tests::fixed(), "storm-runtime").unwrap()
-    }
 
     #[test]
     fn only_the_host_account_is_answered() {

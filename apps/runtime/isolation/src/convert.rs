@@ -16,14 +16,12 @@
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, OsStr};
-use std::io::Write as _;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::pool::{self, Pool};
@@ -156,7 +154,7 @@ impl Ownership for Recorded {
     }
 }
 
-fn kind_of(st: &rustix::fs::Stat) -> Kind {
+pub(crate) fn kind_of(st: &rustix::fs::Stat) -> Kind {
     match FileType::from_raw_mode(st.st_mode as _) {
         FileType::Directory => Kind::Dir,
         FileType::RegularFile => Kind::File,
@@ -167,7 +165,7 @@ fn kind_of(st: &rustix::fs::Stat) -> Kind {
 
 // `Stat`'s field types differ between architectures.
 #[allow(clippy::unnecessary_cast)]
-fn key_of(st: &rustix::fs::Stat) -> Key {
+pub(crate) fn key_of(st: &rustix::fs::Stat) -> Key {
     Key {
         dev: st.st_dev as u64,
         ino: st.st_ino as u64,
@@ -175,7 +173,7 @@ fn key_of(st: &rustix::fs::Stat) -> Key {
 }
 
 #[allow(clippy::unnecessary_cast)]
-fn meta_of(st: &rustix::fs::Stat) -> Meta {
+pub(crate) fn meta_of(st: &rustix::fs::Stat) -> Meta {
     Meta {
         uid: st.st_uid,
         gid: st.st_gid,
@@ -194,12 +192,8 @@ pub struct Entry<'a> {
 
 /// Visits the workspace and everything under it, parents first.
 pub fn walk(workspace: &Path, visit: &mut dyn FnMut(Entry) -> Result<()>) -> Result<()> {
-    let fd = rustix::fs::open(
-        workspace,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .with_context(|| format!("opening {}", workspace.display()))?;
+    let fd = rustix::fs::open(workspace, crate::files::DIR_FLAGS, Mode::empty())
+        .with_context(|| format!("opening {}", workspace.display()))?;
     let st = rustix::fs::fstat(&fd)?;
     let dev = st.st_dev as u64;
     visit(Entry {
@@ -226,16 +220,7 @@ fn walk_dir(
             workspace.display()
         );
     }
-    let mut names: Vec<std::ffi::CString> = Vec::new();
-    for entry in Dir::read_from(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            names.push(name.to_owned());
-        }
-    }
-    names.sort();
-    for name in names {
+    for name in crate::files::dir_names(dir)? {
         let base = rel.len();
         if !rel.is_empty() {
             rel.push(b'/');
@@ -444,7 +429,6 @@ impl Manifest {
     /// old record or the new one, never half of one.
     pub(crate) fn save(&self, dir: &Path) -> Result<()> {
         let path = Self::path(dir, &self.group);
-        let tmp = path.with_extension("jsonl.tmp");
         let mut out = String::new();
         out.push_str(&serde_json::to_string(&Header {
             workspace: hex(self.workspace.as_os_str().as_bytes()),
@@ -459,18 +443,7 @@ impl Manifest {
             })?);
             out.push('\n');
         }
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&tmp)
-            .with_context(|| format!("writing {}", tmp.display()))?;
-        f.write_all(out.as_bytes())?;
-        f.sync_all()?;
-        std::fs::rename(&tmp, &path)?;
-        std::fs::File::open(dir)?.sync_all()?;
-        Ok(())
+        crate::files::write_root_private_atomic(&path, out.as_bytes())
     }
 
     pub(crate) fn remove(&self, dir: &Path) -> Result<()> {
@@ -588,11 +561,8 @@ pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pool::tests::pool;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
-
-    fn pool() -> Pool {
-        Pool::resolve(&crate::pool::tests::fixed(), "storm-runtime").unwrap()
-    }
 
     struct Fixture {
         _t: tempfile::TempDir,

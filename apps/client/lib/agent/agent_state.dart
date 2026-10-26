@@ -158,8 +158,9 @@ class AgentOverview {
       if (h.online) h,
   ];
 
-  String hostName(String id) =>
-      hosts.where((h) => h.id == id).firstOrNull?.name ?? 'host';
+  AgentHost? host(String id) => hosts.where((h) => h.id == id).firstOrNull;
+
+  String hostName(String id) => host(id)?.name ?? 'host';
 
   AgentSession? byId(String id) =>
       sessions.where((s) => s.id == id).firstOrNull;
@@ -168,7 +169,7 @@ class AgentOverview {
   /// there is none to reopen (decision 89).
   String? resumeBlocker(AgentSession s) {
     if (!s.ended || !s.hasConversation) return null;
-    final host = hosts.where((h) => h.id == s.hostId).firstOrNull;
+    final host = this.host(s.hostId);
     if (host == null || !host.online) {
       return "Can't resume while ${host?.name ?? 'its host'} is offline";
     }

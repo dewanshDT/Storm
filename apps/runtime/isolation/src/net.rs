@@ -18,6 +18,8 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use crate::units;
+
 pub const PASTA: &str = "/usr/bin/pasta";
 pub const IP: &str = "/usr/bin/ip";
 
@@ -168,41 +170,19 @@ impl NetSpec {
     }
 
     pub fn systemd_run_args(&self) -> Vec<OsString> {
-        let mut out: Vec<OsString> = vec![
-            format!("--unit={}", unit_name(&self.session)).into(),
-            "--quiet".into(),
-            "--no-ask-password".into(),
-            "--expand-environment=no".into(),
-        ];
-        for property in self.properties() {
-            out.push("-p".into());
-            out.push(property.into());
-        }
-        out.push("--".into());
-        out.push(PASTA.into());
-        out.extend(self.pasta_args().into_iter().map(OsString::from));
-        out
+        let unit = unit_name(&self.session);
+        units::run_args(&unit, false, self.properties(), self.exec())
     }
 
     /// The same unit as a file, for `systemd-analyze` offline.
     pub fn unit_file(&self) -> String {
-        let mut unit = String::from("[Unit]\n");
-        let mut service = String::from("[Service]\n");
-        for property in self.properties() {
-            let key = property.split('=').next().unwrap_or("");
-            let section = if matches!(key, "Description" | "BindsTo" | "After") {
-                &mut unit
-            } else {
-                &mut service
-            };
-            section.push_str(&property);
-            section.push('\n');
-        }
-        service.push_str(&format!(
-            "ExecStart={PASTA} {}\n",
-            self.pasta_args().join(" ")
-        ));
-        format!("{unit}\n{service}")
+        units::unit_file(self.properties(), &units::command_line(&self.exec()))
+    }
+
+    fn exec(&self) -> Vec<OsString> {
+        let mut out = vec![OsString::from(PASTA)];
+        out.extend(self.pasta_args().into_iter().map(OsString::from));
+        out
     }
 }
 

@@ -242,6 +242,11 @@ pub mod tests {
         a
     }
 
+    /// The pool [`fixed`] declares, resolved.
+    pub fn pool() -> Pool {
+        Pool::resolve(&fixed(), "storm-runtime").unwrap()
+    }
+
     #[test]
     fn names_round_trip_and_nothing_else_is_a_member() {
         assert_eq!(user_name(1), "storm-s001");

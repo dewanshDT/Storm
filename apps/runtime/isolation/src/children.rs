@@ -35,7 +35,7 @@ use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, Mode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -43,7 +43,7 @@ use crate::files;
 use crate::protocol::Refusal;
 use crate::serve::Helper;
 use crate::session::{Answer, failed};
-use crate::units::{STOP_GRACE_SECS, property_safe};
+use crate::units::{self, STOP_GRACE_SECS, property_safe};
 
 /// The helper's own binary, which a clone unit runs as the child's user
 /// (`child-clone`). Pinned against the package's install path.
@@ -136,13 +136,9 @@ pub fn disk_usage(path: &Path) -> Result<u64> {
     if FileType::from_raw_mode(st.st_mode as _) != FileType::Directory {
         return Ok(own);
     }
-    let fd = rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .with_context(|| format!("opening {}", path.display()))?;
-    Ok(own + usage_in(&fd, dev_of(&st), 0)?)
+    let fd = rustix::fs::open(path, files::DIR_FLAGS, Mode::empty())
+        .with_context(|| format!("opening {}", path.display()))?;
+    Ok(own + usage_in(&fd, crate::convert::key_of(&st).dev, 0)?)
 }
 
 #[allow(clippy::unnecessary_cast)]
@@ -150,41 +146,23 @@ fn blocks(st: &rustix::fs::Stat) -> u64 {
     st.st_blocks as u64 * 512
 }
 
-#[allow(clippy::unnecessary_cast)]
-fn dev_of(st: &rustix::fs::Stat) -> u64 {
-    st.st_dev as u64
-}
-
 fn usage_in(dir: &OwnedFd, dev: u64, depth: usize) -> Result<u64> {
     if depth >= MAX_DEPTH {
         bail!("nested deeper than {MAX_DEPTH} directories");
     }
-    let mut names = Vec::new();
-    for entry in Dir::read_from(dir)? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            names.push(name.to_owned());
-        }
-    }
     let mut total = 0u64;
-    for name in names {
+    for name in files::dir_names(dir)? {
         let st = match rustix::fs::statat(dir, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
             Ok(st) => st,
             Err(rustix::io::Errno::NOENT) => continue,
             Err(e) => return Err(e.into()),
         };
-        if dev_of(&st) != dev {
+        if crate::convert::key_of(&st).dev != dev {
             continue;
         }
         total = total.saturating_add(blocks(&st));
         if FileType::from_raw_mode(st.st_mode as _) == FileType::Directory {
-            let sub = rustix::fs::openat(
-                dir,
-                name.as_c_str(),
-                OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                Mode::empty(),
-            )?;
+            let sub = rustix::fs::openat(dir, name.as_c_str(), files::DIR_FLAGS, Mode::empty())?;
             total = total.saturating_add(usage_in(&sub, dev, depth + 1)?);
         }
     }
@@ -272,42 +250,18 @@ impl CloneSpec {
     }
 
     pub fn systemd_run_args(&self) -> Result<Vec<OsString>> {
-        let mut out: Vec<OsString> = vec![
-            format!("--unit={}", clone_unit_name(&self.child)).into(),
-            "--quiet".into(),
-            "--no-ask-password".into(),
-            "--expand-environment=no".into(),
-            "--wait".into(),
-            "--pipe".into(),
-            "--collect".into(),
-        ];
-        for property in self.properties()? {
-            out.push("-p".into());
-            out.push(property.into());
-        }
-        out.push("--".into());
-        out.extend(self.args());
-        Ok(out)
+        let unit = clone_unit_name(&self.child);
+        Ok(units::run_args(
+            &unit,
+            true,
+            self.properties()?,
+            self.args(),
+        ))
     }
 
     pub fn unit_file(&self) -> Result<String> {
-        let mut service = String::from("[Service]\n");
-        for property in self.properties()? {
-            if !property.starts_with("Description=") {
-                service.push_str(&property);
-                service.push('\n');
-            }
-        }
-        let exec: Vec<String> = self
-            .args()
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        service.push_str(&format!("ExecStart={}\n", exec.join(" ")));
-        Ok(format!(
-            "[Unit]\nDescription=Storm child workspace {}\n\n{service}",
-            self.child
-        ))
+        let exec = units::command_line(&self.args());
+        Ok(units::unit_file(self.properties()?, &exec))
     }
 }
 
@@ -386,42 +340,18 @@ impl ReviewSpec {
     }
 
     pub fn systemd_run_args(&self) -> Result<Vec<OsString>> {
-        let mut out: Vec<OsString> = vec![
-            format!("--unit={}", review_unit_name(&self.child)).into(),
-            "--quiet".into(),
-            "--no-ask-password".into(),
-            "--expand-environment=no".into(),
-            "--wait".into(),
-            "--pipe".into(),
-            "--collect".into(),
-        ];
-        for property in self.properties()? {
-            out.push("-p".into());
-            out.push(property.into());
-        }
-        out.push("--".into());
-        out.extend(self.exec());
-        Ok(out)
+        let unit = review_unit_name(&self.child);
+        Ok(units::run_args(
+            &unit,
+            true,
+            self.properties()?,
+            self.exec(),
+        ))
     }
 
     pub fn unit_file(&self) -> Result<String> {
-        let mut service = String::from("[Service]\n");
-        for property in self.properties()? {
-            if !property.starts_with("Description=") {
-                service.push_str(&property);
-                service.push('\n');
-            }
-        }
-        let exec: Vec<String> = self
-            .exec()
-            .iter()
-            .map(|a| a.to_string_lossy().into_owned())
-            .collect();
-        service.push_str(&format!("ExecStart={}\n", exec.join(" ")));
-        Ok(format!(
-            "[Unit]\nDescription=Storm child workspace review {}\n\n{service}",
-            self.child
-        ))
+        let exec = units::command_line(&self.exec());
+        Ok(units::unit_file(self.properties()?, &exec))
     }
 }
 
@@ -512,11 +442,10 @@ impl Helper {
     }
 
     fn save_child(&self, r: &ChildRecord) -> Result<()> {
-        let path = self.layout.child_record(&r.child);
-        let tmp = path.with_extension("tmp");
-        files::write_root_private(&tmp, &serde_json::to_vec(r)?)?;
-        std::fs::rename(&tmp, &path)?;
-        Ok(())
+        files::write_root_private_atomic(
+            &self.layout.child_record(&r.child),
+            &serde_json::to_vec(r)?,
+        )
     }
 
     /// `child_create {parent, child, workspace}`: the child's workspace,

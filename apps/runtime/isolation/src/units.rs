@@ -73,6 +73,58 @@ pub fn property_safe(path: &Path) -> bool {
             .all(|&b| b.is_ascii_alphanumeric() || b"/._-+@".contains(&b))
 }
 
+/// `systemd-run`'s arguments for a unit: its properties as they are, and
+/// the command never expanded. A `wait`ed unit is one the helper runs to
+/// the end, its output piped back.
+pub fn run_args(
+    unit: &str,
+    wait: bool,
+    properties: Vec<String>,
+    exec: Vec<OsString>,
+) -> Vec<OsString> {
+    let mut out: Vec<OsString> = vec![
+        format!("--unit={unit}").into(),
+        "--quiet".into(),
+        "--no-ask-password".into(),
+        "--expand-environment=no".into(),
+    ];
+    if wait {
+        out.extend(["--wait".into(), "--pipe".into(), "--collect".into()]);
+    }
+    for property in properties {
+        out.push("-p".into());
+        out.push(property.into());
+    }
+    out.push("--".into());
+    out.extend(exec);
+    out
+}
+
+/// The same unit as a file, for `systemd-analyze verify` and `security` to
+/// check the property set offline. `exec_start` is `ExecStart=`'s value.
+pub fn unit_file(properties: Vec<String>, exec_start: &str) -> String {
+    let mut unit = String::from("[Unit]\n");
+    let mut service = String::from("[Service]\n");
+    for property in properties {
+        let key = property.split('=').next().unwrap_or("");
+        let section = if matches!(key, "Description" | "BindsTo" | "After" | "Requires") {
+            &mut unit
+        } else {
+            &mut service
+        };
+        section.push_str(&property);
+        section.push('\n');
+    }
+    service.push_str(&format!("ExecStart={exec_start}\n"));
+    format!("{unit}\n{service}")
+}
+
+/// A command as `ExecStart=` reads it.
+pub fn command_line(exec: &[OsString]) -> String {
+    let words: Vec<_> = exec.iter().map(|a| a.to_string_lossy()).collect();
+    words.join(" ")
+}
+
 impl UnitSpec {
     fn paths(&self) -> impl Iterator<Item = &Path> {
         [
@@ -189,41 +241,20 @@ impl UnitSpec {
     /// `systemd-run`'s arguments. The program comes from the operator's
     /// configuration; its arguments are passed as they are, never expanded.
     pub fn systemd_run_args(&self) -> Result<Vec<OsString>> {
-        let mut out: Vec<OsString> = vec![
-            format!("--unit={}", unit_name(&self.session)).into(),
-            "--quiet".into(),
-            "--no-ask-password".into(),
-            "--expand-environment=no".into(),
-        ];
-        for property in self.properties()? {
-            out.push("-p".into());
-            out.push(property.into());
-        }
-        out.push("--".into());
-        out.push(self.program.clone().into_os_string());
-        out.extend(self.args.iter().cloned());
-        Ok(out)
+        let unit = unit_name(&self.session);
+        Ok(run_args(&unit, false, self.properties()?, self.exec()))
     }
 
-    /// The same unit as a file, for `systemd-analyze verify` and `security`
-    /// to check the property set offline.
     pub fn unit_file(&self) -> Result<String> {
-        let mut unit = String::from("[Unit]\n");
-        let mut service = String::from("[Service]\n");
-        for property in self.properties()? {
-            let key = property.split('=').next().unwrap_or("");
-            if matches!(key, "Description" | "BindsTo" | "After" | "Requires") {
-                unit.push_str(&property);
-                unit.push('\n');
-            } else {
-                service.push_str(&property);
-                service.push('\n');
-            }
-        }
-        let mut exec = vec![self.program.display().to_string()];
-        exec.extend(self.args.iter().map(|a| a.to_string_lossy().into_owned()));
-        service.push_str(&format!("ExecStart=:{}\n", exec.join(" ")));
-        Ok(format!("{unit}\n{service}"))
+        // `:` keeps systemd from expanding `$` and `%` in the arguments.
+        let exec = format!(":{}", command_line(&self.exec()));
+        Ok(unit_file(self.properties()?, &exec))
+    }
+
+    fn exec(&self) -> Vec<OsString> {
+        let mut out = vec![self.program.clone().into_os_string()];
+        out.extend(self.args.iter().cloned());
+        out
     }
 }
 

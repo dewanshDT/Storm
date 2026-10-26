@@ -879,7 +879,7 @@ Future<void> runCrewAction(
         send: (api) async {
           Crew? removed;
           for (final s in members.where((s) => s.ended)) {
-            removed = await api.dismiss(s.id) ?? removed;
+            removed = (await api.dismiss(s.id)).firstOrNull ?? removed;
           }
           return removed;
         },

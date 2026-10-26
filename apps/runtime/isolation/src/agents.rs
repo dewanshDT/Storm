@@ -23,7 +23,7 @@ use serde_json::{Map, Value};
 
 use crate::convert::{self, Kind, Manifest, Meta, Ownership};
 use crate::pool::{INSTALL_ACCOUNT, Pool};
-use crate::units::property_safe;
+use crate::units::{self, property_safe};
 
 /// The agents a host can install (storm-runtime's `agents::MANAGEABLE`;
 /// pinned by its packaging tests).
@@ -119,44 +119,27 @@ impl JobSpec {
     }
 
     pub fn systemd_run_args(&self) -> Result<Vec<OsString>> {
-        let mut out: Vec<OsString> = vec![
-            format!("--unit={}", job_unit_name(&self.agent)).into(),
-            "--quiet".into(),
-            "--no-ask-password".into(),
-            "--expand-environment=no".into(),
-            "--wait".into(),
-            "--pipe".into(),
-            "--collect".into(),
-        ];
-        for property in self.properties()? {
-            out.push("-p".into());
-            out.push(property.into());
-        }
-        out.push("--".into());
-        out.push(STORM_RUNTIME.into());
-        out.push("agent-job".into());
-        out.push(self.agent.clone().into());
-        out.push(self.action.clone().into());
-        Ok(out)
+        let unit = job_unit_name(&self.agent);
+        Ok(units::run_args(
+            &unit,
+            true,
+            self.properties()?,
+            self.exec(),
+        ))
     }
 
     pub fn unit_file(&self) -> Result<String> {
-        let mut service = String::from("[Service]\n");
-        let mut unit = String::from("[Unit]\n");
-        for property in self.properties()? {
-            if property.starts_with("Description=") {
-                unit.push_str(&property);
-                unit.push('\n');
-            } else {
-                service.push_str(&property);
-                service.push('\n');
-            }
-        }
-        service.push_str(&format!(
-            "ExecStart={STORM_RUNTIME} agent-job {} {}\n",
-            self.agent, self.action
-        ));
-        Ok(format!("{unit}\n{service}"))
+        let exec = units::command_line(&self.exec());
+        Ok(units::unit_file(self.properties()?, &exec))
+    }
+
+    fn exec(&self) -> Vec<OsString> {
+        vec![
+            STORM_RUNTIME.into(),
+            "agent-job".into(),
+            self.agent.clone().into(),
+            self.action.clone().into(),
+        ]
     }
 }
 
@@ -344,6 +327,7 @@ pub fn off(host_state: &Path, pool: &Pool, manifests: &Path, own: &dyn Ownership
 mod tests {
     use super::*;
     use crate::convert::{Key, Recorded};
+    use crate::session::tests::me;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
 
     fn spec() -> JobSpec {
@@ -486,10 +470,6 @@ mod tests {
         let mut a = crate::pool::tests::fixed();
         a.add_user("storm-runtime", me(), me(), "/usr/sbin/nologin");
         Pool::resolve(&a, "storm-runtime").unwrap()
-    }
-
-    fn me() -> u32 {
-        rustix::process::getuid().as_raw()
     }
 
     fn meta(own: &Recorded, p: &Path) -> Meta {

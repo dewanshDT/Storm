@@ -25,7 +25,7 @@ use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 
-use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, RenameFlags};
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 use serde_json::{Map, Value, json};
 
 use crate::clone::{GIT, Git, HOME, commit_ok, environment, protections};
@@ -283,35 +283,16 @@ fn clip_raw(text: &str, max: usize) -> String {
 }
 
 fn open_dir(path: &Path) -> Result<OwnedFd, Failure> {
-    rustix::fs::open(
-        path,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| Failure::Failed)
+    rustix::fs::open(path, crate::files::DIR_FLAGS, Mode::empty()).map_err(|_| Failure::Failed)
 }
 
 fn open_dir_at(dir: &OwnedFd, name: &CStr) -> Result<OwnedFd, Failure> {
-    rustix::fs::openat(
-        dir,
-        name,
-        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-        Mode::empty(),
-    )
-    .map_err(|_| Failure::Failed)
+    rustix::fs::openat(dir, name, crate::files::DIR_FLAGS, Mode::empty())
+        .map_err(|_| Failure::Failed)
 }
 
 fn names(dir: &OwnedFd) -> Result<Vec<CString>, Failure> {
-    let mut out = Vec::new();
-    for entry in Dir::read_from(dir).map_err(|_| Failure::Failed)? {
-        let entry = entry.map_err(|_| Failure::Failed)?;
-        let name = entry.file_name();
-        if name.to_bytes() != b"." && name.to_bytes() != b".." {
-            out.push(name.to_owned());
-        }
-    }
-    out.sort();
-    Ok(out)
+    crate::files::dir_names(dir).map_err(|_| Failure::Failed)
 }
 
 /// What a scratch child left and an Apply would copy: regular files and

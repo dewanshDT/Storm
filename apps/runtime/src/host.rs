@@ -422,7 +422,7 @@ impl Host {
         // 136a: with isolation on, every session goes through the helper. A
         // host that has none (not Linux, not the packaged state directory)
         // keeps providers that cannot isolate, and so starts nothing.
-        let on = config.isolation == crate::config::Isolation::PerSession;
+        let on = config.isolated();
         let status = Arc::new(crate::isolation::Status::new(on, cfg!(target_os = "linux")));
         let link = on
             .then(|| crate::isolation::Link::installed(state_dir, status.clone()))
@@ -458,10 +458,7 @@ impl Host {
         }
         let isolation_status = match &isolation {
             Some(link) => link.status(),
-            None => Arc::new(crate::isolation::Status::new(
-                config.isolation == crate::config::Isolation::PerSession,
-                false,
-            )),
+            None => Arc::new(crate::isolation::Status::new(config.isolated(), false)),
         };
         Ok(Arc::new(Self {
             state_dir: state_dir.to_path_buf(),
@@ -541,8 +538,8 @@ impl Host {
 
     /// Each listed workspace's directory, and each live child's own under
     /// the name the server records it by (`children/<id>`, 134-5).
-    fn workspace_paths(&self) -> HashMap<String, String> {
-        let mut paths = workspace_paths(&self.config.workspace_roots);
+    fn workspace_paths(&self, names: &[String]) -> HashMap<String, String> {
+        let mut paths = workspace_paths(&self.config.workspace_roots, names);
         for (child, dir) in self.child_paths.lock().unwrap().iter() {
             paths.insert(format!("children/{child}"), dir.display().to_string());
         }
@@ -570,11 +567,13 @@ impl Host {
                 cap
             })
             .collect();
+        let workspaces = list_workspaces(&self.config.workspace_roots);
+        let workspace_paths = self.workspace_paths(&workspaces);
         let mut caps = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
-            "workspaces": list_workspaces(&self.config.workspace_roots),
-            "workspace_paths": self.workspace_paths(),
+            "workspaces": workspaces,
+            "workspace_paths": workspace_paths,
             // Where a workspace goes, so an empty host can say where to put
             // one.
             "workspace_roots": self
@@ -1558,7 +1557,7 @@ impl Host {
         };
         // 136a: on an isolated host no session runs as this account: one
         // its provider cannot start through the helper does not start.
-        if self.config.isolation == crate::config::Isolation::PerSession && !provider.isolated() {
+        if self.config.isolated() && !provider.isolated() {
             refuse("isolation is on and this host cannot isolate a session");
             return self.post_start_failure(&id).await;
         }
@@ -1572,7 +1571,7 @@ impl Host {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
         }
-        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        let isolated = self.config.isolated();
         if let Some(parent) = &child_of {
             // A child's workspace is its own user's (WS-1): only the helper
             // can make one, so a host without it starts no child at all.
@@ -2409,7 +2408,7 @@ impl Host {
         }
         let inbox =
             std::path::absolute(crate::mcp::session_dir(&self.state_dir, session).join(INBOX))?;
-        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        let isolated = self.config.isolated();
         write_image(&inbox, &format!("{image}.{ext}"), &bytes, isolated)
     }
 
@@ -2449,7 +2448,7 @@ impl Host {
     /// The same for one session: on an isolated host, its own socket in its
     /// own directory (136i), which no other session can reach.
     fn socket_address_for(&self, session: &str) -> PathBuf {
-        if self.config.isolation == crate::config::Isolation::PerSession {
+        if self.config.isolated() {
             return crate::mcp::session_dir(&self.state_dir, session).join(crate::mcp::SOCKET);
         }
         self.socket_address()
@@ -2466,21 +2465,10 @@ impl Host {
         let listener = crate::isolation::bind_session_socket(&dir.join(crate::mcp::SOCKET))?;
         listener.set_nonblocking(true)?;
         let listener = tokio::net::UnixListener::from_std(listener)?;
-        let host = self.clone();
-        let id = session.to_string();
-        let task = tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        tokio::spawn(host.clone().bridge_connection(stream, Some(id.clone())));
-                    }
-                    Err(e) => {
-                        tracing::warn!(session = %id, error = %e, "session socket accept failed");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
-                    }
-                }
-            }
-        });
+        let task = tokio::spawn(
+            self.clone()
+                .serve_socket(listener.into(), Some(session.to_string())),
+        );
         self.session_sockets
             .lock()
             .unwrap()
@@ -2504,7 +2492,12 @@ impl Host {
                     tokio::spawn(self.clone().bridge_connection(stream, via.clone()));
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, "mcp socket accept failed");
+                    match &via {
+                        Some(session) => {
+                            tracing::warn!(%session, error = %e, "session socket accept failed")
+                        }
+                        None => tracing::warn!(error = %e, "mcp socket accept failed"),
+                    }
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
             }
@@ -2521,7 +2514,7 @@ impl Host {
     /// have come in on the session's own socket, from the user the session
     /// was leased.
     async fn admit(&self, peer: Peer, session: &str, kind: &'static str) -> bool {
-        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        let isolated = self.config.isolated();
         let verdict = if isolated {
             isolated_verdict(peer, session, self.leader_of(session).await).await
         } else {
@@ -2671,8 +2664,7 @@ impl Host {
                 .peer_identity
                 .verified()
                 .then(|| crate::platform::peer::peer(&stream)),
-            user: (self.config.isolation == crate::config::Isolation::PerSession)
-                .then(|| peer_uid(&stream)),
+            user: self.config.isolated().then(|| peer_uid(&stream)),
             via,
         };
         let (read, mut write) = tokio::io::split(stream);

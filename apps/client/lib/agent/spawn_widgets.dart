@@ -11,7 +11,9 @@ import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
-import 'crew_changes.dart' show announceRemovedCrews, removedCrewFrom;
+import 'agent_widgets.dart'
+    show agentCode, agentKey, agentMono, agentSans, clockAt;
+import 'crew_changes.dart' show announceDismissedCrews;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 import 'spawn_state.dart';
@@ -21,34 +23,6 @@ import 'spawn_state.dart';
 /// parent or its children, dismissing a tree, lineage and attention. Each
 /// shows only what the server's view says, so on a host that cannot offer
 /// spawning there is nothing here to show.
-
-TextStyle _mono(StormTokens t, [Color? color]) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: t.labelSize,
-  color: color ?? t.text3,
-);
-
-TextStyle _sans(StormTokens t, {Color? color, FontWeight? weight}) => TextStyle(
-  fontFamily: StormTokens.sansFamily,
-  fontSize: t.codeSize,
-  height: 1.4,
-  fontWeight: weight,
-  color: color ?? t.text,
-);
-
-TextStyle _key(StormTokens t, [Color? color]) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: t.labelSize,
-  letterSpacing: t.labelSize * 0.08,
-  color: color ?? t.text3,
-);
-
-String _two(int n) => n.toString().padLeft(2, '0');
-
-String _at(String? iso) {
-  final t = iso == null ? null : DateTime.tryParse(iso)?.toLocal();
-  return t == null ? '' : '${_two(t.hour)}:${_two(t.minute)}';
-}
 
 void _say(BuildContext context, String text) {
   if (!context.mounted) return;
@@ -84,7 +58,7 @@ class AttentionTag extends StatelessWidget {
       child: Text(
         label,
         maxLines: 1,
-        style: _mono(t, kind == 'blocked' ? t.amber : t.accent),
+        style: agentMono(t, color: kind == 'blocked' ? t.amber : t.accent),
       ),
     );
   }
@@ -97,12 +71,26 @@ String? lineageLine(AgentSession s, AgentOverview? o) {
   if (parentId == null) return null;
   final parent = o?.byId(parentId);
   final ws = parent?.workspace ?? 'its parent’s workspace';
-  final mode = switch (s.spawn.childWorkspace?.mode) {
-    'clone' => 'own copy of $ws',
-    'scratch' => 'scratch beside $ws',
-    _ => 'own workspace',
-  };
+  final mode = childWorkspaceLabel(s.spawn.childWorkspace, parent: ws);
   return '↳ from ${parent?.displayName ?? 'its parent'} · $mode';
+}
+
+/// A child's workspace named for what it is rather than its record's
+/// `children/<id>`, with its [parent]'s workspace where the line has room.
+String childWorkspaceLabel(ChildWorkspace? w, {String? parent}) =>
+    switch (w?.mode) {
+      'clone' => parent == null ? 'own copy' : 'own copy of $parent',
+      'scratch' => parent == null ? 'scratch folder' : 'scratch beside $parent',
+      _ => 'own workspace',
+    };
+
+/// [row] on the dashed indent when its parent is listed in [list] too
+/// (134l).
+Widget lineageIndented(AgentSession s, List<AgentSession> list, Widget row) {
+  final p = s.spawn.parentSession;
+  return p != null && list.any((o) => o.id == p)
+      ? LineageIndent(child: row)
+      : row;
 }
 
 /// A child's row on a dashed indent: lineage, drawn apart from a crew's
@@ -246,7 +234,7 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
           },
         ),
         SizedBox(width: t.sp * 1.25),
-        Text('Allow this session to start agents', style: _sans(t)),
+        Text('Allow this session to start agents', style: agentSans(t)),
         SizedBox(width: t.sp * 1.25),
         Flexible(
           child: Text(
@@ -254,7 +242,7 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
             key: const Key('spawn-switch-note'),
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
-            style: _mono(t),
+            style: agentMono(t),
           ),
         ),
       ],
@@ -322,7 +310,7 @@ class _Banner extends StatelessWidget {
           Text(
             title,
             key: const Key('banner-title'),
-            style: _sans(t, weight: FontWeight.w600),
+            style: agentSans(t, weight: FontWeight.w600),
           ),
           for (final (label, names) in groups)
             if (names.isNotEmpty)
@@ -333,9 +321,11 @@ class _Banner extends StatelessWidget {
                   children: [
                     SizedBox(
                       width: t.sp * 16,
-                      child: Text(label.toUpperCase(), style: _key(t)),
+                      child: Text(label.toUpperCase(), style: agentKey(t)),
                     ),
-                    Expanded(child: Text(names.join(', '), style: _sans(t))),
+                    Expanded(
+                      child: Text(names.join(', '), style: agentSans(t)),
+                    ),
                   ],
                 ),
               ),
@@ -345,7 +335,7 @@ class _Banner extends StatelessWidget {
               child: Text(
                 note!,
                 key: const Key('banner-note'),
-                style: _sans(t, color: t.text2),
+                style: agentSans(t, color: t.text2),
               ),
             ),
           SizedBox(height: t.sp * 1.25),
@@ -374,7 +364,7 @@ class _Banner extends StatelessWidget {
                       Flexible(
                         child: Text(
                           tick.label,
-                          style: _sans(t, color: t.text2),
+                          style: agentSans(t, color: t.text2),
                         ),
                       ),
                     ],
@@ -406,7 +396,7 @@ class _Banner extends StatelessWidget {
                         ),
                         child: Text(
                           action,
-                          style: _sans(
+                          style: agentSans(
                             t,
                             color: onAction == null ? t.text3 : t.onAccent,
                             weight: FontWeight.w600,
@@ -549,16 +539,9 @@ class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
     final before = ref.read(agentOverviewProvider).value;
     final messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      final removed = await api.dismissTree(widget.session.id);
+      final removed = await api.dismiss(widget.session.id, tree: true);
       ref.invalidate(agentOverviewProvider);
-      announceRemovedCrews(
-        c,
-        [for (final gone in removed) removedCrewFrom(before, gone)],
-        why: removed.length == 1
-            ? 'its last session was dismissed'
-            : 'their last sessions were dismissed',
-        fallback: messenger,
-      );
+      announceDismissedCrews(c, before, removed, fallback: messenger);
       widget.onDismissed();
     } catch (e) {
       if (!mounted) return;
@@ -766,19 +749,35 @@ class ApprovalCard extends ConsumerStatefulWidget {
 class _ApprovalCardState extends ConsumerState<ApprovalCard> {
   bool _write = false;
   bool _busy = false;
-  Timer? _tick;
+  bool _expired = false;
+  Timer? _expiry;
 
   @override
   void initState() {
     super.initState();
-    _tick = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (mounted) setState(() {});
-    });
+    _arm();
+  }
+
+  @override
+  void didUpdateWidget(ApprovalCard old) {
+    super.didUpdateWidget(old);
+    if (old.request.expiresAt != widget.request.expiresAt) _arm();
+  }
+
+  void _arm() {
+    _expiry?.cancel();
+    final left = widget.request.left(DateTime.now());
+    _expired = left == Duration.zero;
+    if (!_expired) {
+      _expiry = Timer(left, () {
+        if (mounted) setState(() => _expired = true);
+      });
+    }
   }
 
   @override
   void dispose() {
-    _tick?.cancel();
+    _expiry?.cancel();
     super.dispose();
   }
 
@@ -831,8 +830,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
       targetDescendants: ends,
     );
     if (f == null) return const SizedBox.shrink();
-    final left = r.left(DateTime.now());
-    final expired = left == Duration.zero;
+    final expired = _expired || r.left(DateTime.now()) == Duration.zero;
     final kind = r.kind.toUpperCase();
     final title = approvalTitle(f);
     final rows = approvalRows(f);
@@ -852,15 +850,10 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
             child: SelectableText(
               text,
               key: const Key('approval-exact'),
-              style: TextStyle(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize * 1.09,
-                height: 1.45,
-                color: t.text,
-              ),
+              style: agentCode(t, color: t.text),
             ),
           )
-        : Text(text, style: _sans(t));
+        : Text(text, style: agentSans(t));
 
     final toggle = writeVault == null
         ? null
@@ -876,7 +869,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
               Flexible(
                 child: Text(
                   writeToggleLabel(writeVault),
-                  style: _sans(t, color: t.text2),
+                  style: agentSans(t, color: t.text2),
                 ),
               ),
             ],
@@ -896,21 +889,17 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
     final heading = Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(kind, style: _key(t, t.accent)),
+        Text(kind, style: agentKey(t, color: t.accent)),
         SizedBox(width: t.sp),
         Expanded(
           child: Text(
             title,
             key: const Key('approval-title'),
-            style: _sans(t, weight: FontWeight.w600),
+            style: agentSans(t, weight: FontWeight.w600),
           ),
         ),
         SizedBox(width: t.sp),
-        Text(
-          expired ? 'expired' : 'expires in ${clockLeft(left)}',
-          key: const Key('approval-left'),
-          style: _mono(t, expired ? t.danger : t.text3),
-        ),
+        _Countdown(request: r, expired: expired),
       ],
     );
     final body = Column(
@@ -922,7 +911,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
           SizedBox(height: t.sp * 0.75),
           Text(
             'Nothing happens until you decide here.',
-            style: _sans(t, color: t.text2),
+            style: agentSans(t, color: t.text2),
           ),
         ],
         for (final (k, v, exact) in rows)
@@ -932,7 +921,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
                 ? Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text(k.toUpperCase(), style: _key(t)),
+                      Text(k.toUpperCase(), style: agentKey(t)),
                       SizedBox(height: t.sp * 0.5),
                       value(v, exact),
                     ],
@@ -942,7 +931,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
                     children: [
                       SizedBox(
                         width: t.sp * 12,
-                        child: Text(k.toUpperCase(), style: _key(t)),
+                        child: Text(k.toUpperCase(), style: agentKey(t)),
                       ),
                       Expanded(child: value(v, exact)),
                     ],
@@ -982,6 +971,61 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
               ),
         child: body,
       ),
+    );
+  }
+}
+
+/// "expires in 8:42", ticking on its own so the card around it doesn't
+/// rebuild every second; it stops once the request has expired.
+class _Countdown extends StatefulWidget {
+  const _Countdown({required this.request, required this.expired});
+
+  final SpawnRequest request;
+  final bool expired;
+
+  @override
+  State<_Countdown> createState() => _CountdownState();
+}
+
+class _CountdownState extends State<_Countdown> {
+  Timer? _tick;
+
+  @override
+  void initState() {
+    super.initState();
+    _start();
+  }
+
+  @override
+  void didUpdateWidget(_Countdown old) {
+    super.didUpdateWidget(old);
+    if (old.request.expiresAt != widget.request.expiresAt) _start();
+  }
+
+  void _start() {
+    _tick?.cancel();
+    _tick = Timer.periodic(const Duration(seconds: 1), (tick) {
+      if (!mounted) return;
+      setState(() {});
+      if (widget.request.left(DateTime.now()) == Duration.zero) tick.cancel();
+    });
+  }
+
+  @override
+  void dispose() {
+    _tick?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final left = widget.request.left(DateTime.now());
+    final expired = widget.expired || left == Duration.zero;
+    return Text(
+      expired ? 'expired' : 'expires in ${clockLeft(left)}',
+      key: const Key('approval-left'),
+      style: agentMono(t, color: expired ? t.danger : t.text3),
     );
   }
 }
@@ -1070,12 +1114,12 @@ class ApprovalBanner extends ConsumerWidget {
                   '${session.displayName} is asking to $what',
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: _sans(t, color: t.accent),
+                  style: agentSans(t, color: t.accent),
                 ),
               ),
               Text(
                 'Review ›',
-                style: _sans(t, color: t.accent, weight: FontWeight.w600),
+                style: agentSans(t, color: t.accent, weight: FontWeight.w600),
               ),
             ],
           ),
@@ -1091,7 +1135,8 @@ class ApprovalBanner extends ConsumerWidget {
 /// Requests tab lists it (4m), shown to the person and nowhere else.
 String requestStateLine(SpawnRequest r, DateTime now) {
   if (r.waiting(now)) return 'Waiting · ${clockLeft(r.left(now))} left';
-  final at = _at(r.decidedAt ?? r.expiresAt);
+  final when = DateTime.tryParse(r.decidedAt ?? r.expiresAt);
+  final at = when == null ? '' : clockAt(when);
   final word = switch (r.outcome) {
     'started' => 'Started',
     'start_failed' => 'Couldn’t start',
@@ -1147,7 +1192,7 @@ class RequestsPanel extends ConsumerWidget {
           'No requests yet. Each start, message and end this session asks '
           'for waits here for you.',
           key: const Key('requests-empty'),
-          style: _sans(t, color: t.text3),
+          style: agentSans(t, color: t.text3),
         ),
       );
     }
@@ -1171,14 +1216,17 @@ class RequestsPanel extends ConsumerWidget {
               children: [
                 Text(
                   requestStateLine(r, now).toUpperCase(),
-                  style: _key(t, r.waiting(now) ? t.accent : t.text3),
+                  style: agentKey(
+                    t,
+                    color: r.waiting(now) ? t.accent : t.text3,
+                  ),
                 ),
                 SizedBox(height: t.sp * 0.5),
                 Text(
                   requestSummary(r, o),
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
-                  style: _sans(t),
+                  style: agentSans(t),
                 ),
                 if (r.waiting(now) && sheet)
                   Padding(
@@ -1205,12 +1253,10 @@ String spawnMeta(String meta, AgentSession s, AgentOverview? o) {
   final parent = s.spawn.parentSession;
   if (parent == null) return meta;
   final ws = o?.byId(parent)?.workspace ?? 'its parent’s workspace';
-  final own = switch (s.spawn.childWorkspace?.mode) {
-    'clone' => 'own copy of $ws',
-    'scratch' => 'scratch beside $ws',
-    _ => 'own workspace',
-  };
-  return meta.replaceFirst(s.workspace, own);
+  return meta.replaceFirst(
+    s.workspace,
+    childWorkspaceLabel(s.spawn.childWorkspace, parent: ws),
+  );
 }
 
 /// A child's workspace as About says it (137b, 137c): where its work is, and
@@ -1282,7 +1328,7 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         SizedBox(height: t.sp * 2),
-        Text('CHILDREN', style: _key(t)),
+        Text('CHILDREN', style: agentKey(t)),
         SizedBox(height: t.sp * 0.5),
         Text(
           [
@@ -1290,7 +1336,7 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
             for (final k in kids)
               if (k.ended) '${k.displayName} (ended)',
           ].join(' · '),
-          style: _sans(t),
+          style: agentSans(t),
         ),
         if (running.isNotEmpty) ...[
           SizedBox(height: t.sp),
@@ -1358,7 +1404,7 @@ class SpawnHeaderLine extends ConsumerWidget {
                 ),
                 child: Text(
                   '↳ started by ${o?.byId(parent)?.displayName ?? 'its parent'} ›',
-                  style: _mono(t, t.accent),
+                  style: agentMono(t, color: t.accent),
                 ),
               ),
             ),

@@ -252,12 +252,21 @@ class AgentApi {
     _decode(await _client.post(_uri('${_s(id)}/end'), headers: _headers));
   }
 
-  /// The crew its dismissal emptied and so deleted (138c); null from a
-  /// server before decision 138, which answers with no body.
-  Future<Crew?> dismiss(String id) async {
-    final body = _decode(await _client.delete(_uri(_s(id)), headers: _headers));
-    final crew = body is Map ? body['removed_crew'] : null;
-    return crew is Map<String, dynamic> ? Crew.fromJson(crew) : null;
+  /// The crews its dismissal emptied and so deleted (138c); none from a
+  /// server before decision 138, which answers with no body. [tree]
+  /// dismisses a whole tree, once every member has ended (C8).
+  Future<List<Crew>> dismiss(String id, {bool tree = false}) async {
+    final body = _decode(
+      await _client.delete(
+        _uri(_s(id), tree ? const {'tree': 'true'} : null),
+        headers: _headers,
+      ),
+    );
+    if (body is! Map) return const [];
+    return [
+      for (final c in body['removed_crews'] as List? ?? [body['removed_crew']])
+        if (c is Map<String, dynamic>) Crew.fromJson(c),
+    ];
   }
 
   // ---- crews and role labels (decision 138; plan §3.2) -------------------
