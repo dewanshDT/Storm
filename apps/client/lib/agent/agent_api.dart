@@ -171,6 +171,25 @@ class AgentApi {
     ];
   }
 
+  /// Makes a workspace on a host (decision 141c): a folder in its first
+  /// workspace root, a git repository if [git]. Answers its name.
+  Future<String> createWorkspace(
+    String hostId,
+    String name, {
+    required bool git,
+  }) async =>
+      (_decode(
+                await _client.post(
+                  _uri(
+                    '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/workspaces',
+                  ),
+                  headers: _headers,
+                  body: jsonEncode({'name': name, 'git': git}),
+                ),
+              )
+              as Map)['name']
+          as String;
+
   Future<List<AgentSession>> sessions() async {
     final json = _decode(
       await _client.get(_uri('/v1/agent/sessions'), headers: _headers),

@@ -126,6 +126,7 @@ class SpawnRequest {
     this.contextTitle,
     this.provider,
     this.text,
+    this.sharedWith = 0,
   });
 
   final String id;
@@ -157,6 +158,10 @@ class SpawnRequest {
   final String? provider;
   final String? text;
 
+  /// Other live sessions in the requester's workspace, its own tree left
+  /// out (decision 141b). 0 from a server that does not say.
+  final int sharedWith;
+
   /// Waiting for a person, and not yet past its expiry.
   bool waiting(DateTime now) => state != 'decided' && left(now) > Duration.zero;
 
@@ -187,6 +192,7 @@ class SpawnRequest {
       contextTitle: note is Map ? note['title'] as String? : null,
       provider: j['provider'] as String?,
       text: j['text'] as String?,
+      sharedWith: (j['shared_with'] as num?)?.toInt() ?? 0,
     );
   }
 }

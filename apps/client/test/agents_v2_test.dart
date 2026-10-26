@@ -618,6 +618,87 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('New workspace… makes one on the host and picks it', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+
+      Future<void> ask(String name) async {
+        await tester.tap(find.byKey(const Key('launcher-workspace')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('New workspace…').last);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const Key('new-workspace-name')),
+          name,
+        );
+        await tester.pump();
+      }
+
+      // A name already taken: said as a sentence, and the dialog stays.
+      agents.refuseNewWorkspace = (409, 'exists');
+      await ask('storm');
+      expect(
+        tester
+            .widget<StormToggle>(find.byKey(const Key('new-workspace-git')))
+            .value,
+        isTrue,
+        reason: 'a git repository unless turned off',
+      );
+      await tester.tap(find.byKey(const Key('new-workspace-create')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('There is already a folder named “storm” on this host.'),
+        findsOneWidget,
+      );
+      expect(find.text('exists'), findsNothing);
+
+      await tester.enterText(
+        find.byKey(const Key('new-workspace-name')),
+        '  demo  ',
+      );
+      await tester.tap(find.byKey(const Key('new-workspace-git')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('new-workspace-create')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('new-workspace-name')), findsNothing);
+      expect(agents.newWorkspaces, [
+        {'name': 'storm', 'git': true},
+        {'name': 'demo', 'git': false},
+      ]);
+      expect(inField('launcher-workspace', 'demo'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(agents.launches.single['workspace'], 'demo');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a refused launch is a sentence, never its code', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+
+      agents.refuseLaunch = (409, 'workspace_held');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Another session is working in this workspace.'),
+        findsOneWidget,
+      );
+      expect(find.text('workspace_held'), findsNothing);
+
+      agents.refuseLaunch = (409, 'something_new');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(find.text("Couldn't launch: something_new"), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('without a note it writes to the first vault, or not at all', (
       tester,
     ) async {

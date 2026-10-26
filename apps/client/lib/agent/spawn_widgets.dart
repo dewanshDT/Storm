@@ -641,10 +641,14 @@ List<(String, String, bool)> approvalRows(ApprovalFacts f) {
     false,
   );
   final target = f.targetName ?? r.target ?? '';
+  final shared = r.sharedWith > 0
+      ? ('Workspace', sharedWorkspaceText(ws, r.sharedWith), false)
+      : null;
   return switch (r.kind) {
     'start' => [
       asker,
       ('Task', r.task ?? '', true),
+      ?shared,
       if (r.name != null) ('Name', r.name!, false),
       if (r.contextTitle != null) ('Note', r.contextTitle!, false),
       (
@@ -660,6 +664,7 @@ List<(String, String, bool)> approvalRows(ApprovalFacts f) {
       asker,
       ('To', '$target, which it started', false),
       ('Message', r.text ?? '', true),
+      ?shared,
       host,
     ],
     'end' => [
@@ -672,11 +677,16 @@ List<(String, String, bool)> approvalRows(ApprovalFacts f) {
                   '${f.targetDescendants.join(', ')}',
         false,
       ),
+      ?shared,
       host,
     ],
-    _ => [asker, host],
+    _ => [asker, ?shared, host],
   };
 }
+
+/// Decision 141b: other sessions can change what the agent reads there.
+String sharedWorkspaceText(String ws, int n) =>
+    '$ws is shared with $n other ${n == 1 ? 'session' : 'sessions'}';
 
 /// The write toggle on a start's card (D2): off by default.
 String writeToggleLabel(String vault) => 'Let the child write to $vault';

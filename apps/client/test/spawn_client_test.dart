@@ -289,6 +289,36 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('a shared workspace is said on the card (141b)', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      final spawning = FakeSpawning(agents);
+      spawning.addRequest('ags_p', task: 't', sharedWith: 2);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.text('WORKSPACE'), findsOneWidget);
+      expect(
+        find.text('storm is shared with 2 other sessions'),
+        findsOneWidget,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an unshared workspace says nothing of it', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      FakeSpawning(agents).addRequest('ags_p', task: 't', sharedWith: 0);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.byType(ApprovalCard), findsOneWidget);
+      expect(find.textContaining('is shared with'), findsNothing);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('ticking the write toggle is what grants it', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
