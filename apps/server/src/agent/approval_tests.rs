@@ -1269,16 +1269,14 @@ fn an_approved_child_is_started_narrowed_in_its_own_workspace() {
     let launch = f.m.launch_of(&c.id).unwrap().unwrap();
     assert_eq!(launch.write_vault_id, None, "D2: unticked, none");
     assert_eq!(launch.name, "test-writer");
-    // Its record is apart from its parent's workspace once its host says
-    // where it is (WS-9), so the parent's switch can be turned on again.
+    // A child the host has not placed may be anywhere, but it is the
+    // parent's own tree: never counted as sharing (141b), and the switch
+    // turns on again either way (141a).
     f.m.set_spawn(&p.id, false, Some("dev_A")).unwrap().unwrap();
-    assert_eq!(
-        f.m.set_spawn(&p.id, true, Some("dev_A")).unwrap().err(),
-        Some("workspace_held"),
-        "a child the host has not placed may be anywhere"
-    );
-    f.m.report_children_for_tests("hst_A");
+    assert_eq!(f.m.shared_with(&p.id).unwrap(), 0);
     assert!(f.m.set_spawn(&p.id, true, Some("dev_A")).unwrap().is_ok());
+    f.m.report_children_for_tests("hst_A");
+    assert_eq!(f.m.shared_with(&c.id).unwrap(), 0, "its parent is its tree");
 
     // Ticked: the parent's own write vault, and only it.
     let r = f.start_as(&p.id, None).unwrap();

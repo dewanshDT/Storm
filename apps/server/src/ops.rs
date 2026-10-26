@@ -1890,6 +1890,7 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
             format!("the host could not take the image: {m}"),
         ),
         E::ChildRefused(code) => ApiError(child_status(&code), code),
+        E::WorkspaceRefused(code) => ApiError(new_workspace_status(&code), code),
         E::Internal(e) => internal(e),
     }
 }
@@ -1921,6 +1922,119 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
             name,
         })
         .collect())
+}
+
+// ---- New workspaces (decision 141c) ----------------------------------------
+//
+// Owner only and session tier, like installs: no `stk_` key, agent or MCP
+// tool makes one. The host checks the name again and makes the folder.
+
+/// The audit row of a new workspace: the host, the name and the result
+/// code, never a path.
+pub const EVENT_WORKSPACE_CREATE: &str = "workspace_create";
+
+#[derive(Debug, Deserialize)]
+pub struct NewWorkspace {
+    pub name: String,
+    #[serde(default)]
+    pub git: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreatedWorkspace {
+    pub name: String,
+}
+
+/// The host's own rule for a workspace name (one path segment), checked
+/// here too so a bad one never reaches it.
+fn workspace_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.chars().count())
+        && !name.starts_with('.')
+        && name.trim() == name
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+}
+
+fn new_workspace_status(code: &str) -> axum::http::StatusCode {
+    use axum::http::StatusCode as S;
+    match code {
+        "bad_name" => S::BAD_REQUEST,
+        "timeout" => S::GATEWAY_TIMEOUT,
+        "failed" | "git_failed" => S::BAD_GATEWAY,
+        _ => S::CONFLICT,
+    }
+}
+
+/// `POST /v1/agent/hosts/{id}/workspaces`: makes a workspace on the host,
+/// audited whether it was made or not.
+pub async fn create_workspace(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    req: NewWorkspace,
+) -> ApiResult<CreatedWorkspace> {
+    let owner = crews_owner(actor)?;
+    {
+        let auth_db = state.auth_db.lock().await;
+        match auth_db.host_by_id(host_id).map_err(internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(not_found("no such host")),
+        }
+    }
+    let made = if workspace_name_ok(&req.name) {
+        state
+            .agent
+            .create_workspace(host_id, &req.name, req.git)
+            .await
+    } else {
+        Err(crate::agent::AgentError::WorkspaceRefused(
+            "bad_name".into(),
+        ))
+    };
+    let result = match &made {
+        Ok(_) => "created".to_string(),
+        Err(crate::agent::AgentError::WorkspaceRefused(code)) => code.clone(),
+        Err(crate::agent::AgentError::HostOffline) => "host_offline".into(),
+        Err(_) => "failed".into(),
+    };
+    // A refused name is not echoed: it may not be one.
+    let name = (result != "bad_name").then_some(req.name.as_str());
+    let detail = serde_json::json!({
+        "host_id": host_id,
+        "name": name,
+        "git": req.git,
+        "result": result,
+    });
+    {
+        let auth_db = state.auth_db.lock().await;
+        if let Err(e) = auth_db.record_event(
+            EVENT_WORKSPACE_CREATE,
+            Some(owner),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        ) {
+            tracing::warn!(error = %e, host = host_id, "could not record a new workspace");
+        }
+    }
+    let name = made.map_err(agent_error)?;
+    tracing::info!(host = host_id, git = req.git, "workspace created");
+    Ok(CreatedWorkspace { name })
+}
+
+/// A host's answer to `workspace.create`: `{answer}` or `{refused}`.
+pub fn runtime_workspace_created(
+    state: &Shared,
+    host_id: &str,
+    request: &str,
+    body: serde_json::Value,
+) -> ApiResult<()> {
+    let outcome = host_answer(&body)?;
+    state
+        .agent
+        .workspace_created(host_id, request, outcome)
+        .map_err(agent_error)
 }
 
 // ---- Agent spawning: the spawn switch (decision 134-2) ---------------------
@@ -2231,13 +2345,16 @@ pub struct RequestCard {
     /// A message's text, exactly as the agent sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The live sessions sharing the requester's workspace now, other than
+    /// it and its own tree (decision 141b).
+    pub shared_with: u32,
 }
 
 /// How many of a session's requests its list carries, newest first.
 const REQUESTS_LISTED: usize = 50;
 
 impl RequestCard {
-    fn of(r: crate::agent::store::spawn::Request) -> Self {
+    fn of(r: crate::agent::store::spawn::Request, shared_with: u32) -> Self {
         let payload: serde_json::Value =
             serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
         let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
@@ -2254,6 +2371,7 @@ impl RequestCard {
             context_note,
             provider,
             text: message,
+            shared_with,
         }
     }
 }
@@ -2274,15 +2392,24 @@ pub async fn session_requests(
     let mut requests = state.agent.requests_of(id).map_err(agent_error)?;
     requests.reverse();
     requests.truncate(REQUESTS_LISTED);
+    let shared_with = state.agent.shared_with(id).map_err(agent_error)?;
     Ok(SessionRequests {
-        requests: requests.into_iter().map(RequestCard::of).collect(),
+        requests: requests
+            .into_iter()
+            .map(|r| RequestCard::of(r, shared_with))
+            .collect(),
     })
 }
 
 /// `GET /v1/agent/requests/{id}`: one request as its card shows it.
 pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestCard> {
     let owner = crews_owner(actor)?;
-    Ok(RequestCard::of(owners_request(state, owner, id)?))
+    let request = owners_request(state, owner, id)?;
+    let shared_with = state
+        .agent
+        .shared_with(&request.requester)
+        .map_err(agent_error)?;
+    Ok(RequestCard::of(request, shared_with))
 }
 
 /// The expiry sweeper's pass (P-5), audited per request.
@@ -3356,7 +3483,18 @@ pub fn runtime_child_answered(
     request: &str,
     body: serde_json::Value,
 ) -> ApiResult<()> {
-    let outcome = match (body.get("answer"), body.get("refused")) {
+    let outcome = host_answer(&body)?;
+    state
+        .agent
+        .child_answered(host_id, request, outcome)
+        .map_err(agent_error)
+}
+
+/// A host's `{answer}` (an object) or `{refused}` (a code).
+fn host_answer(
+    body: &serde_json::Value,
+) -> ApiResult<std::result::Result<serde_json::Value, String>> {
+    Ok(match (body.get("answer"), body.get("refused")) {
         (Some(answer), None) if answer.is_object() => Ok(answer.clone()),
         (None, Some(code)) => {
             let code = code
@@ -3369,11 +3507,7 @@ pub fn runtime_child_answered(
             Err(code.to_string())
         }
         _ => return Err(bad_request("an answer or a refusal")),
-    };
-    state
-        .agent
-        .child_answered(host_id, request, outcome)
-        .map_err(agent_error)
+    })
 }
 
 // ---- Agent installs (decision 133) ------------------------------------

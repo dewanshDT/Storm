@@ -1442,15 +1442,6 @@ pub mod spawn {
 
     const ENDED: &str = "('completed', 'failed', 'stopped')";
 
-    /// What asks for a workspace under WS-9.
-    #[derive(Debug, Clone, Copy)]
-    pub enum Claim<'a> {
-        /// A new session launching into it.
-        Launch,
-        /// This session turning its spawn switch on.
-        Spawn(&'a str),
-    }
-
     /// Whether two of a host's workspaces may share files (WS-9, 137-2): by
     /// the canonical directories the host reports for both, and otherwise
     /// yes, since two names can be one directory (a symlinked or nested
@@ -1901,31 +1892,26 @@ pub mod spawn {
             Ok(refused)
         }
 
-        /// WS-9 (decision 137): whether `workspace` on `host_id` is held
-        /// against `claim`. A launch is refused beside a live session whose
-        /// spawn is on; spawn is refused beside any other live session.
-        /// `unknown` is live. Nested workspaces share files, so they count as
-        /// one.
-        pub fn workspace_held(
+        /// How many live sessions on `host_id` share `workspace` (WS-9, 137-2,
+        /// now only reported: decision 141a), leaving out `except`. `unknown`
+        /// is live. Nested workspaces share files, so they count as one.
+        pub fn workspace_sharers(
             &self,
             host_id: &str,
             workspace: &str,
-            claim: Claim<'_>,
+            except: &[String],
             paths: &std::collections::HashMap<String, String>,
-        ) -> Result<bool> {
+        ) -> Result<u32> {
+            let mut n = 0;
             for r in self.for_host(host_id)? {
-                if r.is_ended() || !shares_workspace(&r.workspace, workspace, paths) {
-                    continue;
-                }
-                let held = match claim {
-                    Claim::Launch => self.spawn_enabled(&r.id)?,
-                    Claim::Spawn(session) => r.id != session,
-                };
-                if held {
-                    return Ok(true);
+                if !r.is_ended()
+                    && !except.contains(&r.id)
+                    && shares_workspace(&r.workspace, workspace, paths)
+                {
+                    n += 1;
                 }
             }
-            Ok(false)
+            Ok(n)
         }
 
         pub fn task(&self, session_id: &str) -> Result<Option<String>> {

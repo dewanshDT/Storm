@@ -401,6 +401,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(runtime_child_answered)
                 .layer(axum::extract::DefaultBodyLimit::max(4 * 1024 * 1024)),
         )
+        // New workspaces (decision 141c): the answer to a `workspace.create`.
+        .route(
+            "/v1/runtime/workspaces/{request}",
+            post(runtime_workspace_created),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             require_auth,
@@ -483,9 +488,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
         )
+        // Making one (decision 141c) is owner only, in ops.
         .route(
             "/v1/agent/hosts/{id}/workspaces",
-            get(agent_host_workspaces),
+            get(agent_host_workspaces).post(agent_create_workspace),
         )
         // Agent installs (decision 133): owner only, never an `stk_` key.
         .route("/v1/agent/hosts/{id}/agents/{agent}", post(agent_start_job))
@@ -1906,6 +1912,16 @@ async fn agent_host_workspaces(
     Ok(Json(crate::ops::host_workspaces(&state, &id).await?))
 }
 
+async fn agent_create_workspace(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::NewWorkspace>,
+) -> ApiResult<(StatusCode, Json<crate::ops::CreatedWorkspace>)> {
+    let made = crate::ops::create_workspace(&state, &actor, &id, req).await?;
+    Ok((StatusCode::CREATED, Json(made)))
+}
+
 #[derive(Deserialize)]
 struct AgentJobRequest {
     op: String,
@@ -2044,6 +2060,16 @@ async fn runtime_child_answered(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_child_answered(&state, &auth.host.id, &request, body)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_workspace_created(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(request): Path<String>,
+    Json(body): Json<serde_json::Value>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_workspace_created(&state, &auth.host.id, &request, body)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -9777,15 +9803,9 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(list_changed(&f.sent()), 0);
 
-        // WS-9 from the launch side.
+        // 141a: a launch beside a spawning session is allowed.
         let (status, body) = f.launch_body(serde_json::json!({})).await;
-        assert_eq!(
-            (status, body),
-            (
-                StatusCode::CONFLICT,
-                serde_json::json!({"error": "workspace_held"})
-            )
-        );
+        assert_eq!(status, StatusCode::OK, "{body}");
 
         let (status, body) = f.spawn(&session, false).await;
         assert_eq!(status, StatusCode::OK, "{body}");
@@ -9805,18 +9825,11 @@ pub(crate) mod tests {
             ]
         );
 
-        // Another session now shares the workspace, so spawn is held.
-        let (status, body) = f.launch_body(serde_json::json!({})).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        // Other sessions share the workspace, and spawn turns on anyway.
         let (status, body) = f.spawn(&session, true).await;
-        assert_eq!(
-            (status, body),
-            (
-                StatusCode::CONFLICT,
-                serde_json::json!({"error": "workspace_held"})
-            )
-        );
-        assert_eq!(list_changed(&f.sent()), 0);
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["enabled"], true);
+        assert_eq!(list_changed(&f.sent()), 1);
     }
 
     // ---- the approval engine (decision 134-3) ----
@@ -13146,6 +13159,283 @@ pub(crate) mod tests {
                 .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
                 .collect()
         }
+    }
+
+    // ---- new workspaces (decision 141c) ----
+
+    async fn workspace_fixture(dir: &FsPath, workspace_create: bool) -> ChildFixture {
+        let f = child_fixture(dir, false).await;
+        let mut caps = install_caps(false);
+        caps["workspace_create"] = serde_json::json!(workspace_create);
+        f.state
+            .agent
+            .inventory(&f.host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        f
+    }
+
+    impl ChildFixture {
+        fn workspaces(&self) -> String {
+            format!("/v1/agent/hosts/{}/workspaces", self.host)
+        }
+
+        /// The owner asks for `body` while the host answers as `answer` says.
+        async fn create_workspace(
+            &mut self,
+            body: serde_json::Value,
+            answer: serde_json::Value,
+        ) -> ((StatusCode, serde_json::Value), serde_json::Value) {
+            let (app, path, bearer) = (
+                self.app.clone(),
+                self.workspaces(),
+                self.owner_bearer.clone(),
+            );
+            let host = async {
+                let sent = serde_json::to_value(self.link.recv().await.unwrap()).unwrap();
+                let request = sent["request"].as_str().unwrap().to_string();
+                let (status, _) = send(
+                    &self.app,
+                    post_json_with_auth(
+                        &format!("/v1/runtime/workspaces/{request}"),
+                        answer,
+                        &self.host_bearer,
+                    ),
+                )
+                .await;
+                assert_eq!(status, StatusCode::NO_CONTENT);
+                sent
+            };
+            tokio::join!(send(&app, post_json_with_auth(&path, body, &bearer)), host)
+        }
+
+        async fn workspace_events(&self) -> Vec<serde_json::Value> {
+            security_events(&self.state)
+                .await
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_WORKSPACE_CREATE)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    /// 141c: the owner's new workspace goes to the host as
+    /// `workspace.create` and is answered with its name; each attempt is
+    /// audited with the name only.
+    #[tokio::test]
+    async fn the_owner_makes_a_workspace_through_its_host() {
+        let dir = tempdir::TempDir::new("storm-new-workspace").unwrap();
+        let mut f = workspace_fixture(dir.path(), true).await;
+        let ((status, body), sent) = f
+            .create_workspace(
+                serde_json::json!({"name": "demo 2", "git": true}),
+                serde_json::json!({"answer": {"name": "demo 2"}}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        assert_eq!(body, serde_json::json!({"name": "demo 2"}));
+        let request = sent["request"].as_str().unwrap();
+        assert!(request.starts_with("wsr_"), "{sent}");
+        assert_eq!(
+            sent,
+            serde_json::json!({"cmd_seq": sent["cmd_seq"], "type": "workspace.create",
+                "request": request, "name": "demo 2", "git": true})
+        );
+
+        let ((status, body), sent) = f
+            .create_workspace(
+                serde_json::json!({"name": "demo 2"}),
+                serde_json::json!({"refused": "exists"}),
+            )
+            .await;
+        assert_eq!(
+            (status, body),
+            (StatusCode::CONFLICT, serde_json::json!({"error": "exists"}))
+        );
+        assert_eq!(sent["git"], false, "git is off unless asked");
+
+        let host = f.host.clone();
+        assert_eq!(
+            f.workspace_events().await,
+            vec![
+                serde_json::json!({"host_id": host, "name": "demo 2", "git": true, "result": "created"}),
+                serde_json::json!({"host_id": host, "name": "demo 2", "git": false, "result": "exists"}),
+            ]
+        );
+    }
+
+    /// 141c's refusals: a bad name never reaches the host, nor does anyone
+    /// but the signed-in owner; an old, unknown, offline or silent host is
+    /// refused, and a host answers only its own request.
+    #[tokio::test]
+    async fn a_new_workspace_is_refused_a_bad_name_a_non_owner_and_an_old_host() {
+        let dir = tempdir::TempDir::new("storm-new-workspace-refused").unwrap();
+        let mut f = workspace_fixture(dir.path(), true).await;
+        for bad in [
+            "",
+            ".hidden",
+            "..",
+            "a/b",
+            "a\\b",
+            "c:",
+            "bell\u{7}",
+            " pad",
+            &"x".repeat(129),
+        ] {
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &f.workspaces(),
+                    serde_json::json!({"name": bad}),
+                    &f.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(
+                (status, body),
+                (
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"error": "bad_name"})
+                ),
+                "{bad:?}"
+            );
+        }
+        assert!(f.link.try_recv().is_err(), "no bad name reached the host");
+        assert!(
+            f.workspace_events()
+                .await
+                .iter()
+                .all(|e| e["name"].is_null() && e["result"] == "bad_name"),
+            "a refused name is never recorded"
+        );
+
+        // A key and the host's own credential never reach the route; a key's
+        // or an agent's actor is refused in ops.
+        let (_, key) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "k"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = send(
+                &f.app,
+                post_json_with_auth(&f.workspaces(), serde_json::json!({"name": "x"}), bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let host = f.host.clone();
+        for actor in [
+            Actor::Key {
+                key_id: "key_X".into(),
+                user_id: "u".into(),
+            },
+            Actor::Agent {
+                session_id: "ags_X".into(),
+                host_id: host.clone(),
+                user_id: "u".into(),
+                write_vault: None,
+            },
+        ] {
+            let new = crate::ops::NewWorkspace {
+                name: "x".into(),
+                git: false,
+            };
+            let r = crate::ops::create_workspace(&f.state, &actor, &host, new)
+                .await
+                .unwrap_err();
+            assert_eq!((r.0, r.1.as_str()), (StatusCode::FORBIDDEN, "owner_only"));
+        }
+        assert!(f.link.try_recv().is_err());
+        assert!(
+            !include_str!("mcp.rs").contains("create_workspace"),
+            "never an MCP tool"
+        );
+
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/agent/hosts/hst_nope/workspaces",
+                serde_json::json!({"name": "x"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Another host cannot answer it; silence is a timeout.
+        let (other, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (_, _other_link) = f.state.agent.connect_host(&other);
+        let (app, path, bearer) = (f.app.clone(), f.workspaces(), f.owner_bearer.clone());
+        let host_side = async {
+            let sent = serde_json::to_value(f.link.recv().await.unwrap()).unwrap();
+            let request = sent["request"].as_str().unwrap().to_string();
+            send(
+                &app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/workspaces/{request}"),
+                    serde_json::json!({"answer": {"name": "x"}}),
+                    &format!("Bearer {other_token}"),
+                ),
+            )
+            .await
+            .0
+        };
+        let ((status, body), stranger) = tokio::join!(
+            send(
+                &app,
+                post_json_with_auth(&path, serde_json::json!({"name": "x"}), &bearer)
+            ),
+            host_side
+        );
+        assert_eq!(stranger, StatusCode::NOT_FOUND);
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::GATEWAY_TIMEOUT,
+                serde_json::json!({"error": "timeout"})
+            )
+        );
+
+        // A host that does not say it makes workspaces is never sent one.
+        let mut caps = install_caps(false);
+        caps["workspace_create"] = serde_json::json!(false);
+        f.state
+            .agent
+            .inventory(&f.host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        let (status, body) = send(
+            &f.app,
+            post_json_with_auth(
+                &f.workspaces(),
+                serde_json::json!({"name": "x"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            (status, body),
+            (
+                StatusCode::CONFLICT,
+                serde_json::json!({"error": "old_host"})
+            )
+        );
+        assert!(f.link.try_recv().is_err());
+        f.state.agent.disconnect_host(&f.host, f.generation);
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &f.workspaces(),
+                serde_json::json!({"name": "x"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     }
 
     fn child_listing(mode: &str) -> serde_json::Value {
@@ -16637,6 +16927,30 @@ pub(crate) mod tests {
             .await;
         assert_eq!(status, StatusCode::OK, "{card}");
         assert_eq!(card, listed[0]);
+        assert_eq!(card["shared_with"], 0);
+
+        // 141b: another live session in the requester's workspace is on
+        // both reads.
+        let beside = f.launch("shell", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        for path in [
+            format!("/v1/agent/sessions/{session}/requests"),
+            format!("/v1/agent/requests/{second}"),
+        ] {
+            let (_, body) = f.ask(get_with_auth(&path, &f.owner_bearer)).await;
+            let card = body.get("requests").map_or(&body, |r| &r[0]);
+            assert_eq!(card["shared_with"], 1, "{path}: {body}");
+        }
+        f.report(&beside, "completed").await;
+        let (_, card) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/requests/{second}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(card["shared_with"], 0);
 
         // A key and the host's credential never reach either route.
         let (_, key) = f
@@ -16794,10 +17108,11 @@ pub(crate) mod tests {
             shell["spawn"],
             serde_json::json!({"enabled": false, "refused": "provider_cannot_spawn"})
         );
-        // WS-9: another live session shares its workspace.
+        // 141a: another live session shares its workspace, which is no
+        // reason to refuse.
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": false, "refused": "workspace_held"})
+            serde_json::json!({"enabled": false})
         );
         let shell = shell["id"].as_str().unwrap().to_string();
         f.report(&shell, "completed").await;

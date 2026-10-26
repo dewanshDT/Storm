@@ -815,7 +815,7 @@ fn the_oldest_database_reaches_134() {
 
 // ---- 134-2: the spawn switch ------------------------------------------------
 
-use super::store::spawn::{Claim, same_workspace, shares_workspace};
+use super::store::spawn::{same_workspace, shares_workspace};
 use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
@@ -1132,57 +1132,37 @@ fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
     assert!(!m.spawn_offered(&parent.id), "new requests have no tool");
 }
 
+/// 141a: a spawning session does not hold its workspace. A launch beside
+/// it and its switch beside another live session are both allowed.
 #[test]
-fn ws9_a_spawning_session_holds_its_workspace_alone() {
+fn a_spawning_session_shares_its_workspace() {
     let (m, _d, _rx) = verified_host();
     let a = start(&m, "storm", "claude-code", None).unwrap();
     let b = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    // A workspace inside it shares its files.
-    report(&m, &b.id, "completed", None);
     let nested = start(&m, "storm/site", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    report(&m, &nested.id, "completed", None);
     m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-
+    m.set_spawn(&b.id, true, Some("dev_A")).unwrap().unwrap();
     for workspace in ["storm", "storm/site"] {
         assert!(
-            matches!(start(&m, workspace, "claude-code", None),
-                Err(AgentError::Conflict(ref c)) if c == "workspace_held"),
-            "{workspace}"
+            !start(&m, workspace, "claude-code", None)
+                .unwrap()
+                .is_ended()
         );
     }
-    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
-    assert!(!elsewhere.is_ended());
-
-    // `unknown` is live and still holds it.
+    assert_eq!(m.shared_with(&a.id).unwrap(), 4, "b, nested and two more");
+    report(&m, &nested.id, "completed", None);
+    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
+    // `unknown` is live and still shares it.
     m.store.lock().unwrap().mark_unknown_on_boot().unwrap();
-    assert!(
-        m.store
-            .lock()
-            .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
-            .unwrap()
-    );
-    m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
-    assert!(
-        !m.store
-            .lock()
-            .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
-            .unwrap()
-    );
+    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
 }
 
-fn paths(m: &AgentManager) -> std::collections::HashMap<String, String> {
-    m.host_live("hst_A").capabilities.unwrap().workspace_paths
-}
-
-/// WT-8 (137-2): WS-9 both ways, judged by the directories the host
+/// WT-8, as decision 141 amends it: WS-9 no longer refuses either way, and
+/// the sharing it judges by the host's directories is what an approval card
 /// reports. Two names for one directory, or one inside the other, are one
 /// workspace; a name the host gives no directory for may be any of them.
 #[test]
-fn wt8_a_shared_workspace_refuses_launch_and_spawn_both_ways() {
+fn wt8_a_shared_workspace_allows_launch_and_spawn_both_ways() {
     let (m, _d, _rx) = host(Some(VERIFIED));
     let layout = |paths: serde_json::Value| {
         let mut extra = isolated();
@@ -1194,39 +1174,33 @@ fn wt8_a_shared_workspace_refuses_launch_and_spawn_both_ways() {
         "storm": "/w/storm", "alias": "/w/storm/", "site": "/w/storm/site", "other": "/w/other",
     });
     m.inventory("hst_A", layout(paths.clone())).unwrap();
-    let held = |r: Result<SessionRecord, AgentError>| matches!(r, Err(AgentError::Conflict(ref c)) if c == "workspace_held");
 
     for beside in ["storm", "alias", "site", "bare"] {
         // Spawn on, then a launch beside it.
         let a = start(&m, "storm", "claude-code", None).unwrap();
         m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-        assert!(held(start(&m, beside, "claude-code", None)), "{beside}");
-        assert!(!held(start(&m, "other", "shell", None)), "{beside}");
+        let b = start(&m, beside, "claude-code", None).unwrap();
+        let elsewhere = start(&m, "other", "shell", None).unwrap();
+        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
         report(&m, &a.id, "completed", None);
         // A live session beside it, then spawn on.
-        let b = start(&m, beside, "claude-code", None).unwrap();
         let a = start(&m, "storm", "claude-code", None).unwrap();
-        assert_eq!(refusal(&m, &a.id, true), "workspace_held", "{beside}");
-        report(&m, &b.id, "completed", None);
         m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-        report(&m, &a.id, "completed", None);
-    }
-    let live: Vec<_> = m.store.lock().unwrap().for_host("hst_A").unwrap();
-    for r in live.into_iter().filter(|r| !r.is_ended()) {
-        report(&m, &r.id, "completed", None);
+        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
+        for r in [&a, &b, &elsewhere] {
+            report(&m, &r.id, "completed", None);
+        }
     }
 
     // A host that reports no directories: every pair may be one.
     m.inventory("hst_A", layout(serde_json::json!({}))).unwrap();
     let a = start(&m, "storm", "claude-code", None).unwrap();
-    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    report(&m, &elsewhere.id, "completed", None);
+    start(&m, "other", "claude-code", None).unwrap();
     m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-    assert!(held(start(&m, "other", "claude-code", None)));
+    assert_eq!(m.shared_with(&a.id).unwrap(), 1);
     // Once it does, the two are apart.
     m.inventory("hst_A", layout(paths)).unwrap();
-    assert!(!held(start(&m, "other", "claude-code", None)));
+    assert_eq!(m.shared_with(&a.id).unwrap(), 0);
 }
 
 #[test]

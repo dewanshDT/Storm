@@ -636,7 +636,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   copy does not count), and `reassess_spawn_gate` runs after every one.
   **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
   names for one directory, or one inside the other, are one workspace, and
-  a name the host gives no directory for is shared with every other.
+  a name the host gives no directory for is shared with every other. Since
+  decision 141 it only *reports* sharing — a request card's `shared_with`,
+  the live sessions there outside the requester's own tree — and refuses
+  neither a launch nor the spawn switch.
 - **An approved child is started in a workspace of its own, never its
   parent's** (134-5): its `start` names the parent's workspace and
   `child_of`, the host has the helper make the child's W2 clone or W3

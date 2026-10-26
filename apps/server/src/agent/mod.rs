@@ -197,6 +197,15 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
+    /// A person's new workspace (decision 141c): a folder under the host's
+    /// first workspace root, a git repository if `git`. The host answers on
+    /// `/v1/runtime/workspaces/{request}`.
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate {
+        request: String,
+        name: String,
+        git: bool,
+    },
 }
 
 impl Command {
@@ -213,6 +222,7 @@ impl Command {
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
             Self::ChildWorkspace { .. } => "child.workspace",
+            Self::WorkspaceCreate { .. } => "workspace.create",
         }
     }
 
@@ -226,7 +236,10 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
+            Self::Refresh
+            | Self::AgentInstall { .. }
+            | Self::ChildWorkspace { .. }
+            | Self::WorkspaceCreate { .. } => None,
         }
     }
 }
@@ -294,6 +307,10 @@ pub struct Capabilities {
     /// 137-3). Only an isolated host says so; any other is never sent one.
     #[serde(default)]
     pub child_workspaces: bool,
+    /// The host takes `workspace.create` (decision 141c). An old host does
+    /// not, and is never sent one.
+    #[serde(default)]
+    pub workspace_create: bool,
     /// Whether the host checks who connects for a session (decision 135d).
     /// An old host does not say, and is `unavailable: old_host`.
     #[serde(default, deserialize_with = "identity_or_unavailable")]
@@ -709,6 +726,8 @@ pub enum AgentError {
     /// The isolation helper refused a child workspace request, or the host
     /// could not carry it (decision 137-3). The code is the helper's.
     ChildRefused(String),
+    /// The host did not make a workspace, and the code says why (141c).
+    WorkspaceRefused(String),
     Internal(anyhow::Error),
 }
 
@@ -789,7 +808,9 @@ pub struct AgentManager {
     images: Mutex<images::Images>,
     jobs: Mutex<jobs::Jobs>,
     /// `child.workspace` requests waiting for their host's answer.
-    children: Mutex<HashMap<String, ChildPending>>,
+    children: Mutex<HashMap<String, HostPending>>,
+    /// `workspace.create` requests waiting for their host's answer.
+    new_workspaces: Mutex<HashMap<String, HostPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
     /// Bumped whenever the approval engine decides a request.
@@ -815,10 +836,17 @@ const CHILD_DEADLINE: std::time::Duration = if cfg!(test) {
     std::time::Duration::from_secs(700)
 };
 
-struct ChildPending {
+struct HostPending {
     host: String,
     done: tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>,
 }
+
+/// How long a new workspace waits for its host: a `mkdir` and a `git init`.
+const WORKSPACE_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(30)
+};
 
 /// What a `child.workspace` request does on the host's helper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -883,6 +911,7 @@ impl AgentManager {
             images: Mutex::new(images::Images::default()),
             jobs: Mutex::new(jobs::Jobs::default()),
             children: Mutex::new(HashMap::new()),
+            new_workspaces: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
             requests: watch::channel(0).0,
@@ -1349,15 +1378,24 @@ impl AgentManager {
             .unwrap_or_default()
     }
 
+    /// How many live sessions share `session_id`'s workspace on its host,
+    /// leaving out the session's own tree (decision 141b), for the approval
+    /// card. Judged as WS-9 judged it (137-2).
+    pub fn shared_with(&self, session_id: &str) -> AgentResult<u32> {
+        let r = self.get(session_id)?;
+        let paths = self.workspace_paths(&r.host_id);
+        let store = self.store.lock().unwrap();
+        let root = store.lineage(&r.id)?.root_session;
+        let mut tree = store.descendants(&root, false)?;
+        tree.push(root);
+        tree.push(r.id.clone());
+        Ok(store.workspace_sharers(&r.host_id, &r.workspace, &tree, &paths)?)
+    }
+
     /// Why turning a session's switch on would be refused now, in 134-2's
-    /// order, or `None` when it would not. Takes the store held, so the
-    /// WS-9 check and a write share one lock (store, then live).
-    fn enable_refusal(
-        &self,
-        r: &SessionRecord,
-        store: &Store,
-        paths: &HashMap<String, String>,
-    ) -> Result<Option<&'static str>> {
+    /// order, or `None` when it would not. A shared workspace is not a
+    /// reason (decision 141a): the approval card says so instead.
+    fn enable_refusal(&self, r: &SessionRecord, store: &Store) -> Result<Option<&'static str>> {
         if r.is_ended() {
             return Ok(Some("session_not_live"));
         }
@@ -1370,13 +1408,7 @@ impl AgentManager {
         if !store.spawn_asks(&r.id)? {
             return Ok(Some("launched_without_asks"));
         }
-        let held = store.workspace_held(
-            &r.host_id,
-            &r.workspace,
-            store::spawn::Claim::Spawn(&r.id),
-            paths,
-        )?;
-        Ok(held.then_some("workspace_held"))
+        Ok(None)
     }
 
     /// The spawn switch as a session's view shows it (134-10): only where
@@ -1389,16 +1421,15 @@ impl AgentManager {
         if !enabled && self.spawn_gate(&r.host_id).is_err() {
             return Ok(None);
         }
-        let paths = self.workspace_paths(&r.host_id);
         Ok(Some(SpawnView {
             enabled,
-            refused: self.enable_refusal(r, &store, &paths)?,
+            refused: self.enable_refusal(r, &store)?,
         }))
     }
 
     /// A person turns a session's spawn switch on or off (134c, B1, B2).
     /// Off always succeeds and refuses the session's pending requests at
-    /// once. On needs a live session of a spawning adapter, C0, and WS-9;
+    /// once. On needs a live session of a spawning adapter and C0;
     /// otherwise the inner error is the refusal's code.
     pub fn set_spawn(
         &self,
@@ -1407,12 +1438,9 @@ impl AgentManager {
         device: Option<&str>,
     ) -> AgentResult<std::result::Result<SpawnChange, &'static str>> {
         let r = self.get(session_id)?;
-        let paths = self.workspace_paths(&r.host_id);
-        // One lock for the WS-9 check and the write, so a launch into the
-        // workspace cannot slip between them.
         let mut store = self.store.lock().unwrap();
         let was = store.spawn_enabled(session_id)?;
-        if enabled && let Some(code) = self.enable_refusal(&r, &store, &paths)? {
+        if enabled && let Some(code) = self.enable_refusal(&r, &store)? {
             return Ok(Err(code));
         }
         let refused = store.set_spawn(session_id, enabled, device, &now())?;
@@ -1863,16 +1891,6 @@ impl AgentManager {
         .then_some(SpawnStart::default());
         let launch = {
             let mut store = self.store.lock().unwrap();
-            // WS-9: under the same lock as the insert, so a spawn switch
-            // turned on beside it cannot slip between.
-            if store.workspace_held(
-                &record.host_id,
-                &record.workspace,
-                store::spawn::Claim::Launch,
-                &caps.workspace_paths,
-            )? {
-                return Err(AgentError::Conflict("workspace_held".into()));
-            }
             // Checked under the same lock as the writes below, so the crew
             // cannot be deleted between the check and the join.
             if let Some(CrewJoin::Existing(id)) = &meta.crew
@@ -2312,7 +2330,7 @@ impl AgentManager {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.children.lock().unwrap().insert(
             request.clone(),
-            ChildPending {
+            HostPending {
                 host: host_id.to_string(),
                 done: tx,
             },
@@ -2353,6 +2371,68 @@ impl AgentManager {
             _ => return Err(AgentError::NotFound("no such request")),
         }
         if let Some(p) = children.remove(request) {
+            let _ = p.done.send(outcome);
+        }
+        Ok(())
+    }
+
+    /// Asks a host to make a workspace (decision 141c) and waits for its
+    /// answer: the name, once the host has reported it in an inventory.
+    pub async fn create_workspace(
+        &self,
+        host_id: &str,
+        name: &str,
+        git: bool,
+    ) -> AgentResult<String> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.is_some_and(|c| c.workspace_create) {
+            return Err(AgentError::WorkspaceRefused("old_host".into()));
+        }
+        let request = crate::auth::identity::random_id("wsr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.new_workspaces.lock().unwrap().insert(
+            request.clone(),
+            HostPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::WorkspaceCreate {
+            request: request.clone(),
+            name: name.to_string(),
+            git,
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(WORKSPACE_DEADLINE, rx).await,
+            Err(e) => {
+                self.new_workspaces.lock().unwrap().remove(&request);
+                return Err(e);
+            }
+        };
+        self.new_workspaces.lock().unwrap().remove(&request);
+        match outcome {
+            Ok(Ok(Ok(_))) => Ok(name.to_string()),
+            Ok(Ok(Err(code))) => Err(AgentError::WorkspaceRefused(code)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::WorkspaceRefused("timeout".into())),
+        }
+    }
+
+    /// A host's answer to its own `workspace.create`, never another's.
+    pub fn workspace_created(
+        &self,
+        host_id: &str,
+        request: &str,
+        outcome: std::result::Result<serde_json::Value, String>,
+    ) -> AgentResult<()> {
+        let mut pending = self.new_workspaces.lock().unwrap();
+        match pending.get(request) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = pending.remove(request) {
             let _ = p.done.send(outcome);
         }
         Ok(())
@@ -2784,6 +2864,7 @@ mod tests {
             plugin_mcp_remote: Vec::new(),
             agent_install: false,
             child_workspaces: false,
+            workspace_create: false,
             identity: Identity::default(),
             isolation: Isolation::default(),
             workspace_paths: [("storm", "/work/storm"), ("site", "/work/site")]
