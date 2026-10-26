@@ -300,7 +300,7 @@ pub const SHOW_PROPERTIES: &str = "LoadState,SubState,MainPID,ExecMainCode,ExecM
 
 /// systemd, as the helper uses it.
 pub trait Units: Send + Sync {
-    /// Whether pasta and `ip` are installed and pasta runs (136j).
+    /// Whether pasta and `ip` are installed (136j).
     fn network_ready(&self) -> bool;
     /// Starts the session's network and returns once it is configured.
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()>;
@@ -343,9 +343,21 @@ fn run(program: &str, args: &[OsString]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether pasta and `ip` are installed as executables. Never by running
+/// pasta here: it sandboxes itself as it starts, which this helper's own
+/// seccomp filter refuses, and it only ever runs in a session's network unit.
+/// The self-test's probe sessions go through that unit, so a pasta that
+/// cannot run there still fails the self-test.
+pub(crate) fn network_tools_installed(pasta: &Path, ip: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    [pasta, ip].iter().all(|tool| {
+        std::fs::metadata(tool).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
+}
+
 impl Units for Systemd {
     fn network_ready(&self) -> bool {
-        Path::new(crate::net::IP).is_file() && run(crate::net::PASTA, &["--version".into()]).is_ok()
+        network_tools_installed(Path::new(crate::net::PASTA), Path::new(crate::net::IP))
     }
 
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
@@ -423,6 +435,29 @@ impl Units for Systemd {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    /// Found on a Debian 13 host (2026-10-26): pasta starts by sandboxing
+    /// itself, which the helper's own seccomp filter refuses, so running it
+    /// from the helper failed every self-test with `no_passt` while pasta
+    /// worked in the network unit it actually runs in.
+    #[test]
+    fn a_pasta_that_cannot_run_inside_the_helper_still_counts_as_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let exec = |name: &str, mode: u32| {
+            let p = t.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\nexit 255\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        let pasta = exec("pasta", 0o755);
+        let ip = exec("ip", 0o755);
+        assert!(network_tools_installed(&pasta, &ip));
+        let missing = t.path().join("absent");
+        assert!(!network_tools_installed(&missing, &ip));
+        assert!(!network_tools_installed(&pasta, &missing));
+        assert!(!network_tools_installed(&exec("noexec", 0o644), &ip));
+    }
 
     pub fn spec() -> UnitSpec {
         UnitSpec {
