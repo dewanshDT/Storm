@@ -391,12 +391,16 @@ impl Helper {
         }
         let (uid, gid) = self.uid_gid(user);
         let home = self.layout.home(session);
+        let unit_workspace = match &child {
+            Some(_) => self.layout.child_workspace(session),
+            None => workspace.to_path_buf(),
+        };
         let kept = launch
             .resume
             .as_ref()
             .map(|r| (r, self.layout.kept(&r.from)));
         crate::home::populate(
-            &crate::home::Paths::new(&self.layout.host_state, &home),
+            &crate::home::Paths::new(&self.layout.host_state, &home, &unit_workspace),
             provider,
             session,
             self.pool.host_uid,
@@ -418,10 +422,6 @@ impl Helper {
             .tty
             .give(tty.as_fd(), uid)
             .map_err(|e| failed("giving the terminal", e.into()))?;
-        let unit_workspace = match &child {
-            Some(_) => self.layout.child_workspace(session),
-            None => workspace.to_path_buf(),
-        };
         let env = session_env(provider, &home, &unit_workspace, launch.env);
         files::write_root_private(
             &self.layout.env_file(session),

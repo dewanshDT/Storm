@@ -1146,10 +1146,14 @@ mod tests {
     }
 
     fn start_child(f: &Fixture, user: &str) -> Value {
+        start_child_as(f, user, "shell")
+    }
+
+    fn start_child_as(f: &Fixture, user: &str, provider: &str) -> Value {
         f.launch("ags_C");
         let (_master, slave) = crate::tty::tests::pty();
         f.call(
-            json!({"op": "start", "session": "ags_C", "user": user, "provider": "shell", "workspace": f.workspace()}),
+            json!({"op": "start", "session": "ags_C", "user": user, "provider": provider, "workspace": f.workspace()}),
             vec![slave],
         )
         .0
@@ -1248,6 +1252,39 @@ mod tests {
         // Lease end never walks the parent's workspace for the child.
         let leases = files::load_leases(&f.helper.layout.leases()).unwrap();
         assert_eq!(leases[&child_user].workspace, None);
+    }
+
+    /// 142: a child's Claude Code trusts the directory its unit starts in,
+    /// its own clone or scratch, never its parent's workspace.
+    #[test]
+    fn a_childs_claude_code_trusts_its_own_workspace_not_its_parents() {
+        for git in [true, false] {
+            let f = fixture();
+            if git {
+                git_workspace(&f);
+            }
+            let (_, child_user) = parent_and_child(&f);
+            assert_eq!(create(&f)["ok"], true);
+            let v = start_child_as(&f, &child_user, "claude-code");
+            assert_eq!(v["ok"], true, "{v}");
+            let dest = f.helper.layout.child_workspace("ags_C");
+            let home = f.helper.layout.home("ags_C");
+            let json: Value =
+                serde_json::from_slice(&std::fs::read(home.join(".claude.json")).unwrap()).unwrap();
+            let projects = json["projects"].as_object().unwrap();
+            assert_eq!(
+                projects.keys().collect::<Vec<_>>(),
+                [&dest.display().to_string()]
+            );
+            let specs = f.units.specs.lock().unwrap().clone();
+            let child = specs.iter().find(|s| s.session == "ags_C").unwrap();
+            assert!(
+                child
+                    .properties()
+                    .unwrap()
+                    .contains(&format!("WorkingDirectory={}", dest.display()))
+            );
+        }
     }
 
     /// W3 (137c): a workspace that is not a repository root — no `.git`, or
