@@ -3130,6 +3130,10 @@ async fn checked_child(
         .as_array()
         .and_then(|c| c.iter().find(|r| r["child"] == child))
         .cloned();
+    // A listing cut to fit the host's read (139c) cannot show a child absent.
+    if record.is_none() && listed["more"] == true {
+        return Err(refuse("listing_incomplete").await);
+    }
     let mismatch = match (&record, &parent) {
         (Some(r), Some(p)) => r["parent"] != p.as_str(),
         (None, _) if using != ChildUse::Delete => {

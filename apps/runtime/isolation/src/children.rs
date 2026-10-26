@@ -40,7 +40,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::files;
-use crate::protocol::Refusal;
+use crate::protocol::{Op, Refusal};
+use crate::review::CHILD_ANSWER_BUDGET;
 use crate::serve::Helper;
 use crate::session::{Answer, failed};
 use crate::units::{self, STOP_GRACE_SECS, property_safe};
@@ -752,7 +753,14 @@ impl Helper {
         let _busy = self.session_busy(child)?;
         let r = self.ended_child(child)?;
         let review = self.export(&r)?;
-        Ok(Self::review_answer(&r, review))
+        let (mut answer, fd) = Self::review_answer(&r, review);
+        if !crate::review::fit(&mut answer, Op::ChildExport, CHILD_ANSWER_BUDGET) {
+            return Err(failed(
+                "the child's export",
+                anyhow::anyhow!("too long for the host's read"),
+            ));
+        }
+        Ok((answer, fd))
     }
 
     fn export(&self, r: &ChildRecord) -> Result<Map<String, Value>, Refusal> {
@@ -1025,6 +1033,12 @@ impl Helper {
         out.insert("children".into(), children.into());
         out.insert("orphans".into(), orphans.into());
         out.insert("unknown_entries".into(), unknown.into());
+        if !crate::review::fit_listing(&mut out, Op::ChildList, CHILD_ANSWER_BUDGET) {
+            return Err(failed(
+                "the children's listing",
+                anyhow::anyhow!("too long for the host's read"),
+            ));
+        }
         Ok((out, None))
     }
 
@@ -1963,6 +1977,93 @@ mod tests {
             assert!(!f.helper.layout.child_review("ags_C").exists());
             assert!(!f.helper.layout.child_export("ags_C").exists());
         }
+    }
+
+    fn sent(v: &Value) -> usize {
+        serde_json::to_vec(v).unwrap().len() + 1
+    }
+
+    /// 139-D2 through the helper: an export at every limit reaches the host
+    /// within its read, and says what it left out.
+    #[test]
+    fn an_export_at_every_limit_is_sent_within_the_hosts_read() {
+        let f = fixture();
+        ended_clone_child(&f);
+        *f.units.review_output.lock().unwrap() =
+            Some(crate::review::tests::export_at_every_limit(false));
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{}", v["error"]);
+        assert!(
+            sent(&v) <= crate::review::CHILD_ANSWER_BUDGET,
+            "{}",
+            sent(&v)
+        );
+        assert_eq!(
+            (v["more_files"].clone(), v["patch_truncated"].clone()),
+            (json!(true), json!(false))
+        );
+        assert_eq!(v["child"], "ags_C");
+        assert_eq!(v["parent"], "ags_P");
+        assert_eq!(v["tip"], "a".repeat(40));
+        let cached = std::fs::read(f.helper.layout.child_export("ags_C")).unwrap();
+        let cached: Value = serde_json::from_slice(&cached).unwrap();
+        assert_eq!(
+            cached["files"].as_array().unwrap().len(),
+            crate::review::MAX_FILES
+        );
+    }
+
+    /// A listing of more children than the host can read is cut, orphans
+    /// first, and says so; its counts are kept.
+    #[test]
+    fn a_listing_too_long_for_the_hosts_read_is_cut_and_says_so() {
+        let f = fixture();
+        let long = PathBuf::from(format!("/{}", "\u{1}".repeat(4000)));
+        for i in 0..120 {
+            let child = format!("ags_C{i:03}");
+            std::fs::create_dir_all(f.helper.layout.child(&child)).unwrap();
+            f.helper
+                .save_child(&ChildRecord {
+                    child,
+                    parent: "ags_P".into(),
+                    parent_workspace: long.clone(),
+                    mode: ChildMode::Scratch,
+                    stage: Stage::Ended,
+                    commit: None,
+                    branch: None,
+                    submodules: false,
+                    large_files: false,
+                    applied: None,
+                })
+                .unwrap();
+        }
+        for i in 0..50 {
+            std::fs::create_dir_all(f.helper.layout.child(&format!("ags_L{i:03}"))).unwrap();
+        }
+        std::fs::create_dir_all(f.helper.layout.children().join("not-a-session")).unwrap();
+        let (v, _) = f.ok(json!({"op": "child_list"}), vec![]);
+        assert!(
+            sent(&v) <= crate::review::CHILD_ANSWER_BUDGET,
+            "{}",
+            sent(&v)
+        );
+        assert_eq!(v["more"], true);
+        assert_eq!(v["orphans"], json!([]));
+        assert_eq!(v["omitted"]["orphans"], 50);
+        let kept = v["children"].as_array().unwrap().len();
+        assert!(kept > 0 && kept < 120, "{kept}");
+        assert_eq!(v["omitted"]["children"], 120 - kept);
+        assert_eq!(v["children"][0]["child"], "ags_C000");
+        assert_eq!(v["unknown_entries"], 1);
+    }
+
+    #[test]
+    fn an_ordinary_listing_is_whole() {
+        let f = fixture();
+        ended_clone_child(&f);
+        let (v, _) = f.ok(json!({"op": "child_list"}), vec![]);
+        assert_eq!(v["more"], false);
+        assert!(v.get("omitted").is_none());
     }
 
     /// G-137-3 at unit level: a W3 child's view, every mount of it. The

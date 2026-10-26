@@ -51,9 +51,10 @@ pub const MECHANISM: &str = "systemd_units";
 pub const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 /// The host's isolation state (136j): `verified` only when isolation is on,
-/// the helper answers, pasta works and the self-test passed. Any failure
-/// later drops it to `unavailable` at once; only another passing self-test
-/// brings it back.
+/// the helper answers, pasta works and the self-test passed. A helper that
+/// can no longer be reached, or pasta gone, drops it to `unavailable` at
+/// once; an operation that is only slow does not (139-D4). Only another
+/// passing self-test brings it back.
 pub struct Status {
     report: Mutex<Report>,
     /// When a failed self-test may run again.
@@ -352,8 +353,8 @@ mod imp {
             .map(|r| r.code.as_str())
     }
 
-    /// Why isolation cannot be had through the helper now (136j): it does
-    /// not answer, or no session could have a network.
+    /// Why the self-test finds isolation cannot be had through the helper
+    /// (136j): it does not answer, or no session could have a network.
     pub fn unavailable_because(e: &io::Error) -> Option<&'static str> {
         match refusal(e) {
             Some("no_passt") => Some("no_passt"),
@@ -371,16 +372,48 @@ mod imp {
         }
     }
 
+    /// Whether an operation's failure says the helper cannot be reached
+    /// at all (136j, 139-D4): it is not listening, or pasta is missing.
+    /// One that was slow or cut short is only that operation's failure.
+    fn unreachable_because(e: &io::Error) -> Option<&'static str> {
+        match refusal(e) {
+            Some("no_passt") => Some("no_passt"),
+            Some(_) => None,
+            None => matches!(
+                e.kind(),
+                io::ErrorKind::NotFound
+                    | io::ErrorKind::ConnectionRefused
+                    | io::ErrorKind::PermissionDenied
+            )
+            .then_some("helper"),
+        }
+    }
+
     /// A connect or a request that takes longer than this is a helper that
     /// is not answering; only `end` waits longer, for the stop's grace.
     const IO_TIMEOUT: Duration = Duration::from_secs(10);
     const END_TIMEOUT: Duration = Duration::from_secs(30);
-    /// The job unit's own limit is 900 s (the helper's `agents.rs`).
-    const JOB_TIMEOUT: Duration = Duration::from_secs(960);
-    /// A child's clone unit's own limit is 600 s (`children.rs`).
-    const CHILD_TIMEOUT: Duration = Duration::from_secs(660);
+    /// What the helper's units may run (`RuntimeMaxSec`): an install job
+    /// 900 s (`agents.rs`), a child's clone, export or import 600 s
+    /// (`children.rs`); then a minute for the helper's own work.
+    const JOB_UNIT: u64 = 900;
+    const CHILD_UNIT: u64 = 600;
+    const MARGIN: u64 = 60;
     const MAX_RESPONSE: usize = 16 * 1024;
     const MAX_CHILD_RESPONSE: usize = 2 << 20;
+
+    /// How long the host waits for `op`'s answer: a child's operation runs
+    /// one unit with scans around it, and an Apply may run an export unit
+    /// before its import unit.
+    pub(crate) fn wait_for(op: &str) -> Duration {
+        match op {
+            "agent_job" => Duration::from_secs(JOB_UNIT + MARGIN),
+            "child_import" => Duration::from_secs(2 * CHILD_UNIT + MARGIN),
+            _ if op.starts_with("child_") => Duration::from_secs(CHILD_UNIT + 2 * MARGIN),
+            "end" | "release" => END_TIMEOUT,
+            _ => IO_TIMEOUT,
+        }
+    }
 
     /// One request to the helper, and its answer.
     pub trait Helper: Send + Sync {
@@ -402,16 +435,7 @@ mod imp {
         ) -> io::Result<(Value, Option<OwnedFd>)> {
             let stream = UnixStream::connect(&self.0)?;
             let op = request["op"].as_str().unwrap_or_default();
-            let wait = if op == "agent_job" {
-                JOB_TIMEOUT
-            } else if op.starts_with("child_") {
-                CHILD_TIMEOUT
-            } else if request["op"] == "end" || request["op"] == "release" {
-                END_TIMEOUT
-            } else {
-                IO_TIMEOUT
-            };
-            stream.set_read_timeout(Some(wait))?;
+            stream.set_read_timeout(Some(wait_for(op)))?;
             stream.set_write_timeout(Some(IO_TIMEOUT))?;
             let mut line = request.to_string().into_bytes();
             line.push(b'\n');
@@ -498,7 +522,7 @@ mod imp {
         pub state_dir: PathBuf,
         /// [`HOMES`], or a test's.
         pub homes: PathBuf,
-        /// What a helper that stops answering downgrades (136j).
+        /// What a helper that cannot be reached downgrades (136j).
         pub status: Arc<super::Status>,
     }
 
@@ -550,7 +574,7 @@ mod imp {
                 Ok((answer, fd))
             });
             if let Err(e) = &answered
-                && let Some(reason) = unavailable_because(e)
+                && let Some(reason) = unreachable_because(e)
                 && self.status.downgrade(reason)
             {
                 tracing::error!(reason, error = %e, "session isolation is now unavailable");
@@ -1185,6 +1209,113 @@ mod imp {
             let mut line = answer.to_string().into_bytes();
             line.push(b'\n');
             let _ = send_line(&stream, &line, fd.as_ref().map(|f| f.as_fd()));
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// A helper that fails every request with `kind`, as one that is
+        /// slow, cut short or gone does.
+        struct Failing(io::ErrorKind);
+
+        impl Helper for Failing {
+            fn call(
+                &self,
+                request: &Value,
+                _: Option<BorrowedFd<'_>>,
+            ) -> io::Result<(Value, Option<OwnedFd>)> {
+                Err(io::Error::new(self.0, format!("{}", request["op"])))
+            }
+        }
+
+        fn verified_link(kind: io::ErrorKind) -> Link {
+            let status = Arc::new(super::super::Status::new(true, true));
+            status.settle(Ok(()));
+            Link {
+                helper: Arc::new(Failing(kind)),
+                state_dir: "/nonexistent/state".into(),
+                homes: "/nonexistent/homes".into(),
+                status,
+            }
+        }
+
+        /// 139-D4: an operation that outlasts its wait is its caller's
+        /// error; only a failed verification check (the self-test, or a
+        /// helper that cannot be reached at all) changes isolation's state.
+        #[test]
+        fn a_slow_child_operation_does_not_make_isolation_unavailable() {
+            use io::ErrorKind::*;
+            for kind in [TimedOut, WouldBlock, UnexpectedEof] {
+                let link = verified_link(kind);
+                let e = link
+                    .child_import("ags_C", "ags_P", "storm/ags_C")
+                    .unwrap_err();
+                assert_eq!(e.kind(), kind);
+                assert!(link.agent_job("opencode", "install").is_err());
+                assert!(link.child_export("ags_C").is_err());
+                assert!(
+                    link.child_create("ags_P", "ags_C", Path::new("/w"))
+                        .is_err()
+                );
+                assert!(link.lease("ags_A").is_err());
+                assert!(
+                    link.status.verified(),
+                    "{kind:?} made isolation unavailable"
+                );
+                link.status.settle(link.self_test());
+                assert_eq!(link.status.report().reason, Some("helper"), "{kind:?}");
+            }
+            for kind in [NotFound, ConnectionRefused, PermissionDenied] {
+                let link = verified_link(kind);
+                assert!(link.child_list().is_err());
+                assert!(!link.status.verified(), "{kind:?}");
+                assert_eq!(link.status.report().reason, Some("helper"));
+            }
+        }
+
+        /// Each operation waits as long as the helper's units for it may
+        /// run, and a minute more.
+        #[test]
+        fn each_operation_waits_as_long_as_its_units_may_run() {
+            let secs = |op| wait_for(op).as_secs();
+            assert_eq!(secs("child_import"), 2 * 600 + 60);
+            for op in [
+                "child_create",
+                "child_export",
+                "child_list",
+                "child_dispose",
+            ] {
+                assert_eq!(secs(op), 660 + 60, "{op}");
+            }
+            assert_eq!(secs("agent_job"), 900 + 60);
+            for op in ["end", "release"] {
+                assert_eq!(secs(op), 30, "{op}");
+            }
+            for op in ["lease", "prepare", "start", "signal", "self_test"] {
+                assert_eq!(secs(op), 10, "{op}");
+            }
+        }
+
+        /// The helper fits a child's answer in its budget, which must fit
+        /// this read (139-D2); the crates share no code, so both pin it.
+        #[test]
+        fn the_helpers_answer_budget_fits_the_hosts_read() {
+            const HELPERS_BUDGET: usize = (2 << 20) - (64 << 10);
+            assert_eq!(
+                storm_runtime_isolation::review::CHILD_ANSWER_BUDGET,
+                HELPERS_BUDGET
+            );
+            assert_eq!(MAX_CHILD_RESPONSE, 2 << 20);
+            let (a, b) = UnixStream::pair().unwrap();
+            let pad = HELPERS_BUDGET - r#"{"ok":true,"p":""}"#.len() - 1;
+            let line = format!("{{\"ok\":true,\"p\":\"{}\"}}\n", "x".repeat(pad));
+            assert_eq!(line.len(), HELPERS_BUDGET);
+            let writer = std::thread::spawn(move || send_line(&a, line.as_bytes(), None));
+            let (got, _) = recv_line(&b, MAX_CHILD_RESPONSE).unwrap();
+            writer.join().unwrap().unwrap();
+            assert_eq!(got.len(), HELPERS_BUDGET - 1);
         }
     }
 }

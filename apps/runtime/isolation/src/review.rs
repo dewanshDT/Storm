@@ -595,6 +595,131 @@ pub fn import_scratch(
     }))
 }
 
+/// The most the helper sends the host for one child answer: the host reads
+/// at most 2 MiB (`MAX_CHILD_RESPONSE` in storm-runtime's `isolation.rs`).
+pub const CHILD_ANSWER_BUDGET: usize = (2 << 20) - (64 << 10);
+
+/// Room left for the flags and counts a trim adds.
+const TRIM_ROOM: usize = 256;
+
+fn serialized<T: serde::Serialize + ?Sized>(v: &T) -> usize {
+    serde_json::to_vec(v).map_or(usize::MAX, |b| b.len())
+}
+
+/// Fits `answer`, as `protocol::ok_with(op, …)` puts it on the wire, in
+/// `budget` bytes (139-D2): files go first, then the patch's tail, then
+/// commits, each marked by its flag and counted under `omitted`. Nothing
+/// else is cut; false when even that is too long.
+pub fn fit(answer: &mut Map<String, Value>, op: crate::protocol::Op, budget: usize) -> bool {
+    let envelope = crate::protocol::ok_with(op, Map::new()).len();
+    let budget = budget.saturating_sub(envelope);
+    let mut total = serialized(answer);
+    if total <= budget {
+        return true;
+    }
+    let target = budget.saturating_sub(TRIM_ROOM);
+    let mut omitted = Map::new();
+    let files = drop_tail(answer, "files", &mut total, target);
+    if files > 0 {
+        answer.insert("more_files".into(), true.into());
+        omitted.insert("files".into(), files.into());
+    }
+    if total > target
+        && let Some(Value::String(patch)) = answer.get_mut("patch")
+        && !patch.is_empty()
+    {
+        let before = serialized(patch.as_str());
+        let room = before.saturating_sub(total - target);
+        let cut = longest_prefix(patch, room);
+        omitted.insert("patch_bytes".into(), (patch.len() - cut).into());
+        patch.truncate(cut);
+        total -= before - serialized(patch.as_str());
+        answer.insert("patch_truncated".into(), true.into());
+    }
+    let commits = drop_tail(answer, "commits", &mut total, target);
+    if commits > 0 {
+        answer.insert("more_commits".into(), true.into());
+        omitted.insert("commits".into(), commits.into());
+    }
+    trimmed(answer, omitted, budget)
+}
+
+/// `child_list`'s answer in `budget` (139-D2): orphans go first, then
+/// children; `more` says whether any did.
+pub fn fit_listing(
+    answer: &mut Map<String, Value>,
+    op: crate::protocol::Op,
+    budget: usize,
+) -> bool {
+    let envelope = crate::protocol::ok_with(op, Map::new()).len();
+    let budget = budget.saturating_sub(envelope);
+    answer.insert("more".into(), false.into());
+    let mut total = serialized(answer);
+    if total <= budget {
+        return true;
+    }
+    let target = budget.saturating_sub(TRIM_ROOM);
+    let mut omitted = Map::new();
+    for key in ["orphans", "children"] {
+        let n = drop_tail(answer, key, &mut total, target);
+        if n > 0 {
+            omitted.insert(key.into(), n.into());
+        }
+    }
+    answer.insert("more".into(), true.into());
+    trimmed(answer, omitted, budget)
+}
+
+fn trimmed(answer: &mut Map<String, Value>, omitted: Map<String, Value>, budget: usize) -> bool {
+    if !omitted.is_empty() {
+        answer.insert("omitted".into(), omitted.into());
+    }
+    serialized(answer) <= budget
+}
+
+/// Drops `key`'s items from its end until `total` is within `target`; how
+/// many it dropped.
+fn drop_tail(
+    answer: &mut Map<String, Value>,
+    key: &str,
+    total: &mut usize,
+    target: usize,
+) -> usize {
+    let Some(Value::Array(items)) = answer.get_mut(key) else {
+        return 0;
+    };
+    let mut dropped = 0;
+    while *total > target
+        && let Some(last) = items.pop()
+    {
+        let comma = usize::from(!items.is_empty());
+        *total -= serialized(&last) + comma;
+        dropped += 1;
+    }
+    dropped
+}
+
+/// The longest prefix of `text`, cut at a character, that serializes in
+/// `room` bytes.
+fn longest_prefix(text: &str, room: usize) -> usize {
+    let floor = |mut i: usize| {
+        while !text.is_char_boundary(i) {
+            i -= 1;
+        }
+        i
+    };
+    let (mut lo, mut hi) = (0, text.len());
+    while lo < hi {
+        let mid = lo + (hi - lo).div_ceil(2);
+        if serialized(&text[..floor(mid)]) <= room {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    floor(lo)
+}
+
 pub fn line(result: &Result<Value, Failure>) -> String {
     match result {
         Ok(v) => json!({"done": v}).to_string(),
@@ -1442,6 +1567,152 @@ pub mod tests {
                 .get("extra")
                 .is_none()
         );
+    }
+
+    fn wire(answer: &Map<String, Value>) -> usize {
+        crate::protocol::ok_with(crate::protocol::Op::ChildExport, answer.clone()).len()
+    }
+
+    /// What a child's review may print at every one of its limits, with
+    /// every string made of control bytes, which serialize as six bytes
+    /// each. `cut`: the export itself cut its commits and patch, as one at
+    /// those limits does.
+    pub fn export_at_every_limit(cut: bool) -> String {
+        let control = |n: usize| "\u{1}".repeat(n);
+        let id = "a".repeat(40);
+        let files: Vec<Value> = (0..MAX_FILES)
+            .map(|_| json!({"path": control(MAX_PATH), "added": 1, "removed": 1}))
+            .collect();
+        let commits: Vec<Value> = (0..MAX_COMMITS)
+            .map(|_| json!({"id": id, "subject": control(MAX_SUBJECT)}))
+            .collect();
+        json!({"done": {"mode": "clone", "tip": id, "base": id, "base_found": true,
+            "commits": commits, "more_commits": cut, "files": files, "more_files": false,
+            "patch": control(MAX_PATCH), "patch_truncated": cut}})
+        .to_string()
+    }
+
+    fn answer_of(line: &str) -> Map<String, Value> {
+        let Some(Ok(Value::Object(mut v))) = parse_export(line) else {
+            panic!("no export");
+        };
+        v.insert("child".into(), "ags_C".into());
+        v.insert("parent".into(), "ags_P".into());
+        v.insert(
+            "parent_workspace".into(),
+            format!("/{}", "\u{1}".repeat(4095)).into(),
+        );
+        v
+    }
+
+    /// 139-D2: the host reads 2 MiB of a child's answer; an export at every
+    /// limit is several times that once serialized, so the helper trims it,
+    /// files first, then the patch, then commits, and says so. What names
+    /// the child and its work is never trimmed.
+    #[test]
+    fn an_export_at_every_limit_fits_the_hosts_read() {
+        let mut v = answer_of(&export_at_every_limit(true));
+        assert!(wire(&v) > 4 * CHILD_ANSWER_BUDGET);
+        assert!(fit(
+            &mut v,
+            crate::protocol::Op::ChildExport,
+            CHILD_ANSWER_BUDGET
+        ));
+        let sent = crate::protocol::ok_with(crate::protocol::Op::ChildExport, v.clone());
+        assert!(sent.len() <= CHILD_ANSWER_BUDGET, "{} bytes", sent.len());
+        assert!(sent.ends_with('\n'));
+        for flag in ["more_files", "patch_truncated", "more_commits"] {
+            assert_eq!(v[flag], true, "{flag}");
+        }
+        for (k, want) in [
+            ("mode", json!("clone")),
+            ("tip", json!("a".repeat(40))),
+            ("base", json!("a".repeat(40))),
+            ("base_found", json!(true)),
+            ("child", json!("ags_C")),
+            ("parent", json!("ags_P")),
+        ] {
+            assert_eq!(v[k], want, "{k}");
+        }
+        assert_eq!(v["parent_workspace"].as_str().unwrap().len(), 4096);
+        let kept = v["files"].as_array().unwrap().len();
+        assert!(kept < MAX_FILES);
+        assert_eq!(v["omitted"]["files"], MAX_FILES - kept);
+        // The rest fits once the files are cut.
+        assert_eq!(v["patch"].as_str().unwrap().len(), MAX_PATCH);
+        assert_eq!(v["commits"].as_array().unwrap().len(), MAX_COMMITS);
+    }
+
+    /// An ordinary export is sent as it is.
+    #[test]
+    fn an_ordinary_export_is_untouched() {
+        let id = "b".repeat(40);
+        let line = json!({"done": {"mode": "clone", "tip": id, "base": id, "base_found": true,
+            "commits": [{"id": id, "subject": "work"}], "more_commits": false,
+            "files": [{"path": "a.txt", "added": 1, "removed": 0}], "more_files": false,
+            "patch": "+a\n", "patch_truncated": false}})
+        .to_string();
+        let mut v = answer_of(&line);
+        let before = v.clone();
+        assert!(fit(
+            &mut v,
+            crate::protocol::Op::ChildExport,
+            CHILD_ANSWER_BUDGET
+        ));
+        assert_eq!(v, before);
+        for flag in ["more_files", "patch_truncated", "more_commits"] {
+            assert_eq!(v[flag], false, "{flag}");
+        }
+        assert!(v.get("omitted").is_none());
+    }
+
+    /// Files go first, then the patch, then commits, each only as far as
+    /// the budget needs.
+    #[test]
+    fn an_answer_is_trimmed_files_then_patch_then_commits() {
+        let full = answer_of(&export_at_every_limit(false));
+        let essential = {
+            let mut v = full.clone();
+            v.insert("files".into(), json!([]));
+            v.insert("commits".into(), json!([]));
+            v.insert("patch".into(), json!(""));
+            wire(&v)
+        };
+        let op = crate::protocol::Op::ChildExport;
+        let mut v = full.clone();
+        assert!(fit(&mut v, op, wire(&full) - 1));
+        assert!(wire(&v) < wire(&full));
+        assert_eq!(v["files"].as_array().unwrap().len(), MAX_FILES - 1);
+        assert_eq!(
+            (v["more_files"].clone(), v["patch_truncated"].clone()),
+            (json!(true), json!(false))
+        );
+        let mut v = full.clone();
+        assert!(fit(&mut v, op, essential + 300_000));
+        assert!(v["files"].as_array().unwrap().is_empty());
+        assert_eq!(v["patch_truncated"], true);
+        assert_eq!(v["commits"].as_array().unwrap().len(), MAX_COMMITS);
+        assert_eq!(v["more_commits"], false);
+        let mut v = full.clone();
+        assert!(fit(&mut v, op, essential + 100_000));
+        assert_eq!(v["patch"], "");
+        let kept = v["commits"].as_array().unwrap().len();
+        assert!(0 < kept && kept < MAX_COMMITS, "{kept}");
+        assert_eq!(v["more_commits"], true);
+        assert_eq!(v["omitted"]["commits"], MAX_COMMITS - kept);
+        assert!(wire(&v) <= essential + 100_000);
+        let mut v = full;
+        assert!(!fit(&mut v, op, essential / 2));
+    }
+
+    /// The host's read is storm-runtime's `MAX_CHILD_RESPONSE`, pinned here
+    /// because the two crates share no code (136); its suite pins the
+    /// other side.
+    #[test]
+    fn the_answer_budget_fits_the_hosts_read() {
+        const HOSTS_READ: usize = 2 << 20;
+        const { assert!(CHILD_ANSWER_BUDGET + (64 << 10) <= HOSTS_READ) };
+        assert_eq!(CHILD_ANSWER_BUDGET, 2_031_616);
     }
 
     #[test]

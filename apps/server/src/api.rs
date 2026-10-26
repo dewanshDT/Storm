@@ -16164,6 +16164,43 @@ pub(crate) mod tests {
         );
     }
 
+    /// A listing the helper cut to fit the host's read (139c) that leaves a
+    /// child out proves nothing about it: review, Apply and delete are
+    /// refused, and nothing is sent after the listing.
+    #[tokio::test]
+    async fn a_cut_listing_without_the_child_is_refused() {
+        let dir = tempdir::TempDir::new("storm-139c-cut").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.with_child_workspaces().await;
+        f.report(&child, "completed").await;
+        f.sent();
+        let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
+        let host_id = f.host_id.clone();
+        let by_host = format!("/v1/agent/hosts/{host_id}/children/{child}");
+        let cut = serde_json::json!({"answer": {"children": [{"child": "ags_OTHER",
+            "parent": parent, "parent_workspace": "/w/storm", "mode": "clone",
+            "stage": "ended", "live": false, "commit": "b".repeat(40), "branch": "main",
+            "applied": null}], "orphans": [], "unknown_entries": 0, "more": true,
+            "omitted": {"children": 1}}});
+        for req in [
+            get_with_auth(&by_host, &bearer),
+            post_json_with_auth(&format!("{by_host}/apply"), serde_json::json!({}), &bearer),
+            delete_with_auth(&by_host, &bearer),
+        ] {
+            let ((status, body), _) =
+                tokio::join!(send(&app, req), f.child_answers(|_| cut.clone()));
+            assert_eq!(
+                (status, body),
+                (
+                    StatusCode::CONFLICT,
+                    serde_json::json!({"error": "listing_incomplete"})
+                )
+            );
+        }
+        assert!(f.child_requests().is_empty(), "nothing after the listing");
+    }
+
     /// The lineage cross-check (decision 137, "As built in 137-3"), on both
     /// kinds of route: a record whose parent is not the child's lineage, a
     /// session that is no child, a child still running and a child on
