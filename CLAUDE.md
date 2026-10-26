@@ -653,8 +653,12 @@ Specification*; the slices are decisions 81 and 81a onward):
   scratch before it starts it (and refuses a child on a host without
   isolation), and the child's record is `children/<id>`, which the host
   reports in `workspace_paths` once made. Its grants are the parent's live
-  ones at approval, its agent the parent's (B4), its synced login only the
-  parent's; it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
+  ones at approval; its agent the parent's or any other its host reports
+  installed with `mcp: true`, never `shell` (143a, `approval::child_agents`;
+  else `agent_unavailable`, checked at creation and again at approval); its
+  credential what a person's launch of that agent there would get (143d:
+  the synced login for Claude Code when deliverable, else the host's own
+  136f setup); it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
   starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
   grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
   holds the two crates' tests to one `start`.

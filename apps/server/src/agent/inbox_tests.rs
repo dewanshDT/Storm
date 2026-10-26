@@ -91,7 +91,7 @@ impl Fixture {
     }
 
     fn approve(&self, id: &str) -> Request {
-        match self.m.approve_request(id, "dev_A", false).unwrap() {
+        match self.m.approve_request(id, "dev_A", false, None).unwrap() {
             Decision::Decided { request, .. } => request,
             other => panic!("not decided: {other:?}"),
         }
@@ -413,7 +413,7 @@ fn approval_recounts_the_cap() {
             .unwrap();
     }
     drop(store);
-    let refused = match f.m.approve_request(&late.id, "dev_A", false).unwrap() {
+    let refused = match f.m.approve_request(&late.id, "dev_A", false, None).unwrap() {
         Decision::Decided { request, cap, .. } => (request.reason, cap),
         other => panic!("{other:?}"),
     };

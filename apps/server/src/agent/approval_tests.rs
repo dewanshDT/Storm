@@ -9,7 +9,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::store::SessionRecord;
 use super::store::spawn::{
-    Decision, MAX_CHILDREN, MAX_PENDING, MAX_TREE, NewRequest, Refusal, Request,
+    Decision, HostNow, MAX_CHILDREN, MAX_PENDING, MAX_TREE, NewRequest, Refusal, Request,
 };
 use super::{AgentManager, Command, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
@@ -29,10 +29,20 @@ fn caps(identity: &str, max_sessions: u32) -> Hello {
 
 /// A host that does not say it isolates its sessions.
 fn unisolated(identity: &str, max_sessions: u32) -> Hello {
-    let providers: Vec<_> = ["claude-code", "opencode", "shell"]
-        .iter()
-        .map(|id| serde_json::json!({"id": id, "kind": "cli", "interactions": ["terminal"], "available": true}))
-        .collect();
+    // Codex is not installed, Cursor gets no Storm servers (130a).
+    let providers: Vec<_> = [
+        ("claude-code", true, Some(true)),
+        ("opencode", true, Some(true)),
+        ("shell", true, None),
+        ("codex", false, Some(true)),
+        ("cursor", true, Some(false)),
+    ]
+    .iter()
+    .map(|(id, available, mcp)| {
+        serde_json::json!({"id": id, "kind": "cli",
+        "interactions": ["terminal"], "available": available, "mcp": mcp})
+    })
+    .collect();
     serde_json::from_value(serde_json::json!({
         "providers": providers,
         "workspaces": ["storm", "other"],
@@ -143,7 +153,7 @@ impl Fixture {
     }
 
     fn approve(&self, id: &str, device: &str) -> Decision {
-        let d = self.m.approve_request(id, device, false).unwrap();
+        let d = self.m.approve_request(id, device, false, None).unwrap();
         self.m.report_children_for_tests("hst_A");
         d
     }
@@ -304,17 +314,17 @@ fn creation_needs_c0_spawn_on_a_live_requester_and_a_descendant_target() {
     let p = f.parent();
     let off = f.launch("other", None);
     assert_eq!(f.start(&off.id), Err(because("not_permitted")), "spawn off");
-    // Another provider than the parent's is refused in V1 (B4).
+    // An agent the host cannot start a child in is refused (143a).
     let other = f.m.create_request(
         &p.id,
         NewRequest::Start {
             task: "t".into(),
-            provider: Some("opencode".into()),
+            provider: Some("cursor".into()),
             name: None,
             context_note: None,
         },
     );
-    assert_eq!(other.unwrap(), Err(because("not_permitted")));
+    assert_eq!(other.unwrap(), Err(because("agent_unavailable")));
     let same = f.m.create_request(
         &p.id,
         NewRequest::Start {
@@ -619,7 +629,7 @@ fn ap7_a_grant_the_parent_lost_before_approval_never_reaches_the_child() {
     let p = f.parent();
     let r = f.start(&p.id).unwrap();
     f.m.revoke_grants_for("con_X").unwrap();
-    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true).unwrap());
+    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true, None).unwrap());
     let child = child.unwrap();
     let store = f.m.store.lock().unwrap();
     let ids: Vec<String> = store
@@ -646,7 +656,7 @@ fn ap7_a_grant_the_parent_lost_before_approval_never_reaches_the_child() {
     f.m.report_children_for_tests("hst_A");
     let q = f.parent_in("other");
     let r = f.start(&q).unwrap();
-    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true).unwrap());
+    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true, None).unwrap());
     let store = f.m.store.lock().unwrap();
     assert_eq!(
         store
@@ -768,7 +778,7 @@ fn ap4_a_request_is_decided_once() {
         1
     );
     assert!(matches!(
-        f.m.approve_request("agr_NOPE", "dev_A", false),
+        f.m.approve_request("agr_NOPE", "dev_A", false, None),
         Err(super::AgentError::NotFound(_))
     ));
 
@@ -865,7 +875,12 @@ fn ap3_an_end_never_precedes_its_childs_start() {
         f.m.store
             .lock()
             .unwrap()
-            .approve_request(&r.id, "dev_A", false, &now, &|_| Ok(16))
+            .approve_request(&r.id, "dev_A", false, &now, &|_| {
+                Ok(HostNow {
+                    max_sessions: 16,
+                    ..HostNow::default()
+                })
+            })
             .unwrap()
             .unwrap();
     let child = *decided(decision).1.unwrap();
@@ -875,7 +890,7 @@ fn ap3_an_end_never_precedes_its_childs_start() {
         .unwrap();
     assert!(f.m.stop_cascade_targets(&now).unwrap().is_empty());
 
-    f.m.dispatch_spawned(&child).unwrap();
+    f.m.dispatch_spawned(&child, None).unwrap();
     let stops = f.m.stop_cascade_targets(&now).unwrap();
     assert_eq!(stops.len(), 1);
     let sent: Vec<&str> = std::iter::from_fn(|| f.link.try_recv().ok())
@@ -1056,17 +1071,23 @@ fn an_adapter_that_cannot_spawn_is_refused_at_creation_and_approval() {
     assert_eq!(child, None);
 }
 
-/// B4 again at approval: a payload naming another provider never starts.
+/// 143a again at approval, as C0 is: an agent the host's live link no
+/// longer offers a child never starts.
 #[test]
-fn another_provider_is_refused_at_approval_too() {
+fn an_agent_the_host_dropped_is_refused_at_approval() {
     let f = fixture(16);
     let p = f.parent();
-    let payload = r#"{"task":"t","provider":"opencode"}"#;
-    raw_request_with(&f, "agr_1", "start", &p.id, None, &stamp(60_000), payload);
-    let (request, child, _) = decided(f.approve("agr_1", "dev_A"));
+    let r = f.start_as(&p.id, Some("opencode")).unwrap();
+    let mut hello = caps(VERIFIED, 16);
+    hello
+        .capabilities
+        .providers
+        .retain(|provider| provider.id != "opencode");
+    f.m.inventory("hst_A", hello.capabilities).unwrap();
+    let (request, child, _) = decided(f.approve(&r.id, "dev_A"));
     assert_eq!(
         outcome(&request),
-        ("decided", Some("refused"), Some("not_permitted"))
+        ("decided", Some("refused"), Some("agent_unavailable"))
     );
     assert_eq!(child, None);
 }
@@ -1237,7 +1258,7 @@ fn an_approved_child_is_started_narrowed_in_its_own_workspace() {
     f.starts();
     let r = f.start_as(&p.id, None).unwrap();
     f.m.revoke_grants_for("con_X").unwrap();
-    let (request, child, _) = decided(f.m.approve_request(&r.id, "dev_A", false).unwrap());
+    let (request, child, _) = decided(f.m.approve_request(&r.id, "dev_A", false, None).unwrap());
     let child = child.unwrap();
     assert_eq!(outcome(&request), ("decided", Some("started"), None));
     let starts = f.starts();
@@ -1275,46 +1296,109 @@ fn an_approved_child_is_started_narrowed_in_its_own_workspace() {
 
     // Ticked: the parent's own write vault, and only it.
     let r = f.start_as(&p.id, None).unwrap();
-    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true).unwrap());
+    let (_, child, _) = decided(f.m.approve_request(&r.id, "dev_A", true, None).unwrap());
     let launch = f.m.launch_of(&child.unwrap().id).unwrap().unwrap();
     assert_eq!(launch.write_vault_id.as_deref(), Some("vlt_W"));
 }
 
-/// B4, the checks table's provider row: another agent than the parent's is
-/// refused when it is asked for and again at approval; naming the parent's
-/// own is a same-provider start.
+/// 143a, the checks table's provider row: a child runs its parent's agent,
+/// or another its host reports installed with Storm's servers; `shell`, an
+/// agent not installed, one without Storm's servers (`mcp: false`) and a
+/// name the host does not report are refused `agent_unavailable` when asked
+/// for and again at approval, and nothing reaches the host.
 #[test]
-fn b4_a_child_runs_its_parents_agent_or_nothing() {
+fn a_child_runs_an_agent_its_host_can_start_or_nothing() {
     let mut f = fixture(16);
     let p = f.parent();
-    for other in ["opencode", "codex", "shell", "Claude-Code"] {
+    for other in ["shell", "codex", "cursor", "Claude-Code", "my-agent"] {
         assert_eq!(
             f.start_as(&p.id, Some(other)),
-            Err(because("not_permitted")),
+            Err(because("agent_unavailable")),
             "{other}"
         );
     }
+    assert_eq!(
+        f.m.startable_agents(&p.id).unwrap(),
+        ["claude-code", "opencode"]
+    );
     let same = f.start_as(&p.id, Some("claude-code")).unwrap();
     let (request, ..) = decided(f.approve(&same.id, "dev_A"));
     assert_eq!(request.outcome.as_deref(), Some("started"));
 
-    raw_request_with(
-        &f,
-        "agr_B4",
-        "start",
-        &p.id,
-        None,
-        &stamp(60_000),
-        r#"{"task":"t","provider":"opencode"}"#,
-    );
+    for (id, other) in [
+        ("agr_SH", "shell"),
+        ("agr_CX", "codex"),
+        ("agr_CU", "cursor"),
+    ] {
+        raw_request_with(
+            &f,
+            id,
+            "start",
+            &p.id,
+            None,
+            &stamp(60_000),
+            &format!(r#"{{"task":"t","provider":"{other}"}}"#),
+        );
+        f.starts();
+        let (request, child, _) = decided(f.approve(id, "dev_A"));
+        assert_eq!(
+            outcome(&request),
+            ("decided", Some("refused"), Some("agent_unavailable")),
+            "{other}"
+        );
+        assert!(child.is_none());
+        assert!(f.starts().is_empty(), "nothing reaches the host");
+    }
+}
+
+/// 143a, 143d: a Claude Code parent's OpenCode child starts as OpenCode,
+/// with the parent's grants and the asks, and is named no synced login even
+/// when the account has one for that host: the host's own setup for
+/// OpenCode applies (136f).
+#[test]
+fn a_claude_code_parent_starts_an_opencode_child_on_the_hosts_own_setup() {
+    const KIND: &str = "claude_subscription_token";
+    let mut f = fixture(16);
+    let mut hello = caps(VERIFIED, 16);
+    hello.capabilities.provider_credentials = vec![KIND.into()];
+    f.m.inventory("hst_A", hello.capabilities).unwrap();
+    let p = f.parent();
     f.starts();
-    let (request, child, _) = decided(f.approve("agr_B4", "dev_A"));
+    let r = f.start_as(&p.id, Some("opencode")).unwrap();
     assert_eq!(
-        outcome(&request),
-        ("decided", Some("refused"), Some("not_permitted"))
+        f.m.child_credential("hst_A", "opencode", Some(KIND)),
+        super::CredentialOutcome::Native
     );
-    assert!(child.is_none());
-    assert!(f.starts().is_empty(), "nothing reaches the host");
+    let (request, child, _) = decided(
+        f.m.approve_request(&r.id, "dev_A", false, Some(KIND))
+            .unwrap(),
+    );
+    assert_eq!(outcome(&request), ("decided", Some("started"), None));
+    let child = child.unwrap();
+    let starts = f.starts();
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    let mut start = starts[0].clone();
+    start.as_object_mut().unwrap().remove("cmd_seq");
+    assert_eq!(
+        start,
+        serde_json::json!({
+            "type": "start", "session": child.id, "workspace": "storm",
+            "provider": "opencode", "interaction": "terminal",
+            "terminal": {"cols": 80, "rows": 24},
+            "mcp": [{"id": "con_X", "slug": "con_X"}, {"id": "storm", "slug": "storm"}],
+            "context": true, "spawn_asks": {"spawned": true}, "child_of": p.id,
+        })
+    );
+    let c = f.m.get(&child.id).unwrap();
+    assert_eq!(
+        (
+            c.provider.as_str(),
+            c.provider_kind.as_str(),
+            c.status.as_str()
+        ),
+        ("opencode", "cli", "starting")
+    );
+    assert_eq!(f.m.requested_credential(&c.id), None);
 }
 
 /// A decided request cannot change: a child whose host takes no command
@@ -1407,10 +1491,13 @@ fn a_childs_workspace_is_kept_as_its_host_made_it() {
     assert_eq!(f.m.child_workspace_of(&p.id).unwrap(), None);
 }
 
-/// Token sync (decision 124) narrows too: a child pulls its parent's synced
-/// login only when the parent had one, and never one the parent did not.
+/// 143d: a child's credential is what a person's own launch of its agent
+/// on its host would get, whatever its parent's. An OpenCode parent's Claude
+/// Code child is named the synced login when the account delivers one to
+/// that host, and none otherwise (the host's 136f path then); an OpenCode
+/// child never is.
 #[test]
-fn a_child_gets_its_parents_synced_login_and_no_other() {
+fn a_child_gets_the_synced_login_a_launch_of_its_agent_would() {
     const KIND: &str = "claude_subscription_token";
     let dir = tempdir::TempDir::new("storm-start-credential").unwrap();
     let m = AgentManager::open(dir.path()).unwrap();
@@ -1418,46 +1505,52 @@ fn a_child_gets_its_parents_synced_login_and_no_other() {
     let mut hello = caps(VERIFIED, 16);
     hello.capabilities.provider_credentials = vec![KIND.into()];
     m.hello("hst_A", hello).unwrap();
-    for synced in [true, false] {
+    let cases = [
+        ("claude-code", true, Some(KIND)),
+        ("claude-code", false, None),
+        ("opencode", true, None),
+    ];
+    for (agent, synced, named) in cases {
         let launch: Launch = serde_json::from_value(serde_json::json!({
-            "host_id": "hst_A", "workspace": if synced { "storm" } else { "other" },
-            "provider": "claude-code", "terminal": {"cols": 80, "rows": 24},
+            "host_id": "hst_A", "workspace": "storm",
+            "provider": "opencode", "terminal": {"cols": 80, "rows": 24},
             "spawn": true,
         }))
         .unwrap();
-        let meta = LaunchMeta {
-            provider_credential: synced.then_some(KIND),
-            ..LaunchMeta::default()
-        };
         let (p, ..) = m
-            .launch("usr_A", launch, meta, vec![grant("storm")])
+            .launch("usr_A", launch, LaunchMeta::default(), vec![grant("storm")])
             .unwrap();
+        assert_eq!(m.requested_credential(&p.id), None, "the parent has none");
         let running = serde_json::from_value(serde_json::json!({"status": "running"})).unwrap();
         m.host_status("hst_A", &p.id, &running).unwrap();
-        m.set_spawn(&p.id, true, Some("dev_A")).unwrap().unwrap();
         while link.try_recv().is_ok() {}
         let r = m
             .create_request(
                 &p.id,
                 NewRequest::Start {
                     task: "t".into(),
-                    provider: None,
+                    provider: Some(agent.into()),
                     name: None,
                     context_note: None,
                 },
             )
             .unwrap()
             .unwrap();
-        let (_, child, _) = decided(m.approve_request(&r.id, "dev_A", false).unwrap());
+        let deliverable = synced.then_some(KIND);
+        let (_, child, _) = decided(
+            m.approve_request(&r.id, "dev_A", false, deliverable)
+                .unwrap(),
+        );
         let child = child.unwrap().id;
         let start = serde_json::to_value(link.try_recv().unwrap()).unwrap();
         assert_eq!(start["type"], "start");
+        assert_eq!(start["provider"], agent);
         assert_eq!(
             start.get("provider_credential").and_then(|k| k.as_str()),
-            synced.then_some(KIND),
+            named,
             "{start}"
         );
-        assert_eq!(m.requested_credential(&child), synced.then_some(KIND));
+        assert_eq!(m.requested_credential(&child), named);
         m.report_children_for_tests("hst_A");
     }
 }

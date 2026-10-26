@@ -1185,7 +1185,8 @@ fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
 
 /// Agent spawning's records (decision 134): lineage, the spawn switch, task,
 /// result, approval requests, the inbox and cascades. Additive tables only;
-/// nothing older is altered.
+/// nothing older is altered, and of these only `agent_requests` was rebuilt
+/// (143a).
 pub mod spawn {
     use std::sync::LazyLock;
 
@@ -1208,6 +1209,48 @@ pub mod spawn {
     pub const RESULT_OUTCOMES: &[&str] = &["succeeded", "partial", "failed", "blocked"];
     pub const MAX_SUMMARY_BYTES: usize = 4 * 1024;
     pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
+
+    /// 134o: start, message and end wait here for a person's decision.
+    const REQUESTS_TABLE: &str = "
+    CREATE TABLE IF NOT EXISTS agent_requests (
+        id                TEXT PRIMARY KEY,
+        kind              TEXT NOT NULL CHECK (kind IN ('start', 'message', 'end')),
+        requester         TEXT NOT NULL,
+        target            TEXT,
+        payload           TEXT NOT NULL,
+        created_at        TEXT NOT NULL,
+        expires_at        TEXT NOT NULL,
+        state             TEXT NOT NULL
+            CHECK (state IN ('pending', 'approving', 'decided')),
+        decided_by_device TEXT,
+        decided_at        TEXT,
+        outcome           TEXT CHECK (outcome IN ('started', 'start_failed',
+            'delivered', 'ended', 'denied', 'expired', 'refused')),
+        reason            TEXT CHECK (reason IN ('limit', 'not_permitted', 'revoked',
+            'requester_ended', 'target_gone', 'identity_unverified',
+            'isolation_unverified', 'agent_unavailable')),
+        session           TEXT,
+        CHECK ((kind = 'start') = (target IS NULL)),
+        CHECK ((state = 'decided') = (outcome IS NOT NULL)),
+        CHECK ((COALESCE(outcome, '') = 'refused') = (reason IS NOT NULL)),
+        CHECK (session IS NULL OR outcome IN ('started', 'start_failed')),
+        CHECK (COALESCE(outcome, '') != 'started' OR session IS NOT NULL)
+    );";
+
+    const REQUESTS_INDEXES: &str = "
+    CREATE INDEX IF NOT EXISTS requests_by_requester
+        ON agent_requests(requester, state);
+    CREATE INDEX IF NOT EXISTS requests_by_target ON agent_requests(target, state);
+    CREATE INDEX IF NOT EXISTS requests_pending
+        ON agent_requests(created_at, id, expires_at) WHERE state = 'pending';
+    -- What a person approves is what acts (T8, T9), and once.
+    CREATE TRIGGER IF NOT EXISTS request_text_fixed
+        BEFORE UPDATE OF id, kind, requester, target, payload, created_at, expires_at
+        ON agent_requests
+        BEGIN SELECT RAISE(ABORT, 'a request is fixed when it is made'); END;
+    CREATE TRIGGER IF NOT EXISTS request_decided_once
+        BEFORE UPDATE ON agent_requests WHEN OLD.state = 'decided'
+        BEGIN SELECT RAISE(ABORT, 'a request is decided once'); END;";
 
     pub(super) fn init(conn: &Connection) -> Result<()> {
         conn.execute_batch(
@@ -1291,45 +1334,6 @@ pub mod spawn {
                  reported_at TEXT NOT NULL
              );
 
-             -- 134o: start, message and end wait here for a person's decision.
-             CREATE TABLE IF NOT EXISTS agent_requests (
-                 id                TEXT PRIMARY KEY,
-                 kind              TEXT NOT NULL CHECK (kind IN ('start', 'message', 'end')),
-                 requester         TEXT NOT NULL,
-                 target            TEXT,
-                 payload           TEXT NOT NULL,
-                 created_at        TEXT NOT NULL,
-                 expires_at        TEXT NOT NULL,
-                 state             TEXT NOT NULL
-                     CHECK (state IN ('pending', 'approving', 'decided')),
-                 decided_by_device TEXT,
-                 decided_at        TEXT,
-                 outcome           TEXT CHECK (outcome IN ('started', 'start_failed',
-                     'delivered', 'ended', 'denied', 'expired', 'refused')),
-                 reason            TEXT CHECK (reason IN ('limit', 'not_permitted', 'revoked',
-                     'requester_ended', 'target_gone', 'identity_unverified',
-                     'isolation_unverified')),
-                 session           TEXT,
-                 CHECK ((kind = 'start') = (target IS NULL)),
-                 CHECK ((state = 'decided') = (outcome IS NOT NULL)),
-                 CHECK ((COALESCE(outcome, '') = 'refused') = (reason IS NOT NULL)),
-                 CHECK (session IS NULL OR outcome IN ('started', 'start_failed')),
-                 CHECK (COALESCE(outcome, '') != 'started' OR session IS NOT NULL)
-             );
-             CREATE INDEX IF NOT EXISTS requests_by_requester
-                 ON agent_requests(requester, state);
-             CREATE INDEX IF NOT EXISTS requests_by_target ON agent_requests(target, state);
-             CREATE INDEX IF NOT EXISTS requests_pending
-                 ON agent_requests(created_at, id, expires_at) WHERE state = 'pending';
-             -- What a person approves is what acts (T8, T9), and once.
-             CREATE TRIGGER IF NOT EXISTS request_text_fixed
-                 BEFORE UPDATE OF id, kind, requester, target, payload, created_at, expires_at
-                 ON agent_requests
-                 BEGIN SELECT RAISE(ABORT, 'a request is fixed when it is made'); END;
-             CREATE TRIGGER IF NOT EXISTS request_decided_once
-                 BEFORE UPDATE ON agent_requests WHEN OLD.state = 'decided'
-                 BEGIN SELECT RAISE(ABORT, 'a request is decided once'); END;
-
              -- 134j: a child's inbox. The sender is the parent or `storm` (C9).
              CREATE TABLE IF NOT EXISTS session_inbox (
                  session_id TEXT NOT NULL,
@@ -1377,6 +1381,27 @@ pub mod spawn {
                  WHEN OLD.state IN ('ended', 'already_ended')
                  BEGIN SELECT RAISE(ABORT, 'a cascade target is ended once'); END;",
         )?;
+        conn.execute_batch(REQUESTS_TABLE)?;
+        let requests: String = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_requests'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !requests.contains("'agent_unavailable'") {
+            // 143a's reason: a CHECK is not altered in place, so the table is
+            // rebuilt with its rows. Its old indexes and triggers go with the
+            // old table, and are made again below.
+            conn.execute_batch(&format!(
+                "BEGIN;
+                 ALTER TABLE agent_requests RENAME TO agent_requests_142;
+                 {REQUESTS_TABLE}
+                 INSERT INTO agent_requests ({REQUEST_COLUMNS})
+                     SELECT {REQUEST_COLUMNS} FROM agent_requests_142;
+                 DROP TABLE agent_requests_142;
+                 COMMIT;"
+            ))?;
+        }
+        conn.execute_batch(REQUESTS_INDEXES)?;
         Ok(())
     }
 
@@ -1513,7 +1538,8 @@ pub mod spawn {
     pub enum NewRequest {
         Start {
             task: String,
-            /// Another provider than the parent's: refused in V1 (B4).
+            /// The child's agent; the parent's own when absent. Another must
+            /// be one the parent's host can start a child in (143a).
             provider: Option<String>,
             /// What the child is called; the workspace's name otherwise.
             name: Option<String>,
@@ -1605,9 +1631,35 @@ pub mod spawn {
         }
     }
 
-    /// What the host's live link says now: C0's refusal, or its
-    /// `max_sessions` (0 is no limit).
-    pub type HostCheck<'a> = &'a dyn Fn(&str) -> std::result::Result<u32, &'static str>;
+    /// What the host's live link says now, when C0 holds.
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    pub struct HostNow {
+        /// 0 is no limit.
+        pub max_sessions: u32,
+        /// `(id, kind)` of each agent a child may run there other than its
+        /// parent's own (143a): installed, with Storm's servers, not `shell`.
+        pub agents: Vec<(String, String)>,
+    }
+
+    /// What the host's live link says now: C0's refusal, or what it reports.
+    pub type HostCheck<'a> = &'a dyn Fn(&str) -> std::result::Result<HostNow, &'static str>;
+
+    /// The child's agent and its kind: the parent's own when the request
+    /// names none or names it, else one its host reports it can start a
+    /// child in (143a). `None` is `agent_unavailable`.
+    fn child_agent(
+        parent: &SessionRecord,
+        named: Option<&str>,
+        host: &HostNow,
+    ) -> Option<(String, String)> {
+        match named {
+            None => Some((parent.provider.clone(), parent.provider_kind.clone())),
+            Some(p) if p == parent.provider => {
+                Some((parent.provider.clone(), parent.provider_kind.clone()))
+            }
+            Some(p) => host.agents.iter().find(|(id, _)| id == p).cloned(),
+        }
+    }
 
     /// How an approval or a denial came out.
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1768,7 +1820,8 @@ pub mod spawn {
                 name: None,
                 context_note: None,
             };
-            let mut child = spawn_child(&tx, &parent, &payload, write_vault, &now)?;
+            let agent = (parent.provider.clone(), parent.provider_kind.clone());
+            let mut child = spawn_child(&tx, &parent, agent, &payload, write_vault, &now)?;
             child.status = "running".into();
             tx.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?1",
@@ -2309,15 +2362,13 @@ pub mod spawn {
                 }
                 return Ok(Err(refusal));
             }
-            if let NewRequest::Start {
-                provider: Some(p), ..
-            } = new
-                && *p != r.provider
+            let live = host(&r.host_id).unwrap_or_default();
+            if let NewRequest::Start { provider, .. } = new
+                && child_agent(&r, provider.as_deref(), &live).is_none()
             {
-                return Ok(Err(Refusal::because("not_permitted")));
+                return Ok(Err(Refusal::because("agent_unavailable")));
             }
-            let max_sessions = host(&r.host_id).unwrap_or(0);
-            if let Some(cap) = over_cap(&tx, &r, new.kind(), max_sessions, id)? {
+            if let Some(cap) = over_cap(&tx, &r, new.kind(), live.max_sessions, id)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
             if let NewRequest::Message { target, .. } = new
@@ -2727,16 +2778,17 @@ pub mod spawn {
             (kind, _) => bail!("a {kind} request without its target"),
         }
         let payload: StartPayload = serde_json::from_str(&request.payload)?;
-        if payload.provider.as_ref().is_some_and(|p| *p != r.provider) {
-            return Ok(Act::Refused(Refusal::because("not_permitted")));
-        }
-        let max_sessions = host(&r.host_id).unwrap_or(0);
-        if let Some(cap) = over_cap(conn, &r, "start", max_sessions, &request.id)? {
+        let live = host(&r.host_id).unwrap_or_default();
+        let Some(agent) = child_agent(&r, payload.provider.as_deref(), &live) else {
+            return Ok(Act::Refused(Refusal::because("agent_unavailable")));
+        };
+        if let Some(cap) = over_cap(conn, &r, "start", live.max_sessions, &request.id)? {
             return Ok(Act::Refused(Refusal::limit(cap)));
         }
         Ok(Act::Started(Box::new(spawn_child(
             conn,
             &r,
+            agent,
             &payload,
             write_vault,
             now,
@@ -2756,10 +2808,12 @@ pub mod spawn {
     /// to the parent's grants as they are now (134e, AP-7), with the
     /// parent's write vault only when the person ticked it (D2). Spawn is
     /// off: a child has no switch row, but its start carries the asks
-    /// (134-8), recorded here. Its workspace is its own (137-1).
+    /// (134-8), recorded here. Its workspace is its own (137-1), its agent
+    /// `agent` (143a).
     fn spawn_child(
         conn: &Connection,
         parent: &SessionRecord,
+        (provider, provider_kind): (String, String),
         payload: &StartPayload,
         write_vault: bool,
         now: &str,
@@ -2770,8 +2824,8 @@ pub mod spawn {
             id,
             owner_user_id: parent.owner_user_id.clone(),
             host_id: parent.host_id.clone(),
-            provider: parent.provider.clone(),
-            provider_kind: parent.provider_kind.clone(),
+            provider,
+            provider_kind,
             interaction: parent.interaction.clone(),
             provider_fallback: None,
             status: "creating".into(),

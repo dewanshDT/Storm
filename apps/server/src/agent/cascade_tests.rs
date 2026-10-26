@@ -952,7 +952,7 @@ fn an_approved_end_stops_its_target_and_the_targets_descendants() {
         .unwrap()
         .unwrap();
     f.ends();
-    match f.m.approve_request(&r.id, "dev_A", false).unwrap() {
+    match f.m.approve_request(&r.id, "dev_A", false, None).unwrap() {
         Decision::Decided { request, .. } => {
             assert_eq!(request.outcome.as_deref(), Some("ended"))
         }

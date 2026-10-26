@@ -149,7 +149,8 @@ fn a_pending_request_needs_its_requester_approved_until_it_is_decided() {
     let approved = f.message(&parent, &child);
     assert_eq!(f.attention(&parent), Some("approval"));
     assert_eq!(f.attention(&child), None, "only the requester waits");
-    f.m.approve_request(&approved.id, "dev_A", false).unwrap();
+    f.m.approve_request(&approved.id, "dev_A", false, None)
+        .unwrap();
     assert_eq!(f.attention(&parent), None, "cleared by approval");
 
     let denied = f.message(&parent, &child);

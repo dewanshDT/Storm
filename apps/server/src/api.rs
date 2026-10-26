@@ -16130,6 +16130,14 @@ pub(crate) mod tests {
             caps["workspace_paths"] = paths;
             caps["resume"] = serde_json::json!(["claude-code"]);
             caps["child_workspaces"] = serde_json::json!(true);
+            // Codex is not installed, Cursor gets no Storm servers (130a).
+            caps["providers"] = serde_json::json!([
+                {"id": "claude-code", "kind": "cli", "interactions": ["terminal"], "available": true, "mcp": true},
+                {"id": "shell", "kind": "cli", "interactions": ["terminal"], "available": true},
+                {"id": "opencode", "kind": "cli", "interactions": ["terminal"], "available": true, "mcp": true},
+                {"id": "codex", "kind": "cli", "interactions": ["terminal"], "available": false, "mcp": true},
+                {"id": "cursor", "kind": "cli", "interactions": ["terminal"], "available": true, "mcp": false},
+            ]);
             caps
         }
 
@@ -16137,7 +16145,16 @@ pub(crate) mod tests {
         /// path), then a running parent with spawn on and its storm
         /// connection initialized.
         async fn spawning_parent(&mut self) -> String {
+            self.spawning_parent_on("claude-code", false).await
+        }
+
+        /// `spawning_parent` running `provider`, on a host that takes the
+        /// synced login when `can_sync`.
+        async fn spawning_parent_on(&mut self, provider: &str, can_sync: bool) -> String {
             let mut hello = self.verified_caps(serde_json::json!({"storm": "/w/storm"}));
+            if can_sync {
+                hello["provider_credentials"] = serde_json::json!(["claude_subscription_token"]);
+            }
             hello["sessions"] = serde_json::json!([]);
             let (code, _) = send(
                 &self.app,
@@ -16145,13 +16162,185 @@ pub(crate) mod tests {
             )
             .await;
             assert!(code.is_success(), "{code}");
-            let parent = self.launch_on("claude-code").await["id"]
+            let parent = self.launch_on(provider).await["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
             self.initialize(&parent, "storm").await;
             self.sent();
             parent
+        }
+
+        /// The account's synced Claude login, delivered to this host.
+        async fn sync_login(&self) {
+            let owner = Actor::Session {
+                user_id: self.owner.clone(),
+            };
+            crate::ops::put_provider_credential(
+                &self.state,
+                &owner,
+                crate::gateway::provider::Secret::new(
+                    "sk-ant-oat01-CANARY-143a-0123456789abcdefghij".into(),
+                ),
+                None,
+            )
+            .await
+            .unwrap();
+            crate::ops::set_provider_credential_hosts(
+                &self.state,
+                &owner,
+                vec![self.host_id.clone()],
+            )
+            .await
+            .unwrap();
+        }
+
+        async fn card(&self, request: &str) -> serde_json::Value {
+            let (status, card) = self
+                .ask(get_with_auth(
+                    &format!("/v1/agent/requests/{request}"),
+                    &self.owner_bearer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{card}");
+            card
+        }
+    }
+
+    /// Decision 143 through the real routes: a Claude Code parent lists and
+    /// asks for OpenCode, the card says so and that OpenCode starts on the
+    /// host's own setup, and the approved start runs OpenCode named no
+    /// synced login although the account has one for the host (143d).
+    /// `shell`, an agent not installed and one without Storm's servers are
+    /// refused at once, `agent_unavailable`, with the agents it may ask for.
+    #[tokio::test]
+    async fn a_claude_code_parent_starts_an_opencode_child() {
+        let dir = tempdir::TempDir::new("storm-143-opencode-child").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.sync_login().await;
+        let parent = f.spawning_parent_on("claude-code", true).await;
+        let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
+        assert_eq!(
+            listed["agents"],
+            serde_json::json!([{"provider": "claude-code"}, {"provider": "opencode"}])
+        );
+        for other in ["shell", "codex", "cursor", "nope"] {
+            let refused = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "provider": other}),
+                )
+                .await,
+            );
+            assert_eq!(
+                refused,
+                serde_json::json!({"request_id": null, "state": "refused",
+                    "reason": "agent_unavailable",
+                    "message": format!("Storm cannot start {other} on this host for a child. \
+                        The agents it can start here: claude-code, opencode.")}),
+                "{other}"
+            );
+        }
+
+        let asked = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "port the tests", "provider": "opencode"}),
+            )
+            .await,
+        );
+        assert_eq!(asked["state"], "pending", "{asked}");
+        let request = asked["request_id"].as_str().unwrap().to_string();
+        let card = f.card(&request).await;
+        assert_eq!(
+            (
+                &card["agent"],
+                &card["parent_agent"],
+                &card["agent_differs"],
+                &card["credential"]
+            ),
+            (
+                &serde_json::json!("opencode"),
+                &serde_json::json!("claude-code"),
+                &serde_json::json!(true),
+                &serde_json::json!("host_setup")
+            ),
+            "{card}"
+        );
+        let same = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
+                .await,
+        );
+        let card = f.card(same["request_id"].as_str().unwrap()).await;
+        assert_eq!(card["credential"], "synced_login", "{card}");
+        assert!(card.get("agent_differs").is_none(), "{card}");
+
+        let (status, decided) = f.decide(&request, "approve", &f.owner_bearer).await;
+        assert_eq!(status, StatusCode::OK, "{decided}");
+        assert_eq!(decided["outcome"], "started", "{decided}");
+        let child = decided["session"].as_str().unwrap().to_string();
+        let sent = f.sent();
+        let start = sent
+            .iter()
+            .find(|m| m["type"] == "start")
+            .unwrap_or_else(|| panic!("{sent:?}"));
+        assert_eq!(start["provider"], "opencode", "{start}");
+        assert_eq!(start["child_of"], parent.as_str());
+        assert!(start.get("provider_credential").is_none(), "{start}");
+        assert_eq!(start["spawn_asks"], serde_json::json!({"spawned": true}));
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["provider"], "opencode", "{view}");
+    }
+
+    /// 143d: an OpenCode parent's Claude Code child is named the account's
+    /// synced login for the host, as a person's launch of Claude Code there
+    /// would be; without one it is named none, and the host's own setup
+    /// applies (136f).
+    #[tokio::test]
+    async fn an_opencode_parents_claude_code_child_gets_the_synced_login() {
+        for synced in [true, false] {
+            let dir = tempdir::TempDir::new("storm-143-claude-child").unwrap();
+            let mut f = gateway_fixture(dir.path()).await;
+            if synced {
+                f.sync_login().await;
+            }
+            let parent = f.spawning_parent_on("opencode", true).await;
+            let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
+            assert_eq!(
+                listed["agents"],
+                serde_json::json!([{"provider": "opencode"}, {"provider": "claude-code"}])
+            );
+            let asked = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "provider": "claude-code"}),
+                )
+                .await,
+            );
+            let request = asked["request_id"].as_str().unwrap().to_string();
+            let card = f.card(&request).await;
+            assert_eq!(
+                (&card["agent"], &card["parent_agent"], &card["credential"]),
+                (
+                    &serde_json::json!("claude-code"),
+                    &serde_json::json!("opencode"),
+                    &serde_json::json!(if synced { "synced_login" } else { "host_setup" })
+                ),
+                "{card}"
+            );
+            let (_, decided) = f.decide(&request, "approve", &f.owner_bearer).await;
+            assert_eq!(decided["outcome"], "started", "{decided}");
+            let sent = f.sent();
+            let start = sent.iter().find(|m| m["type"] == "start").unwrap();
+            assert_eq!(start["provider"], "claude-code");
+            assert_eq!(
+                start.get("provider_credential").and_then(|k| k.as_str()),
+                synced.then_some("claude_subscription_token"),
+                "{start}"
+            );
         }
     }
 
@@ -16819,7 +17008,8 @@ pub(crate) mod tests {
 
     /// What `start_agent` refuses, and where: a blank task, a long or
     /// multi-line name and a note the caller cannot read are the caller's
-    /// errors; another agent is refused at once (B4), as is a start from a
+    /// errors; an agent its host cannot start a child in is refused at once
+    /// (143a), as is a start from a
     /// child (no grandchild today); a wait answers within its bound; and
     /// without the switch or C0 the tool is neither listed nor callable.
     #[tokio::test]
@@ -16840,14 +17030,11 @@ pub(crate) mod tests {
             &f.tool(
                 &parent,
                 "start_agent",
-                serde_json::json!({"task": "t", "provider": "opencode"}),
+                serde_json::json!({"task": "t", "provider": "shell"}),
             )
             .await,
         );
-        assert_eq!(
-            other,
-            serde_json::json!({"request_id": null, "state": "refused", "reason": "not_permitted"})
-        );
+        assert_eq!(other["reason"], "agent_unavailable", "{other}");
         assert!(f.sent().iter().all(|m| m["type"] != "start"));
 
         // A context note the caller reads becomes the child's.
@@ -17009,6 +17196,21 @@ pub(crate) mod tests {
         assert!(listed[0]["expires_at"].as_str().is_some());
         assert_eq!(listed[1]["outcome"], "denied");
         assert!(listed[0].get("text").is_none());
+        // 143c: the parent's own agent, on the host's own setup.
+        assert_eq!(
+            (
+                &listed[0]["agent"],
+                &listed[0]["parent_agent"],
+                listed[0].get("agent_differs"),
+                &listed[0]["credential"]
+            ),
+            (
+                &serde_json::json!("claude-code"),
+                &serde_json::json!("claude-code"),
+                None,
+                &serde_json::json!("host_setup")
+            )
+        );
 
         let (status, card) = f
             .ask(get_with_auth(

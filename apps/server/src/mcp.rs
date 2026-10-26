@@ -300,7 +300,7 @@ pub struct StartAgentParams {
     /// A note you can read, given to it as its context note.
     #[serde(default)]
     pub context_note: Option<NoteParams>,
-    /// Another agent than yours. Refused: a new agent runs your agent.
+    /// The agent it runs, one list_agents names; yours when absent.
     #[serde(default)]
     pub provider: Option<String>,
     /// Seconds to wait for the person's decision, capped as wait_agent is.
@@ -724,7 +724,7 @@ impl Storm {
     }
 
     #[tool(
-        description = "Ask Storm to start another agent for a task. A person approves it first; the new agent runs your agent on your host, in its own copy of your workspace's committed history (or a scratch directory beside a read-only view of it), with no more access than yours. The answer is at once (or after wait seconds): pending, decided with started and the new agent's id, or refused with the reason. list_children shows a later decision."
+        description = "Ask Storm to start another agent for a task. A person approves it first; the new agent runs your agent, or another one list_agents names, on your host, in its own copy of your workspace's committed history (or a scratch directory beside a read-only view of it), with no more access than yours. The answer is at once (or after wait seconds): pending, decided with started and the new agent's id, or refused with the reason (agent_unavailable with a message naming the agents you can ask for). list_children shows a later decision."
     )]
     async fn start_agent(
         &self,

@@ -2286,10 +2286,16 @@ pub async fn approve_spawn_request(
     req: ApproveRequest,
 ) -> ApiResult<RequestView> {
     let owner = crews_owner(actor)?;
-    owners_request(state, owner, id)?;
+    let request = owners_request(state, owner, id)?;
+    // 143d: what a person's own launch on the child's host would name now.
+    let deliverable = state
+        .agent
+        .get(&request.requester)
+        .ok()
+        .and_then(|r| deliverable_credential(state, &r.host_id));
     let decision = state
         .agent
-        .approve_request(id, device, req.write_vault)
+        .approve_request(id, device, req.write_vault, deliverable)
         .map_err(agent_error)?;
     let view = decided(decision)?;
     record_spawn_event(
@@ -2342,6 +2348,20 @@ pub struct RequestCard {
     pub context_note: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// A start's child's agent: the one it names, else its parent's (143c).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The requester's own agent, beside a start's `agent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<String>,
+    /// A start's child runs another agent than its parent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_differs: bool,
+    /// What a start's child would sign in with if approved now:
+    /// `synced_login` (the account's synced Claude login) or `host_setup`
+    /// (whatever the host has for that agent: Storm cannot see which).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub credential: Option<&'static str>,
     /// A message's text, exactly as the agent sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
@@ -2353,8 +2373,16 @@ pub struct RequestCard {
 /// How many of a session's requests its list carries, newest first.
 const REQUESTS_LISTED: usize = 50;
 
+/// What a card says of its requester: its own agent, and what a child's
+/// agent would sign in with on its host now (143c).
+struct CardContext<'a> {
+    parent: &'a crate::agent::store::SessionRecord,
+    credential: &'a dyn Fn(&str) -> &'static str,
+    shared_with: u32,
+}
+
 impl RequestCard {
-    fn of(r: crate::agent::store::spawn::Request, shared_with: u32) -> Self {
+    fn of(r: crate::agent::store::spawn::Request, cx: &CardContext<'_>) -> Self {
         let payload: serde_json::Value =
             serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
         let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
@@ -2364,15 +2392,41 @@ impl RequestCard {
             .get("context_note")
             .filter(|v| v.is_object())
             .cloned();
+        let agent = (r.kind == "start").then(|| {
+            provider
+                .clone()
+                .unwrap_or_else(|| cx.parent.provider.clone())
+        });
         Self {
+            parent_agent: agent.as_ref().map(|_| cx.parent.provider.clone()),
+            agent_differs: agent.as_ref().is_some_and(|a| *a != cx.parent.provider),
+            credential: agent.as_deref().map(cx.credential),
+            agent,
             request: RequestView::of(r, None),
             task,
             name,
             context_note,
             provider,
             text: message,
-            shared_with,
+            shared_with: cx.shared_with,
         }
+    }
+}
+
+/// A card's word for the credential a child running `agent` on `parent`'s
+/// host would get now (143c, 143d).
+fn card_credential(
+    state: &Shared,
+    parent: &crate::agent::store::SessionRecord,
+    agent: &str,
+) -> &'static str {
+    let deliverable = deliverable_credential(state, &parent.host_id);
+    match state
+        .agent
+        .child_credential(&parent.host_id, agent, deliverable)
+    {
+        crate::agent::credential::CredentialOutcome::Synced(_) => "synced_login",
+        _ => "host_setup",
     }
 }
 
@@ -2393,10 +2447,16 @@ pub async fn session_requests(
     requests.reverse();
     requests.truncate(REQUESTS_LISTED);
     let shared_with = state.agent.shared_with(id).map_err(agent_error)?;
+    let parent = state.agent.get(id).map_err(agent_error)?;
+    let cx = CardContext {
+        parent: &parent,
+        credential: &|agent| card_credential(state, &parent, agent),
+        shared_with,
+    };
     Ok(SessionRequests {
         requests: requests
             .into_iter()
-            .map(|r| RequestCard::of(r, shared_with))
+            .map(|r| RequestCard::of(r, &cx))
             .collect(),
     })
 }
@@ -2409,7 +2469,13 @@ pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult
         .agent
         .shared_with(&request.requester)
         .map_err(agent_error)?;
-    Ok(RequestCard::of(request, shared_with))
+    let parent = state.agent.get(&request.requester).map_err(agent_error)?;
+    let cx = CardContext {
+        parent: &parent,
+        credential: &|agent| card_credential(state, &parent, agent),
+        shared_with,
+    };
+    Ok(RequestCard::of(request, &cx))
 }
 
 /// The expiry sweeper's pass (P-5), audited per request.
@@ -2639,8 +2705,7 @@ fn spawned_caller(state: &Shared, actor: &Actor) -> ApiResult<String> {
     }
 }
 
-/// An agent a parent may ask for (agent discovery): in V1 only its own
-/// provider, since B4 refuses every other.
+/// An agent a parent may ask for (agent discovery, 143b).
 #[derive(Debug, Clone, Serialize)]
 pub struct StartableAgent {
     pub provider: String,
@@ -2675,9 +2740,13 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
-        agents: vec![StartableAgent {
-            provider: r.provider,
-        }],
+        agents: state
+            .agent
+            .startable_agents(&caller)
+            .map_err(agent_error)?
+            .into_iter()
+            .map(|provider| StartableAgent { provider })
+            .collect(),
         limits: SpawnLimits {
             depth: MAX_DEPTH.min(BUILT_DEPTH),
             children: MAX_CHILDREN,
@@ -2793,12 +2862,15 @@ pub struct StartRequested {
     /// For `started`, the new agent's id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// For `agent_unavailable`, which agents it can ask for instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
 /// `start_agent {task, name?, context_note?, provider?, wait?}` (134-5):
 /// asks a person to approve a new agent on the caller's host, in its own
-/// workspace, running the caller's agent with no more than the caller's
-/// grants (134e). Answered at once, or after at most `wait` seconds below
+/// workspace, running the caller's agent or another its host can start
+/// (143a), with no more than the caller's grants (134e). Answered at once, or after at most `wait` seconds below
 /// the caller's tool-call timeout (134i); `list_children` shows a decision
 /// that comes later.
 pub async fn start_agent(
@@ -2834,6 +2906,7 @@ pub async fn start_agent(
         }
     };
     let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
+    let asked = req.provider.clone();
     let new = NewRequest::Start {
         task: req.task,
         provider: req.provider,
@@ -2843,6 +2916,17 @@ pub async fn start_agent(
     let created = match create_spawn_request(state, &caller, new).await? {
         Ok(r) => r,
         Err(refusal) => {
+            let message = (refusal.reason == "agent_unavailable")
+                .then(|| state.agent.startable_agents(&caller))
+                .transpose()
+                .map_err(agent_error)?
+                .map(|agents| {
+                    format!(
+                        "Storm cannot start {} on this host for a child. The agents it can start here: {}.",
+                        asked.as_deref().unwrap_or("that agent"),
+                        agents.join(", ")
+                    )
+                });
             return Ok(StartRequested {
                 request_id: None,
                 state: "refused",
@@ -2850,6 +2934,7 @@ pub async fn start_agent(
                 reason: Some(refusal.reason.into()),
                 cap: refusal.cap,
                 agent: None,
+                message,
             });
         }
     };
@@ -2874,6 +2959,7 @@ pub async fn start_agent(
         reason: r.reason,
         cap: None,
         agent: r.session,
+        message: None,
     })
 }
 

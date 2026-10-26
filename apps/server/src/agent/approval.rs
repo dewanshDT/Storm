@@ -7,25 +7,69 @@
 
 use std::time::{Duration, Instant};
 
+use super::credential::{self, CredentialOutcome};
 use super::store::SessionRecord;
 use super::store::spawn::{
-    Decision, MAX_MESSAGE_BYTES, MAX_TASK_BYTES, NewRequest, Refusal, Request,
+    Decision, HostNow, MAX_MESSAGE_BYTES, MAX_TASK_BYTES, NewRequest, Refusal, Request,
 };
-use super::{AgentError, AgentManager, AgentResult, now};
+use super::{AgentError, AgentManager, AgentResult, Capabilities, now};
+
+/// The agents a host can start a child in besides its parent's own (143a):
+/// installed for the terminal, given Storm's servers there (`mcp: true`,
+/// 130a), and never `shell`. `(id, kind)`, in the host's order.
+pub fn child_agents(caps: &Capabilities) -> Vec<(String, String)> {
+    caps.providers
+        .iter()
+        .filter(|p| {
+            p.id != "shell"
+                && p.available
+                && p.mcp == Some(true)
+                && p.interactions.iter().any(|i| i == "terminal")
+        })
+        .map(|p| (p.id.clone(), p.kind.clone()))
+        .collect()
+}
 
 impl AgentManager {
     /// C0 for the store's checks, read from the live link while the store's
-    /// lock is held: `max_sessions` when it holds.
-    fn host_check(&self, host_id: &str) -> std::result::Result<u32, &'static str> {
+    /// lock is held, and what the link reports when it holds.
+    fn host_check(&self, host_id: &str) -> std::result::Result<HostNow, &'static str> {
         self.spawn_gate(host_id)?;
         Ok(self
-            .live
-            .lock()
-            .unwrap()
-            .hosts
-            .get(host_id)
-            .and_then(|link| link.capabilities.as_ref())
-            .map_or(0, |caps| caps.max_sessions))
+            .with_live(host_id, |caps| HostNow {
+                max_sessions: caps.max_sessions,
+                agents: child_agents(caps),
+            })
+            .unwrap_or_default())
+    }
+
+    /// What `session_id` may ask a child to run now (143b): its own agent
+    /// first, then each other its host's live link reports for a child.
+    pub fn startable_agents(&self, session_id: &str) -> AgentResult<Vec<String>> {
+        let r = self.get(session_id)?;
+        let others = self.with_live(&r.host_id, child_agents).unwrap_or_default();
+        Ok(std::iter::once(r.provider.clone())
+            .chain(
+                others
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .filter(|id| *id != r.provider),
+            )
+            .collect())
+    }
+
+    /// The credential a child running `agent` on `host_id` would start on
+    /// now (143d): what a person's own launch of it there would name, from
+    /// `deliverable`, the synced login the account would deliver to that
+    /// host. A host away is told nothing.
+    pub fn child_credential(
+        &self,
+        host_id: &str,
+        agent: &str,
+        deliverable: Option<&'static str>,
+    ) -> CredentialOutcome {
+        let caps = self.with_live(host_id, Clone::clone).unwrap_or_default();
+        credential::decide(agent, deliverable, &caps)
     }
 
     fn requests_changed(&self) {
@@ -75,12 +119,15 @@ impl AgentManager {
     }
 
     /// P-3: a person's device approves. `write_vault` is D2's toggle. A
-    /// start's child is told to its host after the decision commits.
+    /// start's child is told to its host after the decision commits, with
+    /// `deliverable`, the synced login a person's launch on that host would
+    /// name now (143d).
     pub fn approve_request(
         &self,
         id: &str,
         device: &str,
         write_vault: bool,
+        deliverable: Option<&'static str>,
     ) -> AgentResult<Decision> {
         let decision = self
             .store
@@ -92,7 +139,7 @@ impl AgentManager {
             .ok_or(AgentError::NotFound("no such request"))?;
         if let Decision::Decided { child, request, .. } = &decision {
             if let Some(child) = child {
-                self.dispatch_spawned(child)?;
+                self.dispatch_spawned(child, deliverable)?;
             }
             match (request.outcome.as_deref(), request.target.as_deref()) {
                 // A delivered message wakes the child's read (134-6).
@@ -227,11 +274,16 @@ impl AgentManager {
     /// The host is told of an approved child after commit (P-3): its start
     /// names the parent's workspace and the parent, so the host makes the
     /// child's own workspace from it (137-1) before it starts; the child
-    /// runs its parent's agent (B4) with its narrowed grants, the spawned
-    /// opening prompt and the asks (134-8). The decision cannot change once
+    /// runs its own agent (143a) with its narrowed grants, the spawned
+    /// opening prompt and the asks (134-8), on the credential a person's
+    /// launch of that agent there would get (143d). The decision cannot change once
     /// made, so a start that fails here or on the host is the child's own
     /// `failed`, and the request keeps `started`.
-    pub(super) fn dispatch_spawned(&self, child: &SessionRecord) -> AgentResult<()> {
+    pub(super) fn dispatch_spawned(
+        &self,
+        child: &SessionRecord,
+        deliverable: Option<&'static str>,
+    ) -> AgentResult<()> {
         let parent = self
             .store
             .lock()
@@ -251,12 +303,7 @@ impl AgentManager {
             let reads_storm = mcp
                 .iter()
                 .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
-            // The parent's own synced login, never one it did not have.
-            let credential = super::credential::decide(
-                &child.provider,
-                self.requested_credential(&parent.id),
-                &caps,
-            );
+            let credential = credential::decide(&child.provider, deliverable, &caps);
             Some((
                 credential.kind(),
                 super::Command::Start {

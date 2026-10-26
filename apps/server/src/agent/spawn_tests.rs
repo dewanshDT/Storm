@@ -1396,3 +1396,72 @@ fn a_launch_with_spawn_on_needs_the_asks_and_is_on_before_start() {
     m.dismiss(&s.id).unwrap();
     assert!(!m.store.lock().unwrap().spawn_launched(&s.id).unwrap());
 }
+
+/// 143a: a database from before `agent_unavailable` has its requests table
+/// rebuilt at open, every row kept, and its indexes and triggers made again.
+#[test]
+fn a_requests_table_from_before_143_is_rebuilt_with_its_rows() {
+    let d = tempdir::TempDir::new("storm-143-requests").unwrap();
+    let path = d.path().join("agent.db");
+    let old = Connection::open(&path).unwrap();
+    old.execute_batch(
+        "CREATE TABLE agent_requests (
+             id TEXT PRIMARY KEY,
+             kind TEXT NOT NULL CHECK (kind IN ('start', 'message', 'end')),
+             requester TEXT NOT NULL, target TEXT, payload TEXT NOT NULL,
+             created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+             state TEXT NOT NULL CHECK (state IN ('pending', 'approving', 'decided')),
+             decided_by_device TEXT, decided_at TEXT,
+             outcome TEXT CHECK (outcome IN ('started', 'start_failed',
+                 'delivered', 'ended', 'denied', 'expired', 'refused')),
+             reason TEXT CHECK (reason IN ('limit', 'not_permitted', 'revoked',
+                 'requester_ended', 'target_gone', 'identity_unverified',
+                 'isolation_unverified')),
+             session TEXT);
+         CREATE INDEX requests_by_requester ON agent_requests(requester, state);
+         CREATE TRIGGER request_decided_once
+             BEFORE UPDATE ON agent_requests WHEN OLD.state = 'decided'
+             BEGIN SELECT RAISE(ABORT, 'a request is decided once'); END;
+         INSERT INTO agent_requests VALUES ('agr_OLD', 'start', 'ags_P', NULL,
+             '{\"task\":\"t\"}', '2026-10-25T10:00:00Z', '2026-10-25T10:10:00Z',
+             'decided', 'dev_A', '2026-10-25T10:01:00Z', 'refused', 'not_permitted', NULL);",
+    )
+    .unwrap();
+    drop(old);
+    let s = Store::open(&path).unwrap();
+    let kept = s.request("agr_OLD").unwrap().unwrap();
+    assert_eq!(
+        (kept.outcome.as_deref(), kept.reason.as_deref()),
+        (Some("refused"), Some("not_permitted"))
+    );
+    s.conn
+        .execute(
+            "INSERT INTO agent_requests (id, kind, requester, payload, created_at, expires_at,
+                 state, outcome, reason)
+             VALUES ('agr_NEW', 'start', 'ags_P', '{}', ?1, ?1, 'decided', 'refused',
+                 'agent_unavailable')",
+            [NOW],
+        )
+        .unwrap();
+    assert!(
+        s.conn
+            .execute(
+                "UPDATE agent_requests SET payload = 'x' WHERE id = 'agr_OLD'",
+                []
+            )
+            .is_err(),
+        "its triggers are back"
+    );
+    let objects: i64 = s
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name = 'agent_requests'
+                 AND type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(objects, 5);
+    drop(s);
+    Store::open(&path).unwrap();
+}
