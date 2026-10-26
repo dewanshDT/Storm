@@ -75,9 +75,13 @@ fn grant(id: &str) -> McpGrant {
 
 impl Fixture {
     fn launch(&self, workspace: &str, write_vault: Option<&str>) -> SessionRecord {
+        self.launch_as(workspace, write_vault, false)
+    }
+
+    fn launch_as(&self, workspace: &str, write_vault: Option<&str>, spawn: bool) -> SessionRecord {
         let launch: Launch = serde_json::from_value(serde_json::json!({
             "host_id": "hst_A", "workspace": workspace, "provider": "claude-code",
-            "terminal": {"cols": 80, "rows": 24},
+            "terminal": {"cols": 80, "rows": 24}, "spawn": spawn,
         }))
         .unwrap();
         let meta = LaunchMeta {
@@ -100,12 +104,7 @@ impl Fixture {
 
     /// A launched session with a write vault and spawn on.
     fn parent(&self) -> SessionRecord {
-        let p = self.launch("storm", Some("vlt_W"));
-        self.m
-            .set_spawn(&p.id, true, Some("dev_A"))
-            .unwrap()
-            .unwrap();
-        p
+        self.launch_as("storm", Some("vlt_W"), true)
     }
 
     /// A running child of `parent`, recorded the way an approval records
@@ -447,11 +446,7 @@ fn each_cap_refuses_at_its_boundary_and_names_itself() {
 
 impl Fixture {
     fn parent_in(&self, workspace: &str) -> String {
-        let p = self.launch(workspace, None);
-        self.m
-            .set_spawn(&p.id, true, Some("dev_A"))
-            .unwrap()
-            .unwrap();
+        let p = self.launch_as(workspace, None, true);
         p.id
     }
 }
@@ -1427,6 +1422,7 @@ fn a_child_gets_its_parents_synced_login_and_no_other() {
         let launch: Launch = serde_json::from_value(serde_json::json!({
             "host_id": "hst_A", "workspace": if synced { "storm" } else { "other" },
             "provider": "claude-code", "terminal": {"cols": 80, "rows": 24},
+            "spawn": true,
         }))
         .unwrap();
         let meta = LaunchMeta {

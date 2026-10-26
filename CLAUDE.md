@@ -621,6 +621,13 @@ Specification*; the slices are decisions 81 and 81a onward):
   `spawn_asks` — sent where C0 holds, for a spawning adapter with the storm
   connection — gets them, and only such a session's switch turns on
   (`launched_without_asks`); every other config is byte for byte as before.
+  **The switch turns on only for a session launched with it** (141e): a
+  launch's `spawn: true` is refused `spawn_unavailable` unless its `start`
+  carries `spawn_asks`, and is written on, and audited `spawn_enabled`,
+  before `start` goes out, so the CLI's one `tools/list` has the tools
+  (Claude Code never re-fetches on `list_changed`). Any other session's
+  switch is refused `launched_without_spawn`; a spawn tool called while a
+  launched-on session's switch is off answers `spawn_off` with a sentence.
   Claude Code: `permissions.ask` for `start_agent`, `send_message`,
   `end_agent` and `allow` for the exemptions in its `--settings` file (an
   ask beats any allow; G-134-5). OpenCode: each pinned ask under a key no

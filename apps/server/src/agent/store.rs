@@ -1254,6 +1254,12 @@ pub mod spawn {
                  created_at TEXT NOT NULL
              );
 
+             -- 141e: launched with the switch on, so only it turns on again.
+             CREATE TABLE IF NOT EXISTS session_spawn_launch (
+                 session_id TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL
+             );
+
              -- 134-5: a child's own workspace as its host made it (137-1):
              -- the mode, and for a clone the commit it starts from.
              CREATE TABLE IF NOT EXISTS session_child_workspace (
@@ -1845,6 +1851,34 @@ pub mod spawn {
                 .conn
                 .query_row(
                     "SELECT 1 FROM session_spawn_asks WHERE session_id = ?1",
+                    params![session_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        }
+
+        /// Records a launch with the switch on (141e) and turns it on, before
+        /// the host is sent `start`.
+        pub fn record_spawn_launch(
+            &mut self,
+            session_id: &str,
+            device: Option<&str>,
+            now: &str,
+        ) -> Result<()> {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at) VALUES (?1, ?2)",
+                params![session_id, now],
+            )?;
+            self.set_spawn(session_id, true, device, now)?;
+            Ok(())
+        }
+
+        pub fn spawn_launched(&self, session_id: &str) -> Result<bool> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM session_spawn_launch WHERE session_id = ?1",
                     params![session_id],
                     |_| Ok(()),
                 )
@@ -2977,6 +3011,7 @@ pub mod spawn {
         for table in [
             "session_spawn",
             "session_spawn_asks",
+            "session_spawn_launch",
             "session_child_workspace",
             "session_task",
             "session_result",

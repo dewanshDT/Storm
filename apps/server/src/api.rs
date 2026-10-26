@@ -2076,9 +2076,13 @@ async fn runtime_workspace_created(
 async fn agent_launch(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
     Json(req): Json<crate::agent::Launch>,
 ) -> ApiResult<Json<crate::ops::LaunchedSession>> {
-    Ok(Json(crate::ops::launch_session(&state, &actor, req).await?))
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::launch_session(&state, &actor, device, req).await?,
+    ))
 }
 
 async fn agent_list_sessions(
@@ -7461,6 +7465,20 @@ pub(crate) mod tests {
     impl GatewayFixture {
         /// Launches a session and has the host report it running.
         async fn launch(&mut self, provider: &str, allow_vault_writes: bool) -> serde_json::Value {
+            self.launch_as(provider, allow_vault_writes, false).await
+        }
+
+        /// Launches with "Allow this session to start agents" on (141e).
+        async fn launch_on(&mut self, provider: &str) -> serde_json::Value {
+            self.launch_as(provider, false, true).await
+        }
+
+        async fn launch_as(
+            &mut self,
+            provider: &str,
+            allow_vault_writes: bool,
+            spawn: bool,
+        ) -> serde_json::Value {
             let (status, body) = send(
                 &self.app,
                 post_json_with_auth(
@@ -7468,7 +7486,7 @@ pub(crate) mod tests {
                     serde_json::json!({
                         "host_id": self.host_id, "workspace": "storm", "provider": provider,
                         "terminal": {"cols": 80, "rows": 24},
-                        "allow_vault_writes": allow_vault_writes,
+                        "allow_vault_writes": allow_vault_writes, "spawn": spawn,
                     }),
                     &self.owner_bearer,
                 ),
@@ -7946,8 +7964,16 @@ pub(crate) mod tests {
             let (status, body) = f.spawn(&session, true).await;
             match refused {
                 None => {
-                    assert_eq!(status, StatusCode::OK, "{body}");
-                    assert_eq!(body["enabled"], true);
+                    // 141e: only a session launched with it turns it on.
+                    assert_eq!(
+                        (status, body["error"].as_str()),
+                        (StatusCode::CONFLICT, Some("launched_without_spawn"))
+                    );
+                    let session = f.launch_on("claude-code").await["id"]
+                        .as_str()
+                        .unwrap()
+                        .to_string();
+                    f.initialize(&session, "storm").await;
                     assert!(
                         f.storm_tools(&session)
                             .await
@@ -7958,6 +7984,11 @@ pub(crate) mod tests {
                 Some(code) => {
                     assert_eq!(status, StatusCode::CONFLICT, "{body}");
                     assert_eq!(body["error"], code);
+                    let (status, body) = f.launch_body(serde_json::json!({"spawn": true})).await;
+                    assert_eq!(
+                        (status, body["error"].as_str()),
+                        (StatusCode::CONFLICT, Some("spawn_unavailable"))
+                    );
                     assert!(
                         !f.storm_tools(&session)
                             .await
@@ -9703,7 +9734,38 @@ pub(crate) mod tests {
             .unwrap()
             .to_string();
         let (status, body) = f.spawn(&session, true).await;
-        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::CONFLICT, Some("launched_without_spawn"))
+        );
+        // 141e: a launch with it on is the person's too.
+        let before = f.state.agent.list().unwrap().len();
+        let launch: crate::agent::Launch = serde_json::from_value(serde_json::json!({
+            "host_id": f.host_id, "workspace": "storm", "provider": "claude-code",
+            "terminal": {"cols": 80, "rows": 24}, "spawn": true,
+        }))
+        .unwrap();
+        let refused = crate::ops::launch_session(
+            &f.state,
+            &Actor::Key {
+                key_id: "key_X".into(),
+                user_id: f.owner.clone(),
+            },
+            None,
+            launch,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (refused.0, refused.1.as_str()),
+            (StatusCode::FORBIDDEN, "owner_only")
+        );
+        assert_eq!(f.state.agent.list().unwrap().len(), before);
+        let session = f.launch_on("claude-code").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(f.spawn(&session, true).await.0, StatusCode::OK);
     }
 
     /// C0 on every host today: identity is the fixture's old host, then
@@ -9767,36 +9829,41 @@ pub(crate) mod tests {
     }
 
     /// The allowed path, through the test-only isolation hook no host can
-    /// reach: a flip tells the agent its tools changed, every change is
-    /// audited, and no 134 tool exists to list yet.
+    /// reach: a launch with it on lists the tools from the first
+    /// `tools/list` (141e), a flip tells the agent its tools changed, and
+    /// every change is audited.
     #[tokio::test]
     async fn turning_spawn_on_and_off_tells_the_agent_and_is_audited() {
         let dir = tempdir::TempDir::new("storm-spawn-flip").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
         f.verified().await;
         f.state.agent.verify_isolation_for_tests(&f.host_id);
-        let session = f.launch("claude-code", false).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let launched = f.launch_on("claude-code").await;
+        assert_eq!(
+            launched["spawn"],
+            serde_json::json!({"enabled": true, "launched_on": true})
+        );
+        let session = launched["id"].as_str().unwrap().to_string();
         f.initialize(&session, "storm").await;
-        let before = f.storm_tools(&session).await;
+        let on = f.storm_tools(&session).await;
+        assert_eq!(spawn_134(&on), PARENT_BUILT.to_vec());
         f.sent();
 
-        let (status, body) = f.spawn(&session, true).await;
+        let (status, body) = f.spawn(&session, false).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(
             body,
-            serde_json::json!({"enabled": true, "refused_requests": 0})
+            serde_json::json!({"enabled": false, "refused_requests": 0})
         );
         assert_eq!(list_changed(&f.sent()), 1);
-        // The list gains exactly the parent tools.
-        for name in SPAWN_134 {
-            assert!(!before.contains(&name.to_string()), "{name} listed");
-        }
-        let after = f.storm_tools(&session).await;
-        assert_eq!(spawn_134(&after), PARENT_BUILT.to_vec());
-        assert_eq!(after.len(), before.len() + PARENT_BUILT.len());
+        let off = f.storm_tools(&session).await;
+        assert!(spawn_134(&off).is_empty(), "{off:?}");
+        assert_eq!(on.len(), off.len() + PARENT_BUILT.len());
+
+        let (status, body) = f.spawn(&session, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(list_changed(&f.sent()), 1);
+        assert_eq!(f.storm_tools(&session).await, on);
 
         // Asked again: audited, but nothing flipped, so no notification.
         let (status, _) = f.spawn(&session, true).await;
@@ -9811,7 +9878,7 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["enabled"], false);
         assert_eq!(list_changed(&f.sent()), 1);
-        assert_eq!(f.storm_tools(&session).await, before);
+        assert_eq!(f.storm_tools(&session).await, off);
         let detail = |was: bool| {
             serde_json::json!({"session_id": session, "host_id": f.host_id,
                 "was": was, "refused_requests": 0})
@@ -9819,6 +9886,8 @@ pub(crate) mod tests {
         assert_eq!(
             f.spawn_events().await,
             vec![
+                ("spawn_enabled".to_string(), detail(false)),
+                ("spawn_revoked".to_string(), detail(true)),
                 ("spawn_enabled".to_string(), detail(false)),
                 ("spawn_enabled".to_string(), detail(true)),
                 ("spawn_revoked".to_string(), detail(true)),
@@ -9840,12 +9909,10 @@ pub(crate) mod tests {
         async fn spawn_request(&mut self) -> (String, String) {
             self.verified().await;
             self.state.agent.verify_isolation_for_tests(&self.host_id);
-            let session = self.launch("claude-code", false).await["id"]
+            let session = self.launch_on("claude-code").await["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
-            let (status, body) = self.spawn(&session, true).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
             let id = self.request_from(&session).await;
             (session, id)
         }
@@ -14749,12 +14816,10 @@ pub(crate) mod tests {
         async fn tree(&mut self) -> (String, String) {
             self.verified().await;
             self.state.agent.verify_isolation_for_tests(&self.host_id);
-            let parent = self.launch("claude-code", false).await["id"]
+            let parent = self.launch_on("claude-code").await["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
-            let (status, body) = self.spawn(&parent, true).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
             let child = self
                 .state
                 .agent
@@ -16080,12 +16145,10 @@ pub(crate) mod tests {
             )
             .await;
             assert!(code.is_success(), "{code}");
-            let parent = self.launch("claude-code", false).await["id"]
+            let parent = self.launch_on("claude-code").await["id"]
                 .as_str()
                 .unwrap()
                 .to_string();
-            let (status, body) = self.spawn(&parent, true).await;
-            assert_eq!(status, StatusCode::OK, "{body}");
             self.initialize(&parent, "storm").await;
             self.sent();
             parent
@@ -16874,15 +16937,43 @@ pub(crate) mod tests {
                 .await
                 .contains(&"start_agent".to_string())
         );
-        let refused = f
-            .tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
-            .await;
+        // 141e: its list may still hold every spawn tool, so each says how
+        // to get it back.
+        for name in crate::mcp::SPAWN_TOOLS {
+            let refused = f.tool(&parent, name, serde_json::json!({})).await;
+            let error = &refused.last().unwrap()["message"]["error"];
+            assert_eq!(
+                (
+                    error["message"].as_str(),
+                    error["data"]["storm_error"].as_str()
+                ),
+                (
+                    Some(
+                        "Spawning is turned off for this session; the person can turn it \
+                         back on in the session's About."
+                    ),
+                    Some("spawn_off")
+                ),
+                "{name} {refused:?}"
+            );
+        }
+        // The child's own tools are no business of the switch.
         assert_eq!(
-            refused.last().unwrap()["message"]["error"]["message"],
-            "tool_not_allowed",
-            "{refused:?}"
+            error_code(&f.call(&parent, "storm", "report_result").await).as_deref(),
+            Some("tool_not_allowed")
         );
         assert!(f.sent().iter().all(|m| m["type"] != "start"));
+        // Launched with it, it turns on again and the call is taken.
+        assert_eq!(f.spawn(&parent, true).await.0, StatusCode::OK);
+        assert!(
+            f.storm_tools(&parent)
+                .await
+                .contains(&"start_agent".to_string())
+        );
+        tool_error(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": " "}))
+                .await,
+        );
     }
 
     // ---- the spawning client's reads (decision 134-10) ----
@@ -17097,33 +17188,42 @@ pub(crate) mod tests {
         f.state.agent.verify_isolation_for_tests(&f.host_id);
         assert_eq!(
             view(&f, before.clone()).await["spawn"],
-            serde_json::json!({"enabled": false, "refused": "launched_without_asks"})
+            serde_json::json!({"enabled": false, "launched_on": false,
+                "refused": "launched_without_asks"})
         );
         f.report(&before, "completed").await;
-        let session = f.launch("claude-code", false).await;
-        assert_eq!(session["spawn"], serde_json::json!({"enabled": false}));
+        // 141e: asks alone are not enough to turn it on later.
+        let plain = f.launch("claude-code", false).await;
+        assert_eq!(
+            plain["spawn"],
+            serde_json::json!({"enabled": false, "launched_on": false,
+                "refused": "launched_without_spawn"})
+        );
+        let session = f.launch_on("claude-code").await;
+        assert_eq!(
+            session["spawn"],
+            serde_json::json!({"enabled": true, "launched_on": true})
+        );
         let session = session["id"].as_str().unwrap().to_string();
+        assert_eq!(f.spawn(&session, false).await.0, StatusCode::OK);
         let shell = f.launch("shell", false).await;
         assert_eq!(
             shell["spawn"],
-            serde_json::json!({"enabled": false, "refused": "provider_cannot_spawn"})
+            serde_json::json!({"enabled": false, "launched_on": false,
+                "refused": "provider_cannot_spawn"})
         );
         // 141a: another live session shares its workspace, which is no
         // reason to refuse.
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": false})
+            serde_json::json!({"enabled": false, "launched_on": true})
         );
         let shell = shell["id"].as_str().unwrap().to_string();
         f.report(&shell, "completed").await;
-        assert_eq!(
-            view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": false})
-        );
         assert_eq!(f.spawn(&session, true).await.0, StatusCode::OK);
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": true})
+            serde_json::json!({"enabled": true, "launched_on": true})
         );
 
         // A downgrade: the switch that is on stays shown, with why it is
@@ -17131,7 +17231,8 @@ pub(crate) mod tests {
         f.state.agent.lose_isolation_for_tests(&f.host_id);
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": true, "refused": "isolation_unverified"})
+            serde_json::json!({"enabled": true, "launched_on": true,
+                "refused": "isolation_unverified"})
         );
         assert!(view(&f, before).await.get("spawn").is_none());
         assert_eq!(f.spawn(&session, false).await.0, StatusCode::OK);

@@ -3802,8 +3802,13 @@ pub struct LaunchMcp {
 pub async fn launch_session(
     state: &Shared,
     actor: &Actor,
+    device: Option<&str>,
     mut req: crate::agent::Launch,
 ) -> ApiResult<LaunchedSession> {
+    // Only a person turns the switch on, at launch as later (B1, 141e).
+    if req.spawn {
+        crews_owner(actor)?;
+    }
     // A resume is the old session's launch again (decision 89): its note and
     // launch role as they were then, its write vault, still checked below,
     // its role label, and a place right after it in its crew (138f).
@@ -3919,7 +3924,9 @@ pub async fn launch_session(
         role,
         label,
         crew,
+        device: device.map(str::to_string),
     };
+    let spawn = req.spawn;
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
         slug: BUILTIN_SLUG.into(),
@@ -3938,6 +3945,26 @@ pub async fn launch_session(
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    if spawn {
+        let detail = serde_json::json!({
+            "session_id": session.id,
+            "host_id": session.host_id,
+            "was": false,
+            "refused_requests": 0,
+        });
+        state
+            .auth_db
+            .lock()
+            .await
+            .record_event(
+                EVENT_SPAWN_ENABLED,
+                Some(actor.user_id()),
+                device,
+                &crate::index::now_rfc3339(),
+                &detail.to_string(),
+            )
+            .map_err(internal)?;
+    }
     let (credential, credential_notice) =
         provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
@@ -5778,6 +5805,12 @@ pub async fn integration_tools(
 
 // ---- MCP Gateway: an agent's call (decision 81e, spec §7) ------------------
 
+/// A spawn tool called after a person turned the switch off (141e): the
+/// agent's list may still hold it, so the refusal says how to get it back.
+pub const SPAWN_OFF: &str = "spawn_off";
+pub const SPAWN_OFF_SENTENCE: &str = "Spawning is turned off for this session; the person can \
+     turn it back on in the session's About.";
+
 /// Methods an agent may send (spec §9). Anything else is refused.
 fn method_permitted(method: &str, c: Option<&Connection>) -> bool {
     let resources = c.is_none_or(|c| c.expose_resources);
@@ -5809,6 +5842,8 @@ struct Authorized {
     spawn: bool,
     /// The spawned tools are offered: another agent started it and C0 holds.
     spawned: bool,
+    /// The session was launched with spawning on and a person turned it off.
+    spawn_off: bool,
 }
 
 impl Authorized {
@@ -5962,6 +5997,7 @@ async fn authorize_call(
         has_role: launch.is_some_and(|l| l.role.is_some()),
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
+        spawn_off: state.agent.spawn_turned_off(session_id),
     })
 }
 
@@ -5980,7 +6016,7 @@ pub async fn integration_call(
     connection_id: &str,
     message: serde_json::Value,
 ) -> tokio::sync::mpsc::Receiver<serde_json::Value> {
-    use crate::gateway::session::{error_line, message_line};
+    use crate::gateway::session::{error_line, message_line, refusal_line};
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let id = crate::gateway::session::agent_id(&message);
     let method = message
@@ -6048,12 +6084,20 @@ pub async fn integration_call(
     if let Some(name) = &tool
         && !authorized.may_call(name)
     {
-        let _ = tx.send(error_line(&id, "tool_not_allowed")).await;
+        let off = authorized.spawn_off
+            && authorized.connection.is_none()
+            && crate::mcp::SPAWN_TOOLS.contains(&name.as_str());
+        let (code, line) = if off {
+            (SPAWN_OFF, refusal_line(&id, SPAWN_OFF, SPAWN_OFF_SENTENCE))
+        } else {
+            ("tool_not_allowed", error_line(&id, "tool_not_allowed"))
+        };
+        let _ = tx.send(line).await;
         scope.audit(
             &state.gateway,
             Some(&method),
             tool.as_deref(),
-            Err("tool_not_allowed"),
+            Err(code),
             0,
             None,
         );

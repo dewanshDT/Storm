@@ -82,6 +82,8 @@ pub struct SpawnChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SpawnView {
     pub enabled: bool,
+    /// Launched with the switch on (141e): only such a session turns it on.
+    pub launched_on: bool,
     /// What turning it on would be refused with now (134-2's codes); absent
     /// when it would turn on.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -633,6 +635,10 @@ pub struct Launch {
     /// and the session's first role label. A resume ignores it.
     #[serde(default)]
     pub role: Option<ContextRef>,
+    /// Launch with the spawn switch on (141e). Refused unless the `start`
+    /// carries `spawn_asks`.
+    #[serde(default)]
+    pub spawn: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -677,6 +683,8 @@ pub struct LaunchMeta {
     /// role, or a resumed session's predecessor's label.
     pub label: Option<RoleLabel>,
     pub crew: Option<CrewJoin>,
+    /// The person's device, for a switch turned on at launch (141e).
+    pub device: Option<String>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -1368,6 +1376,14 @@ impl AgentManager {
         on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
     }
 
+    /// Whether a session launched with the switch on has it off now, so a
+    /// spawn tool call can say how to turn it back on (141e).
+    pub fn spawn_turned_off(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store.spawn_launched(session_id).unwrap_or(false)
+            && !store.spawn_enabled(session_id).unwrap_or(true)
+    }
+
     #[cfg(test)]
     pub fn spawn_enabled(&self, session_id: &str) -> AgentResult<bool> {
         Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
@@ -1408,6 +1424,9 @@ impl AgentManager {
         if !store.spawn_asks(&r.id)? {
             return Ok(Some("launched_without_asks"));
         }
+        if !store.spawn_launched(&r.id)? {
+            return Ok(Some("launched_without_spawn"));
+        }
         Ok(None)
     }
 
@@ -1421,9 +1440,14 @@ impl AgentManager {
         if !enabled && self.spawn_gate(&r.host_id).is_err() {
             return Ok(None);
         }
+        // A switch turned on before 141e is not refused for how it launched.
+        let refused = self
+            .enable_refusal(r, &store)?
+            .filter(|code| !(enabled && *code == "launched_without_spawn"));
         Ok(Some(SpawnView {
             enabled,
-            refused: self.enable_refusal(r, &store)?,
+            launched_on: store.spawn_launched(&r.id)?,
+            refused,
         }))
     }
 
@@ -1889,6 +1913,9 @@ impl AgentManager {
             && SPAWN_PROVIDERS.contains(&provider.id.as_str())
             && self.spawn_gate(&req.host_id).is_ok())
         .then_some(SpawnStart::default());
+        if req.spawn && spawn_asks.is_none() {
+            return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
         let launch = {
             let mut store = self.store.lock().unwrap();
             // Checked under the same lock as the writes below, so the crew
@@ -1921,6 +1948,13 @@ impl AgentManager {
             store.insert_launch(&launch, &record.created_at)?;
             if spawn_asks.is_some() {
                 store.record_spawn_asks(&record.id, &record.created_at)?;
+            }
+            if req.spawn {
+                store.record_spawn_launch(
+                    &record.id,
+                    meta.device.as_deref(),
+                    &record.created_at,
+                )?;
             }
             let integrations: Vec<store::SessionIntegration> = grants
                 .iter()
@@ -2935,6 +2969,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                spawn: false,
             },
             meta,
             grants,
@@ -2957,6 +2992,7 @@ mod tests {
                 resume_of: Some(old.id.clone()),
                 crew: None,
                 role: None,
+                spawn: false,
             },
             LaunchMeta::default(),
             offered(),
@@ -3624,6 +3660,7 @@ mod tests {
                     resume_of: None,
                     crew: None,
                     role: None,
+                    spawn: false,
                 },
                 meta,
                 offered(),
@@ -3830,6 +3867,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                spawn: false,
             },
             LaunchMeta::default(),
             Vec::new(),
