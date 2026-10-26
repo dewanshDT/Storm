@@ -10215,6 +10215,339 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
+    // ---- launch role and crew (decision 138f, 138-2) -----------------------
+
+    /// A Kit vault with one role note and a second one, and a personal vault
+    /// with a context note.
+    async fn role_notes(
+        f: &GatewayFixture,
+    ) -> (
+        String,
+        serde_json::Value,
+        serde_json::Value,
+        String,
+        serde_json::Value,
+    ) {
+        let kit = f.vault("kit").await;
+        let reviewer = f
+            .note(
+                &kit,
+                "agents/Storm Reviewer.md",
+                "# Storm Reviewer\n\nreviewer rules\n",
+            )
+            .await;
+        let release = f
+            .note(
+                &kit,
+                "projects/storm/agents/Release Notes.md",
+                "# Release Notes\n\nrelease rules\n",
+            )
+            .await;
+        let personal = f.vault("Personal").await;
+        let plan = f.note(&personal, "Plan.md", "# Plan\n\nplan body\n").await;
+        (kit, reviewer, release, personal, plan)
+    }
+
+    /// Every command the host has been sent since the last call; the last
+    /// `start` among them.
+    fn last_start(f: &mut GatewayFixture) -> serde_json::Value {
+        let mut start = serde_json::Value::Null;
+        while let Ok(e) = f.link.try_recv() {
+            let e = serde_json::to_value(e).unwrap();
+            if e["type"] == "start" {
+                start = e;
+            }
+        }
+        start
+    }
+
+    fn note_ref(vault: &str, note: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"vault_id": vault, "note_id": note["id"]})
+    }
+
+    #[tokio::test]
+    async fn a_launch_role_reaches_the_agent_beside_the_context_note_and_is_its_first_label() {
+        let dir = tempdir::TempDir::new("storm-launch-role").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (kit, reviewer, _, personal, plan) = role_notes(&f).await;
+        let (_, plain) = f.launch_body(serde_json::json!({})).await;
+        last_start(&mut f);
+
+        let (status, la) = f
+            .launch_body(serde_json::json!({
+                "context": note_ref(&personal, &plan),
+                "role": note_ref(&kit, &reviewer),
+                "crew": {"new_name": " Release "},
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{la}");
+        assert_eq!(
+            la["launch_role"],
+            serde_json::json!({"vault_id": kit, "note_id": reviewer["id"], "title": "Storm Reviewer"})
+        );
+        assert_eq!(la["role"]["note_id"], reviewer["id"]);
+        assert_eq!(la["role"]["title"], "Storm Reviewer");
+        assert_eq!(la["crew"]["order"], 0);
+        let crew = la["crew"]["id"].as_str().unwrap().to_string();
+        let (_, crews) = f.get("/v1/agent/crews").await;
+        assert_eq!(crews[0]["id"], crew.as_str());
+        assert_eq!(crews[0]["name"], "Release");
+        assert_eq!(crews[0]["color"], "coral");
+        // A crew and a role change nothing about what the session may use.
+        assert_eq!(la["mcp"], plain["mcp"]);
+        assert_eq!(last_start(&mut f)["context"], true);
+
+        let session = la["id"].as_str().unwrap().to_string();
+        let init = f.initialize(&session, "storm").await;
+        assert!(
+            init["instructions"].as_str().unwrap().contains(
+                "started from a note and with a role note. Call session_context to read both."
+            ),
+            "{init}"
+        );
+        let got = structured(&f.call(&session, "storm", "session_context").await);
+        assert_eq!(got["context"]["note_id"], plan["id"]);
+        assert!(
+            got["context"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("plan body")
+        );
+        assert_eq!(got["role"]["vault_id"], kit.as_str());
+        assert_eq!(got["role"]["note_id"], reviewer["id"]);
+        assert_eq!(got["role"]["title"], "Storm Reviewer");
+        assert_eq!(got["role"]["path"], "agents/Storm Reviewer.md");
+        assert!(
+            got["role"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("reviewer rules")
+        );
+        assert!(got.get("missing").is_none(), "{got}");
+
+        // A role alone is launch context too, and joins an existing crew last.
+        let (status, lr) = f
+            .launch_body(serde_json::json!({
+                "role": note_ref(&kit, &reviewer),
+                "crew": {"id": crew},
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{lr}");
+        assert_eq!(lr["crew"], serde_json::json!({"id": crew, "order": 1}));
+        assert_eq!(last_start(&mut f)["context"], true);
+        let only_role = lr["id"].as_str().unwrap().to_string();
+        let init = f.initialize(&only_role, "storm").await;
+        assert!(
+            init["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("started with a role note. Call session_context to read it."),
+            "{init}"
+        );
+        let got = structured(&f.call(&only_role, "storm", "session_context").await);
+        assert_eq!(got["context"], serde_json::Value::Null);
+        assert_eq!(got["role"]["note_id"], reviewer["id"]);
+        assert!(got.get("missing").is_none(), "{got}");
+
+        // A role is validated like a label; an unknown crew is refused; and
+        // neither leaves a session behind.
+        let (_, before) = f.get("/v1/agent/sessions").await;
+        for (extra, want) in [
+            (
+                serde_json::json!({"role": note_ref(&personal, &plan)}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"role": {"vault_id": kit, "note_id": "nope"}}),
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                serde_json::json!({"crew": {"id": "crw_NOPE"}}),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                serde_json::json!({"crew": {"new_name": "  "}}),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let (status, body) = f.launch_body(extra.clone()).await;
+            assert_eq!(status, want, "{extra} → {body}");
+        }
+        let (_, after) = f.get("/v1/agent/sessions").await;
+        assert_eq!(
+            after.as_array().unwrap().len(),
+            before.as_array().unwrap().len()
+        );
+    }
+
+    #[tokio::test]
+    async fn changing_the_label_leaves_the_launch_role_and_session_context_alone() {
+        let dir = tempdir::TempDir::new("storm-launch-role-label").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (kit, reviewer, release, _, _) = role_notes(&f).await;
+        let (_, la) = f
+            .launch_body(serde_json::json!({"role": note_ref(&kit, &reviewer)}))
+            .await;
+        let session = la["id"].as_str().unwrap().to_string();
+        let launch_role = la["launch_role"].clone();
+        assert_eq!(launch_role["title"], "Storm Reviewer");
+        f.initialize(&session, "storm").await;
+        let context = structured(&f.call(&session, "storm", "session_context").await);
+
+        let (status, _) = f
+            .ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{session}/role"),
+                note_ref(&kit, &release),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["role"]["title"], "Release Notes");
+        assert_eq!(view["launch_role"], launch_role);
+        assert_eq!(
+            structured(&f.call(&session, "storm", "session_context").await),
+            context
+        );
+
+        let (status, _) = f
+            .ask(delete_with_auth(
+                &format!("/v1/agent/sessions/{session}/role"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["role"], serde_json::Value::Null);
+        assert_eq!(view["launch_role"], launch_role);
+
+        // A deleted role note is null with a reason, not an error.
+        let id = reviewer["id"].as_str().unwrap();
+        send(
+            &f.app,
+            delete_with_auth(&format!("/v1/vaults/{kit}/notes/{id}"), &f.owner_bearer),
+        )
+        .await;
+        let got = structured(&f.call(&session, "storm", "session_context").await);
+        assert_eq!(got["role"], serde_json::Value::Null, "{got}");
+        assert_eq!(got["context"], serde_json::Value::Null);
+        assert_eq!(
+            got["missing"],
+            serde_json::json!({"role": "the role note no longer exists"})
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(
+            view["launch_role"], launch_role,
+            "the launch role is history"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_resume_carries_the_launch_role_and_label_and_joins_the_crew_after_its_predecessor() {
+        let dir = tempdir::TempDir::new("storm-launch-role-resume").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let mut caps = host_caps(true);
+        caps["resume"] = serde_json::json!(["claude-code"]);
+        f.state
+            .agent
+            .hello(&f.host_id, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        let (kit, reviewer, release, _, _) = role_notes(&f).await;
+        let (_, old) = f
+            .launch_body(serde_json::json!({
+                "role": note_ref(&kit, &reviewer),
+                "crew": {"new_name": "Release"},
+            }))
+            .await;
+        let old_id = old["id"].as_str().unwrap().to_string();
+        let crew = old["crew"]["id"].as_str().unwrap().to_string();
+        let (_, next) = f
+            .launch_body(serde_json::json!({"crew": {"id": crew}}))
+            .await;
+        let next_id = next["id"].as_str().unwrap().to_string();
+        // The label moves on from the launch role.
+        f.ask(put_json_with_auth(
+            &format!("/v1/agent/sessions/{old_id}/role"),
+            note_ref(&kit, &release),
+            &f.owner_bearer,
+        ))
+        .await;
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{old_id}/status"),
+                serde_json::json!({"status": "completed", "exit_code": 0,
+                    "harness_session": "80d0cf8c-8176-43b4-8206-7908d74d1387"}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        last_start(&mut f);
+
+        // Whatever the request says about a role or a crew.
+        let (status, body) = f
+            .launch_body(serde_json::json!({
+                "resume_of": old_id,
+                "role": note_ref(&kit, &release),
+                "crew": {"new_name": "Elsewhere"},
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["resumed_from"], old_id.as_str());
+        assert_eq!(body["launch_role"], old["launch_role"]);
+        assert_eq!(body["role"]["note_id"], release["id"]);
+        assert_eq!(body["role"]["title"], "Release Notes");
+        assert_eq!(last_start(&mut f)["context"], true);
+        let resumed = body["id"].as_str().unwrap().to_string();
+        assert_eq!(f.crew_ids().await, std::slice::from_ref(&crew));
+        let (status, members) = f.get("/v1/agent/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        let mut order: Vec<(i64, String)> = members
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|s| s["crew"]["id"] == crew.as_str())
+            .map(|s| {
+                (
+                    s["crew"]["order"].as_i64().unwrap(),
+                    s["id"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        order.sort();
+        let order: Vec<String> = order.into_iter().map(|(_, id)| id).collect();
+        assert_eq!(order, [old_id, resumed.clone(), next_id]);
+
+        f.initialize(&resumed, "storm").await;
+        let got = structured(&f.call(&resumed, "storm", "session_context").await);
+        assert_eq!(got["role"]["note_id"], reviewer["id"]);
+    }
+
+    #[tokio::test]
+    async fn a_shell_launch_with_a_role_gets_the_label_only() {
+        let dir = tempdir::TempDir::new("storm-launch-role-shell").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (kit, reviewer, _, _, _) = role_notes(&f).await;
+        last_start(&mut f);
+        let (status, la) = f
+            .launch_body(serde_json::json!({
+                "provider": "shell",
+                "role": note_ref(&kit, &reviewer),
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{la}");
+        assert_eq!(la["launch_role"], serde_json::Value::Null);
+        assert_eq!(la["role"]["note_id"], reviewer["id"]);
+        assert_eq!(la["role"]["title"], "Storm Reviewer");
+        let start = last_start(&mut f);
+        assert_eq!(start["provider"], "shell");
+        assert!(start.get("context").is_none(), "{start}");
+        let session = la["id"].as_str().unwrap();
+        let launch = f.state.agent.launch_of(session).unwrap().unwrap();
+        assert_eq!(launch.role, None);
+    }
+
     #[tokio::test]
     async fn session_context_reads_the_callers_own_note_and_the_launch_validates_it() {
         let dir = tempdir::TempDir::new("storm-gateway-context").unwrap();
@@ -10271,13 +10604,23 @@ pub(crate) mod tests {
         f.initialize(&sb, "storm").await;
 
         let got = structured(&f.call(&sa, "storm", "session_context").await);
-        assert_eq!(got["note_id"], a["id"]);
-        assert_eq!(got["title"], "Gateway spec");
-        assert_eq!(got["path"], "specs/Gateway spec.md");
-        assert!(got["content"].as_str().unwrap().contains("alpha body"));
+        assert_eq!(got["context"]["note_id"], a["id"]);
+        assert_eq!(got["context"]["title"], "Gateway spec");
+        assert_eq!(got["context"]["path"], "specs/Gateway spec.md");
+        assert!(
+            got["context"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("alpha body")
+        );
+        assert_eq!(got["role"], serde_json::Value::Null);
+        assert!(got.get("missing").is_none(), "{got}");
         let got = structured(&f.call(&sb, "storm", "session_context").await);
         assert!(
-            got["content"].as_str().unwrap().contains("bravo body"),
+            got["context"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("bravo body"),
             "{got}"
         );
         assert!(
@@ -10294,8 +10637,12 @@ pub(crate) mod tests {
             ),
         )
         .await;
-        assert!(
-            tool_error(&f.call(&sa, "storm", "session_context").await).contains("no longer exists")
+        // A deleted note is null with a reason, not an error (138f).
+        let got = structured(&f.call(&sa, "storm", "session_context").await);
+        assert_eq!(got["context"], serde_json::Value::Null, "{got}");
+        assert_eq!(
+            got["missing"]["context"],
+            "the context note no longer exists"
         );
 
         // The launch refuses a context or a write vault that does not resolve.
@@ -10467,9 +10814,9 @@ pub(crate) mod tests {
         assert_eq!(view["name"], "gateway-spec");
         f.initialize(&session, "storm").await;
         let got = structured(&f.call(&session, "storm", "session_context").await);
-        assert_eq!(got["note_id"], note_id.as_str());
-        assert_eq!(got["path"], "archive/Renamed plan.md");
-        assert_eq!(got["title"], "Renamed plan");
+        assert_eq!(got["context"]["note_id"], note_id.as_str());
+        assert_eq!(got["context"]["path"], "archive/Renamed plan.md");
+        assert_eq!(got["context"]["title"], "Renamed plan");
     }
 
     #[tokio::test]
@@ -14447,7 +14794,10 @@ pub(crate) mod tests {
             &f.tool(&child, "session_context", serde_json::json!({}))
                 .await,
         );
-        assert_eq!(context, serde_json::json!({"task": "count the tests"}));
+        assert_eq!(
+            context,
+            serde_json::json!({"context": null, "role": null, "task": "count the tests"})
+        );
         // A top-level session's answer has no task and is as before.
         assert_eq!(
             crate::ops::session_context(&f.state, &f.agent(&parent))
@@ -16082,7 +16432,10 @@ pub(crate) mod tests {
         );
         assert_eq!(context["task"], "t");
         assert!(
-            context["content"].as_str().unwrap().contains("the plan"),
+            context["context"]["content"]
+                .as_str()
+                .unwrap()
+                .contains("the plan"),
             "{context}"
         );
 

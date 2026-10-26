@@ -19,7 +19,7 @@ own machines, and gives AI apps access to your notes through MCP.
 |---|---|
 | **[Install](/docs/install/server/)** | The server on Linux, macOS or Windows; the apps; pairing; firewalls; upgrades. |
 | **[Notes](/docs/notes/writing/)** | Writing, vaults and folders, sync and conflicts, shortcuts. |
-| **[Agents](/docs/agents/sessions/)** | Sessions, Runtime Hosts, integrations. |
+| **[Agents](/docs/agents/sessions/)** | Sessions, crews, Runtime Hosts, integrations. |
 | **[MCP](/docs/mcp/connect/)** | Connecting Claude Code, Claude Desktop and other AI apps. |
 | **[Operate](/docs/operate/backups/)** | Backups, the security model, troubleshooting. |
 | **[Reference](/docs/reference/config/)** | Configuration, MCP tools and both command lines — generated from the release. |

@@ -17,6 +17,10 @@ import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
+import 'crew_changes.dart';
+import 'crew_prefs.dart';
+import 'crew_sheets.dart';
+import 'crew_widgets.dart';
 import 'launcher.dart';
 import 'spawn_state.dart' show lineageOrder;
 import 'spawn_widgets.dart' show LineageIndent, lineageLine;
@@ -113,18 +117,24 @@ class AgentsScreen extends ConsumerWidget {
 /// opened — on its Context tab when it has a note, else About.
 ///
 /// [contextNote] starts it from a note (Start session); [provider] from an
-/// agent card; [runAgain] prefills everything an ended session had.
+/// agent card; [runAgain] prefills everything an ended session had; [crew]
+/// presets the crew (a crew page's New session in crew, 138h).
 Future<AgentSession?> launchAgentSession(
   BuildContext context,
   WidgetRef ref, {
   ({String vaultId, String noteId})? contextNote,
   String? provider,
   AgentSession? runAgain,
+  Crew? crew,
 }) async {
   final overview = ref.read(agentOverviewProvider).value;
   final prefill = runAgain != null
       ? LaunchPrefill.runAgain(runAgain)
-      : LaunchPrefill(context: contextNote, provider: provider);
+      : LaunchPrefill(
+          context: contextNote,
+          provider: provider,
+          crewId: crew?.id,
+        );
   final launched = await showNewSessionLauncher(
     context,
     hosts: overview?.hosts ?? const [],
@@ -640,8 +650,9 @@ class _InfraLine extends ConsumerWidget {
   }
 }
 
-/// The desk overview: work by (workspace, host), the agents you can start,
-/// and the infrastructure line (handoff §2.7).
+/// The desk overview: CREWS, then the sessions in none by (workspace, host),
+/// the agents you can start, and the infrastructure line (handoff §2.7;
+/// crews Round 4 §3). With no crew it is the overview before crews.
 class _Overview extends ConsumerWidget {
   const _Overview({required this.overview});
 
@@ -651,9 +662,11 @@ class _Overview extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final o = overview;
+    final crews = o.crews ?? const <Crew>[];
+    final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
     final groups = <(String, String), List<AgentSession>>{};
     for (final s in o.sessions) {
-      (groups[(s.workspace, s.hostId)] ??= []).add(s);
+      if (o.crewOf(s) == null) (groups[(s.workspace, s.hostId)] ??= []).add(s);
     }
 
     return SingleChildScrollView(
@@ -679,8 +692,30 @@ class _Overview extends ConsumerWidget {
                   size: t.uiSize,
                 ),
                 SizedBox(height: t.sp * 3),
-                const AgentsLabel('Work'),
-                SizedBox(height: t.sp * 1.5),
+                if (crews.isNotEmpty) ...[
+                  const AgentsLabel('Crews'),
+                  SizedBox(height: t.sp * 1.5),
+                  for (final c in crews) ...[
+                    CrewCard(
+                      crew: c,
+                      overview: o,
+                      collapsed: prefs.collapsed(c.id),
+                      onOpenSession: (s) => openAgentSession(context, s.id),
+                    ),
+                    SizedBox(height: t.sp * 1.5),
+                  ],
+                  SizedBox(height: t.sp * 1.5),
+                ],
+                // Until the first crew exists, and only once crews have
+                // loaded from a server that has them.
+                if (o.crews != null && crews.isEmpty) ...[
+                  const _NoCrewsHint(),
+                  SizedBox(height: t.sp * 2.5),
+                ],
+                if (crews.isEmpty || groups.isNotEmpty) ...[
+                  AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
+                  SizedBox(height: t.sp * 1.5),
+                ],
                 for (final MapEntry(key: (ws, host), value: rows)
                     in groups.entries) ...[
                   _WorkCard(
@@ -703,6 +738,84 @@ class _Overview extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// How crews are made, on the desk overview while there are none (handoff
+/// §5, Round 3's 3j).
+class _NoCrewsHint extends StatelessWidget {
+  const _NoCrewsHint();
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return CustomPaint(
+      key: const Key('no-crews-hint'),
+      painter: _DashedOutline(
+        color: t.border,
+        width: t.bw,
+        radius: t.rControl,
+        dash: t.sp * 0.5,
+      ),
+      child: Padding(
+        padding: EdgeInsets.symmetric(
+          horizontal: t.sp * 1.75,
+          vertical: t.sp * 1.5,
+        ),
+        child: Text(
+          'Working on one thing across several sessions? Drag one session '
+          'onto another to make a crew, or pick a crew when you launch.',
+          style: TextStyle(
+            fontFamily: StormTokens.sansFamily,
+            fontSize: t.codeSize,
+            height: 1.5,
+            color: t.text2,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DashedOutline extends CustomPainter {
+  _DashedOutline({
+    required this.color,
+    required this.width,
+    required this.radius,
+    required this.dash,
+  });
+
+  final Color color;
+  final double width;
+  final double radius;
+  final double dash;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final inset = width / 2;
+    final outline = Path()
+      ..addRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(inset, inset, size.width - width, size.height - width),
+          Radius.circular(radius),
+        ),
+      );
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = width
+      ..style = PaintingStyle.stroke;
+    for (final m in outline.computeMetrics()) {
+      for (var d = 0.0; d < m.length; d += dash * 2) {
+        canvas.drawPath(m.extractPath(d, d + dash), paint);
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_DashedOutline old) =>
+      old.color != color ||
+      old.width != width ||
+      old.radius != radius ||
+      old.dash != dash;
 }
 
 class _WorkCard extends StatelessWidget {
@@ -803,10 +916,10 @@ class _WorkRow extends StatelessWidget {
                   child: Row(
                     children: [
                       Flexible(
-                        child: Text(
-                          s.displayName,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                        child: RoleTagRow(
+                          name: s.displayName,
+                          role: s.role,
+                          launchRole: s.launchRole,
                           style: TextStyle(
                             fontFamily: StormTokens.sansFamily,
                             fontSize: t.uiSize,
@@ -949,17 +1062,32 @@ Widget _indentedChild(AgentSession s, List<AgentSession> list, Widget row) {
       : row;
 }
 
-/// The phone list: Running, then Ended, then the infrastructure line. No
-/// work grouping — the rows already carry the workspace (handoff §2.8).
-class _PhoneList extends StatelessWidget {
+/// The phone list: CREWS as on the desk, then Running and Ended with the
+/// sessions in no crew, then the infrastructure line. No work grouping, the
+/// rows already carry the workspace (handoff §2.8; crews 4j). A long-press
+/// on any row is its Crew and Role sheet; there is no drag on a phone.
+class _PhoneList extends ConsumerWidget {
   const _PhoneList({required this.overview});
 
   final AgentOverview overview;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final o = overview;
+    final crews = o.crews ?? const <Crew>[];
+    final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
+    Widget row(AgentSession s) => SnapBackOutline(
+      id: s.id,
+      child: SessionRow(
+        session: s,
+        host: o.hostName(s.hostId),
+        phone: true,
+        lineage: lineageLine(s, o),
+        onTap: () => openAgentSession(context, s.id),
+        onLongPress: () => showSessionCrewSheet(context, ref, s),
+      ),
+    );
     Widget section(String label, List<AgentSession> list, double top) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -967,25 +1095,45 @@ class _PhoneList extends StatelessWidget {
           padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
           child: AgentsLabel(label),
         ),
-        for (final s in lineageOrder(list))
-          _indentedChild(
-            s,
-            list,
-            SessionRow(
-              session: s,
-              host: o.hostName(s.hostId),
-              phone: true,
-              lineage: lineageLine(s, o),
-              onTap: () => openAgentSession(context, s.id),
-            ),
-          ),
+        for (final s in lineageOrder(list)) _indentedChild(s, list, row(s)),
       ],
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (o.live.isNotEmpty) section('Running', o.live, t.sp * 1.75),
-        if (o.ended.isNotEmpty) section('Ended', o.ended, t.sp * 2.75),
+        if (crews.isNotEmpty) ...[
+          CrewsSectionLabel(
+            count: crews.length,
+            collapsed: prefs.section,
+            phone: true,
+            onTap: () => ref.read(crewPrefsProvider.notifier).toggleSection(),
+          ),
+          if (!prefs.section)
+            for (final c in crews) ...[
+              SnapBackOutline(
+                id: c.id,
+                child: PhoneCrewHeader(
+                  crew: c,
+                  members: o.membersOf(c),
+                  collapsed: prefs.collapsed(c.id),
+                  onToggle: () =>
+                      ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
+                  onOpen: () => context.go(Routes.agentCrew(c.id)),
+                  onActions: () =>
+                      showCrewSheet(context, ref, crew: c, overview: o),
+                ),
+              ),
+              if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty)
+                CrewMembers(
+                  phone: true,
+                  children: [for (final s in liveFirst(o.membersOf(c))) row(s)],
+                ),
+            ],
+        ],
+        if (o.looseLive.isNotEmpty)
+          section('Running', o.looseLive, t.sp * (crews.isEmpty ? 1.75 : 2)),
+        if (o.looseEnded.isNotEmpty)
+          section('Ended', o.looseEnded, t.sp * 2.75),
         Padding(
           padding: EdgeInsets.only(top: t.sp * 2.25),
           child: _InfraLine(overview: o, phone: true),

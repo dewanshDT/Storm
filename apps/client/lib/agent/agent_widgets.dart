@@ -6,6 +6,7 @@ import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
+import 'crew_widgets.dart' show RoleTagRow;
 import 'spawn_widgets.dart' show AttentionTag;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
@@ -110,6 +111,7 @@ class SessionRow extends StatelessWidget {
     this.selected = false,
     this.phone = false,
     this.lineage,
+    this.onLongPress,
   });
 
   final AgentSession session;
@@ -121,11 +123,19 @@ class SessionRow extends StatelessWidget {
   /// A spawned child's "↳ from …" in place of the sub-line (134l).
   final String? lineage;
 
+  /// The phone's crew and role sheet (decision 138n).
+  final VoidCallback? onLongPress;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final s = session;
     final radius = BorderRadius.circular(phone ? 0 : t.rControl);
+    final subStyle = TextStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: t.labelSize,
+      color: t.text3,
+    );
     final content = Row(
       children: [
         AgentMark(
@@ -142,10 +152,10 @@ class SessionRow extends StatelessWidget {
               Row(
                 children: [
                   Flexible(
-                    child: Text(
-                      s.displayName,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+                    child: RoleTagRow(
+                      name: s.displayName,
+                      role: s.role,
+                      launchRole: s.launchRole,
                       style: TextStyle(
                         fontFamily: StormTokens.sansFamily,
                         fontSize: phone ? t.uiSize : t.codeSize,
@@ -160,16 +170,15 @@ class SessionRow extends StatelessWidget {
                 ],
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
-              Text(
-                lineage ?? sessionSub(s, host),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
-                ),
-              ),
+              if (lineage case final line?)
+                Text(
+                  line,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: subStyle,
+                )
+              else
+                SessionSubLine(session: s, host: host, style: subStyle),
             ],
           ),
         ),
@@ -181,6 +190,7 @@ class SessionRow extends StatelessWidget {
       label: sessionSpoken(s, host),
       excludeSemantics: true,
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Material(
         color: selected ? t.surface2 : Colors.transparent,
         borderRadius: radius,
@@ -188,6 +198,7 @@ class SessionRow extends StatelessWidget {
           key: Key('session-${s.id}'),
           borderRadius: radius,
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Container(
             padding: phone
                 ? EdgeInsets.symmetric(vertical: t.sp * 1.5)
@@ -210,11 +221,71 @@ class SessionRow extends StatelessWidget {
   }
 }
 
+/// "build-vm · storm · 40m", where only the workspace gives way: the host
+/// and the age are never cut (decision 138l).
+class SessionSubLine extends StatelessWidget {
+  const SessionSubLine({
+    super.key,
+    required this.session,
+    required this.host,
+    required this.style,
+  });
+
+  final AgentSession session;
+  final String host;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final dir = Directionality.of(context);
+    // What the Text below draws with, letter spacing included.
+    final drawn = DefaultTextStyle.of(context).style.merge(style);
+    final ws = session.workspace;
+    final when = sessionWhen(session);
+    return LayoutBuilder(
+      builder: (context, box) {
+        String line(String w) => '$host · $w · $when';
+        bool fits(String text) =>
+            (TextPainter(
+              text: TextSpan(text: text, style: drawn),
+              textDirection: dir,
+              textScaler: scaler,
+              maxLines: 1,
+            )..layout()).width <=
+            box.maxWidth;
+        var text = line(ws);
+        if (box.hasBoundedWidth && !fits(text)) {
+          var lo = 0, hi = ws.length;
+          while (lo < hi) {
+            final mid = (lo + hi + 1) ~/ 2;
+            fits(line('${ws.substring(0, mid)}…')) ? lo = mid : hi = mid - 1;
+          }
+          text = line('${ws.substring(0, lo)}…');
+          // No room for even a cut workspace: it goes, so the host and age
+          // stay whole (the overview card at 900).
+          if (lo == 0 && !fits(text)) text = '$host · $when';
+        }
+        return Text(
+          text,
+          maxLines: 1,
+          softWrap: false,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+      },
+    );
+  }
+}
+
 /// The note a session started from: a file icon and its title, outlined.
 class NoteContextChip extends StatelessWidget {
-  const NoteContextChip({super.key, required this.title});
+  const NoteContextChip({super.key, required this.title, this.maxWidth});
 
   final String title;
+
+  /// The title's room; 160 by default.
+  final double? maxWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -231,7 +302,7 @@ class NoteContextChip extends StatelessWidget {
           Icon(LucideIcons.file, size: t.labelSize, color: t.text2),
           SizedBox(width: t.sp * 0.625),
           ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: t.sp * 20),
+            constraints: BoxConstraints(maxWidth: maxWidth ?? t.sp * 20),
             child: Text(
               title,
               maxLines: 1,
@@ -251,9 +322,16 @@ class NoteContextChip extends StatelessWidget {
 
 /// *＋ New session*, the phone list's one labelled primary in the pill.
 class NewSessionPill extends StatelessWidget {
-  const NewSessionPill({super.key, required this.onTap});
+  const NewSessionPill({
+    super.key,
+    required this.onTap,
+    this.label = 'New session',
+  });
 
   final VoidCallback onTap;
+
+  /// "New session in crew" on a phone's crew page.
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -265,7 +343,7 @@ class NewSessionPill extends StatelessWidget {
         child: StormPill(
           child: Semantics(
             button: true,
-            label: 'New session',
+            label: label,
             excludeSemantics: true,
             onTap: onTap,
             child: Material(
@@ -288,7 +366,7 @@ class NewSessionPill extends StatelessWidget {
                       ),
                       SizedBox(width: t.sp),
                       Text(
-                        'New session',
+                        label,
                         style: TextStyle(
                           fontFamily: StormTokens.sansFamily,
                           fontSize: t.bodySize,

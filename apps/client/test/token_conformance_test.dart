@@ -2,10 +2,10 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-/// A source scan over `lib/ui/` and the spawning client
-/// (`lib/agent/spawn_*.dart`, decision 134-10), guarding the one rule the
-/// token layer rests on: no screen decides a size, a radius or a colour for
-/// itself.
+/// A source scan over `lib/ui/`, the crew widgets (`lib/agent/crew_*.dart`,
+/// decision 138) and the spawning client (`lib/agent/spawn_*.dart`, decision
+/// 134-10), guarding the one rule the token layer rests on: no screen decides
+/// a size, a radius or a colour for itself.
 ///
 /// A source scan rather than a widget test because the failure it catches is
 /// invisible at runtime in the default theme — a literal `circular(8)` looks
@@ -18,6 +18,12 @@ void main() {
       .whereType<File>()
       .where((f) => f.path.endsWith('.dart'))
       .toList();
+  final crewFiles = Directory('lib/agent')
+      .listSync()
+      .whereType<File>()
+      .where((f) => RegExp(r'/crew_[^/]*\.dart$').hasMatch(f.path))
+      .toList();
+  files.addAll(crewFiles);
   final spawnFiles = Directory('lib/agent')
       .listSync()
       .whereType<File>()
@@ -38,6 +44,13 @@ void main() {
 
   test('lib/ui has at least the files this suite thinks it has', () {
     expect(files.length, greaterThan(20));
+  });
+
+  test('the crew widgets are scanned too', () {
+    expect(
+      crewFiles.map((f) => f.uri.pathSegments.last),
+      containsAll(['crew_widgets.dart', 'crew_prefs.dart']),
+    );
   });
 
   test('the spawning client is scanned too', () {

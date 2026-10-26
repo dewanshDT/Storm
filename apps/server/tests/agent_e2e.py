@@ -407,6 +407,37 @@ args = ["-i"]
         call("POST", f"/v1/agent/sessions/{again['id']}/end", auth=owner)
         wait(lambda: session(owner, again["id"])["status"] == "stopped", "stopped")
 
+        print("\n=== a launch role and crew (decision 138f, 138-2) ===")
+        status, roles = call("GET", "/v1/agent/roles", auth=owner)
+        check("Kit's role notes are listed", status == 200 and len(roles) > 0, (status, roles))
+        role = roles[0]
+        role_ref = {"vault_id": role["vault_id"], "note_id": role["note_id"]}
+        status, cast = launch_with({**ctx, "role": role_ref, "crew": {"new_name": "E2E launch crew"}})
+        check("a launch with a role and a new crew is accepted", status == 200, cast)
+        check("it records the launch role",
+              cast["launch_role"] == {**role_ref, "title": role["title"]}, cast.get("launch_role"))
+        check("the role is also its first label",
+              cast["role"] == {**role_ref, "title": role["title"]}, cast.get("role"))
+        check("it is the new crew's first member", cast["crew"]["order"] == 0, cast.get("crew"))
+        running(owner, cast["id"])
+        view = session(owner, cast["id"])
+        check("the session view reads the launch role and crew back",
+              view["launch_role"] == cast["launch_role"] and view["crew"] == cast["crew"], view)
+        status, sh = launch_with({"provider": "shell", "role": role_ref})
+        check("a shell launch with a role gets the label only",
+              status == 200 and sh["launch_role"] is None and sh["role"]["note_id"] == role["note_id"], sh)
+        status, _ = launch_with({"role": {"vault_id": vault, "note_id": note["id"]}})
+        check("a note outside Kit's agents/ folders is not a role", status == 400, status)
+        for rec in (cast, sh):
+            running(owner, rec["id"])
+            call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        wait(lambda: all(session(owner, r["id"])["status"] == "stopped" for r in (cast, sh)),
+             "the role sessions to stop")
+        for rec in (cast, sh):
+            call("DELETE", f"/v1/agent/sessions/{rec['id']}", auth=owner)
+        check("dismissing its only member removes the launch crew",
+              call("GET", "/v1/agent/crews", auth=owner)[1] == [])
+
         print("\n=== offset resume and gap ===")
         status, rec = launch(owner, host_id, provider="fake")
         sid2 = rec["id"]

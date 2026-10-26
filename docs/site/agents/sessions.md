@@ -21,9 +21,14 @@ launcher asks for:
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
+| **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
+| **Role** | A role note from your Kit the agent reads at launch, as a [role](/docs/agents/crews/#roles). Off for an agent that can't read Storm notes. |
 
 The session takes its name from the agent's own terminal title, and its row
 shows the agent's logo and whether it is working or idle.
+
+Sessions working toward one goal can be grouped into a
+[crew](/docs/agents/crews/), and each can carry a role label.
 
 ## The terminal
 

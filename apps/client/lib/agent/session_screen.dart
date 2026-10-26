@@ -25,9 +25,13 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
+import 'crew_changes.dart';
+import 'crew_sheets.dart' show CrewRoleSections;
+import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'session_controller.dart';
+import 'session_crew.dart';
 import 'session_inspector.dart';
 import 'spawn_state.dart';
 import 'spawn_widgets.dart';
@@ -163,8 +167,19 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
     final api = agentApi(ref);
     if (api == null) return;
+    final c = ProviderScope.containerOf(context, listen: false);
+    final before = ref.read(agentOverviewProvider).value;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      await api.dismiss(_id);
+      final removed = await api.dismiss(_id);
+      if (removed != null) {
+        announceRemovedCrew(
+          c,
+          removedCrewFrom(before, removed),
+          why: 'its last session was dismissed',
+          fallback: messenger,
+        );
+      }
       _gone();
     } catch (e) {
       if (e is AgentRefusal &&
@@ -257,7 +272,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         final record = detail.value ?? overview?.byId(_id);
         final live = controller?.session;
         _catchUpAtEnd(record, live);
-        final s = record?.withLive(live) ?? live;
+        final seen = record?.withLive(live) ?? live;
+        // A crew or label change still pending is ahead of the record.
+        final s = seen == null ? null : overview?.labelsOf(seen) ?? seen;
         final wide = context.isExpanded;
         if (s == null) {
           final settled =
@@ -522,16 +539,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ],
           ),
           SizedBox(height: t.sp * 0.5),
-          Text(
-            spawnMeta(
-              sessionMeta(s, host),
-              s,
-              ref.watch(agentOverviewProvider).value,
-            ),
-            key: const Key('session-meta'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: _mono(t, t.labelSize * 1.09),
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  spawnMeta(
+                    sessionMeta(s, host),
+                    s,
+                    ref.watch(agentOverviewProvider).value,
+                  ),
+                  key: const Key('session-meta'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: _mono(t, t.labelSize * 1.09),
+                ),
+              ),
+              SessionMetaTags(session: s),
+            ],
           ),
           if (_resumeBlocker(s) case final why?) ...[
             SizedBox(height: t.sp * 0.25),
@@ -945,17 +969,18 @@ String phoneHeaderMeta(AgentSession s) => [
 /// The phone session's header, between the corner bubbles: status dot, name
 /// and caret over a mono line. A tap opens the details sheet, where the full
 /// name wraps.
-class _PhoneHeader extends StatelessWidget {
+class _PhoneHeader extends ConsumerWidget {
   const _PhoneHeader({required this.session, required this.onTap});
 
   final AgentSession session;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final s = session;
     final meta = phoneHeaderMeta(s);
+    final crew = ref.watch(agentOverviewProvider).value?.crewOf(s);
     return Semantics(
       button: true,
       label: '${s.displayName}, $meta, details',
@@ -996,13 +1021,41 @@ class _PhoneHeader extends StatelessWidget {
               ],
             ),
             SizedBox(height: t.sp * 0.25),
-            Text(
-              meta,
-              key: const Key('session-meta'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: _mono(t, 11).copyWith(height: 1.3),
+            // The crew chip and role tag ride the meta line (138-5); each
+            // gives way in proportion when the three don't fit.
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  flex: 4,
+                  child: Text(
+                    meta,
+                    key: const Key('session-meta'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: _mono(t, 11).copyWith(height: 1.3),
+                  ),
+                ),
+                if (crew != null) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 3,
+                    child: LayoutBuilder(
+                      key: const Key('phone-crew-chip'),
+                      builder: (context, box) =>
+                          CrewChip(crew: crew, maxWidth: box.maxWidth),
+                    ),
+                  ),
+                ],
+                if (s.role case final role?) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 2,
+                    child: RoleTag(role: role, launchRole: s.launchRole),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
@@ -1439,23 +1492,27 @@ class _About extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final rows = aboutRows(
+      session,
+      host: host,
+      writeVault: vaults
+          .where((v) => v.id == session.writeVaultId)
+          .firstOrNull
+          ?.name,
+      integrations: sessionIntegrations(ref, session),
+      overview: ref.watch(agentOverviewProvider).value,
+    );
+    // Crew and Role sit after Agent and Workspace (handoff 4e).
     return Column(
+      key: const Key('session-about'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        KeyValueList(
-          key: const Key('session-about'),
-          rows: aboutRows(
-            session,
-            host: host,
-            writeVault: vaults
-                .where((v) => v.id == session.writeVaultId)
-                .firstOrNull
-                ?.name,
-            integrations: sessionIntegrations(ref, session),
-            overview: ref.watch(agentOverviewProvider).value,
-          ),
-        ),
+        KeyValueList(rows: rows.take(2).toList()),
+        AboutCrewRole(session: session),
+        SizedBox(height: t.sp * 1.75),
+        KeyValueList(rows: rows.skip(2).toList()),
         AddSkippedToIntegrations(session: session),
         SpawnChildrenSection(session: session),
       ],
@@ -1662,6 +1719,8 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
               ),
         ],
       ),
+      // The same Crew and Role a long-press on its row raises (138n).
+      CrewRoleSections(session: s),
       KeyValueList(rows: rows),
       AddSkippedToIntegrations(session: s),
       SpawnChildrenSection(session: s),

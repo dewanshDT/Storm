@@ -591,7 +591,7 @@ args = ["-i"]
         vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
 
         print("\n=== a session started from a note (§5.3 C; the argv rule) ===")
-        prompt = "Read your context note with the storm session_context tool, then wait for my instructions."
+        prompt = "Read your launch context with the storm session_context tool, then wait for my instructions."
         mark = "ctx-marker-" + os.urandom(6).hex()
         other_mark = "ctx-other-" + os.urandom(6).hex()
         _, made = call("POST", f"/v1/vaults/{vault}/notes", {
@@ -641,13 +641,18 @@ args = ["-i"]
         c.initialize("storm", 1)
         c.tool("storm", 2, "session_context")
         got = c.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        note = got.get("context") or {}
         check("the agent reads its note through session_context",
-              f"{mark}-body" in got.get("content", "") and got.get("note_id") == brief["id"], got)
+              f"{mark}-body" in note.get("content", "") and note.get("note_id") == brief["id"]
+              and got.get("role") is None, got)
+        check("a top-level session's context carries no task (134-4's additive field)",
+              "task" not in got and "missing" not in got, got)
         c2.initialize("storm", 1)
         c2.tool("storm", 2, "session_context")
         got2 = c2.answer("storm", 2).get("result", {}).get("structuredContent", {})
         check("a second session reads its own note, never the first one's",
-              f"{other_mark}-body" in got2.get("content", "") and mark not in json.dumps(got2), got2)
+              f"{other_mark}-body" in (got2.get("context") or {}).get("content", "")
+              and mark not in json.dumps(got2), got2)
         print("\n=== resuming a conversation (decision 89) ===")
         check("the host says which agents it can resume",
               sorted(host_online()["capabilities"].get("resume", [])) == ["claude-code", "opencode"],

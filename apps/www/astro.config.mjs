@@ -76,6 +76,7 @@ export default defineConfig({
           label: "Agents",
           items: [
             "docs/agents/sessions",
+            "docs/agents/crews",
             "docs/agents/hosts",
             "docs/agents/integrations",
             "docs/agents/plugins",
