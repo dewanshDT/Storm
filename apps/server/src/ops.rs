@@ -2308,6 +2308,36 @@ pub async fn sweep_spawn_requests(state: &Shared) {
     }
 }
 
+/// An approved child the server stopped before its `start` went out,
+/// failed at startup (139-D5).
+pub const EVENT_SPAWN_RESTART_FAILED: &str = "spawn_restart_failed";
+
+/// At startup, before the sweepers: every spawned child a restart left
+/// `creating` is failed `server_restart`, each audited once. Its approval
+/// committed but its `start` never went out, so no host will report it.
+pub async fn fail_children_left_creating(state: &Shared) -> anyhow::Result<()> {
+    let failed = state
+        .agent
+        .fail_children_left_creating()
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    for (r, parent) in failed {
+        tracing::warn!(
+            session = r.id,
+            "spawned session failed: the server restarted before its start"
+        );
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_RESTART_FAILED,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": r.id, "host_id": r.host_id,
+                "parent_session": parent, "end_reason": r.end_reason}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
 // ---- Read and report tools (decision 134-4) ----------------------------
 //
 // Agent-only, on the built-in `storm` connection. The gateway offers them

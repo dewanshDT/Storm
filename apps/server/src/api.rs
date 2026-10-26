@@ -15426,6 +15426,78 @@ pub(crate) mod tests {
         );
     }
 
+    /// 139-D5: a child whose approval committed but whose `start` never went
+    /// out is failed `server_restart` at the next startup, audited once; a
+    /// second run changes nothing, and nothing past `creating` or outside a
+    /// tree is touched.
+    #[tokio::test]
+    async fn a_child_left_creating_by_a_restart_is_failed_on_startup() {
+        let dir = tempdir::TempDir::new("storm-139-d5").unwrap();
+        let owner = {
+            let (_, _, state) = test_router_with_state(dir.path());
+            let owner = seed_owner(&state).await;
+            for (child, status) in [
+                ("ags_C1", "creating"),
+                ("ags_C2", "starting"),
+                ("ags_C3", "running"),
+            ] {
+                state
+                    .agent
+                    .child_session_for_tests(&owner, "hst_A", "ags_P1", child, status);
+            }
+            state
+                .agent
+                .session_for_tests(&owner, "hst_A", "ags_TOP", "creating");
+            owner
+        };
+
+        let (_, _, state) = test_router_with_state(dir.path());
+        let of = |id: &str| {
+            let r = state.agent.get(id).unwrap();
+            (r.status, r.end_reason, r.ended_at.is_some())
+        };
+        let others = || ["ags_C2", "ags_C3", "ags_TOP"].map(&of);
+        let before = others();
+        crate::ops::fail_children_left_creating(&state)
+            .await
+            .unwrap();
+        assert_eq!(
+            of("ags_C1"),
+            ("failed".into(), Some("server_restart".into()), true)
+        );
+        assert_eq!(others(), before);
+        assert!(
+            before
+                .iter()
+                .all(|(_, reason, ended)| reason.is_none() && !ended)
+        );
+        let audited = serde_json::json!({"session_id": "ags_C1", "host_id": "hst_A",
+            "parent_session": "ags_P1", "end_reason": "server_restart"});
+        let events = || async {
+            let events: Vec<_> = state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_SPAWN_RESTART_FAILED)
+                .map(|(_, detail)| serde_json::from_str::<serde_json::Value>(&detail).unwrap())
+                .collect();
+            events
+        };
+        assert_eq!(events().await, std::slice::from_ref(&audited));
+        let failed = state.agent.get("ags_C1").unwrap();
+
+        crate::ops::fail_children_left_creating(&state)
+            .await
+            .unwrap();
+        assert_eq!(state.agent.get("ags_C1").unwrap().ended_at, failed.ended_at);
+        assert_eq!(others(), before);
+        assert_eq!(events().await, [audited]);
+        assert_eq!(state.agent.get("ags_C1").unwrap().owner_user_id, owner);
+    }
+
     /// `end_agent` through the gateway: a request a person approves, then
     /// the target's `end`; scope as for every parent tool.
     #[tokio::test]

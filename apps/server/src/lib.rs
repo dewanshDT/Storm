@@ -1192,6 +1192,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     ops::reconcile_single_user(&state)
         .await
         .context("single-user sweep over agent.db and gateway.db")?;
+    ops::fail_children_left_creating(&state)
+        .await
+        .context("failing spawned sessions a restart left creating")?;
 
     // P-5: expired spawn requests are marked, at boot and then every few
     // seconds. An approval checks expiry itself, so this is for the record.

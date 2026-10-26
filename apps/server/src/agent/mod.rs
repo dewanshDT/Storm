@@ -771,9 +771,10 @@ struct Live {
     /// Whether C0 held for each host when its agents were last told, so a
     /// flip sends `list_changed` once (134-3). Kept across links.
     c0: HashMap<String, bool>,
-    /// Cascade targets sent their `end` in this run (134-6, 134-7), so each
-    /// is sent one.
-    stopping: std::collections::HashSet<String>,
+    /// Cascade targets sent their `end` in this run (134-6, 134-7), with the
+    /// generation of the link it went down: one per link, so an `end` lost
+    /// with its link is sent again on the next.
+    stopping: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1077,10 +1078,18 @@ impl AgentManager {
                     r.ended_at.get_or_insert_with(now);
                 }
                 self.store.lock().unwrap().update(&r)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
             }
         }
         Ok(())
+    }
+
+    /// An ended session is no longer a cascade target to stop.
+    fn forget_stop(&self, r: &SessionRecord) {
+        if r.is_ended() {
+            self.live.lock().unwrap().stopping.remove(&r.id);
+        }
     }
 
     fn bump(&self, session_id: &str) {
@@ -1131,6 +1140,7 @@ impl AgentManager {
                             r.end_reason = Some(reason);
                         }
                         self.store.lock().unwrap().update(&r)?;
+                        self.forget_stop(&r);
                         self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
@@ -1149,6 +1159,7 @@ impl AgentManager {
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
                     self.store.lock().unwrap().update(&r)?;
+                    self.forget_stop(&r);
                     self.bump(&r.id);
                 }
                 None => {}
@@ -1229,10 +1240,18 @@ impl AgentManager {
             .map(f)
     }
 
-    /// Whether the host's link says it checks every connection (135d).
+    /// Whether the host's link says it checks every connection (135d), as
+    /// that link has itself reported: what a new link carried over says
+    /// nothing until then (135-2 as-built 4).
     pub fn host_verified(&self, host_id: &str) -> bool {
-        self.with_live(host_id, |caps| caps.identity.verified())
-            .unwrap_or(false)
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.identity.verified())
     }
 
     /// Whether the host's session isolation (136j, IG-7) is `verified` as
@@ -1631,6 +1650,7 @@ impl AgentManager {
             );
         }
         self.store.lock().unwrap().update(&r)?;
+        self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
         }
@@ -2536,6 +2556,7 @@ impl AgentManager {
                 r.end_reason = Some("owner_removed".into());
                 r.ended_at.get_or_insert_with(now);
                 self.store.lock().unwrap().update(&r)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
                 failed += 1;
             }
@@ -4475,6 +4496,32 @@ mod tests {
             m.host_label(HostLabel::Identity, "hst_A").unwrap(),
             Some(verified)
         );
+    }
+
+    /// 135-2 as-built 4: a new link carries the old one's capabilities over,
+    /// but its identity says nothing until the link itself reports.
+    #[test]
+    fn a_copied_identity_is_not_verified_until_the_link_reports() {
+        let (m, _d) = manager();
+        let verified = Capabilities {
+            identity: Identity {
+                state: "verified".into(),
+                mechanism: Some("so_peerpidfd".into()),
+                reason: None,
+            },
+            ..caps(&[("shell", true)])
+        };
+        m.connect_host("hst_A");
+        m.inventory("hst_A", verified.clone()).unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.connect_host("hst_A");
+        assert!(
+            m.host_live("hst_A").capabilities.is_some(),
+            "carried over for views"
+        );
+        assert!(!m.host_verified("hst_A"));
+        m.inventory("hst_A", verified).unwrap();
+        assert!(m.host_verified("hst_A"));
     }
 
     /// 136j, read as 135-2 reads `identity`: an old host is

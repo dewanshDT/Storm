@@ -327,6 +327,50 @@ fn lt4_an_unreachable_target_is_ended_once_when_its_host_returns() {
     assert!(done.completed_at.is_some());
 }
 
+/// LT-4, the link lost after the `end` was queued on it: a reconnect
+/// replaces the link, the stale link's own close changes nothing, and the
+/// target is sent its `end` again on the new link (L-3: a duplicate is
+/// harmless).
+#[test]
+fn lt4_an_end_lost_with_its_link_is_sent_again_on_the_next_link() {
+    lost_end_is_resent(false);
+}
+
+/// The same, with the old link closed before the host comes back.
+#[test]
+fn lt4_an_end_lost_with_a_closed_link_is_sent_again_on_the_next_link() {
+    lost_end_is_resent(true);
+}
+
+fn lost_end_is_resent(closed_first: bool) {
+    let mut f = fixture();
+    let p = f.parent("storm");
+    let c = f.child(&p.id);
+    let cascade =
+        f.m.end_by_person(&p.id, Some(std::slice::from_ref(&c.id)), false)
+            .unwrap()
+            .unwrap();
+    assert_eq!(f.stops(&after_secs(0)), [(c.id.clone(), true)]);
+    let old = f.generation;
+    if closed_first {
+        f.m.disconnect_host("hst_A", old);
+    }
+    f.reconnect(&[(&p.id, "stopped"), (&c.id, "running")]);
+    f.m.disconnect_host("hst_A", old);
+    assert_eq!(f.stops(&after_secs(1)), [(c.id.clone(), true)]);
+    assert!(f.stops(&after_secs(2)).is_empty(), "once per link");
+    assert_eq!(f.ends(), std::slice::from_ref(&c.id));
+    f.report(&c.id, "stopped");
+    assert_eq!(f.get(&c.id), ended("cascade"));
+    let done = f.m.cascade(&cascade.id).unwrap();
+    assert_eq!(done.targets, [(c.id.clone(), s("ended"))]);
+    assert!(done.completed_at.is_some());
+    assert!(
+        !f.m.live.lock().unwrap().stopping.contains_key(&c.id),
+        "forgotten once ended"
+    );
+}
+
 /// LT-5: a host restart ends every session `host_restart`; no child is
 /// relabelled, though Storm had sent its `end`, and running the cascade
 /// again does nothing.

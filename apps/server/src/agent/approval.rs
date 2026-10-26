@@ -231,7 +231,7 @@ impl AgentManager {
     /// opening prompt and the asks (134-8). The decision cannot change once
     /// made, so a start that fails here or on the host is the child's own
     /// `failed`, and the request keeps `started`.
-    fn dispatch_spawned(&self, child: &SessionRecord) -> AgentResult<()> {
+    pub(super) fn dispatch_spawned(&self, child: &SessionRecord) -> AgentResult<()> {
         let parent = self
             .store
             .lock()
@@ -306,6 +306,21 @@ impl AgentManager {
         self.store.lock().unwrap().update(&r)?;
         self.bump(&r.id);
         Ok(())
+    }
+
+    /// 139-D5: every spawned child still `creating`, failed `server_restart`,
+    /// with its parent. Only at startup, before any host links: the status
+    /// check in the same update keeps it from ending a child past `creating`.
+    pub fn fail_children_left_creating(&self) -> AgentResult<Vec<(SessionRecord, String)>> {
+        let failed = self
+            .store
+            .lock()
+            .unwrap()
+            .fail_children_left_creating(&now())?;
+        for (r, _) in &failed {
+            self.bump(&r.id);
+        }
+        Ok(failed)
     }
 
     fn send_end(&self, session: &str) -> AgentResult<()> {

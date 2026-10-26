@@ -211,37 +211,29 @@ impl AgentManager {
         child: &str,
         status: &str,
     ) {
-        let record = |id: &str, status: &str| SessionRecord {
-            id: id.into(),
-            owner_user_id: owner.into(),
-            host_id: host.into(),
-            workspace: "app".into(),
-            provider: "claude-code".into(),
-            provider_kind: "cli".into(),
-            interaction: "terminal".into(),
-            provider_fallback: None,
-            status: status.into(),
-            end_reason: None,
-            signal: None,
-            exit_code: None,
-            created_at: now(),
-            started_at: None,
-            ended_at: None,
-            last_activity: None,
-            egress: "host".into(),
-            cols: 80,
-            rows: 24,
-            title: None,
-            activity: None,
-            harness_session: None,
-            resumed_from: None,
-        };
         let mut store = self.store.lock().unwrap();
         if store.get(parent).unwrap().is_none() {
-            store.insert(&record(parent, "completed")).unwrap();
+            store
+                .insert(&test_record(owner, host, parent, "completed"))
+                .unwrap();
         }
         store
-            .insert_spawned(&record(child, status), parent, "a task", &now())
+            .insert_spawned(
+                &test_record(owner, host, child, status),
+                parent,
+                "a task",
+                &now(),
+            )
+            .unwrap();
+    }
+
+    /// Test-only: a top-level session on `host` in `status`.
+    #[cfg(test)]
+    pub fn session_for_tests(&self, owner: &str, host: &str, id: &str, status: &str) {
+        self.store
+            .lock()
+            .unwrap()
+            .insert(&test_record(owner, host, id, status))
             .unwrap();
     }
 
@@ -254,5 +246,34 @@ impl AgentManager {
             .unwrap()
             .set_spawn(session_id, true, Some("dev_X"), &now())
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+fn test_record(owner: &str, host: &str, id: &str, status: &str) -> SessionRecord {
+    SessionRecord {
+        id: id.into(),
+        owner_user_id: owner.into(),
+        host_id: host.into(),
+        workspace: "app".into(),
+        provider: "claude-code".into(),
+        provider_kind: "cli".into(),
+        interaction: "terminal".into(),
+        provider_fallback: None,
+        status: status.into(),
+        end_reason: None,
+        signal: None,
+        exit_code: None,
+        created_at: now(),
+        started_at: None,
+        ended_at: None,
+        last_activity: None,
+        egress: "host".into(),
+        cols: 80,
+        rows: 24,
+        title: None,
+        activity: None,
+        harness_session: None,
+        resumed_from: None,
     }
 }

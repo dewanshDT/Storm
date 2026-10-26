@@ -143,21 +143,26 @@ impl AgentManager {
     }
 
     /// The stop pass (L-3, L-8): each cascade target whose stop is due is
-    /// sent `end`, once per server run. A target whose host is away is
-    /// `unreachable`, and is sent its `end` once the host is back; nothing
-    /// else retries it. Returns each `end` sent or found unreachable.
+    /// sent `end`, once per host link. A target whose host is away is
+    /// `unreachable`, and is sent its `end` once the host is back; an `end`
+    /// lost with a replaced link is sent again on the new one (a duplicate
+    /// is harmless, L-3). Returns each `end` sent or found unreachable.
     pub fn stop_cascade_targets(&self, now: &str) -> AgentResult<Vec<Stop>> {
         let due: Vec<DueStop> = self.store.lock().unwrap().due_stops(now)?;
         let mut stops = Vec::new();
         for d in due {
             {
                 let mut live = self.live.lock().unwrap();
-                if d.state == "unreachable" && !live.hosts.contains_key(&d.host_id) {
+                let generation = live.hosts.get(&d.host_id).map(|l| l.generation);
+                if d.state == "unreachable" && generation.is_none() {
                     continue;
                 }
-                if !live.stopping.insert(d.session_id.clone()) {
+                if generation.is_some() && live.stopping.get(&d.session_id) == generation.as_ref() {
                     continue;
                 }
+                // Generations start at 1: an `end` with no link is never a match.
+                live.stopping
+                    .insert(d.session_id.clone(), generation.unwrap_or(0));
             }
             let stop = |sent| Stop {
                 session_id: d.session_id.clone(),
@@ -197,7 +202,7 @@ impl AgentManager {
         if !r.is_ended() || r.end_reason.as_deref() == Some("host_restart") {
             return Ok(None);
         }
-        let sent = self.live.lock().unwrap().stopping.contains(&r.id);
+        let sent = self.live.lock().unwrap().stopping.contains_key(&r.id);
         Ok(self
             .store
             .lock()

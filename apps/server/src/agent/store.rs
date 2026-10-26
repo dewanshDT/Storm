@@ -344,10 +344,15 @@ impl Store {
     /// reports it (freeze §13). A server that just started knows nothing about
     /// what its hosts did while it was down, and saying `running` would be a
     /// guess.
+    ///
+    /// A spawned child still `creating` is left as it is: its host was never
+    /// told of it, and startup fails it `server_restart` (139-D5).
     pub fn mark_unknown_on_boot(&self) -> Result<usize> {
         Ok(self.conn.execute(
             "UPDATE sessions SET status = 'unknown'
-             WHERE status NOT IN ('completed', 'failed', 'stopped')",
+             WHERE status NOT IN ('completed', 'failed', 'stopped')
+               AND NOT (status = 'creating'
+                        AND id IN (SELECT session_id FROM session_lineage))",
             [],
         )?)
     }
@@ -1650,6 +1655,44 @@ pub mod spawn {
             lineage_of(&self.conn, session_id)
         }
 
+        /// 139-D5: every spawned child still `creating` is failed
+        /// `server_restart`, in one transaction, and returned with its
+        /// parent. Each update is conditional on `creating`, so a child past
+        /// it is never ended and a second run changes nothing.
+        pub fn fail_children_left_creating(
+            &mut self,
+            now: &str,
+        ) -> Result<Vec<(SessionRecord, String)>> {
+            let tx = self.conn.transaction()?;
+            let left: Vec<(String, String)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT s.id, l.parent_session FROM sessions s
+                     JOIN session_lineage l ON l.session_id = s.id
+                     WHERE s.status = 'creating' ORDER BY s.created_at, s.id",
+                )?;
+                let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect::<rusqlite::Result<_>>()?
+            };
+            let mut failed = Vec::new();
+            for (id, parent) in left {
+                let changed = tx.execute(
+                    "UPDATE sessions SET status = 'failed', end_reason = 'server_restart',
+                         ended_at = ?2
+                     WHERE id = ?1 AND status = 'creating'",
+                    params![id, now],
+                )?;
+                if changed == 0 {
+                    continue;
+                }
+                let r = get_in(&tx, &id)?.expect("just updated");
+                refuse_requests_of_in(&tx, &id, "requester_ended", now)?;
+                on_ended(&tx, &r, now)?;
+                failed.push((r, parent));
+            }
+            tx.commit()?;
+            Ok(failed)
+        }
+
         /// Records a child at its approval, in one transaction: the session,
         /// its lineage under `parent` and its task. The only writer of
         /// lineage; nothing ever changes it after (L-1).
@@ -2035,7 +2078,9 @@ pub mod spawn {
 
         /// Every cascade target whose stop is due at `now`, oldest cascade
         /// first: still live, `pending` or `unreachable`, and either its
-        /// cascade stops at once or its grace is over.
+        /// cascade stops at once or its grace is over. A child still
+        /// `creating` waits for its `start` to go out, so its `end` never
+        /// reaches the host first (AP-3).
         pub fn due_stops(&self, now: &str) -> Result<Vec<DueStop>> {
             static SQL: LazyLock<String> = LazyLock::new(|| {
                 format!(
@@ -2045,7 +2090,7 @@ pub mod spawn {
                      JOIN spawn_cascade_targets t ON t.cascade_id = c.id
                      JOIN sessions s ON s.id = t.session_id
                      WHERE c.completed_at IS NULL AND t.state IN ('pending', 'unreachable')
-                       AND s.status NOT IN {ENDED}
+                       AND s.status NOT IN {ENDED} AND s.status <> 'creating'
                      ORDER BY c.created_at, c.rowid, t.rowid"
                 )
             });

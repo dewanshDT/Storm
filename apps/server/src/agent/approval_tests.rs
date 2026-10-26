@@ -11,7 +11,7 @@ use super::store::SessionRecord;
 use super::store::spawn::{
     Decision, MAX_CHILDREN, MAX_PENDING, MAX_TREE, NewRequest, Refusal, Request,
 };
-use super::{AgentManager, Envelope, Hello, Launch, LaunchMeta, McpGrant};
+use super::{AgentManager, Command, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
 const UNAVAILABLE: &str = r#"{"state": "unavailable", "reason": "self_test"}"#;
@@ -857,6 +857,42 @@ fn an_approved_end_is_decided_ended() {
 
 /// AP-5: approval after expiry is `expired`, and nothing acts; the sweeper
 /// marks what is due and nothing else.
+/// AP-3: a child the person ends the parent of while its approval is
+/// between commit and `start` is never sent `end` first, so the host
+/// cannot drop the `end` and then start it.
+#[test]
+fn ap3_an_end_never_precedes_its_childs_start() {
+    let mut f = fixture(16);
+    let p = f.parent();
+    let r = f.start(&p.id).unwrap();
+    let now = crate::index::now_rfc3339();
+    let decision =
+        f.m.store
+            .lock()
+            .unwrap()
+            .approve_request(&r.id, "dev_A", false, &now, &|_| Ok(16))
+            .unwrap()
+            .unwrap();
+    let child = *decided(decision).1.unwrap();
+    assert_eq!(child.status, "creating");
+    f.m.end_by_person(&p.id, Some(std::slice::from_ref(&child.id)), false)
+        .unwrap()
+        .unwrap();
+    assert!(f.m.stop_cascade_targets(&now).unwrap().is_empty());
+
+    f.m.dispatch_spawned(&child).unwrap();
+    let stops = f.m.stop_cascade_targets(&now).unwrap();
+    assert_eq!(stops.len(), 1);
+    let sent: Vec<&str> = std::iter::from_fn(|| f.link.try_recv().ok())
+        .filter_map(|e| match e.command {
+            Command::Start { session, .. } if session == child.id => Some("start"),
+            Command::End { session } if session == child.id => Some("end"),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(sent, ["start", "end"]);
+}
+
 #[test]
 fn ap5_an_expired_request_never_acts() {
     let f = fixture(16);

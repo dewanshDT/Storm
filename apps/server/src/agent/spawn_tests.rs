@@ -1000,9 +1000,10 @@ fn a_verified_isolation_report_opens_c0() {
         .unwrap();
     assert!(m.spawn_offered(&s.id));
 
-    // A new link carries the last report over, but has said nothing yet.
+    // A new link carries the last report over, but has said nothing yet:
+    // neither half counts.
     let (_generation, _rx2) = m.connect_host("hst_A");
-    assert_eq!(m.spawn_gate("hst_A"), Err("isolation_unverified"));
+    assert_eq!(m.spawn_gate("hst_A"), Err("identity_unverified"));
     assert!(!m.spawn_offered(&s.id));
     // Its own inventory counts as its word.
     m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
