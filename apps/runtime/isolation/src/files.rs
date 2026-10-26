@@ -875,6 +875,33 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_new_workspaces_get_distinct_groups() {
+        let t = tempfile::tempdir().unwrap();
+        let manifests = t.path().join("manifests");
+        let own = crate::session::tests::Own::default();
+        let pool = pool();
+        let start = std::sync::Barrier::new(8);
+        let groups: Vec<String> = std::thread::scope(|s| {
+            let threads: Vec<_> = (0..8)
+                .map(|i| {
+                    let ws = t.path().join(format!("ws{i}"));
+                    std::fs::create_dir(&ws).unwrap();
+                    let (pool, manifests, own, start) = (&pool, &manifests, own.clone(), &start);
+                    s.spawn(move || {
+                        convert::PAUSE_AFTER_CHOICE.set(std::time::Duration::from_millis(50));
+                        start.wait();
+                        workspace_group(&ws, pool, manifests, &own).unwrap()
+                    })
+                })
+                .collect();
+            threads.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let distinct: std::collections::BTreeSet<_> = groups.iter().collect();
+        assert_eq!(distinct.len(), 8, "{groups:?}");
+        assert_eq!(convert::Manifest::load_all(&manifests).unwrap().len(), 8);
+    }
+
+    #[test]
     fn leases_survive_a_restart_on_disk() {
         let t = tempfile::tempdir().unwrap();
         let dir = t.path().join("leases");

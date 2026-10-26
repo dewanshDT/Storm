@@ -18,10 +18,11 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CStr, OsStr};
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use rustix::fs::{AtFlags, FileType, Mode, OFlags};
+use rustix::fs::{AtFlags, FileType, FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 
 use crate::pool::{self, Pool};
@@ -557,6 +558,34 @@ pub struct Report {
     pub sealed: Vec<PathBuf>,
 }
 
+/// Held across load, choice, save and apply in `on` and `off`: a session's
+/// start, a child's and the operator's CLI each convert, and two unlocked
+/// conversions could give two workspaces one group and one manifest.
+fn lock(manifests: &Path) -> Result<OwnedFd> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(manifests)?;
+    let path = manifests.join(".lock");
+    let fd = rustix::fs::open(
+        &path,
+        OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o600),
+    )
+    .with_context(|| format!("opening {}", path.display()))?;
+    rustix::fs::flock(&fd, FlockOperation::LockExclusive)
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(fd)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Widens the window between choosing groups and saving them, so a
+    /// test can race two conversions.
+    pub(crate) static PAUSE_AFTER_CHOICE: std::cell::Cell<std::time::Duration> =
+        const { std::cell::Cell::new(std::time::Duration::ZERO) };
+}
+
 /// Turns isolation on for `workspaces`. Groups are assigned before
 /// anything is written, every manifest is complete before anything is
 /// changed, and a rerun after an interruption finishes the job without
@@ -567,6 +596,7 @@ pub fn on(
     manifests: &Path,
     own: &dyn Ownership,
 ) -> Result<Report> {
+    let _lock = lock(manifests)?;
     let mut existing = workspace_manifests(manifests)?;
     let mut used: Vec<String> = existing.iter().map(|m| m.group.clone()).collect();
     let mut plan: Vec<Manifest> = Vec::new();
@@ -588,7 +618,8 @@ pub fn on(
             entries: BTreeMap::new(),
         });
     }
-    std::fs::create_dir_all(manifests)?;
+    #[cfg(test)]
+    std::thread::sleep(PAUSE_AFTER_CHOICE.get());
     // A recorded workspace that has gone keeps its record (and its group)
     // until isolation is turned off.
     for m in &mut plan {
@@ -622,6 +653,7 @@ pub fn on(
 /// to the host account. A manifest is removed only once its workspace is
 /// restored, so an interrupted run can be repeated.
 pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report> {
+    let _lock = lock(manifests)?;
     let mut report = Report::default();
     for m in workspace_manifests(manifests)? {
         match std::fs::symlink_metadata(&m.workspace) {

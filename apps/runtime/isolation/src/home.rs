@@ -854,10 +854,7 @@ fn copy_conversation(
             let db = ".local/share/opencode/opencode.db";
             let wal = ".local/share/opencode/opencode.db-wal";
             if is_file(root.as_fd(), db, own)? {
-                let named = |rel: &str| -> Result<bool> {
-                    let path = kept.join("home").join(rel);
-                    Ok(path.is_file() && contains(&std::fs::read(&path)?, id.as_bytes()))
-                };
+                let named = |rel: &str| names(root.as_fd(), rel, id.as_bytes(), own);
                 found = named(db)? || (is_file(root.as_fd(), wal, own)? && named(wal)?);
                 if found {
                     copy(c, made, db)?;
@@ -881,6 +878,49 @@ fn copy_conversation(
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
     !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+const CHUNK: usize = 64 * 1024;
+
+/// Whether root's kept file `rel` holds `id`. A session wrote it, so it is
+/// opened through `root`, bounded as a copy would be, and read in chunks.
+fn names(root: BorrowedFd<'_>, rel: &str, id: &[u8], own: &dyn Ownership) -> Result<bool> {
+    let (dir_rel, name) = rel.rsplit_once('/').unwrap_or(("", rel));
+    let Some(dir) = open_dir_under(root, dir_rel, Some(0), own)? else {
+        return Ok(false);
+    };
+    let fd = match rustix::fs::openat(
+        &dir,
+        cname(name.as_bytes())?.as_c_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT | rustix::io::Errno::LOOP) => return Ok(false),
+        Err(e) => return Err(e).with_context(|| format!("opening {rel}")),
+    };
+    let st = rustix::fs::fstat(&fd)?;
+    if kind_of(&st) != Kind::File || owner_of(own, &st) != 0 || id.is_empty() {
+        return Ok(false);
+    }
+    if st.st_size as u64 > MAX_BYTES {
+        bail!("the kept {rel} is too large to resume from");
+    }
+    let mut file = std::fs::File::from(fd).take(MAX_BYTES);
+    let mut buf = vec![0; id.len() - 1 + CHUNK];
+    let mut carried = 0;
+    loop {
+        let n = file.read(&mut buf[carried..])?;
+        if n == 0 {
+            return Ok(false);
+        }
+        let end = carried + n;
+        if contains(&buf[..end], id) {
+            return Ok(true);
+        }
+        carried = (id.len() - 1).min(end);
+        buf.copy_within(end - carried..end, 0);
+    }
 }
 
 /// A regular file of root's under a kept root.
@@ -1611,6 +1651,61 @@ mod tests {
             .is_err(),
             "a database without the conversation"
         );
+    }
+
+    /// Keeps an OpenCode database of `db` (grown to `grow_to` once kept)
+    /// and resumes `ses_abc123` from it.
+    fn resume_opencode(f: &Fx, db: &[u8], grow_to: Option<u64>) -> Result<()> {
+        let kept_root = f.homes.parent().unwrap().join("kept");
+        let o = f.home("ags_O");
+        let data = o.join(".local/share/opencode");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("opencode.db"), db).unwrap();
+        assert!(end(f, &o, &kept_root.join("ags_O"), "opencode"));
+        if let Some(len) = grow_to {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(kept_root.join("ags_O/home/.local/share/opencode/opencode.db"))
+                .unwrap()
+                .set_len(len)
+                .unwrap();
+        }
+        let home = f.home("ags_P");
+        let resume = Resume {
+            from: "ags_O".into(),
+            conversation: "ses_abc123".into(),
+        };
+        populate(
+            &Paths::new(&f.host_state, &home),
+            "opencode",
+            "ags_P",
+            me(),
+            UID,
+            GID,
+            Some((&resume, &kept_root.join("ags_O"))),
+            &f.own,
+        )
+    }
+
+    #[test]
+    fn a_resume_refuses_an_oversized_kept_database() {
+        let f = fx();
+        let started = std::time::Instant::now();
+        let err =
+            resume_opencode(&f, b"SQLite format 3\0...ses_abc123...", Some(8 << 30)).unwrap_err();
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_conversation_id_across_a_chunk_boundary_is_found() {
+        let f = fx();
+        let mut db = vec![b'.'; 64 * 1024 - 4];
+        db.extend_from_slice(b"ses_abc123");
+        db.extend_from_slice(&[b'.'; 100]);
+        resume_opencode(&f, &db, None).unwrap();
+        let home = f.homes.join("ags_P");
+        assert!(home.join(".local/share/opencode/opencode.db").is_file());
     }
 
     /// A session that left a link where its conversations go keeps nothing
