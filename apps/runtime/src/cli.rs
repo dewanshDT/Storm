@@ -75,6 +75,8 @@ pub struct CliProvider {
     /// The `PATH` it is looked for on and runs with (AM38). `None`: the
     /// host's own.
     path: Option<OsString>,
+    /// On an isolated host, the helper that starts its sessions (136d).
+    isolation: Option<crate::isolation::Link>,
 }
 
 impl CliProvider {
@@ -89,7 +91,15 @@ impl CliProvider {
             args: args.into_iter().map(Into::into).collect(),
             env: Vec::new(),
             path: None,
+            isolation: None,
         }
+    }
+
+    /// Its sessions are started by the isolation helper, each in its own
+    /// unit under its own user, never as this host's account (136a).
+    pub fn isolated(mut self, link: crate::isolation::Link) -> Self {
+        self.isolation = Some(link);
+        self
     }
 
     /// Looks the command up on `path`, and gives every session that `PATH`,
@@ -174,6 +184,17 @@ impl Provider for CliProvider {
         pty::resolve(&self.command, self.path.as_deref())
     }
 
+    fn isolated(&self) -> bool {
+        self.isolation.is_some()
+    }
+
+    fn env_names(&self) -> Vec<(OsString, bool)> {
+        self.env
+            .iter()
+            .map(|(k, v)| (k.clone(), !v.is_empty()))
+            .collect()
+    }
+
     fn helper_command(&self) -> Option<std::process::Command> {
         let program = pty::resolve(&self.command, self.path.as_deref())?;
         let mut command = std::process::Command::new(program);
@@ -230,10 +251,38 @@ impl Provider for CliProvider {
             env,
             env_remove: spec.launch.env_remove,
             secret_env: spec.launch.secret_env,
+            resumed_from: spec.launch.resumed_from,
+            child_of: spec.launch.child_of,
             tag: spec.session_id.clone(),
+            isolated: self
+                .isolation
+                .clone()
+                .map(|link| crate::isolation::Isolated {
+                    link,
+                    provider: self.id.to_string(),
+                }),
         };
-        let spawned = pty::spawn(&launch, size)
-            .map_err(|e| failed(&format!("starting {}", program.display()), e))?;
+        let spawned = pty::spawn(&launch, size).map_err(|e| {
+            #[cfg(target_os = "linux")]
+            {
+                use crate::status::EndReason;
+                let why = match crate::isolation::child_failure(&e) {
+                    Some("workspace_cap") => Some(EndReason::WorkspaceCap),
+                    Some("unreadable_repository") => Some(EndReason::UnreadableRepository),
+                    _ => None,
+                };
+                if let Some(why) = why {
+                    return StartError::Ended(why, format!("the child's workspace: {e}"));
+                }
+            }
+            failed(&format!("starting {}", program.display()), e)
+        })?;
+        if let Some(leader) = spawned.leader {
+            events.leader(leader, spawned.user);
+        }
+        if let Some(made) = spawned.child_workspace {
+            events.child_workspace(made);
+        }
 
         let shared = Arc::new(Shared {
             status: Mutex::new(SessionStatus::Running),

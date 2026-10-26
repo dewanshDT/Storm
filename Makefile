@@ -13,6 +13,8 @@ RELAY  := apps/relay
 CONFORMANCE := tools/relay-conformance
 RELAY_CF := apps/relay-cf
 RUNTIME := apps/runtime
+# Per-session isolation's root helper (decision 136): its own small crate.
+ISOLATION := apps/runtime/isolation
 CLIENT := apps/client
 WWW    := apps/www
 
@@ -70,6 +72,7 @@ fmt-check:
 	cd $(RELAY) && cargo fmt --check
 	cd $(CONFORMANCE) && cargo fmt --check
 	cd $(RUNTIME) && cargo fmt --check
+	cd $(ISOLATION) && cargo fmt --check
 	cd $(CLIENT) && dart format --set-exit-if-changed lib test test_live
 
 ## lint: clippy + dart analyze, all must be clean
@@ -78,6 +81,7 @@ lint:
 	cd $(RELAY) && cargo clippy --all-targets -- -D warnings
 	cd $(CONFORMANCE) && cargo clippy --all-targets -- -D warnings
 	cd $(RUNTIME) && cargo clippy --all-targets -- -D warnings
+	cd $(ISOLATION) && cargo clippy --all-targets -- -D warnings
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
@@ -137,6 +141,21 @@ test-relay-cf:
 # (decision 77), so it is its own crate with its own target.
 test-runtime:
 	cd $(RUNTIME) && cargo test
+	cd $(ISOLATION) && cargo test
+
+## verify-isolation-units: systemd-analyze verify and security on the isolation helper's units (Linux)
+#
+# Unprivileged. The service's ExecStart is pointed at the debug build, since
+# verify refuses a unit whose binary is missing; security fails above an
+# exposure of 2.0 (the helper is root, so every sandbox setting counts).
+verify-isolation-units:
+	cd $(ISOLATION) && cargo build --quiet
+	d=$$(mktemp -d) && \
+	cp deploy/storm-runtime-isolation.socket deploy/storm-runtime-isolation.service "$$d"/ && \
+	sed -i "s#/usr/sbin/storm-runtime-isolation#$$PWD/$(ISOLATION)/target/debug/storm-runtime-isolation#" "$$d/storm-runtime-isolation.service" && \
+	systemd-analyze verify --man=no "$$d/storm-runtime-isolation.socket" "$$d/storm-runtime-isolation.service" && \
+	systemd-analyze security --offline=true --threshold=20 "$$d/storm-runtime-isolation.service" && \
+	rm -rf "$$d"
 
 ## test-client: Dart unit tests
 test-client:
@@ -146,6 +165,25 @@ test-client:
 test-gateway-mutations:
 	@cd $(SERVER) && cargo build --quiet
 	@python3 $(SERVER)/tests/gateway_mutations.py
+
+## gate-spawn-asks: G-134-5 — decision 134's pinned asks and exemptions against the real, signed-in Claude Code and OpenCode on this host (never CI)
+gate-spawn-asks:
+	@cd $(RUNTIME) && STORM_SPAWN_ASKS_GATE=1 OPENCODE_DISABLE_MODELS_FETCH=1 \
+		cargo test --quiet --test spawn_asks_gate -- --nocapture --test-threads 1
+
+## gate-attention: G-134-7 — needs_attention's permission prompt hooks against the real Claude Code and OpenCode on this host, typed into like a person (never CI)
+gate-attention:
+	@cd $(RUNTIME) && STORM_ATTENTION_GATE=1 \
+		cargo test --quiet --test attention_gate -- --nocapture --test-threads 1
+
+## gate-bridge-identity: G-135-2 (Linux) or G-135-4 (macOS) against the real, signed-in agent CLIs on this host (never CI)
+gate-bridge-identity:
+	@cd $(SERVER) && cargo build --quiet
+	@cd $(RUNTIME) && cargo build --quiet $(if $(filter Darwin,$(shell uname -s)),--features macos-identity-gate)
+	@STORM_BRIDGE_IDENTITY_GATE=1 \
+		SERVER_BIN="$$PWD/$(SERVER)/target/debug/storm-server" \
+		RUNTIME_BIN="$$PWD/$(RUNTIME)/target/debug/storm-runtime" \
+		python3 $(RUNTIME)/tests/bridge_identity_gate.py
 
 ## test-migration: boot this build on a v5 auth.db made by the pre-v6 server (decision 82)
 # Builds PRE_V6_REF in .dev/pre-v6 (kept between runs) to make the v5 database.
@@ -355,6 +393,7 @@ fmt:
 	cd $(RELAY) && cargo fmt
 	cd $(CONFORMANCE) && cargo fmt
 	cd $(RUNTIME) && cargo fmt
+	cd $(ISOLATION) && cargo fmt
 	cd $(CLIENT) && dart format lib test test_live
 
 # ---- running --------------------------------------------------------
@@ -562,7 +601,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-spawn-asks gate-attention fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

@@ -38,6 +38,22 @@ pub enum Op {
     Remove,
 }
 
+impl Op {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+            Self::Remove => "remove",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        [Self::Install, Self::Update, Self::Remove]
+            .into_iter()
+            .find(|op| op.name() == name)
+    }
+}
+
 /// Why a job failed: the stable codes the app shows (133-4). npm's output
 /// never crosses the wire (it can hold registry URLs with tokens), and
 /// neither does a URL; the host's own log keeps the detail.
@@ -58,6 +74,36 @@ pub enum Failure {
 }
 
 impl Failure {
+    /// Back from a code an install job printed (136g): a known one, or
+    /// `job_failed`.
+    pub fn from_code(code: &str) -> Self {
+        const BLOCKED: [&str; 4] = [
+            "disabled",
+            "unsupported_platform",
+            "no_node",
+            "node_too_old",
+        ];
+        if let Some(reason) = BLOCKED.iter().find(|r| **r == code) {
+            return Self::Blocked(reason);
+        }
+        [
+            Self::Unknown,
+            Self::DownloadFailed,
+            Self::ChecksumMismatch,
+            Self::UnpackFailed,
+            Self::NpmFailed,
+            Self::VersionProbeFailed,
+            Self::DiskFull,
+            Self::NotManaged,
+            Self::InUse,
+            Self::Busy,
+            Self::Timeout,
+        ]
+        .into_iter()
+        .find(|f| f.code() == code)
+        .unwrap_or(Self::Blocked("job_failed"))
+    }
+
     pub fn code(self) -> &'static str {
         match self {
             Self::Unknown => "unknown_agent",
@@ -390,6 +436,35 @@ pub async fn run(
     path: Option<OsString>,
     step: &(dyn Fn(&'static str) + Sync),
 ) -> Result<Option<String>, Failure> {
+    run_as(state_dir, agent, op, path, step, false).await
+}
+
+/// The isolation helper's job (136g): `run_as` the install identity, with
+/// the `PATH` its unit gives, answered as one line for the helper to check.
+pub async fn isolated_job(state_dir: &Path, agent: &str, action: &str) -> serde_json::Value {
+    let Some(op) = Op::from_name(action) else {
+        return serde_json::json!({"failed": Failure::Unknown.code()});
+    };
+    if let Some(home) = std::env::var_os("HOME") {
+        let _ = crate::platform::create_private_dir(Path::new(&home));
+    }
+    let path = std::env::var_os("PATH");
+    match run_as(state_dir, agent, op, path, &|_| {}, true).await {
+        Ok(version) => serde_json::json!({"done": {"version": version}}),
+        Err(f) => serde_json::json!({"failed": f.code()}),
+    }
+}
+
+/// [`run`], and with `shared` as the install identity on an isolated host
+/// (136g): what it writes is for every session to read.
+pub async fn run_as(
+    state_dir: &Path,
+    agent: &str,
+    op: Op,
+    path: Option<OsString>,
+    step: &(dyn Fn(&'static str) + Sync),
+    shared: bool,
+) -> Result<Option<String>, Failure> {
     let recipe = recipe(agent).ok_or(Failure::Unknown)?;
     if op == Op::Remove {
         return remove(state_dir, recipe, path).await.map(|()| None);
@@ -408,11 +483,11 @@ pub async fn run(
     let target = match recipe.kind {
         Kind::Npm(package) => {
             step("Installing");
-            npm_install(state_dir, recipe, package, &version, path.clone()).await?
+            npm_install(state_dir, recipe, package, &version, path.clone(), shared).await?
         }
-        _ => fetch_release(state_dir, recipe, &version, step).await?,
+        _ => fetch_release(state_dir, recipe, &version, step, shared).await?,
     };
-    activate(state_dir, recipe, &target, &version)
+    activate_as(state_dir, recipe, &target, &version, shared)
         .map_err(|e| io_failure(&e, Failure::UnpackFailed))?;
     let probed = tokio::task::spawn_blocking({
         let target = target.clone();
@@ -438,13 +513,18 @@ async fn fetch_release(
     recipe: &Recipe,
     version: &str,
     step: &(dyn Fn(&'static str) + Sync),
+    shared: bool,
 ) -> Result<PathBuf, Failure> {
     let (os, arch) = platform().ok_or(Failure::Blocked("unsupported_platform"))?;
     let http = http()?;
     let dir = agent_dir(state_dir, recipe);
-    crate::platform::create_private_dir(&crate::agents::managed_dir(state_dir))
-        .or_else(|_| std::fs::create_dir_all(crate::agents::managed_dir(state_dir)))
-        .map_err(|e| io_failure(&e, Failure::UnpackFailed))?;
+    let managed = crate::agents::managed_dir(state_dir);
+    if shared {
+        std::fs::create_dir_all(&managed)
+    } else {
+        crate::platform::create_private_dir(&managed).or_else(|_| std::fs::create_dir_all(&managed))
+    }
+    .map_err(|e| io_failure(&e, Failure::UnpackFailed))?;
     std::fs::create_dir_all(&dir).map_err(|e| io_failure(&e, Failure::UnpackFailed))?;
     let final_dir = dir.join(version);
     let staging = dir.join(format!(".tmp-{version}-{}", std::process::id()));
@@ -586,9 +666,18 @@ async fn npm_install(
     package: &str,
     version: &str,
     path: Option<OsString>,
+    shared: bool,
 ) -> Result<PathBuf, Failure> {
     let npm = crate::pty::resolve(OsStr::new("npm"), path.as_deref())
         .ok_or(Failure::Blocked("no_node"))?;
+    if shared {
+        // Under the install identity's UMask=0022 npm would make its cache,
+        // and the logs in it, readable by every session.
+        crate::platform::create_private_dir(
+            &crate::agents::managed_dir(state_dir).join("npm-cache"),
+        )
+        .map_err(|e| io_failure(&e, Failure::NpmFailed))?;
+    }
     let prefix = npm_prefix(state_dir);
     std::fs::create_dir_all(&prefix).map_err(|e| io_failure(&e, Failure::NpmFailed))?;
     let mut command = tokio::process::Command::new(npm);
@@ -641,11 +730,12 @@ async fn npm_install(
 
 /// Points `bin/<command>` at `target`, atomically, records the version, and
 /// keeps only the current and previous releases.
-fn activate(
+fn activate_as(
     state_dir: &Path,
     recipe: &Recipe,
     target: &Path,
     version: &str,
+    shared: bool,
 ) -> std::io::Result<()> {
     let bin = crate::agents::managed_bin(state_dir);
     std::fs::create_dir_all(&bin)?;
@@ -663,7 +753,11 @@ fn activate(
     crate::fsutil::write_atomic(
         &dir.join("current"),
         version.as_bytes(),
-        crate::fsutil::Access::Private,
+        if shared {
+            crate::fsutil::Access::Default
+        } else {
+            crate::fsutil::Access::Private
+        },
     )
     .map_err(std::io::Error::other)?;
     if !matches!(recipe.kind, Kind::Npm(_)) {
@@ -783,7 +877,7 @@ mod tests {
         for v in ["1.0.0", "1.1.0", "1.2.0"] {
             std::fs::create_dir_all(dir.join(v)).unwrap();
             std::fs::write(dir.join(v).join("claude"), v).unwrap();
-            activate(t.path(), r, &dir.join(v).join("claude"), v).unwrap();
+            activate_as(t.path(), r, &dir.join(v).join("claude"), v, false).unwrap();
         }
         assert_eq!(
             managed_target(t.path(), "claude-code"),
@@ -809,7 +903,7 @@ mod tests {
         let dir = agent_dir(t.path(), r).join("1.0");
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("cursor-agent"), "x").unwrap();
-        activate(t.path(), r, &dir.join("cursor-agent"), "1.0").unwrap();
+        activate_as(t.path(), r, &dir.join("cursor-agent"), "1.0", false).unwrap();
         remove(t.path(), r, None).await.unwrap();
         assert!(managed_target(t.path(), "cursor").is_none());
         assert!(!agent_dir(t.path(), r).exists());

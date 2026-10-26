@@ -245,6 +245,19 @@ args = ["-i"]
         check("it offers fake and shell", {p["id"] for p in caps["providers"]} == {"fake", "shell"}, caps)
         check("it lists its workspaces", sorted(caps["workspaces"]) == ["site", "storm"], caps)
         check("egress is the host's", host["egress"] == "host")
+        # Decision 135d: the host row carries the identity the host reported.
+        identity = host.get("identity") or {}
+        check("the host row carries its bridge identity, as its capabilities say",
+              sorted(identity) == ["mechanism", "reason", "state"]
+              and identity == caps.get("identity")
+              and identity["state"] in ("verified", "unsupported", "unavailable"), host)
+        # Decision 136j: and its session isolation, off here.
+        isolation = host.get("isolation") or {}
+        check("the host row carries its isolation, as its capabilities say: off here",
+              sorted(isolation) == ["mechanism", "reason", "state"]
+              and isolation == caps.get("isolation")
+              and isolation["state"] in ("unsupported", "unavailable")
+              and isolation["reason"] in ("off", "macos", "windows"), host)
         status, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
         check("workspaces carry live counts", status == 200 and all("live_sessions" in w for w in wss), wss)
 
@@ -284,6 +297,11 @@ args = ["-i"]
         check("the agent's title reaches the stream as a status (D15 AM42)",
               not closed and seen[-1]["activity"] == "working", seen[-1:])
         check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
+        check("a working agent needs no attention (134p)", session(owner, sid)["needs_attention"] is None)
+        write(owner, sid, "\x1b]0;\u2733 Fix the login\x07")
+        idle = wait(lambda: (lambda r: r if r["activity"] == "idle" else None)(session(owner, sid)), "the idle title")
+        check("nor an idle one: idle never sets needs_attention (134p, A3)",
+              idle and idle["needs_attention"] is None, idle)
         png = b"\x89PNG\r\n\x1a\n" + bytes(64)
         status, staged = call("POST", f"/v1/agent/sessions/{sid}/terminal/images", auth=owner,
                               raw=png, timeout=40)

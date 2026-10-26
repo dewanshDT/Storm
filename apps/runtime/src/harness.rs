@@ -32,11 +32,39 @@ use crate::provider::LaunchExtras;
 
 pub const HANDLE_ENV: &str = "STORM_HARNESS_HANDLE";
 
+/// The longest a report waits for the host to take it: well past the host's
+/// own wait for a session still starting.
+const REPORT_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// One line from `harness-session` on the daemon socket.
 #[derive(Debug, Deserialize, Serialize)]
 pub struct HarnessLine {
     pub handle: String,
     pub harness_session: String,
+}
+
+/// The adapters whose hooks report a permission prompt as `needs_attention`
+/// (decision 134p): each joins only once G-134-7 passes for it
+/// (`tests/attention_gate.rs`), and 134 lands dark, so none is on. Claude
+/// Code 2.1.310 failed: an Esc at its prompt runs no hook, so nothing
+/// clears it. OpenCode 1.18.31 passed. Codex has no hooks written. The
+/// server keeps the same list and takes a report only from both.
+pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
+
+pub const PERMISSION_PROMPT: &str = "permission_prompt";
+/// What a hook says when the prompt is answered.
+pub const ATTENTION_CLEAR: &str = "none";
+
+/// One line from `attention` on the daemon socket: the agent's own prompt
+/// is waiting for a person, or no longer is.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AttentionLine {
+    pub handle: String,
+    pub attention: String,
+}
+
+pub fn permission_prompt_on(provider: &str) -> bool {
+    PERMISSION_PROMPT_ADAPTERS.contains(&provider)
 }
 
 /// Whether `id` is a session id `provider` could have made. It becomes an
@@ -65,7 +93,11 @@ fn new_uuid() -> String {
 /// What a session's launch gains so its id reaches the host, and the id when
 /// it is known before the agent starts. `resume` must already be valid for
 /// `provider`. Nothing for any other provider. `synced` is merged into Claude
-/// Code's settings file and checked there (token sync, AM71).
+/// Code's settings file and checked there (token sync, AM71), and so are a
+/// spawn session's `permissions` (134-8). `attention` adds the hooks that
+/// report a permission prompt (134-9), only for an adapter in
+/// [`PERMISSION_PROMPT_ADAPTERS`]; without it every file is as before.
+#[allow(clippy::too_many_arguments)]
 pub fn launch(
     provider: &str,
     dir: &Path,
@@ -74,6 +106,8 @@ pub fn launch(
     exe: &Path,
     resume: Option<&str>,
     synced: Option<&serde_json::Map<String, serde_json::Value>>,
+    spawn: Option<&crate::mcp::SpawnAsks>,
+    attention: bool,
 ) -> Result<(LaunchExtras, Option<String>)> {
     let env = vec![
         (HANDLE_ENV.into(), handle.into()),
@@ -95,11 +129,17 @@ pub fn launch(
             let mut settings = json!({
                 "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": hook}]}]}
             });
+            if attention {
+                claude_attention_hooks(&mut settings, exe);
+            }
             if let Some(pins) = synced {
                 settings
                     .as_object_mut()
                     .expect("an object")
                     .extend(pins.clone());
+            }
+            if let Some(asks) = spawn {
+                settings["permissions"] = crate::mcp::claude_permissions(asks);
             }
             // A file, not inline JSON: npm installs Claude Code on Windows as
             // `claude.cmd`, and a batch file's arguments may hold no `"`
@@ -109,6 +149,9 @@ pub fn launch(
             write_private(&path, settings.to_string().as_bytes())?;
             if let Some(pins) = synced {
                 crate::credential::verify_settings(&std::fs::read(&path)?, pins)?;
+            }
+            if let Some(asks) = spawn {
+                crate::mcp::verify_claude_permissions(&std::fs::read(&path)?, asks)?;
             }
             args.extend(["--settings".into(), path.into_os_string()]);
             Ok((
@@ -126,7 +169,7 @@ pub fn launch(
             private_dir(dir)?;
             private_dir(&config)?;
             private_dir(&plugins)?;
-            write_private(&plugins.join("storm.js"), plugin(exe).as_bytes())?;
+            write_private(&plugins.join("storm.js"), plugin(exe, attention).as_bytes())?;
             let mut env = env;
             env.push(("OPENCODE_CONFIG_DIR".into(), config.into_os_string()));
             let args = match resume {
@@ -167,18 +210,79 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
+/// Claude Code's hooks for a permission prompt (134-9): `PermissionRequest`
+/// as its dialog opens and `Notification` named `permission_prompt` set it;
+/// a tool's end, a new prompt and the turn's end clear it. `idle_prompt`, the
+/// notification for an agent waiting at its prompt, is never matched.
+fn claude_attention_hooks(settings: &mut serde_json::Value, exe: &Path) {
+    let command = |kind: &str| {
+        json!([{"type": "command", "command": format!(
+            "{} attention {kind}",
+            shell_quote(&exe.display().to_string())
+        )}])
+    };
+    let hooks = &mut settings["hooks"];
+    hooks["PermissionRequest"] = json!([{"hooks": command(PERMISSION_PROMPT)}]);
+    hooks["Notification"] =
+        json!([{"matcher": PERMISSION_PROMPT, "hooks": command(PERMISSION_PROMPT)}]);
+    for event in [
+        "PostToolUse",
+        "PostToolUseFailure",
+        "UserPromptSubmit",
+        "Stop",
+    ] {
+        hooks[event] = json!([{"hooks": command(ATTENTION_CLEAR)}]);
+    }
+}
+
 /// The OpenCode plugin. A subagent's session has a parent and is never the
-/// one to resume; an id is reported once per change.
-fn plugin(exe: &Path) -> String {
+/// one to resume; an id is reported once per change. With `attention`, it
+/// also reports while any permission it was asked is unanswered (134-9),
+/// one report at a time so they arrive in order.
+fn plugin(exe: &Path, attention: bool) -> String {
     let exe = serde_json::to_string(&exe.display().to_string()).expect("a string serializes");
+    let (tell, attention) = if attention {
+        let tell = format!(
+            r#"
+  const asked = new Set();
+  let told = Promise.resolve();
+  const tell = (kind) => {{
+    told = told.then(() => new Promise((done) => {{
+      try {{
+        const child = spawn({exe}, ["attention", kind], {{ stdio: "ignore" }});
+        child.on("exit", done);
+        child.on("error", done);
+      }} catch {{
+        done();
+      }}
+    }}));
+  }};"#
+        );
+        let attention = format!(
+            r#"
+      if (event.type === "permission.asked") {{
+        const was = asked.size;
+        asked.add(event.properties?.id);
+        if (was === 0) tell("{PERMISSION_PROMPT}");
+        return;
+      }}
+      if (event.type === "permission.replied") {{
+        if (asked.delete(event.properties?.requestID) && asked.size === 0) tell("{ATTENTION_CLEAR}");
+        return;
+      }}"#
+        );
+        (tell, attention)
+    } else {
+        (String::new(), String::new())
+    };
     format!(
         r#"import {{ spawn }} from "node:child_process";
 
 export const StormHarness = async () => {{
   const children = new Set();
-  let last;
+  let last;{tell}
   return {{
-    event: async ({{ event }}) => {{
+    event: async ({{ event }}) => {{{attention}
       const info = event.properties?.info;
       if (event.type === "session.created" || event.type === "session.updated") {{
         if (info?.parentID) children.add(info.id);
@@ -222,6 +326,36 @@ pub fn report(id: Option<String>) {
     }
 }
 
+/// `storm-runtime attention KIND`: tells the daemon the agent's permission
+/// prompt is waiting (`permission_prompt`) or answered (`none`). Run by the
+/// agent's own hook or plugin. Always successful, and prints nothing: a
+/// hook's output would reach the agent.
+pub fn report_attention(kind: &str) {
+    // A Claude Code hook is handed its input; read it so the hook never
+    // blocks on a full pipe.
+    let _ = read_hook_input();
+    let Ok(handle) = std::env::var(HANDLE_ENV) else {
+        return;
+    };
+    let Some(socket) = std::env::var_os(crate::mcp::SOCKET_ENV) else {
+        return;
+    };
+    let _ = send_attention(&socket, handle, kind.to_string());
+}
+
+pub(crate) fn send_attention(
+    socket: impl AsRef<Path>,
+    handle: String,
+    attention: String,
+) -> Result<()> {
+    let mut line = serde_json::to_vec(&AttentionLine { handle, attention })?;
+    line.push(b'\n');
+    let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
+    stream.write_all(&line)?;
+    stream.wait_closed(REPORT_WAIT);
+    Ok(())
+}
+
 fn read_hook_input() -> Option<serde_json::Value> {
     let mut input = String::new();
     std::io::stdin()
@@ -255,6 +389,8 @@ pub(crate) fn send(socket: impl AsRef<Path>, handle: String, id: String) -> Resu
     line.push(b'\n');
     let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
     stream.write_all(&line)?;
+    // Stay alive until the host has checked who sent it (decision 135).
+    stream.wait_closed(REPORT_WAIT);
     Ok(())
 }
 
@@ -324,6 +460,8 @@ mod tests {
             exe,
             None,
             None,
+            None,
+            false,
         )
         .unwrap();
         let id = id.unwrap();
@@ -368,6 +506,8 @@ mod tests {
             Path::new("/x"),
             None,
             Some(&pins),
+            None,
+            false,
         )
         .unwrap();
         let at = extras.args.iter().position(|a| a == "--settings").unwrap();
@@ -407,6 +547,114 @@ mod tests {
         assert!(!String::from_utf8_lossy(&bytes).contains(crate::credential::TOKEN_ENV));
     }
 
+    /// 134-9: without the permission prompt hooks, OpenCode's plugin is the
+    /// one every session had before.
+    #[test]
+    fn the_plugin_without_attention_is_unchanged() {
+        let before = r#"import { spawn } from "node:child_process";
+
+export const StormHarness = async () => {
+  const children = new Set();
+  let last;
+  return {
+    event: async ({ event }) => {
+      const info = event.properties?.info;
+      if (event.type === "session.created" || event.type === "session.updated") {
+        if (info?.parentID) children.add(info.id);
+        return;
+      }
+      if (event.type !== "message.updated") return;
+      const id = info?.sessionID;
+      if (typeof id !== "string" || id === last || children.has(id)) return;
+      last = id;
+      try {
+        spawn("/x", ["harness-session", id], { stdio: "ignore", detached: true }).unref();
+      } catch {}
+    },
+  };
+};
+"#;
+        assert_eq!(plugin(Path::new("/x"), false), before);
+    }
+
+    /// 134-9: no adapter's permission prompt hooks are written until its
+    /// G-134-7 passes, and the server keeps the same list.
+    #[test]
+    fn no_adapter_has_permission_prompt_hooks_yet() {
+        for provider in ["claude-code", "opencode", "codex", "shell", "cursor"] {
+            assert!(!permission_prompt_on(provider), "{provider}");
+        }
+        let server = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../server/src/agent/attention.rs"),
+        )
+        .unwrap();
+        let list = |src: &str| {
+            let head = "PERMISSION_PROMPT_ADAPTERS: &[&str] = &[";
+            let rest = &src[src.find(head).unwrap() + head.len()..];
+            rest[..rest.find("];").unwrap()].to_string()
+        };
+        assert_eq!(list(include_str!("harness.rs")), list(&server));
+        assert_eq!(list(&server).trim(), "");
+    }
+
+    /// 134-9 with the hooks on: Claude Code's dialog sets it, and a tool's
+    /// end, a prompt and the turn's end clear it; its idle notification is
+    /// never matched. OpenCode's plugin counts unanswered permissions.
+    #[test]
+    fn the_permission_prompt_hooks_set_on_a_prompt_and_clear_on_its_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = Path::new("/opt/it's/storm-runtime");
+        let settings = |attention| {
+            launch(
+                "claude-code",
+                dir.path(),
+                "h",
+                Path::new("/s"),
+                exe,
+                None,
+                None,
+                None,
+                attention,
+            )
+            .unwrap();
+            let bytes = std::fs::read(dir.path().join("claude-settings.json")).unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        };
+        let off = settings(false);
+        assert_eq!(
+            off["hooks"].as_object().unwrap().keys().collect::<Vec<_>>(),
+            ["SessionStart"]
+        );
+        let on = settings(true);
+        let command = |event: &str| on["hooks"][event][0]["hooks"][0]["command"].clone();
+        let set = json!(r"'/opt/it'\''s/storm-runtime' attention permission_prompt");
+        let clear = json!(r"'/opt/it'\''s/storm-runtime' attention none");
+        assert_eq!(command("PermissionRequest"), set);
+        assert_eq!(command("Notification"), set);
+        assert_eq!(
+            on["hooks"]["Notification"][0]["matcher"],
+            "permission_prompt"
+        );
+        assert_eq!(on["hooks"]["Notification"].as_array().unwrap().len(), 1);
+        for event in [
+            "PostToolUse",
+            "PostToolUseFailure",
+            "UserPromptSubmit",
+            "Stop",
+        ] {
+            assert_eq!(command(event), clear, "{event}");
+        }
+        assert!(!on.to_string().contains("idle"), "{on}");
+        assert_eq!(on["hooks"]["SessionStart"], off["hooks"]["SessionStart"]);
+
+        let js = plugin(Path::new("/x"), true);
+        assert!(js.contains(r#"event.type === "permission.asked""#), "{js}");
+        assert!(js.contains(r#"event.properties?.requestID"#), "{js}");
+        assert!(js.contains(r#"tell("permission_prompt")"#), "{js}");
+        assert!(js.contains(r#"tell("none")"#), "{js}");
+        assert!(!js.contains("idle"), "{js}");
+    }
+
     #[test]
     fn a_resume_names_the_conversation() {
         let dir = tempfile::tempdir().unwrap();
@@ -420,6 +668,8 @@ mod tests {
             exe,
             Some(uuid),
             None,
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -437,6 +687,8 @@ mod tests {
             exe,
             Some(ses),
             None,
+            None,
+            false,
         )
         .unwrap();
         assert_eq!(oc.args, ["-s", ses]);
@@ -454,6 +706,8 @@ mod tests {
             Path::new("/usr/bin/storm-runtime"),
             None,
             None,
+            None,
+            false,
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -480,6 +734,8 @@ mod tests {
                 Path::new("/x"),
                 None,
                 None,
+                None,
+                false,
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());

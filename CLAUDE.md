@@ -612,6 +612,39 @@ Specification*; the slices are decisions 81 and 81a onward):
   else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
+- **Decision 134's CLI asks are written at launch, never later** (134-8,
+  `mcp::PINNED_ASK_TOOLS`/`EXEMPT_TOOLS`, pinned in the host and checked
+  against the server's lists by a test). Only a `start` carrying
+  `spawn_asks` — sent where C0 holds, for a spawning adapter with the storm
+  connection — gets them, and only such a session's switch turns on
+  (`launched_without_asks`); every other config is byte for byte as before.
+  Claude Code: `permissions.ask` for `start_agent`, `send_message`,
+  `end_agent` and `allow` for the exemptions in its `--settings` file (an
+  ask beats any allow; G-134-5). OpenCode: each pinned ask under a key no
+  account config has (`storm_start_agent`, else with more `*`), so the merge
+  appends it after the account's keys, at the top level and in every agent
+  the account or `runtime.toml` defines; exemptions only where the account
+  names no such key. Exemptions only on a host whose own identity is
+  verified and whose isolation self-test has passed. Codex: nothing new,
+  every Storm tool already prompts.
+- **C0 is the live link's word, both halves** (134r): `spawn_gate` needs
+  `identity` and `isolation` exactly `verified` in what the host's current
+  link has itself sent (`hello` or an inventory; a new link's carried-over
+  copy does not count), and `reassess_spawn_gate` runs after every one.
+  **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
+  names for one directory, or one inside the other, are one workspace, and
+  a name the host gives no directory for is shared with every other.
+- **An approved child is started in a workspace of its own, never its
+  parent's** (134-5): its `start` names the parent's workspace and
+  `child_of`, the host has the helper make the child's W2 clone or W3
+  scratch before it starts it (and refuses a child on a host without
+  isolation), and the child's record is `children/<id>`, which the host
+  reports in `workspace_paths` once made. Its grants are the parent's live
+  ones at approval, its agent the parent's (B4), its synced login only the
+  parent's; it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
+  starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
+  grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
+  holds the two crates' tests to one `start`.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
@@ -671,6 +704,64 @@ Specification*; the slices are decisions 81 and 81a onward):
   audited in `security_events` with codes only, never a URL or npm output.
   `tests/agent_install_gate.rs` (`STORM_AGENT_INSTALL_GATE=1`) proves every
   recipe against the real channels.
+- **Per-session isolation's root side is its own crate and unit, and the
+  host's unit never changes for it** (decision 136, `apps/runtime/isolation`).
+  `storm-runtime-isolation` is the only root code: the helper answers only
+  the host account's uid on the socket systemd binds, accepts only its fixed
+  operations with exactly their fields (a program, arguments or a uid in a
+  request is refused; a workspace must sit directly under a configured
+  root, with no symlink), and audits every request; its unit keeps
+  `CAP_DAC_READ_SEARCH`, `CAP_CHOWN` and `CAP_FOWNER`, each with its reason,
+  and a slice that needs another adds it there with its reason. **With
+  isolation on, no session is this host's child** (136-2): the host leases a
+  pool user, writes the session's arguments and variables (never a program)
+  to `<state>/launch/<id>.json` (`0600`, removed after `start`), keeps the
+  PTY master and sends the slave over `SCM_RIGHTS`; the helper checks it is
+  a devpts slave, resolves the program from `runtime.toml` itself and asks
+  systemd for `storm-session-<id>.service` (`units.rs` is the property set,
+  tested as data), and hands back the leader's pidfd. **Each session has its
+  own network namespace** (136-3, `net.rs`): `storm-session-<id>-net.service`
+  creates `/run/netns/storm-<id>` and runs `pasta` in it as a dynamic user
+  with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only; pasta's every forwarding
+  direction is set explicitly (each defaults to `auto`, which would publish
+  listeners both ways), `--no-map-gw` keeps the host's loopback out, and only
+  `runtime.toml` `isolation_host_ports` reach it; DNS goes through pasta's
+  forwarder, named in a bound `/etc/resolv.conf`. A session whose network
+  does not start is never started. Ending is the unit's
+  stop; at lease end (`release`) the helper hands back what the user wrote
+  and removes its home before the user is free, and leases are on disk so
+  a restarted helper revokes them first. **A session's home is a snapshot
+  of the account's config, never its credentials** (136-4, `home.rs`): a
+  per-profile allowlist copied at `start` through `O_NOFOLLOW` descriptors
+  (links copied, never followed), root's and read-only except the files an
+  agent rewrites; no credential file (`DENIED`), and of a provider's store
+  only its static API keys (`static_keys`). At lease end its conversations
+  move to the helper's `kept/<session>/`, and a resume copies only the named
+  conversation from the predecessor the server names, once that one has
+  ended. **An isolated session starts only on a credential 136f permits**
+  (`credential_paths.rs`: the synced token, an env-file key, a store's
+  static key) or fails `credential_unavailable`; never on a refreshable
+  login. **The agents prefix belongs to `storm-install`** (136g,
+  `agents.rs`): installs run through the helper's `agent_job` as the host's
+  own `storm-runtime agent-job`, in a unit that can write only the prefix.
+  **On an isolated host each session has its own bridge socket**
+  (136-5): `<state>/sessions/<id>/mcp.sock`, `0660`, bound before `start`
+  so the helper shares it with the session's group; a bridge or harness
+  connection is taken only on its session's own socket, from the uid the
+  lease named (`SO_PEERCRED`), and on a verified host also under the leader
+  the helper handed back (`wrong_socket`, `wrong_user`, then 135b). **No
+  isolated session starts before the self-test passes** (`isolation_probe.rs`:
+  two probe sessions of the helper's `storm-probe` provider, the host's own
+  `storm-runtime isolation-probe`; B must reach none of A's processes,
+  state, sockets, ports, `/tmp`, `/dev/shm`, IPC or the agents prefix, and
+  each probe's own controls must work); anything else is `isolation:
+  unavailable` and `isolation_unavailable`, and a helper that stops
+  answering or `no_passt` drops it at once. The operator's
+  `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
+  record every entry before changing any, and write `isolation` in
+  `runtime.toml` last. Nothing at install creates the pools or enables the
+  helper. `tests/packaging.rs` pins `storm-runtime.service` line for line
+  (G-136-6).
 - **An agent's conversation id reaches argv only in its provider's shape**
   (decision 89): a lowercase UUID for `claude-code`, `ses_` + alphanumerics
   for `opencode`, checked by the host on every report and every `resume`,

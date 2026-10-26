@@ -302,5 +302,19 @@ class AgentApi {
               as Map)['ticket']
           as String;
 
+  /// One request to an owner-only route, decoded: what the spawning
+  /// client's calls (`spawn_api.dart`) are built on.
+  Future<dynamic> send(
+    String method,
+    String path, {
+    Object? body,
+    Map<String, String>? query,
+  }) async {
+    final req = http.Request(method, _uri(path, query))
+      ..headers.addAll(_headers);
+    if (body != null) req.body = jsonEncode(body);
+    return _decode(await http.Response.fromStream(await _client.send(req)));
+  }
+
   void dispose() => _client.close();
 }

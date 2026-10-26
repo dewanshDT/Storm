@@ -26,10 +26,11 @@
 //! spawned outlives the host, whichever service manager runs it.
 
 use std::collections::HashMap;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::BASE64;
@@ -40,7 +41,7 @@ use tokio::sync::{Notify, RwLock, watch};
 
 use crate::cli::DEFAULT_GRACE;
 use crate::client::{Refused, ServerClient};
-use crate::config::{RuntimeConfig, list_workspaces, resolve_workspace};
+use crate::config::{RuntimeConfig, list_workspaces, resolve_workspace, workspace_paths};
 use crate::identity::{HostConfig, HostKey};
 use crate::provider::{
     Availability, Interaction, InteractionSpec, Provider, ProviderSession, SessionEvents,
@@ -70,11 +71,25 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const LINK_IDLE: Duration = Duration::from_secs(45);
 /// How often a host looks for newer agent CLIs (133-5).
 const AUTO_UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// A child's: the helper's 660 s for its workspace, then a start's own.
+const CHILD_START_DEADLINE: Duration = if cfg!(test) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_secs(690)
+};
 const START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(1)
 } else {
     Duration::from_secs(30)
 };
+
+/// What a `start` says about a session decision 134 may offer its tools.
+#[derive(Debug, Clone, Copy, Default, Deserialize)]
+pub struct SpawnStart {
+    /// A child: its `session_context` is exempt too.
+    #[serde(default)]
+    pub spawned: bool,
+}
 
 /// A command from the server (freeze §11.5).
 #[derive(Debug, Deserialize)]
@@ -101,6 +116,19 @@ pub enum Command {
         /// never its value.
         #[serde(default)]
         provider_credential: Option<String>,
+        /// The session may be offered decision 134's tools while it runs:
+        /// its CLI's config gets the pinned asks and, on a verified host,
+        /// the exemptions (134-8). Absent for every other session.
+        #[serde(default)]
+        spawn_asks: Option<SpawnStart>,
+        /// A resume's predecessor (decision 136e): on an isolated host its
+        /// kept conversation is what the new home gets.
+        #[serde(default)]
+        resumed_from: Option<String>,
+        /// A spawned child's parent (134-5): `workspace` is the parent's, and
+        /// the helper makes the child's own from it before it starts (137-1).
+        #[serde(default)]
+        child_of: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -140,6 +168,29 @@ pub enum Command {
         blake3: String,
         ext: String,
     },
+    /// A person's look at, Apply of or delete of a child's workspace
+    /// (decision 137e, 137g), carried to the isolation helper. The host
+    /// answers on `/v1/runtime/children/<request>`.
+    #[serde(rename = "child.workspace")]
+    ChildWorkspace {
+        request: String,
+        op: ChildOp,
+        #[serde(default)]
+        child: Option<String>,
+        #[serde(default)]
+        parent: Option<String>,
+        #[serde(default)]
+        target: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChildOp {
+    List,
+    Export,
+    Import,
+    Dispose,
 }
 
 impl Command {
@@ -155,6 +206,7 @@ impl Command {
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
+            Self::ChildWorkspace { .. } => "child.workspace",
         }
     }
 
@@ -168,7 +220,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } => None,
+            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
         }
     }
 }
@@ -198,6 +250,24 @@ struct Events {
     titles: bool,
     /// The agent's own session id, as last reported (decision 89).
     harness: Mutex<Option<String>>,
+    /// The session's leader once the provider has started it (decision 135).
+    leader: watch::Sender<Option<Arc<Leader>>>,
+    /// A spawned child's own workspace, as the helper made it (137-1).
+    child: Mutex<Option<crate::isolation::ChildWorkspace>>,
+    /// Its adapter's hooks report a permission prompt (134-9), so its status
+    /// reports say whether one is waiting. Off for every adapter until its
+    /// G-134-7 passes.
+    attention_hooks: bool,
+    /// `permission_prompt` while the agent's own prompt waits, as its hooks
+    /// last said.
+    attention: Mutex<Option<&'static str>>,
+}
+
+/// A session's leader, and on an isolated host the uid it runs as: both
+/// what its bridge and harness connections are checked against.
+pub(crate) struct Leader {
+    process: crate::platform::peer::Process,
+    user: Option<u32>,
 }
 
 impl SessionEvents for Events {
@@ -212,6 +282,17 @@ impl SessionEvents for Events {
     fn ended(&self, end: SessionEnd) {
         *self.ended.lock().unwrap() = Some(end);
         self.wake.notify_one();
+    }
+
+    fn leader(&self, leader: crate::platform::peer::Process, user: Option<u32>) {
+        self.leader.send_replace(Some(Arc::new(Leader {
+            process: leader,
+            user,
+        })));
+    }
+
+    fn child_workspace(&self, made: crate::isolation::ChildWorkspace) {
+        *self.child.lock().unwrap() = Some(made);
     }
 }
 
@@ -232,6 +313,8 @@ struct HostSession {
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// The agent's session id last acknowledged by the server.
     harness_sent: Mutex<Option<String>>,
+    /// The permission prompt last acknowledged by the server (134-9).
+    attention_sent: Mutex<Option<&'static str>>,
     /// Input, in order, for this session's writer task. A queue so the link
     /// never waits on a PTY, and one writer so keystrokes never reorder.
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -242,6 +325,20 @@ type Subscribers = HashMap<(String, String), Vec<tokio::sync::mpsc::Sender<serde
 
 /// `harness-session` handles: handle → (session, provider, its events).
 type HarnessHandles = HashMap<String, (String, String, Arc<Events>)>;
+
+/// Each session's leader, by session id, from before it is started.
+type Leaders = HashMap<String, watch::Receiver<Option<Arc<Leader>>>>;
+
+/// How long a connection waits for its session's leader while the session
+/// is still starting: the agent can run a hook before `start` returns.
+const LEADER_WAIT: Duration = Duration::from_secs(5);
+
+/// How long an isolated start waits for the self-test still running.
+const ISOLATION_WAIT: Duration = Duration::from_secs(90);
+
+/// At most this many refusals a minute reach the server's audit (135-2).
+const REFUSALS_PER_MINUTE: u32 = 30;
+const REFUSAL_POST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The table that survives a restart: which sessions this host was running.
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -270,6 +367,18 @@ pub struct Host {
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
     harness_handles: Mutex<HarnessHandles>,
+    /// The adapters whose permission prompts are reported (134-9).
+    permission_prompt: Mutex<&'static [&'static str]>,
+    /// Bridge identity (decision 135): whether connections are checked, and
+    /// each session's leader to check them against.
+    peer_identity: crate::peer_identity::Identity,
+    leaders: Mutex<Leaders>,
+    /// Refusals told to the server in the current minute; past
+    /// [`REFUSALS_PER_MINUTE`] only the journal has them.
+    refusals_reported: Mutex<(Instant, u32)>,
+    /// Refused connections, for the tests to see what the audit line said.
+    #[cfg(test)]
+    refused: Mutex<Vec<(String, &'static str, &'static str)>>,
     opencode_settings: Option<serde_json::Value>,
     /// Set once by [`Host::shutdown`]: from then on nothing is posted, so an
     /// ending the shutdown caused never reaches the server as `stopped`.
@@ -286,6 +395,16 @@ pub struct Host {
     agents: Arc<crate::agents::Inventory>,
     /// Agents with a job running: one at a time each (133-4).
     agent_jobs: Mutex<std::collections::HashSet<String>>,
+    /// With isolation on, the helper: agent installs run through it under
+    /// the install identity (136g).
+    isolation: Option<crate::isolation::Link>,
+    /// Whether sessions here are isolated, as the self-test found (136j).
+    isolation_status: Arc<crate::isolation::Status>,
+    /// Each isolated session's own bridge socket's accept loop (136i).
+    session_sockets: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// Each live spawned child's own workspace directory (137-1), reported
+    /// in `workspace_paths` under the name its record has (137-2).
+    child_paths: Mutex<HashMap<String, PathBuf>>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -299,14 +418,27 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
-        let providers = config.providers_with(&crate::agents::managed_bin(state_dir))?;
-        Self::with_providers(state_dir, config, providers)
+        let managed = crate::agents::managed_bin(state_dir);
+        // 136a: with isolation on, every session goes through the helper. A
+        // host that has none (not Linux, not the packaged state directory)
+        // keeps providers that cannot isolate, and so starts nothing.
+        let on = config.isolation == crate::config::Isolation::PerSession;
+        let status = Arc::new(crate::isolation::Status::new(on, cfg!(target_os = "linux")));
+        let link = on
+            .then(|| crate::isolation::Link::installed(state_dir, status.clone()))
+            .flatten();
+        let providers = match &link {
+            Some(link) => config.providers_isolated(&managed, link.clone())?,
+            None => config.providers_with(&managed)?,
+        };
+        Self::with_providers(state_dir, config, providers, link)
     }
 
     fn with_providers(
         state_dir: &Path,
         config: RuntimeConfig,
         providers: Vec<Arc<dyn Provider>>,
+        isolation: Option<crate::isolation::Link>,
     ) -> Result<Arc<Self>> {
         let identity = HostConfig::load(state_dir)?;
         let key = HostKey::load(state_dir, &identity.key_id)?;
@@ -324,6 +456,13 @@ impl Host {
                 "sessions from before this restart are gone; reporting them as host_restart"
             );
         }
+        let isolation_status = match &isolation {
+            Some(link) => link.status(),
+            None => Arc::new(crate::isolation::Status::new(
+                config.isolation == crate::config::Isolation::PerSession,
+                false,
+            )),
+        };
         Ok(Arc::new(Self {
             state_dir: state_dir.to_path_buf(),
             config,
@@ -340,6 +479,15 @@ impl Host {
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
             harness_handles: Mutex::new(HashMap::new()),
+            permission_prompt: Mutex::new(crate::harness::PERMISSION_PROMPT_ADAPTERS),
+            peer_identity: crate::peer_identity::Identity::detect(),
+            leaders: Mutex::new(HashMap::new()),
+            isolation_status,
+            session_sockets: Mutex::new(HashMap::new()),
+            child_paths: Mutex::new(HashMap::new()),
+            refusals_reported: Mutex::new((Instant::now(), 0)),
+            #[cfg(test)]
+            refused: Mutex::new(Vec::new()),
             opencode_settings,
             shutting_down: AtomicBool::new(false),
             starting: Mutex::new(HashMap::new()),
@@ -347,6 +495,7 @@ impl Host {
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
             agent_jobs: Mutex::default(),
+            isolation,
         }))
     }
 
@@ -367,6 +516,20 @@ impl Host {
                 "provider"
             );
         }
+        let identity = self.peer_identity.report();
+        tracing::info!(
+            state = identity.state.as_str(),
+            mechanism = identity.mechanism,
+            reason = identity.reason,
+            "bridge identity"
+        );
+        let isolation = self.isolation_status.report();
+        tracing::info!(
+            state = isolation.state.as_str(),
+            mechanism = isolation.mechanism,
+            reason = isolation.reason,
+            "session isolation"
+        );
         for root in &self.config.workspace_roots {
             tracing::info!(root = %root.display(), "workspace root");
         }
@@ -374,6 +537,16 @@ impl Host {
             workspaces = list_workspaces(&self.config.workspace_roots).len(),
             "workspaces"
         );
+    }
+
+    /// Each listed workspace's directory, and each live child's own under
+    /// the name the server records it by (`children/<id>`, 134-5).
+    fn workspace_paths(&self) -> HashMap<String, String> {
+        let mut paths = workspace_paths(&self.config.workspace_roots);
+        for (child, dir) in self.child_paths.lock().unwrap().iter() {
+            paths.insert(format!("children/{child}"), dir.display().to_string());
+        }
+        paths
     }
 
     fn capabilities(&self) -> serde_json::Value {
@@ -397,10 +570,11 @@ impl Host {
                 cap
             })
             .collect();
-        json!({
+        let mut caps = json!({
             "version": env!("CARGO_PKG_VERSION"),
             "providers": providers,
             "workspaces": list_workspaces(&self.config.workspace_roots),
+            "workspace_paths": self.workspace_paths(),
             // Where a workspace goes, so an empty host can say where to put
             // one.
             "workspace_roots": self
@@ -436,7 +610,78 @@ impl Host {
             // Remote servers its agents' plugins declare, for the app's
             // suggestions (131g); never a header or env value.
             "plugin_mcp_remote": self.plugin_remote(),
+            // Whether bridge and harness connections are bound to their
+            // session (decision 135d). A host without it is `old_host`.
+            "identity": self.peer_identity.report().to_json(),
+            // Whether each session runs as its own identity, from the
+            // self-test (decision 136j). A host without it is `old_host`.
+            "isolation": self.isolation_status.report().to_json(),
+        });
+        // It carries `child.workspace` to the helper (decision 137-3). Only
+        // an isolated host has child workspaces; every other host's bytes
+        // are unchanged.
+        if self.isolation.is_some() {
+            caps["child_workspaces"] = json!(true);
+        }
+        caps
+    }
+
+    /// One `child.workspace` command (decision 137e, 137g): the helper's
+    /// answer, or its refusal's code, posted back for the person who asked.
+    /// The host decides nothing: the helper checks every field.
+    async fn child_workspace(
+        self: Arc<Self>,
+        request: String,
+        op: ChildOp,
+        child: Option<String>,
+        parent: Option<String>,
+        target: Option<String>,
+    ) {
+        let request_ok = request.len() <= 64
+            && request.starts_with("cwr_")
+            && request[4..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !request_ok {
+            tracing::warn!(request = %request, "child workspace: a malformed request id, ignored");
+            return;
+        }
+        let report = format!("/v1/runtime/children/{request}");
+        let Some(link) = self.isolation.clone() else {
+            let _ = self
+                .post(&report, &json!({ "refused": "isolation_off" }))
+                .await;
+            return;
+        };
+        let answered = tokio::task::spawn_blocking(move || {
+            let child = child.unwrap_or_default();
+            match op {
+                ChildOp::List => link.child_list(),
+                ChildOp::Export => link.child_export(&child),
+                ChildOp::Import => link.child_import(
+                    &child,
+                    parent.as_deref().unwrap_or_default(),
+                    target.as_deref().unwrap_or_default(),
+                ),
+                ChildOp::Dispose => link.child_dispose(&child),
+            }
         })
+        .await;
+        let body = match answered {
+            Ok(Ok(answer)) => json!({ "answer": answer }),
+            Ok(Err(e)) => match crate::isolation::refusal(&e) {
+                Some(code) => json!({ "refused": code }),
+                None => {
+                    tracing::warn!(error = %e, "child workspace: the helper did not answer");
+                    json!({ "refused": "helper" })
+                }
+            },
+            Err(e) => {
+                tracing::error!(error = %e, "child workspace: the call panicked");
+                json!({ "refused": "failed" })
+            }
+        };
+        if let Err(e) = self.post(&report, &body).await {
+            tracing::warn!(error = %e, "child workspace: could not post the answer");
+        }
     }
 
     /// An installable agent's version, where it came from, and whether this
@@ -534,12 +779,20 @@ impl Host {
         let step = move |s: &'static str| {
             let _ = tx.send(s);
         };
-        let result = tokio::time::timeout(
-            Duration::from_secs(600),
-            crate::install::run(&self.state_dir, &agent, op, path, &step),
-        )
-        .await
-        .unwrap_or(Err(Failure::Timeout));
+        let result = match (&self.isolation, self.config.isolation) {
+            // 136g: never this account; the helper runs it as the install
+            // identity, from the same recipes.
+            (link, crate::config::Isolation::PerSession) => {
+                step("Installing");
+                self.isolated_job(link.clone(), &agent, op).await
+            }
+            (_, crate::config::Isolation::Off) => tokio::time::timeout(
+                Duration::from_secs(600),
+                crate::install::run(&self.state_dir, &agent, op, path, &step),
+            )
+            .await
+            .unwrap_or(Err(Failure::Timeout)),
+        };
         drop(step);
         let _ = poster.await;
         self.agent_jobs.lock().unwrap().remove(&agent);
@@ -555,6 +808,34 @@ impl Host {
             self.agents.record_update(&agent, result.is_ok());
         }
         self.probe_agents();
+    }
+
+    async fn isolated_job(
+        &self,
+        link: Option<crate::isolation::Link>,
+        agent: &str,
+        op: crate::install::Op,
+    ) -> Result<Option<String>, crate::install::Failure> {
+        use crate::install::Failure;
+        let Some(link) = link else {
+            tracing::warn!(
+                agent,
+                "agent job: isolation is on and this host has no helper"
+            );
+            return Err(Failure::Blocked("isolation_unavailable"));
+        };
+        let (agent, action) = (agent.to_string(), op.name());
+        let answer = tokio::task::spawn_blocking(move || link.agent_job(&agent, action))
+            .await
+            .map_err(|_| Failure::Blocked("isolation_unavailable"))?;
+        match answer {
+            Ok(Ok(version)) => Ok(version),
+            Ok(Err(code)) => Err(Failure::from_code(&code)),
+            Err(e) => {
+                tracing::warn!(error = %e, "agent job: the isolation helper did not run it");
+                Err(Failure::Blocked("isolation_unavailable"))
+            }
+        }
     }
 
     /// Once a day, from a random point in the first hour (133-5): learns
@@ -767,8 +1048,12 @@ impl Host {
     /// Runs until revoked. Returns the refusal that ended it.
     pub async fn run(self: Arc<Self>) -> Result<()> {
         let listener = self.bind_socket()?;
-        tokio::spawn(self.clone().serve_socket(listener));
+        tokio::spawn(self.clone().serve_socket(listener, None));
         tokio::spawn(self.clone().auto_updates());
+        tokio::spawn(self.clone().report_isolation_changes());
+        if self.isolation_status.pending() {
+            tokio::spawn(self.clone().isolation_self_test());
+        }
         let mut backoff = Duration::from_secs(1);
         loop {
             match self.clone().connect_once().await {
@@ -792,6 +1077,66 @@ impl Host {
             tokio::time::sleep(backoff).await;
             backoff = (backoff * 2).min(Duration::from_secs(60));
         }
+    }
+
+    /// Runs the isolation self-test (136j) once one may run, and records
+    /// what it found.
+    async fn isolation_self_test(self: Arc<Self>) {
+        let Some(link) = self.isolation.clone() else {
+            return;
+        };
+        if !self.isolation_status.may_test() {
+            return;
+        }
+        tracing::info!("isolation self-test: two probe sessions");
+        let outcome = tokio::task::spawn_blocking(move || link.self_test())
+            .await
+            .unwrap_or(Err("self_test"));
+        match outcome {
+            Ok(()) => tracing::info!("isolation self-test passed: sessions are isolated"),
+            Err(reason) => tracing::error!(
+                reason,
+                "isolation self-test did not pass: new sessions are refused"
+            ),
+        }
+        self.isolation_status.settle(outcome);
+    }
+
+    /// Every change to isolation's state reaches the server at once (136j).
+    async fn report_isolation_changes(self: Arc<Self>) {
+        let mut changes = self.isolation_status.subscribe();
+        while changes.changed().await.is_ok() {
+            if *self.link_up.borrow() {
+                let _ = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await;
+            }
+        }
+    }
+
+    /// Whether a spawn session's CLI may skip the prompt for 134's read and
+    /// report tools (A6): only on a host that checks every connection's
+    /// identity and has passed its isolation self-test.
+    fn spawn_exempt(&self) -> bool {
+        self.peer_identity.verified() && self.isolation_status.verified()
+    }
+
+    /// On an isolated host, whether a session may start (136j): only once
+    /// the self-test has passed. One still running is waited for; one that
+    /// failed is tried again, at most once a minute.
+    async fn isolation_ready(self: &Arc<Self>) -> Result<(), &'static str> {
+        let status = &self.isolation_status;
+        let deadline = Instant::now() + ISOLATION_WAIT;
+        while status.pending() && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !status.verified() && !status.pending() {
+            self.clone().isolation_self_test().await;
+        }
+        if status.verified() {
+            return Ok(());
+        }
+        Err(status.report().reason.unwrap_or("unavailable"))
     }
 
     /// The orderly end of the host (AM37): every session's process group gets
@@ -929,6 +1274,7 @@ impl Host {
             let end = *s.events.ended.lock().unwrap();
             let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
             entry = with_harness(entry, s.events.harness.lock().unwrap().as_deref());
+            entry = with_attention(entry, &s.events);
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -1015,7 +1361,10 @@ impl Host {
                     host.starting.lock().unwrap().remove(&id);
                 });
             }
-            Command::Refresh | Command::TerminalImage { .. } | Command::AgentInstall { .. } => {
+            Command::Refresh
+            | Command::TerminalImage { .. }
+            | Command::AgentInstall { .. }
+            | Command::ChildWorkspace { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -1044,6 +1393,9 @@ impl Host {
                 context,
                 resume,
                 provider_credential,
+                spawn_asks,
+                resumed_from,
+                child_of,
             } => {
                 self.start(
                     session,
@@ -1053,8 +1405,10 @@ impl Host {
                     terminal,
                     mcp,
                     context,
-                    resume,
+                    resume.map(|r| (r, resumed_from)),
                     provider_credential,
+                    spawn_asks,
+                    child_of,
                 )
                 .await
             }
@@ -1075,6 +1429,16 @@ impl Host {
                 tokio::spawn(self.stage_image(session, image, size, blake3, ext));
             }
             Command::AgentInstall { job, agent, op } => self.agent_job(job, agent, op).await,
+            Command::ChildWorkspace {
+                request,
+                op,
+                child,
+                parent,
+                target,
+            } => {
+                self.child_workspace(request, op, child, parent, target)
+                    .await
+            }
             command => self.handle_now(command),
         }
     }
@@ -1087,7 +1451,8 @@ impl Host {
             Command::Start { .. }
             | Command::Refresh
             | Command::TerminalImage { .. }
-            | Command::AgentInstall { .. } => {
+            | Command::AgentInstall { .. }
+            | Command::ChildWorkspace { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -1158,9 +1523,15 @@ impl Host {
         size: Size,
         mcp: Vec<crate::mcp::McpGrant>,
         context: bool,
-        resume: Option<String>,
+        resume: Option<(String, Option<String>)>,
         provider_credential: Option<String>,
+        spawn_asks: Option<SpawnStart>,
+        child_of: Option<String>,
     ) {
+        let (resume, resumed_from) = match resume {
+            Some((r, from)) => (Some(r), from),
+            None => (None, None),
+        };
         let refuse = |reason: &str| {
             tracing::warn!(session = %id, reason, "start refused");
         };
@@ -1185,6 +1556,12 @@ impl Host {
             refuse("no such provider");
             return self.post_start_failure(&id).await;
         };
+        // 136a: on an isolated host no session runs as this account: one
+        // its provider cannot start through the helper does not start.
+        if self.config.isolation == crate::config::Isolation::PerSession && !provider.isolated() {
+            refuse("isolation is on and this host cannot isolate a session");
+            return self.post_start_failure(&id).await;
+        }
         let Some(size) = TerminalSize::new(size.cols, size.rows) else {
             refuse("bad size");
             return self.post_start_failure(&id).await;
@@ -1194,6 +1571,63 @@ impl Host {
         {
             refuse("not a session this provider can resume");
             return self.post_start_failure(&id).await;
+        }
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        if let Some(parent) = &child_of {
+            // A child's workspace is its own user's (WS-1): only the helper
+            // can make one, so a host without it starts no child at all.
+            if !isolated {
+                refuse("a spawned session starts only on an isolated host");
+                return self.post_start_failure(&id).await;
+            }
+            if !crate::credential_paths::session_id_ok(parent) || *parent == id || resume.is_some()
+            {
+                refuse("not a parent this session can have");
+                return self.post_start_failure(&id).await;
+            }
+        }
+        if isolated && let Err(reason) = self.isolation_ready().await {
+            // 136j: no session starts on a host whose isolation is not
+            // verified; those already running keep running.
+            tracing::warn!(session = %id, reason, "start refused: isolation_unavailable");
+            return self
+                .post_start_ended(&id, EndReason::IsolationUnavailable)
+                .await;
+        }
+        if isolated {
+            // 136f: only a path that cannot rotate the account's login, or
+            // nothing; never the account's own login.
+            let refused = {
+                let names = provider.env_names();
+                let env_set = |k: &str| names.iter().any(|(n, set)| *set && n == k);
+                let account_home = self.state_dir.join("home");
+                let codex_home = crate::codex::home(&self.state_dir);
+                let setup = crate::credential_paths::Setup {
+                    provider: &provider_id,
+                    synced: provider_credential.is_some(),
+                    env_set: &env_set,
+                    any_api_key: names.iter().any(|(n, set)| {
+                        *set && n.to_str().is_some_and(|n| n.ends_with("_API_KEY"))
+                    }),
+                    account_home: &account_home,
+                    codex_home: &codex_home,
+                };
+                crate::credential_paths::check(&setup).err()
+            };
+            if let Some(reason) = refused {
+                tracing::warn!(session = %id, reason, "start refused: credential_unavailable");
+                return self
+                    .post_start_ended(&id, EndReason::CredentialUnavailable)
+                    .await;
+            }
+            if resume.is_some()
+                && !resumed_from
+                    .as_deref()
+                    .is_some_and(crate::credential_paths::session_id_ok)
+            {
+                refuse("an isolated resume needs the session it resumes");
+                return self.post_start_failure(&id).await;
+            }
         }
         // Token sync (AM71): pulled before anything is written; any failure
         // ends the launch, never a fallback to this host's own login.
@@ -1213,6 +1647,12 @@ impl Host {
         // config cannot be written does not start rather than start without
         // its integrations.
         let session_dir = crate::mcp::session_dir(&self.state_dir, &id);
+        // 136i: an isolated session's bridge socket and inbox are its own,
+        // in its directory, made before `start` so the helper shares them.
+        if isolated && let Err(e) = self.clone().session_socket(&id) {
+            tracing::warn!(session = %id, error = %format!("{e:#}"), "could not bind the session's bridge socket");
+            return self.post_start_failure(&id).await;
+        }
         let mut launch = match crate::mcp::provider_baseline(&provider_id, &session_dir, &dir) {
             Ok(extras) => extras,
             Err(e) => {
@@ -1239,6 +1679,8 @@ impl Host {
         let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
         let is_claude = crate::profile::get(&provider_id).and_then(|p| p.mcp)
             == Some(crate::profile::Mcp::ClaudeCode);
+        let is_opencode = crate::profile::get(&provider_id).and_then(|p| p.mcp)
+            == Some(crate::profile::Mcp::OpenCode);
         let plugin_plan = if codex_plan.is_some() {
             codex_plan
         } else if storm_only && !mcp.is_empty() && is_claude {
@@ -1267,6 +1709,26 @@ impl Host {
             storm_only,
             taken: &taken,
         };
+        // Only where the session reaches Storm's own tools; the exemptions
+        // only while this host's identity is verified and its isolation
+        // self-test has passed (A6, C0).
+        let spawn = spawn_asks
+            .filter(|_| mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION))
+            .map(|s| crate::mcp::SpawnAsks {
+                exempt: self.spawn_exempt(),
+                spawned: s.spawned,
+            });
+        let spawned = child_of.is_some() && spawn.is_some_and(|s| s.spawned);
+        let opencode_account = match spawn {
+            Some(_) if is_opencode => match crate::mcp::opencode_account(storm_only) {
+                Ok(account) => Some(account),
+                Err(e) => {
+                    tracing::warn!(session = %id, error = %format!("{e:#}"), "could not read the account's OpenCode config for the pinned asks");
+                    return self.post_start_failure(&id).await;
+                }
+            },
+            _ => None,
+        };
         let plugin_plan = match self.mcp_launch(
             &id,
             &provider_id,
@@ -1274,6 +1736,7 @@ impl Host {
             &mcp,
             &plugin_servers,
             &own,
+            spawn.as_ref().zip(opencode_account.as_ref()),
         ) {
             Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
@@ -1285,7 +1748,7 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
-        let start_report = match &plugin_plan {
+        let mut start_report = match &plugin_plan {
             Some(plan) => {
                 {
                     let mut found = self.launch_remote.lock().unwrap();
@@ -1317,19 +1780,39 @@ impl Host {
             title: Mutex::new(TitleObserver::default()),
             titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             harness: Mutex::new(None),
+            leader: watch::channel(None).0,
+            child: Mutex::new(None),
+            attention_hooks: self
+                .permission_prompt
+                .lock()
+                .unwrap()
+                .contains(&provider_id.as_str()),
+            attention: Mutex::new(None),
         });
+        self.leaders
+            .lock()
+            .unwrap()
+            .insert(id.clone(), events.leader.subscribe());
         let pins = synced.as_ref().map(|(pins, _)| pins);
-        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins) {
+        let claude_asks = spawn.filter(|_| is_claude);
+        match self.harness_launch(
+            &id,
+            &provider_id,
+            resume.as_deref(),
+            &events,
+            pins,
+            claude_asks.as_ref(),
+        ) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
             }
             // A session that cannot report its id still runs; it only cannot
             // be resumed. A resume still names its conversation, and a synced
-            // session's pins live in the same file.
+            // session's pins and a spawn session's asks live in the same file.
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
-                if resume.is_some() || is_synced {
+                if resume.is_some() || is_synced || claude_asks.is_some() {
                     return self.post_start_failure(&id).await;
                 }
             }
@@ -1342,17 +1825,36 @@ impl Host {
                 .secret_env
                 .push((crate::credential::TOKEN_ENV.into(), token));
         }
-        // Storm is the only thing that updates its own copy (133-2).
+        launch.child_of = child_of.clone();
+        if isolated {
+            launch
+                .env_remove
+                .extend(crate::credential_paths::REFRESHABLE_ENV.map(Into::into));
+            if let (Some(conversation), Some(from)) = (&resume, &resumed_from) {
+                launch.resumed_from = Some((from.clone(), conversation.clone()));
+            }
+        }
+        // Storm is the only thing that updates its own copy (133-2); on an
+        // isolated host no session can write where agents live (136g).
         if provider_id == "claude-code"
-            && provider
-                .resolved()
-                .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm")
+            && (isolated
+                || provider
+                    .resolved()
+                    .is_some_and(|b| crate::agents::source(&b, &self.state_dir) == "storm"))
         {
             launch.env.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
         }
+        if provider_id == "opencode" && isolated {
+            launch
+                .env
+                .push(("OPENCODE_DISABLE_AUTOUPDATE".into(), "true".into()));
+        }
         // A resumed conversation has read its note already.
-        let launch =
-            crate::mcp::with_opening_prompt(launch, &provider_id, context && resume.is_none());
+        let launch = crate::mcp::with_opening_prompt(
+            launch,
+            &provider_id,
+            crate::mcp::opening_prompt(context && resume.is_none(), spawned),
+        );
         let spec = SessionSpec {
             session_id: id.clone(),
             workspace: dir,
@@ -1365,12 +1867,19 @@ impl Host {
             let events: Arc<dyn SessionEvents> = events.clone();
             tokio::task::spawn_blocking(move || provider.start(spec, events))
         };
-        let started = match tokio::time::timeout(START_DEADLINE, &mut provider_start).await {
+        // A child's start includes its clone, which the helper allows
+        // 660 s (137-1).
+        let deadline = if child_of.is_some() {
+            CHILD_START_DEADLINE
+        } else {
+            START_DEADLINE
+        };
+        let started = match tokio::time::timeout(deadline, &mut provider_start).await {
             Ok(started) => started,
             Err(_) => {
                 tracing::warn!(
                     session = %id,
-                    deadline_s = START_DEADLINE.as_secs(),
+                    deadline_s = deadline.as_secs(),
                     "start did not return in time; reporting it failed"
                 );
                 // Whatever it returns now has no session to belong to.
@@ -1384,6 +1893,10 @@ impl Host {
         };
         let session = match started {
             Ok(Ok(session)) => session,
+            Ok(Err(crate::provider::StartError::Ended(reason, e))) => {
+                tracing::warn!(session = %id, error = %e, "start failed");
+                return self.post_start_ended(&id, reason).await;
+            }
             Ok(Err(e)) => {
                 tracing::warn!(session = %id, error = %e, "start failed");
                 return self.post_start_failure(&id).await;
@@ -1393,6 +1906,34 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
+        // A child's own workspace: its record says what it starts from, and
+        // WS-9 is told its directory under the name the server gave it.
+        let made = events.child.lock().unwrap().take();
+        if let (Some(_), Some(made)) = (&child_of, made) {
+            if !start_report.is_object() {
+                start_report = json!({});
+            }
+            start_report["child_workspace"] = json!({
+                "mode": match made.mode {
+                    crate::isolation::ChildMode::Clone => "clone",
+                    crate::isolation::ChildMode::Scratch => "scratch",
+                },
+                "commit": made.commit,
+                "branch": made.branch,
+                "submodules": made.submodules,
+                "large_files": made.large_files,
+            });
+            self.child_paths
+                .lock()
+                .unwrap()
+                .insert(id.clone(), made.path.clone());
+            let host = self.clone();
+            tokio::spawn(async move {
+                let _ = host
+                    .post("/v1/runtime/inventory", &host.capabilities())
+                    .await;
+            });
+        }
         let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let host_session = Arc::new(HostSession {
             id: id.clone(),
@@ -1404,6 +1945,7 @@ impl Host {
             start_report,
             title_sent: Mutex::new((Title::default(), None)),
             harness_sent: Mutex::new(None),
+            attention_sent: Mutex::new(None),
             input,
         });
         // The writer: one per session, in order. Each write is bounded by the
@@ -1450,11 +1992,15 @@ impl Host {
     }
 
     async fn post_start_failure(&self, id: &str) {
+        self.post_start_ended(id, EndReason::StartFailure).await
+    }
+
+    async fn post_start_ended(&self, id: &str, reason: EndReason) {
         self.forget_mcp(id);
         let _ = self
             .post(
                 &format!("/v1/runtime/sessions/{id}/status"),
-                &json!({ "status": "failed", "end_reason": EndReason::StartFailure.as_str() }),
+                &json!({ "status": "failed", "end_reason": reason.as_str() }),
             )
             .await;
     }
@@ -1529,7 +2075,9 @@ impl Host {
             let end = *s.events.ended.lock().unwrap();
             let (sent, posted_at) = s.title_sent.lock().unwrap().clone();
             let harness_changed = harness != *s.harness_sent.lock().unwrap();
-            if end.is_none() && (title != sent || harness_changed) {
+            let attention = *s.events.attention.lock().unwrap();
+            let attention_changed = attention != *s.attention_sent.lock().unwrap();
+            if end.is_none() && (title != sent || harness_changed || attention_changed) {
                 let wait =
                     posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
                 if !wait.is_zero() {
@@ -1539,7 +2087,11 @@ impl Host {
                     }
                     continue;
                 }
-                let body = with_harness(with_title(status_json(None), &title), harness.as_deref());
+                let mut body =
+                    with_harness(with_title(status_json(None), &title), harness.as_deref());
+                if s.events.attention_hooks {
+                    body["attention"] = json!(attention);
+                }
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -1547,6 +2099,7 @@ impl Host {
                     Ok(st) if st.is_success() => {
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
+                        *s.attention_sent.lock().unwrap() = attention;
                         retry = Duration::from_millis(250);
                     }
                     _ => {
@@ -1597,6 +2150,7 @@ const MCP_LINE_MAX: u64 = 4 * 1024 * 1024;
 
 impl Host {
     /// Writes a session's provider config and registers its handle.
+    #[allow(clippy::too_many_arguments)]
     fn mcp_launch(
         &self,
         session: &str,
@@ -1605,6 +2159,7 @@ impl Host {
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
         own: &crate::mcp::AgentServers,
+        spawn: Option<(&crate::mcp::SpawnAsks, &crate::mcp::OpencodeAccount)>,
     ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         use crate::profile::Mcp;
         if grants.is_empty() && !own.storm_only {
@@ -1612,7 +2167,7 @@ impl Host {
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the bridge")?;
-        let socket = self.socket_address();
+        let socket = self.socket_address_for(session);
         let mcp = crate::profile::get(provider).and_then(|p| p.mcp);
         let (extras, plan) = if matches!(mcp, Some(Mcp::Codex | Mcp::Cursor | Mcp::CommandCode)) {
             let grants: Vec<_> = grants
@@ -1674,6 +2229,7 @@ impl Host {
                     self.opencode_settings.as_ref(),
                     plugin_servers,
                     own,
+                    spawn,
                 )?,
                 None,
             )
@@ -1718,6 +2274,7 @@ impl Host {
         resume: Option<&str>,
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
+        spawn: Option<&crate::mcp::SpawnAsks>,
     ) -> Result<crate::mcp::LaunchExtras> {
         if !crate::profile::resumable(provider) {
             return Ok(Default::default());
@@ -1728,10 +2285,12 @@ impl Host {
             provider,
             &crate::mcp::session_dir(&self.state_dir, session),
             &handle,
-            &self.socket_address(),
+            &self.socket_address_for(session),
             &exe,
             resume,
             synced,
+            spawn,
+            events.attention_hooks,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -1850,11 +2409,17 @@ impl Host {
         }
         let inbox =
             std::path::absolute(crate::mcp::session_dir(&self.state_dir, session).join(INBOX))?;
-        write_private(&inbox, &format!("{image}.{ext}"), &bytes)
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        write_image(&inbox, &format!("{image}.{ext}"), &bytes, isolated)
     }
 
     fn forget_mcp(&self, session: &str) {
+        if let Some(task) = self.session_sockets.lock().unwrap().remove(session) {
+            task.abort();
+        }
+        self.child_paths.lock().unwrap().remove(session);
         self.handles.forget_session(session);
+        self.leaders.lock().unwrap().remove(session);
         self.harness_handles
             .lock()
             .unwrap()
@@ -1881,11 +2446,62 @@ impl Host {
         crate::platform::ipc::address(&crate::mcp::socket_path(&self.state_dir)).into()
     }
 
-    async fn serve_socket(self: Arc<Self>, mut listener: crate::platform::ipc::Listener) {
+    /// The same for one session: on an isolated host, its own socket in its
+    /// own directory (136i), which no other session can reach.
+    fn socket_address_for(&self, session: &str) -> PathBuf {
+        if self.config.isolation == crate::config::Isolation::PerSession {
+            return crate::mcp::session_dir(&self.state_dir, session).join(crate::mcp::SOCKET);
+        }
+        self.socket_address()
+    }
+
+    /// An isolated session's own bridge socket and inbox (136i), made
+    /// before `start` so the helper shares them with the session's group.
+    /// The socket is served until the session is forgotten.
+    #[cfg(unix)]
+    fn session_socket(self: Arc<Self>, session: &str) -> Result<()> {
+        let dir = crate::mcp::session_dir(&self.state_dir, session);
+        crate::platform::create_private_dir(&dir)?;
+        crate::platform::create_private_dir(&dir.join(INBOX))?;
+        let listener = crate::isolation::bind_session_socket(&dir.join(crate::mcp::SOCKET))?;
+        listener.set_nonblocking(true)?;
+        let listener = tokio::net::UnixListener::from_std(listener)?;
+        let host = self.clone();
+        let id = session.to_string();
+        let task = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        tokio::spawn(host.clone().bridge_connection(stream, Some(id.clone())));
+                    }
+                    Err(e) => {
+                        tracing::warn!(session = %id, error = %e, "session socket accept failed");
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                    }
+                }
+            }
+        });
+        self.session_sockets
+            .lock()
+            .unwrap()
+            .insert(session.to_string(), task.abort_handle());
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn session_socket(self: Arc<Self>, _: &str) -> Result<()> {
+        bail!("per-session isolation is Linux only")
+    }
+
+    async fn serve_socket(
+        self: Arc<Self>,
+        mut listener: crate::platform::ipc::Listener,
+        via: Option<String>,
+    ) {
         loop {
             match listener.accept().await {
                 Ok(stream) => {
-                    tokio::spawn(self.clone().bridge_connection(stream));
+                    tokio::spawn(self.clone().bridge_connection(stream, via.clone()));
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "mcp socket accept failed");
@@ -1895,10 +2511,105 @@ impl Host {
         }
     }
 
+    /// 135a: whether a connection that named `session` may act for it. On a
+    /// host that is not `verified` it is handle-only, as before. Otherwise
+    /// the connector must descend from the session's leader, and every
+    /// failure — no leader, an error, a walk that does not arrive — refuses,
+    /// audited on the session.
+    ///
+    /// On an isolated host (136i), whatever the identity state, it must also
+    /// have come in on the session's own socket, from the user the session
+    /// was leased.
+    async fn admit(&self, peer: Peer, session: &str, kind: &'static str) -> bool {
+        let isolated = self.config.isolation == crate::config::Isolation::PerSession;
+        let verdict = if isolated {
+            isolated_verdict(peer, session, self.leader_of(session).await).await
+        } else {
+            let Some(process) = peer.process else {
+                return true;
+            };
+            verdict(process, self.leader_of(session).await).await
+        };
+        match verdict {
+            Ok(()) => true,
+            Err(why) => {
+                self.refuse(session, kind, why).await;
+                false
+            }
+        }
+    }
+
+    /// Audits a refusal on its session, never its handle. A precondition
+    /// that stopped holding drops the host to `unavailable` there and then,
+    /// and the server hears it at once (135d).
+    async fn refuse(&self, session: &str, kind: &'static str, why: crate::peer_identity::Mismatch) {
+        tracing::warn!(
+            target: "storm_runtime::audit",
+            %session,
+            connection = kind,
+            reason = why.as_str(),
+            "identity_mismatch: connection refused"
+        );
+        #[cfg(test)]
+        self.refused
+            .lock()
+            .unwrap()
+            .push((session.to_string(), kind, why.as_str()));
+        if let crate::peer_identity::Mismatch::Precondition(reason) = why
+            && self.peer_identity.downgrade(reason)
+        {
+            tracing::error!(reason, "bridge identity is now unavailable");
+            if *self.link_up.borrow() {
+                let _ = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await;
+            }
+        }
+        // The server's audit row (135-2). An older server answers 404, and a
+        // flood of refusals is bounded here: the journal line above has each.
+        if *self.link_up.borrow() && self.may_report_refusal() {
+            let _ = self
+                .post_for_response(
+                    &format!("/v1/runtime/sessions/{session}/identity-refused"),
+                    &json!({"connection": kind, "reason": why.as_str()}),
+                    Some(REFUSAL_POST_TIMEOUT),
+                )
+                .await;
+        }
+    }
+
+    fn may_report_refusal(&self) -> bool {
+        let mut window = self.refusals_reported.lock().unwrap();
+        if window.0.elapsed() >= Duration::from_secs(60) {
+            *window = (Instant::now(), 0);
+        }
+        window.1 += 1;
+        window.1 <= REFUSALS_PER_MINUTE
+    }
+
+    /// The session's leader, waiting a little for one still starting.
+    async fn leader_of(&self, session: &str) -> Option<Arc<Leader>> {
+        let mut rx = self.leaders.lock().unwrap().get(session)?.clone();
+        let found = tokio::time::timeout(LEADER_WAIT, rx.wait_for(Option::is_some)).await;
+        found.ok()?.ok()?.clone()
+    }
+
     /// The agent's hook or plugin saying which conversation it is on. Only
     /// a handle this host gave out, and only an id its provider could have
     /// made, is taken.
-    fn harness_reported(&self, report: crate::harness::HarnessLine) {
+    async fn harness_reported(&self, report: crate::harness::HarnessLine, peer: Peer) {
+        let Some(session) = self
+            .harness_handles
+            .lock()
+            .unwrap()
+            .get(&report.handle)
+            .map(|(s, _, _)| s.clone())
+        else {
+            return;
+        };
+        if !self.admit(peer, &session, "harness").await {
+            return;
+        }
         let handles = self.harness_handles.lock().unwrap();
         let Some((session, provider, events)) = handles.get(&report.handle) else {
             return;
@@ -1915,9 +2626,55 @@ impl Host {
         }
     }
 
+    /// The agent's hook or plugin saying its permission prompt waits, or was
+    /// answered (134-9). Taken only through a handle this host gave out, as
+    /// a harness report is, and only for a session whose adapter reports it.
+    async fn attention_reported(&self, report: crate::harness::AttentionLine, peer: Peer) {
+        let attention = match report.attention.as_str() {
+            crate::harness::PERMISSION_PROMPT => Some(crate::harness::PERMISSION_PROMPT),
+            crate::harness::ATTENTION_CLEAR => None,
+            _ => return,
+        };
+        let Some((session, events)) = self
+            .harness_handles
+            .lock()
+            .unwrap()
+            .get(&report.handle)
+            .map(|(s, _, e)| (s.clone(), e.clone()))
+        else {
+            return;
+        };
+        if !events.attention_hooks || !self.admit(peer, &session, "harness").await {
+            return;
+        }
+        let mut current = events.attention.lock().unwrap();
+        if *current != attention {
+            tracing::info!(%session, attention = ?attention, "permission prompt");
+            *current = attention;
+            events.wake.notify_one();
+        }
+    }
+
     /// One bridge connection: a message to forward, or a subscription.
-    async fn bridge_connection(self: Arc<Self>, stream: crate::platform::ipc::Stream) {
+    /// `via` is the session whose own socket it came in on (136i), or none
+    /// for the host's shared one.
+    async fn bridge_connection(
+        self: Arc<Self>,
+        stream: crate::platform::ipc::Stream,
+        via: Option<String>,
+    ) {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        // Who connected, asked before anything is read: the connector, even
+        // if it hands the socket on (135b).
+        let peer = Peer {
+            process: self
+                .peer_identity
+                .verified()
+                .then(|| crate::platform::peer::peer(&stream)),
+            user: (self.config.isolation == crate::config::Isolation::PerSession)
+                .then(|| peer_uid(&stream)),
+            via,
+        };
         let (read, mut write) = tokio::io::split(stream);
         let mut line = String::new();
         let mut reader = tokio::io::BufReader::new(read.take(MCP_LINE_MAX));
@@ -1925,7 +2682,10 @@ impl Host {
             return;
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::HarnessLine>(&line) {
-            return self.harness_reported(report);
+            return self.harness_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::AttentionLine>(&line) {
+            return self.attention_reported(report, peer).await;
         }
         let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
             return;
@@ -1943,6 +2703,12 @@ impl Host {
                 .await;
             return;
         };
+        if !self.admit(peer, &session, "bridge").await {
+            let _ = write
+                .write_all(&send(json!({"storm_error": "identity_mismatch"})))
+                .await;
+            return;
+        }
         if request.subscribe {
             let (tx, mut rx) = tokio::sync::mpsc::channel(64);
             self.subscribers
@@ -1991,7 +2757,70 @@ impl Host {
     }
 }
 
-/// The wire form of a session's status: running, or how it ended.
+/// Who is at the other end of a bridge or harness connection, as the kernel
+/// said when it was accepted.
+struct Peer {
+    /// The connecting process, on a host whose identity is `verified`.
+    process: Option<io::Result<crate::platform::peer::Process>>,
+    /// Its uid, on an isolated host.
+    user: Option<io::Result<u32>>,
+    /// The session whose own socket it came in on.
+    via: Option<String>,
+}
+
+#[cfg(unix)]
+fn peer_uid(stream: &crate::platform::ipc::Stream) -> io::Result<u32> {
+    stream.peer_cred().map(|c| c.uid())
+}
+
+#[cfg(windows)]
+fn peer_uid(_: &crate::platform::ipc::Stream) -> io::Result<u32> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// 135a's answer for one connection: any error, or no leader, refuses.
+async fn verdict(
+    peer: io::Result<crate::platform::peer::Process>,
+    leader: Option<Arc<Leader>>,
+) -> Result<(), crate::peer_identity::Mismatch> {
+    use crate::peer_identity::Mismatch;
+    match (peer, leader) {
+        (Err(e), _) => Err(Mismatch::from(e)),
+        (_, None) => Err(Mismatch::LeaderGone),
+        (Ok(peer), Some(leader)) => {
+            tokio::task::spawn_blocking(move || crate::peer_identity::check(&peer, &leader.process))
+                .await
+                .unwrap_or(Err(Mismatch::Error(io::ErrorKind::Other)))
+        }
+    }
+}
+
+/// 136i's answer on an isolated host: the session's own socket, the
+/// session's leased user, and then, where identity is `verified`, 135b's
+/// walk to the leader the helper handed back.
+async fn isolated_verdict(
+    peer: Peer,
+    session: &str,
+    leader: Option<Arc<Leader>>,
+) -> Result<(), crate::peer_identity::Mismatch> {
+    use crate::peer_identity::Mismatch;
+    if peer.via.as_deref() != Some(session) {
+        return Err(Mismatch::WrongSocket);
+    }
+    let Some(leader) = leader else {
+        return Err(Mismatch::LeaderGone);
+    };
+    match (peer.user, leader.user) {
+        (Some(Ok(uid)), Some(leased)) if uid == leased => {}
+        (Some(Err(e)), _) => return Err(Mismatch::from(e)),
+        _ => return Err(Mismatch::WrongUser),
+    }
+    match peer.process {
+        Some(process) => verdict(process, Some(leader)).await,
+        None => Ok(()),
+    }
+}
+
 /// The host account's home, where Cursor and Command Code keep their own
 /// config.
 fn account_home() -> Result<PathBuf> {
@@ -2020,18 +2849,32 @@ fn status_json(end: Option<SessionEnd>) -> serde_json::Value {
 
 /// Writes `name` into `dir` as `0600`, through a temporary file and a rename,
 /// with `dir` and its parent `0700`. Returns the file's path.
-fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> Result<String> {
+/// An image in a session's inbox, private to this account. On an isolated
+/// host the session runs as another user, so the image is readable to
+/// whoever can enter the inbox: the host and that session's group, which
+/// the helper shared it with at `start` (136i). Its modes are never
+/// tightened there, which would take the share back.
+fn write_image(dir: &Path, name: &str, bytes: &[u8], isolated: bool) -> Result<String> {
     use std::io::Write;
-    std::fs::create_dir_all(dir).context("creating the inbox")?;
-    for d in [dir.parent(), Some(dir)].into_iter().flatten() {
-        crate::platform::tighten_private_dir(d)?;
+    if isolated {
+        if !dir.is_dir() {
+            bail!("the session has no inbox");
+        }
+    } else {
+        std::fs::create_dir_all(dir).context("creating the inbox")?;
+        for d in [dir.parent(), Some(dir)].into_iter().flatten() {
+            crate::platform::tighten_private_dir(d)?;
+        }
     }
     let tmp = dir.join(format!(".{name}.tmp"));
     let _ = std::fs::remove_file(&tmp);
-    let mut f = crate::platform::open_private(
-        &tmp,
-        std::fs::OpenOptions::new().write(true).create_new(true),
-    )
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    let mut f = if isolated {
+        crate::platform::open_readable(&tmp, &mut options)
+    } else {
+        crate::platform::open_private(&tmp, &mut options)
+    }
     .context("creating the image file")?;
     f.write_all(bytes)?;
     f.sync_all()?;
@@ -2055,6 +2898,15 @@ fn running_report(extra: &serde_json::Value) -> serde_json::Value {
 fn with_harness(mut body: serde_json::Value, harness: Option<&str>) -> serde_json::Value {
     if let Some(id) = harness {
         body["harness_session"] = json!(id);
+    }
+    body
+}
+
+/// A status body with whether the agent's permission prompt waits, for a
+/// session whose adapter reports it (134-9); unchanged for any other.
+fn with_attention(mut body: serde_json::Value, events: &Events) -> serde_json::Value {
+    if events.attention_hooks {
+        body["attention"] = json!(*events.attention.lock().unwrap());
     }
     body
 }
@@ -2174,7 +3026,7 @@ mod tests {
     fn a_staged_image_is_private_and_whole() {
         let state = tempfile::tempdir().unwrap();
         let inbox = state.path().join("sessions/ags_X/inbox");
-        let path = write_private(&inbox, "img_A.png", b"\x89PNG").unwrap();
+        let path = write_image(&inbox, "img_A.png", b"\x89PNG", false).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"\x89PNG");
         crate::platform::assert_private(std::path::Path::new(&path), 0o600);
         crate::platform::assert_private(&inbox, 0o700);
@@ -2223,6 +3075,9 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
+                resumed_from: None,
+                child_of: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -2326,7 +3181,7 @@ mod tests {
         }
         let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
         let listener = host.bind_socket().unwrap();
-        tokio::spawn(host.clone().serve_socket(listener));
+        tokio::spawn(host.clone().serve_socket(listener, None));
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
@@ -2352,6 +3207,9 @@ mod tests {
             context,
             resume: resume.map(str::to_string),
             provider_credential: None,
+            spawn_asks: None,
+            resumed_from: None,
+            child_of: None,
         }
     }
 
@@ -2374,13 +3232,693 @@ mod tests {
             .collect()
     }
 
+    /// A command for a session's script that runs [`identity_probe`] as one
+    /// of the session's own processes: `exec` makes it the leader itself.
+    #[cfg(unix)]
+    fn probe(mode: &str, exec: bool) -> String {
+        format!(
+            "STORM_PROBE='{mode}' {}'{}' --exact host::tests::identity_probe --nocapture -q --test-threads=1 >/dev/null 2>&1",
+            if exec { "exec " } else { "" },
+            std::env::current_exe().unwrap().display()
+        )
+    }
+
+    #[cfg(unix)]
+    fn rerun_probe(mode: String) -> std::process::Child {
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "host::tests::identity_probe",
+                "--nocapture",
+                "-q",
+                "--test-threads=1",
+            ])
+            .env("STORM_PROBE", mode)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn wait_for_new_parent(was: u32) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::os::unix::process::parent_id() == was {
+            assert!(std::time::Instant::now() < deadline, "never re-parented");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// Not a test: the process a session's script starts to reach its host
+    /// the way a hook, a tool command or a stray would (decision 135). It
+    /// does nothing unless `STORM_PROBE` names what to do.
+    #[cfg(unix)]
+    #[test]
+    fn identity_probe() {
+        use std::io::{Read, Write};
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let Ok(mode) = std::env::var("STORM_PROBE") else {
+            return;
+        };
+        let (verb, arg) = mode.split_once(' ').unwrap_or((&mode, ""));
+        let socket = || std::env::var_os(crate::mcp::SOCKET_ENV).unwrap();
+        let handle = || std::env::var(crate::harness::HANDLE_ENV).unwrap();
+        let line = |handle: String, id: &str| {
+            let mut l = serde_json::to_vec(&crate::harness::HarnessLine {
+                handle,
+                harness_session: id.into(),
+            })
+            .unwrap();
+            l.push(b'\n');
+            l
+        };
+        match verb {
+            // A hook: the session's own process, with its own handle.
+            "send" => crate::harness::send(socket(), handle(), arg.into()).unwrap(),
+            // A permission prompt hook (134-9), with its own handle.
+            "attend" => crate::harness::send_attention(socket(), handle(), arg.into()).unwrap(),
+            "attend-as" => {
+                let (h, kind) = arg.split_once(' ').unwrap();
+                crate::harness::send_attention(socket(), h.into(), kind.into()).unwrap()
+            }
+            // With the handle in file `arg` (another session's, say), or a
+            // literal one when there is no such file.
+            "as" => {
+                let (h, id) = arg.split_once(' ').unwrap();
+                let h = std::fs::read_to_string(h).unwrap_or_else(|_| h.to_string());
+                crate::harness::send(socket(), h, id.into()).unwrap()
+            }
+            // A tool command: a new process session, still a descendant.
+            "setsid" => {
+                rustix::process::setsid().unwrap();
+                crate::harness::send(socket(), handle(), arg.into()).unwrap()
+            }
+            // A detached shell: leaves the tree, then reports.
+            "detach" => {
+                rerun_probe(format!("orphan {} {arg}", std::process::id()));
+                std::process::exit(0);
+            }
+            "orphan" => {
+                let (parent, id) = arg.split_once(' ').unwrap();
+                wait_for_new_parent(parent.parse().unwrap());
+                crate::harness::send(socket(), handle(), id.into()).unwrap()
+            }
+            // An exited connector: connect, hand the socket to a child that
+            // outlives this process, and let the child write.
+            "handoff" => {
+                let stream = std::os::unix::net::UnixStream::connect(socket()).unwrap();
+                rustix::io::fcntl_setfd(&stream, rustix::io::FdFlags::empty()).unwrap();
+                rerun_probe(format!(
+                    "heir {} {} {arg}",
+                    stream.as_raw_fd(),
+                    std::process::id()
+                ));
+                std::process::exit(0);
+            }
+            "heir" => {
+                let mut parts = arg.splitn(3, ' ');
+                let fd: i32 = parts.next().unwrap().parse().unwrap();
+                let parent: u32 = parts.next().unwrap().parse().unwrap();
+                let id = parts.next().unwrap();
+                wait_for_new_parent(parent);
+                // SAFETY: the parent left this descriptor open for us.
+                let mut stream = unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
+                stream.write_all(&line(handle(), id)).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let _ = stream.read(&mut [0u8; 64]);
+            }
+            // The session's bridge: one call through its own MCP config,
+            // the answer written to a file.
+            "bridge" => {
+                let config = std::env::var("STORM_PROBE_CONFIG").unwrap();
+                let config: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(config).unwrap()).unwrap();
+                let (_, server) = config["mcpServers"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap();
+                let env = &server["env"];
+                let mut stream = std::os::unix::net::UnixStream::connect(
+                    env[crate::mcp::SOCKET_ENV].as_str().unwrap(),
+                )
+                .unwrap();
+                let mut request = serde_json::to_vec(&json!({
+                    "handle": env[crate::mcp::HANDLE_ENV],
+                    "connection": server["args"][1],
+                    "message": {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+                }))
+                .unwrap();
+                request.push(b'\n');
+                stream.write_all(&request).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                let mut answer = String::new();
+                let _ = stream.read_to_string(&mut answer);
+                std::fs::write("answer", answer).unwrap();
+            }
+            other => panic!("no probe {other:?}"),
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn refusals(host: &Host, session: &str) -> Vec<(&'static str, &'static str)> {
+        host.refused
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(s, _, _)| s == session)
+            .map(|(_, kind, why)| (*kind, *why))
+            .collect()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn harness_id(host: &Host, session: &str) -> Option<String> {
+        host.session(session)?
+            .events
+            .harness
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn handle_of(host: &Host, session: &str) -> String {
+        host.harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == session)
+            .map(|(h, _)| h.clone())
+            .unwrap()
+    }
+
+    /// A script that does `cases` by session id, then stays up.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn by_session(cases: &[(&str, String)]) -> String {
+        let arms: String = cases
+            .iter()
+            .map(|(session, cmd)| format!("{session}) {cmd};; "))
+            .collect();
+        format!(
+            "while [ ! -e go ]; do sleep 0.05; done; \
+             case \"$STORM_RUNTIME_SESSION\" in {arms}esac; exec sleep 1000"
+        )
+    }
+
+    /// G-135-1, accepted: the session's own processes — its leader, a hook
+    /// under it, and a tool command in a process session of its own.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn g_135_1_the_sessions_own_processes_are_accepted() {
+        let ids = [
+            ("ags_LEAD", "11111111-1111-4111-8111-111111111111"),
+            ("ags_HOOK", "22222222-2222-4222-8222-222222222222"),
+            ("ags_TOOL", "33333333-3333-4333-8333-333333333333"),
+        ];
+        let script = by_session(&[
+            (ids[0].0, probe(&format!("send {}", ids[0].1), true)),
+            (ids[1].0, probe(&format!("send {}", ids[1].1), false)),
+            (
+                ids[2].0,
+                format!(
+                    "/bin/sh -c \"{}\"",
+                    probe(&format!("setsid {}", ids[2].1), false)
+                ),
+            ),
+        ]);
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        assert!(
+            host.peer_identity.verified(),
+            "{:?}",
+            host.peer_identity.report()
+        );
+        assert_eq!(host.capabilities()["identity"]["state"], "verified");
+        for (session, _) in ids {
+            host.clone()
+                .handle(harness_start(session, "claude-code", None, false))
+                .await;
+        }
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        for (session, id) in ids {
+            // The leader's session ends with it, so its report is read
+            // from what was posted.
+            wait_for(&format!("{session}'s report"), || {
+                harness_posts(&seen, &session.to_lowercase()).contains(&id.to_string())
+            })
+            .await;
+            assert_eq!(refusals(&host, session), [], "{session}");
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-1, refused and audited: a real handle from outside the session
+    /// — the host's own process, another session's, a detached shell's — and
+    /// a connector that exited and left its socket to a child. None of them
+    /// changes a session's id.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn g_135_1_a_real_handle_from_outside_the_session_is_refused() {
+        let id = "44444444-4444-4444-8444-444444444444";
+        let script = by_session(&[
+            ("ags_OTHER", probe(&format!("as victim {id}"), false)),
+            ("ags_DETACH", probe(&format!("detach {id}"), false)),
+            ("ags_HANDOFF", probe(&format!("handoff {id}"), false)),
+        ]);
+        let (host, _seen, state, roots) = harness_host(&script).await;
+        assert!(host.peer_identity.verified());
+        let sessions = ["ags_VICTIM", "ags_OTHER", "ags_DETACH", "ags_HANDOFF"];
+        for session in sessions {
+            host.clone()
+                .handle(harness_start(session, "claude-code", None, false))
+                .await;
+        }
+        let before: Vec<_> = sessions.iter().map(|s| harness_id(&host, s)).collect();
+        let victim = handle_of(&host, "ags_VICTIM");
+        std::fs::write(roots.path().join("w").join("victim"), &victim).unwrap();
+
+        // The host's own process — no session's — with the real handle.
+        let socket = crate::mcp::socket_path(state.path());
+        let h = victim.clone();
+        tokio::task::spawn_blocking(move || crate::harness::send(&socket, h, id.into()))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refusals(&host, "ags_VICTIM"), [("harness", "reached_host")]);
+
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        wait_for("another session's process refused", || {
+            refusals(&host, "ags_VICTIM").len() == 2
+        })
+        .await;
+        assert_eq!(
+            refusals(&host, "ags_VICTIM")[1],
+            ("harness", "reached_host")
+        );
+        for (session, why) in [
+            ("ags_DETACH", "reached_init"),
+            ("ags_HANDOFF", "peer_exited"),
+        ] {
+            wait_for(&format!("{session} refused"), || {
+                !refusals(&host, session).is_empty()
+            })
+            .await;
+            assert_eq!(refusals(&host, session), [("harness", why)], "{session}");
+        }
+        let after: Vec<_> = sessions.iter().map(|s| harness_id(&host, s)).collect();
+        assert_eq!(after, before);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 135a: a handle whose session has no leader on record — none was ever
+    /// started, or it has gone — takes nothing, whoever sends it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn a_session_without_a_leader_takes_no_connection() {
+        let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
+        let events = Arc::new(Events {
+            ring: Mutex::new(Scrollback::new(64)),
+            ended: Mutex::new(None),
+            wake: Notify::new(),
+            title: Mutex::new(TitleObserver::default()),
+            titles: false,
+            harness: Mutex::new(None),
+            leader: watch::channel(None).0,
+            child: Mutex::new(None),
+            attention_hooks: false,
+            attention: Mutex::new(None),
+        });
+        host.harness_handles.lock().unwrap().insert(
+            "h_ORPHAN".into(),
+            ("ags_NOLEAD".into(), "claude-code".into(), events.clone()),
+        );
+        let socket = crate::mcp::socket_path(state.path());
+        let id = "66666666-6666-4666-8666-666666666666";
+        tokio::task::spawn_blocking(move || {
+            crate::harness::send(&socket, "h_ORPHAN".into(), id.into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(refusals(&host, "ags_NOLEAD"), [("harness", "leader_gone")]);
+        assert_eq!(*events.harness.lock().unwrap(), None);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 135a: a connector the kernel would not name is refused like any other
+    /// failure, never waved through.
+    #[tokio::test]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn a_peer_that_cannot_be_read_is_refused() {
+        let me = Arc::new(Leader {
+            process: crate::platform::peer::Process::open(std::process::id() as i32).unwrap(),
+            user: None,
+        });
+        let r = verdict(Err(io::ErrorKind::InvalidInput.into()), Some(me)).await;
+        assert_eq!(r.unwrap_err().as_str(), "error");
+    }
+
+    /// 135d: a precondition that stops holding while the host runs drops it
+    /// to `unavailable` at once, and the server is told straight away.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn a_lost_precondition_downgrades_the_host_at_once() {
+        let (host, seen, _state, _roots) = harness_host("exec sleep 1000").await;
+        assert!(host.peer_identity.verified());
+        let mechanism = host.peer_identity.report().mechanism;
+        host.refuse(
+            "ags_X",
+            "bridge",
+            crate::peer_identity::Mismatch::Precondition("ptrace_scope"),
+        )
+        .await;
+        assert!(!host.peer_identity.verified());
+        let inventory = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/inventory"))
+            .map(|(_, b)| b.clone())
+            .expect("an inventory was posted");
+        assert_eq!(
+            inventory["identity"],
+            json!({"state": "unavailable", "mechanism": mechanism, "reason": "ptrace_scope"})
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-1 for a bridge line: the session's own call is forwarded; the
+    /// same handle from outside is answered `identity_mismatch`, audited,
+    /// and never reaches the server.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn g_135_1_a_bridge_line_from_outside_is_never_forwarded() {
+        use std::io::{Read, Write};
+        // The probe finds the session's MCP config in its own arguments.
+        let script =
+            "for a in \"$0\" \"$@\"; do [ \"$prev\" = --mcp-config ] && cfg=$a; prev=$a; done; \
+             while [ ! -e go ]; do sleep 0.05; done; "
+                .to_string()
+                + &probe("bridge", false)
+                    .replace("STORM_PROBE=", "STORM_PROBE_CONFIG=\"$cfg\" STORM_PROBE=")
+                + "; exec sleep 1000";
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        let mut start = harness_start("ags_BRIDGE", "claude-code", None, false);
+        if let Command::Start { mcp, .. } = &mut start {
+            mcp.push(crate::mcp::McpGrant {
+                id: "con_NOTES".into(),
+                slug: "notes".into(),
+                plugin_origin: None,
+            });
+        }
+        host.clone().handle(start).await;
+        let forwarded = || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/sessions/ags_bridge/mcp/con_notes"))
+                .count()
+        };
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        let answer = roots.path().join("w").join("answer");
+        wait_for("the session's own call", || answer.exists()).await;
+        assert_eq!(std::fs::read_to_string(&answer).unwrap(), "{}");
+        assert_eq!(forwarded(), 1);
+
+        // Its handle, read from its config, presented from outside.
+        let config_path = crate::mcp::session_dir(&host.state_dir, "ags_BRIDGE").join("mcp.json");
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(config_path).unwrap()).unwrap();
+        let env = config["mcpServers"]["notes"]["env"].clone();
+        let reply = tokio::task::spawn_blocking(move || {
+            let mut stream = std::os::unix::net::UnixStream::connect(
+                env[crate::mcp::SOCKET_ENV].as_str().unwrap(),
+            )
+            .unwrap();
+            let line = json!({
+                "handle": env[crate::mcp::HANDLE_ENV],
+                "connection": "notes",
+                "message": {"jsonrpc": "2.0", "id": 2, "method": "ping"},
+            });
+            stream.write_all(format!("{line}\n").as_bytes()).unwrap();
+            let mut reply = String::new();
+            stream.read_to_string(&mut reply).unwrap();
+            reply
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&reply).unwrap(),
+            json!({"storm_error": "identity_mismatch"})
+        );
+        assert_eq!(forwarded(), 1);
+        assert_eq!(refusals(&host, "ags_BRIDGE"), [("bridge", "reached_host")]);
+        // The server is told, for its audit row (135-2); never the handle.
+        let told: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/sessions/ags_bridge/identity-refused"))
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(
+            told,
+            [json!({"connection": "bridge", "reason": "reached_host"})]
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// G-135-3: a host that is not `verified` is handle-only, as before —
+    /// it says so, and a line from outside still goes through.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn an_unverified_host_is_handle_only_and_says_why() {
+        let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
+        host.peer_identity.downgrade("ptrace_scope");
+        let caps = host.capabilities();
+        assert_eq!(caps["identity"]["state"], "unavailable");
+        assert!(caps["identity"]["reason"].is_string());
+        host.clone()
+            .handle(harness_start("ags_OPEN", "claude-code", None, false))
+            .await;
+        let handle = host
+            .harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == "ags_OPEN")
+            .map(|(h, _)| h.clone())
+            .unwrap();
+        let id = "55555555-5555-4555-8555-555555555555";
+        let socket = crate::mcp::socket_path(state.path());
+        tokio::task::spawn_blocking(move || crate::harness::send(&socket, handle, id.into()))
+            .await
+            .unwrap()
+            .unwrap();
+        wait_for("the outsider's report", || {
+            host.session("ags_OPEN")
+                .and_then(|s| s.events.harness.lock().unwrap().clone())
+                .as_deref()
+                == Some(id)
+        })
+        .await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[cfg(unix)]
+    fn attention_posts(
+        seen: &Mutex<Vec<(String, serde_json::Value)>>,
+        session: &str,
+    ) -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with(&format!("/{session}/status")))
+            .filter_map(|(_, b)| b.get("attention").cloned())
+            .collect()
+    }
+
+    /// 134-9: no adapter's permission prompt is reported until its G-134-7
+    /// passes. A session's own hook saying so changes nothing, and no
+    /// status or `hello` carries the field.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn no_adapter_reports_a_permission_prompt_yet() {
+        assert!(crate::harness::PERMISSION_PROMPT_ADAPTERS.is_empty());
+        let script = format!(
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; exec sleep 1000",
+            probe("attend permission_prompt", false),
+            probe("send 66666666-6666-4666-8666-666666666666", false),
+        );
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        host.clone()
+            .handle(harness_start("ags_OFF", "claude-code", None, false))
+            .await;
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
+        wait_for("the id after the prompt", || {
+            harness_posts(&seen, "ags_off")
+                .contains(&"66666666-6666-4666-8666-666666666666".to_string())
+        })
+        .await;
+        let s = host.session("ags_OFF").unwrap();
+        assert!(!s.events.attention_hooks);
+        assert_eq!(*s.events.attention.lock().unwrap(), None);
+        assert_eq!(
+            attention_posts(&seen, "ags_off"),
+            Vec::<serde_json::Value>::new()
+        );
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert!(hello["sessions"][0].get("attention").is_none(), "{hello}");
+        let settings = std::fs::read_to_string(
+            crate::mcp::session_dir(&host.state_dir, "ags_OFF").join("claude-settings.json"),
+        )
+        .unwrap();
+        assert!(!settings.contains("attention"), "{settings}");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-9 with an adapter on, as once its gate passes: the session's own
+    /// hook sets and clears it, each change reaches the server once, a value
+    /// that is neither is ignored, and so is a handle no session has.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_permission_prompt_is_set_and_cleared_by_the_sessions_hook() {
+        let marker = "77777777-7777-4777-8777-777777777777";
+        let second = "88888888-8888-4888-8888-888888888888";
+        let wait = |file: &str| format!("while [ ! -e {file} ]; do sleep 0.05; done");
+        let script = format!(
+            "{}; {}; {}; {}; {}; {}; {}; {}; {}; {}; {}; exec sleep 1000",
+            wait("go"),
+            probe("attend-as not-a-handle permission_prompt", false),
+            probe("attend idle_prompt", false),
+            probe(&format!("send {marker}"), false),
+            wait("go2"),
+            probe("attend permission_prompt", false),
+            probe("attend permission_prompt", false),
+            probe("attend idle_prompt", false),
+            probe(&format!("send {second}"), false),
+            wait("go3"),
+            probe("attend none", false),
+        );
+        let (host, seen, state, roots) = harness_host(&script).await;
+        *host.permission_prompt.lock().unwrap() = &["claude-code"];
+        host.clone()
+            .handle(harness_start("ags_ON", "claude-code", None, false))
+            .await;
+        let s = host.session("ags_ON").unwrap();
+        assert!(s.events.attention_hooks);
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                crate::mcp::session_dir(&host.state_dir, "ags_ON").join("claude-settings.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            settings["hooks"]["Notification"][0]["matcher"],
+            "permission_prompt"
+        );
+        // The session's own handle from outside its tree (135): refused on
+        // a host that checks who connects.
+        let handle = host
+            .harness_handles
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(_, (s, _, _))| s == "ags_ON")
+            .map(|(h, _)| h.clone())
+            .unwrap();
+        let socket = crate::mcp::socket_path(state.path());
+        tokio::task::spawn_blocking(move || {
+            crate::harness::send_attention(&socket, handle, "permission_prompt".into())
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        if host.peer_identity.verified() {
+            assert_eq!(*s.events.attention.lock().unwrap(), None, "an outsider");
+        }
+        let go = |file: &str| std::fs::write(roots.path().join("w").join(file), "").unwrap();
+        go("go");
+        wait_for("the marker", || {
+            harness_posts(&seen, "ags_on").contains(&marker.to_string())
+        })
+        .await;
+        assert_eq!(
+            *s.events.attention.lock().unwrap(),
+            None,
+            "another handle and another value change nothing"
+        );
+        go("go2");
+        wait_for("the prompt", || {
+            attention_posts(&seen, "ags_on").contains(&json!("permission_prompt"))
+        })
+        .await;
+        wait_for("the second marker", || {
+            harness_posts(&seen, "ags_on").contains(&second.to_string())
+        })
+        .await;
+        assert_eq!(
+            *s.events.attention.lock().unwrap(),
+            Some("permission_prompt"),
+            "another value leaves it as it is"
+        );
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["attention"], "permission_prompt");
+        go("go3");
+        wait_for("the answer", || {
+            attention_posts(&seen, "ags_on").last() == Some(&serde_json::Value::Null)
+        })
+        .await;
+        assert_eq!(
+            attention_posts(&seen, "ags_on")
+                .into_iter()
+                .skip_while(|a| a.is_null())
+                .collect::<Vec<_>>(),
+            [json!("permission_prompt"), serde_json::Value::Null],
+            "one post per change"
+        );
+        assert_eq!(*s.events.attention.lock().unwrap(), None);
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     /// Decision 89: the id a fresh Claude Code session starts with is
     /// reported, then whatever its hook says, but only through its own
-    /// handle and only as an id Claude Code could have made.
+    /// handle and only as an id Claude Code could have made. The reports
+    /// come from the session's own processes, as a real hook's do: on a
+    /// Linux host they are checked (decision 135).
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(unix)]
     async fn the_agents_session_id_is_reported_as_it_changes() {
-        let (host, seen, state, _roots) = harness_host("exec sleep 1000").await;
+        let cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63";
+        let script = format!(
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; exec sleep 1000",
+            probe(&format!("as not-a-handle {cleared}"), false),
+            probe("send ses_notclaude", false),
+            probe(&format!("send {cleared}"), false),
+        );
+        let (host, seen, _state, roots) = harness_host(&script).await;
         host.clone()
             .handle(harness_start("ags_HARN", "claude-code", None, false))
             .await;
@@ -2398,20 +3936,7 @@ mod tests {
             harness_posts(&seen, "ags_harn").contains(&first)
         })
         .await;
-
-        let handle = host
-            .harness_handles
-            .lock()
-            .unwrap()
-            .iter()
-            .find(|(_, (s, _, _))| s == "ags_HARN")
-            .map(|(h, _)| h.clone())
-            .unwrap();
-        let socket = crate::mcp::socket_path(state.path());
-        let cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63";
-        crate::harness::send(&socket, "not-a-handle".into(), cleared.into()).unwrap();
-        crate::harness::send(&socket, handle.clone(), "ses_notclaude".into()).unwrap();
-        crate::harness::send(&socket, handle.clone(), cleared.into()).unwrap();
+        std::fs::write(roots.path().join("w").join("go"), "").unwrap();
         wait_for("the cleared id", || {
             harness_posts(&seen, "ags_harn").last().map(String::as_str) == Some(cleared)
         })
@@ -2637,6 +4162,119 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 .unwrap()
                 .iter()
                 .any(|(p, b)| p.ends_with("/ags_bad/status") && b["end_reason"] == "start_failure")
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[cfg(unix)]
+    fn child_command(
+        request: &str,
+        op: ChildOp,
+        child: Option<&str>,
+        target: Option<&str>,
+    ) -> Command {
+        Command::ChildWorkspace {
+            request: request.into(),
+            op,
+            child: child.map(Into::into),
+            parent: Some("ags_P".into()),
+            target: target.map(Into::into),
+        }
+    }
+
+    #[cfg(unix)]
+    fn child_answer(
+        seen: &Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        request: &str,
+    ) -> Option<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .find(|(p, _)| p.ends_with(&format!("/v1/runtime/children/{request}")))
+            .map(|(_, b)| b.clone())
+    }
+
+    /// Decision 137-3: a host carries `child.workspace` to its helper and
+    /// posts the helper's answer, or its refusal's code, back; it decides
+    /// nothing itself. Only an isolated host says it can.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_workspace_command_is_carried_to_the_helper_and_answered() {
+        let (host, seen, helper, _state, _roots) = isolated_host_for("shell", &[]).await;
+        assert_eq!(host.capabilities()["child_workspaces"], json!(true));
+        host.clone()
+            .handle(child_command("cwr_1", ChildOp::List, None, None))
+            .await;
+        let v = child_answer(&seen, "cwr_1").unwrap();
+        assert_eq!(v["answer"]["orphans"], json!(["ags_LOST"]));
+        assert!(v["answer"].get("ok").is_none() && v["answer"].get("op").is_none());
+        host.clone()
+            .handle(child_command("cwr_2", ChildOp::Export, Some("ags_C"), None))
+            .await;
+        let v = child_answer(&seen, "cwr_2").unwrap();
+        assert_eq!(
+            v["answer"]["patch"].as_str().unwrap().len(),
+            200 << 10,
+            "a whole diff"
+        );
+        host.clone()
+            .handle(child_command(
+                "cwr_3",
+                ChildOp::Import,
+                Some("ags_C"),
+                Some("storm/ags_C"),
+            ))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_3").unwrap()["answer"]["branch"],
+            "storm/ags_C"
+        );
+        host.clone()
+            .handle(child_command("cwr_4", ChildOp::Export, Some("ags_X"), None))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_4").unwrap(),
+            json!({"refused": "no_child"})
+        );
+        host.clone()
+            .handle(child_command(
+                "cwr_5",
+                ChildOp::Dispose,
+                Some("ags_C"),
+                None,
+            ))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_5").unwrap()["answer"]["removed"],
+            true
+        );
+        let ops = helper.seen.lock().unwrap().ops.clone();
+        for want in [
+            "child_list ",
+            "child_export ags_C",
+            "child_import ags_C",
+            "child_dispose ags_C",
+        ] {
+            assert!(ops.iter().any(|o| o == want), "{want} in {ops:?}");
+        }
+        host.clone()
+            .handle(child_command("../evil", ChildOp::List, None, None))
+            .await;
+        assert!(!seen.lock().unwrap().iter().any(|(p, _)| p.contains("evil")));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_host_without_isolation_has_no_child_workspaces() {
+        let (host, seen, _state, _roots) = harness_host("exec sleep 1000").await;
+        assert!(host.capabilities().get("child_workspaces").is_none());
+        host.clone()
+            .handle(child_command("cwr_1", ChildOp::List, None, None))
+            .await;
+        assert_eq!(
+            child_answer(&seen, "cwr_1").unwrap(),
+            json!({"refused": "isolation_off"})
         );
         host.shutdown(Duration::from_millis(200)).await;
     }
@@ -2910,6 +4548,9 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
+                resumed_from: None,
+                child_of: None,
             })
             .await;
 
@@ -3002,6 +4643,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 context: false,
                 resume: None,
                 provider_credential: None,
+                spawn_asks: None,
+                resumed_from: None,
+                child_of: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -3076,6 +4720,18 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         tempfile::TempDir,
         tempfile::TempDir,
     ) {
+        test_host_with(providers, "").await
+    }
+
+    async fn test_host_with(
+        providers: Vec<Arc<dyn Provider>>,
+        extra_config: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let (url, seen) = recording_server().await;
         let state = tempfile::tempdir().unwrap();
@@ -3093,14 +4749,1133 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .save(state.path())
         .unwrap();
         let config: RuntimeConfig = toml::from_str(&format!(
-            "workspace_roots = [{:?}]\nmax_sessions = 2",
+            "workspace_roots = [{:?}]\nmax_sessions = 2\n{extra_config}",
             roots.path().display().to_string()
         ))
         .unwrap();
-        let host = Host::with_providers(state.path(), config, providers).unwrap();
+        let host = Host::with_providers(state.path(), config, providers, None).unwrap();
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
+    }
+
+    /// 136a: with isolation on, a host that cannot isolate a session
+    /// starts none, rather than run it as its own account.
+    #[tokio::test]
+    async fn with_isolation_on_no_session_starts_as_the_host_account() {
+        let (host, seen, _state, _roots) = test_host_with(
+            vec![Arc::new(crate::fake::FakeProvider::new())],
+            "isolation = \"per-session\"",
+        )
+        .await;
+        host.dispatch(1, start("ags_ISO", "fake"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_iso") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_ISO").is_none());
+
+        let (host, _seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        host.dispatch(1, start("ags_OFF", "fake"));
+        eventually("with isolation off it starts", || {
+            host.session("ags_OFF").is_some()
+        })
+        .await;
+    }
+
+    /// A host whose `shell` runs `args` through a fake isolation helper,
+    /// which starts it on the terminal it is handed, as the helper would.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host(
+        program: &str,
+        args: &[&str],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), program);
+        let shell = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new("shell").unwrap(),
+            "/bin/sh",
+            args.iter().copied(),
+        )
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(shell)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
+        // As if its self-test had passed (136j); `run` reports changes.
+        helper.status.settle(Ok(()));
+        tokio::spawn(host.clone().report_isolation_changes());
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    /// A host whose one provider is `id`, with `env` from its env file,
+    /// started through a fake isolation helper running `/bin/sh -c 'sleep 30'`.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host_for(
+        id: &str,
+        env: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        isolated_host_with(id, "/bin/sleep", &[], env).await
+    }
+
+    /// An isolated host whose one provider is `id`: the fake helper runs
+    /// `program` with `args` and the launch's own arguments after them.
+    #[cfg(target_os = "linux")]
+    async fn isolated_host_with(
+        id: &str,
+        program: &str,
+        args: &[&str],
+        env: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\nisolation = \"per-session\"\n",
+            roots.path().display().to_string()
+        ))
+        .unwrap();
+        let helper = crate::isolation::fake::FakeHelper::start(state.path(), program);
+        let provider = crate::cli::CliProvider::new(
+            crate::provider::ProviderId::new(id).unwrap(),
+            "/bin/sh",
+            args.iter().copied(),
+        )
+        .with_env(env.iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        .isolated(helper.link(state.path()));
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            vec![Arc::new(provider)],
+            Some(helper.link(state.path())),
+        )
+        .unwrap();
+        // As if its self-test had passed (136j); `run` reports changes.
+        helper.status.settle(Ok(()));
+        tokio::spawn(host.clone().report_isolation_changes());
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, helper, state, roots)
+    }
+
+    /// An isolated host whose Claude Code runs `script` through the fake
+    /// helper, which leases `uid` (this account's when none), and which
+    /// also serves the host's shared socket.
+    #[cfg(target_os = "linux")]
+    async fn isolated_script_host(
+        script: &str,
+        uid: Option<u32>,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let fixture = isolated_host_with(
+            "claude-code",
+            "/bin/sh",
+            &["-c", script],
+            &[("ANTHROPIC_API_KEY", "sk")],
+        )
+        .await;
+        fixture.2.seen.lock().unwrap().lease_uid = uid;
+        let listener = fixture.0.bind_socket().unwrap();
+        tokio::spawn(fixture.0.clone().serve_socket(listener, None));
+        fixture
+    }
+
+    #[cfg(target_os = "linux")]
+    fn me() -> u32 {
+        rustix::process::getuid().as_raw()
+    }
+
+    /// A harness line with `handle` on `socket`, from this process: the
+    /// host itself, never one of a session's.
+    #[cfg(target_os = "linux")]
+    async fn report_from_here(socket: PathBuf, handle: String) {
+        tokio::task::spawn_blocking(move || {
+            let _ = crate::harness::send(
+                socket.into_os_string(),
+                handle,
+                "55555555-5555-4555-8555-555555555555".into(),
+            );
+        })
+        .await
+        .unwrap();
+    }
+
+    /// 136i, accepted: on an isolated host a session's own hook reaches the
+    /// host on the session's own socket, made in its directory before the
+    /// helper started it, from the user the session was leased and under
+    /// the leader the helper handed back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_sessions_own_hook_is_taken_on_its_own_socket() {
+        use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+        let id = "44444444-4444-4444-8444-444444444444";
+        let script = format!("{}; exec sleep 1000", probe(&format!("send {id}"), false));
+        let (host, _seen, helper, state, _roots) = isolated_script_host(&script, None).await;
+        host.clone()
+            .handle(harness_start("ags_OWN", "claude-code", None, false))
+            .await;
+        wait_for("its id", || {
+            harness_id(&host, "ags_OWN").as_deref() == Some(id)
+        })
+        .await;
+        assert!(refusals(&host, "ags_OWN").is_empty());
+        let dir = state.path().join("sessions/ags_OWN");
+        let md = std::fs::symlink_metadata(dir.join("mcp.sock")).unwrap();
+        assert!(md.file_type().is_socket());
+        assert_eq!(md.permissions().mode() & 0o777, 0o660);
+        assert!(dir.join("inbox").is_dir(), "its inbox, made before start");
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let sock = dir.join("mcp.sock").display().to_string();
+        assert!(
+            launch["env"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|kv| kv[0] == crate::mcp::SOCKET_ENV && kv[1] == sock.as_str()),
+            "{launch}"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// The start the server sends an approved child (134-5), as the shared
+    /// vector pins it.
+    fn spawned_start() -> Command {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        serde_json::from_value::<Envelope>(vector["start"].clone())
+            .unwrap()
+            .command
+    }
+
+    #[cfg(target_os = "linux")]
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8(out.stdout).unwrap().trim().to_string()
+    }
+
+    /// 134-5, the host's half of the full flow (api.rs has the server's):
+    /// the start the server sends an approved child reaches an isolated
+    /// host, the helper makes the child a W2 clone of its parent's
+    /// workspace with real git between `prepare` and `start`, and the child
+    /// runs in it, at the parent's `HEAD`, without the parent's uncommitted
+    /// files, with the spawned opening prompt. Its first `running` report
+    /// says what it starts from, and the host's next inventory names its
+    /// directory under the name the server records it by (WS-9).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_approved_childs_start_runs_it_in_its_own_clone() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "pwd > {o}/pwd; /usr/bin/git rev-parse HEAD > {o}/head; ls -A > {o}/ls; \
+             /usr/bin/git remote > {o}/remotes; printf '%s\\n' \"$@\" > {o}/args; exec sleep 1000"
+        );
+        let (host, seen, helper, _state, roots) = isolated_script_host(&script, None).await;
+        let parent = roots.path().join("w");
+        git(&parent, &["init", "-q", "-b", "main"]);
+        std::fs::write(parent.join("README.md"), "committed\n").unwrap();
+        git(&parent, &["add", "README.md"]);
+        git(
+            &parent,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "commit",
+                "-q",
+                "-m",
+                "one",
+            ],
+        );
+        let head = git(&parent, &["rev-parse", "HEAD"]);
+        std::fs::write(parent.join("untracked.txt"), "never copied\n").unwrap();
+        std::fs::write(parent.join("README.md"), "uncommitted\n").unwrap();
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+
+        host.clone().handle(spawned_start()).await;
+        wait_for("the child's arguments", || out.path().join("args").exists()).await;
+        wait_for("its first running report", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/sessions/ags_child/status") && b["status"] == "running")
+        })
+        .await;
+        let read = |f: &str| std::fs::read_to_string(out.path().join(f)).unwrap();
+        let made = children.path().join("ags_CHILD/workspace");
+        assert_eq!(read("pwd").trim(), made.display().to_string());
+        assert_eq!(read("head").trim(), head);
+        let mut ls: Vec<String> = read("ls").lines().map(str::to_string).collect();
+        ls.sort();
+        assert_eq!(ls, [".git", "README.md"], "only committed history");
+        assert_eq!(
+            std::fs::read_to_string(made.join("README.md")).unwrap(),
+            "committed\n"
+        );
+        assert_eq!(
+            read("remotes").trim(),
+            "",
+            "nothing points back at the parent"
+        );
+        assert_eq!(
+            read("args").lines().last(),
+            Some(crate::mcp::SPAWNED_OPENING_PROMPT)
+        );
+        assert_eq!(
+            helper.seen.lock().unwrap().ops,
+            [
+                "lease ags_CHILD",
+                "prepare ags_CHILD",
+                "child_create ags_CHILD",
+                "start ags_CHILD"
+            ]
+        );
+        let running = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(p, b)| p.ends_with("/sessions/ags_child/status") && b["status"] == "running")
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(
+            running["child_workspace"],
+            serde_json::json!({"mode": "clone", "commit": head, "branch": "main",
+                "submodules": false, "large_files": false})
+        );
+        wait_for("an inventory naming its directory", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p == "/v1/runtime/inventory"
+                    && b["workspace_paths"]["children/ags_CHILD"] == made.display().to_string()
+            })
+        })
+        .await;
+        assert_eq!(
+            host.capabilities()["workspaces"],
+            serde_json::json!(["w"]),
+            "no launch can name a child's workspace"
+        );
+        host.clone()
+            .handle(Command::End {
+                session: "ags_CHILD".into(),
+            })
+            .await;
+        wait_for("its end", || host.session("ags_CHILD").is_none()).await;
+        assert!(
+            host.capabilities()["workspace_paths"]
+                .get("children/ags_CHILD")
+                .is_none(),
+            "an ended child is not reported"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// One of the shared vector's `child.workspace` commands (137-3 ⋈ 134).
+    #[cfg(target_os = "linux")]
+    fn child_work(op: &str) -> (Command, serde_json::Value) {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        let v = &vector["child_work"][op];
+        let command = serde_json::from_value::<Envelope>(v["command"].clone())
+            .unwrap()
+            .command;
+        (command, v["answer"].clone())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn keys(v: &serde_json::Value) -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    }
+
+    /// The integration of 137-3 with 134-5, the host's half (api.rs has
+    /// the server's, `the_full_flow_applies_an_ended_childs_work_by_its_session`):
+    /// a child started by the server's `start` works in its W2 clone and
+    /// commits, then ends by itself; at its lease end the helper keeps its
+    /// workspace for review, and the vector's `child.workspace` commands
+    /// export its work and apply it as `storm/<child>` through the helper's
+    /// own export and Apply code with real git. The parent's every existing
+    /// ref, `HEAD`, index and working tree are as they were; a second Apply
+    /// is refused.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_ended_childs_work_is_exported_and_applied_into_its_parent() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "printf 'done\\n' > WORK.md && /usr/bin/git add WORK.md && \
+             /usr/bin/git -c user.name=child -c user.email=c@c commit -q -m \"the child's work\" && \
+             /usr/bin/git rev-parse HEAD > {o}/tip; printf 'left over\\n' > UNCOMMITTED.md; exit 0"
+        );
+        let (host, seen, helper, _state, roots) = isolated_script_host(&script, None).await;
+        let parent = roots.path().join("w");
+        git(&parent, &["init", "-q", "-b", "main"]);
+        std::fs::write(parent.join("README.md"), "committed\n").unwrap();
+        git(&parent, &["add", "README.md"]);
+        let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q"];
+        git(&parent, &[&commit[..], &["-m", "one"]].concat());
+        git(&parent, &["branch", "feature"]);
+        git(&parent, &["tag", "v1"]);
+        let base = git(&parent, &["rev-parse", "HEAD"]);
+        std::fs::write(parent.join("README.md"), "uncommitted\n").unwrap();
+        std::fs::write(parent.join("untracked.txt"), "mine\n").unwrap();
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+        let refs = || {
+            git(
+                &parent,
+                &["for-each-ref", "--format=%(refname) %(objectname)"],
+            )
+        };
+        let state_of = || {
+            (
+                std::fs::read(parent.join(".git/HEAD")).unwrap(),
+                std::fs::read(parent.join(".git/index")).unwrap(),
+                std::fs::read_to_string(parent.join("README.md")).unwrap(),
+                std::fs::read_to_string(parent.join("untracked.txt")).unwrap(),
+            )
+        };
+        let (refs_before, state_before) = (refs(), state_of());
+
+        host.clone().handle(spawned_start()).await;
+        wait_for("the child's commit", || out.path().join("tip").exists()).await;
+        wait_for("its lease end", || {
+            helper.seen.lock().unwrap().released == ["ags_CHILD"]
+        })
+        .await;
+        let tip = std::fs::read_to_string(out.path().join("tip"))
+            .unwrap()
+            .trim()
+            .to_string();
+        assert_ne!(tip, base);
+
+        let answered = |request: &str| {
+            let path = format!("/v1/runtime/children/{}", request.to_lowercase());
+            let seen = seen.clone();
+            move || {
+                seen.lock()
+                    .unwrap()
+                    .iter()
+                    .rev()
+                    .find(|(p, _)| *p == path)
+                    .map(|(_, b)| b.clone())
+            }
+        };
+        let run = |op: &'static str| {
+            let host = host.clone();
+            let answered = &answered;
+            async move {
+                let (command, want) = child_work(op);
+                let Command::ChildWorkspace { request, .. } = &command else {
+                    unreachable!()
+                };
+                let got = answered(request);
+                let before = got().map(|b| b.to_string());
+                host.handle(command).await;
+                wait_for(op, || got().map(|b| b.to_string()) != before).await;
+                (got().unwrap(), want)
+            }
+        };
+
+        let (listed, want) = run("list").await;
+        let record = &listed["answer"]["children"][0];
+        assert_eq!(keys(record), keys(&want["children"][0]));
+        assert_eq!(
+            (
+                record["child"].clone(),
+                record["parent"].clone(),
+                record["stage"].clone()
+            ),
+            ("ags_CHILD".into(), "ags_PARENT".into(), "ended".into())
+        );
+        assert_eq!(record["commit"], base);
+
+        let (exported, want) = run("export").await;
+        let review = &exported["answer"];
+        assert_eq!(keys(review), keys(&want), "{review}");
+        assert_eq!(
+            (review["base"].clone(), review["tip"].clone()),
+            (base.clone().into(), tip.clone().into())
+        );
+        assert_eq!(
+            review["commits"],
+            serde_json::json!([{"id": tip, "subject": "the child's work"}])
+        );
+        assert_eq!(
+            review["files"],
+            serde_json::json!([{"path": "WORK.md", "added": 1, "removed": 0}])
+        );
+        let patch = review["patch"].as_str().unwrap();
+        assert!(patch.contains("+done"), "{patch}");
+        assert!(
+            !patch.contains("left over"),
+            "uncommitted work never leaves"
+        );
+        assert_eq!(
+            refs(),
+            refs_before,
+            "an export changes nothing of the parent's"
+        );
+
+        let (applied, want) = run("import").await;
+        assert_eq!(keys(&applied["answer"]), keys(&want), "{applied}");
+        assert_eq!(
+            applied["answer"],
+            serde_json::json!({"branch": "storm/ags_CHILD", "commit": tip, "child": "ags_CHILD"})
+        );
+        let mut refs_after: Vec<String> = refs().lines().map(str::to_string).collect();
+        refs_after.retain(|r| *r != format!("refs/heads/storm/ags_CHILD {tip}"));
+        assert_eq!(refs_after.join("\n"), refs_before, "no existing ref moved");
+        assert_eq!(
+            state_of(),
+            state_before,
+            "HEAD, index and working tree as they were"
+        );
+        assert_eq!(git(&parent, &["show", "storm/ags_CHILD:WORK.md"]), "done");
+
+        let (again, _) = run("import").await;
+        assert_eq!(again, serde_json::json!({"refused": "branch_exists"}));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A child whose workspace the helper will not make never starts and
+    /// ends with why (137f): its record names the cap.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_over_its_cap_ends_workspace_cap() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        helper.seen.lock().unwrap().child_refusal = Some("workspace_cap".into());
+        host.clone().handle(spawned_start()).await;
+        wait_for("its failure", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/sessions/ags_child/status")
+                    && b["status"] == "failed"
+                    && b["end_reason"] == "workspace_cap"
+            })
+        })
+        .await;
+        assert!(host.session("ags_CHILD").is_none());
+        assert!(
+            helper
+                .seen
+                .lock()
+                .unwrap()
+                .released
+                .contains(&"ags_CHILD".to_string())
+        );
+    }
+
+    /// A child's workspace is its own user's (WS-1), which only the helper
+    /// makes: a host without isolation starts no child, whatever the
+    /// server says, and a parent that is no session is refused too.
+    #[tokio::test]
+    async fn a_child_starts_only_on_an_isolated_host() {
+        let (host, seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        let mut start = spawned_start();
+        if let Command::Start { provider, .. } = &mut start {
+            *provider = "fake".into();
+        }
+        host.dispatch(1, start);
+        eventually("the start was reported failed", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.ends_with("/sessions/ags_child/status") && b["end_reason"] == "start_failure"
+            })
+        })
+        .await;
+        assert!(host.session("ags_CHILD").is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_child_needs_a_parent_that_is_a_session() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        // Not a session id, none, itself, and a resume (which is never a
+        // child's: C7).
+        let cases = [
+            ("ags_C0", "../etc", false),
+            ("ags_C1", "", false),
+            ("ags_C2", "ags_C2", false),
+            ("ags_C3", "ags_PARENT", true),
+        ];
+        for (id, parent, resumes) in cases {
+            let mut start = spawned_start();
+            if let Command::Start {
+                session,
+                child_of,
+                resume,
+                ..
+            } = &mut start
+            {
+                *session = id.into();
+                *child_of = Some(parent.into());
+                if resumes {
+                    *resume = Some("11111111-1111-4111-8111-111111111111".into());
+                }
+            }
+            host.clone().handle(start).await;
+        }
+        let failed = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, b)| p.contains("/sessions/ags_c") && b["end_reason"] == "start_failure")
+            .count();
+        assert_eq!(failed, 4);
+        assert!(
+            helper.seen.lock().unwrap().ops.is_empty(),
+            "no lease was taken"
+        );
+    }
+
+    /// IT-8: a connection with the session's valid handle, from a user that
+    /// is not the one the session was leased, is refused as
+    /// `identity_mismatch` — even from inside the session's own tree.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_8_a_connection_from_another_user_is_refused() {
+        let id = "66666666-6666-4666-8666-666666666666";
+        let script = format!("{}; exec sleep 1000", probe(&format!("send {id}"), false));
+        let (host, seen, _helper, _state, _roots) =
+            isolated_script_host(&script, Some(me() + 1)).await;
+        host.clone()
+            .handle(harness_start("ags_USER", "claude-code", None, false))
+            .await;
+        wait_for("the refusal", || !refusals(&host, "ags_USER").is_empty()).await;
+        assert_eq!(refusals(&host, "ags_USER"), [("harness", "wrong_user")]);
+        assert_ne!(harness_id(&host, "ags_USER").as_deref(), Some(id));
+        wait_for("the server's audit row", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/sessions/ags_user/identity-refused") && b["reason"] == "wrong_user"
+            })
+        })
+        .await;
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 136i: a session's handle is good only on its own socket — not the
+    /// host's shared one, not another session's — and from the right user
+    /// it still has to descend from the session's leader (135b).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_handle_is_good_only_on_its_own_socket_and_under_its_leader() {
+        let (host, _seen, _helper, state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        for id in ["ags_SA", "ags_SB"] {
+            host.clone()
+                .handle(harness_start(id, "claude-code", None, false))
+                .await;
+            wait_for("started", || host.session(id).is_some()).await;
+        }
+        let (a, b) = (handle_of(&host, "ags_SA"), handle_of(&host, "ags_SB"));
+        let own = |s: &str| state.path().join("sessions").join(s).join("mcp.sock");
+        report_from_here(crate::mcp::socket_path(state.path()), a.clone()).await;
+        report_from_here(own("ags_SB"), a.clone()).await;
+        report_from_here(own("ags_SB"), b).await;
+        assert_eq!(
+            refusals(&host, "ags_SA"),
+            [("harness", "wrong_socket"), ("harness", "wrong_socket")]
+        );
+        // The right socket and the right user, but the host's own process.
+        assert_eq!(refusals(&host, "ags_SB"), [("harness", "reached_host")]);
+        for s in ["ags_SA", "ags_SB"] {
+            assert_ne!(
+                harness_id(&host, s).as_deref(),
+                Some("55555555-5555-4555-8555-555555555555")
+            );
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// IT-7, pasta and the helper: a failure the helper reports, or a
+    /// helper that stops answering, drops isolation to `unavailable` at
+    /// once and the server hears it; new sessions are refused with
+    /// `isolation_unavailable`; one already running keeps running.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_7_pasta_or_the_helper_gone_refuses_new_sessions_only() {
+        for broken in ["no_passt", "helper"] {
+            let (host, seen, helper, _state, _roots) =
+                isolated_script_host("exec sleep 1000", None).await;
+            assert_eq!(
+                host.capabilities()["isolation"],
+                json!({"state": "verified", "mechanism": "systemd_units", "reason": null})
+            );
+            host.clone()
+                .handle(harness_start("ags_RUN", "claude-code", None, false))
+                .await;
+            wait_for("running", || host.session("ags_RUN").is_some()).await;
+            match broken {
+                "no_passt" => helper.seen.lock().unwrap().no_passt = true,
+                _ => std::fs::remove_file(&helper.socket).unwrap(),
+            }
+            host.clone()
+                .handle(harness_start("ags_NEXT", "claude-code", None, false))
+                .await;
+            assert_eq!(
+                host.capabilities()["isolation"],
+                json!({"state": "unavailable", "mechanism": "systemd_units", "reason": broken}),
+                "{broken}"
+            );
+            eventually("the server told", || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.ends_with("/v1/runtime/inventory") && b["isolation"]["reason"] == broken
+                })
+            })
+            .await;
+            host.clone()
+                .handle(harness_start("ags_LATER", "claude-code", None, false))
+                .await;
+            eventually("refused", || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.contains("ags_later") && b["end_reason"] == "isolation_unavailable"
+                })
+            })
+            .await;
+            assert!(
+                !ops(&helper).iter().any(|o| o == "lease ags_LATER"),
+                "{broken}: nothing leased for a refused start"
+            );
+            let running = host.session("ags_RUN").expect("still there");
+            assert!(running.events.ended.lock().unwrap().is_none(), "{broken}");
+            host.shutdown(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// IT-7, the self-test: on a host that does not isolate (the fake
+    /// helper runs every session as this account) the real probes run and
+    /// the self-test fails, so isolation is `unavailable: self_test` and no
+    /// session starts.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_7_a_failing_self_test_refuses_every_start() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        helper.status.set_for_tests_pending();
+        assert_eq!(host.capabilities()["isolation"]["reason"], "pending");
+        host.clone().isolation_self_test().await;
+        assert_eq!(
+            host.capabilities()["isolation"],
+            json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"})
+        );
+        let probes = ops(&helper)
+            .iter()
+            .filter(|o| o.starts_with("start ags_isoprobe"))
+            .count();
+        assert_eq!(probes, 2, "both probes ran: {:?}", ops(&helper));
+        host.clone()
+            .handle(harness_start("ags_NONE", "claude-code", None, false))
+            .await;
+        eventually("refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.contains("ags_none") && b["end_reason"] == "isolation_unavailable")
+        })
+        .await;
+        assert!(!ops(&helper).iter().any(|o| o == "lease ags_NONE"));
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// With isolation off nothing is isolated, and the host says so.
+    #[tokio::test]
+    async fn with_isolation_off_the_host_reports_isolation_off() {
+        let (host, _seen, _state, _roots) = test_host(Vec::new()).await;
+        assert_eq!(
+            host.capabilities()["isolation"],
+            if cfg!(target_os = "linux") {
+                json!({"state": "unavailable", "mechanism": null, "reason": "off"})
+            } else if cfg!(windows) {
+                json!({"state": "unsupported", "mechanism": null, "reason": "windows"})
+            } else {
+                json!({"state": "unsupported", "mechanism": null, "reason": "macos"})
+            }
+        );
+    }
+
+    /// 136i: a pasted image on an isolated host is readable through the
+    /// inbox the helper shared, whose modes are left as they are; off it,
+    /// as private as before.
+    #[test]
+    #[cfg(unix)]
+    fn an_isolated_sessions_image_is_readable_to_its_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let inbox = t.path().join("sessions/ags_I/inbox");
+        assert!(
+            write_image(&inbox, "img_A.png", b"x", true).is_err(),
+            "no inbox"
+        );
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::set_permissions(&inbox, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let path = write_image(&inbox, "img_A.png", b"x", true).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(Path::new(&path)), 0o644);
+        assert_eq!(mode(&inbox), 0o750, "the share is kept");
+        let private = write_image(&t.path().join("other"), "img_B.png", b"x", false).unwrap();
+        assert_eq!(mode(Path::new(&private)), 0o600);
+    }
+
+    /// IT-5's half the host decides: on an isolated host a Claude Code
+    /// session with no synced token and no API key is refused with
+    /// `credential_unavailable`, before any lease: the account's own login
+    /// is never what it starts on.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn it_5_an_isolated_session_without_a_permitted_credential_never_starts() {
+        let (host, seen, helper, state, _roots) = isolated_host_for("claude-code", &[]).await;
+        std::fs::create_dir_all(state.path().join("home/.claude")).unwrap();
+        std::fs::write(
+            state.path().join("home/.claude/.credentials.json"),
+            br#"{"claudeAiOauth":{"refreshToken":"r"}}"#,
+        )
+        .unwrap();
+        host.dispatch(1, start("ags_NOCRED", "claude-code"));
+        eventually("refused", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_nocred") && b["end_reason"] == "credential_unavailable"
+            })
+        })
+        .await;
+        assert!(ops(&helper).is_empty(), "no lease, no start");
+        assert!(host.session("ags_NOCRED").is_none());
+    }
+
+    /// 136f: an isolated session gets its env file's key in its
+    /// environment only, never a refreshable login, never a key in argv,
+    /// and its agent's self-updater stays off (136g).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_session_gets_only_the_credentials_136f_permits() {
+        let (host, _seen, helper, _state, _roots) = isolated_host_for(
+            "claude-code",
+            &[
+                ("ANTHROPIC_API_KEY", "sk-ant-ENVKEY"),
+                ("CLAUDE_CODE_OAUTH_REFRESH_TOKEN", "sk-ant-ort01-REFRESH"),
+            ],
+        )
+        .await;
+        host.dispatch(1, start("ags_KEY", "claude-code"));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("ANTHROPIC_API_KEY".into(), "sk-ant-ENVKEY".into())));
+        assert!(env.contains(&("DISABLE_AUTOUPDATER".into(), "1".into())));
+        assert!(!launch.to_string().contains("REFRESH"), "{launch}");
+        let args = launch["args"].to_string();
+        assert!(!args.contains("sk-ant"), "{args}");
+        // The helper's own parser takes the launch the host wrote.
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert!(parsed.resume.is_none());
+        assert!(
+            parsed
+                .env
+                .iter()
+                .all(|(k, _)| k != "CLAUDE_CODE_OAUTH_REFRESH_TOKEN")
+        );
+    }
+
+    /// 136e: an isolated resume names the session that had the
+    /// conversation, so the helper copies it from that session's kept
+    /// files; without one it does not start.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_resume_names_its_predecessor() {
+        let (host, seen, helper, _state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        const C: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
+        let resumed = |session: &str, from: Option<&str>| {
+            let mut c = start(session, "claude-code");
+            if let Command::Start {
+                resume,
+                resumed_from,
+                ..
+            } = &mut c
+            {
+                *resume = Some(C.into());
+                *resumed_from = from.map(str::to_string);
+            }
+            c
+        };
+        host.dispatch(1, resumed("ags_NOFROM", None));
+        eventually("refused", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nofrom") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(ops(&helper).is_empty());
+        host.dispatch(2, resumed("ags_RES", Some("ags_OLD")));
+        eventually("started", || {
+            !helper.seen.lock().unwrap().launches.is_empty()
+        })
+        .await;
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        assert_eq!(
+            launch["resume"],
+            json!({"from": "ags_OLD", "conversation": C})
+        );
+        let parsed =
+            storm_runtime_isolation::files::parse_launch(launch.to_string().as_bytes()).unwrap();
+        assert_eq!(parsed.resume.unwrap().from, "ags_OLD");
+    }
+
+    /// 136g: with isolation on, an install never runs as this account; the
+    /// helper runs it as the install identity and the host reports what
+    /// came back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_host_installs_only_through_the_helper() {
+        let (host, seen, helper, state, _roots) =
+            isolated_host_for("claude-code", &[("ANTHROPIC_API_KEY", "sk")]).await;
+        host.dispatch(
+            1,
+            Command::AgentInstall {
+                job: "agj_ONE".into(),
+                agent: "claude-code".into(),
+                op: crate::install::Op::Install,
+            },
+        );
+        eventually("reported", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.ends_with("/agents/jobs/agj_one") && b["done"]["version"] == "9.9.9"
+            })
+        })
+        .await;
+        assert_eq!(ops(&helper), ["agent_job claude-code install"]);
+        assert!(
+            !state.path().join("agents/managed").exists(),
+            "nothing was installed by this account"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ops(helper: &crate::isolation::fake::FakeHelper) -> Vec<String> {
+        helper.seen.lock().unwrap().ops.clone()
+    }
+
+    /// 136-2: with isolation on, a session starts through the helper, on a
+    /// terminal the host keeps the master of: input, output and resize work
+    /// as they do today (AC-F4), and the exit status is the helper's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn with_isolation_on_a_session_starts_through_the_helper() {
+        let (host, seen, helper, state, _roots) = isolated_host("/bin/sh", &[]).await;
+        host.dispatch(1, start("ags_ISO", "shell"));
+        eventually("the isolated session started", || {
+            host.session("ags_ISO").is_some()
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            ["lease ags_ISO", "prepare ags_ISO", "start ags_ISO"]
+        );
+        let s = host.session("ags_ISO").unwrap();
+        let said = || match s.events.ring.lock().unwrap().read(0, BATCH) {
+            Read::Data { bytes, .. } => String::from_utf8_lossy(&bytes).into_owned(),
+            _ => String::new(),
+        };
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let env: Vec<(String, String)> = serde_json::from_value(launch["env"].clone()).unwrap();
+        assert!(env.contains(&("STORM_RUNTIME_SESSION".into(), "ags_ISO".into())));
+        assert!(env.contains(&("TERM".into(), "xterm-256color".into())));
+        assert!(
+            !state.path().join("launch/ags_ISO.json").exists(),
+            "the launch is gone once the helper has read it"
+        );
+        host.dispatch(
+            2,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"echo iso-$((40+2))\n"),
+            },
+        );
+        eventually("the session answered its input", || {
+            said().contains("iso-42")
+        })
+        .await;
+        host.dispatch(
+            3,
+            Command::Resize {
+                session: "ags_ISO".into(),
+                cols: 101,
+                rows: 33,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        host.dispatch(
+            4,
+            Command::Input {
+                session: "ags_ISO".into(),
+                data: BASE64.encode(b"stty size; exit 3\n"),
+            },
+        );
+        eventually("the exit was reported with its code", || {
+            seen.lock().unwrap().iter().any(|(path, b)| {
+                path.contains("ags_iso") && b["status"] == "completed" && b["exit_code"] == 3
+            })
+        })
+        .await;
+        assert!(said().contains("33 101"), "{}", said());
+        eventually("the lease was released", || {
+            ops(&helper).last().map(String::as_str) == Some("release ags_ISO")
+        })
+        .await;
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_ISO",
+                "prepare ags_ISO",
+                "start ags_ISO",
+                "end ags_ISO",
+                "release ags_ISO"
+            ]
+        );
+    }
+
+    /// Ending an isolated session signals its unit through the helper,
+    /// never a process of this host's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn an_isolated_end_goes_through_the_helper() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/bin/sleep", &["1000"]).await;
+        host.dispatch(1, start("ags_END", "shell"));
+        eventually("started", || host.session("ags_END").is_some()).await;
+        host.dispatch(
+            2,
+            Command::End {
+                session: "ags_END".into(),
+            },
+        );
+        eventually("reported stopped", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_end") && b["status"] == "stopped")
+        })
+        .await;
+        eventually("released", || {
+            ops(&helper).contains(&"release ags_END".to_string())
+        })
+        .await;
+        let ops = ops(&helper);
+        // SIGHUP first; `sleep` ends on it, so no SIGKILL follows.
+        assert_eq!(
+            &ops[3..],
+            ["signal ags_END hup", "end ags_END", "release ags_END"]
+        );
+    }
+
+    /// A start the helper refuses fails, and its lease is given back.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_refused_isolated_start_fails_and_releases_its_lease() {
+        let (host, seen, helper, _state, _roots) = isolated_host("/nonexistent/agent", &[]).await;
+        host.dispatch(1, start("ags_NOPE", "shell"));
+        eventually("the start was reported failed", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(path, b)| path.contains("ags_nope") && b["end_reason"] == "start_failure")
+        })
+        .await;
+        assert!(host.session("ags_NOPE").is_none());
+        assert_eq!(
+            ops(&helper),
+            [
+                "lease ags_NOPE",
+                "prepare ags_NOPE",
+                "start ags_NOPE",
+                "release ags_NOPE"
+            ]
+        );
     }
 
     fn start(session: &str, provider: &str) -> Command {
@@ -3114,6 +5889,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: None,
+            spawn_asks: None,
+            resumed_from: None,
+            child_of: None,
         }
     }
 
@@ -3434,6 +6212,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             context: false,
             resume: None,
             provider_credential: kind.map(str::to_string),
+            spawn_asks: None,
+            resumed_from: None,
+            child_of: None,
         }
     }
 
@@ -3570,6 +6351,134 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap();
         assert!(settings.get("env").is_none() && settings.get("apiKeyHelper").is_none());
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-8: a start that may be offered decision 134's tools gives Claude
+    /// Code the pinned asks, and the exemptions only on a verified host; one
+    /// without the storm connection, or with no `spawn_asks`, gets the
+    /// settings it always did.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_spawn_start_pins_claude_codes_asks() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let storm = crate::mcp::McpGrant {
+            id: "storm".into(),
+            slug: "storm".into(),
+            plugin_origin: None,
+        };
+        let starts = [
+            (
+                "ags_SPAWN",
+                vec![storm.clone()],
+                Some(SpawnStart { spawned: true }),
+            ),
+            (
+                "ags_NOSTORM",
+                Vec::new(),
+                Some(SpawnStart { spawned: true }),
+            ),
+            ("ags_PLAIN", vec![storm], None),
+        ];
+        for (id, mcp, spawn_asks) in starts.clone() {
+            let mut start = synced_start(id, "claude-code", None);
+            if let Command::Start {
+                mcp: m,
+                spawn_asks: s,
+                ..
+            } = &mut start
+            {
+                *m = mcp;
+                *s = spawn_asks;
+            }
+            host.clone().handle(start).await;
+        }
+        let settings = |id: &str| -> serde_json::Value {
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            let at = lines.iter().position(|l| *l == "--settings").unwrap();
+            serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap()
+        };
+        for (id, ..) in &starts {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
+            })
+            .await;
+        }
+        // Isolation is off here, so no exemption, whatever the identity.
+        let asks = crate::mcp::SpawnAsks {
+            exempt: false,
+            spawned: true,
+        };
+        assert_eq!(
+            settings("ags_SPAWN")["permissions"],
+            crate::mcp::claude_permissions(&asks)
+        );
+        assert!(settings("ags_NOSTORM").get("permissions").is_none());
+        assert!(settings("ags_PLAIN").get("permissions").is_none());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 137-2: the inventory names each workspace's canonical directory.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn the_inventory_names_each_workspaces_directory() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let caps = host.capabilities();
+        let names = caps["workspaces"].as_array().unwrap();
+        assert!(!names.is_empty());
+        for name in names {
+            let name = name.as_str().unwrap();
+            let real = roots.path().join(name).canonicalize().unwrap();
+            assert_eq!(caps["workspace_paths"][name], real.display().to_string());
+        }
+        assert_eq!(
+            caps["workspace_paths"].as_object().unwrap().len(),
+            names.len()
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 134-8 on the integration branch: A6's exemptions need the host's
+    /// identity verified **and** its isolation self-test passed; either
+    /// alone writes only the asks.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    async fn the_exemptions_need_identity_and_isolation_both() {
+        let (host, _seen, _state, _roots) = synced_host(&[]).await;
+        assert!(host.peer_identity.verified());
+        assert!(!host.isolation_status.verified());
+        assert!(!host.spawn_exempt(), "identity alone");
+        host.isolation_status.settle(Ok(()));
+        assert!(host.spawn_exempt());
+        host.peer_identity.downgrade("ptrace_scope");
+        assert!(!host.spawn_exempt(), "isolation alone");
+        host.isolation_status.settle(Err("self_test"));
+        assert!(!host.spawn_exempt());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[test]
+    fn a_start_names_spawn_asks_only_when_the_server_says_so() {
+        let base = serde_json::json!({
+            "type": "start", "session": "ags_1", "workspace": "w", "provider": "claude-code",
+            "terminal": {"cols": 80, "rows": 24},
+        });
+        let parse = |extra: serde_json::Value| {
+            let mut v = base.clone();
+            v.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            match serde_json::from_value::<Command>(v).unwrap() {
+                Command::Start { spawn_asks, .. } => spawn_asks.map(|s| s.spawned),
+                _ => unreachable!(),
+            }
+        };
+        assert_eq!(parse(serde_json::json!({})), None);
+        assert_eq!(parse(serde_json::json!({"spawn_asks": {}})), Some(false));
+        assert_eq!(
+            parse(serde_json::json!({"spawn_asks": {"spawned": true}})),
+            Some(true)
+        );
     }
 
     /// AC-TS11, AC-TS17: a synced start that cannot get its token, names a

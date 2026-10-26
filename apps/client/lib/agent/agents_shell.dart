@@ -12,6 +12,8 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart';
+import 'spawn_state.dart' show lineageOrder;
+import 'spawn_widgets.dart' show LineageIndent, lineageLine;
 
 /// The session a location shows, or null on the overview.
 String? sessionIdOf(Uri location) {
@@ -70,13 +72,18 @@ class AgentsSidebar extends ConsumerWidget {
           padding: EdgeInsets.fromLTRB(t.sp, top, t.sp, t.sp * 0.75),
           child: AgentsLabel(label),
         ),
-        for (final (i, s) in list.indexed) ...[
+        for (final (i, s) in lineageOrder(list).indexed) ...[
           if (i > 0) SizedBox(height: t.sp * 0.25),
-          SessionRow(
-            session: s,
-            host: o?.hostName(s.hostId) ?? 'host',
-            selected: s.id == selected,
-            onTap: () => openAgentSession(context, s.id),
+          _maybeIndented(
+            s,
+            list,
+            SessionRow(
+              session: s,
+              host: o?.hostName(s.hostId) ?? 'host',
+              selected: s.id == selected,
+              lineage: lineageLine(s, o),
+              onTap: () => openAgentSession(context, s.id),
+            ),
           ),
         ],
       ],
@@ -145,6 +152,14 @@ class AgentsSidebar extends ConsumerWidget {
       ),
     );
   }
+}
+
+/// A child listed under its parent sits on the dashed indent (134l).
+Widget _maybeIndented(AgentSession s, List<AgentSession> list, Widget row) {
+  final p = s.spawn.parentSession;
+  return p != null && list.any((o) => o.id == p)
+      ? LineageIndent(child: row)
+      : row;
 }
 
 class _OverviewRow extends StatelessWidget {

@@ -160,6 +160,9 @@ void _refreshEvery(Ref ref, Duration every) {
   });
 }
 
+/// [_refreshEvery] for the spawning client's providers (`spawn_state.dart`).
+void refreshProviderEvery(Ref ref, Duration every) => _refreshEvery(ref, every);
+
 /// The overview, refreshed every [agentRefreshInterval] while it is on screen
 /// and the app is in front.
 ///
@@ -277,7 +280,7 @@ final agentNoteProvider = FutureProvider.autoDispose
     });
 
 /// The panel tabs of a session (`?tab=`).
-enum SessionTab { context, wrote, about }
+enum SessionTab { context, wrote, about, requests, work }
 
 SessionTab sessionTabOf(String? raw) => SessionTab.values.firstWhere(
   (t) => t.name == raw,

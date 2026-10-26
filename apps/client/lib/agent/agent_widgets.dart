@@ -6,6 +6,7 @@ import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
+import 'spawn_widgets.dart' show AttentionTag;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -108,6 +109,7 @@ class SessionRow extends StatelessWidget {
     required this.onTap,
     this.selected = false,
     this.phone = false,
+    this.lineage,
   });
 
   final AgentSession session;
@@ -115,6 +117,9 @@ class SessionRow extends StatelessWidget {
   final VoidCallback onTap;
   final bool selected;
   final bool phone;
+
+  /// A spawned child's "↳ from …" in place of the sub-line (134l).
+  final String? lineage;
 
   @override
   Widget build(BuildContext context) {
@@ -134,19 +139,29 @@ class SessionRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                s.displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: phone ? t.uiSize : t.codeSize,
-                  color: s.ended ? t.text2 : t.text,
-                ),
+              Row(
+                children: [
+                  Flexible(
+                    child: Text(
+                      s.displayName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: phone ? t.uiSize : t.codeSize,
+                        color: s.ended ? t.text2 : t.text,
+                      ),
+                    ),
+                  ),
+                  if (!s.ended && s.spawn.needsAttention != null) ...[
+                    SizedBox(width: t.sp * 0.75),
+                    AttentionTag(kind: s.spawn.needsAttention),
+                  ],
+                ],
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
               Text(
-                sessionSub(s, host),
+                lineage ?? sessionSub(s, host),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(

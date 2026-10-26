@@ -152,6 +152,13 @@ pub struct LaunchExtras {
     pub env_remove: Vec<std::ffi::OsString>,
     /// Like `env`, applied last, but never printed: `Debug` shows names only.
     pub secret_env: Vec<(std::ffi::OsString, crate::credential::SecretOsString)>,
+    /// On an isolated host, the conversation a resume reopens and the
+    /// session that had it (136e): the helper copies it into the new home.
+    pub resumed_from: Option<(String, String)>,
+    /// On an isolated host, a spawned child's parent session (decision
+    /// 137): the helper makes the child's own workspace from the parent's,
+    /// which is this session's `workspace`, before it starts.
+    pub child_of: Option<String>,
 }
 
 /// Where a session's output and its ending go. The runtime implements it.
@@ -162,6 +169,15 @@ pub struct LaunchExtras {
 pub trait SessionEvents: Send + Sync {
     fn output(&self, bytes: &[u8]);
     fn ended(&self, end: SessionEnd);
+    /// The session's leader, as soon as it exists: what its bridges and
+    /// hooks must descend from (decision 135). A provider with no process
+    /// never calls it, and no connection is taken for it on a verified host.
+    /// On an isolated host it comes with the uid the session runs as, which
+    /// its connections must come from too (decision 136i).
+    fn leader(&self, _leader: crate::platform::peer::Process, _user: Option<u32>) {}
+    /// A spawned child's own workspace, as the isolation helper made it
+    /// before the child started (decision 137).
+    fn child_workspace(&self, _made: crate::isolation::ChildWorkspace) {}
 }
 
 /// Why a session could not be started.
@@ -172,13 +188,16 @@ pub enum StartError {
     /// Anything else, with the reason for the host's log and the session's
     /// `start_failure`.
     Failed(String),
+    /// A failure the session's record names (137f, 137h: a child's
+    /// workspace over a cap, or a repository that cannot be cloned).
+    Ended(crate::status::EndReason, String),
 }
 
 impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotAvailable => f.write_str("provider not installed on this host"),
-            Self::Failed(reason) => write!(f, "could not start: {reason}"),
+            Self::Failed(reason) | Self::Ended(_, reason) => write!(f, "could not start: {reason}"),
         }
     }
 }
@@ -203,6 +222,16 @@ pub trait Provider: Send + Sync {
     /// that is not installed or not a command.
     fn resolved(&self) -> Option<std::path::PathBuf> {
         None
+    }
+    /// Whether its sessions run isolated, each under its own identity
+    /// (decision 136). On an isolated host nothing else starts.
+    fn isolated(&self) -> bool {
+        false
+    }
+    /// The variables its env file sets, with their values' emptiness only:
+    /// whether a key decision 136f permits is there.
+    fn env_names(&self) -> Vec<(std::ffi::OsString, bool)> {
+        Vec::new()
     }
     /// Starts a session. On success the session is running and owns `events`;
     /// on failure `events` has not been called.
