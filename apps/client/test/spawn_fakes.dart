@@ -320,13 +320,14 @@ class FakeSpawning {
       for (final x in tree) {
         server.sessions.remove(x);
       }
+      final emptied = server.dropEmptyCrews();
       return _json({
-        'removed_crew': null,
-        'removed_crews': <Object>[],
+        'removed_crew': emptied.firstOrNull,
+        'removed_crews': emptied,
         'dismissed': [for (final x in tree) x['id']],
       });
     }
     server.sessions.remove(s);
-    return _json({'removed_crew': null});
+    return _json({'removed_crew': server.dropEmptyCrews().firstOrNull});
   }
 }

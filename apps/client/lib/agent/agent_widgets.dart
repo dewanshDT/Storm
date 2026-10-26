@@ -241,7 +241,15 @@ class SessionSubLine extends StatelessWidget {
     final dir = Directionality.of(context);
     // What the Text below draws with, letter spacing included.
     final drawn = DefaultTextStyle.of(context).style.merge(style);
-    final ws = session.workspace;
+    // A child's workspace is `children/<id>` on its host: named by what it
+    // is instead, as its meta line does (134l).
+    final ws = session.spawn.isChild
+        ? switch (session.spawn.childWorkspace?.mode) {
+            'clone' => 'own copy',
+            'scratch' => 'scratch folder',
+            _ => 'own workspace',
+          }
+        : session.workspace;
     final when = sessionWhen(session);
     return LayoutBuilder(
       builder: (context, box) {

@@ -11,6 +11,7 @@ import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'crew_changes.dart' show announceRemovedCrews, removedCrewFrom;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 import 'spawn_state.dart';
@@ -544,9 +545,20 @@ class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
     final api = agentApi(ref);
     if (api == null) return;
     setState(() => _busy = true);
+    final c = ProviderScope.containerOf(context, listen: false);
+    final before = ref.read(agentOverviewProvider).value;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      await api.dismissTree(widget.session.id);
+      final removed = await api.dismissTree(widget.session.id);
       ref.invalidate(agentOverviewProvider);
+      announceRemovedCrews(
+        c,
+        [for (final gone in removed) removedCrewFrom(before, gone)],
+        why: removed.length == 1
+            ? 'its last session was dismissed'
+            : 'their last sessions were dismissed',
+        fallback: messenger,
+      );
       widget.onDismissed();
     } catch (e) {
       if (!mounted) return;

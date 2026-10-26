@@ -230,6 +230,9 @@ class FakeAgentServer {
   Map<String, dynamic>? crew(String id) =>
       crews.where((c) => c['id'] == id).firstOrNull;
 
+  /// [_dropEmpty] for the spawning fakes' tree dismissal.
+  List<Map<String, dynamic>> dropEmptyCrews() => _dropEmpty();
+
   /// The crews the last change emptied, removed as the server would (138c).
   List<Map<String, dynamic>> _dropEmpty() {
     final emptied = [
@@ -313,13 +316,17 @@ class FakeAgentServer {
         color: body['color'] as String? ?? 'sky',
         order: crews.length,
       );
+      bool held(Map<String, dynamic> c) =>
+          sessions.any((s) => (s['crew'] as Map?)?['id'] == c['id']);
+      final heldBefore = crews.where(held).toList();
       crews.add(made);
       for (final (i, id) in (body['session_ids'] as List? ?? []).indexed) {
         session(id as String)?['crew'] = {'id': made['id'], 'order': i};
       }
-      // A crew made empty stays; only the crews its sessions left go.
-      final emptied = _dropEmpty()..remove(made);
-      if (!crews.contains(made)) crews.add(made);
+      // A crew made empty stays, and so does any crew already empty (an
+      // earlier Undo's); only the crews its sessions left go.
+      final emptied = heldBefore.where((c) => !held(c)).toList();
+      crews.removeWhere(emptied.contains);
       return Future.value(_json({'crew': made, 'removed_crews': emptied}, 201));
     }
     if (path == '/v1/agent/crews/order') {

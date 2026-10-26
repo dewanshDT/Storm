@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -539,17 +538,5 @@ void main() {
         Accent.none,
       );
     });
-  });
-
-  test('no Phase 3 UI in lib/ (decision 138p)', () {
-    final offenders = <String>[];
-    for (final f in Directory('lib').listSync(recursive: true)) {
-      if (f is! File || !f.path.endsWith('.dart')) continue;
-      final text = f.readAsStringSync().toLowerCase();
-      for (final phrase in ['start agents', '↳ from', 'let children report']) {
-        if (text.contains(phrase)) offenders.add('${f.path}: $phrase');
-      }
-    }
-    expect(offenders, isEmpty);
   });
 }

@@ -420,6 +420,35 @@ void announceRemovedCrew(
   fallback: fallback,
 );
 
+/// "{a} and {b} were removed: [why]. Undo" for the crews one change emptied,
+/// a tree dismissal's (134-7's `removed_crews`). Undo restores every one of
+/// them, in their old order, one after another so each finds its place.
+void announceRemovedCrews(
+  ProviderContainer c,
+  List<RemovedCrew> gone, {
+  required String why,
+  ScaffoldMessengerState? fallback,
+}) {
+  if (gone.isEmpty) return;
+  if (gone.length == 1) {
+    announceRemovedCrew(c, gone.single, why: why, fallback: fallback);
+    return;
+  }
+  final ordered = [...gone]..sort((a, b) => a.index.compareTo(b.index));
+  final names = [for (final g in ordered) g.crew.name];
+  final listed =
+      '${names.sublist(0, names.length - 1).join(', ')} and ${names.last}';
+  showUndoToast(
+    '$listed were removed: $why.',
+    onUndo: () async {
+      for (final g in ordered) {
+        await restoreCrew(c, g, fallback: fallback);
+      }
+    },
+    fallback: fallback,
+  );
+}
+
 /// Undo for a removed crew: the same name, colour and place, and for a move
 /// the session moved back. It is a new crew with a new id (plan §7).
 Future<void> restoreCrew(

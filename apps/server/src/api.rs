@@ -16398,6 +16398,26 @@ pub(crate) mod tests {
         // A context note the caller reads becomes the child's.
         let vault = f.vault("Work").await;
         let note = f.note(&vault, "Brief.md", "# Brief\n\nthe plan\n").await;
+        // Whatever its parent's crew and role, a child joins no crew and
+        // gets no role (134-5 with 138a and 138d).
+        let (status, body) = f
+            .ask(post_json_with_auth(
+                "/v1/agent/crews",
+                serde_json::json!({"name": "Parent's crew", "session_ids": [parent]}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        f.state
+            .agent
+            .set_role(
+                &parent,
+                Some(&crate::agent::store::RoleLabel {
+                    vault_id: vault.clone(),
+                    note_id: note["id"].as_str().unwrap().into(),
+                }),
+            )
+            .unwrap();
         let t = std::time::Instant::now();
         let asked = structured(
             &f.tool(
@@ -16424,6 +16444,10 @@ pub(crate) mod tests {
         let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
         assert_eq!(view["context"]["title"], "Brief", "{view}");
         assert_eq!(view["name"], "brief");
+        assert_eq!(view["crew"], serde_json::Value::Null, "{view}");
+        assert_eq!(view["role"], serde_json::Value::Null, "{view}");
+        assert_eq!(view["launch_role"], serde_json::Value::Null, "{view}");
+        assert_eq!(view["parent_session"], parent.as_str(), "{view}");
         f.report(&child, "running").await;
         f.initialize(&child, "storm").await;
         let context = structured(

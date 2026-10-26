@@ -1,4 +1,5 @@
 import 'agent_api.dart';
+import 'agent_models.dart' show Crew;
 import 'spawn_models.dart';
 
 /// The spawning routes (decisions 134 and 137), owner only on the session
@@ -80,7 +81,7 @@ extension SpawnApi on AgentApi {
 
   /// Dismisses a whole tree, once every member has ended (C8). The crews
   /// it emptied, when the server says.
-  Future<List<Map<String, dynamic>>> dismissTree(String sessionId) async {
+  Future<List<Crew>> dismissTree(String sessionId) async {
     final json = await send(
       'DELETE',
       _s(sessionId),
@@ -89,7 +90,7 @@ extension SpawnApi on AgentApi {
     return [
       if (json is Map)
         for (final c in json['removed_crews'] as List? ?? const [])
-          if (c is Map<String, dynamic>) c,
+          if (c is Map<String, dynamic>) Crew.fromJson(c),
     ];
   }
 
