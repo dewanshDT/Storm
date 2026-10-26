@@ -10,7 +10,8 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'crew_changes.dart';
-import 'crew_screen.dart' show endAllPlan, endAllRunning;
+import 'crew_screen.dart'
+    show endAllDescendants, endAllPlan, endAllReaches, endAllRunning;
 import 'crew_widgets.dart';
 import 'session_crew.dart' show sessionReadsStorm;
 
@@ -412,6 +413,8 @@ class _EndAllSheetState extends ConsumerState<_EndAllSheet> {
     final t = context.tokens;
     final o = widget.overview;
     final plan = endAllPlan(o, widget.members);
+    final descendants = endAllDescendants(ref, o, plan.stops);
+    final reaches = endAllReaches(plan.stops, descendants ?? const {});
     final n = plan.stops.length;
     Widget group(String label, Key key, List<Widget> items) => Column(
       key: key,
@@ -433,6 +436,11 @@ class _EndAllSheetState extends ConsumerState<_EndAllSheet> {
             for (final s in plan.stops)
               _Item(label: s.displayName, detail: o.hostName(s.hostId)),
           ]),
+        if (reaches.isNotEmpty)
+          group('What they started', const Key('end-all-reaches'), [
+            for (final (child, parent) in reaches)
+              _Item(label: child, detail: 'started by $parent'),
+          ]),
         if (plan.unreachable.isNotEmpty)
           group("Can't reach now", const Key('end-all-unreachable'), [
             for (final s in plan.unreachable)
@@ -452,11 +460,16 @@ class _EndAllSheetState extends ConsumerState<_EndAllSheet> {
           key: const Key('end-all-confirm'),
           label: n == 1 ? 'End 1 session' : 'End $n sessions',
           expand: true,
-          onPressed: _ending || n == 0
+          onPressed: _ending || n == 0 || descendants == null
               ? null
               : () async {
                   setState(() => _ending = true);
-                  await endAllRunning(context, ref, plan.stops);
+                  await endAllRunning(
+                    context,
+                    ref,
+                    plan.stops,
+                    descendants: descendants,
+                  );
                   if (mounted) widget.onDone();
                 },
         ),
