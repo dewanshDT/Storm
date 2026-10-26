@@ -1025,8 +1025,10 @@ final rootMessengerKey = GlobalKey<ScaffoldMessengerState>();
 ///
 /// Instantiated by the shell; nothing else depends on its value.
 final syncListenerProvider = Provider<void>((ref) {
-  // Rebuild only when the connection itself changes, never on a status tick.
+  // Rebuild only when the connection or the vault changes, never on a status
+  // tick: each vault has its own engine.
   ref.watch(apiProvider);
+  ref.watch(activeVaultProvider);
   final engine = ref.read(syncEngineProvider);
 
   final sub = engine.changes.listen((ids) {
@@ -1110,8 +1112,13 @@ final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   // the editor mid-open and left the tree showing a selected note with an
   // empty pane.
   ref.watch(apiProvider);
+  // A session is one vault's: kept across a vault switch it asks the old
+  // vault for the new vault's notes, and the answer is "no such note".
+  ref.watch(activeVaultProvider);
+  final session = NoteSession(ref.read(syncEngineProvider));
+  ref.onDispose(session.keepUnsaved);
   // Disposal is ChangeNotifierProvider's job — see syncEngineProvider.
-  return NoteSession(ref.read(syncEngineProvider));
+  return session;
 });
 
 /// Which notes are kept available offline.
