@@ -90,6 +90,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
     try {
       final answer = await api.applyChildWork(s.id, name: name);
       final commit = shortCommit(answer['commit'] as String?);
+      if (!mounted) return;
       setState(
         () => _done = w.clone
             ? 'Applied: the branch storm/${s.id}'
@@ -97,6 +98,7 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
             : 'Applied: the folder $name is in $ws.',
       );
     } catch (e) {
+      if (!mounted) return;
       final code = e is AgentRefusal ? e.code : null;
       setState(
         () => _refused = code == null
@@ -113,14 +115,17 @@ class _ChildWorkPanelState extends ConsumerState<ChildWorkPanel> {
     final api = agentApi(ref);
     if (api == null) return;
     setState(() => _busy = true);
+    final c = ProviderScope.containerOf(context, listen: false);
     try {
       await api.deleteChildWork(widget.session.id);
+      c.invalidate(childWorkProvider(widget.session.id));
+      if (!mounted) return;
       setState(() {
         _confirmDelete = false;
         _done = 'Deleted: its workspace is gone, and nothing reached $ws.';
       });
-      ref.invalidate(childWorkProvider(widget.session.id));
     } catch (e) {
+      if (!mounted) return;
       final code = e is AgentRefusal ? e.code : null;
       setState(
         () => _refused = code == null

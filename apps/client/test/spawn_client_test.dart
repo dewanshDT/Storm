@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -242,7 +243,7 @@ void main() {
       const task =
           'Write tests for token refresh in gateway/oauth.rs. Run cargo test '
           '-p gateway and report failures.';
-      spawning.addRequest('ags_p', task: task);
+      spawning.addRequest('ags_p', task: task, name: 'test-gateway');
       final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
       expect(find.byType(ApprovalCard), findsOneWidget);
       expect(find.text('START'), findsOneWidget);
@@ -283,7 +284,7 @@ void main() {
       expect(sent(agents, 'POST', '/v1/agent/requests/agr_1/approve'), [
         {'write_vault': false},
       ]);
-      expect(find.text('Approved: its child is starting.'), findsOneWidget);
+      expect(find.text('Approved: test-gateway is starting.'), findsOneWidget);
       expect(spawning.terminalWrites, 0);
       await disposeShell(tester, c);
     });
@@ -432,6 +433,78 @@ void main() {
       expect(find.byKey(const Key('approval-banner')), findsNothing);
       await disposeShell(tester, c);
     });
+  });
+
+  testWidgets('a decision finished after the card is gone still refreshes', (
+    tester,
+  ) async {
+    final agents = FakeAgentServer(
+      hosts: [agentHost()],
+      sessions: [parent(needs: 'approval')],
+    );
+    final spawning = FakeSpawning(agents)..holdDecisions = Completer();
+    spawning.addRequest('ags_p', task: 't', name: 'test-gateway');
+    final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+    await tester.tap(find.byKey(const Key('approval-approve')));
+    await tester.pump();
+    c.read(routerProvider).go(Routes.agents);
+    await tester.pumpAndSettle();
+    expect(find.byType(ApprovalCard), findsNothing);
+    final before = agents.requests.length;
+    spawning.holdDecisions!.complete();
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(spawning.requests.single['outcome'], 'started');
+    final after = agents.requests.sublist(before);
+    expect(
+      after.where(
+        (r) => r.method == 'GET' && r.url.path == '/v1/agent/sessions',
+      ),
+      isNotEmpty,
+    );
+    await disposeShell(tester, c);
+  });
+
+  testWidgets('a held crew change keeps the approval card, Requests and the '
+      'parent line', (tester) async {
+    final agents = FakeAgentServer(
+      hosts: [agentHost()],
+      crews: [agentCrew('crw_1')],
+      sessions: [
+        spawnSession('ags_p'),
+        spawnSession(
+          'ags_c',
+          name: 'test-gateway',
+          parent: 'ags_p',
+          depth: 1,
+          spawn: {'enabled': true},
+        ),
+      ],
+    );
+    FakeSpawning(agents).addRequest('ags_c', task: 't', name: 'grandchild');
+    final c = await open(
+      tester,
+      agents,
+      at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
+    );
+    void onScreen() {
+      expect(find.byType(ApprovalCard), findsOneWidget);
+      expect(find.text('Requests'), findsOneWidget);
+      expect(find.text('↳ started by gateway-impl ›'), findsOneWidget);
+    }
+
+    onScreen();
+    agents.holdCrewChanges = Completer();
+    await tester.tap(find.byKey(const Key('move-to-crew')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('move-to-crw_1')));
+    await tester.pumpAndSettle();
+    onScreen();
+    agents.holdCrewChanges!.complete();
+    await tester.pumpAndSettle();
+    expect((agents.session('ags_c')!['crew'] as Map)['id'], 'crw_1');
+    onScreen();
+    await disposeShell(tester, c);
   });
 
   testWidgets('the Requests tab lists every outcome to the person', (

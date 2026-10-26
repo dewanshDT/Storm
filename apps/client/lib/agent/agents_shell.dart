@@ -135,7 +135,7 @@ class AgentsSidebar extends ConsumerWidget {
     // A loose row: another session dropped on it makes a crew of the two.
     Widget looseRow(AgentSession s) => ZoneDropTarget<SessionDrag>(
       zoneOf: (d, _) => d.session.id == s.id ? null : DropZone.onto,
-      onDrop: (d, _) => makeCrew(context, ref, [s.id, d.session.id]),
+      onDrop: (d, _) => makeCrew(context, [s.id, d.session.id]),
       child: row(s),
     );
 

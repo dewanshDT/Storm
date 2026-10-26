@@ -484,6 +484,9 @@ class CrewChange {
   );
 }
 
+/// A [AgentSession._copy] argument left as it is, where null is a value.
+const _keep = Object();
+
 Map<String, dynamic>? _map(Object? v) => v is Map<String, dynamic> ? v : null;
 
 class AgentSession {
@@ -656,78 +659,81 @@ class AgentSession {
   /// carries the bare record: no name, context or count.
   AgentSession withLive(AgentSession? live) => live == null || live.id != id
       ? this
-      : AgentSession(
-          id: id,
-          hostId: hostId,
-          workspace: workspace,
-          provider: provider,
+      : _copy(
           status: live.status,
           endReason: live.endReason,
           exitCode: live.exitCode,
           signal: live.signal,
           cols: live.cols,
           rows: live.rows,
-          createdAt: createdAt,
-          fallback: fallback,
           startedAt: live.startedAt ?? startedAt,
           endedAt: live.endedAt ?? endedAt,
-          name: name,
-          context: context,
-          writeVaultId: writeVaultId,
-          wroteCount: wroteCount,
-          integrations: integrations,
           title: live.title ?? title,
           activity: live.activity,
           harnessSession: live.harnessSession ?? harnessSession,
-          resumedFrom: resumedFrom,
-          mcpSkipped: mcpSkipped,
-          mcpPluginLocal: mcpPluginLocal,
-          identityState: identityState,
-          isolationState: isolationState,
-          isolationReason: isolationReason,
-          spawn: spawn,
-          crew: crew,
-          role: role,
-          launchRole: launchRole,
+          launchNotice: null,
+          credential: null,
         );
 
   /// This record in [crew] (null: none), as a change not yet confirmed
   /// draws it.
-  AgentSession withCrew(SessionCrew? crew) => _relabeled(crew, role);
+  AgentSession withCrew(SessionCrew? crew) => _copy(crew: crew);
 
   /// This record with the label [role] (null: none).
-  AgentSession withRole(RoleRef? role) => _relabeled(crew, role);
+  AgentSession withRole(RoleRef? role) => _copy(role: role);
 
-  AgentSession _relabeled(SessionCrew? crew, RoleRef? role) => AgentSession(
+  AgentSession _copy({
+    String? status,
+    Object? endReason = _keep,
+    Object? exitCode = _keep,
+    Object? signal = _keep,
+    int? cols,
+    int? rows,
+    String? startedAt,
+    String? endedAt,
+    String? title,
+    Object? activity = _keep,
+    String? harnessSession,
+    Object? launchNotice = _keep,
+    Object? credential = _keep,
+    Object? crew = _keep,
+    Object? role = _keep,
+  }) => AgentSession(
     id: id,
     hostId: hostId,
     workspace: workspace,
     provider: provider,
-    status: status,
-    endReason: endReason,
-    exitCode: exitCode,
-    signal: signal,
-    cols: cols,
-    rows: rows,
+    status: status ?? this.status,
+    endReason: endReason == _keep ? this.endReason : endReason as String?,
+    exitCode: exitCode == _keep ? this.exitCode : exitCode as int?,
+    signal: signal == _keep ? this.signal : signal as int?,
+    cols: cols ?? this.cols,
+    rows: rows ?? this.rows,
     createdAt: createdAt,
     fallback: fallback,
-    startedAt: startedAt,
-    endedAt: endedAt,
+    startedAt: startedAt ?? this.startedAt,
+    endedAt: endedAt ?? this.endedAt,
     name: name,
     context: context,
     writeVaultId: writeVaultId,
     wroteCount: wroteCount,
     integrations: integrations,
-    launchNotice: launchNotice,
-    credential: credential,
-    title: title,
-    activity: activity,
-    harnessSession: harnessSession,
+    launchNotice: launchNotice == _keep
+        ? this.launchNotice
+        : launchNotice as String?,
+    credential: credential == _keep ? this.credential : credential as String?,
+    title: title ?? this.title,
+    activity: activity == _keep ? this.activity : activity as String?,
+    harnessSession: harnessSession ?? this.harnessSession,
     resumedFrom: resumedFrom,
     mcpSkipped: mcpSkipped,
     mcpPluginLocal: mcpPluginLocal,
-    crew: crew,
-    role: role,
+    identityState: identityState,
+    isolationState: isolationState,
+    isolationReason: isolationReason,
+    spawn: spawn,
+    crew: crew == _keep ? this.crew : crew as SessionCrew?,
+    role: role == _keep ? this.role : role as RoleRef?,
     launchRole: launchRole,
   );
 

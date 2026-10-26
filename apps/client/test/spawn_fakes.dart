@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
@@ -46,6 +47,8 @@ Map<String, dynamic> spawnSession(
 
 const _ended = ['completed', 'stopped', 'failed'];
 
+const _cardOnly = {'task', 'name', 'context_note', 'provider', 'text'};
+
 class FakeSpawning {
   FakeSpawning(this.server) {
     server.extra = _handle;
@@ -68,6 +71,9 @@ class FakeSpawning {
 
   /// What each end and End all children was sent.
   final ends = <(String, Map<String, dynamic>)>[];
+
+  /// While set, an approve or deny is answered only once it completes.
+  Completer<void>? holdDecisions;
 
   /// Terminal input any spawning action sent: it must stay empty (138p).
   int get terminalWrites => server.requests
@@ -156,6 +162,7 @@ class FakeSpawning {
       final r = requests.where((r) => r['id'] == seg[3]).firstOrNull;
       if (r == null) return _json({'error': 'no such request'}, 404);
       if (seg.length == 4) return _json(r);
+      await holdDecisions?.future;
       if (r['state'] == 'decided') {
         return _json({'error': 'already_decided'}, 409);
       }
@@ -193,7 +200,11 @@ class FakeSpawning {
         }
       }
       _attention();
-      return _json(r);
+      // A decision answers the request's view, without the card's words.
+      return _json({
+        for (final e in r.entries)
+          if (!_cardOnly.contains(e.key)) e.key: e.value,
+      });
     }
     if (seg.length < 5 || seg[1] != 'agent' || seg[2] != 'sessions') {
       if (seg.length == 4 && seg[2] == 'sessions' && req.method == 'DELETE') {

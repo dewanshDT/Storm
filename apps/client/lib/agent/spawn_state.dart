@@ -61,12 +61,13 @@ final childWorkProvider = FutureProvider.autoDispose.family<ChildWork, String>((
   }
 });
 
-/// After a person decides, switches or ends: everything that shows it.
-void spawnChanged(WidgetRef ref, String sessionId) {
-  ref.invalidate(sessionRequestsProvider(sessionId));
-  ref.invalidate(sessionDetailProvider(sessionId));
-  ref.invalidate(sessionDescendantsProvider(sessionId));
-  ref.invalidate(agentOverviewProvider);
+/// After a person decides, switches or ends: everything that shows it. The
+/// container, not a widget's ref, so it still runs once the widget is gone.
+void spawnChanged(ProviderContainer c, String sessionId) {
+  c.invalidate(sessionRequestsProvider(sessionId));
+  c.invalidate(sessionDetailProvider(sessionId));
+  c.invalidate(sessionDescendantsProvider(sessionId));
+  c.invalidate(agentOverviewProvider);
 }
 
 /// A session's tree as the overview knows it: its root and every session
@@ -79,6 +80,10 @@ List<AgentSession> treeOf(AgentOverview o, AgentSession s) {
   ]..sort((a, b) => a.spawn.depth.compareTo(b.spawn.depth));
   return members;
 }
+
+/// A session in a tree goes only with its tree, after a warning (C8).
+bool inTree(AgentOverview? o, AgentSession s) =>
+    s.spawn.parentSession != null || (o != null && treeOf(o, s).length > 1);
 
 /// Its own children, as the overview knows them.
 List<AgentSession> childrenOf(AgentOverview o, String id) => [

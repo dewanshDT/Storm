@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_models.dart';
@@ -18,6 +19,7 @@ import 'package:storm/ui/tokens.dart';
 import 'agent_fakes.dart';
 import 'real_fonts.dart';
 import 'shell_harness.dart';
+import 'spawn_fakes.dart';
 
 /// Decision 138, slice 138-3: crews in the sidebar and on the overview, the
 /// crew menu, and collapse kept per device (plan §4.1–§4.3, §6.3).
@@ -364,6 +366,128 @@ void main() {
         findsOneWidget,
       );
       expect(find.byKey(const Key('crew-crw_1')), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    List<http.Request> dismissals(FakeAgentServer a) => [
+      for (final r in a.requests)
+        if (r.method == 'DELETE' && r.url.pathSegments[2] == 'sessions') r,
+    ];
+
+    testWidgets('Dismiss ended skips spawned trees and says so', (t) async {
+      Map<String, dynamic> inCrew(
+        Map<String, dynamic> s,
+        String crew,
+        int order,
+      ) => s..['crew'] = {'id': crew, 'order': order};
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        crews: [
+          agentCrew('crw_1'),
+          agentCrew('crw_2', name: 'Relay hardening', order: 1),
+        ],
+        sessions: [
+          inCrew(
+            spawnSession('ags_a', name: 'notes-a', status: 'completed'),
+            'crw_1',
+            0,
+          ),
+          inCrew(
+            spawnSession('ags_b', name: 'notes-b', status: 'failed'),
+            'crw_1',
+            1,
+          ),
+          inCrew(
+            spawnSession('ags_root', name: 'root', status: 'stopped'),
+            'crw_1',
+            2,
+          ),
+          inCrew(
+            spawnSession(
+              'ags_kid',
+              name: 'kid',
+              status: 'completed',
+              parent: 'ags_root',
+              depth: 1,
+            ),
+            'crw_1',
+            3,
+          ),
+          inCrew(
+            spawnSession('ags_far', name: 'far-root', status: 'stopped'),
+            'crw_2',
+            0,
+          ),
+          inCrew(
+            spawnSession(
+              'ags_stray',
+              name: 'stray',
+              status: 'completed',
+              parent: 'ags_far',
+              depth: 1,
+            ),
+            'crw_1',
+            4,
+          ),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await open(t, agents);
+      await rightClick(t, find.byKey(const Key('crew-crw_1')));
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('crew-action-dismissEnded')),
+          matching: find.text('2'),
+        ),
+        findsOneWidget,
+      );
+      await t.tap(find.byKey(const Key('crew-action-dismissEnded')));
+      await t.pumpAndSettle();
+      final sent = dismissals(agents);
+      expect([for (final r in sent) r.url.pathSegments[3]], ['ags_a', 'ags_b']);
+      for (final r in sent) {
+        expect(r.url.queryParameters['tree'], isNull);
+      }
+      for (final id in ['ags_root', 'ags_kid', 'ags_far', 'ags_stray']) {
+        expect(agents.session(id), isNotNull, reason: id);
+      }
+      expect(
+        find.text(
+          '3 are in a spawned tree and were kept: dismiss a tree from its '
+          'session.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('confirm_tree'), findsNothing);
+      expect(find.textContaining('tree_live'), findsNothing);
+      expect(agents.crew('crw_1'), isNotNull);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('Dismiss ended with only standalone sessions: each, and the '
+        'emptied crew offered back', (t) async {
+      final agents = crewServer();
+      agents.session('ags_impl')!['status'] = 'stopped';
+      FakeSpawning(agents);
+      final c = await open(t, agents);
+      await rightClick(t, find.byKey(const Key('crew-crw_1')));
+      await t.tap(find.byKey(const Key('crew-action-dismissEnded')));
+      await t.pumpAndSettle();
+      expect(
+        [for (final r in dismissals(agents)) r.url.pathSegments[3]],
+        ['ags_notes', 'ags_impl'],
+      );
+      expect(agents.crews, isEmpty);
+      expect(
+        find.text(
+          'Gateway release was removed: its last session was dismissed.',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining('spawned tree'), findsNothing);
+      await t.tap(find.text('Undo'));
+      await t.pumpAndSettle();
+      expect(agents.crews.single['name'], 'Gateway release');
       await disposeShell(t, c);
     });
   });

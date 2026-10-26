@@ -153,15 +153,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     if (mounted) context.go(Routes.agents);
   }
 
-  /// A session in a tree goes only with its tree, after a warning (C8).
-  bool _inTree(AgentSession s) {
-    final o = ref.read(agentOverviewProvider).value;
-    return s.spawn.parentSession != null ||
-        (o != null && treeOf(o, s).length > 1);
-  }
-
   Future<void> _dismiss([AgentSession? s]) async {
-    if (s != null && _inTree(s)) {
+    if (s != null && inTree(ref.read(agentOverviewProvider).value, s)) {
       setState(() => _dismissTree = true);
       return;
     }

@@ -10,6 +10,7 @@ import 'package:go_router/go_router.dart';
 import '../router.dart';
 import '../ui/accents.dart';
 import '../ui/settings/settings_widgets.dart' show promptForText;
+import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem, PopoverTone;
@@ -19,6 +20,7 @@ import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
 import 'crew_changes.dart';
 import 'crew_prefs.dart';
+import 'spawn_state.dart';
 
 /// The pieces crews are drawn with (decision 138, plan §4.2): one role tag,
 /// one crew square, chip, header and menu wherever a crew appears.
@@ -799,7 +801,7 @@ Future<void> showCrewMenu(
     builder: (_) => CrewMenu(
       crew: crew,
       collapsed: collapsed,
-      ended: members.where((s) => s.ended).length,
+      ended: dismissableEnded(overview, members).length,
       running: members.where((s) => !s.ended).length,
     ),
   );
@@ -826,7 +828,7 @@ Future<void> showCrewSheet(
     builder: (_) => CrewMenu(
       crew: crew,
       collapsed: collapsed,
-      ended: members.where((s) => s.ended).length,
+      ended: dismissableEnded(overview, members).length,
       running: members.where((s) => !s.ended).length,
       sheet: true,
       onPage: onPage,
@@ -835,6 +837,16 @@ Future<void> showCrewSheet(
   if (picked == null || !context.mounted) return;
   await runCrewAction(context, ref, picked, crew: crew, overview: overview);
 }
+
+/// The ended [members] Dismiss ended may take: a session in a spawned tree
+/// goes only with its tree, from its own session (C8).
+List<AgentSession> dismissableEnded(
+  AgentOverview overview,
+  List<AgentSession> members,
+) => [
+  for (final s in members)
+    if (s.ended && !inTree(overview, s)) s,
+];
 
 /// Does what the crew menu or sheet was closed with.
 Future<void> runCrewAction(
@@ -871,19 +883,48 @@ Future<void> runCrewAction(
     case CrewAction.collapse:
       ref.read(crewPrefsProvider.notifier).toggleCrew(crew.id);
     case CrewAction.dismissEnded:
-      await sendCrewChange(
+      final c = ProviderScope.containerOf(context, listen: false);
+      final messenger = ScaffoldMessenger.maybeOf(context);
+      final loose = dismissableEnded(overview, members);
+      final kept = members.where((s) => s.ended).length - loose.length;
+      final done = await sendCrewChange(
         context,
         what: 'dismiss every ended session in ${crew.name}',
-        why: 'its last session was dismissed',
-        removed: (crew) => [?crew],
+        removed: (_) => const <Crew>[],
         send: (api) async {
-          Crew? removed;
-          for (final s in members.where((s) => s.ended)) {
-            removed = (await api.dismiss(s.id)).firstOrNull ?? removed;
+          final removed = <Crew>[];
+          Object? failure;
+          var failed = 0;
+          for (final s in loose) {
+            try {
+              removed.addAll(await api.dismiss(s.id));
+            } catch (e) {
+              failure ??= e;
+              failed++;
+            }
           }
-          return removed;
+          return (removed: removed, failed: failed, failure: failure);
         },
       );
+      if (done == null) return;
+      announceDismissedCrews(c, overview, done.removed, fallback: messenger);
+      if (done.failure case final e?) {
+        showUndoToast(
+          "Couldn't dismiss ${done.failed} of ${loose.length} ended sessions "
+          'in ${crew.name}: ${describeFailure(e)}',
+          fallback: messenger,
+        );
+      }
+      if (kept > 0) {
+        showUndoToast(
+          kept == 1
+              ? '1 is in a spawned tree and was kept: dismiss a tree from '
+                    'its session.'
+              : '$kept are in a spawned tree and were kept: dismiss a tree '
+                    'from its session.',
+          fallback: messenger,
+        );
+      }
     case CrewAction.openPage:
       context.go(Routes.agentCrew(crew.id));
     case CrewAction.newSession:

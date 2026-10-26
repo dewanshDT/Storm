@@ -113,14 +113,13 @@ SessionSelection selectWith(
 
 /// Makes a crew named "New crew" of [ids], in that order, and opens its
 /// name for editing with the text selected (138n, Q3).
-Future<void> makeCrew(
-  BuildContext context,
-  WidgetRef ref,
-  List<String> ids,
-) async {
+Future<void> makeCrew(BuildContext context, List<String> ids) async {
+  // The container, not the caller's ref: the multi-select bar that asked
+  // is gone once its selection clears, before the server answers.
+  final c = ProviderScope.containerOf(context, listen: false);
   // Unfolded first, so the crew being made is seen being made.
-  if (ref.read(crewPrefsProvider).value?.section ?? false) {
-    ref.read(crewPrefsProvider.notifier).toggleSection();
+  if (c.read(crewPrefsProvider).value?.section ?? false) {
+    c.read(crewPrefsProvider.notifier).toggleSection();
   }
   final change = await sendCrewChange(
     context,
@@ -129,8 +128,8 @@ Future<void> makeCrew(
     send: (api) => api.createCrew('New crew', sessionIds: ids),
   );
   final made = change?.crew;
-  if (made == null || !context.mounted) return;
-  ref.read(crewRenameProvider.notifier).state = made.id;
+  if (made == null) return;
+  c.read(crewRenameProvider.notifier).state = made.id;
 }
 
 /// Puts [s] in [crewId] in front of [before], or last ([reorder] moves it
@@ -401,7 +400,7 @@ class _SelectionBarState extends ConsumerState<SelectionBar> {
   Future<void> _make() async {
     final ids = _ids;
     _clear();
-    await makeCrew(context, ref, ids);
+    await makeCrew(context, ids);
   }
 
   Future<void> _move() async {

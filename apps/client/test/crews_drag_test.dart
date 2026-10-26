@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
@@ -432,6 +433,23 @@ void main() {
       expect(bar(), findsNothing);
       expect(find.byKey(const Key('crew-rename-crw_new2')), findsOneWidget);
       expect(roleRequests(agents), isEmpty);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('Make crew opens the name even when the bar is gone first', (
+      t,
+    ) async {
+      final agents = crewServer()..holdCrewChanges = Completer();
+      final c = await open(t, agents);
+      await clickWith(t, LogicalKeyboardKey.metaLeft, row('ags_shell'));
+      await clickWith(t, LogicalKeyboardKey.metaLeft, row('ags_spike'));
+      await t.tap(find.byKey(const Key('selection-make-crew')));
+      await t.pumpAndSettle();
+      expect(bar(), findsNothing);
+      agents.holdCrewChanges!.complete();
+      await t.pumpAndSettle();
+      expect(changes(agents), hasLength(1));
+      expect(find.byKey(const Key('crew-rename-crw_new2')), findsOneWidget);
       await disposeShell(t, c);
     });
 

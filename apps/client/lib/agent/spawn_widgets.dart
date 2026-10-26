@@ -179,6 +179,7 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
     if (api == null) return;
     setState(() => _busy = true);
     final s = widget.session;
+    final c = ProviderScope.containerOf(context, listen: false);
     try {
       final refused = await api.setSpawn(s.id, enabled);
       if (!enabled && mounted) {
@@ -205,7 +206,7 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
       }
     } finally {
       api.dispose();
-      spawnChanged(ref, s.id);
+      spawnChanged(c, s.id);
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -445,6 +446,7 @@ class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
     setState(() => _busy = true);
     final s = widget.session;
     final ids = [for (final r in d.running) r.id];
+    final c = ProviderScope.containerOf(context, listen: false);
     try {
       if (widget.children) {
         await api.endChildren(
@@ -459,7 +461,7 @@ class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
           reportFirst: _reportFirst,
         );
       }
-      widget.onDone();
+      if (mounted) widget.onDone();
     } catch (e) {
       if (!mounted) return;
       _say(context, switch (_code(e)) {
@@ -470,7 +472,7 @@ class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
       });
     } finally {
       api.dispose();
-      spawnChanged(ref, s.id);
+      spawnChanged(c, s.id);
       if (mounted) setState(() => _busy = false);
     }
   }
@@ -540,7 +542,7 @@ class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
     final messenger = ScaffoldMessenger.maybeOf(context);
     try {
       final removed = await api.dismiss(widget.session.id, tree: true);
-      ref.invalidate(agentOverviewProvider);
+      c.invalidate(agentOverviewProvider);
       announceDismissedCrews(c, before, removed, fallback: messenger);
       widget.onDismissed();
     } catch (e) {
@@ -709,11 +711,15 @@ ApprovalFacts? approvalFactsOf(
 
 /// What a person sees once they have decided: the outcome, never a line in
 /// any terminal (138p point 2).
-String decidedText(SpawnRequest r, AgentOverview? o) {
+String decidedText(SpawnRequest r, AgentOverview? o, {String? name}) {
   String nameOf(String? id) =>
       id == null ? 'the session' : o?.byId(id)?.displayName ?? id;
+  final child =
+      name ??
+      (r.session == null ? null : o?.byId(r.session!)?.displayName) ??
+      'its child';
   return switch (r.outcome) {
-    'started' => 'Approved: ${r.name ?? 'its child'} is starting.',
+    'started' => 'Approved: $child is starting.',
     'start_failed' => 'Approved, but it couldn’t start.',
     'delivered' => 'Approved: the message is in ${nameOf(r.target)}’s inbox.',
     'ended' => 'Approved: ${nameOf(r.target)} is ending.',
@@ -786,6 +792,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
     if (api == null) return;
     setState(() => _busy = true);
     final r = widget.request;
+    final c = ProviderScope.containerOf(context, listen: false);
     try {
       final decided = approve
           ? await api.approve(r.id, writeVault: _write)
@@ -793,7 +800,11 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
       if (mounted) {
         _say(
           context,
-          decidedText(decided, ref.read(agentOverviewProvider).value),
+          decidedText(
+            decided,
+            c.read(agentOverviewProvider).value,
+            name: r.name,
+          ),
         );
       }
       widget.onDecided?.call();
@@ -808,7 +819,7 @@ class _ApprovalCardState extends ConsumerState<ApprovalCard> {
       }
     } finally {
       api.dispose();
-      spawnChanged(ref, r.requester);
+      spawnChanged(c, r.requester);
       if (mounted) setState(() => _busy = false);
     }
   }
