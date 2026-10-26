@@ -16,6 +16,13 @@ install -d -m 0700 -o storm-runtime -g storm-runtime /var/lib/storm-runtime/home
 install -d -m 0750 -o storm-runtime -g storm-runtime /var/lib/storm-runtime/workspaces
 mkdir -p /etc/storm-runtime
 
+# Storm's AppArmor profile for pasta (decision 140), which every isolated
+# session's network unit names. Best effort: `storm-runtime-isolation on`
+# loads it again and refuses if it cannot.
+if [ -d /sys/kernel/security/apparmor ] && command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r -W /etc/apparmor.d/storm-runtime-pasta || true
+fi
+
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload || true
     # The isolation helper (decision 136) ships disabled and runs only once

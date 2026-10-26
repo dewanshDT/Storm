@@ -326,6 +326,42 @@ fn the_package_ships_the_helper_disabled() {
     }
 }
 
+/// Decision 140: every session's network unit names Storm's AppArmor
+/// profile for pasta, so the package ships it (a conffile, as everything
+/// under /etc is to cargo-deb) and loads it where AppArmor is on, best
+/// effort: `storm-runtime-isolation on` loads it again and refuses if it
+/// cannot.
+#[test]
+fn the_package_ships_and_loads_the_pasta_profile() {
+    let cargo = repo_file("apps/runtime/Cargo.toml");
+    assert!(cargo.contains(
+        r#"["../../deploy/storm-runtime-pasta.apparmor", "etc/apparmor.d/storm-runtime-pasta", "644"]"#
+    ));
+    assert_eq!(
+        storm_runtime_isolation::net::APPARMOR_PROFILE_FILE,
+        "/etc/apparmor.d/storm-runtime-pasta"
+    );
+    let profile = repo_file("deploy/storm-runtime-pasta.apparmor");
+    assert!(profile.contains(&format!(
+        "profile {} ",
+        storm_runtime_isolation::net::APPARMOR_PROFILE
+    )));
+    let postinst = repo_file("apps/runtime/debian/postinst");
+    assert!(
+        code_lines(&postinst).any(|l| l
+            .contains("apparmor_parser -r -W /etc/apparmor.d/storm-runtime-pasta")
+            && l.ends_with("|| true")),
+        "{postinst}"
+    );
+    let postrm = repo_file("apps/runtime/debian/postrm");
+    assert!(
+        code_lines(&postrm).any(|l| l
+            .contains("apparmor_parser -R /etc/apparmor.d/storm-runtime-pasta")
+            && l.ends_with("|| true")),
+        "{postrm}"
+    );
+}
+
 /// The helper accepts a provider only by an id the operator's configuration
 /// has; with none configured, the built-ins. Its list is this crate's.
 #[test]

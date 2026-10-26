@@ -302,7 +302,8 @@ pub const SHOW_PROPERTIES: &str = "LoadState,SubState,MainPID,ExecMainCode,ExecM
 pub trait Units: Send + Sync {
     /// Whether pasta and `ip` are installed (136j).
     fn network_ready(&self) -> bool;
-    /// Starts the session's network and returns once it is configured.
+    /// Starts the session's namespace, then its network, and returns once
+    /// it is configured; a network that fails leaves no namespace.
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()>;
     fn start(&self, spec: &UnitSpec) -> Result<()>;
     fn show(&self, unit: &str) -> Result<UnitState>;
@@ -366,7 +367,14 @@ impl Units for Systemd {
                 bail!("{tool} is not installed; a session needs it for its network");
             }
         }
-        run(SYSTEMD_RUN, &spec.systemd_run_args()).map(drop)
+        run(SYSTEMD_RUN, &spec.namespace_run_args())?;
+        if let Err(e) = run(SYSTEMD_RUN, &spec.systemd_run_args()) {
+            let namespace = crate::net::namespace_unit_name(&spec.session);
+            let _ = self.stop(&namespace);
+            self.reset_failed(&namespace);
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn start(&self, spec: &UnitSpec) -> Result<()> {

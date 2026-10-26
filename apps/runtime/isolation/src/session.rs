@@ -443,7 +443,11 @@ impl Helper {
             });
         if let Err((what, e)) = started {
             // A unit that failed to start may still be loaded.
-            for unit in [unit.clone(), crate::net::unit_name(session)] {
+            for unit in [
+                unit.clone(),
+                crate::net::unit_name(session),
+                crate::net::namespace_unit_name(session),
+            ] {
                 let _ = self.deps.units.stop(&unit);
                 self.deps.units.reset_failed(&unit);
             }
@@ -583,10 +587,12 @@ impl Helper {
         Ok((out, None))
     }
 
-    /// The session's unit, then its network.
+    /// The session's unit, then its network, then its namespace: the
+    /// namespace cannot be deleted while pasta's unit holds a mount of it.
     fn stop_session(&self, session: &str) -> Result<()> {
         self.stop_unit(&units::unit_name(session))?;
-        self.stop_unit(&crate::net::unit_name(session))
+        self.stop_unit(&crate::net::unit_name(session))?;
+        self.stop_unit(&crate::net::namespace_unit_name(session))
     }
 
     fn stop_unit(&self, unit: &str) -> Result<()> {
@@ -809,17 +815,23 @@ pub mod tests {
             !self.no_passt.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
+            let state = UnitState {
+                loaded: true,
+                running: true,
+                ..UnitState::default()
+            };
+            let namespace = crate::net::namespace_unit_name(&spec.session);
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("start {namespace}"));
+            self.units.lock().unwrap().insert(namespace, (state, None));
             let unit = crate::net::unit_name(&spec.session);
             self.calls.lock().unwrap().push(format!("start {unit}"));
             self.nets.lock().unwrap().push(spec.clone());
             if self.fail_network.load(std::sync::atomic::Ordering::SeqCst) {
                 anyhow::bail!("injected: no pasta");
             }
-            let state = UnitState {
-                loaded: true,
-                running: true,
-                ..UnitState::default()
-            };
             self.units.lock().unwrap().insert(unit, (state, None));
             Ok(())
         }
@@ -1275,10 +1287,12 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
@@ -1334,12 +1348,14 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
                 "kill storm-session-ags_A.service SIGHUP",
                 "kill storm-session-ags_A.service SIGKILL",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let spec = f.units.specs.lock().unwrap()[0].clone();
@@ -1385,10 +1401,11 @@ pub mod tests {
         );
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[calls.len() - 2..],
+            calls[calls.len() - 3..],
             [
                 "stop storm-session-ags_A.service",
-                "stop storm-session-ags_A-net.service"
+                "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service"
             ]
         );
         let meta = f.own.meta(
@@ -1443,10 +1460,11 @@ pub mod tests {
         f.helper.recover().unwrap();
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[calls.len() - 2..],
+            calls[calls.len() - 3..],
             [
                 "stop storm-session-ags_A.service",
-                "stop storm-session-ags_A-net.service"
+                "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service"
             ]
         );
         assert!(
@@ -1638,8 +1656,9 @@ pub mod tests {
         );
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[..2],
+            calls[..3],
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service"
             ],
@@ -1680,9 +1699,11 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
