@@ -61,6 +61,14 @@ pub const DENIED: &[&str] = &[
     ".pypirc",
 ];
 
+/// OpenCode's config dir in an isolated session's home (140f): OpenCode
+/// writes there at start, and the host's per-session one is read-only to
+/// the session.
+pub const OPENCODE_CONFIG: &str = ".config/storm-opencode";
+/// The host's Storm plugin for OpenCode, under `<host state>/sessions/<id>`.
+const OPENCODE_PLUGIN: &str = "opencode/plugin/storm.js";
+const MAX_PLUGIN: u64 = 64 * 1024;
+
 /// Variables a launch may not carry on an isolated host: a refreshable
 /// login (136f), even from the operator's env file.
 pub const REFRESHABLE_ENV: &[&str] = &["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"];
@@ -762,6 +770,16 @@ pub fn populate(
             skip_denied,
         )?;
     }
+    if provider == "opencode" {
+        opencode_config(
+            &mut c,
+            state.as_fd(),
+            home.as_fd(),
+            &mut made,
+            session,
+            host_uid,
+        )?;
+    }
     if let Some((resume, kept)) = resume {
         copy_conversation(
             &mut c,
@@ -774,6 +792,45 @@ pub fn populate(
         )?;
     }
     c.finish(home.as_fd(), &made)
+}
+
+/// The session's own OpenCode config dir, with the host's plugin for the
+/// session copied in when there is one: a regular file of the host's,
+/// never followed through a link.
+fn opencode_config(
+    c: &mut Copier,
+    state: BorrowedFd<'_>,
+    home: BorrowedFd<'_>,
+    made: &mut Vec<String>,
+    session: &str,
+    host_uid: u32,
+) -> Result<()> {
+    let (to_dir, to_name) = c.parents(home, &format!("{OPENCODE_CONFIG}/plugin/storm.js"), made)?;
+    let rel = format!("sessions/{session}/{OPENCODE_PLUGIN}");
+    let (dir_rel, name) = rel.rsplit_once('/').expect("nested");
+    let Some(dir) = open_dir_under(state, dir_rel, Some(host_uid), c.own)? else {
+        return Ok(());
+    };
+    let fd = match rustix::fs::openat(
+        &dir,
+        cname(name.as_bytes())?.as_c_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(e).context("opening the session's OpenCode plugin"),
+    };
+    let st = rustix::fs::fstat(&fd)?;
+    if kind_of(&st) != Kind::File || owner_of(c.own, &st) != host_uid {
+        bail!("the session's OpenCode plugin is not a file of the host's");
+    }
+    if st.st_size as u64 > MAX_PLUGIN {
+        bail!("the session's OpenCode plugin is too large");
+    }
+    let bytes = Copier::read_file(fd, MAX_PLUGIN)?;
+    let meta = c.target(Access::Private, Kind::File, 0o600);
+    c.write_file(to_dir.as_fd(), &to_name, &bytes, meta)
 }
 
 /// Copies the one conversation from the predecessor's kept files.
@@ -1103,6 +1160,15 @@ mod tests {
                 &self.own,
             )?;
             Ok(home)
+        }
+        fn plugin(&self, session: &str) -> PathBuf {
+            let p = self
+                .host_state
+                .join("sessions")
+                .join(session)
+                .join("opencode/plugin/storm.js");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            p
         }
         fn meta(&self, p: &Path) -> Meta {
             let md = std::fs::symlink_metadata(p).unwrap();
@@ -1760,5 +1826,49 @@ mod tests {
         ] {
             assert!(!conversation_ok(p, bad), "{p} {bad}");
         }
+    }
+
+    /// 140f: OpenCode writes into its config dir at start, so the session's
+    /// is its own, with the host's plugin copied in.
+    #[test]
+    fn an_opencode_home_has_a_config_dir_of_its_own() {
+        let f = fx();
+        std::fs::write(f.plugin("ags_O"), b"export const Storm = 1;\n").unwrap();
+        let home = f.populate("opencode", "ags_O").unwrap();
+        let dir = home.join(".config/storm-opencode");
+        assert_eq!(
+            read(&dir.join("plugin/storm.js")),
+            "export const Storm = 1;\n"
+        );
+        for (rel, mode) in [
+            (".config", 0o700),
+            (".config/storm-opencode", 0o700),
+            (".config/storm-opencode/plugin", 0o700),
+            (".config/storm-opencode/plugin/storm.js", 0o600),
+        ] {
+            let m = f.meta(&home.join(rel));
+            assert_eq!((m.uid, m.gid, m.mode), (UID, GID, mode), "{rel}");
+        }
+        // No plugin from the host: OpenCode still has somewhere to write.
+        let home = f.populate("opencode", "ags_P").unwrap();
+        let m = f.meta(&home.join(".config/storm-opencode"));
+        assert_eq!((m.uid, m.mode), (UID, 0o700));
+        assert!(!home.join(".config/storm-opencode/plugin/storm.js").exists());
+        let home = f.populate("claude-code", "ags_C").unwrap();
+        assert!(!home.join(".config/storm-opencode").exists());
+    }
+
+    #[test]
+    fn a_linked_or_oversized_plugin_is_refused() {
+        let f = fx();
+        let secret = f.account("secret", b"TOKEN");
+        symlink(&secret, f.plugin("ags_L")).unwrap();
+        assert!(f.populate("opencode", "ags_L").is_err());
+        let copied = f.homes.join("ags_L/.config/storm-opencode/plugin/storm.js");
+        assert!(copied.symlink_metadata().is_err(), "not followed");
+        std::fs::write(f.plugin("ags_B"), vec![b'x'; 64 * 1024 + 1]).unwrap();
+        assert!(f.populate("opencode", "ags_B").is_err());
+        std::fs::create_dir(f.plugin("ags_D")).unwrap();
+        assert!(f.populate("opencode", "ags_D").is_err());
     }
 }
