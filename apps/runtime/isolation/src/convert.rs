@@ -72,6 +72,8 @@ pub trait Ownership {
     fn meta(&self, key: Key, seen: Meta) -> Meta;
     fn chown(&self, e: &Entry, uid: u32, gid: u32) -> Result<()>;
     fn chmod(&self, e: &Entry, mode: u32) -> Result<()>;
+    /// What an opened entry is now, asked of its own descriptor.
+    fn stat(&self, e: &Entry) -> Result<Meta>;
     /// Removes a tree whose directories are already root's.
     fn remove_all(&self, path: &Path) -> Result<()>;
 }
@@ -106,6 +108,13 @@ impl Ownership for Real {
         Ok(())
     }
 
+    fn stat(&self, e: &Entry) -> Result<Meta> {
+        match &e.node {
+            Node::Fd(fd) => Ok(meta_of(&rustix::fs::fstat(fd)?)),
+            Node::At(..) => bail!("never stat by name"),
+        }
+    }
+
     fn remove_all(&self, path: &Path) -> Result<()> {
         std::fs::remove_dir_all(path).with_context(|| format!("removing {}", path.display()))
     }
@@ -119,6 +128,9 @@ pub struct Recorded {
     pub changes: RefCell<usize>,
     pub fail_after: Option<usize>,
     pub removed: RefCell<Vec<PathBuf>>,
+    /// Entries whose changes are taken and never made, as a filesystem
+    /// that ignores them would.
+    pub frozen: RefCell<Vec<Key>>,
 }
 
 impl Recorded {
@@ -128,6 +140,9 @@ impl Recorded {
             bail!("injected failure");
         }
         *n += 1;
+        if self.frozen.borrow().contains(&key) {
+            return Ok(());
+        }
         let mut overlay = self.overlay.borrow_mut();
         let meta = overlay.entry(key).or_insert(seen);
         f(meta);
@@ -147,6 +162,9 @@ impl Ownership for Recorded {
     }
     fn chmod(&self, e: &Entry, mode: u32) -> Result<()> {
         self.change(e.key, e.seen, |m| m.mode = mode)
+    }
+    fn stat(&self, e: &Entry) -> Result<Meta> {
+        Ok(self.meta(e.key, e.seen))
     }
     fn remove_all(&self, path: &Path) -> Result<()> {
         self.removed.borrow_mut().push(path.to_path_buf());
@@ -190,8 +208,22 @@ pub struct Entry<'a> {
     pub node: Node<'a>,
 }
 
-/// Visits the workspace and everything under it, parents first.
-pub fn walk(workspace: &Path, visit: &mut dyn FnMut(Entry) -> Result<()>) -> Result<()> {
+type Visit<'f> = &'f mut dyn FnMut(Entry) -> Result<()>;
+
+/// Visits the workspace and everything under it, parents first. A tree
+/// deeper than the cap is an error.
+pub fn walk(workspace: &Path, visit: Visit) -> Result<()> {
+    walk_from(workspace, visit, None).map(drop)
+}
+
+/// As [`walk`], but a directory at the cap is handed to `at_cap` (through
+/// its own descriptor, after `visit` saw it) instead of being an error, and
+/// nothing under it is visited. Returns those directories (139-D1).
+pub fn walk_capped(workspace: &Path, visit: Visit, at_cap: Visit) -> Result<Vec<PathBuf>> {
+    walk_from(workspace, visit, Some(at_cap))
+}
+
+fn walk_from(workspace: &Path, visit: Visit, at_cap: Option<Visit>) -> Result<Vec<PathBuf>> {
     let fd = rustix::fs::open(workspace, crate::files::DIR_FLAGS, Mode::empty())
         .with_context(|| format!("opening {}", workspace.display()))?;
     let st = rustix::fs::fstat(&fd)?;
@@ -203,7 +235,17 @@ pub fn walk(workspace: &Path, visit: &mut dyn FnMut(Entry) -> Result<()>) -> Res
         seen: meta_of(&st),
         node: Node::Fd(fd.as_fd()),
     })?;
-    walk_dir(workspace, &fd, &mut Vec::new(), dev, 0, visit)
+    let mut cap = Cap {
+        at_cap,
+        found: Vec::new(),
+    };
+    walk_dir(workspace, &fd, &mut Vec::new(), dev, 0, visit, &mut cap)?;
+    Ok(cap.found)
+}
+
+struct Cap<'f> {
+    at_cap: Option<Visit<'f>>,
+    found: Vec<PathBuf>,
 }
 
 fn walk_dir(
@@ -213,12 +255,25 @@ fn walk_dir(
     dev: u64,
     depth: usize,
     visit: &mut dyn FnMut(Entry) -> Result<()>,
+    cap: &mut Cap,
 ) -> Result<()> {
     if depth >= MAX_DEPTH {
-        bail!(
-            "{} is nested deeper than {MAX_DEPTH} directories",
-            workspace.display()
-        );
+        let Some(at_cap) = cap.at_cap.as_mut() else {
+            bail!(
+                "{} is nested deeper than {MAX_DEPTH} directories",
+                workspace.display()
+            );
+        };
+        let st = rustix::fs::fstat(dir)?;
+        at_cap(Entry {
+            rel,
+            kind: Kind::Dir,
+            key: key_of(&st),
+            seen: meta_of(&st),
+            node: Node::Fd(dir.as_fd()),
+        })?;
+        cap.found.push(workspace.join(OsStr::from_bytes(rel)));
+        return Ok(());
     }
     for name in crate::files::dir_names(dir)? {
         let base = rel.len();
@@ -266,7 +321,7 @@ fn walk_dir(
                     node: Node::Fd(fd.as_fd()),
                 })?;
                 if kind == Kind::Dir {
-                    walk_dir(workspace, &fd, rel, dev, depth + 1, visit)?;
+                    walk_dir(workspace, &fd, rel, dev, depth + 1, visit, cap)?;
                 }
             }
             Kind::Link | Kind::Other => visit(Entry {
@@ -326,6 +381,40 @@ pub fn restored_new(kind: Kind, m: Meta, pool: &Pool) -> Meta {
         Kind::Link | Kind::Other => m.mode,
     };
     Meta { uid, gid, mode }
+}
+
+/// Seals a directory the walk could not go below (139-D1): `uid`:`gid`,
+/// `0700`, through its own descriptor, then checked on that descriptor.
+/// Anything else than exactly that is an error.
+pub fn seal(own: &dyn Ownership, e: &Entry, shown: &Path, uid: u32, gid: u32) -> Result<()> {
+    own.chown(e, uid, gid)?;
+    own.chmod(e, 0o700)?;
+    let now = own.stat(e)?;
+    if (now.uid, now.gid, now.mode) != (uid, gid, 0o700) {
+        bail!(
+            "{} did not seal: {}:{} {:o}",
+            shown.display(),
+            now.uid,
+            now.gid,
+            now.mode
+        );
+    }
+    // Debug-quoted: a name a session chose cannot forge another line.
+    eprintln!("audit: sealed path={shown:?} uid={uid} gid={gid} mode=0700");
+    Ok(())
+}
+
+/// [`walk_capped`], sealing each directory at the cap to `uid`:`gid`.
+pub fn walk_sealing(
+    path: &Path,
+    uid: u32,
+    gid: u32,
+    own: &dyn Ownership,
+    visit: Visit,
+) -> Result<Vec<PathBuf>> {
+    walk_capped(path, visit, &mut |e| {
+        seal(own, &e, &path.join(OsStr::from_bytes(e.rel)), uid, gid)
+    })
 }
 
 pub(crate) fn apply(own: &dyn Ownership, e: &Entry, target: Meta) -> Result<bool> {
@@ -464,6 +553,8 @@ pub struct Report {
     pub workspaces: usize,
     pub changed: usize,
     pub missing: Vec<PathBuf>,
+    /// Directories past the walk's cap, sealed to the host account.
+    pub sealed: Vec<PathBuf>,
 }
 
 /// Turns isolation on for `workspaces`. Groups are assigned before
@@ -542,17 +633,20 @@ pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report>
             }
         }
         report.workspaces += 1;
-        walk(&m.workspace, &mut |e| {
+        let mut changed = 0;
+        let sealed = walk_sealing(&m.workspace, pool.host_uid, pool.host_gid, own, &mut |e| {
             let now = own.meta(e.key, e.seen);
             let target = match m.entries.get(e.rel) {
                 Some((kind, recorded)) if *kind == e.kind => *recorded,
                 _ => restored_new(e.kind, now, pool),
             };
             if apply(own, &e, target)? {
-                report.changed += 1;
+                changed += 1;
             }
             Ok(())
         })?;
+        report.changed += changed;
+        report.sealed.extend(sealed);
         m.remove(manifests)?;
     }
     Ok(report)
@@ -928,6 +1022,100 @@ mod tests {
                 .unwrap()
                 .permissions()
                 .mode()
+        );
+    }
+
+    /// 139-D1: what a session nested past the cap is sealed to the host
+    /// account, `0700`, and the rest is turned off as usual.
+    #[test]
+    fn off_seals_what_a_session_nested_past_the_cap() {
+        let f = fixture();
+        let pool = pool();
+        let own = Recorded::default();
+        on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
+        let app = f.root.join("app");
+        let deep = app.join(std::iter::repeat_n("d", 300).collect::<PathBuf>());
+        std::fs::create_dir_all(&deep).unwrap();
+        let report = off(&pool, &f.manifests, &own).unwrap();
+        let capped = app.join(std::iter::repeat_n("d", 256).collect::<PathBuf>());
+        assert_eq!(
+            own.overlay.borrow()[&key(&capped)],
+            Meta {
+                uid: 900,
+                gid: 900,
+                mode: 0o700
+            }
+        );
+        assert_eq!(report.sealed, [capped]);
+        assert_eq!(report.workspaces, 2);
+        assert!(Manifest::load_all(&f.manifests).unwrap().is_empty());
+    }
+
+    /// 139-D1: past the cap, the strict walk (and so `on`) refuses; the
+    /// capped one hands over the directory at the cap through its own
+    /// descriptor and visits nothing under it.
+    #[test]
+    fn walk_reports_a_tree_past_the_cap() {
+        let f = fixture();
+        let app = f.root.join("app");
+        let nest = |n| app.join(std::iter::repeat_n("d", n).collect::<PathBuf>());
+        std::fs::create_dir_all(nest(300)).unwrap();
+        assert!(walk(&app, &mut |_| Ok(())).is_err());
+        let err = on(&f.workspaces(), &pool(), &f.manifests, &Recorded::default()).unwrap_err();
+        assert!(err.to_string().contains("deeper than"), "{err}");
+        let mut deepest = 0;
+        let mut handed = Vec::new();
+        let found = walk_capped(
+            &app,
+            &mut |e| {
+                deepest = deepest.max(e.rel.split(|b| *b == b'/').count());
+                Ok(())
+            },
+            &mut |e| {
+                assert!(matches!(e.node, Node::Fd(_)));
+                handed.push((e.rel.to_vec(), e.key));
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(found, [nest(256)]);
+        assert_eq!(handed.len(), 1);
+        assert_eq!(handed[0].1, key(&nest(256)));
+        assert_eq!(deepest, 256, "nothing under the cap is visited");
+    }
+
+    /// A seal is checked on the descriptor: one that does not hold is an
+    /// error, never taken on trust.
+    #[test]
+    fn a_seal_that_does_not_hold_is_an_error() {
+        let f = fixture();
+        let app = f.root.join("app");
+        let own = Recorded::default();
+        own.frozen.borrow_mut().push(key(&app));
+        let mut sealed = Ok(());
+        walk(&app, &mut |e| {
+            if e.rel.is_empty() {
+                sealed = seal(&own, &e, &app, 900, 900);
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert!(sealed.is_err());
+        own.frozen.borrow_mut().clear();
+        walk(&app, &mut |e| {
+            if e.rel.is_empty() {
+                seal(&own, &e, &app, 900, 900)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            own.overlay.borrow()[&key(&app)],
+            Meta {
+                uid: 900,
+                gid: 900,
+                mode: 0o700
+            }
         );
     }
 }

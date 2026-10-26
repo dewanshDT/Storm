@@ -123,6 +123,8 @@ impl Helper {
         let settings = Settings::from_config(&config, Layout::installed(), shell.into())?;
         crate::children::check_root(&settings.layout.children(), &settings.roots)?;
         let helper = Self::new(pool, settings, deps);
+        // A lease it could not revoke stays held and logged; the rest of
+        // the pool is served (139-D1).
         helper.recover()?;
         Ok(helper)
     }

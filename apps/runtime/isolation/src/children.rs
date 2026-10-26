@@ -29,7 +29,7 @@
 //! human deletes it (`child_dispose`), and directories no record claims are
 //! listed as orphans, never removed unasked.
 
-use std::ffi::OsString;
+use std::ffi::{CStr, OsString};
 use std::os::fd::OwnedFd;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
@@ -126,19 +126,29 @@ pub fn parent_mode(workspace: &Path) -> ChildMode {
 
 /// What a tree takes on disk, as `du` counts it: every entry's blocks,
 /// never following a symlink or leaving the filesystem. Nothing missing is
-/// nothing.
+/// nothing. A tree past the depth cap is an error.
 pub fn disk_usage(path: &Path) -> Result<u64> {
+    match measure(path)? {
+        (bytes, true) => Ok(bytes),
+        (_, false) => bail!("nested deeper than {MAX_DEPTH} directories"),
+    }
+}
+
+/// As [`disk_usage`], with `false` when part of the tree was past the depth
+/// cap, so the count is short.
+pub fn measure(path: &Path) -> Result<(u64, bool)> {
     let st = match rustix::fs::lstat(path) {
-        Err(rustix::io::Errno::NOENT) => return Ok(0),
+        Err(rustix::io::Errno::NOENT) => return Ok((0, true)),
         other => other.with_context(|| format!("stat {}", path.display()))?,
     };
     let own = blocks(&st);
     if FileType::from_raw_mode(st.st_mode as _) != FileType::Directory {
-        return Ok(own);
+        return Ok((own, true));
     }
     let fd = rustix::fs::open(path, files::DIR_FLAGS, Mode::empty())
         .with_context(|| format!("opening {}", path.display()))?;
-    Ok(own + usage_in(&fd, crate::convert::key_of(&st).dev, 0)?)
+    let (under, complete) = usage_in(&fd, crate::convert::key_of(&st).dev, 0)?;
+    Ok((own.saturating_add(under), complete))
 }
 
 #[allow(clippy::unnecessary_cast)]
@@ -146,11 +156,11 @@ fn blocks(st: &rustix::fs::Stat) -> u64 {
     st.st_blocks as u64 * 512
 }
 
-fn usage_in(dir: &OwnedFd, dev: u64, depth: usize) -> Result<u64> {
+fn usage_in(dir: &OwnedFd, dev: u64, depth: usize) -> Result<(u64, bool)> {
     if depth >= MAX_DEPTH {
-        bail!("nested deeper than {MAX_DEPTH} directories");
+        return Ok((0, false));
     }
-    let mut total = 0u64;
+    let (mut total, mut complete) = (0u64, true);
     for name in files::dir_names(dir)? {
         let st = match rustix::fs::statat(dir, name.as_c_str(), AtFlags::SYMLINK_NOFOLLOW) {
             Ok(st) => st,
@@ -161,12 +171,28 @@ fn usage_in(dir: &OwnedFd, dev: u64, depth: usize) -> Result<u64> {
             continue;
         }
         total = total.saturating_add(blocks(&st));
-        if FileType::from_raw_mode(st.st_mode as _) == FileType::Directory {
-            let sub = rustix::fs::openat(dir, name.as_c_str(), files::DIR_FLAGS, Mode::empty())?;
-            total = total.saturating_add(usage_in(&sub, dev, depth + 1)?);
+        if FileType::from_raw_mode(st.st_mode as _) == FileType::Directory
+            && let Some(sub) = open_sub(dir, name.as_c_str(), &st)?
+        {
+            let (under, all) = usage_in(&sub, dev, depth + 1)?;
+            total = total.saturating_add(under);
+            complete &= all;
         }
     }
-    Ok(total)
+    Ok((total, complete))
+}
+
+/// The directory `statat` just saw, or `None` when it has gone or is no
+/// longer that directory: a live child's tree changes under the scan.
+fn open_sub(dir: &OwnedFd, name: &CStr, seen: &rustix::fs::Stat) -> Result<Option<OwnedFd>> {
+    use rustix::io::Errno;
+    let sub = match rustix::fs::openat(dir, name, files::DIR_FLAGS, Mode::empty()) {
+        Ok(sub) => sub,
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let now = rustix::fs::fstat(&sub)?;
+    Ok((crate::convert::key_of(&now) == crate::convert::key_of(seen)).then_some(sub))
 }
 
 /// The children root is outside every workspace root and contains none,
@@ -436,6 +462,33 @@ pub fn reply(r: &ChildRecord, workspace: &Path) -> Map<String, Value> {
 }
 
 impl Helper {
+    /// What the children root takes, one child at a time: a child that
+    /// cannot be measured whole is charged at least its cap (139a), so a
+    /// tree no one can finish counting fails closed for itself alone.
+    fn children_usage(&self) -> Result<u64> {
+        let root = self.layout.children();
+        let mut total = match rustix::fs::lstat(&root) {
+            Err(rustix::io::Errno::NOENT) => return Ok(0),
+            other => blocks(&other?),
+        };
+        for entry in std::fs::read_dir(&root)? {
+            let path = entry?.path();
+            let charged = match measure(&path) {
+                Ok((bytes, true)) => bytes,
+                Ok((bytes, false)) => bytes.max(self.caps.child),
+                Err(e) => {
+                    eprintln!(
+                        "storm-runtime-isolation: measuring {}: {e:#}",
+                        path.display()
+                    );
+                    self.caps.child
+                }
+            };
+            total = total.saturating_add(charged);
+        }
+        Ok(total)
+    }
+
     pub(crate) fn child_record(&self, child: &str) -> Option<ChildRecord> {
         let bytes = std::fs::read(self.layout.child_record(child)).ok()?;
         serde_json::from_slice(&bytes).ok()
@@ -495,11 +548,16 @@ impl Helper {
             None => {}
         }
         let mode = parent_mode(workspace);
-        let used =
-            disk_usage(&self.layout.children()).map_err(|e| failed("measuring the children", e))?;
+        let used = self
+            .children_usage()
+            .map_err(|e| failed("measuring the children", e))?;
         let estimate = match mode {
-            ChildMode::Clone => disk_usage(&workspace.join(".git"))
-                .map_err(|e| failed("measuring the parent's repository", e))?,
+            ChildMode::Clone => match measure(&workspace.join(".git"))
+                .map_err(|e| failed("measuring the parent's repository", e))?
+            {
+                (bytes, true) => bytes,
+                (_, false) => return Err(Refusal::WorkspaceCap),
+            },
             ChildMode::Scratch => 0,
         };
         if estimate > self.caps.child || used.saturating_add(estimate) > self.caps.children {
@@ -575,9 +633,9 @@ impl Helper {
                     ));
                 }
             };
-            let made = disk_usage(&self.layout.child(&child))
+            let (made, complete) = measure(&self.layout.child(&child))
                 .map_err(|e| failed("measuring the child's workspace", e))?;
-            if made > budget {
+            if !complete || made > budget {
                 return Err(Refusal::WorkspaceCap);
             }
             record.commit = Some(report.commit);
@@ -615,9 +673,13 @@ impl Helper {
                 let workspace = self.layout.child_workspace(child);
                 let own = self.deps.own.as_ref();
                 match self.pool.review {
-                    Some((uid, gid)) => files::give_tree(&workspace, uid, gid, own)?,
-                    None => files::rootify(&workspace, own)?,
-                };
+                    Some((uid, gid)) => {
+                        files::give_tree(&workspace, uid, gid, own)?;
+                    }
+                    None => {
+                        files::rootify(&workspace, own)?;
+                    }
+                }
                 if r.stage == Stage::Ready {
                     r.stage = Stage::Ended;
                     self.save_child(&r)?;
@@ -701,8 +763,9 @@ impl Helper {
             return Ok(cached);
         }
         self.give_to_review(child)?;
-        let used =
-            disk_usage(&self.layout.children()).map_err(|e| failed("measuring the children", e))?;
+        let used = self
+            .children_usage()
+            .map_err(|e| failed("measuring the children", e))?;
         let budget = self.caps.child.min(self.caps.children.saturating_sub(used));
         if budget == 0 {
             return Err(Refusal::WorkspaceCap);
@@ -967,26 +1030,37 @@ impl Helper {
 
     /// What a previous helper left half made is abandoned before this one
     /// answers.
+    /// One child that cannot be recovered is logged and left as it is; the
+    /// others go on (139-D1).
     pub(crate) fn recover_children(&self) -> Result<()> {
         let entries = match std::fs::read_dir(self.layout.children()) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             other => other?,
         };
         for entry in entries {
-            let name = entry?.file_name();
+            let Ok(entry) = entry else {
+                continue;
+            };
+            let name = entry.file_name();
             let Some(child) = name.to_str().filter(|n| crate::policy::session_ok(n)) else {
                 continue;
             };
             let Some(r) = self.child_record(child) else {
                 continue;
             };
-            if r.stage == Stage::Creating {
-                self.abandon(child)?;
-                continue;
+            let recovered = if r.stage == Stage::Creating {
+                self.abandon(child)
+            } else {
+                // An export or an Apply the last helper did not see end: its
+                // unit goes, and the same request can be made again (G-137-2).
+                self.stop_review(child)
+            };
+            if let Err(e) = recovered {
+                eprintln!(
+                    "audit: skipped child={child} reason=recovery_failed detail={:?}",
+                    format!("{e:#}")
+                );
             }
-            // An export or an Apply the last helper did not see end: its
-            // unit goes, and the same request can be made again (G-137-2).
-            self.stop_review(child)?;
         }
         Ok(())
     }
@@ -2136,5 +2210,49 @@ mod tests {
         let n = disk_usage(&d).unwrap();
         assert!((100 << 10..1 << 20).contains(&n), "{n}");
         assert_eq!(disk_usage(&t.path().join("missing")).unwrap(), 0);
+    }
+
+    /// 139a (F2): a child workspace the measure cannot finish is charged
+    /// its whole cap; it never fails every other child's creation.
+    #[test]
+    fn a_child_nested_past_the_cap_is_charged_its_cap_not_an_error() {
+        let f = fixture();
+        parent_and_child(&f);
+        crate::session::tests::nest(&f.helper.layout.child("ags_OLD"), 300);
+        assert_eq!(create(&f)["ok"], true);
+        let mut g = fixture();
+        parent_and_child(&g);
+        crate::session::tests::nest(&g.helper.layout.child("ags_OLD"), 300);
+        let charged = g.helper.children_usage().unwrap();
+        assert!(charged >= g.helper.caps.child, "{charged}");
+        g.helper.caps.children = charged - 1;
+        assert_eq!(create(&g)["error"], "workspace_cap", "fail closed");
+    }
+
+    /// 139a (F2): an entry a live child removes, or turns into a file or a
+    /// link, between the scan's `stat` and its open is skipped.
+    #[test]
+    fn an_entry_that_changes_during_the_scan_is_skipped() {
+        let t = tempfile::tempdir().unwrap();
+        let x = t.path().join("x");
+        std::fs::create_dir(&x).unwrap();
+        let dir = rustix::fs::open(t.path(), files::DIR_FLAGS, Mode::empty()).unwrap();
+        let seen = rustix::fs::statat(&dir, c"x", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        assert!(open_sub(&dir, c"x", &seen).unwrap().is_some());
+        std::fs::remove_dir(&x).unwrap();
+        assert!(open_sub(&dir, c"x", &seen).unwrap().is_none(), "gone");
+        std::fs::write(&x, b"").unwrap();
+        assert!(open_sub(&dir, c"x", &seen).unwrap().is_none(), "a file");
+        std::fs::remove_file(&x).unwrap();
+        std::os::unix::fs::symlink(t.path(), &x).unwrap();
+        assert!(open_sub(&dir, c"x", &seen).unwrap().is_none(), "a link");
+        std::fs::remove_file(&x).unwrap();
+        std::fs::create_dir(t.path().join("y")).unwrap();
+        std::fs::create_dir(&x).unwrap();
+        let other = rustix::fs::statat(&dir, c"y", AtFlags::SYMLINK_NOFOLLOW).unwrap();
+        assert!(
+            open_sub(&dir, c"x", &other).unwrap().is_none(),
+            "another directory"
+        );
     }
 }

@@ -176,6 +176,13 @@ pub fn off(
             gone.display()
         )?;
     }
+    for sealed in &report.sealed {
+        writeln!(
+            out,
+            "  {} is nested too deep to restore; it was sealed to the host account (0700) and left as it is.",
+            sealed.display()
+        )?;
+    }
     writeln!(
         out,
         "The pool accounts are kept, unused. Start the host again: sudo systemctl start storm-runtime"

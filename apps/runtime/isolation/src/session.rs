@@ -632,14 +632,14 @@ impl Helper {
             })?;
         }
         let home = self.layout.home(session);
-        if files::rootify(&home, own)? {
+        if let Some(sealed) = files::rootify(&home, own)? {
             // What Resume needs leaves the home before it goes (136e).
             if let Some(provider) = record.and_then(|r| r.provider.as_deref())
                 && crate::home::keep(&home, &self.layout.kept(session), provider, own)?
             {
                 crate::home::prune(&self.layout.kept_root(), own)?;
             }
-            own.remove_all(&home)?;
+            files::dispose(&home, &sealed, own)?;
         }
         files::remove_tree(&self.layout.private(session), own)?;
         Ok(())
@@ -657,19 +657,70 @@ impl Helper {
     }
 
     /// What a previous helper left: every recorded lease is ended and
-    /// revoked before this one answers.
-    pub(crate) fn recover(&self) -> Result<()> {
-        self.recover_children()?;
-        for (user, record) in files::load_leases(&self.layout.leases())? {
+    /// revoked before this one answers. Each lease on its own (139-D1): one
+    /// that cannot be revoked, or whose record cannot be read, keeps its
+    /// user held and its file, and is returned; the rest go on.
+    pub(crate) fn recover(&self) -> Result<Vec<Held>> {
+        if let Err(e) = self.recover_children() {
+            eprintln!("storm-runtime-isolation: recovering the children: {e:#}");
+        }
+        let mut held = Vec::new();
+        for (user, record) in files::read_leases(&self.layout.leases())? {
             if !self.pool.users.contains_key(&user) {
                 continue;
             }
-            self.stop_session(&record.session)?;
-            self.revoke(&record.session, &user, Some(&record))?;
-            files::remove_lease(&self.layout.leases(), &user)?;
+            let record = match record {
+                Ok(record) => record,
+                Err(e) => {
+                    self.hold(&user, None, &e);
+                    held.push(Held {
+                        user,
+                        session: None,
+                    });
+                    continue;
+                }
+            };
+            let session = record.session.clone();
+            let revoked = self
+                .stop_session(&session)
+                .and_then(|()| self.revoke(&session, &user, Some(&record)))
+                .and_then(|()| files::remove_lease(&self.layout.leases(), &user));
+            if let Err(e) = revoked {
+                self.hold(&user, Some(record), &e);
+                held.push(Held {
+                    user,
+                    session: Some(session),
+                });
+            }
         }
-        Ok(())
+        Ok(held)
     }
+
+    /// A lease kept through recovery. Without a readable record no session
+    /// can name it, so only an operator frees it.
+    fn hold(&self, user: &str, record: Option<LeaseRecord>, why: &anyhow::Error) {
+        let session = record.as_ref().map_or(UNREADABLE, |r| r.session.as_str());
+        // Debug-quoted: the error can carry a name a session chose.
+        eprintln!(
+            "audit: held user={user} session={session} reason=recovery_failed detail={:?}",
+            format!("{why:#}")
+        );
+        let mut st = self.state.lock().unwrap();
+        st.leases.hold(user, session);
+        if let Some(record) = record {
+            st.records.insert(user.to_string(), record);
+        }
+    }
+}
+
+/// Holds a user whose lease record could not be read; never a session id.
+const UNREADABLE: &str = "-";
+
+/// A lease recovery left held (139-D1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Held {
+    pub user: String,
+    pub session: Option<String>,
 }
 
 #[cfg(test)]
@@ -694,6 +745,9 @@ pub mod tests {
         }
         fn chmod(&self, e: &Entry, mode: u32) -> Result<()> {
             self.0.lock().unwrap().chmod(e, mode)
+        }
+        fn stat(&self, e: &Entry) -> Result<Meta> {
+            self.0.lock().unwrap().stat(e)
         }
         fn remove_all(&self, path: &Path) -> Result<()> {
             self.0.lock().unwrap().remove_all(path)?;
@@ -1915,5 +1969,165 @@ pub mod tests {
             json!({"op": "release", "session": "ags_A", "user": user}),
             vec![],
         );
+    }
+
+    /// `n` directories, each in the last, under `base`; the deepest.
+    pub(crate) fn nest(base: &Path, n: usize) -> PathBuf {
+        let deepest = base.join(std::iter::repeat_n("d", n).collect::<PathBuf>());
+        std::fs::create_dir_all(&deepest).unwrap();
+        deepest
+    }
+
+    pub(crate) fn meta_at(own: &Own, p: &Path) -> Meta {
+        use std::os::unix::fs::MetadataExt;
+        let md = std::fs::symlink_metadata(p).unwrap();
+        own.meta(
+            Key {
+                dev: md.dev(),
+                ino: md.ino(),
+            },
+            Meta {
+                uid: md.uid(),
+                gid: md.gid(),
+                mode: md.mode() & 0o7777,
+            },
+        )
+    }
+
+    fn lease_on_disk(f: &Fixture, user: &str, session: &str, workspace: &Path) {
+        files::save_lease(
+            &f.helper.layout.leases(),
+            user,
+            &LeaseRecord {
+                session: session.into(),
+                workspace: Some(workspace.to_path_buf()),
+                provider: Some("shell".into()),
+            },
+        )
+        .unwrap();
+    }
+
+    /// 139-D1: a lease past the walk's cap never stops a restarted helper.
+    /// What is past the cap is sealed to the workspace's owner, `0700`, and
+    /// nothing is deleted; every lease is then released as usual.
+    #[test]
+    fn a_restarted_helper_starts_past_a_lease_it_cannot_revoke() {
+        use std::os::unix::fs::MetadataExt;
+        let f = fixture();
+        let deep = f.root.join("deep");
+        let leaf = nest(&deep, 300);
+        std::fs::write(leaf.join("f"), b"kept").unwrap();
+        lease_on_disk(&f, "storm-s001", "ags_A", &f.root.join("app"));
+        lease_on_disk(&f, "storm-s002", "ags_B", &deep);
+        f.helper.recover().unwrap();
+        assert!(
+            files::load_leases(&f.helper.layout.leases())
+                .unwrap()
+                .is_empty()
+        );
+        {
+            let st = f.helper.state.lock().unwrap();
+            assert_eq!(st.leases.holder("storm-s001"), None);
+            assert_eq!(st.leases.holder("storm-s002"), None);
+        }
+        let top = std::fs::metadata(&deep).unwrap();
+        assert_eq!(
+            meta_at(&f.own, &nest(&deep, 256)),
+            Meta {
+                uid: top.uid(),
+                gid: top.gid(),
+                mode: 0o700
+            }
+        );
+        assert!(leaf.join("f").is_file(), "nothing deleted");
+    }
+
+    /// 139-D1: a record that cannot be read proves nothing about its user,
+    /// which stays held and is reported, never freed.
+    #[test]
+    fn a_lease_with_an_unreadable_record_stays_held() {
+        let f = fixture();
+        lease_on_disk(&f, "storm-s001", "ags_A", &f.root.join("app"));
+        let bad = f.helper.layout.leases().join("storm-s003.json");
+        std::fs::write(&bad, b"{not json").unwrap();
+        let held = f.helper.recover().unwrap();
+        assert_eq!(
+            held.iter().map(|h| h.user.as_str()).collect::<Vec<_>>(),
+            ["storm-s003"]
+        );
+        assert!(bad.is_file(), "kept for the operator");
+        let st = f.helper.state.lock().unwrap();
+        assert!(st.leases.holder("storm-s003").is_some());
+        assert_eq!(st.leases.holder("storm-s001"), None, "the others go on");
+    }
+
+    /// 139-D1: a seal that does not hold fails closed: the lease stays held
+    /// under its session, its record and file stay, and a later release
+    /// tries again.
+    #[test]
+    fn a_seal_that_does_not_hold_keeps_the_lease() {
+        let f = fixture();
+        let deep = f.root.join("deep");
+        nest(&deep, 300);
+        let capped = nest(&deep, 256);
+        lease_on_disk(&f, "storm-s002", "ags_B", &deep);
+        {
+            use std::os::unix::fs::MetadataExt;
+            let md = std::fs::metadata(&capped).unwrap();
+            let rec = f.own.0.lock().unwrap();
+            rec.frozen.borrow_mut().push(Key {
+                dev: md.dev(),
+                ino: md.ino(),
+            });
+        }
+        let held = f.helper.recover().unwrap();
+        assert_eq!(held.len(), 1);
+        assert_eq!(held[0].session.as_deref(), Some("ags_B"));
+        let lease = f.helper.layout.leases().join("storm-s002.json");
+        assert!(lease.is_file());
+        {
+            let st = f.helper.state.lock().unwrap();
+            assert_eq!(st.leases.holder("storm-s002"), Some("ags_B"));
+            assert!(st.records.contains_key("storm-s002"));
+        }
+        let release = json!({"op": "release", "session": "ags_B", "user": "storm-s002"});
+        let (v, _) = f.call(release.clone(), vec![]);
+        assert_eq!(v["error"], "failed");
+        assert!(lease.is_file());
+        f.own.0.lock().unwrap().frozen.borrow_mut().clear();
+        f.ok(release, vec![]);
+        assert!(!lease.exists());
+        let st = f.helper.state.lock().unwrap();
+        assert_eq!(st.leases.holder("storm-s002"), None);
+    }
+
+    /// 139-D1: a home past the cap is sealed root's `0700` and moved aside
+    /// under `homes/.quarantine/`, never removed.
+    #[test]
+    fn a_home_past_the_cap_is_sealed_and_quarantined() {
+        use std::os::unix::fs::PermissionsExt;
+        let f = fixture();
+        let (user, ..) = f.started("ags_A");
+        let home = f.helper.layout.home("ags_A");
+        std::fs::write(nest(&home, 300).join("f"), b"kept").unwrap();
+        f.ok(
+            json!({"op": "release", "session": "ags_A", "user": user}),
+            vec![],
+        );
+        assert!(!home.exists());
+        let q = f.helper.layout.state.join("homes/.quarantine");
+        let moved = q.join("ags_A");
+        assert!(nest(&moved, 300).join("f").is_file(), "nothing deleted");
+        assert_eq!(
+            meta_at(&f.own, &nest(&moved, 256)),
+            Meta {
+                uid: 0,
+                gid: 0,
+                mode: 0o700
+            }
+        );
+        let mode = std::fs::metadata(&q).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(f.helper.state.lock().unwrap().leases.holder(&user), None);
     }
 }

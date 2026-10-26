@@ -317,15 +317,22 @@ pub fn retarget(
 
 /// At lease end (136b): every entry the session's user owns in its
 /// workspace goes to the workspace's owner, in the workspace's group,
-/// group-writable as the conversion makes everything there.
+/// group-writable as the conversion makes everything there. A directory
+/// past the walk's cap is sealed to the owner, `0700` (139-D1).
 pub fn hand_back(workspace: &Path, uid: u32, own: &dyn Ownership) -> Result<usize> {
     let top = rustix::fs::lstat(workspace)?;
     let (owner, gid) = (top.st_uid, top.st_gid);
-    retarget(workspace, uid, own, &|kind, m| {
-        let mut t = convert::converted(kind, m, gid);
+    let mut changed = 0;
+    convert::walk_sealing(workspace, owner, gid, own, &mut |e| {
+        let now = own.meta(e.key, e.seen);
+        let mut t = convert::converted(e.kind, now, gid);
         t.uid = owner;
-        t
-    })
+        if now.uid == uid && convert::apply(own, &e, t)? {
+            changed += 1;
+        }
+        Ok(())
+    })?;
+    Ok(changed)
 }
 
 /// A session's home: a new directory, the user's own, `0700`.
@@ -349,35 +356,89 @@ pub fn make_home(home: &Path, uid: u32, gid: u32, own: &dyn Ownership) -> Result
 /// Removes a tree a session's user wrote: everything becomes root's and
 /// searchable first, so nothing the user did to its modes can stop it.
 pub fn remove_tree(path: &Path, own: &dyn Ownership) -> Result<()> {
-    if !rootify(path, own)? {
-        return Ok(());
+    match rootify(path, own)? {
+        Some(sealed) => dispose(path, &sealed, own),
+        None => Ok(()),
     }
-    own.remove_all(path)
 }
 
-/// Makes every directory of `path` root's and `0700`; `false` when there is
-/// nothing there.
-pub fn rootify(path: &Path, own: &dyn Ownership) -> Result<bool> {
+/// Removes a rootified tree, or, when part of it was sealed past the cap,
+/// quarantines it instead: nothing the helper cannot see is deleted.
+pub fn dispose(path: &Path, sealed: &[PathBuf], own: &dyn Ownership) -> Result<()> {
+    if sealed.is_empty() {
+        return own.remove_all(path);
+    }
+    quarantine(path).map(drop)
+}
+
+pub const QUARANTINE: &str = ".quarantine";
+
+/// Moves `path` to `<parent>/.quarantine/<name>` (root's, `0700`), on the
+/// same filesystem and never over anything; returns where it went.
+pub fn quarantine(path: &Path) -> Result<PathBuf> {
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("{} names nothing to quarantine", path.display());
+    };
+    let dir = rustix::fs::open(parent, DIR_FLAGS, Mode::empty())
+        .with_context(|| format!("opening {}", parent.display()))?;
+    match rustix::fs::mkdirat(&dir, QUARANTINE, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(e) => return Err(e).context("making the quarantine"),
+    }
+    let q = rustix::fs::openat(&dir, QUARANTINE, DIR_FLAGS, Mode::empty())
+        .context("opening the quarantine")?;
+    let st = rustix::fs::fstat(&q)?;
+    if st.st_uid != rustix::process::geteuid().as_raw() {
+        bail!("{}'s quarantine is not the helper's", parent.display());
+    }
+    if st.st_mode & 0o7777 != 0o700 {
+        rustix::fs::fchmod(&q, Mode::from_raw_mode(0o700))?;
+    }
+    for n in 0..1000 {
+        let mut to = name.to_owned();
+        if n > 0 {
+            to.push(format!(".{n}"));
+        }
+        match rustix::fs::renameat_with(&dir, name, &q, &to, rustix::fs::RenameFlags::NOREPLACE) {
+            Ok(()) => {
+                let moved = parent.join(QUARANTINE).join(&to);
+                eprintln!("audit: quarantined path={path:?} to={moved:?}");
+                return Ok(moved);
+            }
+            Err(rustix::io::Errno::EXIST) => continue,
+            Err(e) => {
+                return Err(e).with_context(|| format!("quarantining {}", path.display()));
+            }
+        }
+    }
+    bail!("{} has too many quarantined copies", path.display())
+}
+
+/// Makes every directory of `path` root's and `0700`, sealing any past the
+/// walk's cap the same way; `None` when there is nothing there, else the
+/// sealed directories.
+pub fn rootify(path: &Path, own: &dyn Ownership) -> Result<Option<Vec<PathBuf>>> {
     match path.symlink_metadata() {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e.into()),
         Ok(md) if !md.is_dir() => bail!("{} is not a directory", path.display()),
         Ok(_) => {}
     }
-    convert::walk(path, &mut |e| {
+    let sealed = convert::walk_sealing(path, 0, 0, own, &mut |e| {
         if e.kind == Kind::Dir {
             own.chown(&e, 0, 0)?;
             own.chmod(&e, 0o700)?;
         }
         Ok(())
     })?;
-    Ok(true)
+    Ok(Some(sealed))
 }
 
 /// Gives `path` and everything under it to `uid`:`gid` alone (137g, the
 /// review identity): directories `0700`, files readable and writable by
-/// that owner only, setuid and setgid gone; nothing followed. `false` when
-/// there is nothing there.
+/// that owner only, setuid and setgid gone; nothing followed. A directory
+/// past the walk's cap is sealed to it, `0700`. `false` when there is
+/// nothing there.
 pub fn give_tree(path: &Path, uid: u32, gid: u32, own: &dyn Ownership) -> Result<bool> {
     match path.symlink_metadata() {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -385,7 +446,7 @@ pub fn give_tree(path: &Path, uid: u32, gid: u32, own: &dyn Ownership) -> Result
         Ok(md) if !md.is_dir() => bail!("{} is not a directory", path.display()),
         Ok(_) => {}
     }
-    convert::walk(path, &mut |e| {
+    convert::walk_sealing(path, uid, gid, own, &mut |e| {
         let now = own.meta(e.key, e.seen);
         if (now.uid, now.gid) != (uid, gid) {
             own.chown(&e, uid, gid)?;
@@ -468,6 +529,15 @@ pub fn remove_lease(dir: &Path, user: &str) -> Result<()> {
 }
 
 pub fn load_leases(dir: &Path) -> Result<BTreeMap<String, LeaseRecord>> {
+    read_leases(dir)?
+        .into_iter()
+        .map(|(user, record)| Ok((user, record?)))
+        .collect()
+}
+
+/// Every pool user with a lease file, and its record or why it could not
+/// be read: one bad record is that user's alone (139-D1).
+pub fn read_leases(dir: &Path) -> Result<BTreeMap<String, Result<LeaseRecord>>> {
     let mut out = BTreeMap::new();
     let entries = match std::fs::read_dir(dir) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
@@ -485,8 +555,16 @@ pub fn load_leases(dir: &Path) -> Result<BTreeMap<String, LeaseRecord>> {
         if crate::pool::user_index(user).is_none() {
             continue;
         }
-        let record: LeaseRecord = serde_json::from_slice(&std::fs::read(&path)?)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let record = std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| Ok(serde_json::from_slice::<LeaseRecord>(&bytes)?))
+            .and_then(|r| {
+                if !crate::policy::session_ok(&r.session) {
+                    bail!("it names no session");
+                }
+                Ok(r)
+            })
+            .with_context(|| format!("reading {}", path.display()));
         out.insert(user.to_string(), record);
     }
     Ok(out)

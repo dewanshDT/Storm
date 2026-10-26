@@ -978,7 +978,7 @@ pub fn keep(home: &Path, kept: &Path, provider: &str, own: &dyn Ownership) -> Re
     if !moved {
         return Ok(false);
     }
-    crate::convert::walk(kept, &mut |e| {
+    crate::convert::walk_sealing(kept, 0, 0, own, &mut |e| {
         own.chown(&e, 0, 0)?;
         match e.kind {
             Kind::Dir => own.chmod(&e, 0o700),

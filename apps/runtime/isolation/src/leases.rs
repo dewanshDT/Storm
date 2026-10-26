@@ -43,6 +43,13 @@ impl Leases {
         Some(user)
     }
 
+    /// A user a restarted helper could not revoke stays held by its
+    /// session (139-D1), so it is never leased to anyone else.
+    pub fn hold(&mut self, user: &str, session: &str) {
+        self.free.retain(|u| u != user);
+        self.held.insert(user.to_string(), session.to_string());
+    }
+
     /// Only once the user's processes are gone and its files handed back
     /// (136b); the caller guarantees that.
     pub fn release(&mut self, session: &str, user: &str) -> bool {
@@ -77,6 +84,17 @@ mod tests {
         );
         assert_eq!(l.lease("ags_D").as_deref(), Some("storm-s001"));
         assert_eq!(l.lease("ags_E"), None, "the pool is exhausted");
+    }
+
+    #[test]
+    fn a_held_user_is_never_leased_and_its_holder_releases_it() {
+        let mut l = table();
+        l.hold("storm-s002", "ags_X");
+        assert_eq!(l.lease("ags_A").as_deref(), Some("storm-s001"));
+        assert_eq!(l.lease("ags_B").as_deref(), Some("storm-s003"));
+        assert_eq!(l.lease("ags_C"), None);
+        assert!(l.release("ags_X", "storm-s002"));
+        assert_eq!(l.lease("ags_C").as_deref(), Some("storm-s002"));
     }
 
     #[test]
