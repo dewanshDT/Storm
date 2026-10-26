@@ -37,11 +37,20 @@ pub(crate) struct Launch {
     pub env_remove: Vec<OsString>,
     /// Set after everything else.
     pub secret_env: Vec<(OsString, crate::credential::SecretOsString)>,
+    /// On an isolated host, a resume's predecessor and conversation (136e).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub resumed_from: Option<(String, String)>,
+    /// On an isolated host, a spawned child's parent (decision 137).
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub child_of: Option<String>,
     /// The session id, which marks everything the session starts. Unix
     /// finds what left the session by it; Windows' job holds everything
     /// already (AM52).
     #[cfg_attr(windows, allow(dead_code))]
     pub tag: String,
+    /// On an isolated host (decision 136): the helper starts the session in
+    /// its own unit, under its own user, and this process never runs it.
+    pub isolated: Option<crate::isolation::Isolated>,
 }
 
 /// A started session's ends.
@@ -51,6 +60,14 @@ pub(crate) struct Spawned {
     pub output: Output,
     pub input: Input,
     pub group: Group,
+    /// A handle on the agent's process, taken before anything can reap it
+    /// (decision 135). `None` where the platform has none.
+    pub leader: Option<crate::platform::peer::Process>,
+    /// On an isolated host, the uid the helper leased the session (136i):
+    /// its bridge connections must come from it.
+    pub user: Option<u32>,
+    /// A spawned child's own workspace, made before it started (137-1).
+    pub child_workspace: Option<crate::isolation::ChildWorkspace>,
 }
 
 /// How the agent's own process ended.

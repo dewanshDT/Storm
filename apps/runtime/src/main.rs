@@ -86,6 +86,12 @@ enum Command {
     /// resume it. Run by the agent's own hook or plugin, never by hand; reads
     /// the id from stdin (a Claude Code hook's input) when none is given.
     HarnessSession { id: Option<String> },
+    /// Tells the host the agent's permission prompt is waiting for a person
+    /// (`permission_prompt`) or answered (`none`). Run by the agent's own hook
+    /// or plugin, never by hand.
+    // Hidden while no adapter's hooks are on (134-9): the site lists commands.
+    #[command(hide = true)]
+    Attention { kind: String },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
     /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
@@ -116,6 +122,18 @@ enum Command {
     #[cfg(windows)]
     #[command(hide = true)]
     Service,
+    /// One agent install on an isolated host (decision 136g), run by the
+    /// isolation helper as the install identity, never by hand. Prints one
+    /// JSON line: the version, or the failure's code.
+    #[command(hide = true)]
+    AgentJob { agent: String, action: String },
+    /// One of the two probe sessions of the isolation self-test (decision
+    /// 136j), run by the isolation helper as a session, never by hand.
+    #[command(hide = true)]
+    IsolationProbe {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -156,6 +174,23 @@ async fn main() -> Result<()> {
         Command::HarnessSession { id } => {
             storm_runtime::harness::report(id);
             Ok(())
+        }
+        Command::Attention { kind } => {
+            storm_runtime::harness::report_attention(&kind);
+            Ok(())
+        }
+        Command::AgentJob { agent, action } => {
+            let line = storm_runtime::install::isolated_job(
+                std::path::Path::new(DEFAULT_STATE),
+                &agent,
+                &action,
+            )
+            .await;
+            println!("{line}");
+            Ok(())
+        }
+        Command::IsolationProbe { args } => {
+            std::process::exit(storm_runtime::isolation_probe::main(&args))
         }
         Command::Enroll { state, name, force } => {
             let enrollment = read_enrollment()?;

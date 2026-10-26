@@ -58,6 +58,30 @@ pub struct RuntimeConfig {
     /// and only while none of that agent's sessions runs (133-5).
     #[serde(default)]
     pub agent_updates: AgentUpdates,
+    /// Per-session isolation (decision 136a), set by `storm-runtime-isolation
+    /// on` and `off`, which also convert the workspaces. On, no session ever
+    /// runs as this host's account: one that cannot be isolated is refused.
+    #[serde(default)]
+    pub isolation: Isolation,
+    /// With isolation on, the TCP ports on this host's loopback a session
+    /// may reach from its own network (136d); the helper reads them.
+    #[serde(default)]
+    pub isolation_host_ports: Vec<u16>,
+    /// With isolation on, the most one spawned child's workspace may take,
+    /// in bytes (decision 137f; default 2 GiB); the helper reads it.
+    #[serde(default)]
+    pub child_workspace_max: Option<u64>,
+    /// And every child's on this host together (default 20 GiB).
+    #[serde(default)]
+    pub children_max: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    #[default]
+    Off,
+    PerSession,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -122,6 +146,10 @@ impl Default for RuntimeConfig {
             agent_mcp: AgentMcp::default(),
             agent_install: AgentInstall::default(),
             agent_updates: AgentUpdates::default(),
+            isolation: Isolation::default(),
+            isolation_host_ports: Vec::new(),
+            child_workspace_max: None,
+            children_max: None,
         }
     }
 }
@@ -155,6 +183,10 @@ fn cli_kind() -> String {
 }
 
 impl RuntimeConfig {
+    pub fn isolated(&self) -> bool {
+        self.isolation == Isolation::PerSession
+    }
+
     /// Loads `path`, or the defaults when it does not exist.
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = match std::fs::read_to_string(path) {
@@ -165,7 +197,33 @@ impl RuntimeConfig {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         config.check_roots()?;
+        config.check_host_ports()?;
+        config.check_child_caps()?;
         Ok(config)
+    }
+
+    /// The helper's rule (`net::host_ports`), so a list it would refuse
+    /// stops the host here with the reason, not every session later.
+    pub fn check_host_ports(&self) -> Result<()> {
+        if self.isolation_host_ports.contains(&0) {
+            bail!("isolation_host_ports: 0 is not a port");
+        }
+        let mut ports = self.isolation_host_ports.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        if ports.len() > 64 {
+            bail!("isolation_host_ports: at most 64 ports");
+        }
+        Ok(())
+    }
+
+    /// The helper's rule (`HelperConfig::caps`): a cap of 0 refuses every
+    /// child, which no operator means.
+    pub fn check_child_caps(&self) -> Result<()> {
+        if self.child_workspace_max == Some(0) || self.children_max == Some(0) {
+            bail!("child_workspace_max and children_max must be above 0");
+        }
+        Ok(())
     }
 
     /// A workspace root may not be inside, or contain, a Storm data root this
@@ -256,18 +314,38 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
-        self.providers_on(self.search_path()?)
+        self.providers_on(self.search_path()?, None)
     }
 
     /// [`Self::providers`] on [`Self::search_path_with`] `managed`.
     pub fn providers_with(&self, managed: &Path) -> Result<Vec<Arc<dyn Provider>>> {
-        self.providers_on(Some(self.search_path_with(managed)?))
+        self.providers_on(Some(self.search_path_with(managed)?), None)
     }
 
-    fn providers_on(&self, path: Option<OsString>) -> Result<Vec<Arc<dyn Provider>>> {
-        let on_path = |p: CliProvider| match &path {
-            Some(path) => p.with_path(path.clone()),
-            None => p,
+    /// [`Self::providers_with`], each `cli` provider's sessions started by
+    /// the isolation helper (decision 136).
+    pub fn providers_isolated(
+        &self,
+        managed: &Path,
+        link: crate::isolation::Link,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        self.providers_on(Some(self.search_path_with(managed)?), Some(link))
+    }
+
+    fn providers_on(
+        &self,
+        path: Option<OsString>,
+        isolation: Option<crate::isolation::Link>,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        let on_path = |p: CliProvider| {
+            let p = match &path {
+                Some(path) => p.with_path(path.clone()),
+                None => p,
+            };
+            match &isolation {
+                Some(link) => p.isolated(link.clone()),
+                None => p,
+            }
         };
         // With no list, every built-in (decision 130): one that is not
         // installed is offered as such, and the launcher says so.
@@ -368,6 +446,21 @@ pub fn list_workspaces(roots: &[PathBuf]) -> Vec<String> {
     names
 }
 
+/// Each of `names`' canonical directory, as a session would start in it, so
+/// the server's WS-9 check (137-2) sees two names for one directory
+/// (overlapping roots) as one. A name that no longer resolves is left out,
+/// which the server reads as possibly any workspace.
+pub fn workspace_paths(roots: &[PathBuf], names: &[String]) -> HashMap<String, String> {
+    let roots = canonical_roots(roots);
+    names
+        .iter()
+        .filter_map(|name| {
+            let dir = resolve_in(&roots, name)?;
+            Some((name.clone(), dir.display().to_string()))
+        })
+        .collect()
+}
+
 /// Resolves a workspace name to its directory, **inside a root only**: a name
 /// is never a path, and a symlink that leads out of the root is refused.
 pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
@@ -380,19 +473,18 @@ pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        let candidate = root.join(name);
-        if let Ok(real) = candidate.canonicalize()
-            && real.starts_with(&root)
-            && real.is_dir()
-        {
-            return Some(real);
-        }
-    }
-    None
+    resolve_in(&canonical_roots(roots), name)
+}
+
+fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
+}
+
+fn resolve_in(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    roots.iter().find_map(|root| {
+        let real = root.join(name).canonicalize().ok()?;
+        (real.starts_with(root) && real.is_dir()).then_some(real)
+    })
 }
 
 #[cfg(test)]
@@ -418,6 +510,26 @@ mod tests {
         let listed = list_workspaces(&roots);
         assert!(listed.contains(&"storm".to_string()));
         assert!(!listed.contains(&".hidden".to_string()));
+    }
+
+    /// 137-2: a root inside another lists one directory under two names;
+    /// their reported directories are what tells the server so.
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_roots_report_one_directory_for_both_names() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outer.path().join("storm/site")).unwrap();
+        std::fs::create_dir(outer.path().join("other")).unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outer.path(), linked.path().join("root")).unwrap();
+        // The same root through a symlink first, then a root inside it.
+        let roots = vec![linked.path().join("root"), outer.path().join("storm")];
+        let paths = workspace_paths(&roots, &list_workspaces(&roots));
+        let real = outer.path().canonicalize().unwrap();
+        assert_eq!(paths["storm"], real.join("storm").display().to_string());
+        assert_eq!(paths["site"], real.join("storm/site").display().to_string());
+        assert_eq!(paths["other"], real.join("other").display().to_string());
+        assert_eq!(paths.len(), list_workspaces(&roots).len());
     }
 
     /// A scratch directory a workspace root may be in: on Windows, the
@@ -622,6 +734,53 @@ mod tests {
             toml::from_str("agent_install = \"off\"\nagent_updates = \"manual\"").unwrap();
         assert_eq!(off.agent_install, AgentInstall::Off);
         assert_eq!(off.agent_updates, AgentUpdates::Manual);
+    }
+
+    /// Decision 136a: off unless the operator's command turned it on, and
+    /// only its two values parse.
+    #[test]
+    fn isolation_defaults_off() {
+        assert_eq!(RuntimeConfig::default().isolation, Isolation::Off);
+        let on: RuntimeConfig = toml::from_str("isolation = \"per-session\"").unwrap();
+        assert_eq!(on.isolation, Isolation::PerSession);
+        for bad in [
+            "isolation = \"on\"",
+            "isolation = true",
+            "isolation = \"per_session\"",
+        ] {
+            assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_child_caps_are_bytes_above_zero() {
+        let c: RuntimeConfig =
+            toml::from_str("child_workspace_max = 1073741824\nchildren_max = 10737418240").unwrap();
+        assert_eq!(
+            (c.child_workspace_max, c.children_max),
+            (Some(1 << 30), Some(10 << 30))
+        );
+        assert!(c.check_child_caps().is_ok());
+        assert!(RuntimeConfig::default().check_child_caps().is_ok());
+        let zero: RuntimeConfig = toml::from_str("children_max = 0").unwrap();
+        assert!(zero.check_child_caps().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("child_workspace_max = \"2 GiB\"").is_err());
+    }
+
+    #[test]
+    fn isolation_host_ports_default_empty_and_are_checked() {
+        assert!(RuntimeConfig::default().isolation_host_ports.is_empty());
+        let c: RuntimeConfig = toml::from_str("isolation_host_ports = [11434, 5432]").unwrap();
+        assert_eq!(c.isolation_host_ports, [11434, 5432]);
+        c.check_host_ports().unwrap();
+        let zero: RuntimeConfig = toml::from_str("isolation_host_ports = [0]").unwrap();
+        assert!(zero.check_host_ports().is_err());
+        let many = RuntimeConfig {
+            isolation_host_ports: (1..=65).collect(),
+            ..RuntimeConfig::default()
+        };
+        assert!(many.check_host_ports().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("isolation_host_ports = [70000]").is_err());
     }
 
     #[test]

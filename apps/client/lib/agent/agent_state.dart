@@ -53,13 +53,15 @@ final agentApiFactoryProvider = Provider<AgentApi Function()?>((ref) {
 /// An [AgentApi] for the signed-in session, or null without one.
 AgentApi? agentApi(WidgetRef ref) => ref.read(agentApiFactoryProvider)?.call();
 
-/// Sessions and hosts, as the rail, the sidebar and the Agents screens show
-/// them.
+/// Sessions, hosts and crews, as the rail, the sidebar and the Agents screens
+/// show them.
 class AgentOverview {
   const AgentOverview({
     required this.sessions,
     required this.hosts,
+    this.crews,
     this.unreachable = false,
+    this.pending = const {},
   });
 
   /// The server could not be asked. **A state, not an error** — Storm's
@@ -68,35 +70,97 @@ class AgentOverview {
   const AgentOverview.unreachable()
     : sessions = const [],
       hosts = const [],
-      unreachable = true;
+      crews = null,
+      unreachable = true,
+      pending = const {};
 
   /// Newest first.
   final List<AgentSession> sessions;
   final List<AgentHost> hosts;
+
+  /// In the owner's order; null until they have loaded, or from a server
+  /// before decision 138. Nothing is drawn as a crew while null.
+  final List<Crew>? crews;
   final bool unreachable;
+
+  /// Sessions under a crew or label change this device made and the server
+  /// has not answered yet (138j): their crew and role here are ahead of any
+  /// other copy of them.
+  final Set<String> pending;
+
+  AgentOverview copyWith({
+    List<AgentSession>? sessions,
+    List<Crew>? crews,
+    Set<String>? pending,
+  }) => AgentOverview(
+    sessions: sessions ?? this.sessions,
+    hosts: hosts,
+    crews: crews ?? this.crews,
+    unreachable: unreachable,
+    pending: pending ?? this.pending,
+  );
+
+  /// [s] with the crew and role this list has for it while a change of
+  /// either is pending, so a session's own record shows the change too.
+  AgentSession labelsOf(AgentSession s) {
+    if (!pending.contains(s.id)) return s;
+    final mine = byId(s.id);
+    return mine == null ? s : s.withCrew(mine.crew).withRole(mine.role);
+  }
 
   List<AgentSession> get live => [
     for (final s in sessions)
       if (!s.ended) s,
   ];
 
+  Set<String> get _resumed => {for (final s in sessions) ?s.resumedFrom};
+
   /// Less any session a later one resumed: that conversation is listed
   /// once, under its latest session.
   List<AgentSession> get ended {
-    final resumed = {for (final s in sessions) ?s.resumedFrom};
+    final resumed = _resumed;
     return [
       for (final s in sessions)
         if (s.ended && !resumed.contains(s.id)) s,
     ];
   }
 
+  /// The crew [s] is drawn in, if any.
+  Crew? crewOf(AgentSession s) {
+    final id = labelsOf(s).crew?.id;
+    return id == null ? null : crews?.where((c) => c.id == id).firstOrNull;
+  }
+
+  /// [crew]'s members in their order, resumed predecessors left out as in
+  /// [ended].
+  List<AgentSession> membersOf(Crew crew) {
+    final resumed = _resumed;
+    return [
+      for (final s in sessions)
+        if (s.crew?.id == crew.id && !(s.ended && resumed.contains(s.id))) s,
+    ]..sort((a, b) => a.crew!.order.compareTo(b.crew!.order));
+  }
+
+  /// Sessions in no crew this overview knows: what RUNNING, ENDED and NOT IN
+  /// A CREW list.
+  List<AgentSession> get looseLive => [
+    for (final s in live)
+      if (crewOf(s) == null) s,
+  ];
+
+  List<AgentSession> get looseEnded => [
+    for (final s in ended)
+      if (crewOf(s) == null) s,
+  ];
+
   List<AgentHost> get online => [
     for (final h in hosts)
       if (h.online) h,
   ];
 
-  String hostName(String id) =>
-      hosts.where((h) => h.id == id).firstOrNull?.name ?? 'host';
+  AgentHost? host(String id) => hosts.where((h) => h.id == id).firstOrNull;
+
+  String hostName(String id) => host(id)?.name ?? 'host';
 
   AgentSession? byId(String id) =>
       sessions.where((s) => s.id == id).firstOrNull;
@@ -105,7 +169,7 @@ class AgentOverview {
   /// there is none to reopen (decision 89).
   String? resumeBlocker(AgentSession s) {
     if (!s.ended || !s.hasConversation) return null;
-    final host = hosts.where((h) => h.id == s.hostId).firstOrNull;
+    final host = this.host(s.hostId);
     if (host == null || !host.online) {
       return "Can't resume while ${host?.name ?? 'its host'} is offline";
     }
@@ -160,24 +224,103 @@ void _refreshEvery(Ref ref, Duration every) {
   });
 }
 
+/// [_refreshEvery] for the spawning client's providers (`spawn_state.dart`).
+void refreshProviderEvery(Ref ref, Duration every) => _refreshEvery(ref, every);
+
+/// One crew or label change this device made that the server has not
+/// answered yet (138j), drawn over the list until it does.
+class CrewPatch {
+  CrewPatch(this.apply, {this.sessions = const {}, this.crews = const {}});
+
+  final AgentOverview Function(AgentOverview o) apply;
+
+  /// What it changes, for the snap-back outline when it is refused.
+  final Set<String> sessions;
+  final Set<String> crews;
+}
+
+/// The changes in flight, oldest first. Kept apart from the list so a poll
+/// that lands meanwhile is drawn with them still applied.
+final crewPatchesProvider = StateProvider<List<CrewPatch>>((ref) => const []);
+
+AgentOverview _patched(AgentOverview o, List<CrewPatch> patches) {
+  if (o.unreachable || patches.isEmpty) return o;
+  var out = o;
+  for (final p in patches) {
+    out = p.apply(out);
+  }
+  return out.copyWith(pending: {for (final p in patches) ...p.sessions});
+}
+
 /// The overview, refreshed every [agentRefreshInterval] while it is on screen
-/// and the app is in front.
+/// and the app is in front, with this device's pending crew changes drawn
+/// over it ([crewPatchesProvider]).
 ///
 /// It never throws. Riverpod 3 retries a failed provider on its own
 /// schedule, which would be a second, unbounded poll alongside this one.
-final agentOverviewProvider = FutureProvider.autoDispose<AgentOverview>((
-  ref,
-) async {
+final agentOverviewProvider =
+    AsyncNotifierProvider.autoDispose<AgentOverviewNotifier, AgentOverview>(
+      AgentOverviewNotifier.new,
+    );
+
+class AgentOverviewNotifier extends AsyncNotifier<AgentOverview> {
+  AgentOverview? _server;
+
+  @override
+  Future<AgentOverview> build() async {
+    _refreshEvery(ref, agentRefreshInterval);
+    ref.listen(crewPatchesProvider, (_, patches) {
+      final server = _server;
+      if (server != null) state = AsyncData(_patched(server, patches));
+    });
+    final o = await _fetch();
+    _server = o;
+    return _patched(o, ref.read(crewPatchesProvider));
+  }
+
+  Future<AgentOverview> _fetch() async {
+    final api = ref.watch(agentApiFactoryProvider)?.call();
+    if (api == null) return const AgentOverview.unreachable();
+    try {
+      // Independent, so together: one round trip, not two, which is the
+      // difference that shows over the relay.
+      final (sessions, hosts, crews) = await (
+        api.sessions(),
+        api.hosts(),
+        _crewsOrNull(api),
+      ).wait;
+      return AgentOverview(
+        sessions: sessions.reversed.toList(),
+        hosts: hosts,
+        crews: crews,
+      );
+    } catch (_) {
+      return const AgentOverview.unreachable();
+    } finally {
+      api.dispose();
+    }
+  }
+}
+
+/// A server before decision 138 has no crews route; its sessions still show.
+Future<List<Crew>?> _crewsOrNull(AgentApi api) async {
+  try {
+    return (await api.crews())..sort((a, b) => a.order.compareTo(b.order));
+  } catch (_) {
+    return null;
+  }
+}
+
+/// Kit's role notes (138e), re-read on the list's tick while something that
+/// offers them is open; null when they cannot be asked for.
+final rolesProvider = FutureProvider.autoDispose<List<RoleNote>?>((ref) async {
   _refreshEvery(ref, agentRefreshInterval);
   final api = ref.watch(agentApiFactoryProvider)?.call();
-  if (api == null) return const AgentOverview.unreachable();
+  if (api == null) return null;
   try {
-    // Independent, so together: one round trip, not two, which is the
-    // difference that shows over the relay.
-    final (sessions, hosts) = await (api.sessions(), api.hosts()).wait;
-    return AgentOverview(sessions: sessions.reversed.toList(), hosts: hosts);
+    return await api.roles();
   } catch (_) {
-    return const AgentOverview.unreachable();
+    return null;
   } finally {
     api.dispose();
   }
@@ -277,7 +420,7 @@ final agentNoteProvider = FutureProvider.autoDispose
     });
 
 /// The panel tabs of a session (`?tab=`).
-enum SessionTab { context, wrote, about }
+enum SessionTab { context, wrote, about, requests, work }
 
 SessionTab sessionTabOf(String? raw) => SessionTab.values.firstWhere(
   (t) => t.name == raw,

@@ -192,9 +192,10 @@ class AgentWorld:
                 self.call("POST", f"/v1/vaults/{vault}/notes/{ids[key]}/opened")
                 time.sleep(1.1)
 
-    def launch(self, host, workspace, provider, name_key, context=None, write_vault=None):
+    def launch(self, host, workspace, provider, name_key, context=None, write_vault=None,
+               extra=None, until="running"):
         body = {"host_id": host.id, "workspace": workspace, "provider": provider,
-                "interaction": "terminal", "terminal": {"cols": 80, "rows": 24}}
+                "interaction": "terminal", "terminal": {"cols": 80, "rows": 24}, **(extra or {})}
         if context:
             body["context"] = {"vault_id": self.h.ids["vault:personal"],
                                "note_id": self.h.ids[context]}
@@ -203,7 +204,7 @@ class AgentWorld:
         status, rec = self.call("POST", "/v1/agent/sessions", body)
         if status != 200:
             raise RuntimeError(f"launch: {status} {rec}")
-        wait(lambda: self.session(rec["id"])["status"] == "running", 30, f"{name_key} running")
+        wait(lambda: self.session(rec["id"])["status"] == until, 30, f"{name_key} {until}")
         self.h.ids[f"session:{name_key}"] = rec["id"]
         return rec, Agent(host, workspace, rec["id"])
 

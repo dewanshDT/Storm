@@ -23,6 +23,8 @@ build/
 
 # Local dev scratch: the Makefile's default VAULT/STATE and live-test data.
 /.dev/
+# What gateway_e2e's scripted agent records about its launch.
+agent-env.json
 
 # Local overrides
 .env

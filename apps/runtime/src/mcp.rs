@@ -134,6 +134,327 @@ impl AgentServers<'_> {
 /// Phase 1 vault server).
 pub const STORM_CONNECTION: &str = "storm";
 
+/// Decision 134's tools that always get the CLI's own ask beside Storm's
+/// approval (134q), whatever the account's config allows.
+pub const PINNED_ASK_TOOLS: [&str; 3] = ["start_agent", "send_message", "end_agent"];
+
+/// Decision 134's read and report tools: they skip the CLI's prompt on
+/// Claude Code and OpenCode on a verified host, since the server scopes each
+/// to the calling session (A6, D18's amendment to decision 132). The host
+/// learns no tool names from the server, so they are pinned here and
+/// checked against the server's lists by a test.
+pub const EXEMPT_TOOLS: [&str; 6] = [
+    "list_agents",
+    "agent_status",
+    "list_children",
+    "wait_agent",
+    "read_messages",
+    "report_result",
+];
+
+/// A spawned session's seventh exemption (A6).
+pub const SPAWNED_EXEMPT_TOOL: &str = "session_context";
+
+/// What a session that may be offered decision 134's tools adds to its
+/// CLI's config (134-8). Every other session gets `None`, which writes
+/// nothing new.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpawnAsks {
+    /// The A6 exemptions: only while this host's identity is verified.
+    pub exempt: bool,
+    /// A child, whose `session_context` is exempt too.
+    pub spawned: bool,
+}
+
+impl SpawnAsks {
+    pub fn exempt_tools(&self) -> Vec<&'static str> {
+        let mut tools = Vec::new();
+        if self.exempt {
+            tools.extend(EXEMPT_TOOLS);
+            if self.spawned {
+                tools.push(SPAWNED_EXEMPT_TOOL);
+            }
+        }
+        tools
+    }
+}
+
+/// Claude Code's `permissions` for a spawn session's `--settings` file.
+/// Claude Code applies an ask before an allow from any source, so neither
+/// the account's allow nor a "don't ask again" skips a pinned ask; and the
+/// account's own ask on the whole server still outranks an exemption (A4).
+pub fn claude_permissions(asks: &SpawnAsks) -> Value {
+    let rule = |t: &str| format!("mcp__{STORM_CONNECTION}__{t}");
+    let mut permissions = json!({ "ask": PINNED_ASK_TOOLS.map(rule) });
+    let allow: Vec<String> = asks.exempt_tools().into_iter().map(rule).collect();
+    if !allow.is_empty() {
+        permissions["allow"] = json!(allow);
+    }
+    permissions
+}
+
+/// Re-reads written Claude Code settings: a file that lost its pinned asks
+/// fails the start.
+pub fn verify_claude_permissions(bytes: &[u8], asks: &SpawnAsks) -> Result<()> {
+    let parsed: Value = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(
+        parsed["permissions"] == claude_permissions(asks),
+        "the settings lost the pinned asks"
+    );
+    Ok(())
+}
+
+/// The account's own OpenCode config, as far as a spawn session's asks must
+/// step around it (134-8).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OpencodeAccount {
+    /// Every config and agent file's text, as read.
+    pub text: String,
+    /// Agents the account defines. Each may carry its own `permission`,
+    /// which OpenCode evaluates after the top level's.
+    pub agents: std::collections::BTreeSet<String>,
+}
+
+/// Reads the account's OpenCode config the way OpenCode finds it: the global
+/// directory (`$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`; not
+/// under `storm-only`, which replaces it), `~/.opencode`, and
+/// `$OPENCODE_CONFIG`. A file that exists but cannot be read or parsed is
+/// an error: the asks could not be placed after it.
+pub fn opencode_account(storm_only: bool) -> Result<OpencodeAccount> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs = Vec::new();
+    if !storm_only {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|h| h.join(".config")));
+        dirs.extend(config.map(|c| c.join("opencode")));
+    }
+    dirs.extend(home.map(|h| h.join(".opencode")));
+    opencode_account_in(
+        &dirs,
+        std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from),
+    )
+}
+
+/// [`opencode_account`] over these config directories and an extra file.
+pub fn opencode_account_in(dirs: &[PathBuf], extra: Option<PathBuf>) -> Result<OpencodeAccount> {
+    let mut files: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|d| {
+            ["config.json", "opencode.json", "opencode.jsonc"]
+                .iter()
+                .map(move |f| d.join(f))
+        })
+        .collect();
+    files.extend(extra);
+    let mut account = OpencodeAccount::default();
+    for file in files.iter().filter(|f| f.is_file()) {
+        let text =
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let v: Value = serde_json::from_str(&strip_jsonc(&text))
+            .with_context(|| format!("parsing {}", file.display()))?;
+        account.agents.extend(
+            v["agent"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .map(|(k, _)| k.clone()),
+        );
+        account.text.push_str(&text);
+    }
+    for dir in dirs
+        .iter()
+        .flat_map(|d| [d.join("agent"), d.join("agents")])
+    {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "md") && path.is_file() {
+                account.text.push_str(
+                    &std::fs::read_to_string(&path)
+                        .with_context(|| format!("reading {}", path.display()))?,
+                );
+                account.agents.extend(
+                    path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(str::to_string),
+                );
+            } else if path.is_dir() {
+                anyhow::bail!("{} nests agents, which Storm cannot name", path.display());
+            }
+        }
+    }
+    Ok(account)
+}
+
+/// JSONC as OpenCode reads it: each comment becomes a space, so no two
+/// tokens join, then a comma before a `}` or `]` is dropped.
+fn strip_jsonc(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut bare = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'"' {
+            let end = string_end(b, i);
+            bare.extend_from_slice(&b[i..end]);
+            i = end;
+        } else if b[i..].starts_with(b"//") {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+            bare.push(b' ');
+        } else if b[i..].starts_with(b"/*") {
+            i = b[i + 2..]
+                .windows(2)
+                .position(|w| w == b"*/")
+                .map_or(b.len(), |at| i + 2 + at + 2);
+            bare.push(b' ');
+        } else {
+            bare.push(b[i]);
+            i += 1;
+        }
+    }
+    let mut out = Vec::with_capacity(bare.len());
+    let mut i = 0;
+    while i < bare.len() {
+        if bare[i] == b'"' {
+            let end = string_end(&bare, i);
+            out.extend_from_slice(&bare[i..end]);
+            i = end;
+            continue;
+        }
+        let trailing = bare[i] == b','
+            && bare[i + 1..]
+                .iter()
+                .find(|x| !x.is_ascii_whitespace())
+                .is_some_and(|x| *x == b'}' || *x == b']');
+        if !trailing {
+            out.push(bare[i]);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Just past the string that opens at `start`, or the end of `b`.
+fn string_end(b: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return i + 1,
+            _ => i += 1,
+        }
+    }
+    b.len()
+}
+
+/// OpenCode's own wildcard match (`Wildcard.match`): `*` is any run, `?` any
+/// one character, the whole name must match, and a trailing ` *` may match
+/// nothing.
+pub fn opencode_matches(pattern: &str, name: &str) -> bool {
+    fn go(p: &[char], n: &[char]) -> bool {
+        match p.split_first() {
+            None => n.is_empty(),
+            Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
+            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
+            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
+        }
+    }
+    let p: Vec<char> = pattern.replace('\\', "/").chars().collect();
+    let n: Vec<char> = name.replace('\\', "/").chars().collect();
+    go(&p, &n) || (p.ends_with(&[' ', '*']) && go(&p[..p.len() - 2], &n))
+}
+
+/// The key a pinned ask is written under: the tool's name, or with as many
+/// `*` after it as it takes to be a key no config of the account's already
+/// has. OpenCode keeps a merged key where it first appeared, so only a new
+/// key is sure to be evaluated after everything the account says; a
+/// trailing `*` still names only this tool, since Storm has no other tool
+/// whose name begins with it.
+fn opencode_pinned_key(tool: &str, seen: &str) -> String {
+    let mut key = tool.to_string();
+    while seen.contains(&key) {
+        key.push('*');
+    }
+    key
+}
+
+/// A spawn session's OpenCode asks (134-8): each pinned tool's ask under a
+/// key that comes after the account's own, at the top level and in every
+/// agent the account or `runtime.toml` defines (an agent's own permission is
+/// evaluated after the top level's); and the exemptions where neither has
+/// named the tool itself.
+///
+/// Within this config the pinned key also follows every key that can match
+/// its tool: a match agrees with the tool's name up to its first wildcard,
+/// and `*` and `?` sort before the letters and `_` these names have, so only a
+/// longer run of `*` could sort after it, and the key has the longest.
+fn opencode_spawn_asks(
+    config: &mut serde_json::Map<String, Value>,
+    permission: &mut serde_json::Map<String, Value>,
+    server: &str,
+    asks: &SpawnAsks,
+    account: &OpencodeAccount,
+) {
+    let pinned: Vec<String> = PINNED_ASK_TOOLS
+        .iter()
+        .map(|t| format!("{server}_{t}"))
+        .collect();
+    let mut agents = config
+        .remove("agent")
+        .and_then(|a| a.as_object().cloned())
+        .unwrap_or_default();
+    let seen = format!(
+        "{}{}",
+        account.text,
+        serde_json::to_string(&(&*permission, &agents)).unwrap_or_default()
+    );
+    let keys: Vec<String> = pinned
+        .iter()
+        .map(|t| opencode_pinned_key(t, &seen))
+        .collect();
+    for key in &keys {
+        permission.insert(key.clone(), json!("ask"));
+    }
+    let named: std::collections::BTreeSet<String> = account
+        .agents
+        .iter()
+        .chain(agents.keys())
+        .cloned()
+        .collect();
+    for name in named {
+        let agent = agents.entry(name).or_insert_with(|| json!({}));
+        if !agent.is_object() {
+            *agent = json!({});
+        }
+        let p = agent
+            .as_object_mut()
+            .expect("an object")
+            .entry("permission")
+            .or_insert_with(|| json!({}));
+        if !p.is_object() {
+            *p = json!({});
+        }
+        for key in &keys {
+            p.as_object_mut()
+                .expect("an object")
+                .insert(key.clone(), json!("ask"));
+        }
+    }
+    if !agents.is_empty() {
+        config.insert("agent".into(), Value::Object(agents));
+    }
+    for tool in asks.exempt_tools() {
+        let key = format!("{server}_{tool}");
+        if !seen.contains(&key) {
+            permission.insert(key, json!("allow"));
+        }
+    }
+}
+
 pub const SESSIONS_DIR: &str = "sessions";
 pub const RUN_DIR: &str = "run";
 pub const SOCKET: &str = "mcp.sock";
@@ -269,6 +590,10 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 /// merged in, minus any `mcp` key — a setting can never add an MCP server.
 /// `plugin_servers` are a Claude Code session's plugins' local servers
 /// (decision 131c, `plugins.rs`), keyed `plugin_…`, which no slug can be.
+/// `spawn` is a session that may be offered decision 134's tools (134-8):
+/// OpenCode's pinned asks and exemptions join the built-in connection's
+/// (Claude Code's are in its `--settings` file, `harness.rs`; Codex asks for
+/// every tool already). `None` writes exactly what it always did.
 #[allow(clippy::too_many_arguments)]
 pub fn write_provider_config(
     provider: &str,
@@ -280,6 +605,7 @@ pub fn write_provider_config(
     opencode_settings: Option<&Value>,
     plugin_servers: &serde_json::Map<String, Value>,
     own: &AgentServers,
+    spawn: Option<(&SpawnAsks, &OpencodeAccount)>,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
     if grants.is_empty() && !own.storm_only {
@@ -340,6 +666,11 @@ pub fn write_provider_config(
                 );
                 // Last, so no setting can relax it.
                 permission.insert(format!("{key}_*"), json!("ask"));
+                if g.id == STORM_CONNECTION
+                    && let Some((asks, account)) = spawn
+                {
+                    opencode_spawn_asks(&mut config, &mut permission, &key, asks, account);
+                }
             }
             config.insert("$schema".into(), json!("https://opencode.ai/config.json"));
             // Replaces any `mcp` key the settings had: a host setting can
@@ -380,24 +711,42 @@ pub fn write_provider_config(
     }
 }
 
-/// The opening prompt of a session started from a note. A constant with
-/// nothing interpolated: the agent reads the note through `session_context`,
-/// so no note content, title or id is ever on a command line.
+/// The opening prompt of a session started from a note or with a role
+/// (decision 138f). A constant with nothing interpolated: the agent reads
+/// both notes through `session_context`, so no note content, title or id is
+/// ever on a command line.
 pub const OPENING_PROMPT: &str =
-    "Read your context note with the storm session_context tool, then wait for my instructions.";
+    "Read your launch context with the storm session_context tool, then wait for my instructions.";
 
-/// Adds the opening prompt, as each CLI takes one, to a session started from
-/// a note. Nothing for any other provider, `shell` and `fake` included.
+/// The opening prompt of a session another agent started (decision 134f):
+/// as constant as [`OPENING_PROMPT`]. Its task, and any note, come only
+/// through `session_context`; nothing ever reaches its terminal, so it is
+/// told where its parent's messages are (134-6) and how it reports.
+pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. Check the storm read_messages tool for messages from the agent that started you, and report your result with the storm report_result tool.";
+
+/// Which opening prompt a session gets: a spawned child's, else a note's.
+pub fn opening_prompt(context: bool, spawned: bool) -> Option<&'static str> {
+    if spawned {
+        Some(SPAWNED_OPENING_PROMPT)
+    } else if context {
+        Some(OPENING_PROMPT)
+    } else {
+        None
+    }
+}
+
+/// Adds an opening prompt, as each CLI takes one. Nothing for any other
+/// provider, `shell` and `fake` included.
 pub fn with_opening_prompt(
     mut extras: LaunchExtras,
     provider: &str,
-    context: bool,
+    prompt: Option<&'static str>,
 ) -> LaunchExtras {
     use crate::profile::Prompt;
-    if context {
+    if let Some(prompt) = prompt {
         match crate::profile::get(provider).and_then(|p| p.prompt) {
-            Some(Prompt::Positional) => extras.args.push(OPENING_PROMPT.into()),
-            Some(Prompt::Flag(flag)) => extras.args.extend([flag.into(), OPENING_PROMPT.into()]),
+            Some(Prompt::Positional) => extras.args.push(prompt.into()),
+            Some(Prompt::Flag(flag)) => extras.args.extend([flag.into(), prompt.into()]),
             None => {}
         }
     }
@@ -506,6 +855,7 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
+            None,
         )
         .unwrap();
         assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -540,6 +890,7 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
+            None,
         )
         .unwrap();
         assert!(!extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -582,6 +933,7 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
+            None,
         )
         .unwrap();
         assert!(
@@ -622,6 +974,7 @@ mod tests {
                 None,
                 &Default::default(),
                 &AgentServers::storm_only(),
+                None,
             )
             .unwrap();
             assert_ne!(extras, LaunchExtras::default(), "{provider}");
@@ -676,6 +1029,7 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
+            None,
         )
         .unwrap();
         let v: Value =
@@ -704,6 +1058,7 @@ mod tests {
             None,
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
+            None,
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -747,6 +1102,7 @@ mod tests {
             Some(&settings),
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
+            None,
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -799,6 +1155,7 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
+                    None,
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -887,6 +1244,7 @@ mod tests {
                 None,
                 &serde_json::Map::new(),
                 &AgentServers::storm_only(),
+                None,
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -906,6 +1264,7 @@ mod tests {
                 storm_only: false,
                 taken: &Default::default(),
             },
+            None,
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -927,12 +1286,13 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
+                    None,
                 )
                 .unwrap()
             };
             let plain = config("plain");
-            assert_eq!(with_opening_prompt(config("plain"), provider, false), plain);
-            let with = with_opening_prompt(config("context"), provider, true);
+            assert_eq!(with_opening_prompt(config("plain"), provider, None), plain);
+            let with = with_opening_prompt(config("context"), provider, Some(OPENING_PROMPT));
             assert_eq!(
                 with.env.len(),
                 plain.env.len(),
@@ -946,10 +1306,32 @@ mod tests {
             };
             assert_eq!(added, expected, "{provider}");
         }
-        // Nothing can ever be interpolated into it.
-        for c in ['{', '}', '$', '%', '`', '\n'] {
+        // Nothing can ever be interpolated into either.
+        for c in ['{', '}', '$', '%', '`', '\n', '"', '\''] {
             assert!(!OPENING_PROMPT.contains(c), "{c:?}");
+            assert!(!SPAWNED_OPENING_PROMPT.contains(c), "{c:?}");
         }
+    }
+
+    /// 134f: a spawned child gets its own prompt, whatever else it was
+    /// started with; a note's session the note's; any other none.
+    #[test]
+    fn a_spawned_child_gets_the_spawned_opening_prompt() {
+        assert_eq!(opening_prompt(false, false), None);
+        assert_eq!(opening_prompt(true, false), Some(OPENING_PROMPT));
+        assert_eq!(opening_prompt(false, true), Some(SPAWNED_OPENING_PROMPT));
+        assert_eq!(opening_prompt(true, true), Some(SPAWNED_OPENING_PROMPT));
+        for tool in ["session_context", "read_messages", "report_result"] {
+            assert!(SPAWNED_OPENING_PROMPT.contains(tool), "{tool}");
+        }
+    }
+
+    #[test]
+    fn the_opening_prompt_asks_for_the_whole_launch_context() {
+        assert_eq!(
+            OPENING_PROMPT,
+            "Read your launch context with the storm session_context tool, then wait for my instructions."
+        );
     }
 
     #[test]
@@ -968,3 +1350,7 @@ mod tests {
         assert_eq!(h.resolve(&handle, "github"), None);
     }
 }
+
+#[cfg(test)]
+#[path = "mcp_spawn_tests.rs"]
+mod spawn_tests;

@@ -151,8 +151,75 @@ V2 = [
          route=f"/v/{P}/note/{GW}", actions=[("tap", r"^BOARD($|\n)")], settle=2.5),
 ]
 
+# Decision 138's crews (Round 4, 4a–4l) on a server seeded by `crews.py`,
+# with the checks it can make against the real server; each "step" below a
+# UI action checks what that action did on the server.
+GR = "{crew:Gateway release}"
+CREWS = [
+    dict(step="hosts"),
+    dict(step="crews"),
+    dict(name="crews/desktop-4a-overview", viewport="desktop", route="/agents", fresh=True,
+         settle=2.5),
+    dict(name="crews/desktop-4b-overview-light", viewport="desktop", route="/agents",
+         actions=[("preset", "storm-light")], settle=2.5),
+    dict(name="crews/desktop-4c-overview-earth", viewport="desktop", route="/agents",
+         actions=[("preset", "slowflow-earth")], settle=2.5),
+    dict(name="crews/desktop-4d-crew-page", viewport="desktop", route=f"/agents/c/{GR}",
+         actions=[("preset", "storm-dark"), ("go", f"/agents/c/{GR}")], settle=2.5),
+    dict(name="crews/desktop-4d-end-all-banner", viewport="desktop", route=f"/agents/c/{GR}",
+         actions=[("tap", "^Crew actions$"), ("tap", "^End all running"), ("wait", 1)]),
+    dict(name="crews/end-all-cancel", noshot=True, viewport="desktop", route=f"/agents/c/{GR}",
+         actions=[("tap", "^Cancel$")]),
+    dict(name="crews/desktop-4e-session-roles", viewport="desktop",
+         route="/agents/s/{session:review-gateway}?tab=about", settle=2.5),
+    dict(name="crews/desktop-4f-launcher", viewport="desktop", route=f"/v/{P}/note/{GW}",
+         fresh=True, actions=[("tap", "^Start session$"), ("wait", 1.5), ("tap", "^Role: ")],
+         settle=2),
+    dict(name="crews/desktop-4g-launcher-shell", viewport="desktop", route=f"/v/{P}/note/{GW}",
+         fresh=True, actions=[("tap", "^Start session$"), ("wait", 1.5), ("tap", "^Agent: "),
+                              ("tap", "^Shell"), ("wait", 1)], settle=2),
+    dict(name="crews/desktop900-4h-narrow", viewport="desktop900", route="/agents",
+         actions=[("rightclick", "^Gateway release, crew")], settle=1.5),
+    # 4i, sync: a crew made through the API (another device) appears on its
+    # own within one poll.
+    dict(name="crews/desktop-4i-sync-in", viewport="desktop", route="/agents", fresh=True,
+         actions=[("api", ("POST", "/v1/agent/crews",
+                           {"name": "Synced from the phone", "color": "mint",
+                            "session_ids": ["{session:shell-1}"]})),
+                  ("wait_text", ("^Synced from the phone, crew", 20)),
+                  ("step", "crews:after_sync_in")]),
+    dict(name="crews/sync-cleanup", noshot=True, viewport="desktop", route="/agents",
+         actions=[("api", ("PUT", "/v1/agent/sessions/{session:shell-1}/crew",
+                           {"crew_id": None}))]),
+    # A change the server refuses: a crew is deleted on another device while
+    # this one drags Relay hardening below Kit cleanup, so the order it
+    # sends names a crew that is gone. The order snaps back, and the toast
+    # says why.
+    dict(name="crews/desktop-4i-refused", viewport="desktop", route="/agents", fresh=True,
+         actions=[("drag", ("^Relay hardening, crew", "^Kit cleanup, crew", [
+                      ("DELETE", "/v1/agent/crews/{crew:long}", None)])),
+                  ("wait_text", ("Couldn.t reorder the crews: ", 5)),
+                  ("step", "crews:after_refused")], settle=0.3),
+    # The last session dismissed: the crew goes, with Undo.
+    dict(name="crews/desktop-4i-removed-undo", viewport="desktop", route="/agents", fresh=True,
+         actions=[("rightclick", "^Kit cleanup, crew"), ("tap", "^Dismiss ended"),
+                  ("wait", 1.5)], settle=0.5),
+    dict(name="crews/desktop-4i-undone", viewport="desktop", route="/agents",
+         actions=[("tap", "Undo$"), ("wait", 2.5), ("step", "crews:after_undo")]),
+    dict(name="crews/phone-4j-list", viewport="phone", route="/agents", settle=2.5),
+    dict(name="crews/phone-4k-sheet", viewport="phone", route="/agents",
+         actions=[("longpress", "^spike-sync, ")], settle=1.5),
+    dict(name="crews/phone-4l-end-all", viewport="phone", route=f"/agents/c/{GR}", fresh=True,
+         actions=[("tap", "^Crew actions$"), ("tap", "^End all running"), ("wait", 1.5)]),
+    # End all running for real, last: it stops the crew.
+    dict(name="crews/desktop-4d-end-all-done", viewport="desktop", route=f"/agents/c/{GR}",
+         fresh=True, actions=[("tap", "^Crew actions$"), ("tap", "^End all running"),
+                              ("tap", r"^End \d+ sessions?$"), ("wait", 3),
+                              ("step", "crews:after_end_all")], settle=1.5),
+]
+
 DESIGN = [
     dict(name="design-system/gallery", viewport="gallery", route="/gallery", settle=2.5),
 ]
 
-SETS = {"current": CURRENT, "v2": V2, "design": DESIGN}
+SETS = {"current": CURRENT, "v2": V2, "design": DESIGN, "crews": CREWS}

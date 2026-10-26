@@ -2,7 +2,9 @@
 /// 77d). Field names are the server's; nothing here is invented.
 library;
 
+import '../ui/accents.dart';
 import 'claude_login_api.dart' show claudeCredentialNotice;
+import 'spawn_models.dart';
 
 /// A provider a host offers.
 class ProviderCap {
@@ -99,6 +101,9 @@ class AgentHost {
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
     this.agentInstall = false,
+    this.identityState,
+    this.isolationState,
+    this.isolationReason,
   });
 
   final String id;
@@ -128,6 +133,24 @@ class AgentHost {
   /// It can install, update and remove agents (decision 133); false for an
   /// older runtime.
   final bool agentInstall;
+
+  /// Its bridge identity (decision 135d): `verified`, `unsupported` or
+  /// `unavailable`; null from a server that does not say.
+  final String? identityState;
+
+  /// Anything but `verified` is labelled (135d). The label is disclosure,
+  /// not a control.
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
+
+  /// Its session isolation (decision 136j): state and reason; null from a
+  /// server that does not say.
+  final String? isolationState;
+  final String? isolationReason;
+
+  /// What the host row says about it; nothing while isolation is off.
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
 
   bool get online => status == 'online';
 
@@ -162,9 +185,54 @@ class AgentHost {
       ],
       capabilitiesKnown: caps != null,
       agentInstall: caps?['agent_install'] == true,
+      identityState: _identityState(j),
+      isolationState: _isolation(j).$1,
+      isolationReason: _isolation(j).$2,
     );
   }
 }
+
+String? _identityState(Map<String, dynamic> j) {
+  final identity = j['identity'];
+  return identity is Map ? '${identity['state'] ?? 'unavailable'}' : null;
+}
+
+(String?, String?) _isolation(Map<String, dynamic> j) {
+  final isolation = j['isolation'];
+  if (isolation is! Map) return (null, null);
+  final reason = isolation['reason'];
+  return (
+    '${isolation['state'] ?? 'unavailable'}',
+    reason is String ? reason : null,
+  );
+}
+
+/// What Storm says about a host's session isolation (decision 136j). Nothing
+/// where it is not on: off (the default), an older host, or a platform that
+/// has none. Anything but `verified` with isolation on refuses new sessions.
+String? isolationLabelFor(String? state, String? reason) {
+  if (state == null || state == 'unsupported') return null;
+  if (state == 'verified') return kIsolationVerified;
+  if (reason == null || reason == 'off' || reason == 'old_host') return null;
+  final why = switch (reason) {
+    'pending' => 'self-test running',
+    'self_test' => 'self-test failed',
+    'no_passt' => 'pasta missing',
+    'helper' => 'helper not answering',
+    'no_helper' => 'no isolation helper',
+    _ => reason.replaceAll('_', ' '),
+  };
+  return 'Session isolation unavailable ($why) — new sessions are refused';
+}
+
+/// A host whose sessions each run as their own user (decision 136j).
+const kIsolationVerified = 'Sessions isolated — each runs as its own user';
+
+/// What Storm says on a host or session whose identity is not verified
+/// (decision 135d).
+const kIdentityNotVerified =
+    'Session identity not verified — sessions on this host can act as each '
+    'other';
 
 /// The agents a host can install from Settings › Agents, in the page's
 /// order (decision 133).
@@ -297,6 +365,130 @@ class SkippedServer {
   );
 }
 
+/// A crew (decision 138a): a named, coloured group of sessions. A label on
+/// the server; it changes how the Agents page is organised and nothing else.
+class Crew {
+  const Crew({
+    required this.id,
+    required this.name,
+    required this.color,
+    required this.order,
+  });
+
+  final String id;
+  final String name;
+
+  /// A vault palette word; anything else reads as no colour.
+  final String color;
+  final int order;
+
+  Accent get accent => Accent.parse(color);
+
+  factory Crew.fromJson(Map<String, dynamic> j) => Crew(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    color: j['color'] as String? ?? 'none',
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// The crew a session is in and its place there.
+class SessionCrew {
+  const SessionCrew({required this.id, required this.order});
+
+  final String id;
+  final int order;
+
+  factory SessionCrew.fromJson(Map<String, dynamic> j) => SessionCrew(
+    id: j['id'] as String,
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// A Kit note used as a role (138d, 138f), by id. The label's [title] is read
+/// live, so it follows a rename; null once the note is deleted.
+class RoleRef {
+  const RoleRef({required this.vaultId, required this.noteId, this.title});
+
+  final String vaultId;
+  final String noteId;
+  final String? title;
+
+  bool get deleted => title == null;
+
+  bool sameNote(RoleRef? other) =>
+      other != null && other.vaultId == vaultId && other.noteId == noteId;
+
+  factory RoleRef.fromJson(Map<String, dynamic> j) => RoleRef(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String?,
+  );
+}
+
+/// A note the role picker offers (`GET /v1/agent/roles`, 138e).
+class RoleNote {
+  const RoleNote({
+    required this.vaultId,
+    required this.noteId,
+    required this.title,
+    required this.path,
+    required this.folder,
+    this.summary,
+  });
+
+  final String vaultId;
+  final String noteId;
+  final String title;
+  final String path;
+
+  /// `agents` or `projects/<name>/agents`: what the picker groups by.
+  final String folder;
+  final String? summary;
+
+  factory RoleNote.fromJson(Map<String, dynamic> j) => RoleNote(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String? ?? '',
+    path: j['path'] as String? ?? '',
+    folder: j['folder'] as String? ?? 'agents',
+    summary: j['summary'] as String?,
+  );
+}
+
+/// The crew a launch joins (138h): an existing one by [id], or a new one
+/// named [newName].
+class LaunchCrew {
+  const LaunchCrew.join(String this.id) : newName = null;
+  const LaunchCrew.create(String this.newName) : id = null;
+
+  final String? id;
+  final String? newName;
+}
+
+/// A crew change, with the crews it emptied and so deleted (138c).
+class CrewChange {
+  const CrewChange({this.crew, this.removedCrews = const []});
+
+  final Crew? crew;
+  final List<Crew> removedCrews;
+
+  factory CrewChange.fromJson(Map<String, dynamic>? j) => CrewChange(
+    crew: j?['crew'] is Map<String, dynamic>
+        ? Crew.fromJson(j!['crew'] as Map<String, dynamic>)
+        : null,
+    removedCrews: [
+      for (final c in j?['removed_crews'] as List? ?? const [])
+        if (c is Map<String, dynamic>) Crew.fromJson(c),
+    ],
+  );
+}
+
+/// A [AgentSession._copy] argument left as it is, where null is a value.
+const _keep = Object();
+
+Map<String, dynamic>? _map(Object? v) => v is Map<String, dynamic> ? v : null;
+
 class AgentSession {
   AgentSession({
     required this.id,
@@ -326,6 +518,13 @@ class AgentSession {
     this.resumedFrom,
     this.mcpSkipped = const [],
     this.mcpPluginLocal = const [],
+    this.identityState,
+    this.isolationState,
+    this.isolationReason,
+    this.spawn = SpawnFacts.none,
+    this.crew,
+    this.role,
+    this.launchRole,
   }) : name = name ?? workspace;
 
   final String id;
@@ -375,6 +574,32 @@ class AgentSession {
   /// integrations (131a).
   final List<String> mcpPluginLocal;
 
+  /// Its host's bridge identity (decision 135d); null from a server that
+  /// does not say.
+  final String? identityState;
+
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
+
+  /// Its host's session isolation (decision 136j).
+  final String? isolationState;
+  final String? isolationReason;
+
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
+
+  /// Its lineage, attention, own workspace and spawn switch (decision 134).
+  final SpawnFacts spawn;
+
+  /// Its crew, null when loose or from a server before decision 138.
+  final SessionCrew? crew;
+
+  /// Its role label (138d), set by a person; a later change moves only this.
+  final RoleRef? role;
+
+  /// The role note it was launched with, titled as then (138f). Fixed.
+  final RoleRef? launchRole;
+
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
@@ -418,6 +643,10 @@ class AgentSession {
     'failed' => switch (endReason) {
       'host_restart' => 'host restarted',
       'host_revoked' => 'host revoked',
+      // Decision 136f: an isolated host had no credential it may use.
+      'credential_unavailable' => 'no credential this host may use',
+      // Decision 136j: the host's isolation was not verified.
+      'isolation_unavailable' => 'isolation unavailable on this host',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',
@@ -430,33 +659,83 @@ class AgentSession {
   /// carries the bare record: no name, context or count.
   AgentSession withLive(AgentSession? live) => live == null || live.id != id
       ? this
-      : AgentSession(
-          id: id,
-          hostId: hostId,
-          workspace: workspace,
-          provider: provider,
+      : _copy(
           status: live.status,
           endReason: live.endReason,
           exitCode: live.exitCode,
           signal: live.signal,
           cols: live.cols,
           rows: live.rows,
-          createdAt: createdAt,
-          fallback: fallback,
           startedAt: live.startedAt ?? startedAt,
           endedAt: live.endedAt ?? endedAt,
-          name: name,
-          context: context,
-          writeVaultId: writeVaultId,
-          wroteCount: wroteCount,
-          integrations: integrations,
           title: live.title ?? title,
           activity: live.activity,
           harnessSession: live.harnessSession ?? harnessSession,
-          resumedFrom: resumedFrom,
-          mcpSkipped: mcpSkipped,
-          mcpPluginLocal: mcpPluginLocal,
+          launchNotice: null,
+          credential: null,
         );
+
+  /// This record in [crew] (null: none), as a change not yet confirmed
+  /// draws it.
+  AgentSession withCrew(SessionCrew? crew) => _copy(crew: crew);
+
+  /// This record with the label [role] (null: none).
+  AgentSession withRole(RoleRef? role) => _copy(role: role);
+
+  AgentSession _copy({
+    String? status,
+    Object? endReason = _keep,
+    Object? exitCode = _keep,
+    Object? signal = _keep,
+    int? cols,
+    int? rows,
+    String? startedAt,
+    String? endedAt,
+    String? title,
+    Object? activity = _keep,
+    String? harnessSession,
+    Object? launchNotice = _keep,
+    Object? credential = _keep,
+    Object? crew = _keep,
+    Object? role = _keep,
+  }) => AgentSession(
+    id: id,
+    hostId: hostId,
+    workspace: workspace,
+    provider: provider,
+    status: status ?? this.status,
+    endReason: endReason == _keep ? this.endReason : endReason as String?,
+    exitCode: exitCode == _keep ? this.exitCode : exitCode as int?,
+    signal: signal == _keep ? this.signal : signal as int?,
+    cols: cols ?? this.cols,
+    rows: rows ?? this.rows,
+    createdAt: createdAt,
+    fallback: fallback,
+    startedAt: startedAt ?? this.startedAt,
+    endedAt: endedAt ?? this.endedAt,
+    name: name,
+    context: context,
+    writeVaultId: writeVaultId,
+    wroteCount: wroteCount,
+    integrations: integrations,
+    launchNotice: launchNotice == _keep
+        ? this.launchNotice
+        : launchNotice as String?,
+    credential: credential == _keep ? this.credential : credential as String?,
+    title: title ?? this.title,
+    activity: activity == _keep ? this.activity : activity as String?,
+    harnessSession: harnessSession ?? this.harnessSession,
+    resumedFrom: resumedFrom,
+    mcpSkipped: mcpSkipped,
+    mcpPluginLocal: mcpPluginLocal,
+    identityState: identityState,
+    isolationState: isolationState,
+    isolationReason: isolationReason,
+    spawn: spawn,
+    crew: crew == _keep ? this.crew : crew as SessionCrew?,
+    role: role == _keep ? this.role : role as RoleRef?,
+    launchRole: launchRole,
+  );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
@@ -502,6 +781,17 @@ class AgentSession {
     mcpPluginLocal: [
       for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
     ],
+    identityState: _identityState(j),
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
+    spawn: SpawnFacts.fromJson(j),
+    crew: _map(j['crew']) == null
+        ? null
+        : SessionCrew.fromJson(_map(j['crew'])!),
+    role: _map(j['role']) == null ? null : RoleRef.fromJson(_map(j['role'])!),
+    launchRole: _map(j['launch_role']) == null
+        ? null
+        : RoleRef.fromJson(_map(j['launch_role'])!),
   );
 }
 

@@ -16,11 +16,29 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
+pub mod approval;
+pub mod attention;
 pub mod cache;
+pub mod cascade;
 pub mod credential;
 pub mod images;
+pub mod inbox;
 pub mod jobs;
+pub mod scope;
 pub mod store;
+
+#[cfg(test)]
+mod approval_tests;
+#[cfg(test)]
+mod attention_tests;
+#[cfg(test)]
+mod cascade_tests;
+#[cfg(test)]
+mod inbox_tests;
+#[cfg(test)]
+mod scope_tests;
+#[cfg(test)]
+mod spawn_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +55,38 @@ use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord}
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
 pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
+
+/// The adapters that may be a spawning parent (decision 134, "candidate").
+pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
+
+/// What a `start` tells the host about a session decision 134 may offer
+/// its tools (134-8).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnStart {
+    /// A child, whose `session_context` is exempt too.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spawned: bool,
+}
+
+/// A spawn switch a person set: the session, what it was, what it is now,
+/// and how many pending requests turning it off refused.
+#[derive(Debug)]
+pub struct SpawnChange {
+    pub session: SessionRecord,
+    pub was: bool,
+    pub enabled: bool,
+    pub refused: usize,
+}
+
+/// A session's spawn switch on its view (134-10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpawnView {
+    pub enabled: bool,
+    /// What turning it on would be refused with now (134-2's codes); absent
+    /// when it would turn on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<&'static str>,
+}
 pub const DEFAULT_PROVIDER: &str = "claude-code";
 /// Largest input POST (freeze §11.1).
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -58,8 +108,9 @@ pub enum Command {
         /// anyway, which is why a launch never relies on it (§6, old hosts).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp: Vec<McpGrant>,
-        /// The session was started from a note: the runtime adds its fixed
-        /// opening prompt. A flag, never text, so no note data reaches argv.
+        /// The session was started from a note or with a role (decision
+        /// 138f): the runtime adds its fixed opening prompt. A flag, never
+        /// text, so no note data reaches argv.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         context: bool,
         /// The agent's own session to reopen (decision 89). Omitted on a
@@ -72,6 +123,22 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
+        /// The session may be offered decision 134's tools while it runs,
+        /// so its CLI's config gets the pinned asks and, on a verified host,
+        /// the A6 exemptions (134-8). Sent only where C0 holds, so omitted
+        /// on every host today.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spawn_asks: Option<SpawnStart>,
+        /// A resume's predecessor (decision 136e): an isolated host copies
+        /// the conversation from that session's kept files, never from
+        /// another's. Omitted on a fresh launch; an old host ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resumed_from: Option<String>,
+        /// A spawned child's parent (134-5): the host makes the child's own
+        /// workspace from `workspace`, the parent's, before it starts it
+        /// (137-1). Omitted for every other start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_of: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -115,6 +182,21 @@ pub enum Command {
         agent: String,
         op: String,
     },
+    /// A person's look at, Apply of or delete of a child's workspace
+    /// (decision 137e, 137g). The host carries it to its isolation helper,
+    /// which checks every field, and answers on
+    /// `/v1/runtime/children/{request}`.
+    #[serde(rename = "child.workspace")]
+    ChildWorkspace {
+        request: String,
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
 }
 
 impl Command {
@@ -130,6 +212,7 @@ impl Command {
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
+            Self::ChildWorkspace { .. } => "child.workspace",
         }
     }
 
@@ -143,7 +226,7 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } => None,
+            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
         }
     }
 }
@@ -207,6 +290,119 @@ pub struct Capabilities {
     /// and is never sent one.
     #[serde(default)]
     pub agent_install: bool,
+    /// The host carries `child.workspace` to its isolation helper (decision
+    /// 137-3). Only an isolated host says so; any other is never sent one.
+    #[serde(default)]
+    pub child_workspaces: bool,
+    /// Whether the host checks who connects for a session (decision 135d).
+    /// An old host does not say, and is `unavailable: old_host`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub identity: Identity,
+    /// Whether each session runs as its own identity, from the host's
+    /// self-test (decision 136j). The same three states and the same fail
+    /// closed reading: an old host is `unavailable: old_host`, anything this
+    /// server does not know is never `verified`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub isolation: Isolation,
+    /// Each listed workspace's canonical directory, so WS-9 can tell two
+    /// names for one directory apart from two directories (137-2). An old
+    /// host does not say, and then any two of its workspaces may be one.
+    #[serde(default)]
+    pub workspace_paths: HashMap<String, String>,
+}
+
+/// A host's session isolation (decision 136j), shaped as [`Identity`] is.
+pub type Isolation = Identity;
+
+/// Which of a host's two self-reported labels, alike in shape but kept apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostLabel {
+    Identity,
+    Isolation,
+}
+
+impl HostLabel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Isolation => "isolation",
+        }
+    }
+}
+
+/// A host's bridge identity (decision 135d): `verified`, `unsupported` or
+/// `unavailable`, with the mechanism and the reason as the host gave them.
+/// Only `verified` means the host checks every connection's peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub state: String,
+    pub mechanism: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub const IDENTITY_VERIFIED: &str = "verified";
+pub const IDENTITY_UNSUPPORTED: &str = "unsupported";
+pub const IDENTITY_UNAVAILABLE: &str = "unavailable";
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self::unavailable("old_host")
+    }
+}
+
+impl Identity {
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            state: IDENTITY_UNAVAILABLE.into(),
+            mechanism: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn verified(&self) -> bool {
+        self.state == IDENTITY_VERIFIED
+    }
+
+    /// A host's words, kept short: they reach every client's host list.
+    fn bounded(mut self) -> Self {
+        for field in [&mut self.mechanism, &mut self.reason] {
+            if let Some(s) = field
+                && s.len() > IDENTITY_WORD_MAX
+            {
+                let mut end = IDENTITY_WORD_MAX;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        }
+        self
+    }
+}
+
+const IDENTITY_WORD_MAX: usize = 64;
+
+/// Fails closed: a field that is null, malformed or names a state this server
+/// does not know is never `verified`, and never refuses the host's `hello`.
+fn identity_or_unavailable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Identity, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    if value.is_null() {
+        return Ok(Identity::default());
+    }
+    Ok(match serde_json::from_value::<Identity>(value) {
+        Ok(i)
+            if [
+                IDENTITY_VERIFIED,
+                IDENTITY_UNSUPPORTED,
+                IDENTITY_UNAVAILABLE,
+            ]
+            .contains(&i.state.as_str()) =>
+        {
+            i
+        }
+        _ => Identity::unavailable("unrecognised"),
+    }
+    .bounded())
 }
 
 /// At most this many entries in each of a session's 131a lists.
@@ -306,6 +502,10 @@ pub struct StatusReport {
     pub title: Option<String>,
     #[serde(default)]
     pub activity: Option<String>,
+    /// `permission_prompt` while the agent's own prompt waits for a person,
+    /// from a host whose hooks report it for the adapter (134-9).
+    #[serde(default)]
+    pub attention: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -319,6 +519,50 @@ pub struct StatusReport {
     /// The plugins' local servers it runs outside the gateway (131a).
     #[serde(default)]
     pub mcp_plugin_local: Option<Vec<String>>,
+    /// A spawned child's own workspace as its host made it (137-1); carried
+    /// by its first `running` report only.
+    #[serde(default)]
+    pub child_workspace: Option<ChildWorkspace>,
+}
+
+/// A spawned child's own workspace (decision 137): a clone of its parent's
+/// committed `HEAD` (W2) or a scratch directory beside a read-only view of
+/// the parent's (W3). Where it is stays the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildWorkspace {
+    /// `clone` or `scratch`.
+    pub mode: String,
+    /// The commit a clone starts from: the base an Apply's diff is against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Submodules and large-file pointers were not materialized (137b).
+    #[serde(default)]
+    pub submodules: bool,
+    #[serde(default)]
+    pub large_files: bool,
+}
+
+impl ChildWorkspace {
+    /// What a host may say, and nothing longer: a hex commit, a branch of
+    /// the clone's own characters.
+    fn valid(&self) -> bool {
+        let hex = |c: &str| matches!(c.len(), 40 | 64) && c.bytes().all(|b| b.is_ascii_hexdigit());
+        let branch = |b: &str| {
+            !b.is_empty()
+                && b.len() <= 255
+                && b.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._/-+@".contains(&c))
+        };
+        match self.mode.as_str() {
+            "clone" => {
+                self.commit.as_deref().is_some_and(hex) && self.branch.as_deref().is_none_or(branch)
+            }
+            "scratch" => self.commit.is_none() && self.branch.is_none(),
+            _ => false,
+        }
+    }
 }
 
 /// One server a session will not have (131a), by name only.
@@ -364,12 +608,40 @@ pub struct Launch {
     /// session's, whatever else the request says.
     #[serde(default)]
     pub resume_of: Option<String>,
+    /// The crew the session joins, last, or a new crew it starts (decision
+    /// 138h). A resume ignores it and joins its predecessor's crew.
+    #[serde(default)]
+    pub crew: Option<LaunchCrew>,
+    /// A Kit role note (138f): handed to the agent beside the context note,
+    /// and the session's first role label. A resume ignores it.
+    #[serde(default)]
+    pub role: Option<ContextRef>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContextRef {
     pub vault_id: String,
     pub note_id: String,
+}
+
+/// `{id}` joins an existing crew; `{new_name}` starts one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LaunchCrew {
+    Existing { id: String },
+    New { new_name: String },
+}
+
+/// The crew a launch puts its session in, once the caller has resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrewJoin {
+    /// An existing crew, as its last member.
+    Existing(String),
+    /// A new crew holding only this session.
+    New { name: String, color: String },
+    /// A resume: the crew this ended session is in, right after it. Nothing
+    /// when it is in none.
+    After(String),
 }
 
 /// What the launch resolved before the manager runs it.
@@ -382,6 +654,12 @@ pub struct LaunchMeta {
     /// What token sync would deliver to this host (decision 124), before the
     /// provider and the host's capability are known.
     pub provider_credential: Option<&'static str>,
+    /// The launch role (138f). Recorded only when the session reads Storm.
+    pub role: Option<store::Context>,
+    /// The session's first role label, written whatever the agent: the launch
+    /// role, or a resumed session's predecessor's label.
+    pub label: Option<RoleLabel>,
+    pub crew: Option<CrewJoin>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -428,6 +706,9 @@ pub enum AgentError {
     Timeout,
     /// The host could not stage it, and said why (502).
     HostFailed(String),
+    /// The isolation helper refused a child workspace request, or the host
+    /// could not carry it (decision 137-3). The code is the helper's.
+    ChildRefused(String),
     Internal(anyhow::Error),
 }
 
@@ -448,12 +729,17 @@ struct HostLink {
     last_seen: std::time::Instant,
     /// Bumped on every inventory the host reports.
     inventory: watch::Sender<u64>,
+    /// This link has sent `hello` or an inventory. What it carried over
+    /// from an earlier link says nothing about now, so C0 waits for this.
+    reported: bool,
 }
 
 struct SessionLive {
     cache: OutputCache,
     /// `working` / `idle`, as the host last said (D15 AM42).
     activity: Option<String>,
+    /// A permission prompt waiting, as the host last said (134-9).
+    attention: Option<String>,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
     /// The credential kind its `start` named (decision 124): the only one the
@@ -466,6 +752,7 @@ impl SessionLive {
         Self {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
+            attention: None,
             version: watch::channel(0).0,
             credential: None,
         }
@@ -481,6 +768,13 @@ struct Live {
     hosts: HashMap<String, HostLink>,
     sessions: HashMap<String, SessionLive>,
     next_generation: u64,
+    /// Whether C0 held for each host when its agents were last told, so a
+    /// flip sends `list_changed` once (134-3). Kept across links.
+    c0: HashMap<String, bool>,
+    /// Cascade targets sent their `end` in this run (134-6, 134-7), with the
+    /// generation of the link it went down: one per link, so an `end` lost
+    /// with its link is sent again on the next.
+    stopping: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -494,8 +788,15 @@ pub struct AgentManager {
     live: Mutex<Live>,
     images: Mutex<images::Images>,
     jobs: Mutex<jobs::Jobs>,
+    /// `child.workspace` requests waiting for their host's answer.
+    children: Mutex<HashMap<String, ChildPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
+    /// Bumped whenever the approval engine decides a request.
+    requests: watch::Sender<u64>,
+    /// The adapters whose permission prompts are taken from their hosts
+    /// (134-9).
+    permission_prompt: Mutex<&'static [&'static str]>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -504,6 +805,40 @@ const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_secs(30)
 };
+
+/// How long a child workspace request waits for its host: an export or an
+/// Apply runs in a unit whose own limit is 600 s, and the host waits 660 s
+/// for the helper.
+const CHILD_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(700)
+};
+
+struct ChildPending {
+    host: String,
+    done: tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>,
+}
+
+/// What a `child.workspace` request does on the host's helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildOp {
+    List,
+    Export,
+    Import,
+    Dispose,
+}
+
+impl ChildOp {
+    fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Export => "export",
+            Self::Import => "import",
+            Self::Dispose => "dispose",
+        }
+    }
+}
 
 /// A staged image: the path the client pastes.
 #[derive(Debug, Clone, Serialize)]
@@ -547,8 +882,11 @@ impl AgentManager {
             live: Mutex::new(Live::default()),
             images: Mutex::new(images::Images::default()),
             jobs: Mutex::new(jobs::Jobs::default()),
+            children: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
+            requests: watch::channel(0).0,
+            permission_prompt: Mutex::new(attention::PERMISSION_PROMPT_ADAPTERS),
         })
     }
 
@@ -591,6 +929,7 @@ impl AgentManager {
                 capabilities,
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
+                reported: false,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -739,10 +1078,18 @@ impl AgentManager {
                     r.ended_at.get_or_insert_with(now);
                 }
                 self.store.lock().unwrap().update(&r)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
             }
         }
         Ok(())
+    }
+
+    /// An ended session is no longer a cascade target to stop.
+    fn forget_stop(&self, r: &SessionRecord) {
+        if r.is_ended() {
+            self.live.lock().unwrap().stopping.remove(&r.id);
+        }
     }
 
     fn bump(&self, session_id: &str) {
@@ -765,11 +1112,16 @@ impl AgentManager {
             last_cmd_seq = hello.last_cmd_seq,
             "runtime host hello"
         );
+        let identity = hello.capabilities.identity.clone();
+        let isolation = hello.capabilities.isolation.clone();
         {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(hello.capabilities);
+            link.reported = true;
         }
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
         let reported: HashMap<String, ReportedSession> = hello
             .sessions
             .into_iter()
@@ -782,7 +1134,13 @@ impl AgentManager {
                 Some(rep) => {
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
+                        // An end Storm sent before a restart (LT-6).
+                        if let Some(reason) = self.storm_stop(&r)? {
+                            r.status = "stopped".into();
+                            r.end_reason = Some(reason);
+                        }
                         self.store.lock().unwrap().update(&r)?;
+                        self.forget_stop(&r);
                         self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
@@ -801,6 +1159,7 @@ impl AgentManager {
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
                     self.store.lock().unwrap().update(&r)?;
+                    self.forget_stop(&r);
                     self.bump(&r.id);
                 }
                 None => {}
@@ -809,6 +1168,7 @@ impl AgentManager {
         for session in replay {
             self.send(host_id, Command::Replay { session, from: 0 })?;
         }
+        self.reassess_spawn_gate(host_id);
         Ok(())
     }
 
@@ -834,11 +1194,248 @@ impl AgentManager {
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
-        let mut live = self.live.lock().unwrap();
-        let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
-        link.capabilities = Some(capabilities);
-        link.inventory.send_modify(|v| *v += 1);
+        let identity = capabilities.identity.clone();
+        let isolation = capabilities.isolation.clone();
+        {
+            let mut live = self.live.lock().unwrap();
+            let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
+            link.capabilities = Some(capabilities);
+            link.reported = true;
+            link.inventory.send_modify(|v| *v += 1);
+        }
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
+        self.reassess_spawn_gate(host_id);
         Ok(())
+    }
+
+    /// Never fails the report it came with: the label it keeps is for while
+    /// the host is away, and the link's own copy is what calls are judged by.
+    fn record_label(&self, kind: HostLabel, host_id: &str, label: &Identity) {
+        let store = self.store.lock().unwrap();
+        let stored = store.host_label(kind, host_id);
+        if matches!(&stored, Ok(Some(known)) if known == label) {
+            return;
+        }
+        tracing::info!(
+            host = host_id,
+            state = label.state,
+            reason = label.reason.as_deref(),
+            "runtime host {}",
+            kind.name()
+        );
+        if let Err(e) = store.set_host_label(kind, host_id, label, &now()) {
+            tracing::warn!(error = %e, host = host_id, "could not record a host's {}", kind.name());
+        }
+    }
+
+    /// Reads one thing from the host's live capabilities, under the lock.
+    fn with_live<T>(&self, host_id: &str, f: impl FnOnce(&Capabilities) -> T) -> Option<T> {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .and_then(|link| link.capabilities.as_ref())
+            .map(f)
+    }
+
+    /// Whether the host's link says it checks every connection (135d), as
+    /// that link has itself reported: what a new link carried over says
+    /// nothing until then (135-2 as-built 4).
+    pub fn host_verified(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.identity.verified())
+    }
+
+    /// Whether the host's session isolation (136j, IG-7) is `verified` as
+    /// its live link says it now; fail closed. Never the stored copy, nor
+    /// what a new link carried over before it said anything itself.
+    pub fn host_isolated(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.isolation.verified())
+    }
+
+    /// Test-only: the host sends an inventory saying `isolation: verified`,
+    /// through the same path a real one takes.
+    #[cfg(test)]
+    pub fn verify_isolation_for_tests(&self, host_id: &str) {
+        let caps = self.host_live(host_id).capabilities;
+        if let Some(mut caps) = caps {
+            caps.isolation = Isolation {
+                state: IDENTITY_VERIFIED.into(),
+                mechanism: Some("systemd_units".into()),
+                reason: None,
+            };
+            self.inventory(host_id, caps).unwrap();
+        }
+    }
+
+    /// Test-only: the host's inventory names each child's own directory, as
+    /// a host does once it has made it (134-5), so WS-9 sees them apart.
+    #[cfg(test)]
+    pub fn report_children_for_tests(&self, host_id: &str) {
+        let children: Vec<String> = self
+            .store
+            .lock()
+            .unwrap()
+            .for_host(host_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.workspace)
+            .filter(|w| w.starts_with("children/"))
+            .collect();
+        if let Some(mut caps) = self.host_live(host_id).capabilities {
+            for w in children {
+                caps.workspace_paths
+                    .insert(w.clone(), format!("/var/{w}/workspace"));
+            }
+            self.inventory(host_id, caps).unwrap();
+        }
+    }
+
+    /// Where a session's work began: its own workspace, or for a spawned
+    /// child, whose own is no listed workspace, its parent's (134-5). A
+    /// resumed child (C7) is a new top-level session there.
+    pub fn origin_workspace(&self, session_id: &str) -> AgentResult<String> {
+        Ok(origin_workspace(&self.store.lock().unwrap(), session_id)?)
+    }
+
+    /// C0 (134r): nothing privileged unless the host checks every
+    /// connection's identity and isolates its sessions, both as its live
+    /// link says now. The refusal names the first that fails.
+    pub fn spawn_gate(&self, host_id: &str) -> std::result::Result<(), &'static str> {
+        if !self.host_verified(host_id) {
+            return Err("identity_unverified");
+        }
+        if !self.host_isolated(host_id) {
+            return Err("isolation_unverified");
+        }
+        Ok(())
+    }
+
+    /// Whether a session is offered the spawn tools now: its switch is on
+    /// and C0 holds. Checked on every call, never cached.
+    pub fn spawn_offered(&self, session_id: &str) -> bool {
+        let (record, on) = {
+            let store = self.store.lock().unwrap();
+            (
+                store.get(session_id).ok().flatten(),
+                store.spawn_enabled(session_id).unwrap_or(false),
+            )
+        };
+        on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
+    }
+
+    #[cfg(test)]
+    pub fn spawn_enabled(&self, session_id: &str) -> AgentResult<bool> {
+        Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
+    }
+
+    fn workspace_paths(&self, host_id: &str) -> HashMap<String, String> {
+        self.with_live(host_id, |caps| caps.workspace_paths.clone())
+            .unwrap_or_default()
+    }
+
+    /// Why turning a session's switch on would be refused now, in 134-2's
+    /// order, or `None` when it would not. Takes the store held, so the
+    /// WS-9 check and a write share one lock (store, then live).
+    fn enable_refusal(
+        &self,
+        r: &SessionRecord,
+        store: &Store,
+        paths: &HashMap<String, String>,
+    ) -> Result<Option<&'static str>> {
+        if r.is_ended() {
+            return Ok(Some("session_not_live"));
+        }
+        if !SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
+            return Ok(Some("provider_cannot_spawn"));
+        }
+        if let Err(code) = self.spawn_gate(&r.host_id) {
+            return Ok(Some(code));
+        }
+        if !store.spawn_asks(&r.id)? {
+            return Ok(Some("launched_without_asks"));
+        }
+        let held = store.workspace_held(
+            &r.host_id,
+            &r.workspace,
+            store::spawn::Claim::Spawn(&r.id),
+            paths,
+        )?;
+        Ok(held.then_some("workspace_held"))
+    }
+
+    /// The spawn switch as a session's view shows it (134-10): only where
+    /// C0 holds on its host now, or the switch is already on, so a person
+    /// can still turn it off after a downgrade. Elsewhere `None`: a host
+    /// that cannot offer spawning shows nothing of it.
+    pub fn spawn_view(&self, r: &SessionRecord) -> Result<Option<SpawnView>> {
+        let store = self.store.lock().unwrap();
+        let enabled = store.spawn_enabled(&r.id)?;
+        if !enabled && self.spawn_gate(&r.host_id).is_err() {
+            return Ok(None);
+        }
+        let paths = self.workspace_paths(&r.host_id);
+        Ok(Some(SpawnView {
+            enabled,
+            refused: self.enable_refusal(r, &store, &paths)?,
+        }))
+    }
+
+    /// A person turns a session's spawn switch on or off (134c, B1, B2).
+    /// Off always succeeds and refuses the session's pending requests at
+    /// once. On needs a live session of a spawning adapter, C0, and WS-9;
+    /// otherwise the inner error is the refusal's code.
+    pub fn set_spawn(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+    ) -> AgentResult<std::result::Result<SpawnChange, &'static str>> {
+        let r = self.get(session_id)?;
+        let paths = self.workspace_paths(&r.host_id);
+        // One lock for the WS-9 check and the write, so a launch into the
+        // workspace cannot slip between them.
+        let mut store = self.store.lock().unwrap();
+        let was = store.spawn_enabled(session_id)?;
+        if enabled && let Some(code) = self.enable_refusal(&r, &store, &paths)? {
+            return Ok(Err(code));
+        }
+        let refused = store.set_spawn(session_id, enabled, device, &now())?;
+        Ok(Ok(SpawnChange {
+            session: r,
+            was,
+            enabled,
+            refused,
+        }))
+    }
+
+    /// The host's bridge identity (135d) or session isolation (136j) for
+    /// its views: what its link says now, else what it last said; `None`
+    /// for a host not heard from since that label was recorded.
+    pub fn host_label(&self, kind: HostLabel, host_id: &str) -> Result<Option<Identity>> {
+        let live = self.with_live(host_id, |caps| match kind {
+            HostLabel::Identity => caps.identity.clone(),
+            HostLabel::Isolation => caps.isolation.clone(),
+        });
+        if live.is_some() {
+            return Ok(live);
+        }
+        self.store.lock().unwrap().host_label(kind, host_id)
     }
 
     // ---- agent installs (decision 133) ----------------------------------
@@ -1038,6 +1635,11 @@ impl AgentManager {
         }
         let before = r.status.clone();
         apply_report(&mut r, report)?;
+        if let Some(reason) = self.storm_stop(&r)? {
+            // Storm stopped it for a cascade (L-4, LT-1, LT-13).
+            r.status = "stopped".into();
+            r.end_reason = Some(reason);
+        }
         if r.status != before || r.is_ended() {
             tracing::info!(
                 host = host_id,
@@ -1048,12 +1650,33 @@ impl AgentManager {
             );
         }
         self.store.lock().unwrap().update(&r)?;
+        self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
+        }
+        if let Some(made) = &report.child_workspace {
+            self.record_child_workspace(session_id, made)?;
         }
         self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
+    }
+
+    /// A child's workspace as its host made it, kept once. Only a session
+    /// with a parent has one; anything else, or anything malformed, is
+    /// dropped.
+    fn record_child_workspace(&self, session_id: &str, made: &ChildWorkspace) -> AgentResult<()> {
+        let store = self.store.lock().unwrap();
+        if store.lineage(session_id)?.parent_session.is_none() || !made.valid() {
+            tracing::warn!(session = session_id, "a child workspace report was dropped");
+            return Ok(());
+        }
+        store.record_child_workspace(session_id, made, &now())?;
+        Ok(())
+    }
+
+    pub fn child_workspace_of(&self, session_id: &str) -> Result<Option<ChildWorkspace>> {
+        self.store.lock().unwrap().child_workspace(session_id)
     }
 
     /// The host's word on what the session will not have (131a): bounded, so
@@ -1232,8 +1855,31 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
+        // 134-8: written now, since a switch turned on later cannot add asks
+        // to a config the CLI has already read.
+        let spawn_asks = (reads_storm
+            && SPAWN_PROVIDERS.contains(&provider.id.as_str())
+            && self.spawn_gate(&req.host_id).is_ok())
+        .then_some(SpawnStart::default());
         let launch = {
             let mut store = self.store.lock().unwrap();
+            // WS-9: under the same lock as the insert, so a spawn switch
+            // turned on beside it cannot slip between.
+            if store.workspace_held(
+                &record.host_id,
+                &record.workspace,
+                store::spawn::Claim::Launch,
+                &caps.workspace_paths,
+            )? {
+                return Err(AgentError::Conflict("workspace_held".into()));
+            }
+            // Checked under the same lock as the writes below, so the crew
+            // cannot be deleted between the check and the join.
+            if let Some(CrewJoin::Existing(id)) = &meta.crew
+                && store.crew(id)?.is_none()
+            {
+                return Err(AgentError::NotFound("no such crew"));
+            }
             let launch = LaunchRecord {
                 session_id: record.id.clone(),
                 name: session_name(
@@ -1242,8 +1888,10 @@ impl AgentManager {
                     &store.live_names()?,
                 ),
                 context: meta.context,
-                // A session that cannot reach Storm has nothing to write with.
+                // A session that cannot reach Storm has nothing to write with,
+                // and cannot read a role note (138g).
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
+                role: meta.role.filter(|_| reads_storm),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -1253,6 +1901,9 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            if spawn_asks.is_some() {
+                store.record_spawn_asks(&record.id, &record.created_at)?;
+            }
             let integrations: Vec<store::SessionIntegration> = grants
                 .iter()
                 .filter(|g| g.id != crate::gateway::connections::BUILTIN_ID)
@@ -1267,6 +1918,40 @@ impl AgentManager {
                 })
                 .collect();
             store.insert_integrations(&record.id, &integrations)?;
+            if let Some(label) = &meta.label {
+                store.set_role(&record.id, Some(label), &record.created_at)?;
+            }
+            match meta.crew {
+                Some(CrewJoin::Existing(id)) => {
+                    store.move_session(&record.id, Some(&id), None)?;
+                }
+                Some(CrewJoin::New { name, color }) => {
+                    let crew = Crew {
+                        id: crate::auth::identity::random_id("crw_"),
+                        name,
+                        color,
+                        order: 0,
+                    };
+                    store.create_crew(
+                        &crew,
+                        owner,
+                        std::slice::from_ref(&record.id),
+                        &record.created_at,
+                    )?;
+                }
+                Some(CrewJoin::After(old)) => {
+                    if let Some(m) = store.membership(&old)? {
+                        let members = store.members(&m.id)?;
+                        let before = members
+                            .iter()
+                            .position(|s| *s == old)
+                            .and_then(|at| members.get(at + 1))
+                            .cloned();
+                        store.move_session(&record.id, Some(&m.id), before.as_deref())?;
+                    }
+                }
+                None => {}
+            }
             launch
         };
         let mut session_live = SessionLive::new();
@@ -1286,9 +1971,13 @@ impl AgentManager {
                 interaction: "terminal".into(),
                 terminal: req.terminal,
                 mcp: grants,
-                context: reads_storm && launch.context.is_some(),
+                // `launch.role` is only set for a session that reads Storm.
+                context: reads_storm && (launch.context.is_some() || launch.role.is_some()),
+                resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
+                spawn_asks,
+                child_of: None,
             },
         );
         let mut record = record;
@@ -1340,7 +2029,7 @@ impl AgentManager {
             ));
         };
         if req.host_id != r.host_id
-            || req.workspace != r.workspace
+            || req.workspace != origin_workspace(&store, &r.id)?
             || req.provider.as_deref() != Some(r.provider.as_str())
         {
             return Err(AgentError::BadRequest(
@@ -1458,13 +2147,14 @@ impl AgentManager {
             .as_deref()
             .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
             .map(str::to_owned);
-        self.live
-            .lock()
-            .unwrap()
+        let attention = self.reported_attention(r, report);
+        let mut live = self.live.lock().unwrap();
+        let session = live
             .sessions
             .entry(r.id.clone())
-            .or_insert_with(SessionLive::new)
-            .activity = activity;
+            .or_insert_with(SessionLive::new);
+        session.activity = activity;
+        session.attention = attention;
     }
 
     /// Activity is shown only while the session runs: an `unknown` session's
@@ -1600,6 +2290,74 @@ impl AgentManager {
         Ok(())
     }
 
+    /// One request to a host's isolation helper about its child workspaces
+    /// (decision 137-3), and the helper's answer. A host that does not say
+    /// it has child workspaces is never sent one.
+    pub async fn child_workspace(
+        &self,
+        host_id: &str,
+        op: ChildOp,
+        child: Option<&str>,
+        parent: Option<&str>,
+        target: Option<&str>,
+    ) -> AgentResult<serde_json::Value> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.is_some_and(|c| c.child_workspaces) {
+            return Err(AgentError::ChildRefused("isolation_off".into()));
+        }
+        let request = crate::auth::identity::random_id("cwr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.children.lock().unwrap().insert(
+            request.clone(),
+            ChildPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::ChildWorkspace {
+            request: request.clone(),
+            op: op.name().into(),
+            child: child.map(str::to_string),
+            parent: parent.map(str::to_string),
+            target: target.map(str::to_string),
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(CHILD_DEADLINE, rx).await,
+            Err(e) => {
+                self.children.lock().unwrap().remove(&request);
+                return Err(e);
+            }
+        };
+        self.children.lock().unwrap().remove(&request);
+        match outcome {
+            Ok(Ok(Ok(answer))) => Ok(answer),
+            Ok(Ok(Err(code))) => Err(AgentError::ChildRefused(code)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::ChildRefused("timeout".into())),
+        }
+    }
+
+    /// A host's answer to its own `child.workspace` request, never
+    /// another's.
+    pub fn child_answered(
+        &self,
+        host_id: &str,
+        request: &str,
+        outcome: std::result::Result<serde_json::Value, String>,
+    ) -> AgentResult<()> {
+        let mut children = self.children.lock().unwrap();
+        match children.get(request) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = children.remove(request) {
+            let _ = p.done.send(outcome);
+        }
+        Ok(())
+    }
+
     /// Raw input. At most once: refused while the host is offline, never
     /// queued (freeze §11.3).
     pub fn input(&self, id: &str, bytes: &[u8]) -> AgentResult<()> {
@@ -1640,26 +2398,11 @@ impl AgentManager {
         Ok(())
     }
 
-    /// Asks the host to end the session. Its status changes when the host
-    /// reports it.
-    pub fn end(&self, id: &str) -> AgentResult<()> {
-        let r = self.live_record(id)?;
-        self.send(&r.host_id, Command::End { session: r.id })
-    }
-
-    /// Removes an ended session from the list (freeze §7.4), with its crew
-    /// membership and role label. Returns the crew this emptied, which is
-    /// deleted with it (decision 138c).
+    /// Test-only: a session outside any tree dismissed, and the crew it
+    /// emptied (decision 138c).
+    #[cfg(test)]
     pub fn dismiss(&self, id: &str) -> AgentResult<Option<Crew>> {
-        let r = self.get(id)?;
-        if !r.is_ended() {
-            return Err(AgentError::Conflict(
-                "only an ended session can be dismissed".into(),
-            ));
-        }
-        let (_, emptied) = self.store.lock().unwrap().delete(id)?;
-        self.live.lock().unwrap().sessions.remove(id);
-        Ok(emptied)
+        Ok(self.dismiss_session(id, false)?.crews.into_iter().next())
     }
 
     // ---- crews and role labels (decision 138) ------------------------------
@@ -1813,6 +2556,7 @@ impl AgentManager {
                 r.end_reason = Some("owner_removed".into());
                 r.ended_at.get_or_insert_with(now);
                 self.store.lock().unwrap().update(&r)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
                 failed += 1;
             }
@@ -1870,6 +2614,22 @@ fn is_permutation(given: &[String], all: &[String]) -> bool {
     a.sort_unstable();
     b.sort_unstable();
     a == b
+}
+
+fn origin_workspace(store: &store::Store, session_id: &str) -> Result<String> {
+    let mut id = session_id.to_string();
+    // Lineage is at most C4's depth; the bound only guards a cycle no
+    // trigger allows.
+    for _ in 0..=store::spawn::MAX_DEPTH {
+        match store.lineage(&id)?.parent_session {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    store
+        .get(&id)?
+        .map(|r| r.workspace)
+        .ok_or_else(|| anyhow::anyhow!("no session {id}"))
 }
 
 pub fn session_name(title: Option<&str>, workspace: &str, live: &[String]) -> String {
@@ -2023,6 +2783,13 @@ mod tests {
             provider_credentials: Vec::new(),
             plugin_mcp_remote: Vec::new(),
             agent_install: false,
+            child_workspaces: false,
+            identity: Identity::default(),
+            isolation: Isolation::default(),
+            workspace_paths: [("storm", "/work/storm"), ("site", "/work/site")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
         }
     }
 
@@ -2085,6 +2852,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
             },
             meta,
             grants,
@@ -2105,6 +2874,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: Some(old.id.clone()),
+                crew: None,
+                role: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -2123,9 +2894,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2182,6 +2955,8 @@ mod tests {
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert_eq!(wire["type"], "start");
         assert_eq!(wire["resume"], uuid);
+        // 136e: the host is told whose conversation it is.
+        assert_eq!(wire["resumed_from"], first.id.as_str());
         assert_eq!(
             m.get(&second.id).unwrap().resumed_from.as_deref(),
             Some(first.id.as_str())
@@ -2252,9 +3027,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2307,6 +3084,107 @@ mod tests {
         );
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert!(wire.get("context").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn a_launch_role_sets_the_start_flag_only_for_a_session_that_reads_storm() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true), ("shell", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let role = store::Context {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+            title: "Storm Reviewer".into(),
+        };
+        let label = RoleLabel {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+        };
+        let with_role = || LaunchMeta {
+            role: Some(role.clone()),
+            label: Some(label.clone()),
+            ..LaunchMeta::default()
+        };
+        let start = |rx: &mut mpsc::UnboundedReceiver<Envelope>| {
+            serde_json::to_value(rx.try_recv().unwrap()).unwrap()
+        };
+
+        // Reads Storm: the role is the launch's, and the host is told.
+        let (r, launch, _) = launch_meta(&m, None, offered(), with_role()).unwrap();
+        assert_eq!(launch.role, Some(role.clone()));
+        assert_eq!(start(&mut rx)["context"], true);
+        assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        assert_eq!(
+            m.launch_of(&r.id).unwrap().unwrap().role,
+            Some(role.clone())
+        );
+
+        // Neither a note nor a role: no flag.
+        launch_meta(&m, None, offered(), LaunchMeta::default()).unwrap();
+        assert!(start(&mut rx).get("context").is_none());
+
+        // Without Storm's connection the role is a label only (138g).
+        for (provider, grants) in [(Some("shell"), offered()), (None, offered()[1..].to_vec())] {
+            let (r, launch, _) = launch_meta(&m, provider, grants, with_role()).unwrap();
+            assert_eq!(launch.role, None, "{provider:?}");
+            let wire = start(&mut rx);
+            assert!(wire.get("context").is_none(), "{wire}");
+            assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        }
+    }
+
+    #[test]
+    fn a_launch_joins_or_starts_its_crew_before_start_and_refuses_an_unknown_one() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let crew = |join: CrewJoin| LaunchMeta {
+            crew: Some(join),
+            ..LaunchMeta::default()
+        };
+        let (a, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::New {
+                name: "Release".into(),
+                color: "sage".into(),
+            }),
+        )
+        .unwrap();
+        let made = m.membership(&a.id).unwrap().unwrap();
+        assert_eq!(m.crews().unwrap()[0].name, "Release");
+        let (b, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing(made.id.clone())),
+        )
+        .unwrap();
+        // A resume's join lands right after its predecessor.
+        let (c, _, _) =
+            launch_meta(&m, None, offered(), crew(CrewJoin::After(a.id.clone()))).unwrap();
+        assert_eq!(
+            m.store.lock().unwrap().members(&made.id).unwrap(),
+            [a.id.clone(), c.id.clone(), b.id.clone()]
+        );
+        while rx.try_recv().is_ok() {}
+
+        let before = m.list().unwrap().len();
+        let refused = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing("crw_NOPE".into())),
+        );
+        assert!(
+            matches!(refused, Err(AgentError::NotFound(_))),
+            "{refused:?}"
+        );
+        assert_eq!(m.list().unwrap().len(), before, "no session is left behind");
+        assert!(rx.try_recv().is_err(), "nothing was sent to the host");
     }
 
     #[test]
@@ -2663,6 +3541,8 @@ mod tests {
                     write_vault_id: None,
                     allow_vault_writes: false,
                     resume_of: None,
+                    crew: None,
+                    role: None,
                 },
                 meta,
                 offered(),
@@ -2767,9 +3647,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2784,9 +3666,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2806,9 +3690,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2861,6 +3747,8 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -2892,9 +3780,11 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -3014,9 +3904,11 @@ mod tests {
                         signal: None,
                         title: None,
                         activity: None,
+                        attention: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
+                        child_workspace: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -3047,9 +3939,11 @@ mod tests {
             end_reason: None,
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
+            attention: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
+            child_workspace: None,
             signal: None,
         }
     }
@@ -3180,6 +4074,30 @@ mod tests {
         let m = AgentManager::open(d.path()).unwrap();
         let old = m.get("ags_OLD").unwrap();
         assert_eq!((old.status.as_str(), old.title), ("completed", None));
+        drop(m);
+        AgentManager::open(d.path()).unwrap();
+    }
+
+    /// 138f is additive: a launch row from before it reads back with no role.
+    #[test]
+    fn an_old_launch_table_gains_the_role_columns() {
+        let d = tempdir::TempDir::new("storm-agent").unwrap();
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("agent/agent.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_launch (
+                 session_id TEXT PRIMARY KEY, name TEXT NOT NULL, context_vault_id TEXT,
+                 context_note_id TEXT, context_title TEXT, write_vault_id TEXT,
+                 created_at TEXT NOT NULL);
+             INSERT INTO session_launch VALUES ('ags_OLD', 'plan', 'vlt_P', 'note-plan',
+                 'Plan', NULL, '2026-10-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+        let m = AgentManager::open(d.path()).unwrap();
+        let old = m.launch_of("ags_OLD").unwrap().unwrap();
+        assert_eq!(old.role, None);
+        assert_eq!(old.context.unwrap().title, "Plan");
         drop(m);
         AgentManager::open(d.path()).unwrap();
     }
@@ -3349,9 +4267,11 @@ mod tests {
                     signal: None,
                     title: None,
                     activity: None,
+                    attention: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
+                    child_workspace: None,
                 },
             )
             .unwrap();
@@ -3398,7 +4318,7 @@ mod tests {
         assert_eq!(v["type"], "terminal.replay");
 
         // A native `start` is byte for byte what it was before token sync.
-        let start = |provider_credential: Option<String>| Envelope {
+        let start_with = |provider_credential: Option<String>, spawn_asks| Envelope {
             cmd_seq: 1,
             command: Command::Start {
                 session: "ags_X".into(),
@@ -3410,8 +4330,12 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
+                spawn_asks,
+                resumed_from: None,
+                child_of: None,
             },
         };
+        let start = |provider_credential| start_with(provider_credential, None);
         assert_eq!(
             serde_json::to_string(&start(None)).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24}}"#
@@ -3420,6 +4344,16 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
+        );
+        // 134-8: a start decision 134 may offer its tools to says so.
+        assert_eq!(
+            serde_json::to_string(&start_with(None, Some(SpawnStart::default()))).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"spawn_asks":{}}"#
+        );
+        assert!(
+            serde_json::to_string(&start_with(None, Some(SpawnStart { spawned: true })))
+                .unwrap()
+                .ends_with(r#""spawn_asks":{"spawned":true}}"#)
         );
     }
 
@@ -3470,6 +4404,248 @@ mod tests {
         assert!(!caps.agent_install);
         let caps: Capabilities = serde_json::from_str(r#"{"agent_install":true}"#).unwrap();
         assert!(caps.agent_install);
+    }
+
+    /// G-135-3 on the server (135d): a host that says nothing, says null,
+    /// or says something this server does not know is never `verified`,
+    /// and its `hello` is still taken.
+    #[test]
+    fn identity_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Identity {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .identity
+        };
+        let old_host = Identity {
+            state: "unavailable".into(),
+            mechanism: None,
+            reason: Some("old_host".into()),
+        };
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"identity": null})), old_host);
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "trusted", "mechanism": "so_peerpidfd"}),
+            serde_json::json!("verified"),
+            serde_json::json!({"mechanism": "so_peerpidfd"}),
+        ] {
+            let i = parse(serde_json::json!({"identity": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"identity":
+            {"state": "verified", "mechanism": "so_peerpidfd", "reason": null}}));
+        assert!(v.verified());
+        assert_eq!(v.mechanism.as_deref(), Some("so_peerpidfd"));
+        let w =
+            parse(serde_json::json!({"identity": {"state": "unsupported", "reason": "windows"}}));
+        assert_eq!(
+            (w.state.as_str(), w.reason.as_deref()),
+            ("unsupported", Some("windows"))
+        );
+        let long = parse(serde_json::json!({"identity":
+            {"state": "unavailable", "reason": "é".repeat(100)}}));
+        assert!(long.reason.unwrap().len() <= IDENTITY_WORD_MAX);
+        // Always all three keys on the way out, as the host sends them.
+        assert_eq!(
+            serde_json::to_value(&old_host).unwrap(),
+            serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"})
+        );
+    }
+
+    #[test]
+    fn a_hosts_identity_is_kept_while_it_is_away_and_its_link_wins() {
+        let (m, _d) = manager();
+        assert_eq!(m.host_label(HostLabel::Identity, "hst_A").unwrap(), None);
+        let verified = Identity {
+            state: "verified".into(),
+            mechanism: Some("so_peerpidfd".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    identity: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.inventory("hst_A", caps(&[("shell", true)])).unwrap();
+        assert!(!m.host_verified("hst_A"));
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(Identity::default())
+        );
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                identity: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert!(!m.host_verified("hst_A"), "an offline host checks nothing");
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(verified)
+        );
+    }
+
+    /// 135-2 as-built 4: a new link carries the old one's capabilities over,
+    /// but its identity says nothing until the link itself reports.
+    #[test]
+    fn a_copied_identity_is_not_verified_until_the_link_reports() {
+        let (m, _d) = manager();
+        let verified = Capabilities {
+            identity: Identity {
+                state: "verified".into(),
+                mechanism: Some("so_peerpidfd".into()),
+                reason: None,
+            },
+            ..caps(&[("shell", true)])
+        };
+        m.connect_host("hst_A");
+        m.inventory("hst_A", verified.clone()).unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.connect_host("hst_A");
+        assert!(
+            m.host_live("hst_A").capabilities.is_some(),
+            "carried over for views"
+        );
+        assert!(!m.host_verified("hst_A"));
+        m.inventory("hst_A", verified).unwrap();
+        assert!(m.host_verified("hst_A"));
+    }
+
+    /// 136j, read as 135-2 reads `identity`: an old host is
+    /// `unavailable: old_host`, and nothing this server does not know is
+    /// ever `verified`.
+    #[test]
+    fn isolation_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Isolation {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .isolation
+        };
+        let old_host = Isolation::default();
+        assert_eq!(old_host.reason.as_deref(), Some("old_host"));
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"isolation": null})), old_host);
+        // `identity` verified says nothing about isolation.
+        assert_eq!(
+            parse(serde_json::json!({"identity": {"state": "verified"}})),
+            old_host
+        );
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "isolated", "mechanism": "systemd_units"}),
+            serde_json::json!(true),
+            serde_json::json!({"mechanism": "systemd_units"}),
+        ] {
+            let i = parse(serde_json::json!({"isolation": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"isolation":
+            {"state": "verified", "mechanism": "systemd_units", "reason": null}}));
+        assert!(v.verified());
+        let off = parse(serde_json::json!({"isolation":
+            {"state": "unavailable", "mechanism": null, "reason": "off"}}));
+        assert_eq!(off.reason.as_deref(), Some("off"));
+    }
+
+    /// `host_isolated` is the live link's alone: verified only while a
+    /// link says so, never offline whatever was stored, and the
+    /// stored copy only labels views.
+    #[test]
+    fn a_hosts_isolation_is_its_live_links_and_kept_for_its_views() {
+        let (m, _d) = manager();
+        assert!(!m.host_isolated("hst_A"));
+        assert_eq!(m.host_label(HostLabel::Isolation, "hst_A").unwrap(), None);
+        let verified = Isolation {
+            state: "verified".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(m.host_isolated("hst_A"));
+        assert!(!m.host_verified("hst_A"), "identity is its own");
+        // A downgrade in the inventory takes effect at once.
+        let down = Isolation {
+            state: "unavailable".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: Some("no_passt".into()),
+        };
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: down.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        assert!(!m.host_isolated("hst_A"));
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert!(
+            !m.host_isolated("hst_A"),
+            "an offline host isolates nothing new"
+        );
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_A").unwrap(),
+            Some(verified)
+        );
+        let (_g, _rx) = m.connect_host("hst_B");
+        m.hello(
+            "hst_B",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: Isolation {
+                        state: "unsupported".into(),
+                        mechanism: None,
+                        reason: Some("windows".into()),
+                    },
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(!m.host_isolated("hst_B"));
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_B")
+                .unwrap()
+                .unwrap()
+                .state,
+            IDENTITY_UNSUPPORTED
+        );
     }
 
     #[test]

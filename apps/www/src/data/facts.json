@@ -56,7 +56,7 @@
     },
     {
       "name": "session_context",
-      "description": "Read the note this agent session was started from: its vault and note ids, title, path, version and full markdown. Takes no arguments.",
+      "description": "Read this agent session's launch context: the note it was started from (`context`) and its role note (`role`), each with vault and note ids, title, path, version and full markdown, or null when not set. A note deleted since is null and named in `missing`. Takes no arguments.",
       "access": "agents",
       "agents": true
     },

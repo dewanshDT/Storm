@@ -36,6 +36,13 @@ impl Listener {
     }
 }
 
+#[cfg(unix)]
+impl From<tokio::net::UnixListener> for Listener {
+    fn from(listener: tokio::net::UnixListener) -> Self {
+        Self(imp::Listener(listener))
+    }
+}
+
 /// The connecting end, a bridge's.
 pub type Client = imp::Client;
 
@@ -45,8 +52,29 @@ pub async fn connect(address: &OsStr) -> io::Result<Client> {
 }
 
 /// Connects without a runtime, for a one-line report (the harness hook).
-pub fn connect_blocking(address: &OsStr) -> io::Result<impl io::Write + use<>> {
-    imp::connect_blocking(address)
+pub fn connect_blocking(address: &OsStr) -> io::Result<BlockingClient> {
+    imp::connect_blocking(address).map(BlockingClient)
+}
+
+/// A one-line reporter's end of the channel.
+pub struct BlockingClient(imp::BlockingClient);
+
+impl io::Write for BlockingClient {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.write(buf)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl BlockingClient {
+    /// Waits, up to `limit`, for the host to close the connection. A host
+    /// that checks who connected (decision 135) does so after reading the
+    /// line, and refuses a connector that has already exited.
+    pub fn wait_closed(&mut self, limit: std::time::Duration) {
+        imp::wait_closed(&mut self.0, limit)
+    }
 }
 
 #[cfg(unix)]
@@ -60,7 +88,7 @@ mod imp {
 
     pub type Stream = tokio::net::UnixStream;
 
-    pub struct Listener(tokio::net::UnixListener);
+    pub struct Listener(pub(super) tokio::net::UnixListener);
 
     impl Listener {
         pub fn bind(path: &Path) -> io::Result<Self> {
@@ -82,8 +110,26 @@ mod imp {
         tokio::net::UnixStream::connect(address).await
     }
 
-    pub fn connect_blocking(address: &OsStr) -> io::Result<std::os::unix::net::UnixStream> {
+    pub type BlockingClient = std::os::unix::net::UnixStream;
+
+    pub fn connect_blocking(address: &OsStr) -> io::Result<BlockingClient> {
         std::os::unix::net::UnixStream::connect(address)
+    }
+
+    pub fn wait_closed(stream: &mut BlockingClient, limit: std::time::Duration) {
+        use std::io::Read;
+        let deadline = std::time::Instant::now() + limit;
+        let mut buf = [0u8; 256];
+        loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() || stream.set_read_timeout(Some(left)).is_err() {
+                return;
+            }
+            match stream.read(&mut buf) {
+                Ok(0) | Err(_) => return,
+                Ok(_) => {}
+            }
+        }
     }
 }
 
@@ -149,7 +195,12 @@ mod imp {
         ClientOptions::new().open(address)
     }
 
-    pub fn connect_blocking(address: &OsStr) -> io::Result<std::fs::File> {
+    pub type BlockingClient = std::fs::File;
+
+    /// Nothing to wait for: Windows hosts do not check who connected (AM80).
+    pub fn wait_closed(_stream: &mut BlockingClient, _limit: std::time::Duration) {}
+
+    pub fn connect_blocking(address: &OsStr) -> io::Result<BlockingClient> {
         for _ in 0..50 {
             match std::fs::OpenOptions::new().write(true).open(address) {
                 Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {

@@ -1192,6 +1192,36 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     ops::reconcile_single_user(&state)
         .await
         .context("single-user sweep over agent.db and gateway.db")?;
+    ops::fail_children_left_creating(&state)
+        .await
+        .context("failing spawned sessions a restart left creating")?;
+
+    // P-5: expired spawn requests are marked, at boot and then every few
+    // seconds. An approval checks expiry itself, so this is for the record.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                ops::sweep_spawn_requests(&state).await;
+            }
+        });
+    }
+
+    // Cascades (134-6, 134-7): each target is stopped once its stop is due,
+    // at once for a person's end and after C9's grace otherwise, and an
+    // unreachable one once its host is back. Checked every second.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                ops::stop_cascade_targets(&state, &crate::index::now_rfc3339()).await;
+            }
+        });
+    }
 
     // One watcher over the whole root, attributing each event to a vault by
     // directory prefix. Adding or removing a vault then needs no watcher work
