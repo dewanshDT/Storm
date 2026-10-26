@@ -28,7 +28,7 @@ use std::path::Path;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, RenameFlags};
 use serde_json::{Map, Value, json};
 
-use crate::clone::{GIT, Git, HOME, commit_ok, environment, protections};
+use crate::clone::{GIT, Git, HOME, TMP, Trust, commit_ok, environment, protections};
 
 /// What an export leaves in the review directory: the bundle an Apply
 /// imports from.
@@ -77,12 +77,25 @@ impl Failure {
     ];
 }
 
-fn git_for<'a>(repo: &Path, home: &Path, git: &'a Path) -> Git<'a> {
-    Git {
+/// git for one repository another user may own: the child's (an export's
+/// transport reads it) or the parent's (an Apply writes it). The `Trust`
+/// must outlive every call.
+fn git_for<'a>(
+    repo: &Path,
+    home: &Path,
+    git: &'a Path,
+    tmp: &Path,
+) -> Result<(Git<'a>, Trust), Failure> {
+    let trust = Trust::write(tmp, repo).map_err(|e| {
+        eprintln!("writing git's trust file: {e}");
+        Failure::Failed
+    })?;
+    let git = Git {
         git,
-        env: environment(home),
+        env: environment(home, trust.path()),
         config: protections(repo),
-    }
+    };
+    Ok((git, trust))
 }
 
 /// Up to `max` bytes of printable text, cut at a character.
@@ -150,13 +163,14 @@ pub fn export_clone(
     base: &str,
     budget: u64,
     home: &Path,
+    tmp: &Path,
 ) -> Result<Value, Failure> {
     let repo = dir.join(EXPORT_REPO);
     let bundle = dir.join(BUNDLE);
     let _ = std::fs::remove_dir_all(&repo);
     let _ = std::fs::remove_file(&bundle);
     std::fs::create_dir(&repo).map_err(|_| Failure::Failed)?;
-    let g = git_for(child, home, git);
+    let (g, _trust) = git_for(child, home, git, tmp)?;
     g.run(&repo, &["init", "--quiet", "--bare", "--template="])
         .map_err(|()| Failure::Failed)?;
     let url = format!("file://{}", child.display());
@@ -397,6 +411,7 @@ pub fn import_clone(
     branch: &str,
     tip: &str,
     home: &Path,
+    tmp: &Path,
 ) -> Result<Value, Failure> {
     let dot = parent.join(".git");
     if !dot.symlink_metadata().is_ok_and(|m| m.is_dir()) || !commit_ok(tip) {
@@ -405,7 +420,7 @@ pub fn import_clone(
     if checked_out(&dot, branch) {
         return Err(Failure::BranchExists);
     }
-    let g = git_for(parent, home, git);
+    let (g, _trust) = git_for(parent, home, git, tmp)?;
     let git_dir = format!("--git-dir={}", dot.display());
     let reference = format!("refs/heads/{branch}");
     let existing = |g: &Git| {
@@ -860,18 +875,32 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     }
     let a: Vec<&str> = args.iter().map(String::as_str).collect();
-    let (git, home) = (Path::new(GIT), Path::new(HOME));
+    let (git, home, tmp) = (Path::new(GIT), Path::new(HOME), Path::new(TMP));
     let result = match a[..] {
         ["export", "clone", child, dir, base, budget] => {
             let Ok(budget) = budget.parse::<u64>() else {
                 return std::process::ExitCode::from(2);
             };
-            export_clone(git, Path::new(child), Path::new(dir), base, budget, home)
+            export_clone(
+                git,
+                Path::new(child),
+                Path::new(dir),
+                base,
+                budget,
+                home,
+                tmp,
+            )
         }
         ["export", "scratch", child] => export_scratch(Path::new(child)),
-        ["import", "clone", parent, bundle, branch, tip] => {
-            import_clone(git, Path::new(parent), Path::new(bundle), branch, tip, home)
-        }
+        ["import", "clone", parent, bundle, branch, tip] => import_clone(
+            git,
+            Path::new(parent),
+            Path::new(bundle),
+            branch,
+            tip,
+            home,
+            tmp,
+        ),
         ["import", "scratch", scratch, parent, child, name] => {
             import_scratch(Path::new(scratch), Path::new(parent), child, name)
         }
@@ -1121,7 +1150,16 @@ pub mod tests {
 
     fn export(c: &Child, dir: &Path) -> Value {
         std::fs::create_dir_all(dir).unwrap();
-        export_clone(Path::new(GIT), &c.child, dir, &c.base, BIG, &c.home).unwrap()
+        export_clone(
+            Path::new(GIT),
+            &c.child,
+            dir,
+            &c.base,
+            BIG,
+            &c.home,
+            Path::new(TMP),
+        )
+        .unwrap()
     }
 
     /// WT-3's export half: a hostile child's repository is read as data.
@@ -1192,6 +1230,7 @@ pub mod tests {
             &"b".repeat(40),
             BIG,
             Path::new(HOME),
+            Path::new(TMP),
         )
         .unwrap();
         assert_eq!(v["base_found"], false);
@@ -1213,7 +1252,16 @@ pub mod tests {
         git(&child, &["commit", "-q", "-m", "long"]);
         let dir = t.path().join("review");
         std::fs::create_dir(&dir).unwrap();
-        let v = export_clone(Path::new(GIT), &child, &dir, &base, BIG, Path::new(HOME)).unwrap();
+        let v = export_clone(
+            Path::new(GIT),
+            &child,
+            &dir,
+            &base,
+            BIG,
+            Path::new(HOME),
+            Path::new(TMP),
+        )
+        .unwrap();
         assert_eq!(v["patch_truncated"], true);
         assert_eq!(v["more_commits"], false);
         for i in 0..MAX_COMMITS {
@@ -1222,14 +1270,196 @@ pub mod tests {
                 &["commit", "-q", "--allow-empty", "-m", &format!("c{i}")],
             );
         }
-        let v = export_clone(Path::new(GIT), &child, &dir, &base, BIG, Path::new(HOME)).unwrap();
+        let v = export_clone(
+            Path::new(GIT),
+            &child,
+            &dir,
+            &base,
+            BIG,
+            Path::new(HOME),
+            Path::new(TMP),
+        )
+        .unwrap();
         assert_eq!(v["commits"].as_array().unwrap().len(), MAX_COMMITS);
         assert_eq!(v["more_commits"], true);
         assert!(v["patch"].as_str().unwrap().len() <= MAX_PATCH);
         assert_eq!(
-            export_clone(Path::new(GIT), &child, &dir, &base, 4096, Path::new(HOME)),
+            export_clone(
+                Path::new(GIT),
+                &child,
+                &dir,
+                &base,
+                4096,
+                Path::new(HOME),
+                Path::new(TMP)
+            ),
             Err(Failure::WorkspaceCap)
         );
+    }
+
+    /// 140h: an export and an Apply each give git a trust file naming only
+    /// the repository it reads or writes, and leave none behind.
+    #[test]
+    fn an_export_and_an_apply_trust_only_their_repository() {
+        let t = tempfile::tempdir().unwrap();
+        let tmp = t.path().join("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        let child = t.path().join("child");
+        let base = repo(&child, &[("a", "1")]);
+        git(&child, &["commit", "-q", "--allow-empty", "-m", "two"]);
+        let (g, trust) = git_for(&child, Path::new(HOME), Path::new(GIT), &tmp).unwrap();
+        let global = ("GIT_CONFIG_GLOBAL", trust.path().display().to_string());
+        assert!(g.env.contains(&global));
+        let listed = git(
+            t.path(),
+            &["config", "--file", trust.path().to_str().unwrap(), "--list"],
+        );
+        let c = child.display();
+        assert_eq!(
+            listed,
+            format!("safe.directory={c}\nsafe.directory={c}/.git")
+        );
+        drop((g, trust));
+        let empty = |tmp: &Path| std::fs::read_dir(tmp).unwrap().count() == 0;
+        assert!(empty(&tmp));
+        let dir = t.path().join("review");
+        std::fs::create_dir(&dir).unwrap();
+        let v = export_clone(
+            Path::new(GIT),
+            &child,
+            &dir,
+            &base,
+            BIG,
+            Path::new(HOME),
+            &tmp,
+        )
+        .unwrap();
+        assert!(empty(&tmp));
+        let parent = t.path().join("parent");
+        repo(&parent, &[("p", "p")]);
+        let tip = v["tip"].as_str().unwrap();
+        let bundle = dir.join(BUNDLE);
+        let apply = |branch: &str| {
+            import_clone(
+                Path::new(GIT),
+                &parent,
+                &bundle,
+                branch,
+                tip,
+                Path::new(HOME),
+                &tmp,
+            )
+        };
+        assert_eq!(apply("storm/ags_T1").unwrap()["already"], false);
+        assert_eq!(apply("main"), Err(Failure::BranchExists));
+        assert!(empty(&tmp));
+    }
+
+    /// 140h, the review's half: git is made to take every repository for
+    /// another user's (`GIT_TEST_ASSUME_DIFFERENT_OWNER`). The export's
+    /// transport call reads the child (the receiving repository named
+    /// outright, so only upload-pack's check is in play), refused with
+    /// `-c safe.directory` alone where upload-pack checks and read with the
+    /// trust file; the Apply's fetch and ref, which name the parent's
+    /// `--git-dir`, write the parent.
+    #[test]
+    fn an_export_and_an_apply_reach_repositories_another_user_owns() {
+        let t = tempfile::tempdir().unwrap();
+        let tmp = t.path().join("tmp");
+        std::fs::create_dir(&tmp).unwrap();
+        let child = t.path().join("child");
+        repo(&child, &[("a", "1")]);
+        let tip = git(&child, &["rev-parse", "HEAD"]);
+        let foreign = |repo: &Path, global: Option<&Path>| {
+            let (mut g, trust) = git_for(repo, Path::new(HOME), Path::new(GIT), &tmp).unwrap();
+            if let Some(global) = global {
+                g.env.retain(|(k, _)| *k != "GIT_CONFIG_GLOBAL");
+                g.env
+                    .push(("GIT_CONFIG_GLOBAL", global.display().to_string()));
+            }
+            g.env.push(("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1".into()));
+            (g, trust)
+        };
+        let fetch = |g: &Git, into: &Path| {
+            let into = t.path().join(into);
+            git(
+                t.path(),
+                &[
+                    "init",
+                    "-q",
+                    "--bare",
+                    "--template=",
+                    into.to_str().unwrap(),
+                ],
+            );
+            g.run(
+                t.path(),
+                &[
+                    &format!("--git-dir={}", into.display()),
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    "--no-write-fetch-head",
+                    "--",
+                    &format!("file://{}", child.display()),
+                    &format!("+HEAD:{EXPORT_REF}"),
+                ],
+            )
+        };
+        let (old, _t) = foreign(&child, Some(Path::new("/dev/null")));
+        let before = fetch(&old, Path::new("before.git"));
+        if crate::clone::tests::upload_pack_checks_ownership(&child) {
+            assert!(before.is_err(), "-c safe.directory alone is lost");
+        } else {
+            eprintln!("this git's upload-pack does not check ownership");
+        }
+        let (new, trust) = foreign(&child, None);
+        assert!(fetch(&new, Path::new("after.git")).is_ok());
+        drop((new, trust));
+        let bundle = t.path().join("b.bundle");
+        git(
+            t.path(),
+            &[
+                "--git-dir",
+                t.path().join("after.git").to_str().unwrap(),
+                "bundle",
+                "create",
+                "-q",
+                bundle.to_str().unwrap(),
+                EXPORT_REF,
+            ],
+        );
+        let parent = t.path().join("parent");
+        repo(&parent, &[("p", "p")]);
+        let (g, _trust) = foreign(&parent, None);
+        let git_dir = format!("--git-dir={}", parent.join(".git").display());
+        let b = bundle.to_str().unwrap();
+        let fetched = g.run(
+            &parent.join(".git"),
+            &[
+                &git_dir,
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--",
+                b,
+                EXPORT_REF,
+            ],
+        );
+        assert!(fetched.is_ok());
+        let zero = "0".repeat(tip.len());
+        let made = g.run(
+            &parent.join(".git"),
+            &[
+                &git_dir,
+                "update-ref",
+                "refs/heads/storm/ags_T2",
+                &tip,
+                &zero,
+            ],
+        );
+        assert!(made.is_ok());
+        assert_eq!(git(&parent, &["rev-parse", "storm/ags_T2"]), tip);
     }
 
     /// Everything a test needs to show the parent is untouched but for the
@@ -1296,6 +1526,7 @@ pub mod tests {
             "storm/ags_C1",
             &c.tip,
             &c.home,
+            Path::new(TMP),
         )
         .unwrap();
         assert_eq!(c.plants.ran(), Vec::<String>::new());
@@ -1329,6 +1560,7 @@ pub mod tests {
             "storm/ags_C1",
             &c.tip,
             &c.home,
+            Path::new(TMP),
         )
         .unwrap();
         assert_eq!(again["already"], true);
@@ -1344,8 +1576,17 @@ pub mod tests {
         export(&c, &dir);
         let parent = parent_with(t.path(), &c);
         let bundle = dir.join(BUNDLE);
-        let apply =
-            |branch: &str| import_clone(Path::new(GIT), &parent, &bundle, branch, &c.tip, &c.home);
+        let apply = |branch: &str| {
+            import_clone(
+                Path::new(GIT),
+                &parent,
+                &bundle,
+                branch,
+                &c.tip,
+                &c.home,
+                Path::new(TMP),
+            )
+        };
         let main = git(&parent, &["rev-parse", "main"]);
         git(&parent, &["branch", "storm/ags_X1", "main"]);
         assert_eq!(apply("storm/ags_X1"), Err(Failure::BranchExists));
@@ -1386,7 +1627,8 @@ pub mod tests {
                 &bundle,
                 "storm/ags_X4",
                 &c.tip,
-                &c.home
+                &c.home,
+                Path::new(TMP)
             ),
             Err(Failure::Unreadable)
         );
@@ -1398,7 +1640,8 @@ pub mod tests {
                 &bundle,
                 "storm/ags_X5",
                 &"d".repeat(40),
-                &c.home
+                &c.home,
+                Path::new(TMP)
             ),
             Err(Failure::Unreadable)
         );

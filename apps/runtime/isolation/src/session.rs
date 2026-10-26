@@ -953,6 +953,7 @@ pub mod tests {
                 &spec.dest,
                 spec.budget,
                 &home,
+                &std::env::temp_dir(),
             )))
         }
         fn run_review(&self, spec: &crate::children::ReviewSpec) -> Result<String> {
@@ -1018,6 +1019,7 @@ pub mod tests {
                     base,
                     budget.parse().unwrap(),
                     &home,
+                    &std::env::temp_dir(),
                 ),
                 ["export", "scratch", child] => crate::review::export_scratch(Path::new(child)),
                 ["import", "clone", parent, bundle, branch, tip] => crate::review::import_clone(
@@ -1027,6 +1029,7 @@ pub mod tests {
                     branch,
                     tip,
                     &home,
+                    &std::env::temp_dir(),
                 ),
                 ["import", "scratch", scratch, parent, child, name] => {
                     crate::review::import_scratch(
