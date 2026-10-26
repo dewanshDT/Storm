@@ -3,7 +3,7 @@
 //! and its workspace group, sees the system read-only, its workspace
 //! read-write at its real path, its own home and Storm session directory,
 //! and nothing of the host account's state or another session's
-//! directories; it has its own `/tmp`, `/dev` (and with it `/dev/shm`) and
+//! directories; it has its own `/tmp`, `/dev`, `/dev/shm` (a tmpfs of its own) and
 //! IPC namespace, its own network namespace (`net.rs`), and its own
 //! control group, which stopping the unit ends whole. The terminal is the
 //! one the host handed over.
@@ -190,9 +190,12 @@ impl UnitSpec {
             p("KillSignal=SIGHUP"),
             format!("TimeoutStopSec={STOP_GRACE_SECS}"),
             p("SendSIGKILL=yes"),
-            // Private /tmp and /var/tmp, /dev (with /dev/shm), IPC.
+            // Private /tmp and /var/tmp, /dev, /dev/shm and IPC.
             p("PrivateTmp=yes"),
             p("PrivateDevices=yes"),
+            // PrivateDevices binds the host's /dev/shm into the private /dev,
+            // so without this every session shares one (AT-11, decision 140).
+            p("TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev"),
             p("PrivateIPC=yes"),
             p("RemoveIPC=yes"),
             p("ProtectSystem=strict"),
@@ -507,6 +510,7 @@ pub mod tests {
             "WorkingDirectory=/var/lib/storm-runtime/workspaces/app",
             "PrivateTmp=yes",
             "PrivateDevices=yes",
+            "TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev",
             "PrivateIPC=yes",
             "RemoveIPC=yes",
             "ProtectSystem=strict",
@@ -567,6 +571,7 @@ pub mod tests {
         assert_eq!(
             mounts,
             [
+                "TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev",
                 "TemporaryFileSystem=/var/lib/storm-runtime:ro",
                 "TemporaryFileSystem=/var/lib/storm-runtime-isolation:ro",
                 "TemporaryFileSystem=/var/lib/storm-runtime/workspaces:ro",
