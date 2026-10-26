@@ -182,6 +182,16 @@ pub enum Command {
         #[serde(default)]
         target: Option<String>,
     },
+    /// A person's new workspace (decision 141c): a folder in the first
+    /// workspace root, a git repository if `git`. The host answers on
+    /// `/v1/runtime/workspaces/<request>`.
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate {
+        request: String,
+        name: String,
+        #[serde(default)]
+        git: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -207,6 +217,7 @@ impl Command {
             Self::TerminalImage { .. } => "terminal.image",
             Self::AgentInstall { .. } => "agent.install",
             Self::ChildWorkspace { .. } => "child.workspace",
+            Self::WorkspaceCreate { .. } => "workspace.create",
         }
     }
 
@@ -220,7 +231,10 @@ impl Command {
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh | Self::AgentInstall { .. } | Self::ChildWorkspace { .. } => None,
+            Self::Refresh
+            | Self::AgentInstall { .. }
+            | Self::ChildWorkspace { .. }
+            | Self::WorkspaceCreate { .. } => None,
         }
     }
 }
@@ -595,6 +609,9 @@ impl Host {
             // It installs, updates and removes agent CLIs (`agent.install`,
             // decision 133-4).
             "agent_install": true,
+            // It makes a workspace a person names (`workspace.create`,
+            // decision 141c).
+            "workspace_create": true,
             // The providers whose sessions it can resume (decision 89). A
             // host without this would start a resume as a new conversation.
             "resume": self
@@ -680,6 +697,50 @@ impl Host {
         };
         if let Err(e) = self.post(&report, &body).await {
             tracing::warn!(error = %e, "child workspace: could not post the answer");
+        }
+    }
+
+    /// One `workspace.create` (decision 141c): the folder is made, a fresh
+    /// inventory names it, and only then is the answer posted, so the app's
+    /// next look finds it. On an isolated host the helper converts it when a
+    /// session first starts there (136-2), as for any workspace made since
+    /// `on`.
+    async fn create_workspace(self: Arc<Self>, request: String, name: String, git: bool) {
+        let request_ok = request.len() <= 64
+            && request.starts_with("wsr_")
+            && request[4..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !request_ok {
+            tracing::warn!(request = %request, "new workspace: a malformed request id, ignored");
+            return;
+        }
+        let roots = self.config.workspace_roots.clone();
+        let made = tokio::task::spawn_blocking(move || {
+            crate::config::create_workspace(&roots, &name, git)
+        })
+        .await;
+        let body = match made {
+            Ok(Ok(name)) => {
+                tracing::info!(git, "workspace created");
+                if let Err(e) = self
+                    .post("/v1/runtime/inventory", &self.capabilities())
+                    .await
+                {
+                    tracing::warn!(error = %e, "new workspace: could not post the inventory");
+                }
+                json!({ "answer": { "name": name } })
+            }
+            Ok(Err(code)) => {
+                tracing::info!(code, "new workspace refused");
+                json!({ "refused": code })
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "new workspace: the call panicked");
+                json!({ "refused": "failed" })
+            }
+        };
+        let report = format!("/v1/runtime/workspaces/{request}");
+        if let Err(e) = self.post(&report, &body).await {
+            tracing::warn!(error = %e, "new workspace: could not post the answer");
         }
     }
 
@@ -1363,7 +1424,8 @@ impl Host {
             Command::Refresh
             | Command::TerminalImage { .. }
             | Command::AgentInstall { .. }
-            | Command::ChildWorkspace { .. } => {
+            | Command::ChildWorkspace { .. }
+            | Command::WorkspaceCreate { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -1438,6 +1500,9 @@ impl Host {
                 self.child_workspace(request, op, child, parent, target)
                     .await
             }
+            Command::WorkspaceCreate { request, name, git } => {
+                self.create_workspace(request, name, git).await
+            }
             command => self.handle_now(command),
         }
     }
@@ -1451,7 +1516,8 @@ impl Host {
             | Command::Refresh
             | Command::TerminalImage { .. }
             | Command::AgentInstall { .. }
-            | Command::ChildWorkspace { .. } => {
+            | Command::ChildWorkspace { .. }
+            | Command::WorkspaceCreate { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -4268,6 +4334,57 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
             child_answer(&seen, "cwr_1").unwrap(),
             json!({"refused": "isolation_off"})
         );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 141c: `workspace.create` as the server sends it makes the
+    /// folder, names it in an inventory posted before the answer, and a
+    /// refusal is its code; a malformed request id is never answered.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_new_workspace_is_made_reported_and_answered() {
+        let (host, seen, _state, roots) = harness_host("exec sleep 1000").await;
+        assert_eq!(host.capabilities()["workspace_create"], json!(true));
+        let command = |request: &str, name: &str| {
+            serde_json::from_value::<Envelope>(json!({"cmd_seq": 7, "type": "workspace.create",
+                "request": request, "name": name, "git": false}))
+            .unwrap()
+            .command
+        };
+        let posts = |path: &str| -> Vec<(usize, serde_json::Value)> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .enumerate()
+                .filter(|(_, (p, _))| p.ends_with(path))
+                .map(|(i, (_, b))| (i, b.clone()))
+                .collect()
+        };
+        host.clone().handle(command("wsr_1", "demo")).await;
+        assert!(roots.path().join("demo").is_dir());
+        let answer = posts("/v1/runtime/workspaces/wsr_1");
+        assert_eq!(answer.len(), 1);
+        assert_eq!(answer[0].1, json!({"answer": {"name": "demo"}}));
+        let inventory = posts("/v1/runtime/inventory");
+        let (at, caps) = inventory.last().unwrap();
+        assert!(*at < answer[0].0, "the inventory goes first");
+        assert!(
+            caps["workspaces"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("demo"))
+        );
+
+        for (request, name, code) in [("wsr_2", "demo", "exists"), ("wsr_3", "../x", "bad_name")] {
+            host.clone().handle(command(request, name)).await;
+            assert_eq!(
+                posts(&format!("/v1/runtime/workspaces/{request}"))[0].1,
+                json!({"refused": code})
+            );
+        }
+        host.clone().handle(command("../evil", "x")).await;
+        assert!(!seen.lock().unwrap().iter().any(|(p, _)| p.contains("evil")));
+        assert!(!roots.path().join("x").exists());
         host.shutdown(Duration::from_millis(200)).await;
     }
 
