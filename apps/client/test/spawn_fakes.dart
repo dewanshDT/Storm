@@ -88,6 +88,9 @@ class FakeSpawning {
     String? text,
     String? name,
     int? sharedWith,
+    String? agent,
+    String? parentAgent,
+    String? credential,
     Duration left = const Duration(minutes: 8, seconds: 42),
   }) {
     final now = DateTime.now().toUtc();
@@ -103,6 +106,11 @@ class FakeSpawning {
       'text': ?text,
       'name': ?name,
       'shared_with': ?sharedWith,
+      'agent': ?agent,
+      'parent_agent': ?parentAgent,
+      if (agent != null && parentAgent != null && agent != parentAgent)
+        'agent_differs': true,
+      'credential': ?credential,
     };
     requests.add(r);
     _attention();

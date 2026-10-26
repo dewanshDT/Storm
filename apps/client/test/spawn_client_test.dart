@@ -419,6 +419,55 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('another agent than the parent\'s, and its login (143c)', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      FakeSpawning(agents).addRequest(
+        'ags_p',
+        task: 't',
+        agent: 'opencode',
+        parentAgent: 'claude-code',
+        credential: 'host_setup',
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.text('AGENT'), findsOneWidget);
+      expect(
+        find.text('OpenCode (different from the parent’s Claude Code)'),
+        findsOneWidget,
+      );
+      expect(find.text('SIGNS IN WITH'), findsOneWidget);
+      expect(find.text('The host’s own setup for OpenCode'), findsOneWidget);
+      expect(
+        find.textContaining(RegExp(r'^OpenCode on build-vm, in a workspace')),
+        findsOneWidget,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the parent\'s own agent on the synced login (143c)', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      FakeSpawning(agents).addRequest(
+        'ags_p',
+        task: 't',
+        agent: 'claude-code',
+        parentAgent: 'claude-code',
+        credential: 'synced_login',
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.text('Claude Code, the parent’s own'), findsOneWidget);
+      expect(find.text('Your synced Claude login'), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('an unshared workspace says nothing of it', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
@@ -1254,6 +1303,10 @@ void main() {
     expect(
       requestRefusalText('isolation_unverified', null),
       'the host doesn’t isolate sessions',
+    );
+    expect(
+      requestRefusalText('agent_unavailable', null),
+      'the host can’t start that agent for a child',
     );
     expect(
       hostStatesLine('unavailable', 'unavailable'),

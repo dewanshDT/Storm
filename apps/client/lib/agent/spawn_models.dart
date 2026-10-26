@@ -133,6 +133,10 @@ class SpawnRequest {
     this.name,
     this.contextTitle,
     this.provider,
+    this.agent,
+    this.parentAgent,
+    this.agentDiffers = false,
+    this.credential,
     this.text,
     this.sharedWith = 0,
   });
@@ -164,6 +168,15 @@ class SpawnRequest {
   final String? name;
   final String? contextTitle;
   final String? provider;
+
+  /// A start's child's agent and its parent's (decision 143c); null from a
+  /// server that does not say.
+  final String? agent;
+  final String? parentAgent;
+  final bool agentDiffers;
+
+  /// What the child would sign in with: `synced_login` or `host_setup`.
+  final String? credential;
   final String? text;
 
   /// Other live sessions in the requester's workspace, its own tree left
@@ -199,6 +212,10 @@ class SpawnRequest {
       name: j['name'] as String?,
       contextTitle: note is Map ? note['title'] as String? : null,
       provider: j['provider'] as String?,
+      agent: j['agent'] as String?,
+      parentAgent: j['parent_agent'] as String?,
+      agentDiffers: j['agent_differs'] == true,
+      credential: j['credential'] as String?,
       text: j['text'] as String?,
       sharedWith: (j['shared_with'] as num?)?.toInt() ?? 0,
     );
@@ -376,9 +393,26 @@ String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'target_gone' => 'the session it named is gone or has ended',
   'identity_unverified' => 'the host’s session identity isn’t verified',
   'isolation_unverified' => 'the host doesn’t isolate sessions',
+  'agent_unavailable' => 'the host can’t start that agent for a child',
   null => 'refused',
   _ => reason.replaceAll('_', ' '),
 };
+
+/// "OpenCode (different from the parent's Claude Code)": a start's child's
+/// agent beside its parent's (decision 143c).
+String childAgentText(String agent, String parent, {required bool differs}) =>
+    differs
+    ? '$agent (different from the parent’s $parent)'
+    : '$agent, the parent’s own';
+
+/// What a start's child signs in with (decision 143d): the account's synced
+/// Claude login, or whatever its host has for that agent, which the server
+/// cannot see.
+String childCredentialText(String credential, String agent) =>
+    switch (credential) {
+      'synced_login' => 'Your synced Claude login',
+      _ => 'The host’s own setup for $agent',
+    };
 
 /// "identity verified · isolates sessions": a host's two states as the
 /// card shows them (138p point 8: a state, never a fingerprint).

@@ -650,6 +650,8 @@ List<(String, String, bool)> approvalRows(ApprovalFacts f) {
   final shared = r.sharedWith > 0
       ? ('Workspace', sharedWorkspaceText(ws, r.sharedWith), false)
       : null;
+  final child = providerLabel(r.agent ?? r.provider ?? s.provider);
+  final parentAgent = providerLabel(r.parentAgent ?? s.provider);
   return switch (r.kind) {
     'start' => [
       asker,
@@ -658,8 +660,15 @@ List<(String, String, bool)> approvalRows(ApprovalFacts f) {
       if (r.name != null) ('Name', r.name!, false),
       if (r.contextTitle != null) ('Note', r.contextTitle!, false),
       (
+        'Agent',
+        childAgentText(child, parentAgent, differs: r.agentDiffers),
+        false,
+      ),
+      if (r.credential != null)
+        ('Signs in with', childCredentialText(r.credential!, child), false),
+      (
         'Runs as',
-        '$agent on ${f.host}, in a workspace of its own: a copy of $ws’s '
+        '$child on ${f.host}, in a workspace of its own: a copy of $ws’s '
             'last commit (uncommitted changes are not included), or $ws '
             'read-only with a scratch folder if it isn’t a git repository',
         false,
