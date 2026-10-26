@@ -274,4 +274,66 @@ void main() {
       await disposeShell(t, c);
     });
   });
+
+  group('"Allow this session to start agents" (141e)', () {
+    Map<String, dynamic> c0({String identity = 'verified'}) => agentHost(
+      providers: ['claude-code', 'opencode', 'shell', 'cursor'],
+      mcp: {'cursor': false},
+      identity: identity,
+      isolation: 'verified',
+    );
+
+    testWidgets('off by default, sent only when turned on', (t) async {
+      final agents = server(host: c0());
+      final c = await launcher(t, agents);
+      expect(find.byKey(const Key('launcher-spawn')), findsOneWidget);
+      expect(
+        find.text('You approve each start, message and end.'),
+        findsOneWidget,
+      );
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(agents.launches.single.containsKey('spawn'), isFalse);
+      await disposeShell(t, c);
+
+      final again = server(host: c0());
+      final c2 = await launcher(t, again);
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(again.launches.single['spawn'], true);
+      await disposeShell(t, c2);
+    });
+
+    testWidgets('only for a host that passes C0 and an agent that can '
+        'start agents', (t) async {
+      for (final host in [
+        agentHost(),
+        agentHost(identity: 'verified'),
+        agentHost(isolation: 'verified'),
+        c0(identity: 'unavailable'),
+      ]) {
+        final c = await launcher(t, server(host: host));
+        expect(find.byKey(const Key('launcher-spawn')), findsNothing);
+        await disposeShell(t, c);
+      }
+      final agents = server(host: c0());
+      final c = await launcher(t, agents);
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      for (final other in ['Shell', 'Cursor']) {
+        await pick(t, 'launcher-agent', find.text(other).last);
+        expect(
+          find.byKey(const Key('launcher-spawn')),
+          findsNothing,
+          reason: other,
+        );
+      }
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(agents.launches.single.containsKey('spawn'), isFalse);
+      await disposeShell(t, c);
+    });
+  });
 }

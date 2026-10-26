@@ -56,9 +56,16 @@ class SpawnFacts {
 
 /// The spawn switch on a session's view (134-10).
 class SpawnSwitch {
-  const SpawnSwitch({required this.enabled, this.refused});
+  const SpawnSwitch({
+    required this.enabled,
+    this.refused,
+    this.launchedOn = false,
+  });
 
   final bool enabled;
+
+  /// Launched with the switch on (141e): only such a session turns it on.
+  final bool launchedOn;
 
   /// What turning it on would be refused with now (134-2's codes), or null.
   final String? refused;
@@ -66,6 +73,7 @@ class SpawnSwitch {
   factory SpawnSwitch.fromJson(Map<String, dynamic> j) => SpawnSwitch(
     enabled: j['enabled'] == true,
     refused: j['refused'] as String?,
+    launchedOn: j['launched_on'] == true,
   );
 }
 
@@ -335,9 +343,18 @@ String spawnRefusalText(String code, String agent) => switch (code) {
   'launched_without_asks' =>
     'It started before this host could offer it. Start a new session to '
         'allow it',
+  'launched_without_spawn' => kSpawnAtLaunch,
   'session_not_live' => 'The session has ended',
   _ => code.replaceAll('_', ' '),
 };
+
+/// The agents that can start agents (134-2).
+const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
+
+/// Why a session launched without the switch can't turn it on (141e).
+const kSpawnAtLaunch =
+    'To let an agent start agents, start a new session with "Allow this '
+    'session to start agents" on.';
 
 /// The cap a request hit, in the decision's words (C4).
 String capText(String? cap) => switch (cap) {

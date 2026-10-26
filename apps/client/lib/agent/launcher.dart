@@ -17,6 +17,7 @@ import 'agent_widgets.dart';
 import 'claude_login_api.dart';
 import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
+import 'spawn_models.dart' show kSpawnProviders;
 
 typedef NoteRef = ({String vaultId, String noteId});
 
@@ -95,6 +96,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
+
+  /// "Allow this session to start agents" (141e): off by default.
+  bool _spawn = false;
   String? _error;
   bool _busy = false;
 
@@ -225,6 +229,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         role: _role == null || !_reachesStorm
             ? null
             : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+        spawn: _spawn && _spawnable,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -252,6 +257,13 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           .firstOrNull
           ?.reachesStorm ??
       _provider != 'shell';
+
+  /// The launch can carry the switch: the host passes C0 and the agent can
+  /// start agents with Storm's tools (141e). The server decides.
+  bool get _spawnable =>
+      (_host?.offersSpawning ?? false) &&
+      kSpawnProviders.contains(_provider) &&
+      _reachesStorm;
 
   @override
   Widget build(BuildContext context) {
@@ -487,6 +499,37 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ),
           ),
         ),
+        if (_spawnable)
+          _Field(
+            label: 'Agents',
+            under: const _Under(
+              key: Key('launcher-spawn-note'),
+              text: 'You approve each start, message and end.',
+            ),
+            child: Row(
+              children: [
+                Semantics(
+                  label: 'Allow this session to start agents',
+                  child: StormToggle(
+                    key: const Key('launcher-spawn'),
+                    value: _spawn,
+                    onChanged: (v) => setState(() => _spawn = v),
+                  ),
+                ),
+                SizedBox(width: t.sp * 1.25),
+                Expanded(
+                  child: Text(
+                    'Allow this session to start agents',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
       ],
       Container(
         key: const Key('launcher-risk'),
@@ -1084,6 +1127,9 @@ String launchErrorText(Object e) {
       "This host's session isolation isn't working, so it isn't starting "
           'new sessions.',
     'owner_only' => 'Only the server’s owner can do that.',
+    'spawn_unavailable' =>
+      "This host or agent can't offer starting agents now. Turn off "
+          '"Allow this session to start agents" to launch.',
     _ => "Couldn't launch: $code",
   };
 }

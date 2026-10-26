@@ -18,11 +18,13 @@ Map<String, dynamic> agentHost({
   List<String>? resumes = const ['claude-code', 'opencode'],
   Map<String, bool> mcp = const {},
   String? isolation,
+  String? identity,
 }) => {
   'id': id,
   'name': name,
   'status': status,
   'egress': 'host',
+  if (identity != null) 'identity': {'state': identity},
   if (isolation != null)
     'isolation': {'state': isolation, 'mechanism': 'systemd_units'},
   'capabilities': {

@@ -216,6 +216,7 @@ class AgentApi {
     String? resumeOf,
     LaunchCrew? crew,
     ({String vaultId, String noteId})? role,
+    bool spawn = false,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -243,6 +244,7 @@ class AgentApi {
                     : {'new_name': crew.newName},
               if (role != null)
                 'role': {'vault_id': role.vaultId, 'note_id': role.noteId},
+              if (spawn) 'spawn': true,
             }),
           ),
         )

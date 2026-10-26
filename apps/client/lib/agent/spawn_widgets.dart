@@ -148,6 +148,7 @@ String spawnSwitchNote(SpawnSwitch sw, String agent) {
         ? 'On · you approve each start, message and end · Turn off any time'
         : 'On, but not offered now: $why';
   }
+  if (sw.refused == 'launched_without_spawn') return kSpawnAtLaunch;
   return why == null ? 'Off' : 'Unavailable · $why';
 }
 
@@ -196,12 +197,14 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
     } catch (e) {
       if (mounted) {
         final code = _code(e);
+        final why = code == null
+            ? null
+            : spawnRefusalText(code, providerLabel(s.provider));
         _say(
           context,
-          code == null
+          why == null
               ? describeFailure(e)
-              : "Couldn't allow it: "
-                    '${spawnRefusalText(code, providerLabel(s.provider))}.',
+              : "Couldn't allow it: ${why.endsWith('.') ? why : '$why.'}",
         );
       }
     } finally {
@@ -235,15 +238,10 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
           },
         ),
         SizedBox(width: t.sp * 1.25),
-        Text('Allow this session to start agents', style: agentSans(t)),
-        SizedBox(width: t.sp * 1.25),
         Flexible(
           child: Text(
-            spawnSwitchNote(sw, providerLabel(s.provider)),
-            key: const Key('spawn-switch-note'),
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: agentMono(t),
+            'Allow this session to start agents',
+            style: agentSans(t),
           ),
         ),
       ],
@@ -252,6 +250,14 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         row,
+        SizedBox(height: t.sp * 0.5),
+        Text(
+          spawnSwitchNote(sw, providerLabel(s.provider)),
+          key: const Key('spawn-switch-note'),
+          maxLines: 3,
+          overflow: TextOverflow.ellipsis,
+          style: agentMono(t),
+        ),
         if (_confirm && !sw.enabled) ...[
           SizedBox(height: t.sp),
           _Banner(
