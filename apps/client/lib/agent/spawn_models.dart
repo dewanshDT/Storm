@@ -15,6 +15,9 @@ class SpawnFacts {
     this.needsAttention,
     this.childWorkspace,
     this.switchState,
+    this.childActivity,
+    this.pendingEvents,
+    this.recentEvents = const [],
   });
 
   static const none = SpawnFacts();
@@ -25,8 +28,20 @@ class SpawnFacts {
   final String? rootSession;
   final int depth;
 
-  /// `approval`, `permission_prompt` or `blocked`; never from idle (A3).
+  /// `approval`, `permission_prompt`, `usage_limit` (144b) or `blocked`;
+  /// never from idle (A3).
   final String? needsAttention;
+
+  /// A child's activity as evidence says it (144b): `working` or `idle`
+  /// only from a signal that passed its gate, else `unknown`. Null on a
+  /// session nobody started.
+  final String? childActivity;
+
+  /// A child's events its parent has not acknowledged (144a).
+  final int? pendingEvents;
+
+  /// A child's latest events, oldest first (144a).
+  final List<ChildEvent> recentEvents;
 
   /// A child's own workspace, once its host has made it.
   final ChildWorkspace? childWorkspace;
@@ -50,9 +65,107 @@ class SpawnFacts {
           ? ChildWorkspace.fromJson(ws)
           : null,
       switchState: sw is Map<String, dynamic> ? SpawnSwitch.fromJson(sw) : null,
+      childActivity: j['child_activity'] as String?,
+      pendingEvents: (j['pending_events'] as num?)?.toInt(),
+      recentEvents: [
+        for (final e in j['recent_events'] as List? ?? const [])
+          if (e is Map<String, dynamic>) ChildEvent.fromJson(e),
+      ],
     );
   }
 }
+
+/// One change of a child's, as its parent's queue holds it (144a): codes
+/// only, never the child's own text.
+class ChildEvent {
+  const ChildEvent({
+    required this.id,
+    required this.seq,
+    required this.child,
+    required this.kind,
+    required this.source,
+    required this.confidence,
+    required this.at,
+    this.reason,
+    this.status,
+    this.activity,
+    this.needsAttention,
+  });
+
+  final String id;
+  final int seq;
+  final String child;
+  final String kind;
+  final String? reason;
+
+  /// The child's state after the change.
+  final String? status;
+  final String? activity;
+  final String? needsAttention;
+
+  /// `host_process`, `storm`, `provider_hook` or `output_pattern` (144b).
+  final String source;
+
+  /// `certain`, `reported` or `heuristic`.
+  final String confidence;
+  final String at;
+
+  bool get certain => confidence == 'certain';
+
+  factory ChildEvent.fromJson(Map<String, dynamic> j) {
+    final state = j['state'] is Map<String, dynamic>
+        ? j['state'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    return ChildEvent(
+      id: j['id'] as String? ?? '',
+      seq: (j['seq'] as num?)?.toInt() ?? 0,
+      child: j['child'] as String? ?? '',
+      kind: j['kind'] as String? ?? '',
+      reason: j['reason'] as String?,
+      status: state['status'] as String?,
+      activity: state['activity'] as String?,
+      needsAttention: state['needs_attention'] as String?,
+      source: j['source'] as String? ?? 'storm',
+      confidence: j['confidence'] as String? ?? 'certain',
+      at: j['at'] as String? ?? '',
+    );
+  }
+}
+
+/// "Started", "Reported: succeeded": an event as a person reads it.
+String childEventLabel(ChildEvent e) => switch (e.kind) {
+  'started' => 'Started',
+  'needs_approval' => 'Asked for approval',
+  'needs_attention' =>
+    e.reason == 'blocked' ? 'Blocked' : 'Waiting at a prompt',
+  'idle_timeout' => 'Idle for 10 minutes',
+  'usage_limit' => 'Out of usage',
+  'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
+  'reported' => e.reason == null ? 'Reported' : 'Reported: ${e.reason}',
+  'ended' => e.reason == null ? 'Ended' : 'Ended: ${e.reason}',
+  'unknown' => 'Lost touch',
+  _ => e.kind,
+};
+
+/// Where a signal came from, when it is not certain (144b): null for what
+/// the host's process or Storm itself saw.
+String? evidenceLabel(ChildEvent e) {
+  if (e.certain) return null;
+  final from = switch (e.source) {
+    'provider_hook' => 'agent hook',
+    'output_pattern' => 'output',
+    _ => e.source,
+  };
+  return '$from · ${e.confidence}';
+}
+
+/// A child's activity, said plainly: unknown is never working (144b).
+String? activityLabel(String? activity) => switch (activity) {
+  null => null,
+  'working' => 'Working',
+  'idle' => 'Idle',
+  _ => 'Unknown',
+};
 
 /// The spawn switch on a session's view (134-10).
 class SpawnSwitch {
@@ -346,6 +459,7 @@ String shortCommit(String? commit) =>
 String? attentionLabel(String? kind) => switch (kind) {
   'approval' => 'Needs approval',
   'permission_prompt' => 'Waiting at a prompt',
+  'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,
 };

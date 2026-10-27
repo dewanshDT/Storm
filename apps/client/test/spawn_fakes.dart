@@ -26,6 +26,9 @@ Map<String, dynamic> spawnSession(
   String? resumedFrom,
   String identity = 'verified',
   String isolation = 'verified',
+  String? childActivity,
+  int? pendingEvents,
+  List<Map<String, dynamic>>? recentEvents,
 }) => {
   ...agentSession(
     id,
@@ -43,6 +46,38 @@ Map<String, dynamic> spawnSession(
   'child_workspace': ?childWorkspace,
   'identity': {'state': identity},
   'isolation': {'state': isolation},
+  'child_activity': ?childActivity,
+  'pending_events': ?pendingEvents,
+  'recent_events': ?recentEvents,
+};
+
+/// A child event as the server's queue holds it (144a).
+Map<String, dynamic> childEvent(
+  String parent,
+  int seq,
+  String child,
+  String kind, {
+  String? reason,
+  String status = 'running',
+  String activity = 'unknown',
+  String? needsAttention,
+  String source = 'storm',
+  String confidence = 'certain',
+  String at = '2026-10-27T10:00:00Z',
+}) => {
+  'id': 'evt_${parent}_$seq',
+  'seq': seq,
+  'child': child,
+  'kind': kind,
+  'reason': reason,
+  'state': {
+    'status': status,
+    'activity': activity,
+    'needs_attention': needsAttention,
+  },
+  'source': source,
+  'confidence': confidence,
+  'at': at,
 };
 
 const _ended = ['completed', 'stopped', 'failed'];

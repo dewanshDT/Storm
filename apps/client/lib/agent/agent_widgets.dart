@@ -193,7 +193,7 @@ class SessionRow extends StatelessWidget {
                   ),
                   if (!s.ended && s.spawn.needsAttention != null) ...[
                     SizedBox(width: t.sp * 0.75),
-                    AttentionTag(kind: s.spawn.needsAttention),
+                    Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
                   ],
                 ],
               ),

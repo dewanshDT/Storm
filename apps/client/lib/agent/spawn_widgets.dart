@@ -52,13 +52,21 @@ class AttentionTag extends StatelessWidget {
         vertical: t.sp * 0.125,
       ),
       decoration: BoxDecoration(
-        color: kind == 'blocked' ? t.amberSoft : t.accentSoft,
+        color: kind == 'blocked' || kind == 'usage_limit'
+            ? t.amberSoft
+            : t.accentSoft,
         borderRadius: BorderRadius.circular(999),
       ),
       child: Text(
         label,
         maxLines: 1,
-        style: agentMono(t, color: kind == 'blocked' ? t.amber : t.accent),
+        overflow: TextOverflow.ellipsis,
+        style: agentMono(
+          t,
+          color: kind == 'blocked' || kind == 'usage_limit'
+              ? t.amber
+              : t.accent,
+        ),
       ),
     );
   }
@@ -1374,6 +1382,11 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
           ].join(' · '),
           style: agentSans(t),
         ),
+        for (final k in kids)
+          if (k.spawn.childActivity != null ||
+              k.spawn.recentEvents.isNotEmpty ||
+              (k.spawn.pendingEvents ?? 0) > 0)
+            ChildEventsTile(child: k),
         if (running.isNotEmpty) ...[
           SizedBox(height: t.sp),
           if (_confirm)
@@ -1396,6 +1409,112 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
             ),
         ],
       ],
+    );
+  }
+}
+
+/// One child's health and latest events (144a, 144b): its activity as
+/// evidence says it ("Unknown" until a gated signal says more, never
+/// working), how many events its parent has not read, and each event with
+/// where it came from when that is less than certain.
+class ChildEventsTile extends StatelessWidget {
+  const ChildEventsTile({super.key, required this.child});
+
+  final AgentSession child;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final k = child;
+    final activity = k.ended ? null : activityLabel(k.spawn.childActivity);
+    final pending = k.spawn.pendingEvents ?? 0;
+    final events = k.spawn.recentEvents.reversed.toList();
+    return Padding(
+      key: Key('child-events-${k.id}'),
+      padding: EdgeInsets.only(top: t.sp),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Wrap(
+            spacing: t.sp,
+            runSpacing: t.sp * 0.5,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(k.displayName, style: agentSans(t, weight: FontWeight.w600)),
+              if (activity != null)
+                _Pill(
+                  key: Key('child-activity-${k.id}'),
+                  text: activity,
+                  color: activity == 'Working' ? t.accent : t.text3,
+                  fill: activity == 'Working' ? t.accentSoft : t.surface2,
+                ),
+              if (pending > 0)
+                _Pill(
+                  key: Key('child-pending-${k.id}'),
+                  text: pending == 1
+                      ? '1 unread event'
+                      : '$pending unread events',
+                  color: t.accent,
+                  fill: t.accentSoft,
+                ),
+            ],
+          ),
+          for (final e in events)
+            Padding(
+              key: Key('child-event-${e.id}'),
+              padding: EdgeInsets.only(top: t.sp * 0.5),
+              child: Wrap(
+                spacing: t.sp * 0.75,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  Text(
+                    [
+                      childEventLabel(e),
+                      if (DateTime.tryParse(e.at) case final at?) clockAt(at),
+                    ].join(' · '),
+                    style: agentMono(t),
+                  ),
+                  if (evidenceLabel(e) case final evidence?)
+                    _Pill(
+                      key: Key('event-evidence-${e.id}'),
+                      text: evidence,
+                      color: t.amber,
+                      fill: t.amberSoft,
+                    ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
+class _Pill extends StatelessWidget {
+  const _Pill({
+    super.key,
+    required this.text,
+    required this.color,
+    required this.fill,
+  });
+
+  final String text;
+  final Color color;
+  final Color fill;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(
+      padding: EdgeInsets.symmetric(
+        horizontal: t.sp * 0.75,
+        vertical: t.sp * 0.125,
+      ),
+      decoration: BoxDecoration(
+        color: fill,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(text, maxLines: 1, style: agentMono(t, color: color)),
     );
   }
 }
