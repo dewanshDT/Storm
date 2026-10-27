@@ -131,7 +131,11 @@ impl AgentManager {
             details: details.map(str::to_string),
             reported_at: now(),
         };
-        self.store.lock().unwrap().set_result(caller, &result)?;
+        let live = self.live_signals(caller);
+        self.store
+            .lock()
+            .unwrap()
+            .record_result(caller, &result, &live)?;
         self.bump(caller);
         Ok(result)
     }

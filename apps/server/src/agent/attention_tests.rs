@@ -244,7 +244,13 @@ const PROMPT: &str = "permission_prompt";
 
 #[test]
 fn no_adapter_reports_a_permission_prompt_until_its_gate_passes() {
-    assert!(super::attention::PERMISSION_PROMPT_ADAPTERS.is_empty());
+    assert!(super::attention::GATED_SIGNALS.is_empty());
+    let gated: Vec<&str> = super::attention::GATED_SIGNALS
+        .iter()
+        .filter(|g| g.signal == PROMPT && g.source == super::events::PROVIDER_HOOK)
+        .map(|g| g.provider)
+        .collect();
+    assert_eq!(gated, super::attention::PERMISSION_PROMPT_ADAPTERS);
     let f = fixture();
     for provider in ["claude-code", "opencode", "codex", "shell"] {
         let s = f.launch(provider).id;

@@ -162,6 +162,9 @@ pub struct RoleLabel {
 
 pub struct Store {
     pub(super) conn: Connection,
+    /// Bumped after a commit that wrote a child event (144a): what a
+    /// waiting `wait_agent` wakes on.
+    pub(super) events: tokio::sync::watch::Sender<u64>,
 }
 
 const COLUMNS: &str = "id, owner_user_id, host_id, workspace, provider, provider_kind, \
@@ -337,7 +340,11 @@ impl Store {
             }
         }
         spawn::init(&conn)?;
-        Ok(Self { conn })
+        super::events::init(&conn)?;
+        Ok(Self {
+            conn,
+            events: tokio::sync::watch::channel(0).0,
+        })
     }
 
     /// At boot, every session that has not ended is `unknown` until its host
@@ -347,14 +354,43 @@ impl Store {
     ///
     /// A spawned child still `creating` is left as it is: its host was never
     /// told of it, and startup fails it `server_restart` (139-D5).
+    ///
+    /// A child that turns `unknown` here gets an `unknown` event from Storm
+    /// (144a), in the same transaction.
     pub fn mark_unknown_on_boot(&self) -> Result<usize> {
-        Ok(self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let children: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM sessions
+                 WHERE status NOT IN ('completed', 'failed', 'stopped', 'creating', 'unknown')
+                   AND id IN (SELECT session_id FROM session_lineage)",
+            )?;
+            let rows = stmt.query_map([], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        let changed = tx.execute(
             "UPDATE sessions SET status = 'unknown'
              WHERE status NOT IN ('completed', 'failed', 'stopped')
                AND NOT (status = 'creating'
                         AND id IN (SELECT session_id FROM session_lineage))",
             [],
-        )?)
+        )?;
+        let now = crate::index::now_rfc3339();
+        for id in children {
+            if let Some(r) = get_in(&tx, &id)? {
+                super::events::record_in(
+                    &tx,
+                    &r,
+                    super::events::UNKNOWN,
+                    None,
+                    super::events::STORM,
+                    &super::events::LiveSignals::default(),
+                    &now,
+                )?;
+            }
+        }
+        tx.commit()?;
+        Ok(changed)
     }
 
     pub fn insert(&self, r: &SessionRecord) -> Result<()> {
@@ -383,19 +419,29 @@ impl Store {
 
     /// Writes the whole record back. Records are small and every change is a
     /// state transition worth persisting in full.
+    #[cfg(test)]
+    pub fn update(&self, r: &SessionRecord) -> Result<()> {
+        self.update_with(r, &super::events::EventCtx::storm())
+    }
+
+    /// [`Self::update`], with the events the change makes for a child's
+    /// parent written in the same transaction (144a): entering `running`
+    /// or `unknown`, an end, and `ctx.extra`.
     ///
     /// An ending refuses the session's pending requests, `requester_ended`,
     /// in the same transaction (P-4, L-7).
-    pub fn update(&self, r: &SessionRecord) -> Result<()> {
+    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
-        let was_ended = tx
+        let before: Option<String> = tx
             .query_row(
                 "SELECT status FROM sessions WHERE id = ?1",
                 params![r.id],
                 |row| row.get::<_, String>(0),
             )
-            .optional()?
-            .is_some_and(|s| matches!(s.as_str(), "completed" | "failed" | "stopped"));
+            .optional()?;
+        let was_ended = before
+            .as_deref()
+            .is_some_and(|s| matches!(s, "completed" | "failed" | "stopped"));
         tx.execute(
             "UPDATE sessions SET status = ?2, end_reason = ?3, signal = ?4, exit_code = ?5,
                  started_at = ?6, ended_at = ?7, last_activity = ?8, cols = ?9, rows = ?10,
@@ -423,7 +469,36 @@ impl Store {
                 spawn::on_ended(&tx, r, &now)?;
             }
         }
+        let now = crate::index::now_rfc3339();
+        let mut wrote = false;
+        if before.is_some()
+            && let Some((kind, reason)) = super::events::status_event(before.as_deref(), r)
+        {
+            wrote |= super::events::record_in(
+                &tx,
+                r,
+                kind,
+                reason.as_deref(),
+                ctx.source,
+                &ctx.live,
+                &now,
+            )?;
+        }
+        for e in &ctx.extra {
+            wrote |= super::events::record_in(
+                &tx,
+                r,
+                e.kind,
+                e.reason.as_deref(),
+                e.source,
+                &ctx.live,
+                &now,
+            )?;
+        }
         tx.commit()?;
+        if wrote {
+            self.notify_events();
+        }
         Ok(())
     }
 
@@ -1111,6 +1186,7 @@ fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
         params![id],
     )?;
     spawn::forget(conn, id)?;
+    super::events::forget_in(conn, id)?;
     Ok((gone, crew))
 }
 
@@ -1736,9 +1812,21 @@ pub mod spawn {
                 let r = get_in(&tx, &id)?.expect("just updated");
                 refuse_requests_of_in(&tx, &id, "requester_ended", now)?;
                 on_ended(&tx, &r, now)?;
+                crate::agent::events::record_in(
+                    &tx,
+                    &r,
+                    crate::agent::events::FAILED,
+                    r.end_reason.as_deref(),
+                    crate::agent::events::STORM,
+                    &crate::agent::events::LiveSignals::default(),
+                    now,
+                )?;
                 failed.push((r, parent));
             }
             tx.commit()?;
+            if !failed.is_empty() {
+                self.notify_events();
+            }
             Ok(failed)
         }
 
@@ -2013,6 +2101,7 @@ pub mod spawn {
         }
 
         /// The session's own result; a later report replaces an earlier one.
+        #[cfg(test)]
         pub fn set_result(&self, session_id: &str, r: &SpawnResult) -> Result<()> {
             if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
                 bail!("{} is not a result outcome", r.outcome);
@@ -2025,6 +2114,71 @@ pub mod spawn {
                      reported_at = excluded.reported_at",
                 params![session_id, r.outcome, r.summary, r.details, r.reported_at],
             )?;
+            Ok(())
+        }
+
+        /// `report_result` (134h) with its events (144a), in one
+        /// transaction: `reported` with the outcome only, and
+        /// `needs_attention` when a live session's report turns it
+        /// `blocked`.
+        pub fn record_result(
+            &self,
+            session_id: &str,
+            r: &SpawnResult,
+            live: &crate::agent::events::LiveSignals,
+        ) -> Result<()> {
+            use crate::agent::events;
+            let tx = self.conn.unchecked_transaction()?;
+            let Some(session) = get_in(&tx, session_id)? else {
+                bail!("no session {session_id}");
+            };
+            let before = events::needs_attention_in(
+                &tx,
+                &session,
+                live.attention.as_deref(),
+                &r.reported_at,
+            )?;
+            if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
+                bail!("{} is not a result outcome", r.outcome);
+            }
+            tx.execute(
+                "INSERT INTO session_result (session_id, outcome, summary, details, reported_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
+                 ON CONFLICT (session_id) DO UPDATE SET outcome = excluded.outcome,
+                     summary = excluded.summary, details = excluded.details,
+                     reported_at = excluded.reported_at",
+                params![session_id, r.outcome, r.summary, r.details, r.reported_at],
+            )?;
+            let mut wrote = events::record_in(
+                &tx,
+                &session,
+                events::REPORTED,
+                Some(&r.outcome),
+                events::STORM,
+                live,
+                &r.reported_at,
+            )?;
+            let after = events::needs_attention_in(
+                &tx,
+                &session,
+                live.attention.as_deref(),
+                &r.reported_at,
+            )?;
+            if after == Some(crate::agent::attention::BLOCKED) && before != after {
+                wrote |= events::record_in(
+                    &tx,
+                    &session,
+                    events::NEEDS_ATTENTION,
+                    Some(crate::agent::attention::BLOCKED),
+                    events::STORM,
+                    live,
+                    &r.reported_at,
+                )?;
+            }
+            tx.commit()?;
+            if wrote {
+                self.notify_events();
+            }
             Ok(())
         }
 
@@ -2350,6 +2504,7 @@ pub mod spawn {
             new: &NewRequest,
             now: &str,
             host: HostCheck<'_>,
+            signals: &crate::agent::events::LiveSignals,
         ) -> Result<std::result::Result<Request, Refusal>> {
             let tx = self.conn.transaction()?;
             let Some(r) = get_in(&tx, requester)? else {
@@ -2391,6 +2546,7 @@ pub mod spawn {
                 reason: None,
                 session: None,
             };
+            let waited = crate::agent::events::awaits_decision_in(&tx, requester, now)?;
             tx.execute(
                 "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
                      expires_at, state)
@@ -2416,7 +2572,22 @@ pub mod spawn {
                     now,
                 )?;
             }
+            // A child's first waiting request (144a); one more while one
+            // already waits changes nothing its parent can see.
+            let wrote = !waited
+                && crate::agent::events::record_in(
+                    &tx,
+                    &r,
+                    crate::agent::events::NEEDS_APPROVAL,
+                    Some(new.kind()),
+                    crate::agent::events::STORM,
+                    signals,
+                    now,
+                )?;
             tx.commit()?;
+            if wrote {
+                self.notify_events();
+            }
             Ok(Ok(request))
         }
 
@@ -2544,22 +2715,6 @@ pub mod spawn {
                 reason,
                 now,
             )
-        }
-
-        /// Whether a request the session made waits for a person at `now`:
-        /// pending and not yet past its expiry, which the sweeper may not
-        /// have reached.
-        pub fn awaits_decision(&self, requester: &str, now: &str) -> Result<bool> {
-            let mut stmt = self.conn.prepare(
-                "SELECT expires_at FROM agent_requests WHERE requester = ?1 AND state = 'pending'",
-            )?;
-            let rows = stmt.query_map(params![requester], |r| r.get::<_, String>(0))?;
-            for expires in rows {
-                if !expired(now, &expires?) {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
         }
 
         /// The requests a session made, oldest first.

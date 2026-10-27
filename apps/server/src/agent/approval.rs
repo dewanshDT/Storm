@@ -99,11 +99,15 @@ impl AgentManager {
         }
         self.get(requester)?;
         let id = crate::auth::identity::random_id("agr_");
-        let created =
-            self.store
-                .lock()
-                .unwrap()
-                .create_request(&id, requester, &new, &now(), &|host| self.host_check(host))?;
+        let live = self.live_signals(requester);
+        let created = self.store.lock().unwrap().create_request(
+            &id,
+            requester,
+            &new,
+            &now(),
+            &|host| self.host_check(host),
+            &live,
+        )?;
         if created.is_ok() {
             self.requests_changed();
         }
@@ -350,7 +354,7 @@ impl AgentManager {
                 "spawned session not started: its host is away"
             );
         }
-        self.store.lock().unwrap().update(&r)?;
+        self.update_record(&r, super::events::STORM)?;
         self.bump(&r.id);
         Ok(())
     }

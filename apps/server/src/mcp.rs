@@ -272,11 +272,20 @@ pub struct AgentParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WaitParams {
-    /// The agents to wait for: session ids of agents you started, or theirs.
+    /// The agents to hear of: session ids of agents you started, or theirs.
+    /// Empty or absent: every agent you started.
+    #[serde(default)]
     pub ids: Vec<String>,
+    /// The `cursor` your last wait_agent returned. It acknowledges every
+    /// event up to it, and only later events come back. Without it you get
+    /// every event you have not acknowledged, again.
+    pub after: Option<i64>,
     /// Seconds to wait at most. Capped by Storm below your tool-call timeout;
     /// `list_agents` says the cap.
     pub timeout: Option<u64>,
+    /// `settled` to wait instead until every listed agent has reported or
+    /// ended. Absent: return on the first new event.
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -691,13 +700,24 @@ impl Storm {
     }
 
     #[tool(
-        description = "Wait until every listed agent has reported a result or ended, or until the wait's cap passes, then return their states. timed_out says the cap ended it; call again to keep waiting."
+        description = "Hear what the agents you started are doing. Returns at once with any new events, else waits up to the cap for the first: started, needs_approval, needs_attention (a permission prompt or a blocked result), idle_timeout, usage_limit, failed, reported, ended, or unknown (its host's link was lost). Returns {events, cursor, agents, timed_out}. Work in a loop: react to the events, then call wait_agent again with after set to the cursor, which acknowledges them; events you never acknowledge come back on your next call. timed_out means nothing new yet, so call again. An event is metadata: read a reported result with agent_status. ids narrows it to some agents (default: all you started); until: \"settled\" instead waits until every listed agent has reported or ended. You cannot answer another agent's permission prompt; a person does, in its terminal."
     )]
     async fn wait_agent(
         &self,
-        Parameters(WaitParams { ids, timeout }): Parameters<WaitParams>,
+        Parameters(WaitParams {
+            ids,
+            after,
+            timeout,
+            until,
+        }): Parameters<WaitParams>,
     ) -> Result<CallToolResult, ErrorData> {
-        respond_object(crate::ops::wait_agent(&self.state, self.actor()?, &ids, timeout).await)
+        let req = crate::ops::WaitAgent {
+            ids,
+            after,
+            timeout,
+            until,
+        };
+        respond_object(crate::ops::wait_agent(&self.state, self.actor()?, req).await)
     }
 
     #[tool(

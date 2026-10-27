@@ -662,6 +662,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
   grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
   holds the two crates' tests to one `start`.
+- **A child's changes are events in its parent's durable queue** (decision
+  144, `agent/events.rs`): written in the transaction that records the
+  change (`Store::update_with`, `record_result`, `create_request`), only on
+  a transition, at most `MAX_EVENTS_PER_CHILD` per child except the
+  terminal kinds. `wait_agent` returns on the first event after a cursor;
+  `after` acknowledges, so an unacknowledged event comes back after a
+  reconnect or restart, and `until: "settled"` is 134i's wait. An event
+  holds codes, never a child's text (A-144-8). A host's attention or idle
+  word counts only through `attention::GATED_SIGNALS` (provider, signal,
+  source; empty until each gate passes), so without a gated idle signal a
+  child's activity is `unknown`, never `working`. No provider has a `wake`
+  (`events::WAKE`), and no event path writes to a terminal (A-144-12 scans
+  for one).
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets

@@ -21,6 +21,7 @@ pub mod attention;
 pub mod cache;
 pub mod cascade;
 pub mod credential;
+pub mod events;
 pub mod images;
 pub mod inbox;
 pub mod jobs;
@@ -33,6 +34,8 @@ mod approval_tests;
 mod attention_tests;
 #[cfg(test)]
 mod cascade_tests;
+#[cfg(test)]
+mod events_tests;
 #[cfg(test)]
 mod inbox_tests;
 #[cfg(test)]
@@ -525,6 +528,14 @@ pub struct StatusReport {
     /// from a host whose hooks report it for the adapter (134-9).
     #[serde(default)]
     pub attention: Option<String>,
+    /// Where `attention` came from (144b): `provider_hook` (the default, as
+    /// the hooks of 134-9 report it) or `output_pattern`.
+    #[serde(default)]
+    pub attention_source: Option<String>,
+    /// Where `activity` came from (144b): `output_pattern` (the default, as
+    /// AM42's terminal title reports it) or `provider_hook`.
+    #[serde(default)]
+    pub activity_source: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -765,8 +776,17 @@ struct SessionLive {
     cache: OutputCache,
     /// `working` / `idle`, as the host last said (D15 AM42).
     activity: Option<String>,
-    /// A permission prompt waiting, as the host last said (134-9).
+    /// A permission prompt or usage limit waiting, as a gated signal last
+    /// said (134-9, 144b).
     attention: Option<String>,
+    /// `working` / `idle` from a gated idle signal only (144b), and its
+    /// source.
+    health: Option<String>,
+    health_source: Option<&'static str>,
+    /// When the current idle spell began, by [`AgentManager::clock`], and
+    /// whether its `idle_timeout` was written.
+    idle_since: Option<std::time::SystemTime>,
+    idle_fired: bool,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
     /// The credential kind its `start` named (decision 124): the only one the
@@ -780,6 +800,10 @@ impl SessionLive {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             attention: None,
+            health: None,
+            health_source: None,
+            idle_since: None,
+            idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
         }
@@ -823,9 +847,10 @@ pub struct AgentManager {
     config: Mutex<AgentConfig>,
     /// Bumped whenever the approval engine decides a request.
     requests: watch::Sender<u64>,
-    /// The adapters whose permission prompts are taken from their hosts
-    /// (134-9).
-    permission_prompt: Mutex<&'static [&'static str]>,
+    /// The signals taken from hosts (134-9, 144b).
+    signals: Mutex<&'static [attention::GatedSignal]>,
+    /// Added to the wall clock that times idle spells; only tests move it.
+    clock_skew: Mutex<std::time::Duration>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -923,7 +948,8 @@ impl AgentManager {
             config_path,
             config: Mutex::new(config),
             requests: watch::channel(0).0,
-            permission_prompt: Mutex::new(attention::PERMISSION_PROMPT_ADAPTERS),
+            signals: Mutex::new(attention::GATED_SIGNALS),
+            clock_skew: Mutex::new(std::time::Duration::ZERO),
         })
     }
 
@@ -986,7 +1012,7 @@ impl AgentManager {
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
         // Its sessions are unknown until it reconnects and reports them.
-        let _ = self.transition_host_sessions(host_id, |r| {
+        let _ = self.transition_host_sessions(host_id, events::HOST_PROCESS, |r| {
             (!r.is_ended()).then(|| ("unknown".to_string(), None, None, None))
         });
     }
@@ -1101,6 +1127,7 @@ impl AgentManager {
     fn transition_host_sessions(
         &self,
         host_id: &str,
+        source: &'static str,
         change: impl Fn(&SessionRecord) -> Option<(String, Option<String>, Option<i32>, Option<i32>)>,
     ) -> Result<()> {
         let records = self.store.lock().unwrap().for_host(host_id)?;
@@ -1114,7 +1141,14 @@ impl AgentManager {
                     r.signal = signal;
                     r.ended_at.get_or_insert_with(now);
                 }
-                self.store.lock().unwrap().update(&r)?;
+                // Nothing a gated signal said holds once the link is gone
+                // (144b): the idle spell starts again from its next report.
+                if let Some(s) = self.live.lock().unwrap().sessions.get_mut(&r.id) {
+                    s.health = None;
+                    s.health_source = None;
+                    s.idle_since = None;
+                }
+                self.update_record(&r, source)?;
                 self.forget_stop(&r);
                 self.bump(&r.id);
             }
@@ -1176,9 +1210,8 @@ impl AgentManager {
                             r.status = "stopped".into();
                             r.end_reason = Some(reason);
                         }
-                        self.store.lock().unwrap().update(&r)?;
+                        self.record_report(&r, &rep.status)?;
                         self.forget_stop(&r);
-                        self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
                     let empty = {
@@ -1195,7 +1228,7 @@ impl AgentManager {
                     r.status = "failed".into();
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
-                    self.store.lock().unwrap().update(&r)?;
+                    self.update_record(&r, events::HOST_PROCESS)?;
                     self.forget_stop(&r);
                     self.bump(&r.id);
                 }
@@ -1668,7 +1701,7 @@ impl AgentManager {
         let stamp = now();
         if r.last_activity.as_deref().map(|l| &l[..19.min(l.len())]) != Some(&stamp[..19]) {
             r.last_activity = Some(stamp);
-            self.store.lock().unwrap().update(&r)?;
+            self.update_record(&r, events::HOST_PROCESS)?;
         }
         Ok(())
     }
@@ -1701,7 +1734,7 @@ impl AgentManager {
                 "session status"
             );
         }
-        self.store.lock().unwrap().update(&r)?;
+        self.record_report(&r, report)?;
         self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
@@ -1709,7 +1742,6 @@ impl AgentManager {
         if let Some(made) = &report.child_workspace {
             self.record_child_workspace(session_id, made)?;
         }
-        self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
     }
@@ -2041,7 +2073,7 @@ impl AgentManager {
                 record.ended_at = Some(now());
             }
         }
-        self.store.lock().unwrap().update(&record)?;
+        self.update_record(&record, events::STORM)?;
         self.bump(&record.id);
         Ok((record, launch, outcome, credential))
     }
@@ -2193,20 +2225,17 @@ impl AgentManager {
         Ok(records.into_iter().map(|r| self.with_activity(r)).collect())
     }
 
-    fn set_activity(&self, r: &SessionRecord, report: &StatusReport) {
-        let activity = report
-            .activity
-            .as_deref()
-            .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
-            .map(str::to_owned);
-        let attention = self.reported_attention(r, report);
-        let mut live = self.live.lock().unwrap();
-        let session = live
-            .sessions
-            .entry(r.id.clone())
-            .or_insert_with(SessionLive::new);
-        session.activity = activity;
-        session.attention = attention;
+    /// A host's report written back, with what its gated signals say and
+    /// the events it makes, in one transaction (144a).
+    fn record_report(&self, r: &SessionRecord, report: &StatusReport) -> AgentResult<()> {
+        let taken = self.take_signals(r, report);
+        let ctx = events::EventCtx {
+            source: events::HOST_PROCESS,
+            live: taken.live,
+            extra: taken.extra,
+        };
+        self.store.lock().unwrap().update_with(r, &ctx)?;
+        Ok(())
     }
 
     /// Activity is shown only while the session runs: an `unknown` session's
@@ -2507,7 +2536,7 @@ impl AgentManager {
         )?;
         r.cols = size.cols;
         r.rows = size.rows;
-        self.store.lock().unwrap().update(&r)?;
+        self.update_record(&r, events::STORM)?;
         self.bump(id);
         Ok(())
     }
@@ -2669,7 +2698,7 @@ impl AgentManager {
                 r.status = "failed".into();
                 r.end_reason = Some("owner_removed".into());
                 r.ended_at.get_or_insert_with(now);
-                self.store.lock().unwrap().update(&r)?;
+                self.update_record(&r, events::STORM)?;
                 self.forget_stop(&r);
                 self.bump(&r.id);
                 failed += 1;
@@ -2683,7 +2712,7 @@ impl AgentManager {
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
-        self.transition_host_sessions(host_id, |r| {
+        self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (
                     "failed".to_string(),
@@ -3012,6 +3041,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3145,6 +3176,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3766,6 +3799,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3785,6 +3820,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3809,6 +3846,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3900,6 +3939,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4024,6 +4065,8 @@ mod tests {
                         title: None,
                         activity: None,
                         attention: None,
+                        attention_source: None,
+                        activity_source: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -4059,6 +4102,8 @@ mod tests {
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
             attention: None,
+            attention_source: None,
+            activity_source: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -4387,6 +4432,8 @@ mod tests {
                     title: None,
                     activity: None,
                     attention: None,
+                    attention_source: None,
+                    activity_source: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,

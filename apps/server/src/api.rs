@@ -14908,10 +14908,18 @@ pub(crate) mod tests {
             StatusCode::FORBIDDEN
         );
         assert_eq!(
-            crate::ops::wait_agent(&f.state, &p, std::slice::from_ref(&child), Some(1))
-                .await
-                .unwrap_err()
-                .0,
+            crate::ops::wait_agent(
+                &f.state,
+                &p,
+                crate::ops::WaitAgent {
+                    ids: vec![child.clone()],
+                    timeout: Some(1),
+                    ..Default::default()
+                }
+            )
+            .await
+            .unwrap_err()
+            .0,
             StatusCode::FORBIDDEN
         );
         assert_eq!(
@@ -15064,6 +15072,258 @@ pub(crate) mod tests {
         );
     }
 
+    // ---- child events (decision 144) ----
+
+    #[tokio::test]
+    async fn a_144_wait_agent_returns_events_and_a_cursor_over_the_gateway() {
+        let dir = tempdir::TempDir::new("storm-144-wire").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+
+        let waited = structured(
+            &f.tool(&parent, "wait_agent", serde_json::json!({"timeout": 1}))
+                .await,
+        );
+        assert_eq!(waited["timed_out"], true);
+        assert_eq!(waited["events"], serde_json::json!([]));
+        assert_eq!(waited["cursor"], 0);
+        assert_eq!(waited["agents"][0]["id"], child);
+        assert_eq!(
+            waited["agents"][0]["activity"], "unknown",
+            "no gated idle signal"
+        );
+        assert_eq!(
+            waited["agents"][0]["needs_attention"],
+            serde_json::Value::Null
+        );
+        assert_eq!(waited["agents"][0]["pending_events"], 0);
+
+        f.tool(
+            &child,
+            "report_result",
+            serde_json::json!({"outcome": "succeeded", "summary": "41 tests"}),
+        )
+        .await;
+        let waited = structured(
+            &f.tool(&parent, "wait_agent", serde_json::json!({"timeout": 20}))
+                .await,
+        );
+        assert_eq!(waited["timed_out"], false);
+        let event = &waited["events"][0];
+        let seq = event["seq"].as_i64().unwrap();
+        assert_eq!(
+            *event,
+            serde_json::json!({
+                "id": format!("evt_{parent}_{seq}"),
+                "seq": seq,
+                "child": child,
+                "kind": "reported",
+                "reason": "succeeded",
+                "state": {"status": "running", "activity": "unknown", "needs_attention": null},
+                "source": "storm",
+                "confidence": "certain",
+                "at": event["at"],
+            })
+        );
+        assert_eq!(waited["cursor"], seq);
+        assert_eq!(waited["agents"][0]["pending_events"], 1);
+        let children = structured(
+            &f.tool(&parent, "list_children", serde_json::json!({}))
+                .await,
+        );
+        assert_eq!(children["agents"][0]["pending_events"], 1);
+        let status = structured(
+            &f.tool(&parent, "agent_status", serde_json::json!({"id": child}))
+                .await,
+        );
+        assert_eq!(status["pending_events"], 1);
+        assert_eq!(
+            status["result"]["summary"], "41 tests",
+            "the text is in the view"
+        );
+
+        let acked = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"after": seq, "timeout": 1}),
+            )
+            .await,
+        );
+        assert_eq!(acked["events"], serde_json::json!([]));
+        assert_eq!(acked["timed_out"], true);
+        assert_eq!(acked["cursor"], seq);
+        assert_eq!(acked["agents"][0]["pending_events"], 0);
+
+        let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
+        assert_eq!(
+            listed["wake"], false,
+            "no provider's wake has passed its gate"
+        );
+
+        // The person's view of the child carries the same.
+        let view = crate::ops::get_session(&f.state, &child)
+            .await
+            .ok()
+            .unwrap();
+        let view = serde_json::to_value(&view).unwrap();
+        assert_eq!(view["pending_events"], 0);
+        assert_eq!(view["child_activity"], "unknown");
+        assert_eq!(view["recent_events"][0]["kind"], "reported");
+        let top = crate::ops::get_session(&f.state, &parent)
+            .await
+            .ok()
+            .unwrap();
+        let top = serde_json::to_value(&top).unwrap();
+        assert!(top.get("recent_events").is_none(), "only a child has them");
+    }
+
+    #[tokio::test]
+    async fn a_144_7_an_mcp_key_a_person_and_a_child_cannot_read_events() {
+        let dir = tempdir::TempDir::new("storm-144-7").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        f.tool(
+            &child,
+            "report_result",
+            serde_json::json!({"outcome": "succeeded", "summary": "s"}),
+        )
+        .await;
+        let key = Actor::Key {
+            key_id: "key_X".into(),
+            user_id: f.owner.clone(),
+        };
+        let person = Actor::Session {
+            user_id: f.owner.clone(),
+        };
+        for actor in [&key, &person, &f.agent(&child)] {
+            for ids in [vec![], vec![child.clone()], vec![parent.clone()]] {
+                let err = crate::ops::wait_agent(
+                    &f.state,
+                    actor,
+                    crate::ops::WaitAgent {
+                        ids,
+                        after: Some(0),
+                        timeout: Some(0),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(err.0, StatusCode::FORBIDDEN, "{actor:?}");
+                assert!(err.1.starts_with("not_permitted"), "{}", err.1);
+            }
+        }
+        // Over the gateway, a child has no wait_agent at all.
+        assert_eq!(
+            error_code(
+                &f.tool(&child, "wait_agent", serde_json::json!({"ids": [parent]}))
+                    .await
+            )
+            .as_deref(),
+            Some("tool_not_allowed")
+        );
+        let err = tool_error(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [parent], "timeout": 0}),
+            )
+            .await,
+        );
+        assert!(err.starts_with("not_permitted"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_144_13_until_settled_waits_as_134i_did() {
+        let dir = tempdir::TempDir::new("storm-144-13").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, a) = f.tree().await;
+        let b = f.state.agent.spawn_child_for_tests(&parent, "another").id;
+        f.initialize(&b, "storm").await;
+        f.tool(
+            &a,
+            "report_result",
+            serde_json::json!({"outcome": "succeeded", "summary": "a"}),
+        )
+        .await;
+
+        let started = std::time::Instant::now();
+        let settled = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [a, b], "until": "settled", "timeout": 1}),
+            )
+            .await,
+        );
+        assert_eq!(settled["timed_out"], true, "b has not settled");
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        assert_eq!(settled["agents"][0]["settled"], true);
+        assert_eq!(settled["agents"][1]["settled"], false);
+
+        // The same moment in event mode answers at once.
+        let started = std::time::Instant::now();
+        let heard = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [a, b], "timeout": 20}),
+            )
+            .await,
+        );
+        assert_eq!(heard["timed_out"], false);
+        assert_eq!(heard["events"][0]["kind"], "reported");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        f.tool(
+            &b,
+            "report_result",
+            serde_json::json!({"outcome": "failed", "summary": "b"}),
+        )
+        .await;
+        let started = std::time::Instant::now();
+        let settled = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [a, b], "until": "settled", "timeout": 20}),
+            )
+            .await,
+        );
+        assert_eq!(settled["timed_out"], false);
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+
+        // 134i's refusals, unchanged.
+        let err = tool_error(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [], "until": "settled"}),
+            )
+            .await,
+        );
+        assert!(err.contains("name at least one agent"), "{err}");
+        let err = tool_error(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"ids": [parent], "until": "settled"}),
+            )
+            .await,
+        );
+        assert!(err.contains("no such agent"), "{err}");
+        let err = tool_error(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"until": "forever"}),
+            )
+            .await,
+        );
+        assert!(err.contains("until is"), "{err}");
+    }
+
     #[tokio::test]
     async fn another_trees_sessions_are_never_seen() {
         let dir = tempdir::TempDir::new("storm-134-4-trees").unwrap();
@@ -15104,7 +15364,7 @@ pub(crate) mod tests {
                     .await,
             );
             assert!(
-                err.contains("no such agent"),
+                err.contains("no such agent") && err.starts_with("not_permitted"),
                 "{caller} waited on {target}: {err}"
             );
         }

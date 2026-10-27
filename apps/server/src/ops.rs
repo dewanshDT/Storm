@@ -2589,8 +2589,15 @@ pub struct AgentView {
     pub name: String,
     pub provider: String,
     pub status: String,
+    /// 144b: `working` or `idle` only from a gated idle signal, `unknown`
+    /// otherwise while it is live; absent once ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
+    /// `approval`, `permission_prompt`, `usage_limit` or `blocked` (134p,
+    /// 144b).
+    pub needs_attention: Option<&'static str>,
+    /// Its events in the caller's queue not yet acknowledged (144a).
+    pub pending_events: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2639,6 +2646,9 @@ fn agent_view(
 ) -> ApiResult<AgentView> {
     let lineage = state.agent.lineage(&r.id).map_err(agent_error)?;
     let result = state.agent.result_of(&r.id).map_err(agent_error)?;
+    let activity = state.agent.health_activity(&r);
+    let needs_attention = state.agent.needs_attention(&r).map_err(agent_error)?;
+    let pending_events = state.agent.pending_events(&r.id).map_err(agent_error)?;
     let (task, messages) = match detail_for {
         Some(caller) => (
             state.agent.task_of(&r.id).map_err(agent_error)?,
@@ -2665,7 +2675,9 @@ fn agent_view(
         name,
         provider: r.provider,
         status: r.status,
-        activity: r.activity,
+        activity,
+        needs_attention,
+        pending_events,
         end_reason: r.end_reason,
         exit_code: r.exit_code,
         created_at: r.created_at,
@@ -2729,6 +2741,9 @@ pub struct ListAgents {
     pub start_refused: Option<&'static str>,
     /// The longest one `wait_agent` holds, in seconds (134i).
     pub wait_cap_secs: u64,
+    /// Whether Storm can wake this session when events wait (144c). While
+    /// false, nothing is pushed: events wait until `wait_agent` reads them.
+    pub wake: bool,
 }
 
 /// `list_agents`: what the calling parent may ask to start, and how close it
@@ -2740,6 +2755,7 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
+        wake: crate::agent::events::wake_on(&r.provider),
         agents: state
             .agent
             .startable_agents(&caller)
@@ -2963,41 +2979,94 @@ pub async fn start_agent(
     })
 }
 
+/// What `wait_agent` is asked (134i, 144a).
+#[derive(Debug, Clone, Default)]
+pub struct WaitAgent {
+    /// Descendants to hear of; all the caller's children when empty.
+    pub ids: Vec<String>,
+    /// The cursor last returned: acknowledges up to it, and reads after it.
+    /// Without it the read starts from the caller's acknowledged cursor.
+    pub after: Option<i64>,
+    pub timeout: Option<u64>,
+    /// `settled` waits as 134i did: until every listed agent has settled.
+    pub until: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct WaitAgents {
+    /// The caller's child events after its cursor, oldest first (144a).
+    pub events: Vec<crate::agent::events::ChildEvent>,
+    /// The highest `seq` returned, or where the read started: the `after`
+    /// of the next call.
+    pub cursor: i64,
     pub agents: Vec<AgentView>,
-    /// The bound ended the wait before every agent settled.
+    /// The bound ended the wait: no event came, or (settled) not every
+    /// agent settled.
     pub timed_out: bool,
 }
 
-/// `wait_agent {ids, timeout?}`: a bounded long-poll (134i). It returns once
-/// every listed descendant has ended or reported, or at the caller's
-/// adapter's cap, which stays below its tool-call timeout.
-pub async fn wait_agent(
-    state: &Shared,
-    actor: &Actor,
-    ids: &[String],
-    timeout_secs: Option<u64>,
-) -> ApiResult<WaitAgents> {
-    let caller = spawning_caller(state, actor)?;
+/// `wait_agent {ids?, after?, timeout?, until?}`: a bounded long-poll over
+/// the caller's child events (144a), returning on the first, or with
+/// `until: "settled"` once every listed descendant has ended or reported
+/// (134i). Either way at most the caller's adapter's cap, which stays
+/// below its tool-call timeout. Anything outside the caller's descendants
+/// is `not_permitted` (144d).
+pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiResult<WaitAgents> {
+    let caller = spawning_caller(state, actor)
+        .map_err(|e| ApiError(e.0, format!("not_permitted: {}", e.1)))?;
+    let settled = match req.until.as_deref() {
+        None | Some("event") => false,
+        Some("settled") => true,
+        Some(_) => return Err(bad_request("until is `event` or `settled`")),
+    };
     let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
-    let bound = crate::agent::scope::wait_bound(
-        &provider,
-        timeout_secs.map(std::time::Duration::from_secs),
-    );
+    let bound =
+        crate::agent::scope::wait_bound(&provider, req.timeout.map(std::time::Duration::from_secs));
     let agent = state.agent.clone();
     let offered = caller.clone();
-    let (records, timed_out) = state
+    let still_offered = move || agent.spawn_offered(&offered);
+    if settled {
+        let (records, timed_out) = state
+            .agent
+            .wait_agents(&caller, &req.ids, bound, &still_offered)
+            .await
+            .map_err(agent_error)?;
+        let read = state
+            .agent
+            .events_now(&caller, &req.ids, req.after)
+            .map_err(agent_error)?;
+        return Ok(WaitAgents {
+            events: read.events,
+            cursor: read.cursor,
+            agents: records
+                .into_iter()
+                .map(|r| agent_view(state, r, None))
+                .collect::<ApiResult<_>>()?,
+            timed_out,
+        });
+    }
+    let read = state
         .agent
-        .wait_agents(&caller, ids, bound, &move || agent.spawn_offered(&offered))
+        .wait_events(&caller, &req.ids, req.after, bound, &still_offered)
         .await
         .map_err(agent_error)?;
+    let records = if req.ids.is_empty() {
+        state.agent.children_of(&caller).map_err(agent_error)?
+    } else {
+        req.ids
+            .iter()
+            .map(|id| state.agent.descendant(&caller, id))
+            .collect::<Result<_, _>>()
+            .map_err(agent_error)?
+    };
     Ok(WaitAgents {
+        events: read.events,
+        cursor: read.cursor,
         agents: records
             .into_iter()
             .map(|r| agent_view(state, r, None))
             .collect::<ApiResult<_>>()?,
-        timed_out,
+        timed_out: read.timed_out,
     })
 }
 
@@ -3754,9 +3823,21 @@ pub struct SessionView {
     /// made it: the mode and the commit a clone starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_workspace: Option<crate::agent::ChildWorkspace>,
-    /// Whether it waits for a person (134p): `approval`, `permission_prompt`
-    /// or `blocked`. Beside `activity`, never a status, never from idle.
+    /// Whether it waits for a person (134p): `approval`, `permission_prompt`,
+    /// `usage_limit` (144b) or `blocked`. Beside `activity`, never a status,
+    /// never from idle.
     pub needs_attention: Option<&'static str>,
+    /// A child's evidence-based activity (144b): `working` or `idle` only
+    /// from a gated signal, else `unknown` while live. Only on a child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_activity: Option<String>,
+    /// A child's events its parent has not acknowledged (144a). Only on a
+    /// child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_events: Option<i64>,
+    /// A child's latest events, oldest first. Only on a child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_events: Option<Vec<crate::agent::events::ChildEvent>>,
     /// Its spawn switch (134-10), only where its host could offer spawning
     /// now or the switch is on; absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3803,6 +3884,27 @@ fn session_view(
         .child_workspace_of(&session.id)
         .map_err(internal)?;
     let needs_attention = state.agent.needs_attention(&session).map_err(agent_error)?;
+    let (child_activity, pending_events, recent_events) = match &lineage {
+        LineageView {
+            parent_session: Some(_),
+            ..
+        } => (
+            state.agent.health_activity(&session),
+            Some(
+                state
+                    .agent
+                    .pending_events(&session.id)
+                    .map_err(agent_error)?,
+            ),
+            Some(
+                state
+                    .agent
+                    .recent_events(&session.id)
+                    .map_err(agent_error)?,
+            ),
+        ),
+        _ => (None, None, None),
+    };
     let spawn = state.agent.spawn_view(&session).map_err(internal)?;
     let role = state
         .agent
@@ -3834,6 +3936,9 @@ fn session_view(
         isolation,
         child_workspace,
         needs_attention,
+        child_activity,
+        pending_events,
+        recent_events,
         spawn,
         launch_role,
     })
@@ -4136,6 +4241,9 @@ pub async fn launch_session(
         isolation,
         child_workspace: None,
         needs_attention: None,
+        child_activity: None,
+        pending_events: None,
+        recent_events: None,
         spawn,
         launch_role: launch.role,
     }];
