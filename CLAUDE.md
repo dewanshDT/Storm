@@ -663,6 +663,8 @@ Specification*; the slices are decisions 81 and 81a onward):
   has it report each round with `report_result` and then wait on
   `read_messages` for the next (145): a message after its round's result
   starts the next round (`session_round`), and results are kept per round.
+  It inherits its parent's write vault only when the parent launched with
+  one it may write (145a); nothing wider.
   A child starts none (`store::spawn::BUILT_DEPTH`) until a decision says
   how a grandchild reads its parent's own workspace.
   `docs/spawned-start-vectors.json` holds the two crates' tests to one
@@ -684,7 +686,36 @@ Specification*; the slices are decisions 81 and 81a onward):
   source; empty until each gate passes), so without a gated idle signal a
   child's activity is `unknown`, never `working`. No provider has a `wake`
   (`events::WAKE`), and no event path writes to a terminal (A-144-12 scans
-  for one).
+  for one). Round events (`reported`, `failed`, `ended`, `parked`) carry
+  `round`, `duration_ms` by Storm's own timestamps, and `usage` only where
+  the agent itself counted it (145f).
+- **A hook is evidence, switched on per agent in two mirrored lists**
+  (144b/c, 145c–e). The host reports only what `harness::{GATED_SIGNALS,
+  RESULT_SOURCES, WAKE}` hold; the server takes only what
+  `attention::GATED_SIGNALS`, `round::RESULT_SOURCES` and `events::WAKE`
+  hold; a test in each crate holds them equal, and all are empty until
+  `make gate-lifecycle` (G-144-S/W, G-145-R/W) passes on VM 113. With none
+  on, every config is byte-identical to before. A hook's line is taken only
+  through its session's own handle, socket and uid (`Host::hook_session`)
+  and can only be shown. A gated final message (`Stop`'s
+  `last_assistant_message`, OpenCode's idle) becomes the round's result,
+  `succeeded`, unless the child reported it itself; it is never in an
+  event. **The wake**: the server sends `wake {session, kind, mark}` when a
+  parent has unacknowledged events or a child a queued message
+  (`agent/wake.rs`); the host answers its one waiter per session
+  (`harness-wake`, a long-poll on the session's socket) once per mark:
+  Claude Code's `asyncRewake` hook exits 2 with a fixed stderr sentence,
+  OpenCode's plugin calls `client.session.promptAsync` — never
+  `/tui/append-prompt` or `/tui/submit-prompt`, never a PTY write. **Park**
+  (145e): a reported child idle `PARK_AFTER` by a gated idle signal is sent
+  `park`; its host stops it as `end` does, the helper's `child_park` keeps
+  its workspace (`Parked`), and it is `parked`, outside C4's live cap but
+  inside `MAX_PARKED` (12 a host) and its tree's total. A message resumes
+  the same session from its own kept conversation (the helper allows
+  `resume.from == session` only for a child `child_create` took back). A
+  parked child survives neither a host nor a helper restart: its resume
+  then fails and it ends. `read_output` (145g) gives a parent its own
+  child's last lines, ANSI stripped, audited without text.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
@@ -809,7 +840,9 @@ Specification*; the slices are decisions 81 and 81a onward):
   keeps the two crates in agreement. The `SessionStart` hook prints nothing
   but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
   a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
-  positive control.
+  positive control. Every later hook command (`harness-signal`,
+  `harness-result`, `harness-wake`) prints nothing either; only the
+  waker's fixed sentence goes to stderr, which `asyncRewake` reads.
 - **Under `agent_mcp = "storm-only"`, a Claude Code session's plugins' local
   MCP servers are written into its `mcp.json` by Storm, and strict stays**
   (decision 131, `plugins.rs`); otherwise Claude Code loads its plugins
