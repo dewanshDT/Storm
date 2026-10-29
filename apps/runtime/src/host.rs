@@ -184,6 +184,19 @@ pub enum Command {
         #[serde(default)]
         git: bool,
     },
+    /// 145e: stop a child whose round is done, as `end` does, keeping its
+    /// workspace for a resume, and report it `parked`.
+    #[serde(rename = "park")]
+    Park { session: String },
+    /// 144c, 145d: the session has something unread up to `mark`
+    /// (`events` for a parent, `message` for a child; 0 is nothing). Its
+    /// waker, if its agent has one, wakes the agent once per mark.
+    #[serde(rename = "wake")]
+    Wake {
+        session: String,
+        kind: String,
+        mark: i64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -210,6 +223,8 @@ impl Command {
             Self::AgentInstall { .. } => "agent.install",
             Self::ChildWorkspace { .. } => "child.workspace",
             Self::WorkspaceCreate { .. } => "workspace.create",
+            Self::Park { .. } => "park",
+            Self::Wake { .. } => "wake",
         }
     }
 
@@ -222,7 +237,9 @@ impl Command {
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
-            | Self::TerminalImage { session, .. } => Some(session),
+            | Self::TerminalImage { session, .. }
+            | Self::Park { session }
+            | Self::Wake { session, .. } => Some(session),
             Self::Refresh
             | Self::AgentInstall { .. }
             | Self::ChildWorkspace { .. }
@@ -267,6 +284,72 @@ struct Events {
     /// `permission_prompt` while the agent's own prompt waits, as its hooks
     /// last said.
     attention: Mutex<Option<&'static str>>,
+    /// What its hooks or plugin report beyond its id, from its agent's
+    /// gated lists (144b, 145c, 144c).
+    hooks: crate::harness::Hooks,
+    /// A spawned child: only a child's final message is a round's result.
+    spawned: bool,
+    /// 144b: its turn as its hooks last said (`working`, `idle`), and
+    /// whether they said it hit a usage limit since.
+    hook_activity: Mutex<Option<&'static str>>,
+    usage_limit: Mutex<bool>,
+    /// 144c, 145d: what Storm last said is unread (its kind and mark), the
+    /// mark a waker last woke the agent for, and the number of the current
+    /// waiter: one per session, an older one released.
+    unread: watch::Sender<(Option<&'static str>, i64)>,
+    woken: Mutex<i64>,
+    waiter: watch::Sender<u64>,
+    /// Set when the session ends, so its waiter lets go.
+    gone: watch::Sender<bool>,
+}
+
+impl Events {
+    fn new(ring: usize, titles: bool, hooks: crate::harness::Hooks, spawned: bool) -> Self {
+        Self {
+            ring: Mutex::new(Scrollback::new(ring)),
+            ended: Mutex::new(None),
+            wake: Notify::new(),
+            title: Mutex::new(TitleObserver::default()),
+            titles,
+            harness: Mutex::new(None),
+            leader: watch::channel(None).0,
+            child: Mutex::new(None),
+            attention_hooks: hooks.attention,
+            attention: Mutex::new(None),
+            hooks,
+            spawned,
+            hook_activity: Mutex::new(None),
+            usage_limit: Mutex::new(false),
+            unread: watch::channel((None, 0)).0,
+            woken: Mutex::new(0),
+            waiter: watch::channel(0).0,
+            gone: watch::channel(false).0,
+        }
+    }
+
+    /// The attention its hooks report now: a permission prompt first, then
+    /// a usage limit (144b). `None` from a session whose hooks report
+    /// neither, so its status reports carry no `attention` at all.
+    fn attention_now(&self) -> Option<Option<&'static str>> {
+        if !self.hooks.attention && !self.hooks.usage_limit {
+            return None;
+        }
+        let prompt = self
+            .attention_hooks
+            .then(|| *self.attention.lock().unwrap())
+            .flatten();
+        let limit = (self.hooks.usage_limit && *self.usage_limit.lock().unwrap())
+            .then_some(crate::harness::USAGE_LIMIT);
+        Some(prompt.or(limit))
+    }
+
+    /// Its turn as its gated idle hooks said, if they did.
+    fn hook_activity_now(&self) -> Option<&'static str> {
+        self.hooks
+            .idle
+            .then(|| *self.hook_activity.lock().unwrap())
+            .flatten()
+    }
 }
 
 /// A session's leader, and on an isolated host the uid it runs as: both
@@ -287,6 +370,7 @@ impl SessionEvents for Events {
 
     fn ended(&self, end: SessionEnd) {
         *self.ended.lock().unwrap() = Some(end);
+        self.gone.send_replace(true);
         self.wake.notify_one();
     }
 
@@ -319,8 +403,14 @@ struct HostSession {
     title_sent: Mutex<(Title, Option<std::time::Instant>)>,
     /// The agent's session id last acknowledged by the server.
     harness_sent: Mutex<Option<String>>,
-    /// The permission prompt last acknowledged by the server (134-9).
+    /// The permission prompt or usage limit last acknowledged by the
+    /// server (134-9, 144b).
     attention_sent: Mutex<Option<&'static str>>,
+    /// The hooks' turn last acknowledged by the server (144b).
+    activity_sent: Mutex<Option<&'static str>>,
+    /// Storm asked to park it (145e): its end is reported `parked` once
+    /// its workspace is kept for a resume.
+    parking: AtomicBool,
     /// Input, in order, for this session's writer task. A queue so the link
     /// never waits on a PTY, and one writer so keystrokes never reorder.
     input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
@@ -373,8 +463,9 @@ pub struct Host {
     /// `(session, connection id)`.
     subscribers: Mutex<Subscribers>,
     harness_handles: Mutex<HarnessHandles>,
-    /// The adapters whose permission prompts are reported (134-9).
-    permission_prompt: Mutex<&'static [&'static str]>,
+    /// The gated lists its sessions' hooks report from (134-9, 144b, 145c,
+    /// 144c): the compiled ones, which are empty, or a test's.
+    gates: Mutex<crate::harness::Gates>,
     /// Bridge identity (decision 135): whether connections are checked, and
     /// each session's leader to check them against.
     peer_identity: crate::peer_identity::Identity,
@@ -482,7 +573,7 @@ impl Host {
             handles: crate::mcp::Handles::default(),
             subscribers: Mutex::new(HashMap::new()),
             harness_handles: Mutex::new(HashMap::new()),
-            permission_prompt: Mutex::new(crate::harness::PERMISSION_PROMPT_ADAPTERS),
+            gates: Mutex::new(crate::harness::Gates::COMPILED),
             peer_identity: crate::peer_identity::Identity::detect(),
             leaders: Mutex::new(HashMap::new()),
             isolation_status,
@@ -1320,6 +1411,7 @@ impl Host {
             let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
             entry = with_harness(entry, s.events.harness.lock().unwrap().as_deref());
             entry = with_attention(entry, &s.events);
+            entry = with_hook_activity(entry, s.events.hook_activity_now());
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -1528,6 +1620,28 @@ impl Host {
                     });
                 }
             }
+            Command::Park { session } => {
+                if let Some(s) = self.session(&session) {
+                    s.parking.store(true, Ordering::SeqCst);
+                    tokio::task::spawn_blocking(move || {
+                        s.session.lock().unwrap().stop(DEFAULT_GRACE)
+                    });
+                }
+            }
+            Command::Wake {
+                session,
+                kind,
+                mark,
+            } => {
+                if let Some(s) = self.session(&session) {
+                    let kind = match kind.as_str() {
+                        "events" => Some("events"),
+                        "message" => Some("message"),
+                        _ => None,
+                    };
+                    s.events.unread.send_replace((kind, mark.max(0)));
+                }
+            }
             Command::Input { session, data } => {
                 if let (Some(s), Ok(bytes)) =
                     (self.session(&session), BASE64.decode(data.as_bytes()))
@@ -1642,8 +1756,10 @@ impl Host {
                 refuse("a spawned session starts only on an isolated host");
                 return self.post_start_failure(&id).await;
             }
-            if !crate::credential_paths::session_id_ok(parent) || *parent == id || resume.is_some()
-            {
+            // 145e: a child resumes only itself, from the conversation it
+            // kept when it was parked.
+            let resumes_another = resume.is_some() && resumed_from.as_deref() != Some(id.as_str());
+            if !crate::credential_paths::session_id_ok(parent) || *parent == id || resumes_another {
                 refuse("not a parent this session can have");
                 return self.post_start_failure(&id).await;
             }
@@ -1814,22 +1930,13 @@ impl Host {
             }
             None => serde_json::Value::Null,
         };
-        let events = Arc::new(Events {
-            ring: Mutex::new(Scrollback::new(self.config.scrollback_bytes)),
-            ended: Mutex::new(None),
-            wake: Notify::new(),
-            title: Mutex::new(TitleObserver::default()),
-            titles: crate::profile::get(&provider_id).is_none_or(|p| p.titles),
-            harness: Mutex::new(None),
-            leader: watch::channel(None).0,
-            child: Mutex::new(None),
-            attention_hooks: self
-                .permission_prompt
-                .lock()
-                .unwrap()
-                .contains(&provider_id.as_str()),
-            attention: Mutex::new(None),
-        });
+        let hooks = self.gates.lock().unwrap().hooks(&provider_id);
+        let events = Arc::new(Events::new(
+            self.config.scrollback_bytes,
+            crate::profile::get(&provider_id).is_none_or(|p| p.titles),
+            hooks,
+            child_of.is_some(),
+        ));
         self.leaders
             .lock()
             .unwrap()
@@ -1890,7 +1997,7 @@ impl Host {
         let launch = crate::mcp::with_opening_prompt(
             launch,
             &provider_id,
-            crate::mcp::opening_prompt(context && resume.is_none(), spawned),
+            crate::mcp::opening_prompt(context && resume.is_none(), spawned, resume.is_some()),
         );
         let spec = SessionSpec {
             session_id: id.clone(),
@@ -1983,6 +2090,8 @@ impl Host {
             title_sent: Mutex::new((Title::default(), None)),
             harness_sent: Mutex::new(None),
             attention_sent: Mutex::new(None),
+            activity_sent: Mutex::new(None),
+            parking: AtomicBool::new(false),
             input,
         });
         // The writer: one per session, in order. Each write is bounded by the
@@ -2112,9 +2221,14 @@ impl Host {
             let end = *s.events.ended.lock().unwrap();
             let (sent, posted_at) = s.title_sent.lock().unwrap().clone();
             let harness_changed = harness != *s.harness_sent.lock().unwrap();
-            let attention = *s.events.attention.lock().unwrap();
-            let attention_changed = attention != *s.attention_sent.lock().unwrap();
-            if end.is_none() && (title != sent || harness_changed || attention_changed) {
+            let attention = s.events.attention_now();
+            let attention_changed =
+                attention.is_some_and(|a| a != *s.attention_sent.lock().unwrap());
+            let activity = s.events.hook_activity_now();
+            let activity_changed = activity != *s.activity_sent.lock().unwrap();
+            if end.is_none()
+                && (title != sent || harness_changed || attention_changed || activity_changed)
+            {
                 let wait =
                     posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
                 if !wait.is_zero() {
@@ -2124,9 +2238,11 @@ impl Host {
                     }
                     continue;
                 }
-                let mut body =
-                    with_harness(with_title(status_json(None), &title), harness.as_deref());
-                if s.events.attention_hooks {
+                let mut body = with_hook_activity(
+                    with_harness(with_title(status_json(None), &title), harness.as_deref()),
+                    activity,
+                );
+                if let Some(attention) = attention {
                     body["attention"] = json!(attention);
                 }
                 match self
@@ -2136,7 +2252,8 @@ impl Host {
                     Ok(st) if st.is_success() => {
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
-                        *s.attention_sent.lock().unwrap() = attention;
+                        *s.attention_sent.lock().unwrap() = attention.flatten();
+                        *s.activity_sent.lock().unwrap() = activity;
                         retry = Duration::from_millis(250);
                     }
                     _ => {
@@ -2147,10 +2264,16 @@ impl Host {
                 continue;
             }
             if let Some(end) = end {
-                let body = with_harness(
-                    with_title(status_json(Some(end)), &title),
-                    harness.as_deref(),
-                );
+                // 145e: a child Storm asked to park is reported `parked`
+                // once its workspace is kept for its resume; otherwise its
+                // end is what it was.
+                let parked = s.parking.load(Ordering::SeqCst) && self.park_child(&s.id).await;
+                let status = if parked {
+                    json!({"status": "parked"})
+                } else {
+                    status_json(Some(end))
+                };
+                let body = with_harness(with_title(status, &title), harness.as_deref());
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -2323,7 +2446,7 @@ impl Host {
             &exe,
             resume,
             synced,
-            events.attention_hooks,
+            &events.hooks,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -2682,6 +2805,176 @@ impl Host {
         }
     }
 
+    /// The session a hook's handle names, with its events, once the
+    /// connection that brought it is admitted as that session's own (135a,
+    /// 136i: its own socket, its leased user). Anything else is dropped,
+    /// with the refusal audited.
+    async fn hook_session(&self, handle: &str, peer: Peer) -> Option<(String, Arc<Events>)> {
+        let (session, events) = self
+            .harness_handles
+            .lock()
+            .unwrap()
+            .get(handle)
+            .map(|(s, _, e)| (s.clone(), e.clone()))?;
+        self.admit(peer, &session, "harness")
+            .await
+            .then_some((session, events))
+    }
+
+    /// The agent's hook or plugin saying its turn began or ended, or that
+    /// it hit a usage limit (144b). Evidence only, never authority: taken
+    /// through the session's own handle and connection, only for a signal
+    /// its agent's gate lets through, and only ever shown.
+    async fn signal_reported(&self, report: crate::harness::SignalLine, peer: Peer) {
+        let Some((session, events)) = self.hook_session(&report.handle, peer).await else {
+            return;
+        };
+        let hooks = events.hooks;
+        let changed = match report.signal.as_str() {
+            "working" => {
+                let mut changed = false;
+                if hooks.idle {
+                    changed |=
+                        events.hook_activity.lock().unwrap().replace("working") != Some("working");
+                }
+                if hooks.usage_limit {
+                    changed |= std::mem::take(&mut *events.usage_limit.lock().unwrap());
+                }
+                changed
+            }
+            crate::harness::IDLE if hooks.idle => {
+                events.hook_activity.lock().unwrap().replace("idle") != Some("idle")
+            }
+            crate::harness::USAGE_LIMIT if hooks.usage_limit => {
+                !std::mem::replace(&mut *events.usage_limit.lock().unwrap(), true)
+            }
+            _ => false,
+        };
+        if changed {
+            tracing::debug!(%session, signal = %report.signal, "hook signal");
+            events.wake.notify_one();
+        }
+    }
+
+    /// The agent's hook or plugin with its turn's final message (145c),
+    /// passed to the server as it is, at most once: the server decides
+    /// whether it is a round's result. Only from a spawned child whose
+    /// agent's gate lets its final message through.
+    async fn result_reported(&self, report: crate::harness::ResultLine, peer: Peer) {
+        let Some((session, events)) = self.hook_session(&report.handle, peer).await else {
+            return;
+        };
+        if !events.hooks.result || !events.spawned || !*self.link_up.borrow() {
+            return;
+        }
+        let mut text = report.final_message;
+        if text.len() > crate::harness::MAX_FINAL_MESSAGE {
+            let mut end = crate::harness::MAX_FINAL_MESSAGE;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+        let mut body = json!({"text": text, "source": crate::harness::PROVIDER_HOOK});
+        if let Some(usage) = report.usage {
+            body["usage"] = json!(usage);
+        }
+        let _ = self
+            .post(
+                &format!("/v1/runtime/sessions/{session}/final-message"),
+                &body,
+            )
+            .await;
+    }
+
+    /// A waker (144c, 145d): held until Storm says something new is unread
+    /// for the session, then told its kind, once per mark. One waiter per
+    /// session: a newer one releases this one. The session's end, or the
+    /// waker going, ends the wait; nothing is ever written to a terminal.
+    async fn waiter(
+        &self,
+        report: crate::harness::WakeLine,
+        peer: Peer,
+        mut write: tokio::io::WriteHalf<crate::platform::ipc::Stream>,
+    ) {
+        use tokio::io::AsyncWriteExt;
+        let Some((session, events)) = self.hook_session(&report.handle, peer).await else {
+            return;
+        };
+        if !events.hooks.wake {
+            return;
+        }
+        let answer = |a: crate::harness::WakeAnswer| {
+            let mut bytes = serde_json::to_vec(&a).unwrap_or_default();
+            bytes.push(b'\n');
+            bytes
+        };
+        let me = {
+            let mut n = 0;
+            events.waiter.send_modify(|w| {
+                *w += 1;
+                n = *w;
+            });
+            n
+        };
+        tracing::debug!(%session, armed_by = %report.wake, waiter = me, "waker armed");
+        let mut waiters = events.waiter.subscribe();
+        let mut unread = events.unread.subscribe();
+        let mut gone = events.gone.subscribe();
+        loop {
+            if *gone.borrow_and_update() || *waiters.borrow_and_update() != me {
+                let _ = write
+                    .write_all(&answer(crate::harness::WakeAnswer {
+                        wake: None,
+                        release: true,
+                    }))
+                    .await;
+                return;
+            }
+            let (kind, mark) = *unread.borrow_and_update();
+            if let Some(kind) = kind
+                && mark > *events.woken.lock().unwrap()
+            {
+                let told = write
+                    .write_all(&answer(crate::harness::WakeAnswer {
+                        wake: Some(kind.into()),
+                        release: false,
+                    }))
+                    .await;
+                if told.is_ok() {
+                    let mut woken = events.woken.lock().unwrap();
+                    *woken = (*woken).max(mark);
+                    tracing::info!(%session, kind, "woke the agent: something is unread");
+                }
+                return;
+            }
+            tokio::select! {
+                _ = waiters.changed() => {}
+                _ = unread.changed() => {}
+                _ = gone.changed() => {}
+            }
+        }
+    }
+
+    /// 145e: a child's workspace kept for its resume, once its lease has
+    /// ended: the helper marks it parked. `false` on a host without the
+    /// helper, or when the helper refuses: the child then ended for good.
+    async fn park_child(&self, session: &str) -> bool {
+        let Some(link) = self.isolation.clone() else {
+            return false;
+        };
+        let session = session.to_string();
+        let parked = tokio::task::spawn_blocking(move || link.child_park(&session)).await;
+        match parked {
+            Ok(Ok(())) => true,
+            Ok(Err(e)) => {
+                tracing::warn!(error = %e, "the helper did not keep a parked child's workspace");
+                false
+            }
+            Err(_) => false,
+        }
+    }
+
     /// One bridge connection: a message to forward, or a subscription.
     /// `via` is the session whose own socket it came in on (136i), or none
     /// for the host's shared one.
@@ -2712,6 +3005,15 @@ impl Host {
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::AttentionLine>(&line) {
             return self.attention_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::SignalLine>(&line) {
+            return self.signal_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::ResultLine>(&line) {
+            return self.result_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::WakeLine>(&line) {
+            return self.waiter(report, peer, write).await;
         }
         let Ok(request) = serde_json::from_str::<crate::mcp::BridgeLine>(&line) else {
             return;
@@ -2931,8 +3233,18 @@ fn with_harness(mut body: serde_json::Value, harness: Option<&str>) -> serde_jso
 /// A status body with whether the agent's permission prompt waits, for a
 /// session whose adapter reports it (134-9); unchanged for any other.
 fn with_attention(mut body: serde_json::Value, events: &Events) -> serde_json::Value {
-    if events.attention_hooks {
-        body["attention"] = json!(*events.attention.lock().unwrap());
+    if let Some(attention) = events.attention_now() {
+        body["attention"] = json!(attention);
+    }
+    body
+}
+
+/// A status body with the agent's turn as its gated hooks said (144b), in
+/// place of the title's, and where it came from; unchanged without one.
+fn with_hook_activity(mut body: serde_json::Value, activity: Option<&str>) -> serde_json::Value {
+    if let Some(activity) = activity {
+        body["activity"] = json!(activity);
+        body["activity_source"] = json!(crate::harness::PROVIDER_HOOK);
     }
     body
 }
@@ -3323,6 +3635,43 @@ mod tests {
             "send" => crate::harness::send(socket(), handle(), arg.into()).unwrap(),
             // A permission prompt hook (134-9), with its own handle.
             "attend" => crate::harness::send_attention(socket(), handle(), arg.into()).unwrap(),
+            // 144b's signal hook, with its own handle.
+            "signal" => crate::harness::send_line(
+                socket(),
+                &crate::harness::SignalLine {
+                    handle: handle(),
+                    signal: arg.into(),
+                },
+            )
+            .unwrap(),
+            // 145c's final message, with its own handle.
+            "result" => crate::harness::send_line(
+                socket(),
+                &crate::harness::ResultLine {
+                    handle: handle(),
+                    final_message: arg.into(),
+                    usage: Some(crate::harness::Usage {
+                        input_tokens: Some(12),
+                        output_tokens: Some(3),
+                        ..Default::default()
+                    }),
+                },
+            )
+            .unwrap(),
+            // 144c's waker: the host's answer goes to the file `arg`.
+            "wake" => {
+                let mut line = serde_json::to_vec(&crate::harness::WakeLine {
+                    handle: handle(),
+                    wake: "Stop".into(),
+                })
+                .unwrap();
+                line.push(b'\n');
+                let mut stream = crate::platform::ipc::connect_blocking(&socket()).unwrap();
+                stream.write_all(&line).unwrap();
+                let answer = stream.read_line(4096).unwrap_or_default();
+                std::fs::write(format!("{arg}.tmp"), answer).unwrap();
+                std::fs::rename(format!("{arg}.tmp"), arg).unwrap();
+            }
             "attend-as" => {
                 let (h, kind) = arg.split_once(' ').unwrap();
                 crate::harness::send_attention(socket(), h.into(), kind.into()).unwrap()
@@ -3566,18 +3915,12 @@ mod tests {
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     async fn a_session_without_a_leader_takes_no_connection() {
         let (host, _seen, state, _roots) = harness_host("exec sleep 1000").await;
-        let events = Arc::new(Events {
-            ring: Mutex::new(Scrollback::new(64)),
-            ended: Mutex::new(None),
-            wake: Notify::new(),
-            title: Mutex::new(TitleObserver::default()),
-            titles: false,
-            harness: Mutex::new(None),
-            leader: watch::channel(None).0,
-            child: Mutex::new(None),
-            attention_hooks: false,
-            attention: Mutex::new(None),
-        });
+        let events = Arc::new(Events::new(
+            64,
+            false,
+            crate::harness::Hooks::default(),
+            false,
+        ));
         host.harness_handles.lock().unwrap().insert(
             "h_ORPHAN".into(),
             ("ags_NOLEAD".into(), "claude-code".into(), events.clone()),
@@ -3840,7 +4183,7 @@ mod tests {
             probe("attend none", false),
         );
         let (host, seen, state, roots) = harness_host(&script).await;
-        *host.permission_prompt.lock().unwrap() = &["claude-code"];
+        host.gates.lock().unwrap().permission_prompt = &["claude-code"];
         host.clone()
             .handle(harness_start("ags_ON", "claude-code", None, false))
             .await;
@@ -6731,5 +7074,408 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         );
         let v = status_json(Some(SessionEnd::Completed { exit_code: Some(2) }));
         assert_eq!(v["exit_code"], 2);
+    }
+
+    // ---- decisions 144b, 145c, 144c/145d, 145e on the host ------------------
+
+    /// Every list on for Claude Code, as once each gate has passed.
+    #[cfg(target_os = "linux")]
+    const ALL_GATES: crate::harness::Gates = crate::harness::Gates {
+        permission_prompt: &["claude-code"],
+        signals: &[
+            crate::harness::GatedSignal {
+                provider: "claude-code",
+                signal: "idle",
+                source: "provider_hook",
+            },
+            crate::harness::GatedSignal {
+                provider: "claude-code",
+                signal: "usage_limit",
+                source: "provider_hook",
+            },
+        ],
+        results: &[crate::harness::ResultSource {
+            provider: "claude-code",
+            source: "provider_hook",
+        }],
+        wakes: &[crate::harness::GatedWake {
+            provider: "claude-code",
+            mechanism: "async_rewake",
+        }],
+    };
+
+    /// A spawned child on an isolated host running `script`, with its own
+    /// scratch workspace, its hooks under `gates`.
+    #[cfg(target_os = "linux")]
+    async fn spawned_child(
+        script: &str,
+        gates: crate::harness::Gates,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        crate::isolation::fake::FakeHelper,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let (host, seen, helper, state, roots) = isolated_script_host(script, None).await;
+        *host.gates.lock().unwrap() = gates;
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+        host.clone().handle(spawned_start()).await;
+        wait_for("the child started", || host.session("ags_CHILD").is_some()).await;
+        (host, seen, helper, state, roots, children)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn child_posts(
+        seen: &Mutex<Vec<(String, serde_json::Value)>>,
+        tail: &str,
+    ) -> Vec<serde_json::Value> {
+        seen.lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with(&format!("/sessions/ags_child/{tail}")))
+            .map(|(_, b)| b.clone())
+            .collect()
+    }
+
+    /// A-144-10 at the host: a gated agent's hooks are reported as
+    /// `provider_hook` evidence (its turn as `activity`, a usage limit as
+    /// `attention`), and a child's final message goes to the server with
+    /// the tokens its agent counted; the same hooks with no gate passed
+    /// report nothing, and its settings gain nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_144_10_a_gated_childs_hooks_are_evidence_and_an_ungated_ones_nothing() {
+        let marker = "99999999-9999-4999-8999-999999999999";
+        let script = format!(
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; {}; {}; exec sleep 1000",
+            probe("signal working", false),
+            probe("signal idle", false),
+            probe("signal usage_limit", false),
+            probe("result the answer is 42", false),
+            probe(&format!("send {marker}"), false),
+        );
+        for gated in [true, false] {
+            let gates = if gated {
+                ALL_GATES
+            } else {
+                crate::harness::Gates::COMPILED
+            };
+            let (host, seen, _helper, state, _roots, children) =
+                spawned_child(&script, gates).await;
+            let settings = std::fs::read_to_string(
+                crate::mcp::session_dir(state.path(), "ags_CHILD").join("claude-settings.json"),
+            )
+            .unwrap();
+            assert_eq!(settings.contains("asyncRewake"), gated, "{settings}");
+            assert_eq!(settings.contains("harness-result"), gated, "{settings}");
+            std::fs::write(children.path().join("ags_CHILD/workspace/go"), "").unwrap();
+            wait_for("the marker", || {
+                child_posts(&seen, "status")
+                    .iter()
+                    .any(|b| b["harness_session"] == marker)
+            })
+            .await;
+            if gated {
+                wait_for("the hooks' evidence", || {
+                    child_posts(&seen, "status").iter().any(|b| {
+                        b["activity"] == "idle"
+                            && b["activity_source"] == "provider_hook"
+                            && b["attention"] == "usage_limit"
+                    })
+                })
+                .await;
+                wait_for("the final message", || {
+                    !child_posts(&seen, "final-message").is_empty()
+                })
+                .await;
+                assert_eq!(
+                    child_posts(&seen, "final-message"),
+                    [
+                        json!({"text": "the answer is 42", "source": "provider_hook",
+                        "usage": {"input_tokens": 12, "output_tokens": 3}})
+                    ]
+                );
+            } else {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                let posts = child_posts(&seen, "status");
+                assert!(
+                    posts
+                        .iter()
+                        .all(|b| b.get("activity_source").is_none() && b.get("attention").is_none()),
+                    "{posts:?}"
+                );
+                assert!(child_posts(&seen, "final-message").is_empty());
+            }
+            host.shutdown(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// A-144-11 at the host: a hook's signal, result or waker with the
+    /// session's own handle is taken only on its own socket (136i), and
+    /// changes nothing otherwise; refused, it is audited.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_144_11_a_hook_is_taken_only_on_its_sessions_own_socket() {
+        let (host, seen, _helper, state, _roots) =
+            isolated_script_host("exec sleep 1000", None).await;
+        *host.gates.lock().unwrap() = ALL_GATES;
+        for id in ["ags_SA", "ags_SB"] {
+            host.clone()
+                .handle(harness_start(id, "claude-code", None, false))
+                .await;
+            wait_for("started", || host.session(id).is_some()).await;
+        }
+        let a = handle_of(&host, "ags_SA");
+        let other = state
+            .path()
+            .join("sessions")
+            .join("ags_SB")
+            .join("mcp.sock");
+        let shared = crate::mcp::socket_path(state.path());
+        for socket in [other, shared] {
+            let handle = a.clone();
+            tokio::task::spawn_blocking(move || {
+                let _ = crate::harness::send_line(
+                    &socket,
+                    &crate::harness::SignalLine {
+                        handle: handle.clone(),
+                        signal: "usage_limit".into(),
+                    },
+                );
+                let _ = crate::harness::send_line(
+                    &socket,
+                    &crate::harness::ResultLine {
+                        handle: handle.clone(),
+                        final_message: "forged".into(),
+                        usage: None,
+                    },
+                );
+                let mut line = serde_json::to_vec(&crate::harness::WakeLine {
+                    handle,
+                    wake: "Stop".into(),
+                })
+                .unwrap();
+                line.push(b'\n');
+                if let Ok(mut stream) = crate::platform::ipc::connect_blocking(socket.as_os_str()) {
+                    use std::io::Write;
+                    let _ = stream.write_all(&line);
+                    assert!(stream.read_line(4096).is_err(), "no answer, only the end");
+                }
+            })
+            .await
+            .unwrap();
+        }
+        wait_for("the refusals", || refusals(&host, "ags_SA").len() == 6).await;
+        assert!(
+            refusals(&host, "ags_SA")
+                .iter()
+                .all(|r| *r == ("harness", "wrong_socket")),
+            "{:?}",
+            refusals(&host, "ags_SA")
+        );
+        let s = host.session("ags_SA").unwrap();
+        assert!(!*s.events.usage_limit.lock().unwrap(), "nothing changed");
+        assert_eq!(*s.events.waiter.borrow(), 0, "no waiter armed");
+        assert!(
+            !seen
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, _)| p.ends_with("/final-message")),
+            "nothing reached the server"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 144c, 145d: one waiter per session; Storm's mark wakes the agent once,
+    /// with the kind only; a mark already woken, or 0, wakes nothing; the
+    /// session's end releases its waiter. No byte is written to its
+    /// terminal on the way.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_144_w_one_waiter_per_session_is_woken_once_per_mark() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let wait = |f: &str| format!("while [ ! -e {f} ]; do sleep 0.05; done");
+        let script = format!(
+            "{}; {} & {}; {} & {}; {} & {}; {} & exec sleep 1000",
+            wait("go1"),
+            probe(&format!("wake {o}/w1"), false),
+            wait("go2"),
+            probe(&format!("wake {o}/w2"), false),
+            wait("go3"),
+            probe(&format!("wake {o}/w3"), false),
+            wait("go4"),
+            probe(&format!("wake {o}/w4"), false),
+        );
+        let (host, _seen, _helper, _state, _roots, children) =
+            spawned_child(&script, ALL_GATES).await;
+        let s = host.session("ags_CHILD").unwrap();
+        let go = |f: &str| {
+            std::fs::write(children.path().join("ags_CHILD/workspace").join(f), "").unwrap()
+        };
+        let read = |f: &str| -> serde_json::Value {
+            serde_json::from_str(&std::fs::read_to_string(out.path().join(f)).unwrap()).unwrap()
+        };
+        let armed = |n: u64| *s.events.waiter.borrow() >= n;
+        let output_before = s.events.ring.lock().unwrap().end();
+        let wake = |kind: &str, mark: i64| Command::Wake {
+            session: "ags_CHILD".into(),
+            kind: kind.into(),
+            mark,
+        };
+
+        go("go1");
+        wait_for("the first waiter", || armed(1)).await;
+        go("go2");
+        wait_for("the first waiter released", || {
+            out.path().join("w1").exists()
+        })
+        .await;
+        assert_eq!(
+            read("w1"),
+            json!({"release": true}),
+            "one waiter per session"
+        );
+        host.clone().handle(wake("events", 3)).await;
+        wait_for("the wake", || out.path().join("w2").exists()).await;
+        assert_eq!(read("w2"), json!({"wake": "events"}));
+
+        go("go3");
+        wait_for("the third waiter", || armed(3)).await;
+        host.clone().handle(wake("events", 3)).await;
+        host.clone().handle(wake("events", 0)).await;
+        host.clone().handle(wake("bogus", 9)).await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!out.path().join("w3").exists(), "a mark is woken once");
+        host.clone().handle(wake("message", 4)).await;
+        wait_for("the next mark", || out.path().join("w3").exists()).await;
+        assert_eq!(read("w3"), json!({"wake": "message"}));
+
+        go("go4");
+        wait_for("the fourth waiter", || armed(4)).await;
+        // The session ending (its processes, the waker among them, go with
+        // its unit; here the waker is left to hear it).
+        s.events.gone.send_replace(true);
+        wait_for("its release at the end", || out.path().join("w4").exists()).await;
+        assert_eq!(read("w4"), json!({"release": true}));
+        assert_eq!(
+            s.events.ring.lock().unwrap().end(),
+            output_before,
+            "the agent's terminal saw nothing of it"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 145e: `park` stops a child as an end does, its helper keeps its
+    /// workspace for a resume, and it is reported `parked`; an `end` is
+    /// still an end.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_145_8_park_stops_a_child_and_its_helper_keeps_it_for_a_resume() {
+        for park in [true, false] {
+            let (host, seen, helper, _state, _roots, _children) =
+                spawned_child("exec sleep 1000", crate::harness::Gates::COMPILED).await;
+            wait_for("running", || {
+                child_posts(&seen, "status")
+                    .iter()
+                    .any(|b| b["status"] == "running")
+            })
+            .await;
+            let command = if park {
+                Command::Park {
+                    session: "ags_CHILD".into(),
+                }
+            } else {
+                Command::End {
+                    session: "ags_CHILD".into(),
+                }
+            };
+            host.clone().handle(command).await;
+            wait_for("its end", || host.session("ags_CHILD").is_none()).await;
+            let last = child_posts(&seen, "status").pop().unwrap();
+            assert_eq!(last["status"] == "parked", park, "{last}");
+            assert_eq!(
+                helper.seen.lock().unwrap().parked == ["ags_CHILD"],
+                park,
+                "the helper keeps it"
+            );
+            host.shutdown(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// 145e: a parked child is started again in its own session, from its
+    /// own kept conversation, sent to its next task; a child may resume
+    /// nothing else.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_145_8_a_parked_child_resumes_only_its_own_conversation() {
+        let uuid = "80d0cf8c-8176-43b4-8206-7908d74d1387";
+        let out = tempfile::tempdir().unwrap();
+        let script = format!(
+            "printf '%s\\n' \"$@\" > {}/args; exec sleep 1000",
+            out.path().display()
+        );
+        let resumed = |from: &str| {
+            let mut start = spawned_start();
+            if let Command::Start {
+                resume,
+                resumed_from,
+                ..
+            } = &mut start
+            {
+                *resume = Some(uuid.into());
+                *resumed_from = Some(from.into());
+            }
+            start
+        };
+        let (host, seen, helper, _state, _roots) = isolated_script_host(&script, None).await;
+        let children = tempfile::tempdir().unwrap();
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+        host.clone().handle(resumed("ags_OTHER")).await;
+        wait_for("its refusal", || {
+            child_posts(&seen, "status")
+                .iter()
+                .any(|b| b["status"] == "failed")
+        })
+        .await;
+        assert!(
+            host.session("ags_CHILD").is_none(),
+            "not another's conversation"
+        );
+
+        let (host, _seen, helper, _state, _roots) = isolated_script_host(&script, None).await;
+        helper.seen.lock().unwrap().children_root = Some(children.path().to_path_buf());
+        host.clone().handle(resumed("ags_CHILD")).await;
+        wait_for("its arguments", || out.path().join("args").exists()).await;
+        let args: Vec<String> = std::fs::read_to_string(out.path().join("args"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        let at = args.iter().position(|a| a == "--resume").unwrap();
+        assert_eq!(args[at + 1], uuid);
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(crate::harness::WAKE_MESSAGE_TEXT),
+            "sent to its next task"
+        );
+        let launch = helper
+            .seen
+            .lock()
+            .unwrap()
+            .launches
+            .last()
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            launch["resume"],
+            json!({"from": "ags_CHILD", "conversation": uuid}),
+            "its own kept conversation"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
     }
 }

@@ -92,6 +92,22 @@ enum Command {
     // Hidden while no adapter's hooks are on (134-9): the site lists commands.
     #[command(hide = true)]
     Attention { kind: String },
+    /// The agent's turn began, ended or hit a usage limit (decision 144b).
+    /// Run by the agent's own hook or plugin, never by hand.
+    #[command(hide = true)]
+    HarnessSignal { kind: String },
+    /// The agent's final message for its turn (decision 145c), from its
+    /// hook's input on stdin. Run by the agent's own hook or plugin.
+    #[command(hide = true)]
+    HarnessResult,
+    /// Waits until the host says something is unread, then wakes the agent
+    /// the way it documents (decisions 144c, 145d). Run by the agent's own
+    /// hook or plugin, never by hand.
+    #[command(hide = true)]
+    HarnessWake {
+        #[arg(long)]
+        plugin: bool,
+    },
     /// Install this host as a system service, as root. macOS: creates the
     /// `_stormruntime` account and `/Library/StormRuntime`, and loads the
     /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
@@ -179,6 +195,15 @@ async fn main() -> Result<()> {
             storm_runtime::harness::report_attention(&kind);
             Ok(())
         }
+        Command::HarnessSignal { kind } => {
+            storm_runtime::harness::report_signal(&kind);
+            Ok(())
+        }
+        Command::HarnessResult => {
+            storm_runtime::harness::report_result();
+            Ok(())
+        }
+        Command::HarnessWake { plugin } => std::process::exit(storm_runtime::harness::wake(plugin)),
         Command::AgentJob { agent, action } => {
             let line = storm_runtime::install::isolated_job(
                 std::path::Path::new(DEFAULT_STATE),

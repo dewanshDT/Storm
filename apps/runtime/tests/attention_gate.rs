@@ -359,7 +359,7 @@ fn claude_codes_hooks_set_and_clear_a_permission_prompt() {
         Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
         None,
         None,
-        true,
+        &storm_runtime::harness::Hooks::attention(true),
     )
     .unwrap();
     let mut argv = vec![bin];
@@ -441,7 +441,7 @@ fn opencodes_plugin_sets_and_clears_a_permission_prompt() {
         Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
         None,
         None,
-        true,
+        &storm_runtime::harness::Hooks::attention(true),
     )
     .unwrap();
     let config = json!({

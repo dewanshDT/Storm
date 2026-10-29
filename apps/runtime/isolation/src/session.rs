@@ -225,6 +225,7 @@ impl Helper {
             }
             Op::ChildDispose => self.child_dispose(req.get("child")),
             Op::ChildList => self.child_list(),
+            Op::ChildPark => self.child_park(req.get("child")),
         }
     }
 
@@ -507,8 +508,23 @@ impl Helper {
         provider: &str,
         resume: &crate::home::Resume,
     ) -> Result<(), Refusal> {
-        if resume.from == session || !crate::home::conversation_ok(provider, &resume.conversation) {
+        if !crate::home::conversation_ok(provider, &resume.conversation) {
             return Err(Refusal::BadLaunch);
+        }
+        // 145e: a parked child resumes its own kept conversation. Its
+        // lease is this start's, and its record says it was a child that
+        // `child_create` took back for this start.
+        if resume.from == session {
+            let readopted = self
+                .child_record(session)
+                .is_some_and(|c| c.stage == crate::children::Stage::Ready && c.resumed);
+            if !readopted {
+                return Err(Refusal::BadLaunch);
+            }
+            if !self.layout.kept(session).is_dir() {
+                return Err(Refusal::NothingKept);
+            }
+            return Ok(());
         }
         if self
             .state

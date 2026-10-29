@@ -28,12 +28,13 @@ pub enum Op {
     ChildImport,
     ChildDispose,
     ChildList,
+    ChildPark,
     SelfTest,
     AgentJob,
 }
 
 impl Op {
-    pub const ALL: [Op; 14] = [
+    pub const ALL: [Op; 15] = [
         Op::Lease,
         Op::Release,
         Op::Prepare,
@@ -46,6 +47,7 @@ impl Op {
         Op::ChildImport,
         Op::ChildDispose,
         Op::ChildList,
+        Op::ChildPark,
         Op::SelfTest,
         Op::AgentJob,
     ];
@@ -64,6 +66,7 @@ impl Op {
             Op::ChildImport => "child_import",
             Op::ChildDispose => "child_dispose",
             Op::ChildList => "child_list",
+            Op::ChildPark => "child_park",
             Op::SelfTest => "self_test",
             Op::AgentJob => "agent_job",
         }
@@ -79,7 +82,9 @@ impl Op {
             Op::Start => &["session", "user", "provider", "workspace"],
             Op::Signal => &["session", "signal"],
             Op::ChildCreate => &["parent", "child", "workspace"],
-            Op::ChildExport | Op::ChildDispose => &["child"],
+            // 145e: a child whose lease ended at Storm's park, to be
+            // started again in the same workspace.
+            Op::ChildExport | Op::ChildDispose | Op::ChildPark => &["child"],
             // 137e: the parent it is applied to, and what is made there:
             // `storm/<child>` for a clone, a directory's name for scratch.
             Op::ChildImport => &["child", "parent", "target"],

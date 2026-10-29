@@ -74,7 +74,7 @@ fn claude_settings(dir: &Path) -> String {
         Path::new("/x"),
         Some("0b8f1c2e-3d4a-4b5c-8d6e-7f8091a2b3c4"),
         None,
-        false,
+        &crate::harness::Hooks::default(),
     )
     .unwrap();
     std::fs::read_to_string(dir.join("claude-settings.json")).unwrap()

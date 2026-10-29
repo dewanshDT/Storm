@@ -399,8 +399,13 @@ pub const OPENING_PROMPT: &str =
 pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round.";
 
 /// Which opening prompt a session gets: a spawned child's, else a note's.
-pub fn opening_prompt(context: bool, spawned: bool) -> Option<&'static str> {
-    if spawned {
+/// A child resumed from its parked conversation (145e) already knows its
+/// task and its loop: it is sent to `read_messages`, where its next round
+/// waits, in the waker's own fixed words.
+pub fn opening_prompt(context: bool, spawned: bool, resumed: bool) -> Option<&'static str> {
+    if spawned && resumed {
+        Some(crate::harness::WAKE_MESSAGE_TEXT)
+    } else if spawned {
         Some(SPAWNED_OPENING_PROMPT)
     } else if context {
         Some(OPENING_PROMPT)
@@ -980,10 +985,22 @@ mod tests {
     /// started with; a note's session the note's; any other none.
     #[test]
     fn a_spawned_child_gets_the_spawned_opening_prompt() {
-        assert_eq!(opening_prompt(false, false), None);
-        assert_eq!(opening_prompt(true, false), Some(OPENING_PROMPT));
-        assert_eq!(opening_prompt(false, true), Some(SPAWNED_OPENING_PROMPT));
-        assert_eq!(opening_prompt(true, true), Some(SPAWNED_OPENING_PROMPT));
+        assert_eq!(opening_prompt(false, false, false), None);
+        assert_eq!(opening_prompt(true, false, false), Some(OPENING_PROMPT));
+        assert_eq!(
+            opening_prompt(false, true, false),
+            Some(SPAWNED_OPENING_PROMPT)
+        );
+        assert_eq!(
+            opening_prompt(true, true, false),
+            Some(SPAWNED_OPENING_PROMPT)
+        );
+        // 145e: a parked child resumed is sent to its next task.
+        assert_eq!(
+            opening_prompt(true, true, true),
+            Some(crate::harness::WAKE_MESSAGE_TEXT)
+        );
+        assert_eq!(opening_prompt(false, false, true), None);
         for tool in ["session_context", "read_messages", "report_result"] {
             assert!(SPAWNED_OPENING_PROMPT.contains(tool), "{tool}");
         }
