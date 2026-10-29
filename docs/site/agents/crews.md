@@ -54,6 +54,11 @@ all running**. They can't be moved on their own; where a move would be,
 they say "moves with the agent that started it". Moving the session that
 started them, or making a crew from it, takes them along.
 
+When one of them stops at its own permission prompt, it shows **Needs you**,
+and so do the session that started it and its crew. Tap the badge to open
+that agent and answer in its terminal: no agent, and nothing in Storm,
+answers it for you.
+
 Collapsing a crew, or the whole CREWS section, is remembered on each device
 separately. Everything else about a crew is kept on your server, so your
 other devices show a change within about 15 seconds.

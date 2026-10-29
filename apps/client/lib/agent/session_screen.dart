@@ -913,6 +913,7 @@ String phoneHeaderMeta(AgentSession s) => [
   s.statusLabel,
   providerLabel(s.provider),
   ?s.model,
+  ?permissionModeWord(s.permissionMode),
   ?s.context?.title,
   if (s.wroteCount > 0) 'wrote ${s.wroteCount}',
 ].join(' · ');
@@ -1357,6 +1358,8 @@ List<(String, String)> aboutRows(
 }) => [
   ('Agent', providerLabel(s.provider)),
   if (s.model != null) ('Model', s.model!),
+  if (s.permissionMode case final mode?)
+    ('Permission mode', permissionModeLabel(mode)),
   (
     'Workspace',
     s.spawn.isChild

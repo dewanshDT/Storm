@@ -21,6 +21,7 @@ import 'agents_screen.dart' show launchAgentSession;
 import 'crew_changes.dart';
 import 'crew_prefs.dart';
 import 'spawn_state.dart';
+import 'spawn_widgets.dart' show AttentionTag, NeedsYouBadge;
 
 /// The pieces crews are drawn with (decision 138, plan §4.2): one role tag,
 /// one crew square, chip, header and menu wherever a crew appears.
@@ -397,6 +398,10 @@ class _CrewHeaderState extends State<CrewHeader> {
                             ),
                       ),
                       SizedBox(width: t.sp),
+                      if (firstWaiting(widget.members) case final w?) ...[
+                        NeedsYouBadge(waiting: w),
+                        SizedBox(width: t.sp),
+                      ],
                       Text(
                         count,
                         key: Key('crew-count-${c.id}'),
@@ -499,6 +504,10 @@ class PhoneCrewHeader extends StatelessWidget {
                 ),
               ),
               SizedBox(width: t.sp * 1.25),
+              if (firstWaiting(members) case final w?) ...[
+                NeedsYouBadge(waiting: w),
+                SizedBox(width: t.sp),
+              ],
               Text(
                 count,
                 key: Key('crew-count-${c.id}'),
@@ -1035,6 +1044,10 @@ class _CrewCardState extends ConsumerState<CrewCard> {
                         ],
                       ),
                     ),
+                    if (overview.waitingInCrew(crew) case final w?) ...[
+                      NeedsYouBadge(waiting: w),
+                      SizedBox(width: t.sp),
+                    ],
                     CrewDots(
                       key: Key('crew-card-menu-${crew.id}'),
                       card: true,
@@ -1052,6 +1065,7 @@ class _CrewCardState extends ConsumerState<CrewCard> {
                 CrewCardRow(
                   session: s,
                   host: overview.hostName(s.hostId),
+                  waiting: overview.waitingChildOf(s),
                   onTap: () => onOpenSession(s),
                 ),
           ],
@@ -1070,11 +1084,15 @@ class CrewCardRow extends StatelessWidget {
     required this.host,
     required this.onTap,
     this.showContext = true,
+    this.waiting,
   });
 
   final AgentSession session;
   final String host;
   final VoidCallback onTap;
+
+  /// One of its children waiting at a permission prompt (146c).
+  final AgentSession? waiting;
 
   /// Its context note's chip; the crew page lists those under Started from.
   final bool showContext;
@@ -1162,6 +1180,13 @@ class CrewCardRow extends StatelessWidget {
                     },
                   ),
                 ),
+                if (waitsForYou(s)) ...[
+                  SizedBox(width: t.sp),
+                  AttentionTag(kind: s.spawn.needsAttention),
+                ] else if (waiting case final w?) ...[
+                  SizedBox(width: t.sp),
+                  NeedsYouBadge(waiting: w),
+                ],
                 if (showContext && s.context != null) ...[
                   SizedBox(width: t.sp),
                   NoteContextChip(title: s.context!.title, maxWidth: t.sp * 15),

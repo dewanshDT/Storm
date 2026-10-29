@@ -20,6 +20,7 @@ launcher asks for:
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's row shows it. |
+| **Permission mode** | How much the agent may do without asking you: **Default** (the agent asks, as it always does), **Accept edits** (file edits go ahead without a prompt) or **Auto** (the agent's own safety check decides routine calls). Claude Code offers all three, OpenCode Default and Accept edits; other agents always ask. There is never an option that turns the agent's prompts off. Agents the session starts get the same mode or a stricter one. The session's row and About show it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |

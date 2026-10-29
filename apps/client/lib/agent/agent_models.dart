@@ -530,6 +530,7 @@ class AgentSession {
     this.role,
     this.launchRole,
     this.model,
+    this.permissionMode,
   }) : name = name ?? workspace;
 
   final String id;
@@ -608,6 +609,10 @@ class AgentSession {
   /// The model it was launched with (decision 145b); null for the agent's
   /// own default.
   final String? model;
+
+  /// `accept_edits` or `auto` as the person chose at launch, or inherited
+  /// (decision 146b); null for the agent's own.
+  final String? permissionMode;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -748,6 +753,7 @@ class AgentSession {
     role: role == _keep ? this.role : role as RoleRef?,
     launchRole: launchRole,
     model: model,
+    permissionMode: permissionMode,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -806,8 +812,37 @@ class AgentSession {
         ? null
         : RoleRef.fromJson(_map(j['launch_role'])!),
     model: j['model'] as String?,
+    permissionMode: permissionModeOf(j['permission_mode']),
   );
 }
+
+/// The permission modes each agent offers at launch (decision 146b), the
+/// agent's own first. There is never a bypass.
+const kPermissionModes = {
+  'claude-code': ['default', 'accept_edits', 'auto'],
+  'opencode': ['default', 'accept_edits'],
+};
+
+List<String> permissionModesOf(String? provider) =>
+    kPermissionModes[provider] ?? const ['default'];
+
+/// Only a mode Storm knows; anything else reads as the agent's own.
+String? permissionModeOf(Object? v) =>
+    v == 'accept_edits' || v == 'auto' ? v as String : null;
+
+/// "accept edits", "auto": a row's word for a mode; null for the default.
+String? permissionModeWord(String? mode) => switch (mode) {
+  'accept_edits' => 'accept edits',
+  'auto' => 'auto',
+  _ => null,
+};
+
+/// The launcher's and About's name for a mode.
+String permissionModeLabel(String mode) => switch (mode) {
+  'accept_edits' => 'Accept edits',
+  'auto' => 'Auto',
+  _ => 'Default (the agent asks)',
+};
 
 /// Everything the launch answer says out loud: the MCP notice, then the
 /// Claude login's, unless the server already said it.

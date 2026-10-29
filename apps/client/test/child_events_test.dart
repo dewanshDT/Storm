@@ -126,9 +126,7 @@ void main() {
           findsOneWidget,
         );
         expect(
-          find.text(
-            'Waiting at a prompt · ${clockAt(DateTime.parse(promptAt))}',
-          ),
+          find.text('Needs you · ${clockAt(DateTime.parse(promptAt))}'),
           findsOneWidget,
         );
         // Certain evidence carries no badge; a hook's word says so.

@@ -136,8 +136,7 @@ class ChildEvent {
 String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
   'needs_approval' => 'Asked for approval',
-  'needs_attention' =>
-    e.reason == 'blocked' ? 'Blocked' : 'Waiting at a prompt',
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Needs you',
   'idle_timeout' => 'Idle for 10 minutes',
   'usage_limit' => 'Out of usage',
   'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
@@ -429,7 +428,7 @@ String shortCommit(String? commit) =>
 
 /// What a session waiting for a person shows beside its activity (134p).
 String? attentionLabel(String? kind) => switch (kind) {
-  'permission_prompt' => 'Waiting at a prompt',
+  'permission_prompt' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,

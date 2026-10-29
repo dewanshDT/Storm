@@ -1076,6 +1076,7 @@ class _PhoneList extends ConsumerWidget {
         host: o.hostName(s.hostId),
         phone: true,
         lineage: lineageLine(s, o),
+        waiting: o.waitingChildOf(s),
         onTap: () => openAgentSession(context, s.id),
         onLongPress: () => showSessionCrewSheet(context, ref, s),
       ),

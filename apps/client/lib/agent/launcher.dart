@@ -102,6 +102,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
 
   /// The model (decision 145b): empty is the agent's own default.
   final _model = TextEditingController();
+
+  /// The permission mode (decision 146b), one [permissionModesOf] offers.
+  String _mode = 'default';
   String? _error;
   bool _busy = false;
 
@@ -240,6 +243,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             : (vaultId: _role!.vaultId, noteId: _role!.noteId),
         spawn: _spawn && _spawnable,
         model: modelHint(_provider) == null ? null : _model.text.trim(),
+        permissionMode: _permissionMode,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -274,6 +278,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       (_host?.offersSpawning ?? false) &&
       kSpawnProviders.contains(_provider) &&
       _reachesStorm;
+
+  /// The chosen mode while the agent offers it, else its own.
+  String get _permissionMode =>
+      permissionModesOf(_provider).contains(_mode) ? _mode : 'default';
 
   @override
   Widget build(BuildContext context) {
@@ -417,7 +425,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               for (final p in host?.providers ?? const <ProviderCap>[])
                 if (!p.available) '${p.label} (not installed)',
             ],
-            onChanged: (p) => setState(() => _provider = _chosen = p),
+            onChanged: (p) => setState(() {
+              _provider = _chosen = p;
+              _mode = _permissionMode;
+            }),
           ),
         ),
         if (_provider == 'claude-code' && host != null && claudeLogin != null)
@@ -442,6 +453,20 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 counterText: '',
                 hintText: 'the agent’s default',
               ),
+            ),
+          ),
+        if (permissionModesOf(_provider).length > 1)
+          _Field(
+            label: 'Permission mode',
+            child: _Select<String>(
+              key: const Key('launcher-permission-mode'),
+              label: 'Permission mode',
+              value: _permissionMode,
+              options: [
+                for (final m in permissionModesOf(_provider))
+                  _Opt(m, permissionModeLabel(m)),
+              ],
+              onChanged: (m) => setState(() => _mode = m),
             ),
           ),
         if (!shell)

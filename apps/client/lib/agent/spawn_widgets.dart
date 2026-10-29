@@ -29,7 +29,7 @@ String? _code(Object e) => e is AgentRefusal ? e.code : null;
 
 // ---- attention and lineage --------------------------------------------
 
-/// "Waiting at a prompt" beside a session's activity (134p); nothing when it
+/// "Needs you" beside a session's activity (134p); nothing when it
 /// waits for nobody.
 class AttentionTag extends StatelessWidget {
   const AttentionTag({super.key, required this.kind});
@@ -68,6 +68,31 @@ class AttentionTag extends StatelessWidget {
   }
 }
 
+/// "Needs you" for a child waiting at its permission prompt, shown on its
+/// parent's row or its crew (146c): a tap opens that child, whose terminal
+/// is where the person answers. Storm never answers it.
+class NeedsYouBadge extends StatelessWidget {
+  const NeedsYouBadge({super.key, required this.waiting});
+
+  final AgentSession waiting;
+
+  @override
+  Widget build(BuildContext context) => Semantics(
+    button: true,
+    label: 'Needs you: ${waiting.displayName} is waiting at a prompt',
+    excludeSemantics: true,
+    child: Tooltip(
+      message: '${waiting.displayName} is waiting at a prompt',
+      child: InkWell(
+        key: Key('needs-you-${waiting.id}'),
+        borderRadius: BorderRadius.circular(999),
+        onTap: () => openAgentSession(context, waiting.id),
+        child: const AttentionTag(kind: 'permission_prompt'),
+      ),
+    ),
+  );
+}
+
 /// "↳ from gateway-impl · own copy of storm": a child's sub-line in a list,
 /// or null for a session nobody started.
 String? lineageLine(AgentSession s, AgentOverview? o) {
@@ -80,6 +105,7 @@ String? lineageLine(AgentSession s, AgentOverview? o) {
     '↳ from ${parent?.displayName ?? 'its parent'}',
     mode,
     ?s.model,
+    ?permissionModeWord(s.permissionMode),
   ].join(' · ');
 }
 

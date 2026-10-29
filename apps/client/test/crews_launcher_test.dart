@@ -85,6 +85,7 @@ void main() {
       'launcher-host',
       'launcher-workspace',
       'launcher-agent',
+      'launcher-permission-mode',
       'launcher-write-vault',
       'launcher-crew',
       'launcher-role',
@@ -98,7 +99,7 @@ void main() {
         reason: key,
       );
     }
-    expect(find.byKey(const Key('select-chevron')), findsNWidgets(6));
+    expect(find.byKey(const Key('select-chevron')), findsNWidgets(7));
     expect(top(t, 'launcher-write-vault'), lessThan(top(t, 'launcher-crew')));
     expect(top(t, 'launcher-crew'), lessThan(top(t, 'launcher-role')));
     expect(inField('launcher-crew', 'None'), findsOneWidget);

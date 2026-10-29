@@ -7,7 +7,8 @@ import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'crew_widgets.dart' show RoleTagRow;
-import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
+import 'spawn_widgets.dart'
+    show AttentionTag, NeedsYouBadge, childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -97,8 +98,13 @@ String sessionWhen(AgentSession s) =>
 
 /// "build-vm · storm · haiku · 40m": the rows' sub-line; the mark says the
 /// agent, and the model shows when it was chosen (145b).
-String sessionSub(AgentSession s, String host) =>
-    [host, s.workspace, ?s.model, sessionWhen(s)].join(' · ');
+String sessionSub(AgentSession s, String host) => [
+  host,
+  s.workspace,
+  ?s.model,
+  ?permissionModeWord(s.permissionMode),
+  sessionWhen(s),
+].join(' · ');
 
 /// "Fix the login, Claude Code on build-vm, working": a row read aloud.
 String sessionSpoken(AgentSession s, String host) => [
@@ -129,7 +135,11 @@ String sessionMeta(AgentSession s, String hostName) {
       : age == 'now'
       ? 'started now'
       : 'started $age ago';
-  final agent = [providerLabel(s.provider), ?s.model].join(' · ');
+  final agent = [
+    providerLabel(s.provider),
+    ?s.model,
+    ?permissionModeWord(s.permissionMode),
+  ].join(' · ');
   return '$agent · ${s.workspace} on $hostName · $when';
 }
 
@@ -146,6 +156,7 @@ class SessionRow extends StatelessWidget {
     this.phone = false,
     this.lineage,
     this.onLongPress,
+    this.waiting,
   });
 
   final AgentSession session;
@@ -156,6 +167,9 @@ class SessionRow extends StatelessWidget {
 
   /// A spawned child's "↳ from …" in place of the sub-line (134l).
   final String? lineage;
+
+  /// One of its children waiting at a permission prompt (146c).
+  final AgentSession? waiting;
 
   /// The phone's crew and role sheet (decision 138n).
   final VoidCallback? onLongPress;
@@ -196,6 +210,9 @@ class SessionRow extends StatelessWidget {
                   if (!s.ended && s.spawn.needsAttention != null) ...[
                     SizedBox(width: t.sp * 0.75),
                     Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
+                  ] else if (waiting case final w?) ...[
+                    SizedBox(width: t.sp * 0.75),
+                    Flexible(child: NeedsYouBadge(waiting: w)),
                   ],
                 ],
               ),
@@ -277,7 +294,11 @@ class SessionSubLine extends StatelessWidget {
         ? childWorkspaceLabel(session.spawn.childWorkspace)
         : session.workspace;
     // The model, when one was chosen (145b), stays whole with the age.
-    final when = [?session.model, sessionWhen(session)].join(' · ');
+    final when = [
+      ?session.model,
+      ?permissionModeWord(session.permissionMode),
+      sessionWhen(session),
+    ].join(' · ');
     return LayoutBuilder(
       builder: (context, box) {
         String line(String w) => '$host · $w · $when';

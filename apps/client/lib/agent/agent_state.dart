@@ -177,6 +177,17 @@ class AgentOverview {
   AgentSession? byId(String id) =>
       sessions.where((s) => s.id == id).firstOrNull;
 
+  /// The first of [parent]'s children waiting at its CLI's own permission
+  /// prompt (decision 146c), which only the person can answer.
+  AgentSession? waitingChildOf(AgentSession parent) => firstWaiting([
+    for (final s in sessions)
+      if (s.spawn.parentSession == parent.id) s,
+  ]);
+
+  /// The first session in [crew], its children included (145i), waiting
+  /// for the person at a permission prompt.
+  AgentSession? waitingInCrew(Crew crew) => firstWaiting(membersOf(crew));
+
   /// Why [s]'s conversation can't be reopened now, or null when it can or
   /// there is none to reopen (decision 89).
   String? resumeBlocker(AgentSession s) {
@@ -430,6 +441,13 @@ final agentNoteProvider = FutureProvider.autoDispose
         return null;
       }
     });
+
+/// A live session whose CLI waits at its own permission prompt (146c).
+bool waitsForYou(AgentSession s) =>
+    !s.ended && s.spawn.needsAttention == 'permission_prompt';
+
+AgentSession? firstWaiting(Iterable<AgentSession> sessions) =>
+    sessions.where(waitsForYou).firstOrNull;
 
 /// The panel tabs of a session (`?tab=`).
 enum SessionTab { context, wrote, about, requests, work }

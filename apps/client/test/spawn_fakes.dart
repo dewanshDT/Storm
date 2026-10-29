@@ -31,6 +31,7 @@ Map<String, dynamic> spawnSession(
   int? pendingEvents,
   List<Map<String, dynamic>>? recentEvents,
   String? model,
+  String? permissionMode,
 }) => {
   ...agentSession(
     id,
@@ -52,6 +53,7 @@ Map<String, dynamic> spawnSession(
   'pending_events': ?pendingEvents,
   'recent_events': ?recentEvents,
   'model': ?model,
+  'permission_mode': ?permissionMode,
 };
 
 /// A child event as the server's queue holds it (144a).
