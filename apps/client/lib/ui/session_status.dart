@@ -33,6 +33,8 @@ SessionStatusLook sessionStatusLook(
     ring: true,
   ),
   'running' => SessionStatusLook(label: 'Running', color: t.accent, live: true),
+  // 145e: still its tree's, so with its parent; no process meanwhile.
+  'parked' => SessionStatusLook(label: 'Parked', color: t.text3, live: true),
   'unknown' => SessionStatusLook(label: 'Unknown', color: t.text3, live: true),
   'completed' => SessionStatusLook(
     label: 'Completed',

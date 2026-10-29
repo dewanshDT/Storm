@@ -143,6 +143,7 @@ String childEventLabel(ChildEvent e) => switch (e.kind) {
   'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
   'reported' => e.reason == null ? 'Reported' : 'Reported: ${e.reason}',
   'ended' => e.reason == null ? 'Ended' : 'Ended: ${e.reason}',
+  'parked' => 'Parked until its next message',
   'unknown' => 'Lost touch',
   _ => e.kind,
 };

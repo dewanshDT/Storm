@@ -235,6 +235,7 @@ void main() {
     );
     expect(childEventLabel(event('unknown')), 'Lost touch');
     expect(childEventLabel(event('usage_limit')), 'Out of usage');
+    expect(childEventLabel(event('parked')), 'Parked until its next message');
     expect(evidenceLabel(event('started')), isNull);
 
     final session = AgentSession.fromJson({

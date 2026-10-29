@@ -640,6 +640,9 @@ class AgentSession {
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
     'running' => 'Running',
+    // 145e: a child whose round is done, its process stopped until its
+    // parent's next message resumes it.
+    'parked' => 'Parked',
     'unknown' => 'Unknown',
     'completed' => 'Completed',
     'stopped' => 'Stopped',
