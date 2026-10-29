@@ -103,6 +103,8 @@ pub struct LaunchRecord {
     pub role: Option<Context>,
     /// The model it was started on (decision 145b), checked for its agent.
     pub model: Option<String>,
+    /// Its permission mode (decision 146b); `None` is `default`.
+    pub permission_mode: Option<String>,
 }
 
 /// The note a session was started from, or its launch role. The title is a
@@ -334,6 +336,7 @@ impl Store {
             ("session_launch", "role_note_id"),
             ("session_launch", "role_title"),
             ("session_launch", "model"),
+            ("session_launch", "permission_mode"),
         ] {
             let has = conn
                 .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
@@ -660,7 +663,8 @@ impl Store {
             .conn
             .query_row(
                 "SELECT session_id, name, context_vault_id, context_note_id, context_title,
-                     write_vault_id, role_vault_id, role_note_id, role_title, model
+                     write_vault_id, role_vault_id, role_note_id, role_title, model,
+                     permission_mode
                  FROM session_launch WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -684,6 +688,7 @@ impl Store {
                         write_vault_id: r.get(5)?,
                         role: note(6)?,
                         model: r.get(9)?,
+                        permission_mode: r.get(10)?,
                     })
                 },
             )
@@ -1184,8 +1189,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
              context_title, write_vault_id, created_at, role_vault_id, role_note_id,
-             role_title, model)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             role_title, model, permission_mode)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             l.session_id,
             l.name,
@@ -1197,7 +1202,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
             role_vault,
             role_note,
             role_title,
-            l.model
+            l.model,
+            l.permission_mode
         ],
     )?;
     Ok(())
@@ -1798,6 +1804,10 @@ pub mod spawn {
         /// Checked for the child's agent before the act (145b).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub model: Option<String>,
+        /// Never looser than the parent's, and offered by the child's agent
+        /// (146b); `None` is `default`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub permission_mode: Option<String>,
         /// A crew role (138), applied as a launch role is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub role: Option<super::Context>,
@@ -3076,6 +3086,7 @@ pub mod spawn {
                 write_vault_id,
                 role: role.clone(),
                 model: payload.model.clone(),
+                permission_mode: payload.permission_mode.clone(),
             },
             now,
         )?;

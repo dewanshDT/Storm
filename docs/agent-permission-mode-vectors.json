@@ -1,0 +1,49 @@
+{
+  "about": "Decision 146b: the permission mode a person chooses at launch, or a start_agent names, per agent. The server (apps/server/src/agent/permission.rs) refuses a mode an agent does not offer with permission_mode_unavailable, a start's mode looser than its parent's with permission_mode_wider, and gives a start without one its parent's mode or the nearest stricter one its agent offers (`inherit`). The host (apps/runtime/src/profile.rs, permission_mode) refuses it again and turns an accepted one into exactly `args` (the agent's own launch flag) and `opencode_permission` (keys Storm's OpenCode config layer sets). `default` is the agent's own behaviour: no flag, no key, and a start omits the field. No bypass or skip-permissions mode exists anywhere. Neither crate depends on the other: this file keeps them on one rule.",
+  "order": ["default", "accept_edits", "auto"],
+  "offered": {
+    "claude-code": ["default", "accept_edits", "auto"],
+    "opencode": ["default", "accept_edits"],
+    "codex": ["default"],
+    "cursor": ["default"],
+    "command-code": ["default"],
+    "shell": ["default"]
+  },
+  "accepted": [
+    {"agent": "claude-code", "mode": "default", "args": [], "opencode_permission": {}},
+    {"agent": "claude-code", "mode": "accept_edits", "args": ["--permission-mode", "acceptEdits"], "opencode_permission": {}},
+    {"agent": "claude-code", "mode": "auto", "args": ["--permission-mode", "auto"], "opencode_permission": {}},
+    {"agent": "opencode", "mode": "default", "args": [], "opencode_permission": {}},
+    {"agent": "opencode", "mode": "accept_edits", "args": [], "opencode_permission": {"edit": "allow"}},
+    {"agent": "codex", "mode": "default", "args": [], "opencode_permission": {}},
+    {"agent": "shell", "mode": "default", "args": [], "opencode_permission": {}}
+  ],
+  "refused": [
+    {"agent": "opencode", "mode": "auto"},
+    {"agent": "codex", "mode": "accept_edits"},
+    {"agent": "codex", "mode": "auto"},
+    {"agent": "cursor", "mode": "accept_edits"},
+    {"agent": "command-code", "mode": "auto"},
+    {"agent": "shell", "mode": "accept_edits"},
+    {"agent": "claude-code", "mode": "bypass"},
+    {"agent": "claude-code", "mode": "bypassPermissions"},
+    {"agent": "claude-code", "mode": "acceptEdits"},
+    {"agent": "claude-code", "mode": "plan"},
+    {"agent": "claude-code", "mode": "dontAsk"},
+    {"agent": "claude-code", "mode": "--dangerously-skip-permissions"},
+    {"agent": "claude-code", "mode": "Auto"},
+    {"agent": "claude-code", "mode": ""},
+    {"agent": "opencode", "mode": "bypass"},
+    {"agent": "codex", "mode": "bypass"}
+  ],
+  "inherit": [
+    {"parent": "default", "agent": "claude-code", "child": "default"},
+    {"parent": "accept_edits", "agent": "claude-code", "child": "accept_edits"},
+    {"parent": "auto", "agent": "claude-code", "child": "auto"},
+    {"parent": "default", "agent": "opencode", "child": "default"},
+    {"parent": "accept_edits", "agent": "opencode", "child": "accept_edits"},
+    {"parent": "auto", "agent": "opencode", "child": "accept_edits"},
+    {"parent": "auto", "agent": "codex", "child": "default"},
+    {"parent": "accept_edits", "agent": "codex", "child": "default"}
+  ]
+}

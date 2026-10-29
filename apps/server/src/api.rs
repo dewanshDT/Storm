@@ -17305,6 +17305,328 @@ pub(crate) mod tests {
         assert!(plain.get("model").is_none(), "an empty field is no model");
     }
 
+    // ---- decision 146: permissions for spawned agents ----
+
+    impl GatewayFixture {
+        /// A running parent with spawn on, launched in `mode`, its storm
+        /// connection initialized.
+        async fn spawning_parent_in(&mut self, provider: &str, mode: &str) -> String {
+            self.spawning_parent().await;
+            let (status, body) = self
+                .launch_body(serde_json::json!({
+                    "provider": provider, "spawn": true, "permission_mode": mode,
+                }))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let parent = body["id"].as_str().unwrap().to_string();
+            self.initialize(&parent, "storm").await;
+            self.sent();
+            parent
+        }
+
+        async fn mode_events(&self) -> Vec<serde_json::Value> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_PERMISSION_MODE)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    /// A-146-2: each mode reaches the host as exactly the start's
+    /// `permission_mode` (none for default), is shown on the session's row
+    /// and audited; bypass, and a mode the agent does not offer, are refused
+    /// `permission_mode_unavailable` by the API and nothing starts; a resume
+    /// keeps the mode.
+    #[tokio::test]
+    async fn a_146_2_the_mode_at_launch_is_checked_shown_audited_and_kept() {
+        let dir = tempdir::TempDir::new("storm-146-2").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.spawning_parent().await;
+        for (provider, mode) in [
+            ("claude-code", "accept_edits"),
+            ("claude-code", "auto"),
+            ("opencode", "accept_edits"),
+        ] {
+            let (status, launched) = f
+                .launch_body(serde_json::json!({"provider": provider, "permission_mode": mode}))
+                .await;
+            assert_eq!(status, StatusCode::OK, "{launched}");
+            assert_eq!(launched["permission_mode"], mode);
+            let id = launched["id"].as_str().unwrap().to_string();
+            assert_eq!(f.start_of(&id)["permission_mode"], mode);
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+            assert_eq!(view["permission_mode"], mode, "the session's row");
+            assert!(
+                f.mode_events()
+                    .await
+                    .iter()
+                    .any(|e| e["session_id"] == id.as_str() && e["permission_mode"] == mode),
+                "audited at launch"
+            );
+        }
+        for extra in [
+            serde_json::json!({"permission_mode": "default"}),
+            serde_json::json!({}),
+        ] {
+            let (status, plain) = f.launch_body(extra).await;
+            assert_eq!(status, StatusCode::OK, "{plain}");
+            assert!(plain.get("permission_mode").is_none());
+            let start = f.start_of(plain["id"].as_str().unwrap());
+            assert!(start.get("permission_mode").is_none(), "{start}");
+        }
+        f.sent();
+        for (provider, mode) in [
+            ("claude-code", "bypass"),
+            ("claude-code", "bypassPermissions"),
+            ("claude-code", "acceptEdits"),
+            ("claude-code", "--dangerously-skip-permissions"),
+            ("opencode", "auto"),
+            ("shell", "accept_edits"),
+            ("cursor", "auto"),
+        ] {
+            let (status, body) = f
+                .launch_body(serde_json::json!({"provider": provider, "permission_mode": mode}))
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{provider} {mode} {body}");
+            assert!(
+                body["error"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("permission_mode_unavailable: "),
+                "{body}"
+            );
+        }
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing started"
+        );
+
+        let (_, launched) = f
+            .launch_body(serde_json::json!({"permission_mode": "auto"}))
+            .await;
+        let old = launched["id"].as_str().unwrap().to_string();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{old}/status"),
+                serde_json::json!({"status": "completed", "exit_code": 0,
+                    "harness_session": "7c9e6679-7425-40de-944b-e07fc1f90ae7"}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        f.sent();
+        let (status, resumed) = f
+            .launch_body(serde_json::json!({"resume_of": old, "permission_mode": "default"}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{resumed}");
+        assert_eq!(
+            resumed["permission_mode"], "auto",
+            "a resume keeps its mode"
+        );
+        let id = resumed["id"].as_str().unwrap().to_string();
+        assert_eq!(f.start_of(&id)["permission_mode"], "auto");
+    }
+
+    /// A-146-3: a child's mode is never looser than its parent's
+    /// (`permission_mode_wider`); left out, it is the parent's, mapped to
+    /// the child's agent with the stricter fallback; a stricter one named is
+    /// kept; bypass is no mode at all.
+    #[tokio::test]
+    async fn a_146_3_children_are_never_looser() {
+        let dir = tempdir::TempDir::new("storm-146-3").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent_in("claude-code", "accept_edits").await;
+
+        let wider = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "permission_mode": "auto"}),
+            )
+            .await,
+        );
+        assert_eq!(wider["reason"], "permission_mode_wider", "{wider}");
+        for bypass in [
+            "bypass",
+            "bypassPermissions",
+            "dangerously-skip-permissions",
+        ] {
+            let refused = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "permission_mode": bypass}),
+                )
+                .await,
+            );
+            assert_eq!(
+                refused["reason"], "permission_mode_unavailable",
+                "{refused}"
+            );
+        }
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing started"
+        );
+        assert!(
+            f.spawn_events()
+                .await
+                .iter()
+                .any(|(kind, d)| kind == "spawn_act_refused"
+                    && d["reason"] == "permission_mode_wider"),
+            "the refusal is audited"
+        );
+
+        let inherited = f
+            .start_child(&parent, serde_json::json!({"task": "t", "name": "same"}))
+            .await;
+        assert_eq!(f.start_of(&inherited)["permission_mode"], "accept_edits");
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{inherited}")).await;
+        assert_eq!(view["permission_mode"], "accept_edits", "the child's row");
+        let status = structured(
+            &f.tool(
+                &parent,
+                "agent_status",
+                serde_json::json!({"id": inherited}),
+            )
+            .await,
+        );
+        assert_eq!(status["permission_mode"], "accept_edits");
+
+        let stricter = f
+            .start_child(
+                &parent,
+                serde_json::json!({"task": "t", "name": "strict", "permission_mode": "default"}),
+            )
+            .await;
+        assert!(f.start_of(&stricter).get("permission_mode").is_none());
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{stricter}")).await;
+        assert!(view.get("permission_mode").is_none(), "{view}");
+        for child in [&inherited, &stricter] {
+            f.tool(&parent, "end_agent", serde_json::json!({"id": child}))
+                .await;
+            f.report(child, "stopped").await;
+        }
+
+        // Across agents: an auto parent's OpenCode child gets accept_edits,
+        // the nearest stricter mode OpenCode offers; asked for auto, it is
+        // unavailable there.
+        let auto = f.spawning_parent_in("claude-code", "auto").await;
+        let open = f
+            .start_child(
+                &auto,
+                serde_json::json!({"task": "t", "name": "open", "agent": "opencode"}),
+            )
+            .await;
+        let start = f.start_of(&open);
+        assert_eq!(
+            (
+                start["provider"].as_str(),
+                start["permission_mode"].as_str()
+            ),
+            (Some("opencode"), Some("accept_edits"))
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{open}")).await;
+        assert_eq!(view["permission_mode"], "accept_edits");
+        let unavailable = structured(
+            &f.tool(
+                &auto,
+                "start_agent",
+                serde_json::json!({"task": "t", "agent": "opencode", "permission_mode": "auto"}),
+            )
+            .await,
+        );
+        assert_eq!(
+            unavailable["reason"], "permission_mode_unavailable",
+            "{unavailable}"
+        );
+        assert!(
+            f.mode_events()
+                .await
+                .iter()
+                .any(|e| e["session_id"] == open.as_str() && e["requester"] == auto.as_str()),
+            "a child's mode is audited at its start"
+        );
+    }
+
+    /// A-146-4, the server's half: a gated permission prompt on a child
+    /// shows on its row, is a `needs_attention`/`permission_prompt` event
+    /// that returns its parent's `wait_agent`, and clears when answered.
+    /// Nothing the parent has can answer it.
+    #[tokio::test]
+    async fn a_146_4_a_waiting_prompt_is_surfaced_and_cleared() {
+        let dir = tempdir::TempDir::new("storm-146-4").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.state
+            .agent
+            .report_permission_prompts_for_tests(&["claude-code"]);
+        let parent = f.spawning_parent().await;
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "t", "name": "poet"}))
+            .await;
+        let first = structured(
+            &f.tool(&parent, "wait_agent", serde_json::json!({"timeout": 1}))
+                .await,
+        );
+        let cursor = first["cursor"].clone();
+
+        let status = |body: serde_json::Value| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                body,
+                &f.host_bearer,
+            )
+        };
+        let (code, _) = send(
+            &f.app,
+            status(serde_json::json!({"status": "running",
+                "attention": "permission_prompt", "attention_source": "provider_hook"})),
+        )
+        .await;
+        assert!(code.is_success());
+        let woke = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"after": cursor, "timeout": 5}),
+            )
+            .await,
+        );
+        assert_eq!(woke["timed_out"], false, "{woke}");
+        let event = woke["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["kind"] == "needs_attention")
+            .unwrap_or_else(|| panic!("{woke}"))
+            .clone();
+        assert_eq!(
+            (event["child"].as_str(), event["reason"].as_str()),
+            (Some(child.as_str()), Some("permission_prompt"))
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(view["needs_attention"], "permission_prompt", "Needs you");
+
+        let tools = f.storm_tools(&parent).await;
+        for t in &tools {
+            for word in ["answer", "approve", "permission", "respond", "allow"] {
+                assert!(!t.contains(word), "{t} could answer a prompt");
+            }
+        }
+        let (code, _) = send(&f.app, status(serde_json::json!({"status": "running"}))).await;
+        assert!(code.is_success());
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert!(view["needs_attention"].is_null(), "answered: {view}");
+    }
+
     /// A-145-4: a name addresses its agent wherever an id does, and is
     /// unique among the parent's live children.
     #[tokio::test]

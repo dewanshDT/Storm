@@ -2218,6 +2218,9 @@ pub struct RequestCard {
     /// A start's model (145b).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// A start's permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// A start's role, titled as it was then.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
@@ -2268,6 +2271,7 @@ impl RequestCard {
             context_note,
             provider,
             model,
+            permission_mode: text("permission_mode"),
             role,
             text: message,
             round,
@@ -2447,6 +2451,9 @@ pub struct AgentView {
     /// The model it started on (145b), when one was chosen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     pub status: String,
     /// The round it is in (145): 1 for its task, then one per message
     /// after a result.
@@ -2513,11 +2520,11 @@ fn agent_view(
     let lineage = state.agent.lineage(&r.id).map_err(agent_error)?;
     let result = state.agent.result_of(&r.id).map_err(agent_error)?;
     let round = state.agent.round_of(&r.id).map_err(agent_error)?;
-    let model = state
+    let (model, permission_mode) = state
         .agent
         .launch_of(&r.id)
         .map_err(internal)?
-        .and_then(|l| l.model);
+        .map_or((None, None), |l| (l.model, l.permission_mode));
     let activity = state.agent.health_activity(&r);
     let needs_attention = state.agent.needs_attention(&r).map_err(agent_error)?;
     let pending_events = state.agent.pending_events(&r.id).map_err(agent_error)?;
@@ -2556,6 +2563,7 @@ fn agent_view(
         name,
         provider: r.provider,
         model,
+        permission_mode,
         status: r.status,
         round,
         activity,
@@ -2777,6 +2785,9 @@ pub struct StartAgent {
     /// The child's agent; the caller's own when absent.
     pub agent: Option<String>,
     pub model: Option<String>,
+    /// Never looser than the caller's own (146b); the caller's, or the
+    /// nearest stricter one the child's agent offers, when absent.
+    pub permission_mode: Option<String>,
     /// A role note in Kit, by title or path.
     pub role: Option<String>,
     /// `false` waits for the child's first result, within the caller's
@@ -2799,6 +2810,9 @@ pub struct StartedAgent {
     pub agent: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     /// For a foreground start: its status when the wait ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
@@ -2826,6 +2840,7 @@ impl StartedAgent {
             name: None,
             agent: None,
             model: None,
+            permission_mode: None,
             status: None,
             result: None,
             still_running: false,
@@ -2834,6 +2849,78 @@ impl StartedAgent {
             message,
         }
     }
+}
+
+/// A permission mode was given to a session (146b): audited once, at its
+/// launch or its start.
+pub const EVENT_PERMISSION_MODE: &str = "permission_mode";
+
+async fn audit_permission_mode(
+    state: &Shared,
+    session: &crate::agent::store::SessionRecord,
+    mode: &str,
+    requester: Option<&str>,
+) {
+    let detail = serde_json::json!({
+        "session_id": session.id,
+        "host_id": session.host_id,
+        "provider": session.provider,
+        "permission_mode": mode,
+        "requester": requester,
+    });
+    let _ = state.auth_db.lock().await.record_event(
+        EVENT_PERMISSION_MODE,
+        Some(&session.owner_user_id),
+        None,
+        &crate::index::now_rfc3339(),
+        &detail.to_string(),
+    );
+}
+
+/// A child's permission mode (146b): the one asked for, never looser than
+/// its parent's and offered by its agent; else its parent's, or the nearest
+/// stricter one its agent offers. `None` is `default`.
+fn child_permission_mode(
+    state: &Shared,
+    parent: &str,
+    agent: &str,
+    asked: Option<&str>,
+) -> Result<Option<String>, (&'static str, String)> {
+    use crate::agent::permission;
+    let parents = state
+        .agent
+        .launch_of(parent)
+        .ok()
+        .flatten()
+        .and_then(|l| l.permission_mode)
+        .unwrap_or_else(|| permission::DEFAULT.to_string());
+    let mode = match asked.map(str::trim) {
+        None | Some("") => permission::inherit(agent, &parents),
+        Some(m) => {
+            let Some(rank) = permission::rank(m) else {
+                return Err((
+                    "permission_mode_unavailable",
+                    format!(
+                        "{:?} is not a permission mode: there are {}.",
+                        m.chars().take(40).collect::<String>(),
+                        permission::ORDER.join(", ")
+                    ),
+                ));
+            };
+            if rank > permission::rank(&parents).unwrap_or(0) {
+                return Err((
+                    "permission_mode_wider",
+                    format!(
+                        "A child's permission mode is never looser than yours ({parents}): \
+                         leave permission_mode out, or choose a stricter one."
+                    ),
+                ));
+            }
+            permission::check(agent, m).map_err(|s| ("permission_mode_unavailable", s))?;
+            permission::ORDER[rank]
+        }
+    };
+    Ok(permission::stored(mode))
 }
 
 /// Every role note in Kit with its frontmatter `model:`, read as the
@@ -2957,6 +3044,21 @@ pub async fn start_agent(
             Some(sentence),
         ));
     }
+    let permission_mode =
+        match child_permission_mode(state, &caller, &agent, req.permission_mode.as_deref()) {
+            Ok(mode) => mode,
+            Err((reason, sentence)) => {
+                audit_act(
+                    state,
+                    &caller,
+                    "start",
+                    None,
+                    Some(crate::agent::store::spawn::Refusal { reason, cap: None }),
+                )
+                .await;
+                return Ok(StartedAgent::refused(reason, None, Some(sentence)));
+            }
+        };
     let deliverable = deliverable_credential(state, &parent.host_id);
     let payload = StartPayload {
         task: req.task,
@@ -2964,6 +3066,7 @@ pub async fn start_agent(
         name,
         context_note,
         model: model.clone(),
+        permission_mode: permission_mode.clone(),
         role,
     };
     let child = match state
@@ -2973,6 +3076,9 @@ pub async fn start_agent(
     {
         Ok(child) => {
             audit_act(state, &caller, "start", Some(&child.id), None).await;
+            if let Some(mode) = &permission_mode {
+                audit_permission_mode(state, &child, mode, Some(&caller)).await;
+            }
             child
         }
         Err(refusal) => {
@@ -3005,6 +3111,7 @@ pub async fn start_agent(
         name: Some(name),
         agent: Some(child.provider.clone()),
         model,
+        permission_mode,
         status: None,
         result: None,
         still_running: false,
@@ -4007,6 +4114,9 @@ pub struct SessionView {
     /// The model it was started on (145b), when one was chosen.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -4078,9 +4188,16 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id, launch_role, model) = match launch {
-        Some(l) => (l.name, l.context, l.write_vault_id, l.role, l.model),
-        None => (session.workspace.clone(), None, None, None, None),
+    let (name, context, write_vault_id, launch_role, model, permission_mode) = match launch {
+        Some(l) => (
+            l.name,
+            l.context,
+            l.write_vault_id,
+            l.role,
+            l.model,
+            l.permission_mode,
+        ),
+        None => (session.workspace.clone(), None, None, None, None, None),
     };
     Ok(SessionView {
         session,
@@ -4104,6 +4221,7 @@ fn session_view(
         spawn,
         launch_role,
         model,
+        permission_mode,
     })
 }
 
@@ -4161,6 +4279,14 @@ pub async fn launch_session(
 ) -> ApiResult<LaunchedSession> {
     // Only a person turns the switch on, at launch as later (B1, 141e).
     if req.spawn {
+        crews_owner(actor)?;
+    }
+    // A permission mode is the person's choice (146b), never an agent's.
+    if req
+        .permission_mode
+        .as_deref()
+        .is_some_and(|m| !m.is_empty() && m != crate::agent::permission::DEFAULT)
+    {
         crews_owner(actor)?;
     }
     // A resume is the old session's launch again (decision 89): its note and
@@ -4318,6 +4444,9 @@ pub async fn launch_session(
             )
             .map_err(internal)?;
     }
+    if let Some(mode) = &launch.permission_mode {
+        audit_permission_mode(state, &session, mode, None).await;
+    }
     let (credential, credential_notice) =
         provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
@@ -4409,6 +4538,7 @@ pub async fn launch_session(
         spawn,
         launch_role: launch.role,
         model: launch.model,
+        permission_mode: launch.permission_mode.clone(),
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;

@@ -218,11 +218,13 @@ impl AgentManager {
         let parent = parent.map(|p| self.get(&p)).transpose()?;
         let start = parent.and_then(|parent| {
             let caps = self.host_live(&child.host_id).capabilities?;
-            let (mcp, model) = {
+            let (mcp, model, permission_mode) = {
                 let store = self.store.lock().unwrap();
+                let launch = store.launch(&child.id).ok()?;
                 (
                     store.grants_of(&child.id).ok()?,
-                    store.launch(&child.id).ok()?.and_then(|l| l.model),
+                    launch.as_ref().and_then(|l| l.model.clone()),
+                    launch.and_then(|l| l.permission_mode),
                 )
             };
             let reads_storm = mcp
@@ -245,6 +247,8 @@ impl AgentManager {
                     resume: None,
                     provider_credential: credential.kind().map(Into::into),
                     model,
+                    permission_mode,
+                    spawn: false,
                     resumed_from: None,
                     child_of: Some(parent.id.clone()),
                 },

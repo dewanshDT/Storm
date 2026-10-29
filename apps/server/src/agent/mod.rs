@@ -27,6 +27,7 @@ pub mod inbox;
 pub mod jobs;
 pub mod model;
 pub mod park;
+pub mod permission;
 pub mod round;
 pub mod scope;
 pub mod store;
@@ -129,6 +130,16 @@ pub enum Command {
         /// agent's own flag. Omitted when none is chosen.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// The permission mode the person chose (decision 146b), checked for
+        /// the agent; the host maps it to the agent's own flag or config.
+        /// Omitted for `default`, so every other start's bytes are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
+        /// A session launched with the spawn switch on (146a): its host
+        /// pre-allows the spawn tools in the agent's own config. Omitted
+        /// otherwise.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spawn: bool,
         /// A resume's predecessor (decision 136e): an isolated host copies
         /// the conversation from that session's kept files, never from
         /// another's. Omitted on a fresh launch; an old host ignores it.
@@ -670,6 +681,11 @@ pub struct Launch {
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
     pub model: Option<String>,
+    /// The permission mode (146b): `default`, `accept_edits` or `auto`,
+    /// checked for its agent, else `permission_mode_unavailable`. There is
+    /// no bypass. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1993,6 +2009,27 @@ impl AgentManager {
                 "model_unavailable: {sentence}"
             )));
         }
+        let permission_mode = match resume.as_ref() {
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.permission_mode)
+                .filter(|m| permission::check(&provider.id, m).is_ok()),
+            None => req
+                .permission_mode
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .and_then(permission::stored),
+        };
+        if let Some(m) = &permission_mode
+            && let Err(sentence) = permission::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "permission_mode_unavailable: {sentence}"
+            )));
+        }
         let launch = {
             let mut store = self.store.lock().unwrap();
             // Checked under the same lock as the writes below, so the crew
@@ -2015,6 +2052,7 @@ impl AgentManager {
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
                 role: meta.role.filter(|_| reads_storm),
                 model: model.clone(),
+                permission_mode: permission_mode.clone(),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -2105,6 +2143,8 @@ impl AgentManager {
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
                 model,
+                permission_mode,
+                spawn: req.spawn,
                 child_of: None,
             },
         );
@@ -3138,6 +3178,7 @@ mod tests {
                 role: None,
                 spawn: false,
                 model: None,
+                permission_mode: None,
             },
             meta,
             grants,
@@ -3162,6 +3203,7 @@ mod tests {
                 role: None,
                 spawn: false,
                 model: None,
+                permission_mode: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3835,6 +3877,7 @@ mod tests {
                     role: None,
                     spawn: false,
                     model: None,
+                    permission_mode: None,
                 },
                 meta,
                 offered(),
@@ -4049,6 +4092,7 @@ mod tests {
                 role: None,
                 spawn: false,
                 model: None,
+                permission_mode: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -4639,6 +4683,8 @@ mod tests {
                 resume: None,
                 provider_credential,
                 model,
+                permission_mode: None,
+                spawn: false,
                 resumed_from: None,
                 child_of: None,
             },
@@ -4657,6 +4703,21 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&start_with(None, Some("haiku".into()))).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"model":"haiku"}"#
+        );
+        // 146: a mode other than default, and a spawning parent's flag.
+        let mut moded = start(None);
+        if let Command::Start {
+            permission_mode,
+            spawn,
+            ..
+        } = &mut moded.command
+        {
+            *permission_mode = Some("accept_edits".into());
+            *spawn = true;
+        }
+        assert_eq!(
+            serde_json::to_string(&moded).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"permission_mode":"accept_edits","spawn":true}"#
         );
     }
 
