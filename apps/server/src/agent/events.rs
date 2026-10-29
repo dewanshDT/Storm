@@ -38,12 +38,19 @@ pub const USAGE_LIMIT_EVENT: &str = "usage_limit";
 pub const FAILED: &str = "failed";
 pub const REPORTED: &str = "reported";
 pub const ENDED: &str = "ended";
+/// 145e: the child's round is done and its process was stopped; its
+/// conversation and workspace are kept, and a message resumes it.
+pub const PARKED: &str = "parked";
 /// The child's host link was lost, or the server restarted: nothing is
 /// known of it until its host reports again (77c).
 pub const UNKNOWN: &str = "unknown";
 
 /// The kinds still written past [`MAX_EVENTS_PER_CHILD`].
-pub const KEPT_PAST_CAP: &[&str] = &[REPORTED, FAILED, ENDED];
+pub const KEPT_PAST_CAP: &[&str] = &[REPORTED, FAILED, ENDED, PARKED];
+
+/// The kinds that close a round (145f): they carry the round, how long it
+/// took by Storm's own clock, and the agent's own usage where it said.
+pub const ROUND_KINDS: &[&str] = &[REPORTED, FAILED, ENDED, PARKED];
 
 pub const HOST_PROCESS: &str = "host_process";
 pub const STORM: &str = "storm";
@@ -68,11 +75,33 @@ pub struct GatedWake {
     pub mechanism: &'static str,
 }
 
-/// No provider's wake has passed its gate.
+/// No provider's wake has passed its gate. The host keeps the same list
+/// (`harness::WAKE`), spelled the same: a test holds the two equal.
 pub const WAKE: &[GatedWake] = &[];
 
+#[cfg(test)]
 pub fn wake_on(provider: &str) -> bool {
     WAKE.iter().any(|w| w.provider == provider)
+}
+
+/// What an agent said a round cost (145f), as its own hook or plugin
+/// reported it. Tokens only, each absent when the agent did not say.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct Usage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_write_tokens: Option<u64>,
+}
+
+impl Usage {
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// A child's state after the change an event records.
@@ -97,6 +126,15 @@ pub struct ChildEvent {
     pub source: String,
     pub confidence: String,
     pub at: String,
+    /// For a round's `reported`, `failed`, `ended` or `parked` (145f): the
+    /// round, and how long it ran by Storm's own timestamps.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    /// Only where the agent itself reported it; never guessed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 /// What the host last said of a session, already through its gates: the
@@ -166,6 +204,7 @@ pub fn status_event(
     let was_ended = before.is_some_and(|s| matches!(s, "completed" | "failed" | "stopped"));
     match r.status.as_str() {
         "running" => Some((STARTED, None)),
+        "parked" => Some((PARKED, None)),
         "unknown" => Some((UNKNOWN, None)),
         "failed" if !was_ended => Some((FAILED, r.end_reason.clone())),
         "completed" | "stopped" if !was_ended => Some((ENDED, r.end_reason.clone())),
@@ -199,7 +238,96 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              parent         TEXT PRIMARY KEY,
              last_seq       INTEGER NOT NULL,
              acked          INTEGER NOT NULL
+         );
+         -- 145f: what the agent itself said a round cost, as its host
+         -- reported it with the round's final message.
+         CREATE TABLE IF NOT EXISTS session_round_usage (
+             session_id  TEXT NOT NULL,
+             round       INTEGER NOT NULL,
+             usage       TEXT NOT NULL,
+             reported_at TEXT NOT NULL,
+             PRIMARY KEY (session_id, round)
          );",
+    )?;
+    // 145f, additive: a queue from before it gains the round's columns.
+    for (column, kind) in [
+        ("round", "INTEGER"),
+        ("duration_ms", "INTEGER"),
+        ("usage", "TEXT"),
+    ] {
+        let has = conn
+            .prepare("SELECT 1 FROM pragma_table_info('child_events') WHERE name = ?1")?
+            .exists([column])?;
+        if !has {
+            conn.execute(
+                &format!("ALTER TABLE child_events ADD COLUMN {column} {kind}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// The round `child` is in, and when it began by Storm's own record: its
+/// start for round 1, else the message that opened it.
+fn round_start(conn: &Connection, child: &SessionRecord) -> Result<(i64, Option<String>)> {
+    let opened: Option<(i64, String)> = conn
+        .query_row(
+            "SELECT round, changed_at FROM session_round WHERE session_id = ?1",
+            params![child.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(match opened {
+        Some((round, at)) => (round, Some(at)),
+        None => (
+            1,
+            child
+                .started_at
+                .clone()
+                .or_else(|| Some(child.created_at.clone())),
+        ),
+    })
+}
+
+fn millis_between(from: &str, to: &str) -> Option<i64> {
+    use time::format_description::well_known::Rfc3339;
+    let from = time::OffsetDateTime::parse(from, &Rfc3339).ok()?;
+    let to = time::OffsetDateTime::parse(to, &Rfc3339).ok()?;
+    Some(((to - from).whole_milliseconds().max(0)) as i64)
+}
+
+/// The usage the agent reported for `round`, if it did.
+pub(super) fn round_usage(
+    conn: &Connection,
+    session_id: &str,
+    round: i64,
+) -> Result<Option<Usage>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT usage FROM session_round_usage WHERE session_id = ?1 AND round = ?2",
+            params![session_id, round],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
+}
+
+/// Keeps what the agent said `round` cost; a later word for the same round
+/// replaces it.
+pub(super) fn record_usage(
+    conn: &Connection,
+    session_id: &str,
+    round: i64,
+    usage: &Usage,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_round_usage (session_id, round, usage, reported_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (session_id, round) DO UPDATE SET usage = excluded.usage,
+             reported_at = excluded.reported_at",
+        params![session_id, round, serde_json::to_string(usage)?, now],
     )?;
     Ok(())
 }
@@ -278,6 +406,19 @@ pub(super) fn record_in(
         }
     }
     let state = state_in(conn, child, live)?;
+    let (round, duration_ms, usage) = if ROUND_KINDS.contains(&kind) {
+        let (round, began) = round_start(conn, child)?;
+        let usage = round_usage(conn, &child.id, round)?
+            .map(|u| serde_json::to_string(&u))
+            .transpose()?;
+        (
+            Some(round),
+            began.and_then(|b| millis_between(&b, now)),
+            usage,
+        )
+    } else {
+        (None, None, None)
+    };
     conn.execute(
         "INSERT INTO child_event_cursor (parent, last_seq, acked) VALUES (?1, 1, 0)
          ON CONFLICT (parent) DO UPDATE SET last_seq = last_seq + 1",
@@ -290,8 +431,8 @@ pub(super) fn record_in(
     )?;
     conn.execute(
         "INSERT INTO child_events (parent, seq, child, kind, reason, status, activity,
-             needs_attention, source, confidence, at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+             needs_attention, source, confidence, at, round, duration_ms, usage)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             parent,
             seq,
@@ -303,7 +444,10 @@ pub(super) fn record_in(
             state.needs_attention,
             source,
             confidence(source),
-            now
+            now,
+            round,
+            duration_ms,
+            usage
         ],
     )?;
     Ok(true)
@@ -324,7 +468,7 @@ pub(super) fn forget_in(conn: &Connection, session_id: &str) -> Result<()> {
 }
 
 const EVENT_COLUMNS: &str = "parent, seq, child, kind, reason, status, activity, \
-    needs_attention, source, confidence, at";
+    needs_attention, source, confidence, at, round, duration_ms, usage";
 
 fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChildEvent> {
     let parent: String = r.get(0)?;
@@ -343,6 +487,11 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChildEvent> {
         source: r.get(8)?,
         confidence: r.get(9)?,
         at: r.get(10)?,
+        round: r.get(11)?,
+        duration_ms: r.get(12)?,
+        usage: r
+            .get::<_, Option<String>>(13)?
+            .and_then(|t| serde_json::from_str(&t).ok()),
     })
 }
 
@@ -395,6 +544,21 @@ impl Store {
             }
         }
         Ok(out)
+    }
+
+    /// The newest event `parent` has not acknowledged, by its `seq`: the
+    /// mark a parent's wake is for (144c). 0 with none.
+    pub fn unread_events_mark(&self, parent: &str) -> Result<i64> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT CASE WHEN last_seq > acked THEN last_seq ELSE 0 END
+                 FROM child_event_cursor WHERE parent = ?1",
+                params![parent],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
 
     /// The cursor `parent` last acknowledged; 0 before any.
@@ -579,6 +743,7 @@ impl AgentManager {
         Ok(match after {
             Some(n) => {
                 store.ack_events(caller, n)?;
+                self.wake_poke.notify_one();
                 n
             }
             None => store.acked_events(caller)?,

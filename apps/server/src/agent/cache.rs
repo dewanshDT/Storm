@@ -49,7 +49,6 @@ impl OutputCache {
         }
     }
 
-    #[cfg(test)]
     pub fn floor(&self) -> u64 {
         self.floor
     }

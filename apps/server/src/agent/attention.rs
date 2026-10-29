@@ -33,8 +33,9 @@ pub struct GatedSignal {
 }
 
 /// The signals taken from hosts. None has passed its gate, so every one is
-/// off for every provider; the host keeps its own list
-/// (`harness::PERMISSION_PROMPT_ADAPTERS`), where the gates' results are.
+/// off for every provider. The host keeps the same list
+/// (`harness::GATED_SIGNALS`), spelled the same with string literals, and
+/// reports only what is on it: a test in each crate holds the two equal.
 pub const GATED_SIGNALS: &[GatedSignal] = &[];
 
 /// The adapters whose permission prompt is on [`GATED_SIGNALS`], spelled as
@@ -66,7 +67,7 @@ fn source_of(reported: Option<&str>, default: &'static str) -> Option<&'static s
 }
 
 impl AgentManager {
-    fn gated(&self, provider: &str, signal: &str, source: Option<&'static str>) -> bool {
+    pub(super) fn gated(&self, provider: &str, signal: &str, source: Option<&'static str>) -> bool {
         source.is_some_and(|source| {
             self.signals
                 .lock()
@@ -81,7 +82,8 @@ impl AgentManager {
     /// says for 144b. An ungated report changes no state and makes no
     /// event. Times the idle spell.
     pub(super) fn take_signals(&self, r: &SessionRecord, report: &StatusReport) -> Taken {
-        let live_session = !r.is_ended();
+        // A parked child (145e) has no process to say anything of.
+        let live_session = !r.is_ended() && r.status != "parked";
         let display = report
             .activity
             .as_deref()

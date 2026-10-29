@@ -367,7 +367,8 @@ impl Store {
     /// guess.
     ///
     /// A spawned child still `creating` is left as it is: its host was never
-    /// told of it, and startup fails it `server_restart` (139-D5).
+    /// told of it, and startup fails it `server_restart` (139-D5). A parked
+    /// child (145e) has no process to be unsure of, so it stays parked.
     ///
     /// A child that turns `unknown` here gets an `unknown` event from Storm
     /// (144a), in the same transaction.
@@ -376,7 +377,8 @@ impl Store {
         let children: Vec<String> = {
             let mut stmt = tx.prepare(
                 "SELECT id FROM sessions
-                 WHERE status NOT IN ('completed', 'failed', 'stopped', 'creating', 'unknown')
+                 WHERE status NOT IN ('completed', 'failed', 'stopped', 'creating', 'unknown',
+                                      'parked')
                    AND id IN (SELECT session_id FROM session_lineage)",
             )?;
             let rows = stmt.query_map([], |r| r.get(0))?;
@@ -384,7 +386,7 @@ impl Store {
         };
         let changed = tx.execute(
             "UPDATE sessions SET status = 'unknown'
-             WHERE status NOT IN ('completed', 'failed', 'stopped')
+             WHERE status NOT IN ('completed', 'failed', 'stopped', 'parked')
                AND NOT (status = 'creating'
                         AND id IN (SELECT session_id FROM session_lineage))",
             [],
@@ -2162,6 +2164,7 @@ pub mod spawn {
             session_id: &str,
             r: &SpawnResult,
             live: &crate::agent::events::LiveSignals,
+            source: &'static str,
         ) -> Result<()> {
             use crate::agent::events;
             let tx = self.conn.unchecked_transaction()?;
@@ -2182,7 +2185,7 @@ pub mod spawn {
                 &session,
                 events::REPORTED,
                 Some(&r.outcome),
-                events::STORM,
+                source,
                 live,
                 &r.reported_at,
             )?;
@@ -2203,6 +2206,76 @@ pub mod spawn {
                 self.notify_events();
             }
             Ok(())
+        }
+
+        /// 145c: a round's final message as its result, unless the child
+        /// already reported this round itself, and what the agent said the
+        /// round cost (145f), in one transaction. Returns whether the
+        /// message became the result.
+        pub fn record_final_message(
+            &self,
+            session_id: &str,
+            r: &SpawnResult,
+            usage: Option<&crate::agent::events::Usage>,
+            live: &crate::agent::events::LiveSignals,
+            source: &'static str,
+        ) -> Result<bool> {
+            let round = round_of(&self.conn, session_id)?;
+            if let Some(usage) = usage.filter(|u| !u.is_empty()) {
+                crate::agent::events::record_usage(
+                    &self.conn,
+                    session_id,
+                    round,
+                    usage,
+                    &r.reported_at,
+                )?;
+            }
+            let reported = self
+                .conn
+                .prepare("SELECT 1 FROM session_round_result WHERE session_id = ?1 AND round = ?2")?
+                .exists(params![session_id, round])?;
+            if reported {
+                return Ok(false);
+            }
+            self.record_result(session_id, r, live, source)?;
+            Ok(true)
+        }
+
+        /// The parked children on a host (145e): what `MAX_PARKED` counts.
+        pub fn parked_on(&self, host_id: &str) -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND status = 'parked'",
+                params![host_id],
+                |r| r.get(0),
+            )?)
+        }
+
+        /// Whether `session_id` has a message it has not read yet: a
+        /// parked child with one is resumed (145d).
+        pub fn has_unread(&self, session_id: &str) -> Result<bool> {
+            Ok(self
+                .conn
+                .prepare("SELECT 1 FROM session_inbox WHERE session_id = ?1 AND state = 'queued'")?
+                .exists(params![session_id])?)
+        }
+
+        /// The newest message `session_id` has not read, by its number: the
+        /// mark a child's wake is for (145d). 0 with none.
+        pub fn unread_mark(&self, session_id: &str) -> Result<i64> {
+            Ok(self.conn.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM session_inbox
+                 WHERE session_id = ?1 AND state = 'queued'",
+                params![session_id],
+                |r| r.get(0),
+            )?)
+        }
+
+        /// Whether `round`'s result is on record for `session_id`.
+        pub fn reported_round(&self, session_id: &str, round: i64) -> Result<bool> {
+            Ok(self
+                .conn
+                .prepare("SELECT 1 FROM session_round_result WHERE session_id = ?1 AND round = ?2")?
+                .exists(params![session_id, round])?)
         }
 
         pub fn result(&self, session_id: &str) -> Result<Option<SpawnResult>> {
@@ -2554,7 +2627,7 @@ pub mod spawn {
             if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
-            let child = spawn_child(&tx, &r, agent, payload, false, now)?;
+            let child = spawn_child(&tx, &r, agent, payload, true, now)?;
             insert_act(
                 &tx,
                 act,
@@ -2764,10 +2837,13 @@ pub mod spawn {
         if lineage.depth + 1 > MAX_DEPTH.min(BUILT_DEPTH) {
             return Ok(Some("depth"));
         }
+        // 145e: a parked child has no process, so the live cap does not
+        // count it; the tree's total does.
         let children: i64 = conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM session_lineage l JOIN sessions s ON s.id = l.session_id
-                 WHERE l.parent_session = ?1 AND s.status NOT IN {ENDED}"
+                 WHERE l.parent_session = ?1 AND s.status NOT IN {ENDED}
+                   AND s.status != 'parked'"
             ),
             params![r.id],
             |row| row.get(0),
@@ -2784,7 +2860,8 @@ pub mod spawn {
         if max_sessions > 0 {
             let live: i64 = conn.query_row(
                 &format!(
-                    "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND status NOT IN {ENDED}"
+                    "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND status NOT IN {ENDED}
+                       AND status != 'parked'"
                 ),
                 params![r.host_id],
                 |row| row.get(0),
@@ -2896,8 +2973,8 @@ pub mod spawn {
 
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
-    /// parent's write vault only when `write_vault` (D2; no act sets it
-    /// since 145a). Spawn is off: a child has no switch row. Its workspace
+    /// parent's write vault when `write_vault` and the parent launched with
+    /// one it may write (145a: a start inherits it; nothing wider). Spawn is off: a child has no switch row. Its workspace
     /// is its own (137-1), its agent `agent` (143a), its name the one asked
     /// for or one made from the task, unique among its live siblings, and
     /// its model and role the start's (145b).
@@ -2960,7 +3037,17 @@ pub mod spawn {
             )
             .optional()?
             .flatten();
-        let write_vault_id = parent_vault.filter(|_| write_vault && reads_storm);
+        // The parent's own write vault, only when it launched able to write
+        // there: never wider than the parent's live grant (134e).
+        let parent_writes: bool = conn
+            .query_row(
+                "SELECT allow_vault_writes FROM session_mcp WHERE session_id = ?1",
+                params![parent.id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false);
+        let write_vault_id = parent_vault.filter(|_| write_vault && reads_storm && parent_writes);
         insert_grants(conn, &child.id, write_vault_id.is_some(), &grants, now)?;
         let name = match &payload.name {
             Some(name) => name.clone(),
@@ -3114,6 +3201,7 @@ pub mod spawn {
             "session_result",
             "session_round",
             "session_round_result",
+            "session_round_usage",
             "session_inbox",
         ] {
             conn.execute(

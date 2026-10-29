@@ -112,6 +112,7 @@ impl AgentManager {
         )?;
         if sent.is_ok() {
             self.bump(target);
+            self.wake_poke.notify_one();
         }
         Ok(sent)
     }
@@ -134,10 +135,14 @@ impl AgentManager {
                 .end_child(&act, requester, target, &now(), &|host| {
                     self.host_check(host)
                 })?;
-        if ended.is_ok()
-            && let Err(e) = self.send_end(target)
-        {
-            tracing::warn!(session = target, error = ?e, "an agent's end not sent");
+        if ended.is_ok() {
+            // A parked child runs nowhere: its end is recorded here (145e).
+            let r = self.get(target)?;
+            if r.status == "parked" {
+                self.end_parked(&r, None)?;
+            } else if let Err(e) = self.send_end(target) {
+                tracing::warn!(session = target, error = ?e, "an agent's end not sent");
+            }
         }
         Ok(ended)
     }

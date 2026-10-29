@@ -371,6 +371,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         .route("/v1/runtime/sessions/{id}/status", post(runtime_status))
         .route(
+            "/v1/runtime/sessions/{id}/final-message",
+            post(runtime_final_message),
+        )
+        .route(
             "/v1/runtime/sessions/{id}/terminal/images/{image}",
             get(runtime_image).post(runtime_image_staged),
         )
@@ -1863,6 +1867,17 @@ async fn runtime_status(
     Json(report): Json<crate::agent::StatusReport>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_status(&state, &auth.host.id, &id, &report)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A child's final message, from its agent's hook (decision 145c).
+async fn runtime_final_message(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(message): Json<crate::agent::round::FinalMessage>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_final_message(&state, &auth.host.id, &id, &message).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -7723,6 +7738,7 @@ pub(crate) mod tests {
             "wait_agent",
             "send_message",
             "end_agent",
+            "read_output",
             "report_result",
             "read_messages",
         ] {
@@ -9520,7 +9536,7 @@ pub(crate) mod tests {
 
     // ---- the spawn switch (decision 134-2) ----
 
-    const SPAWN_134: [&str; 9] = [
+    const SPAWN_134: [&str; 10] = [
         "list_agents",
         "start_agent",
         "agent_status",
@@ -9528,6 +9544,7 @@ pub(crate) mod tests {
         "wait_agent",
         "send_message",
         "end_agent",
+        "read_output",
         "report_result",
         "read_messages",
     ];
@@ -14502,7 +14519,7 @@ pub(crate) mod tests {
 
     /// What a parent is offered once 134-7 is built: 134-4's reads,
     /// `send_message` and `end_agent`, in `SPAWN_134`'s order.
-    const PARENT_BUILT: [&str; 7] = [
+    const PARENT_BUILT: [&str; 8] = [
         "list_agents",
         "start_agent",
         "agent_status",
@@ -14510,6 +14527,7 @@ pub(crate) mod tests {
         "wait_agent",
         "send_message",
         "end_agent",
+        "read_output",
     ];
     const CHILD_BUILT: [&str; 2] = ["report_result", "read_messages"];
 
@@ -14777,6 +14795,87 @@ pub(crate) mod tests {
         );
     }
 
+    // ---- the peek (decision 145g) ----
+
+    /// A-145-10: `read_output` returns the parent's own child's tail,
+    /// stripped and bounded, and is audited without its text; the child
+    /// itself, another parent and a parent's other relations are refused
+    /// `not_permitted`.
+    #[tokio::test]
+    async fn a_145_10_read_output_is_the_parents_own_childs_tail_only() {
+        const CANARY: &str = "CANARY-145-10";
+        let dir = tempdir::TempDir::new("storm-145-peek").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, child) = f.tree().await;
+        let mut out = format!("\x1b[1;32m{CANARY} counting\x1b[0m\r\n").into_bytes();
+        for n in 0..250 {
+            out.extend_from_slice(format!("line {n}\r\n").as_bytes());
+        }
+        f.state
+            .agent
+            .host_output(&f.host_id, &child, 0, &out)
+            .unwrap();
+        let read = structured(
+            &f.tool(
+                &parent,
+                "read_output",
+                serde_json::json!({"id": child, "tail": 3}),
+            )
+            .await,
+        );
+        assert_eq!(read["id"], child);
+        assert_eq!(
+            read["lines"],
+            serde_json::json!(["line 247", "line 248", "line 249"])
+        );
+        let Ok(all) =
+            crate::ops::read_output(&f.state, &f.agent(&parent), &child, Some(10_000)).await
+        else {
+            panic!("the parent reads its child");
+        };
+        assert_eq!(all.lines.len(), crate::ops::MAX_OUTPUT_LINES, "bounded");
+        let Ok(stripped) = crate::ops::read_output(&f.state, &f.agent(&parent), &child, None).await
+        else {
+            panic!("the parent reads its child");
+        };
+        assert!(stripped.lines.iter().all(|l| !l.contains('\x1b')));
+
+        let other = f.launch_on("claude-code").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let refused = |r: ApiResult<crate::ops::OutputTail>| matches!(r, Err(ApiError(StatusCode::FORBIDDEN, m)) if m.starts_with("not_permitted"));
+        for (caller, target) in [
+            (&child, &parent),
+            (&child, &child),
+            (&other, &child),
+            (&parent, &parent),
+            (&parent, &other),
+        ] {
+            assert!(
+                refused(crate::ops::read_output(&f.state, &f.agent(caller), target, None).await),
+                "{caller} read {target}"
+            );
+        }
+
+        let peeks: Vec<serde_json::Value> = f
+            .spawn_events()
+            .await
+            .into_iter()
+            .filter(|(kind, _)| kind == crate::ops::EVENT_SPAWN_PEEK)
+            .map(|(_, d)| d)
+            .collect();
+        assert_eq!(peeks.len(), 3);
+        assert_eq!(
+            peeks[0],
+            serde_json::json!({"session_id": parent, "target": child, "lines": 3})
+        );
+        assert!(
+            peeks.iter().all(|p| !p.to_string().contains(CANARY)),
+            "audited without its text"
+        );
+    }
+
     // ---- child events (decision 144) ----
 
     #[tokio::test]
@@ -14828,8 +14927,13 @@ pub(crate) mod tests {
                 "source": "storm",
                 "confidence": "certain",
                 "at": event["at"],
+                // 145f: a round's event carries its round and how long it
+                // took; no usage, since the agent said none.
+                "round": 1,
+                "duration_ms": event["duration_ms"],
             })
         );
+        assert!(event["duration_ms"].as_i64().is_some_and(|d| d >= 0));
         assert_eq!(waited["cursor"], seq);
         assert_eq!(waited["agents"][0]["pending_events"], 1);
         let children = structured(

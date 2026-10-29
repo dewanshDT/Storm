@@ -578,14 +578,20 @@ fn a_start_records_the_child_narrowed_under_its_parent() {
         names(store.grants_of(&child.id).unwrap()),
         ["con_X", "storm"]
     );
-    // D2: no act gives it the parent's write vault.
+    // 145a: a start inherits the write vault its parent launched with,
+    // and nothing wider.
     assert_eq!(
-        store.launch(&child.id).unwrap().unwrap().write_vault_id,
-        None
+        store
+            .launch(&child.id)
+            .unwrap()
+            .unwrap()
+            .write_vault_id
+            .as_deref(),
+        Some("vlt_W")
     );
     assert!(matches!(
         store.grant(&child.id, "storm"),
-        Ok(Some((_, false)))
+        Ok(Some((_, true)))
     ));
     // 134-5: it is started in its own workspace, which its host makes from
     // the parent's.
@@ -873,7 +879,11 @@ fn a_child_is_started_narrowed_in_its_own_workspace() {
     assert_eq!(c.workspace, format!("children/{}", child.id));
     assert!(!f.m.spawn_enabled(&c.id).unwrap(), "spawn is off");
     let launch = f.m.launch_of(&c.id).unwrap().unwrap();
-    assert_eq!(launch.write_vault_id, None);
+    assert_eq!(
+        launch.write_vault_id.as_deref(),
+        Some("vlt_W"),
+        "its parent's"
+    );
     assert_eq!(launch.name, "Test writer");
     assert_eq!(launch.model.as_deref(), Some("haiku"));
 }

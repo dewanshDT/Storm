@@ -154,7 +154,7 @@ impl AgentManager {
         let live = self.live_signals(caller);
         let result = {
             let store = self.store.lock().unwrap();
-            store.record_result(caller, &result, &live)?;
+            store.record_result(caller, &result, &live, super::events::STORM)?;
             store.result(caller)?.expect("just recorded")
         };
         self.bump(caller);

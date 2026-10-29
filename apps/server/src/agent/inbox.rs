@@ -36,6 +36,10 @@ impl AgentManager {
                 .lock()
                 .unwrap()
                 .read_messages(caller, after.take())?;
+            if !read.is_empty() {
+                // What was unread is read: its wake mark drops (145d).
+                self.wake_poke.notify_one();
+            }
             let left = deadline.saturating_duration_since(Instant::now());
             if !read.is_empty() || left.is_zero() {
                 let timed_out = read.is_empty();

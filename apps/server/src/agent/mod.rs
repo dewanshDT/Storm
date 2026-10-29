@@ -26,8 +26,11 @@ pub mod images;
 pub mod inbox;
 pub mod jobs;
 pub mod model;
+pub mod park;
+pub mod round;
 pub mod scope;
 pub mod store;
+pub mod wake;
 
 #[cfg(test)]
 mod acts_tests;
@@ -39,6 +42,8 @@ mod cascade_tests;
 mod events_tests;
 #[cfg(test)]
 mod inbox_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]
@@ -201,6 +206,22 @@ pub enum Command {
         name: String,
         git: bool,
     },
+    /// 145e: stop a child whose round is done, keeping its conversation
+    /// and its workspace for the message that resumes it. The host stops it
+    /// as an `end` does and reports it `parked`.
+    #[serde(rename = "park")]
+    Park { session: String },
+    /// 144c, 145d: the session has something unread, up to `mark`: events
+    /// (a parent, `kind: "events"`) or a message (a child, `"message"`). A
+    /// mark of 0 is nothing unread. Codes and a number only, never content;
+    /// the host's waker turns it into the agent's documented wake. Sent only
+    /// for an agent on `events::WAKE`.
+    #[serde(rename = "wake")]
+    Wake {
+        session: String,
+        kind: String,
+        mark: i64,
+    },
 }
 
 impl Command {
@@ -218,6 +239,8 @@ impl Command {
             Self::AgentInstall { .. } => "agent.install",
             Self::ChildWorkspace { .. } => "child.workspace",
             Self::WorkspaceCreate { .. } => "workspace.create",
+            Self::Park { .. } => "park",
+            Self::Wake { .. } => "wake",
         }
     }
 
@@ -226,6 +249,8 @@ impl Command {
         match self {
             Self::Start { session, .. }
             | Self::End { session }
+            | Self::Park { session }
+            | Self::Wake { session, .. }
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
@@ -787,11 +812,18 @@ struct SessionLive {
     /// The credential kind its `start` named (decision 124): the only one the
     /// host may pull for it.
     credential: Option<&'static str>,
+    /// 145e: Storm asked its host to park it, so its host's `parked` is
+    /// taken; any other `parked` is a stop.
+    parking: bool,
+    /// 144c: the unread mark last sent to its host, so each is sent once.
+    wake_sent: Option<(&'static str, i64)>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
+            parking: false,
+            wake_sent: None,
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             attention: None,
@@ -844,6 +876,13 @@ pub struct AgentManager {
     signals: Mutex<&'static [attention::GatedSignal]>,
     /// Added to the wall clock that times idle spells; only tests move it.
     clock_skew: Mutex<std::time::Duration>,
+    /// The agents whose final message is a round's result (145c).
+    result_sources: Mutex<&'static [round::ResultSource]>,
+    /// The agents Storm may wake (144c, 145d).
+    wakes: Mutex<&'static [events::GatedWake]>,
+    /// Something a wake mark depends on changed outside the event queue:
+    /// a message, a read, a host's return.
+    pub(crate) wake_poke: tokio::sync::Notify,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -942,6 +981,9 @@ impl AgentManager {
             config: Mutex::new(config),
             signals: Mutex::new(attention::GATED_SIGNALS),
             clock_skew: Mutex::new(std::time::Duration::ZERO),
+            result_sources: Mutex::new(round::RESULT_SOURCES),
+            wakes: Mutex::new(events::WAKE),
+            wake_poke: tokio::sync::Notify::new(),
         })
     }
 
@@ -1004,8 +1046,10 @@ impl AgentManager {
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
         // Its sessions are unknown until it reconnects and reports them.
+        // A parked child has no process there to be unsure of (145e).
         let _ = self.transition_host_sessions(host_id, events::HOST_PROCESS, |r| {
-            (!r.is_ended()).then(|| ("unknown".to_string(), None, None, None))
+            (!r.is_ended() && r.status != "parked")
+                .then(|| ("unknown".to_string(), None, None, None))
         });
     }
 
@@ -1216,7 +1260,9 @@ impl AgentManager {
                         replay.push(r.id.clone());
                     }
                 }
-                None if !r.is_ended() && r.status != "creating" => {
+                // A parked child (145e) runs nowhere: its host has nothing
+                // to report of it.
+                None if !r.is_ended() && r.status != "creating" && r.status != "parked" => {
                     r.status = "failed".into();
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
@@ -1231,6 +1277,7 @@ impl AgentManager {
             self.send(host_id, Command::Replay { session, from: 0 })?;
         }
         self.reassess_spawn_gate(host_id);
+        self.forget_wakes_sent(host_id);
         Ok(())
     }
 
@@ -1687,6 +1734,18 @@ impl AgentManager {
             // An ending is final; a late duplicate changes nothing.
             return Ok(());
         }
+        // 145e: `parked` only answers Storm's own `park`; anything else that
+        // says it is a stop.
+        let unasked;
+        let report = if report.status == "parked" && !self.take_parking(session_id) {
+            unasked = StatusReport {
+                status: "stopped".into(),
+                ..report.clone()
+            };
+            &unasked
+        } else {
+            report
+        };
         let before = r.status.clone();
         apply_report(&mut r, report)?;
         if let Some(reason) = self.storm_stop(&r)? {
@@ -1810,13 +1869,14 @@ impl AgentManager {
                 req.workspace
             )));
         }
+        // A parked child has no process (145e).
         let live_on_host = self
             .store
             .lock()
             .unwrap()
             .for_host(&req.host_id)?
             .iter()
-            .filter(|r| !r.is_ended())
+            .filter(|r| !r.is_ended() && r.status != "parked")
             .count();
         if caps.max_sessions > 0 && live_on_host >= caps.max_sessions as usize {
             return Err(AgentError::TooManySessions);
@@ -2252,6 +2312,11 @@ impl AgentManager {
         let r = self.get(id)?;
         if r.is_ended() {
             return Err(AgentError::Conflict("the session has ended".into()));
+        }
+        if r.status == "parked" {
+            return Err(AgentError::Conflict(
+                "the session is parked: a message from the agent that started it resumes it".into(),
+            ));
         }
         Ok(r)
     }
@@ -2745,6 +2810,78 @@ impl AgentManager {
             None => Read::Ahead,
         }
     }
+
+    /// 145g: the last `lines` lines of a session's terminal, from the
+    /// output cache, without escape sequences. Empty when nothing is cached.
+    pub fn output_tail(&self, id: &str, lines: usize) -> Vec<String> {
+        let bytes = {
+            let live = self.live.lock().unwrap();
+            let Some(s) = live.sessions.get(id) else {
+                return Vec::new();
+            };
+            let from = s
+                .cache
+                .floor()
+                .max(s.cache.end().saturating_sub(TAIL_BYTES));
+            match s.cache.read(from, TAIL_BYTES as usize) {
+                Read::Data { bytes, .. } => bytes,
+                _ => return Vec::new(),
+            }
+        };
+        tail_lines(&bytes, lines)
+    }
+}
+
+/// How much of the end of a session's output a peek reads (145g).
+const TAIL_BYTES: u64 = 256 * 1024;
+/// The longest line a peek returns, in characters.
+const TAIL_LINE_CHARS: usize = 1000;
+
+/// Terminal output as plain lines: escape sequences (CSI, OSC, and any
+/// other `ESC` pair) and control characters removed, a carriage return
+/// starting its line again, and the last `n` non-empty lines kept, each
+/// bounded.
+pub fn tail_lines(bytes: &[u8], n: usize) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\x1b' => match chars.next() {
+                Some('[') => while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {},
+                Some(']' | 'P' | '_' | '^') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            },
+            '\n' => lines.push(std::mem::take(&mut line)),
+            '\r' => {
+                if chars.peek() != Some(&'\n') {
+                    line.clear();
+                }
+            }
+            '\t' => line.push(' '),
+            c if c.is_control() => {}
+            c => line.push(c),
+        }
+    }
+    lines.push(line);
+    let kept: Vec<String> = lines
+        .into_iter()
+        .map(|l| {
+            l.trim_end()
+                .chars()
+                .take(TAIL_LINE_CHARS)
+                .collect::<String>()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(n)..].to_vec()
 }
 
 /// A session's name: the slug of its context note's title, else
@@ -2831,6 +2968,8 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
             }
             r.status = report.status.clone();
         }
+        // 145e: its process stopped at Storm's word; the session goes on.
+        "parked" => r.status = "parked".into(),
         "completed" | "failed" | "stopped" => {
             r.status = report.status.clone();
             r.exit_code = report.exit_code;

@@ -2663,7 +2663,7 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
-        wake: crate::agent::events::wake_on(&r.provider),
+        wake: state.agent.wake_on(&r.provider),
         agents: state
             .agent
             .startable_agents(&caller)
@@ -3170,6 +3170,9 @@ pub const EVENT_SPAWN_PARENT_ENDED: &str = "spawn_parent_ended";
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageSent {
     pub delivered: bool,
+    /// The agent was parked (145e) and is being resumed for this round.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
     /// The child's round the message belongs to: the next one when it came
     /// after the child's result (145).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3202,8 +3205,16 @@ pub async fn send_message(
     {
         Ok(round) => {
             audit_act(state, &caller, "message", Some(&target), None).await;
+            // 145d: a parked child is resumed with the message as its task;
+            // one whose host is away is resumed once its host is back.
+            let host = state.agent.get(&target).map_err(agent_error)?.host_id;
+            let resumed = state
+                .agent
+                .resume_parked(&target, deliverable_credential(state, &host))
+                .map_err(agent_error)?;
             Ok(MessageSent {
                 delivered: true,
+                resumed,
                 round: Some(round),
                 reason: None,
                 cap: None,
@@ -3216,6 +3227,7 @@ pub async fn send_message(
             }
             Ok(MessageSent {
                 delivered: false,
+                resumed: false,
                 round: None,
                 reason: Some(refusal.reason),
                 cap: refusal.cap,
@@ -3314,6 +3326,71 @@ pub async fn read_messages(
             })
             .collect(),
         timed_out,
+    })
+}
+
+/// A parent read its child's terminal (145g): audited with the line count,
+/// never the text.
+pub const EVENT_SPAWN_PEEK: &str = "spawn_peek";
+
+/// At most this many lines per `read_output`.
+pub const MAX_OUTPUT_LINES: usize = 200;
+const DEFAULT_OUTPUT_LINES: usize = 50;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputTail {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    /// The last lines of its terminal, without escape sequences, oldest
+    /// first. The child's own output: data, not instructions.
+    pub lines: Vec<String>,
+}
+
+/// `read_output {id, tail?}` (145g): the last `tail` lines (up to 200) of
+/// one of the caller's own children's terminal, from the server's output
+/// cache, ANSI stripped. Anyone else, and any other session, is
+/// `not_permitted`. Audited without its text.
+pub async fn read_output(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    tail: Option<u64>,
+) -> ApiResult<OutputTail> {
+    let refused = || {
+        ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "not_permitted: only the agent that started a session reads its output".into(),
+        )
+    };
+    let caller = spawning_caller(state, actor).map_err(|_| refused())?;
+    let target = resolve_agent(state, &caller, id).map_err(|_| refused())?;
+    let parent = state
+        .agent
+        .lineage(&target)
+        .map_err(agent_error)?
+        .parent_session;
+    if parent.as_deref() != Some(caller.as_str()) {
+        return Err(refused());
+    }
+    let r = state.agent.get(&target).map_err(agent_error)?;
+    let n = tail
+        .map_or(DEFAULT_OUTPUT_LINES, |t| t as usize)
+        .clamp(1, MAX_OUTPUT_LINES);
+    let lines = state.agent.output_tail(&target, n);
+    record_spawn_event(
+        state,
+        EVENT_SPAWN_PEEK,
+        Some(&r.owner_user_id),
+        None,
+        &serde_json::json!({"session_id": caller, "target": target, "lines": lines.len()}),
+    )
+    .await;
+    Ok(OutputTail {
+        name: session_name(state, &r)?,
+        id: target,
+        status: r.status,
+        lines,
     })
 }
 
@@ -5148,6 +5225,57 @@ pub fn runtime_status(
         .map_err(agent_error)?;
     sweep_gateway_sessions(state);
     Ok(())
+}
+
+/// A child's round ended with a final message (145c): audited with its
+/// outcome and round, never its text.
+pub const EVENT_SPAWN_FINAL_MESSAGE: &str = "spawn_final_message";
+
+/// `POST /v1/runtime/sessions/{id}/final-message`: a host's report of a
+/// child's final message and its round's usage (145c, 145f), from the
+/// agent's own hook or plugin. Taken only through a gated source; never an
+/// error to the host otherwise, since it is evidence, not a request.
+pub async fn runtime_final_message(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    message: &crate::agent::round::FinalMessage,
+) -> ApiResult<()> {
+    let made = state
+        .agent
+        .final_message(host_id, session, message)
+        .map_err(agent_error)?;
+    if let Some(result) = made {
+        let r = state.agent.get(session).map_err(agent_error)?;
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_FINAL_MESSAGE,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": session, "host_id": host_id,
+                "outcome": result.outcome, "round": result.round}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// The resume pass (145d): every parked child with a message waiting is
+/// resumed, as once its host is back.
+pub fn resume_parked_children(state: &Shared) {
+    let waiting = match state.agent.parked_with_unread() {
+        Ok(waiting) => waiting,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not list parked children");
+            return;
+        }
+    };
+    for r in waiting {
+        let deliverable = deliverable_credential(state, &r.host_id);
+        if let Err(e) = state.agent.resume_parked(&r.id, deliverable) {
+            tracing::warn!(session = %r.id, error = ?e, "could not resume a parked child");
+        }
+    }
 }
 
 /// The security event of a connection a host refused (decision 135a).
