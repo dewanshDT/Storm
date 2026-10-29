@@ -132,14 +132,26 @@ class AgentOverview {
   }
 
   /// [crew]'s members in their order, resumed predecessors left out as in
-  /// [ended].
+  /// [ended]. A crew holds whole trees (decision 145i): a child carries its
+  /// root's place, and comes after it.
   List<AgentSession> membersOf(Crew crew) {
     final resumed = _resumed;
     return [
       for (final s in sessions)
         if (s.crew?.id == crew.id && !(s.ended && resumed.contains(s.id))) s,
-    ]..sort((a, b) => a.crew!.order.compareTo(b.crew!.order));
+    ]..sort((a, b) {
+      final byOrder = a.crew!.order.compareTo(b.crew!.order);
+      return byOrder != 0 ? byOrder : a.spawn.depth.compareTo(b.spawn.depth);
+    });
   }
+
+  /// The session a crew change naming [id] acts on: its tree's root, since a
+  /// child moves only with the agent that started it (145i).
+  String rootIdOf(String id) => byId(id)?.spawn.rootSession ?? id;
+
+  /// [ids] as the roots a crew change acts on, each once, in order.
+  List<String> rootIdsOf(Iterable<String> ids) =>
+      {for (final id in ids) rootIdOf(id)}.toList();
 
   /// Sessions in no crew this overview knows: what RUNNING, ENDED and NOT IN
   /// A CREW list.

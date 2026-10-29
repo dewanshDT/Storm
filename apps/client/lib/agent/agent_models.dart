@@ -529,6 +529,7 @@ class AgentSession {
     this.crew,
     this.role,
     this.launchRole,
+    this.model,
   }) : name = name ?? workspace;
 
   final String id;
@@ -603,6 +604,10 @@ class AgentSession {
 
   /// The role note it was launched with, titled as then (138f). Fixed.
   final RoleRef? launchRole;
+
+  /// The model it was launched with (decision 145b); null for the agent's
+  /// own default.
+  final String? model;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -739,6 +744,7 @@ class AgentSession {
     crew: crew == _keep ? this.crew : crew as SessionCrew?,
     role: role == _keep ? this.role : role as RoleRef?,
     launchRole: launchRole,
+    model: model,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -796,6 +802,7 @@ class AgentSession {
     launchRole: _map(j['launch_role']) == null
         ? null
         : RoleRef.fromJson(_map(j['launch_role'])!),
+    model: j['model'] as String?,
   );
 }
 

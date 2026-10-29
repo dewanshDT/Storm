@@ -253,8 +253,31 @@ class FakeAgentServer {
   /// [_dropEmpty] for the spawning fakes' tree dismissal.
   List<Map<String, dynamic>> dropEmptyCrews() => _dropEmpty();
 
+  /// A session's tree root, which every crew change naming it acts on
+  /// (145i).
+  Map<String, dynamic>? _root(String id) {
+    final s = session(id);
+    final root = s?['root_session'] as String?;
+    return root == null || root == id ? s : session(root) ?? s;
+  }
+
+  /// Every child listed in its root's crew, as the server derives it (145i).
+  void deriveTrees() {
+    for (final s in sessions) {
+      final root = s['root_session'] as String?;
+      if (s['parent_session'] == null || root == null) continue;
+      final crew = session(root)?['crew'];
+      if (crew == null) {
+        s.remove('crew');
+      } else {
+        s['crew'] = crew;
+      }
+    }
+  }
+
   /// The crews the last change emptied, removed as the server would (138c).
   List<Map<String, dynamic>> _dropEmpty() {
+    deriveTrees();
     final emptied = [
       for (final c in crews)
         if (!sessions.any((s) => (s['crew'] as Map?)?['id'] == c['id'])) c,
@@ -281,7 +304,7 @@ class FakeAgentServer {
     }
     if (rolePath) return Future.value(_json(roles));
     if (sessionLabel) {
-      final s = session(seg[3]);
+      final s = seg[4] == 'crew' ? _root(seg[3]) : session(seg[3]);
       if (s == null) {
         return Future.value(_json({'error': 'no such session'}, 404));
       }
@@ -306,7 +329,10 @@ class FakeAgentServer {
         final members =
             [
               for (final m in sessions)
-                if ((m['crew'] as Map?)?['id'] == to && m != s) m,
+                if ((m['crew'] as Map?)?['id'] == to &&
+                    m != s &&
+                    m['parent_session'] == null)
+                  m,
             ]..sort(
               (a, b) => ((a['crew'] as Map)['order'] as int).compareTo(
                 (b['crew'] as Map)['order'] as int,
@@ -340,9 +366,14 @@ class FakeAgentServer {
           sessions.any((s) => (s['crew'] as Map?)?['id'] == c['id']);
       final heldBefore = crews.where(held).toList();
       crews.add(made);
-      for (final (i, id) in (body['session_ids'] as List? ?? []).indexed) {
-        session(id as String)?['crew'] = {'id': made['id'], 'order': i};
+      final roots = {
+        for (final id in body['session_ids'] as List? ?? [])
+          ?_root(id as String),
+      };
+      for (final (i, s) in roots.indexed) {
+        s['crew'] = {'id': made['id'], 'order': i};
       }
+      deriveTrees();
       // A crew made empty stays, and so does any crew already empty (an
       // earlier Undo's); only the crews its sessions left go.
       final emptied = heldBefore.where((c) => !held(c)).toList();
@@ -478,6 +509,7 @@ class FakeAgentServer {
         harnessSession: resumed?['harness_session'] as String?,
         resumedFrom: resumed?['id'] as String?,
       );
+      if (body['model'] case final String model) made['model'] = model;
       // As 138-2's launch: join or make the crew, label the role, and keep
       // it as the launch role only for an agent that reads Storm.
       final crewAsk = body['crew'] as Map<String, dynamic>?;

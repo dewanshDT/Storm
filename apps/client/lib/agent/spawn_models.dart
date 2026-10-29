@@ -28,8 +28,8 @@ class SpawnFacts {
   final String? rootSession;
   final int depth;
 
-  /// `approval`, `permission_prompt`, `usage_limit` (144b) or `blocked`;
-  /// never from idle (A3).
+  /// `permission_prompt`, `usage_limit` (144b) or `blocked`; never from
+  /// idle (A3). An older server's `approval` is read and shown as nothing.
   final String? needsAttention;
 
   /// A child's activity as evidence says it (144b): `working` or `idle`
@@ -227,15 +227,15 @@ class ChildWorkspace with _WorkspaceMode {
   );
 }
 
-/// A start, message or end an agent asked for (134o), as its card shows it.
-class SpawnRequest {
-  const SpawnRequest({
+/// A start, message or end a session's agent did (decision 145a): acted at
+/// once under the launch switch, and listed here for the person to see.
+/// Rows from before 145 may be denied or expired; they are read the same.
+class AgentAct {
+  const AgentAct({
     required this.id,
     required this.kind,
     required this.requester,
-    required this.state,
     required this.createdAt,
-    required this.expiresAt,
     this.target,
     this.outcome,
     this.reason,
@@ -245,13 +245,10 @@ class SpawnRequest {
     this.task,
     this.name,
     this.contextTitle,
-    this.provider,
     this.agent,
-    this.parentAgent,
-    this.agentDiffers = false,
-    this.credential,
+    this.model,
     this.text,
-    this.sharedWith = 0,
+    this.round,
   });
 
   final String id;
@@ -260,14 +257,10 @@ class SpawnRequest {
   final String kind;
   final String requester;
   final String? target;
-
-  /// `pending`, `approving` or `decided`.
-  final String state;
   final String createdAt;
-  final String expiresAt;
 
-  /// `started`, `start_failed`, `delivered`, `ended`, `denied`, `expired`
-  /// or `refused`.
+  /// `started`, `start_failed`, `delivered`, `ended`, or from before 145
+  /// `denied`, `expired` or `refused`.
   final String? outcome;
   final String? reason;
   final String? cap;
@@ -280,42 +273,23 @@ class SpawnRequest {
   final String? task;
   final String? name;
   final String? contextTitle;
-  final String? provider;
 
-  /// A start's child's agent and its parent's (decision 143c); null from a
-  /// server that does not say.
+  /// A start's child's agent and model.
   final String? agent;
-  final String? parentAgent;
-  final bool agentDiffers;
-
-  /// What the child would sign in with: `synced_login` or `host_setup`.
-  final String? credential;
+  final String? model;
   final String? text;
 
-  /// Other live sessions in the requester's workspace, its own tree left
-  /// out (decision 141b). 0 from a server that does not say.
-  final int sharedWith;
+  /// The round a message started or joined (145).
+  final int? round;
 
-  /// Waiting for a person, and not yet past its expiry.
-  bool waiting(DateTime now) => state != 'decided' && left(now) > Duration.zero;
-
-  Duration left(DateTime now) {
-    final at = DateTime.tryParse(expiresAt);
-    if (at == null) return Duration.zero;
-    final d = at.difference(now);
-    return d.isNegative ? Duration.zero : d;
-  }
-
-  factory SpawnRequest.fromJson(Map<String, dynamic> j) {
+  factory AgentAct.fromJson(Map<String, dynamic> j) {
     final note = j['context_note'];
-    return SpawnRequest(
-      id: j['id'] as String,
+    return AgentAct(
+      id: j['id'] as String? ?? '',
       kind: j['kind'] as String? ?? 'start',
       requester: j['requester'] as String? ?? '',
       target: j['target'] as String?,
-      state: j['state'] as String? ?? 'pending',
       createdAt: j['created_at'] as String? ?? '',
-      expiresAt: j['expires_at'] as String? ?? '',
       outcome: j['outcome'] as String?,
       reason: j['reason'] as String?,
       cap: j['cap'] as String?,
@@ -324,13 +298,10 @@ class SpawnRequest {
       task: j['task'] as String?,
       name: j['name'] as String?,
       contextTitle: note is Map ? note['title'] as String? : null,
-      provider: j['provider'] as String?,
-      agent: j['agent'] as String?,
-      parentAgent: j['parent_agent'] as String?,
-      agentDiffers: j['agent_differs'] == true,
-      credential: j['credential'] as String?,
+      agent: j['agent'] as String? ?? j['provider'] as String?,
+      model: j['model'] as String?,
       text: j['text'] as String?,
-      sharedWith: (j['shared_with'] as num?)?.toInt() ?? 0,
+      round: (j['round'] as num?)?.toInt(),
     );
   }
 }
@@ -457,7 +428,6 @@ String shortCommit(String? commit) =>
 
 /// What a session waiting for a person shows beside its activity (134p).
 String? attentionLabel(String? kind) => switch (kind) {
-  'approval' => 'Needs approval',
   'permission_prompt' => 'Waiting at a prompt',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
@@ -471,13 +441,14 @@ String spawnRefusalText(String code, String agent) => switch (code) {
   'isolation_unverified' => "This host doesn't isolate sessions",
   'workspace_held' => 'Another session is working in this workspace',
   'provider_cannot_spawn' => "$agent can't start agents",
-  'launched_without_asks' =>
-    'It started before this host could offer it. Start a new session to '
-        'allow it',
   'launched_without_spawn' => kSpawnAtLaunch,
   'session_not_live' => 'The session has ended',
   _ => code.replaceAll('_', ' '),
 };
+
+/// What a child shows where a crew move would be offered (145i): it is in
+/// its root's crew, and goes where that goes.
+const kMovesWithParent = 'moves with the agent that started it';
 
 /// The agents that can start agents (134-2).
 const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
@@ -492,13 +463,12 @@ String capText(String? cap) => switch (cap) {
   'depth' => 'children can’t start agents yet',
   'children' => '3 live children',
   'tree' => '6 live sessions in a tree',
-  'pending' => '2 waiting requests',
   'max_sessions' => 'the host’s session limit',
   'inbox' => 'the child’s inbox is full',
   _ => cap ?? 'a limit',
 };
 
-/// Why the server refused a request when a person approved it.
+/// Why an act was refused, for rows recorded before decision 145.
 String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'limit' => 'limit: ${capText(cap)}',
   'not_permitted' => 'not permitted for this session',
@@ -511,39 +481,6 @@ String requestRefusalText(String? reason, String? cap) => switch (reason) {
   null => 'refused',
   _ => reason.replaceAll('_', ' '),
 };
-
-/// "OpenCode (different from the parent's Claude Code)": a start's child's
-/// agent beside its parent's (decision 143c).
-String childAgentText(String agent, String parent, {required bool differs}) =>
-    differs
-    ? '$agent (different from the parent’s $parent)'
-    : '$agent, the parent’s own';
-
-/// What a start's child signs in with (decision 143d): the account's synced
-/// Claude login, or whatever its host has for that agent, which the server
-/// cannot see.
-String childCredentialText(String credential, String agent) =>
-    switch (credential) {
-      'synced_login' => 'Your synced Claude login',
-      _ => 'The host’s own setup for $agent',
-    };
-
-/// "identity verified · isolates sessions": a host's two states as the
-/// card shows them (138p point 8: a state, never a fingerprint).
-String hostStatesLine(String? identity, String? isolation) => [
-  switch (identity) {
-    'verified' => 'identity verified',
-    'unsupported' => 'identity unsupported',
-    _ => 'identity not verified',
-  },
-  isolation == 'verified' ? 'isolates sessions' : 'doesn’t isolate sessions',
-].join(' · ');
-
-/// "8:42": what is left of a request's ten minutes.
-String clockLeft(Duration d) {
-  final s = d.inSeconds;
-  return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
-}
 
 /// What a scratch child's work is applied as by default: the parent's
 /// workspace and the child, `<ws>-<child>` (138p point 9). A person may

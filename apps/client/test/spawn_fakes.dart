@@ -5,10 +5,11 @@ import 'package:http/http.dart' as http;
 
 import 'agent_fakes.dart';
 
-/// Decision 134's routes on top of [FakeAgentServer], as 134-1…134-9 and
-/// both integrations built them: the requests list and card, approve and
-/// deny, the switch, descendants, a person's end and End all children, tree
-/// dismissal, and a child's work with Apply and delete (137-3).
+/// Decision 134's routes on top of [FakeAgentServer], as 134-1…134-9, both
+/// integrations and 145a left them: what a session's agent did (its acts,
+/// on `…/requests`), the switch, descendants, a person's end and End all
+/// children, tree dismissal, and a child's work with Apply and delete
+/// (137-3). There is no approve or deny route: 145a removed them.
 
 /// A session's view with what spawning adds to it.
 Map<String, dynamic> spawnSession(
@@ -29,6 +30,7 @@ Map<String, dynamic> spawnSession(
   String? childActivity,
   int? pendingEvents,
   List<Map<String, dynamic>>? recentEvents,
+  String? model,
 }) => {
   ...agentSession(
     id,
@@ -49,6 +51,7 @@ Map<String, dynamic> spawnSession(
   'child_activity': ?childActivity,
   'pending_events': ?pendingEvents,
   'recent_events': ?recentEvents,
+  'model': ?model,
 };
 
 /// A child event as the server's queue holds it (144a).
@@ -82,8 +85,6 @@ Map<String, dynamic> childEvent(
 
 const _ended = ['completed', 'stopped', 'failed'];
 
-const _cardOnly = {'task', 'name', 'context_note', 'provider', 'text'};
-
 class FakeSpawning {
   FakeSpawning(this.server) {
     server.extra = _handle;
@@ -91,8 +92,8 @@ class FakeSpawning {
 
   final FakeAgentServer server;
 
-  /// Every request agents made, oldest first, as the server keeps them.
-  final requests = <Map<String, dynamic>>[];
+  /// Every act agents did, oldest first, as the server keeps them (145a).
+  final acts = <Map<String, dynamic>>[];
 
   /// A child's work as its export answers, by child id.
   final work = <String, Map<String, dynamic>>{};
@@ -107,62 +108,83 @@ class FakeSpawning {
   /// What each end and End all children was sent.
   final ends = <(String, Map<String, dynamic>)>[];
 
-  /// While set, an approve or deny is answered only once it completes.
-  Completer<void>? holdDecisions;
-
   /// Terminal input any spawning action sent: it must stay empty (138p).
   int get terminalWrites => server.requests
       .where((r) => r.url.path.endsWith('/terminal/input'))
       .length;
 
-  Map<String, dynamic> addRequest(
+  /// An act as the server records it: decided at once (145a).
+  Map<String, dynamic> addAct(
     String requester, {
     String kind = 'start',
     String? target,
     String? task,
     String? text,
     String? name,
-    int? sharedWith,
     String? agent,
-    String? parentAgent,
-    String? credential,
-    Duration left = const Duration(minutes: 8, seconds: 42),
+    String? model,
+    String? session,
+    int? round,
+    String outcome = 'started',
+    String? reason,
   }) {
-    final now = DateTime.now().toUtc();
+    final now = DateTime.now().toUtc().toIso8601String();
     final r = <String, dynamic>{
-      'id': 'agr_${requests.length + 1}',
+      'id': 'agr_${acts.length + 1}',
       'kind': kind,
       'requester': requester,
       'target': ?target,
-      'state': 'pending',
-      'created_at': now.toIso8601String(),
-      'expires_at': now.add(left).toIso8601String(),
+      'state': 'decided',
+      'created_at': now,
+      'expires_at': now,
+      'decided_at': now,
+      'outcome': outcome,
+      'reason': ?reason,
+      'session': ?session,
       'task': ?task,
       'text': ?text,
       'name': ?name,
-      'shared_with': ?sharedWith,
       'agent': ?agent,
-      'parent_agent': ?parentAgent,
-      if (agent != null && parentAgent != null && agent != parentAgent)
-        'agent_differs': true,
-      'credential': ?credential,
+      'model': ?model,
+      'round': ?round,
     };
-    requests.add(r);
-    _attention();
+    acts.add(r);
     return r;
   }
 
-  void _attention() {
-    for (final s in server.sessions) {
-      final waits = requests.any(
-        (r) => r['requester'] == s['id'] && r['state'] == 'pending',
-      );
-      if (waits) {
-        s['needs_attention'] = 'approval';
-      } else if (s['needs_attention'] == 'approval') {
-        s['needs_attention'] = null;
-      }
-    }
+  /// [parent]'s agent starts a child at once, as `start_agent` does, and
+  /// the act is recorded.
+  Map<String, dynamic> startChild(
+    String parent, {
+    required String id,
+    String name = 'test-gateway',
+    String task = 'write the tests',
+    String? model,
+    String status = 'running',
+  }) {
+    final p = server.session(parent)!;
+    final child = spawnSession(
+      id,
+      status: status,
+      name: name,
+      parent: parent,
+      root: p['root_session'] as String? ?? parent,
+      depth: (p['depth'] as int? ?? 0) + 1,
+      model: model,
+    );
+    // 145i: a child is listed in its root's crew.
+    final root = server.session(child['root_session'] as String);
+    if (root?['crew'] != null) child['crew'] = root!['crew'];
+    server.sessions.add(child);
+    addAct(
+      parent,
+      task: task,
+      name: name,
+      agent: p['provider'] as String?,
+      model: model,
+      session: id,
+    );
+    return child;
   }
 
   bool _live(Map<String, dynamic> s) => !_ended.contains(s['status']);
@@ -203,54 +225,6 @@ class FakeSpawning {
 
   Future<http.Response?> _handle(http.Request req) async {
     final seg = req.url.pathSegments;
-    if (seg.length >= 4 && seg[1] == 'agent' && seg[2] == 'requests') {
-      final r = requests.where((r) => r['id'] == seg[3]).firstOrNull;
-      if (r == null) return _json({'error': 'no such request'}, 404);
-      if (seg.length == 4) return _json(r);
-      await holdDecisions?.future;
-      if (r['state'] == 'decided') {
-        return _json({'error': 'already_decided'}, 409);
-      }
-      r['state'] = 'decided';
-      r['decided_at'] = DateTime.now().toUtc().toIso8601String();
-      if (seg[4] == 'deny') {
-        r['outcome'] = 'denied';
-      } else {
-        final write = _body(req)['write_vault'] == true;
-        r['write_vault_asked'] = write;
-        switch (r['kind']) {
-          case 'start':
-            final parent = server.session(r['requester'] as String)!;
-            final id = 'ags_child${server.sessions.length}';
-            server.sessions.add(
-              spawnSession(
-                id,
-                status: 'starting',
-                name: r['name'] as String? ?? 'test-gateway',
-                parent: parent['id'] as String,
-                root: parent['root_session'] as String?,
-                depth: (parent['depth'] as int? ?? 0) + 1,
-                writeVaultId: write
-                    ? parent['write_vault_id'] as String?
-                    : null,
-              ),
-            );
-            r['outcome'] = 'started';
-            r['session'] = id;
-          case 'message':
-            r['outcome'] = 'delivered';
-          case 'end':
-            server.session(r['target'] as String)?['status'] = 'stopped';
-            r['outcome'] = 'ended';
-        }
-      }
-      _attention();
-      // A decision answers the request's view, without the card's words.
-      return _json({
-        for (final e in r.entries)
-          if (!_cardOnly.contains(e.key)) e.key: e.value,
-      });
-    }
     if (seg.length < 5 || seg[1] != 'agent' || seg[2] != 'sessions') {
       if (seg.length == 4 && seg[2] == 'sessions' && req.method == 'DELETE') {
         return _dismiss(req, seg[3]);
@@ -264,7 +238,7 @@ class FakeSpawning {
       case ('GET', 'requests'):
         return _json({
           'requests': [
-            for (final r in requests.reversed)
+            for (final r in acts.reversed)
               if (r['requester'] == id) r,
           ],
         });
@@ -274,20 +248,8 @@ class FakeSpawning {
         if (on && sw?['refused'] != null) {
           return _json({'error': sw!['refused']}, 409);
         }
-        var refused = 0;
-        if (!on) {
-          for (final r in requests) {
-            if (r['requester'] == id && r['state'] == 'pending') {
-              r['state'] = 'decided';
-              r['outcome'] = 'refused';
-              r['reason'] = 'revoked';
-              refused++;
-            }
-          }
-          _attention();
-        }
-        s['spawn'] = {'enabled': on};
-        return _json({'enabled': on, 'refused_requests': refused});
+        s['spawn'] = {'enabled': on, 'launched_on': sw?['launched_on']};
+        return _json({'enabled': on});
       case ('GET', 'descendants'):
         final d = _descendants(id);
         return _json({

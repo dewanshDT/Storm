@@ -39,10 +39,10 @@ const kCrewPalette = [
 ];
 
 /// Running members before ended ones, each in crew order.
-List<AgentSession> liveFirst(List<AgentSession> members) => [
+List<AgentSession> liveFirst(List<AgentSession> members) => lineageOrder([
   ...members.where((s) => !s.ended),
   ...members.where((s) => s.ended),
-];
+]);
 
 /// "2 running" open, "2 · 1" (running · ended) collapsed.
 String crewCount(List<AgentSession> members, {required bool collapsed}) {

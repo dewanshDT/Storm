@@ -321,49 +321,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final t = context.tokens;
     final open =
         ref.watch(sessionInspectorOpenProvider) ?? context.drawerOpensByDefault;
-    final waiting = waitingRequest(ref, s);
     final terminal = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: c == null
-                    ? const SizedBox.shrink()
-                    : _withPaste(
-                        c,
-                        s,
-                        StormTerminalView(
-                          terminal: c.terminal,
-                          focusNode: _focus,
-                          autofocus: true,
-                          readOnly: s.ended,
-                          prefs: ref.watch(terminalPrefsProvider),
-                        ),
-                      ),
-              ),
-              // A request waits for this device (4m): over the terminal,
-              // which it never writes to (138p point 2).
-              if (waiting != null)
-                Positioned(
-                  left: t.sp * 2,
-                  right: t.sp * 2,
-                  bottom: t.sp * 2,
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: t.sp * 90),
-                      child: ApprovalCard(
-                        key: ValueKey('card-${waiting.id}'),
-                        request: waiting,
-                        requester: s,
-                      ),
-                    ),
+          child: c == null
+              ? const SizedBox.shrink()
+              : _withPaste(
+                  c,
+                  s,
+                  StormTerminalView(
+                    terminal: c.terminal,
+                    focusNode: _focus,
+                    autofocus: true,
+                    readOnly: s.ended,
+                    prefs: ref.watch(terminalPrefsProvider),
                   ),
                 ),
-            ],
-          ),
         ),
         if (s.ended)
           Container(
@@ -599,7 +573,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ),
         child: _About(session: s, host: host),
       ),
-      SessionTab.requests => RequestsPanel(session: s),
+      SessionTab.requests => ActsPanel(session: s),
       SessionTab.work => ChildWorkPanel(session: s),
     };
     return ColoredBox(
@@ -629,7 +603,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         (SessionTab.context, 'Context'),
                         (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
                         (SessionTab.about, 'About'),
-                        if (showsRequests(s)) (SessionTab.requests, 'Requests'),
+                        if (showsActs(s)) (SessionTab.requests, 'Activity'),
                         if (s.spawn.isChild) (SessionTab.work, 'Work'),
                       ],
                       selected: tab,
@@ -682,7 +656,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ApprovalBanner(session: s),
             ..._spawnBanners(
               s,
               padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp),
@@ -939,6 +912,7 @@ class _HeaderButton extends StatelessWidget {
 String phoneHeaderMeta(AgentSession s) => [
   s.statusLabel,
   providerLabel(s.provider),
+  ?s.model,
   ?s.context?.title,
   if (s.wroteCount > 0) 'wrote ${s.wroteCount}',
 ].join(' · ');
@@ -1382,6 +1356,7 @@ List<(String, String)> aboutRows(
   AgentOverview? overview,
 }) => [
   ('Agent', providerLabel(s.provider)),
+  if (s.model != null) ('Model', s.model!),
   (
     'Workspace',
     s.spawn.isChild
@@ -1582,13 +1557,13 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       ),
       if (s.spawn.switchState != null && !s.ended)
         SpawnSwitchRow(session: s, host: widget.host),
-      if (showsRequests(s))
+      if (showsActs(s))
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('REQUESTS', style: label),
+            Text('ACTIVITY', style: label),
             SizedBox(height: t.sp * 0.25),
-            RequestsPanel(session: s, sheet: true),
+            ActsPanel(session: s, sheet: true),
           ],
         ),
       if (s.spawn.isChild)

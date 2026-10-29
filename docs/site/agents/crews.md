@@ -48,6 +48,12 @@ lists every session it will stop before it stops any. A member on a host
 that can't be reached now is listed as such and skipped; nothing is queued
 for later.
 
+**Agents a session started** belong to its crew with it: they are listed
+under it, indented, count toward its running number and are ended by **End
+all running**. They can't be moved on their own; where a move would be,
+they say "moves with the agent that started it". Moving the session that
+started them, or making a crew from it, takes them along.
+
 Collapsing a crew, or the whole CREWS section, is remembered on each device
 separately. Everything else about a crew is kept on your server, so your
 other devices show a change within about 15 seconds.

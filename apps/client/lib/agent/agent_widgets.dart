@@ -95,9 +95,10 @@ TextStyle agentCode(StormTokens t, {Color? color}) => TextStyle(
 String sessionWhen(AgentSession s) =>
     s.ended ? s.statusLabel.toLowerCase() : shortAge(s.createdAt);
 
-/// "build-vm · storm · 40m": the rows' sub-line; the mark says the agent.
+/// "build-vm · storm · haiku · 40m": the rows' sub-line; the mark says the
+/// agent, and the model shows when it was chosen (145b).
 String sessionSub(AgentSession s, String host) =>
-    '$host · ${s.workspace} · ${sessionWhen(s)}';
+    [host, s.workspace, ?s.model, sessionWhen(s)].join(' · ');
 
 /// "Fix the login, Claude Code on build-vm, working": a row read aloud.
 String sessionSpoken(AgentSession s, String host) => [
@@ -128,7 +129,8 @@ String sessionMeta(AgentSession s, String hostName) {
       : age == 'now'
       ? 'started now'
       : 'started $age ago';
-  return '${providerLabel(s.provider)} · ${s.workspace} on $hostName · $when';
+  final agent = [providerLabel(s.provider), ?s.model].join(' · ');
+  return '$agent · ${s.workspace} on $hostName · $when';
 }
 
 /// One session in a list: its agent's mark, its name, and a mono line under
@@ -274,7 +276,8 @@ class SessionSubLine extends StatelessWidget {
     final ws = session.spawn.isChild
         ? childWorkspaceLabel(session.spawn.childWorkspace)
         : session.workspace;
-    final when = sessionWhen(session);
+    // The model, when one was chosen (145b), stays whole with the age.
+    final when = [?session.model, sessionWhen(session)].join(' · ');
     return LayoutBuilder(
       builder: (context, box) {
         String line(String w) => '$host · $w · $when';

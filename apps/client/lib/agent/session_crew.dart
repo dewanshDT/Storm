@@ -12,6 +12,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'crew_changes.dart';
 import 'crew_widgets.dart';
+import 'spawn_models.dart' show kMovesWithParent;
 
 /// A session's crew and role where the session view shows them (decision
 /// 138, handoff §3 Session, 4e): the chip and tag on the meta line, and the
@@ -245,12 +246,26 @@ class _AboutCrewRoleState extends ConsumerState<AboutCrewRole> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(crew?.name ?? 'Not in a crew', style: value),
-                _AboutAction(
-                  key: const Key('move-to-crew'),
-                  anchor: _crewAnchor,
-                  label: 'Move to crew',
-                  onTap: () => _move(crews),
-                ),
+                // 145i: a child is in its root's crew and goes with it.
+                if (_s.spawn.isChild)
+                  Padding(
+                    padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+                    child: Text(
+                      kMovesWithParent,
+                      key: const Key('crew-moves-with-parent'),
+                      style: value.copyWith(
+                        fontSize: t.codeSize,
+                        color: t.text3,
+                      ),
+                    ),
+                  )
+                else
+                  _AboutAction(
+                    key: const Key('move-to-crew'),
+                    anchor: _crewAnchor,
+                    label: 'Move to crew',
+                    onTap: () => _move(crews),
+                  ),
               ],
             ),
           ),

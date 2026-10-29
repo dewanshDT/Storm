@@ -1118,7 +1118,10 @@ class _PhoneList extends ConsumerWidget {
               if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty)
                 CrewMembers(
                   phone: true,
-                  children: [for (final s in liveFirst(o.membersOf(c))) row(s)],
+                  children: [
+                    for (final s in liveFirst(o.membersOf(c)))
+                      lineageIndented(s, o.membersOf(c), row(s)),
+                  ],
                 ),
             ],
         ],

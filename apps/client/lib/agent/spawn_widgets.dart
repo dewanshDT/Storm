@@ -1,25 +1,21 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../api/models.dart' show VaultInfo;
-import '../state/app_state.dart' show vaultsProvider;
 import '../ui/controls.dart';
 import '../ui/states.dart' show describeFailure;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
-import 'agent_widgets.dart'
-    show agentCode, agentKey, agentMono, agentSans, clockAt;
+import 'agent_widgets.dart' show agentKey, agentMono, agentSans, clockAt;
 import 'crew_changes.dart' show announceDismissedCrews;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 import 'spawn_state.dart';
 
 /// Decision 134's surfaces in a session (138p corrects the handoff's §6,
-/// 4m–4w): the spawn switch, approval cards, the Requests list, ending a
+/// 4m–4w; 145a removed the approval cards): the spawn switch, what the
+/// agent did, ending a
 /// parent or its children, dismissing a tree, lineage and attention. Each
 /// shows only what the server's view says, so on a host that cannot offer
 /// spawning there is nothing here to show.
@@ -33,7 +29,7 @@ String? _code(Object e) => e is AgentRefusal ? e.code : null;
 
 // ---- attention and lineage --------------------------------------------
 
-/// "Needs approval" beside a session's activity (134p); nothing when it
+/// "Waiting at a prompt" beside a session's activity (134p); nothing when it
 /// waits for nobody.
 class AttentionTag extends StatelessWidget {
   const AttentionTag({super.key, required this.kind});
@@ -80,7 +76,11 @@ String? lineageLine(AgentSession s, AgentOverview? o) {
   final parent = o?.byId(parentId);
   final ws = parent?.workspace ?? 'its parent’s workspace';
   final mode = childWorkspaceLabel(s.spawn.childWorkspace, parent: ws);
-  return '↳ from ${parent?.displayName ?? 'its parent'} · $mode';
+  return [
+    '↳ from ${parent?.displayName ?? 'its parent'}',
+    mode,
+    ?s.model,
+  ].join(' · ');
 }
 
 /// A child's workspace named for what it is rather than its record's
@@ -153,7 +153,7 @@ String spawnSwitchNote(SpawnSwitch sw, String agent) {
   final why = sw.refused == null ? null : spawnRefusalText(sw.refused!, agent);
   if (sw.enabled) {
     return why == null
-        ? 'On · you approve each start, message and end · Turn off any time'
+        ? 'On · it starts, messages and ends its own agents · Turn off any time'
         : 'On, but not offered now: $why';
   }
   if (sw.refused == 'launched_without_spawn') return kSpawnAtLaunch;
@@ -162,10 +162,10 @@ String spawnSwitchNote(SpawnSwitch sw, String agent) {
 
 /// The confirmation for turning it on (4t, as 138p point 6 corrects it).
 String spawnOnConfirmText(String name, String host) =>
-    'Allow $name to start agents? It can then ask to start, message and end '
-    'sessions on $host. Each request waits for you, and children never get '
-    'more access than $name. You can turn this off at any time: requests '
-    'still waiting are refused then, and children keep running.';
+    'Allow $name to start agents? It can then start, message and end '
+    'sessions on $host without asking, and each shows here as it happens. '
+    'Children never get more access than $name. You can turn this off at '
+    'any time; children keep running.';
 
 /// "Allow this session to start agents": a person's switch for one running
 /// session (134c, B1, B2). Shown only where the server's view carries it.
@@ -190,16 +190,9 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
     final s = widget.session;
     final c = ProviderScope.containerOf(context, listen: false);
     try {
-      final refused = await api.setSpawn(s.id, enabled);
+      await api.setSpawn(s.id, enabled);
       if (!enabled && mounted) {
-        _say(
-          context,
-          refused == 0
-              ? 'Starting agents is off for ${s.displayName}.'
-              : 'Starting agents is off for ${s.displayName}. $refused '
-                    'waiting ${refused == 1 ? 'request was' : 'requests were'} '
-                    'refused.',
-        );
+        _say(context, 'Starting agents is off for ${s.displayName}.');
       }
       if (mounted) setState(() => _confirm = false);
     } catch (e) {
@@ -603,622 +596,54 @@ class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
   }
 }
 
-// ---- approval cards -------------------------------------------------------
+// ---- what the agent did ------------------------------------------------
 
-/// Who and what a card is about, read from the overview.
-class ApprovalFacts {
-  const ApprovalFacts({
-    required this.request,
-    required this.requester,
-    required this.host,
-    this.targetName,
-    this.targetDescendants = const [],
-    this.writeVault,
-  });
+/// Whether a session's view says its agent may have acts to show: its
+/// switch is on its view (141e).
+bool showsActs(AgentSession s) => s.spawn.switchState != null;
 
-  final SpawnRequest request;
-  final AgentSession requester;
-  final String host;
-  final String? targetName;
-
-  /// For an end: what the target started, which ends with it (134-7).
-  final List<String> targetDescendants;
-
-  /// The requester's own write vault, the only one D2 lets a child have.
-  final String? writeVault;
-}
-
-/// The card's heading: who asks for what.
-String approvalTitle(ApprovalFacts f) {
-  final who = f.requester.displayName;
-  final target = f.targetName ?? 'one of its sessions';
-  return switch (f.request.kind) {
-    'start' => '$who wants to start a session',
-    'message' => '$who wants to message $target',
-    'end' => '$who wants to end $target',
-    _ => '$who is asking',
-  };
-}
-
-/// The card's rows (134o): who asks, what exactly, where it runs and the
-/// host's identity and isolation states. The bool marks the exact text,
-/// drawn as the agent sent it.
-List<(String, String, bool)> approvalRows(ApprovalFacts f) {
-  final r = f.request;
-  final s = f.requester;
-  final agent = providerLabel(s.provider);
-  final ws = s.workspace;
-  final asker = ('Asked by', '${s.displayName} · $agent · ${f.host}', false);
-  final host = (
-    'Host',
-    '${f.host} · ${hostStatesLine(s.identityState, s.isolationState)}',
-    false,
-  );
-  final target = f.targetName ?? r.target ?? '';
-  final shared = r.sharedWith > 0
-      ? ('Workspace', sharedWorkspaceText(ws, r.sharedWith), false)
-      : null;
-  final child = providerLabel(r.agent ?? r.provider ?? s.provider);
-  final parentAgent = providerLabel(r.parentAgent ?? s.provider);
-  return switch (r.kind) {
-    'start' => [
-      asker,
-      ('Task', r.task ?? '', true),
-      ?shared,
-      if (r.name != null) ('Name', r.name!, false),
-      if (r.contextTitle != null) ('Note', r.contextTitle!, false),
-      (
-        'Agent',
-        childAgentText(child, parentAgent, differs: r.agentDiffers),
-        false,
-      ),
-      if (r.credential != null)
-        ('Signs in with', childCredentialText(r.credential!, child), false),
-      (
-        'Runs as',
-        '$child on ${f.host}, in a workspace of its own: a copy of $ws’s '
-            'last commit (uncommitted changes are not included), or $ws '
-            'read-only with a scratch folder if it isn’t a git repository',
-        false,
-      ),
-      host,
-    ],
-    'message' => [
-      asker,
-      ('To', '$target, which it started', false),
-      ('Message', r.text ?? '', true),
-      ?shared,
-      host,
-    ],
-    'end' => [
-      asker,
-      (
-        'Ends',
-        f.targetDescendants.isEmpty
-            ? '$target, which it started'
-            : '$target, which it started, and what $target started: '
-                  '${f.targetDescendants.join(', ')}',
-        false,
-      ),
-      ?shared,
-      host,
-    ],
-    _ => [asker, ?shared, host],
-  };
-}
-
-/// Decision 141b: other sessions can change what the agent reads there.
-String sharedWorkspaceText(String ws, int n) =>
-    '$ws is shared with $n other ${n == 1 ? 'session' : 'sessions'}';
-
-/// The write toggle on a start's card (D2): off by default.
-String writeToggleLabel(String vault) => 'Let the child write to $vault';
-
-/// The card's facts for a request, from the overview, or null while the
-/// requester is unknown.
-ApprovalFacts? approvalFactsOf(
-  SpawnRequest r,
-  AgentOverview? o,
-  List<VaultInfo> vaults, {
-  AgentSession? requester,
-  Descendants? targetDescendants,
-}) {
-  final s = requester ?? o?.byId(r.requester);
-  if (s == null) return null;
-  final target = r.target == null ? null : o?.byId(r.target!);
-  return ApprovalFacts(
-    request: r,
-    requester: s,
-    host: o?.hostName(s.hostId) ?? 'host',
-    targetName: target?.displayName ?? r.target,
-    targetDescendants: [
-      for (final d in targetDescendants?.running ?? const <DescendantRef>[])
-        d.name,
-    ],
-    writeVault: s.isShell || s.writeVaultId == null
-        ? null
-        : vaults.where((v) => v.id == s.writeVaultId).firstOrNull?.name ??
-              'its write vault',
-  );
-}
-
-/// What a person sees once they have decided: the outcome, never a line in
-/// any terminal (138p point 2).
-String decidedText(SpawnRequest r, AgentOverview? o, {String? name}) {
-  String nameOf(String? id) =>
-      id == null ? 'the session' : o?.byId(id)?.displayName ?? id;
-  final child =
-      name ??
-      (r.session == null ? null : o?.byId(r.session!)?.displayName) ??
-      'its child';
-  return switch (r.outcome) {
-    'started' => 'Approved: $child is starting.',
-    'start_failed' => 'Approved, but it couldn’t start.',
-    'delivered' => 'Approved: the message is in ${nameOf(r.target)}’s inbox.',
-    'ended' => 'Approved: ${nameOf(r.target)} is ending.',
-    'denied' => 'Denied.',
-    'expired' => 'It expired before it was decided.',
-    'refused' => 'Refused: ${requestRefusalText(r.reason, r.cap)}.',
-    _ => 'Decided.',
-  };
-}
-
-/// One waiting request, decided here by this signed-in device (A5). Desk:
-/// a card over the session's terminal (4m). Phone: [sheet] lays it out as
-/// 4w, with full-width Approve and Deny. There is no other way to decide,
-/// and no notification carries Approve or Deny (138p point 7).
-class ApprovalCard extends ConsumerStatefulWidget {
-  const ApprovalCard({
-    super.key,
-    required this.request,
-    this.requester,
-    this.sheet = false,
-    this.onDecided,
-  });
-
-  final SpawnRequest request;
-  final AgentSession? requester;
-  final bool sheet;
-  final VoidCallback? onDecided;
-
-  @override
-  ConsumerState<ApprovalCard> createState() => _ApprovalCardState();
-}
-
-class _ApprovalCardState extends ConsumerState<ApprovalCard> {
-  bool _write = false;
-  bool _busy = false;
-  bool _expired = false;
-  Timer? _expiry;
-
-  @override
-  void initState() {
-    super.initState();
-    _arm();
-  }
-
-  @override
-  void didUpdateWidget(ApprovalCard old) {
-    super.didUpdateWidget(old);
-    if (old.request.expiresAt != widget.request.expiresAt) _arm();
-  }
-
-  void _arm() {
-    _expiry?.cancel();
-    final left = widget.request.left(DateTime.now());
-    _expired = left == Duration.zero;
-    if (!_expired) {
-      _expiry = Timer(left, () {
-        if (mounted) setState(() => _expired = true);
-      });
-    }
-  }
-
-  @override
-  void dispose() {
-    _expiry?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _decide(bool approve) async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(() => _busy = true);
-    final r = widget.request;
-    final c = ProviderScope.containerOf(context, listen: false);
-    try {
-      final decided = approve
-          ? await api.approve(r.id, writeVault: _write)
-          : await api.deny(r.id);
-      if (mounted) {
-        _say(
-          context,
-          decidedText(
-            decided,
-            c.read(agentOverviewProvider).value,
-            name: r.name,
-          ),
-        );
-      }
-      widget.onDecided?.call();
-    } catch (e) {
-      if (mounted) {
-        _say(
-          context,
-          _code(e) == 'already_decided'
-              ? 'Already decided, on another device or by its expiry.'
-              : describeFailure(e),
-        );
-      }
-    } finally {
-      api.dispose();
-      spawnChanged(c, r.requester);
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final r = widget.request;
-    final o = ref.watch(agentOverviewProvider).value;
-    final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-    final ends = r.kind == 'end' && r.target != null
-        ? ref.watch(sessionDescendantsProvider(r.target!)).value
-        : null;
-    final f = approvalFactsOf(
-      r,
-      o,
-      vaults,
-      requester: widget.requester,
-      targetDescendants: ends,
-    );
-    if (f == null) return const SizedBox.shrink();
-    final expired = _expired || r.left(DateTime.now()) == Duration.zero;
-    final kind = r.kind.toUpperCase();
-    final title = approvalTitle(f);
-    final rows = approvalRows(f);
-    final writeVault = r.kind == 'start' ? f.writeVault : null;
-
-    Widget value(String text, bool exact) => exact
-        ? Container(
-            width: double.infinity,
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp,
-              vertical: t.sp * 0.75,
-            ),
-            decoration: BoxDecoration(
-              color: t.surface2,
-              borderRadius: BorderRadius.circular(t.rControl),
-            ),
-            child: SelectableText(
-              text,
-              key: const Key('approval-exact'),
-              style: agentCode(t, color: t.text),
-            ),
-          )
-        : Text(text, style: agentSans(t));
-
-    final toggle = writeVault == null
-        ? null
-        : Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              StormToggle(
-                key: const Key('approval-write'),
-                value: _write,
-                onChanged: _busy ? null : (v) => setState(() => _write = v),
-              ),
-              SizedBox(width: t.sp),
-              Flexible(
-                child: Text(
-                  writeToggleLabel(writeVault),
-                  style: agentSans(t, color: t.text2),
-                ),
-              ),
-            ],
-          );
-    final deny = StormButton.outline(
-      key: const Key('approval-deny'),
-      label: 'Deny',
-      expand: widget.sheet,
-      onPressed: _busy || expired ? null : () => _decide(false),
-    );
-    final approve = StormButton.primary(
-      key: const Key('approval-approve'),
-      label: 'Approve',
-      expand: widget.sheet,
-      onPressed: _busy || expired ? null : () => _decide(true),
-    );
-    final heading = Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(kind, style: agentKey(t, color: t.accent)),
-        SizedBox(width: t.sp),
-        Expanded(
-          child: Text(
-            title,
-            key: const Key('approval-title'),
-            style: agentSans(t, weight: FontWeight.w600),
-          ),
-        ),
-        SizedBox(width: t.sp),
-        _Countdown(request: r, expired: expired),
-      ],
-    );
-    final body = Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        heading,
-        if (widget.sheet) ...[
-          SizedBox(height: t.sp * 0.75),
-          Text(
-            'Nothing happens until you decide here.',
-            style: agentSans(t, color: t.text2),
-          ),
-        ],
-        for (final (k, v, exact) in rows)
-          Padding(
-            padding: EdgeInsets.only(top: t.sp * 1.25),
-            child: widget.sheet
-                ? Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(k.toUpperCase(), style: agentKey(t)),
-                      SizedBox(height: t.sp * 0.5),
-                      value(v, exact),
-                    ],
-                  )
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      SizedBox(
-                        width: t.sp * 12,
-                        child: Text(k.toUpperCase(), style: agentKey(t)),
-                      ),
-                      Expanded(child: value(v, exact)),
-                    ],
-                  ),
-          ),
-        SizedBox(height: t.sp * 2),
-        if (widget.sheet) ...[
-          ?toggle,
-          SizedBox(height: t.sp * 2),
-          approve,
-          SizedBox(height: t.sp),
-          deny,
-        ] else
-          Row(
-            children: [
-              if (toggle != null) Expanded(child: toggle) else const Spacer(),
-              SizedBox(width: t.sp),
-              deny,
-              SizedBox(width: t.sp),
-              approve,
-            ],
-          ),
-      ],
-    );
-    return Semantics(
-      container: true,
-      label: 'Request: $title',
-      child: Container(
-        key: Key('approval-${r.id}'),
-        padding: EdgeInsets.all(t.sp * 2),
-        decoration: widget.sheet
-            ? null
-            : BoxDecoration(
-                color: t.surface,
-                borderRadius: BorderRadius.circular(t.rCard),
-                border: Border.all(color: t.accent, width: t.bw),
-              ),
-        child: body,
-      ),
-    );
-  }
-}
-
-/// "expires in 8:42", ticking on its own so the card around it doesn't
-/// rebuild every second; it stops once the request has expired.
-class _Countdown extends StatefulWidget {
-  const _Countdown({required this.request, required this.expired});
-
-  final SpawnRequest request;
-  final bool expired;
-
-  @override
-  State<_Countdown> createState() => _CountdownState();
-}
-
-class _CountdownState extends State<_Countdown> {
-  Timer? _tick;
-
-  @override
-  void initState() {
-    super.initState();
-    _start();
-  }
-
-  @override
-  void didUpdateWidget(_Countdown old) {
-    super.didUpdateWidget(old);
-    if (old.request.expiresAt != widget.request.expiresAt) _start();
-  }
-
-  void _start() {
-    _tick?.cancel();
-    _tick = Timer.periodic(const Duration(seconds: 1), (tick) {
-      if (!mounted) return;
-      setState(() {});
-      if (widget.request.left(DateTime.now()) == Duration.zero) tick.cancel();
-    });
-  }
-
-  @override
-  void dispose() {
-    _tick?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final left = widget.request.left(DateTime.now());
-    final expired = widget.expired || left == Duration.zero;
-    return Text(
-      expired ? 'expired' : 'expires in ${clockLeft(left)}',
-      key: const Key('approval-left'),
-      style: agentMono(t, color: expired ? t.danger : t.text3),
-    );
-  }
-}
-
-/// The phone's way to a waiting request (4w): its sheet, opened from the
-/// session's "Needs approval".
-Future<void> showApprovalSheet(
-  BuildContext context,
-  SpawnRequest r,
-  AgentSession requester,
-) {
-  final t = context.tokens;
-  return showModalBottomSheet<void>(
-    context: context,
-    isScrollControlled: true,
-    backgroundColor: t.surface,
-    barrierColor: const Color(0x59000000),
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(t.rCard)),
-      side: BorderSide(color: t.border, width: t.bw),
-    ),
-    builder: (sheet) => ConstrainedBox(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.sizeOf(sheet).height * 0.85,
-      ),
-      child: SafeArea(
-        top: false,
-        child: SingleChildScrollView(
-          child: ApprovalCard(
-            request: r,
-            requester: requester,
-            sheet: true,
-            onDecided: () => Navigator.of(sheet).maybePop(),
-          ),
-        ),
-      ),
-    ),
-  );
-}
-
-/// Whether a session's view says it could have requests to show: its switch
-/// is on its view, or one of its requests waits.
-bool showsRequests(AgentSession s) =>
-    s.spawn.switchState != null || s.spawn.needsAttention == 'approval';
-
-/// The oldest request of [s] still waiting for a person.
-SpawnRequest? waitingRequest(WidgetRef ref, AgentSession s) {
-  if (!showsRequests(s)) return null;
-  final list = ref.watch(sessionRequestsProvider(s.id)).value;
-  final now = DateTime.now();
-  return list?.reversed.where((r) => r.waiting(now)).firstOrNull;
-}
-
-/// The phone's line above the terminal while a request waits: a tap opens
-/// its sheet.
-class ApprovalBanner extends ConsumerWidget {
-  const ApprovalBanner({super.key, required this.session});
-
-  final AgentSession session;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final r = waitingRequest(ref, session);
-    if (r == null) return const SizedBox.shrink();
-    final t = context.tokens;
-    final what = switch (r.kind) {
-      'start' => 'start a session',
-      'message' => 'send a message',
-      'end' => 'end a session',
-      _ => 'do something',
-    };
-    return Material(
-      color: t.accentSoft,
-      child: InkWell(
-        key: const Key('approval-banner'),
-        onTap: () => showApprovalSheet(context, r, session),
-        child: Padding(
-          padding: EdgeInsets.symmetric(
-            horizontal: t.sp * 2,
-            vertical: t.sp * 1.25,
-          ),
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  '${session.displayName} is asking to $what',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: agentSans(t, color: t.accent),
-                ),
-              ),
-              Text(
-                'Review ›',
-                style: agentSans(t, color: t.accent, weight: FontWeight.w600),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-// ---- the Requests list ----------------------------------------------------
-
-/// "Waiting · 8:42 left", "Refused · 12:55": a request's state, as the
-/// Requests tab lists it (4m), shown to the person and nowhere else.
-String requestStateLine(SpawnRequest r, DateTime now) {
-  if (r.waiting(now)) return 'Waiting · ${clockLeft(r.left(now))} left';
-  final when = DateTime.tryParse(r.decidedAt ?? r.expiresAt);
-  final at = when == null ? '' : clockAt(when);
-  final word = switch (r.outcome) {
-    'started' => 'Started',
-    'start_failed' => 'Couldn’t start',
-    'delivered' => 'Delivered',
-    'ended' => 'Ended',
-    'denied' => 'Denied',
-    'refused' => 'Refused',
-    _ => 'Expired',
-  };
-  return at.isEmpty ? word : '$word · $at';
-}
-
-/// What a request asked for, and how it ended, in one line.
-String requestSummary(SpawnRequest r, AgentOverview? o) {
+/// "Started poet · haiku", "Message to poet · round 2", "Ended poet": an
+/// act in one line (145a). Rows from before 145 keep their outcome.
+String actTitle(AgentAct r, AgentOverview? o) {
   String nameOf(String? id) =>
       id == null ? 'a session' : o?.byId(id)?.displayName ?? id;
-  final what = switch (r.kind) {
-    'start' => 'Start: “${r.task ?? ''}”',
-    'message' => 'Message to ${nameOf(r.target)}: “${r.text ?? ''}”',
-    'end' => 'End ${nameOf(r.target)}',
+  final child =
+      r.name ?? (r.session == null ? null : nameOf(r.session)) ?? 'a child';
+  final base = switch (r.kind) {
+    'start' => [
+      'Started $child',
+      if (r.agent != null) providerLabel(r.agent!),
+      ?r.model,
+    ].join(' · '),
+    'message' => [
+      'Message to ${nameOf(r.target)}',
+      if (r.round != null) 'round ${r.round}',
+    ].join(' · '),
+    'end' => 'Ended ${nameOf(r.target)}',
     _ => r.kind,
   };
   final how = switch (r.outcome) {
-    'started' => ' · ${nameOf(r.session)}',
-    'refused' => ' · ${requestRefusalText(r.reason, r.cap)}',
-    'expired' => ' · no answer in 10 min',
-    _ =>
-      r.outcome == null && !r.waiting(DateTime.now())
-          ? ' · no answer in 10 min'
-          : '',
+    'start_failed' => ' · couldn’t start',
+    'denied' => ' · denied',
+    'expired' => ' · expired',
+    'refused' => ' · refused: ${requestRefusalText(r.reason, r.cap)}',
+    _ => '',
   };
-  return '$what$how';
+  return '$base$how';
 }
 
-/// The Requests tab: every request the session made and its outcome,
-/// newest first, with the waiting one's card.
-class RequestsPanel extends ConsumerWidget {
-  const RequestsPanel({super.key, required this.session, this.sheet = false});
+/// What the act carried, exactly as the agent sent it: a start's task, a
+/// message's text.
+String? actText(AgentAct r) => switch (r.kind) {
+  'start' => r.task,
+  'message' => r.text,
+  _ => null,
+};
+
+/// What a session's agent started, messaged and ended, newest first: events
+/// for the person to read, never questions (145a).
+class ActsPanel extends ConsumerWidget {
+  const ActsPanel({super.key, required this.session, this.sheet = false});
 
   final AgentSession session;
   final bool sheet;
@@ -1226,29 +651,28 @@ class RequestsPanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
-    final list = ref.watch(sessionRequestsProvider(session.id)).value;
+    final list = ref.watch(sessionActsProvider(session.id)).value;
     final o = ref.watch(agentOverviewProvider).value;
-    final now = DateTime.now();
     if (list == null || list.isEmpty) {
       return Padding(
         padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
         child: Text(
-          'No requests yet. Each start, message and end this session asks '
-          'for waits here for you.',
-          key: const Key('requests-empty'),
+          'Nothing yet. Each agent this session starts, messages or ends '
+          'shows here as it happens.',
+          key: const Key('acts-empty'),
           style: agentSans(t, color: t.text3),
         ),
       );
     }
     return ListView(
-      key: const Key('requests-list'),
+      key: const Key('acts-list'),
       shrinkWrap: sheet,
       physics: sheet ? const NeverScrollableScrollPhysics() : null,
       padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
       children: [
         for (final r in list)
           Container(
-            key: Key('request-${r.id}'),
+            key: Key('act-${r.id}'),
             padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
             decoration: BoxDecoration(
               border: Border(
@@ -1258,27 +682,22 @@ class RequestsPanel extends ConsumerWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  requestStateLine(r, now).toUpperCase(),
-                  style: agentKey(
-                    t,
-                    color: r.waiting(now) ? t.accent : t.text3,
-                  ),
-                ),
+                Text(_actWhen(r), style: agentKey(t, color: t.text3)),
                 SizedBox(height: t.sp * 0.5),
                 Text(
-                  requestSummary(r, o),
-                  maxLines: 3,
+                  actTitle(r, o),
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: agentSans(t),
                 ),
-                if (r.waiting(now) && sheet)
+                if (actText(r) case final text?)
                   Padding(
-                    padding: EdgeInsets.only(top: t.sp * 0.75),
-                    child: StormButton.soft(
-                      key: Key('review-${r.id}'),
-                      label: 'Review',
-                      onPressed: () => showApprovalSheet(context, r, session),
+                    padding: EdgeInsets.only(top: t.sp * 0.5),
+                    child: Text(
+                      text,
+                      maxLines: 4,
+                      overflow: TextOverflow.ellipsis,
+                      style: agentMono(t, color: t.text2),
                     ),
                   ),
               ],
@@ -1287,6 +706,17 @@ class RequestsPanel extends ConsumerWidget {
       ],
     );
   }
+}
+
+String _actWhen(AgentAct r) {
+  final when = DateTime.tryParse(r.decidedAt ?? r.createdAt);
+  final word = switch (r.kind) {
+    'start' => 'START',
+    'message' => 'MESSAGE',
+    'end' => 'END',
+    _ => r.kind.toUpperCase(),
+  };
+  return when == null ? word : '$word · ${clockAt(when)}';
 }
 
 // ---- About ----------------------------------------------------------------
