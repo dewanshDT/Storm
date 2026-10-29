@@ -93,8 +93,7 @@ fn new_uuid() -> String {
 /// What a session's launch gains so its id reaches the host, and the id when
 /// it is known before the agent starts. `resume` must already be valid for
 /// `provider`. Nothing for any other provider. `synced` is merged into Claude
-/// Code's settings file and checked there (token sync, AM71), and so are a
-/// spawn session's `permissions` (134-8). `attention` adds the hooks that
+/// Code's settings file and checked there (token sync, AM71). `attention` adds the hooks that
 /// report a permission prompt (134-9), only for an adapter in
 /// [`PERMISSION_PROMPT_ADAPTERS`]; without it every file is as before.
 #[allow(clippy::too_many_arguments)]
@@ -106,7 +105,6 @@ pub fn launch(
     exe: &Path,
     resume: Option<&str>,
     synced: Option<&serde_json::Map<String, serde_json::Value>>,
-    spawn: Option<&crate::mcp::SpawnAsks>,
     attention: bool,
 ) -> Result<(LaunchExtras, Option<String>)> {
     let env = vec![
@@ -138,9 +136,6 @@ pub fn launch(
                     .expect("an object")
                     .extend(pins.clone());
             }
-            if let Some(asks) = spawn {
-                settings["permissions"] = crate::mcp::claude_permissions(asks);
-            }
             // A file, not inline JSON: npm installs Claude Code on Windows as
             // `claude.cmd`, and a batch file's arguments may hold no `"`
             // (AM53; found by the Windows acceptance run).
@@ -149,9 +144,6 @@ pub fn launch(
             write_private(&path, settings.to_string().as_bytes())?;
             if let Some(pins) = synced {
                 crate::credential::verify_settings(&std::fs::read(&path)?, pins)?;
-            }
-            if let Some(asks) = spawn {
-                crate::mcp::verify_claude_permissions(&std::fs::read(&path)?, asks)?;
             }
             args.extend(["--settings".into(), path.into_os_string()]);
             Ok((
@@ -460,7 +452,6 @@ mod tests {
             exe,
             None,
             None,
-            None,
             false,
         )
         .unwrap();
@@ -506,7 +497,6 @@ mod tests {
             Path::new("/x"),
             None,
             Some(&pins),
-            None,
             false,
         )
         .unwrap();
@@ -613,7 +603,6 @@ export const StormHarness = async () => {
                 exe,
                 None,
                 None,
-                None,
                 attention,
             )
             .unwrap();
@@ -668,7 +657,6 @@ export const StormHarness = async () => {
             exe,
             Some(uuid),
             None,
-            None,
             false,
         )
         .unwrap();
@@ -687,7 +675,6 @@ export const StormHarness = async () => {
             exe,
             Some(ses),
             None,
-            None,
             false,
         )
         .unwrap();
@@ -704,7 +691,6 @@ export const StormHarness = async () => {
             "h",
             Path::new("/s"),
             Path::new("/usr/bin/storm-runtime"),
-            None,
             None,
             None,
             false,
@@ -732,7 +718,6 @@ export const StormHarness = async () => {
                 "h",
                 Path::new("/s"),
                 Path::new("/x"),
-                None,
                 None,
                 None,
                 false,

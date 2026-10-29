@@ -159,6 +159,59 @@ pub fn get(id: &str) -> Option<&'static Profile> {
     BUILT_IN.iter().find(|p| p.id == id)
 }
 
+/// The model a session runs, as its agent's own launch flag (decision 145b).
+/// The rules are `docs/agent-model-vectors.json`'s, which the server applies
+/// too: only ASCII letters, digits and `.` `_` `:` `/` `-`, a letter or digit
+/// first, and a bounded length, so a value reaches argv (and a Windows batch
+/// shim, AM53) unescaped. Anything else, and any other agent, is refused with
+/// the forms it would take.
+pub fn model_args(provider: &str, model: &str) -> Result<Vec<String>, String> {
+    let alnum = |c: char| c.is_ascii_alphanumeric();
+    let lower = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let first = |s: &str, ok: &dyn Fn(char) -> bool| s.chars().next().is_some_and(ok);
+    let (ok, flag, forms) = match provider {
+        "claude-code" => {
+            let ok = matches!(model, "haiku" | "sonnet" | "opus")
+                || (model.len() <= 64
+                    && model.strip_prefix("claude-").is_some_and(|rest| {
+                        first(rest, &lower)
+                            && rest.chars().all(|c| lower(c) || c == '.' || c == '-')
+                    }));
+            (
+                ok,
+                "--model",
+                "Claude Code takes an alias (haiku, sonnet or opus) or a full model id such as claude-sonnet-4-5",
+            )
+        }
+        "opencode" => {
+            let ok = model.len() <= 128
+                && model.split_once('/').is_some_and(|(p, m)| {
+                    first(p, &lower)
+                        && p.chars().all(|c| lower(c) || c == '_' || c == '-')
+                        && first(m, &alnum)
+                        && m.chars().all(|c| alnum(c) || ".:_/-".contains(c))
+                });
+            (
+                ok,
+                "--model",
+                "OpenCode takes provider/model, such as anthropic/claude-sonnet-4-5",
+            )
+        }
+        "codex" => {
+            let ok = model.len() <= 64
+                && first(model, &alnum)
+                && model.chars().all(|c| alnum(c) || "._:-".contains(c));
+            (ok, "-m", "Codex takes a model id such as gpt-5-codex")
+        }
+        _ => return Err(format!("Storm passes no model to {provider}")),
+    };
+    if ok {
+        Ok(vec![flag.to_string(), model.to_string()])
+    } else {
+        Err(format!("{model:?} is not a model Storm can pass: {forms}"))
+    }
+}
+
 /// Whether Storm can give `id`'s sessions their own MCP servers: `Some` for
 /// a built-in, `None` for an id it knows nothing about (the server keeps its
 /// older behaviour for those).
@@ -194,6 +247,60 @@ fn is_uuid(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../docs/agent-model-vectors.json")).unwrap()
+    }
+
+    /// 145b: every accepted model becomes exactly its flag, every refused
+    /// one is refused, as the server's copy of the rule decides too.
+    #[test]
+    fn a_model_is_passed_exactly_as_the_vectors_say() {
+        let v = model_vectors();
+        for case in v["accepted"].as_array().unwrap() {
+            let (agent, model) = (
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            );
+            let want: Vec<String> = serde_json::from_value(case["args"].clone()).unwrap();
+            assert_eq!(model_args(agent, model), Ok(want), "{agent} {model}");
+        }
+        for case in v["refused"].as_array().unwrap() {
+            let (agent, model) = (
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            );
+            let refused = model_args(agent, model);
+            assert!(refused.is_err(), "{agent} {model:?}: {refused:?}");
+        }
+        for (agent, max) in v["max_len"].as_object().unwrap() {
+            let max = max.as_u64().unwrap() as usize;
+            let at = match agent.as_str() {
+                "claude-code" => format!("claude-{}", "a".repeat(max - 7)),
+                "opencode" => format!("a/{}", "b".repeat(max - 2)),
+                _ => "c".repeat(max),
+            };
+            assert!(model_args(agent, &at).is_ok(), "{agent} at {max}");
+            assert!(
+                model_args(agent, &format!("{at}x")).is_err(),
+                "{agent} past {max}"
+            );
+        }
+    }
+
+    /// 145b with AM53: an accepted model needs no escaping in a Windows
+    /// batch shim's command line, so `claude.cmd` takes it as it is.
+    #[test]
+    fn every_accepted_model_passes_the_batch_file_rules() {
+        for case in model_vectors()["accepted"].as_array().unwrap() {
+            let args = model_args(
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            )
+            .unwrap();
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &args).unwrap();
+        }
+    }
 
     #[test]
     fn ids_are_unique_and_valid() {
