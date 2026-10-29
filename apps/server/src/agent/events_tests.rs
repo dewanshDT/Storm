@@ -655,6 +655,8 @@ fn a_144_10_each_event_says_its_source_and_confidence() {
         )
     );
 
+    // Nothing gated: as before any gate passed.
+    f.m.gate_signals_for_tests(&[]);
     let ungated = f.running_child(&p, "opencode");
     let c = f.running_child(&p, "claude-code");
     let before = f.events(&p).len();

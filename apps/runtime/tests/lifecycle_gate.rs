@@ -532,6 +532,7 @@ fn claude() -> Session {
         None,
         None,
         &Hooks::all(),
+        &[],
     )
     .unwrap();
     let mut argv = vec![bin];
@@ -611,6 +612,7 @@ fn opencode() -> Session {
         None,
         None,
         &Hooks::all(),
+        &[],
     )
     .unwrap();
     let mut env = env_of(&extras);

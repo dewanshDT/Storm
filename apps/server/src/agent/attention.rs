@@ -32,15 +32,30 @@ pub struct GatedSignal {
     pub source: &'static str,
 }
 
-/// The signals taken from hosts. None has passed its gate, so every one is
-/// off for every provider. The host keeps the same list
+/// The signals taken from hosts. The host keeps the same list
 /// (`harness::GATED_SIGNALS`), spelled the same with string literals, and
 /// reports only what is on it: a test in each crate holds the two equal.
-pub const GATED_SIGNALS: &[GatedSignal] = &[];
+/// On: a child's permission prompt for Claude Code and OpenCode (146c),
+/// whose G-146-P passed locally on 2026-10-29 (Claude Code 2.1.312,
+/// OpenCode 1.19.4); its host writes the hooks for a child only. Its VM 113
+/// run is the operator's.
+pub const GATED_SIGNALS: &[GatedSignal] = &[
+    GatedSignal {
+        provider: "claude-code",
+        signal: "permission_prompt",
+        source: "provider_hook",
+    },
+    GatedSignal {
+        provider: "opencode",
+        signal: "permission_prompt",
+        source: "provider_hook",
+    },
+];
 
-/// The adapters whose permission prompt is on [`GATED_SIGNALS`], spelled as
-/// the host's list is: the host's own test reads this line to keep the two
-/// crates' lists equal, and `attention_tests` holds it to the gated list.
+/// 134-9's adapters, whose permission prompt hooks every session of theirs
+/// would get: none. A child's prompt is gated through [`GATED_SIGNALS`]
+/// instead (146c). The host's own test reads this line to keep the two
+/// crates' lists equal.
 #[cfg(test)]
 pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
 

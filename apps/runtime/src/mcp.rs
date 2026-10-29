@@ -134,6 +134,114 @@ impl AgentServers<'_> {
 /// Phase 1 vault server).
 pub const STORM_CONNECTION: &str = "storm";
 
+/// The Storm tools a child calls on itself, allowed outright in its CLI's
+/// config (decision 146a): each is scoped by the server to the calling
+/// session and has no workspace or host effect. The host learns no tool
+/// names from the server, so they are pinned here and held to the server's
+/// lists by a test.
+pub const CHILD_ALLOWED_TOOLS: [&str; 3] = ["session_context", "report_result", "read_messages"];
+
+/// The spawn tools, allowed outright for a parent launched with the spawn
+/// switch on (146a): the person's standing consent (145a).
+pub const SPAWN_ALLOWED_TOOLS: [&str; 8] = [
+    "list_agents",
+    "start_agent",
+    "agent_status",
+    "list_children",
+    "wait_agent",
+    "send_message",
+    "end_agent",
+    "read_output",
+];
+
+/// What Storm's own layer of a session's CLI config says about permissions
+/// (decision 146): the Storm tools allowed outright, and the keys a
+/// permission mode sets in OpenCode's config. Empty for a session that
+/// cannot spawn, is not a child and runs in `default`, whose config is then
+/// byte-identical to before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StormLayer {
+    pub allow: Vec<&'static str>,
+    pub opencode_permission: Vec<(String, String)>,
+}
+
+impl StormLayer {
+    /// `child`: a session another agent started, reading Storm. `spawn`: one
+    /// launched with the switch on, reading Storm.
+    pub fn new(child: bool, spawn: bool, opencode_permission: Vec<(String, String)>) -> Self {
+        let mut allow = Vec::new();
+        if child {
+            allow.extend(CHILD_ALLOWED_TOOLS);
+        }
+        if spawn {
+            allow.extend(SPAWN_ALLOWED_TOOLS);
+        }
+        Self {
+            allow,
+            opencode_permission,
+        }
+    }
+
+    /// Claude Code's rules for [`Self::allow`], for `permissions.allow` in
+    /// Storm's `--settings` file. The built-in connection is always
+    /// `storm` there.
+    pub fn claude_allow(&self) -> Vec<String> {
+        self.allow
+            .iter()
+            .map(|t| format!("mcp__{STORM_CONNECTION}__{t}"))
+            .collect()
+    }
+}
+
+/// The text of every OpenCode config file the account has where OpenCode
+/// finds it: the global directory (`$XDG_CONFIG_HOME/opencode`, else
+/// `~/.config/opencode`; not under `storm-only`, which replaces it),
+/// `~/.opencode`, and `$OPENCODE_CONFIG`. A file that exists but cannot be
+/// read is an error: Storm could not tell which keys it already uses.
+pub fn opencode_account_text(storm_only: bool) -> Result<String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut dirs = Vec::new();
+    if !storm_only {
+        let config = std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|h| h.join(".config")));
+        dirs.extend(config.map(|c| c.join("opencode")));
+    }
+    dirs.extend(home.map(|h| h.join(".opencode")));
+    let mut files: Vec<PathBuf> = dirs
+        .iter()
+        .flat_map(|d| {
+            ["config.json", "opencode.json", "opencode.jsonc"]
+                .iter()
+                .map(move |f| d.join(f))
+        })
+        .collect();
+    files.extend(std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from));
+    let mut text = String::new();
+    for file in files.iter().filter(|f| f.is_file()) {
+        text.push_str(
+            &std::fs::read_to_string(file)
+                .with_context(|| format!("reading {}", file.display()))?,
+        );
+    }
+    Ok(text)
+}
+
+/// The key an allow is written under (146a): the tool's own name, or with as
+/// many `*` after it as it takes to be a key no config of the account's
+/// already has. OpenCode keeps a merged key where it first appeared, so only
+/// a new key is sure to follow the connection's `<slug>_*` ask; it sorts
+/// after that ask too, since `*` sorts before the letters these names have.
+/// A trailing `*` still names only this tool: no other Storm tool's name
+/// begins with another's.
+fn opencode_allow_key(tool: &str, seen: &str) -> String {
+    let mut key = tool.to_string();
+    while seen.contains(&key) {
+        key.push('*');
+    }
+    key
+}
+
 pub const SESSIONS_DIR: &str = "sessions";
 pub const RUN_DIR: &str = "run";
 pub const SOCKET: &str = "mcp.sock";
@@ -269,9 +377,14 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 /// merged in, minus any `mcp` key — a setting can never add an MCP server.
 /// `plugin_servers` are a Claude Code session's plugins' local servers
 /// (decision 131c, `plugins.rs`), keyed `plugin_…`, which no slug can be.
-/// A session that may start agents, or was started by one, gets exactly
-/// what any other does: decision 145a retired 134-8's pinned asks, so the
-/// spawn tools ask as the agent's own permission mode decides.
+/// `layer` is Storm's own word on permissions (decision 146): OpenCode's
+/// allows for Storm's tools follow the built-in connection's ask, and a
+/// permission mode's keys join the config, which an OpenCode session then
+/// gets even without grants. Claude Code's allows are in its `--settings`
+/// file (`harness.rs`); Codex asks for every Storm tool (132c). An empty
+/// layer writes exactly what it always did. `account` is the text of the
+/// account's own OpenCode configs, read only when there is an allow to
+/// place.
 #[allow(clippy::too_many_arguments)]
 pub fn write_provider_config(
     provider: &str,
@@ -283,9 +396,12 @@ pub fn write_provider_config(
     opencode_settings: Option<&Value>,
     plugin_servers: &serde_json::Map<String, Value>,
     own: &AgentServers,
+    layer: &StormLayer,
+    account: &dyn Fn() -> Result<String>,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
-    if grants.is_empty() && !own.storm_only {
+    let opencode_mode = provider == "opencode" && !layer.opencode_permission.is_empty();
+    if grants.is_empty() && !own.storm_only && !opencode_mode {
         return Ok(LaunchExtras::default());
     }
     match provider {
@@ -343,6 +459,24 @@ pub fn write_provider_config(
                 );
                 // Last, so no setting can relax it.
                 permission.insert(format!("{key}_*"), json!("ask"));
+            }
+            let storm = grants.iter().find(|g| g.id == STORM_CONNECTION);
+            if let Some(g) = storm.filter(|_| !layer.allow.is_empty()) {
+                let key = own.key(g);
+                let seen = format!(
+                    "{}{}",
+                    account()?,
+                    serde_json::to_string(&permission).unwrap_or_default()
+                );
+                for tool in &layer.allow {
+                    permission.insert(
+                        opencode_allow_key(&format!("{key}_{tool}"), &seen),
+                        json!("allow"),
+                    );
+                }
+            }
+            for (k, v) in &layer.opencode_permission {
+                permission.insert(k.clone(), json!(v));
             }
             config.insert("$schema".into(), json!("https://opencode.ai/config.json"));
             // Replaces any `mcp` key the settings had: a host setting can
@@ -534,6 +668,8 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -568,6 +704,8 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         assert!(!extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -610,6 +748,8 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         assert!(
@@ -650,6 +790,8 @@ mod tests {
                 None,
                 &Default::default(),
                 &AgentServers::storm_only(),
+                &StormLayer::default(),
+                &|| Ok(String::new()),
             )
             .unwrap();
             assert_ne!(extras, LaunchExtras::default(), "{provider}");
@@ -704,6 +846,8 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         let v: Value =
@@ -732,6 +876,8 @@ mod tests {
             None,
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -775,6 +921,8 @@ mod tests {
             Some(&settings),
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -827,6 +975,8 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
+                    &StormLayer::default(),
+                    &|| Ok(String::new()),
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -915,6 +1065,8 @@ mod tests {
                 None,
                 &serde_json::Map::new(),
                 &AgentServers::storm_only(),
+                &StormLayer::default(),
+                &|| Ok(String::new()),
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -934,6 +1086,8 @@ mod tests {
                 storm_only: false,
                 taken: &Default::default(),
             },
+            &StormLayer::default(),
+            &|| Ok(String::new()),
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -955,6 +1109,8 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
+                    &StormLayer::default(),
+                    &|| Ok(String::new()),
                 )
                 .unwrap()
             };

@@ -20,11 +20,12 @@
 //! `--resume <id>` or `-s <id>`.
 //!
 //! The same hooks and plugin carry, each only for an agent on its gated
-//! list (all empty until the operator's real-CLI gates pass):
+//! list (on only once the agent's real-CLI gate passes):
 //!
 //! - **144b's signals**: the agent's own idle, usage limit and permission
-//!   prompt, reported with `harness-signal` and posted by the host as
-//!   `provider_hook` evidence ([`GATED_SIGNALS`]);
+//!   prompt, reported with `harness-signal` (the prompt with `attention`,
+//!   a child's only, 146c) and posted by the host as `provider_hook`
+//!   evidence ([`GATED_SIGNALS`]);
 //! - **145c's final message**: the turn's last assistant message and what
 //!   it cost, reported with `harness-result` ([`RESULT_SOURCES`]);
 //! - **144c/145d's waker**: `harness-wake`, a long-poll on the session's
@@ -86,8 +87,22 @@ pub struct GatedSignal {
     pub source: &'static str,
 }
 
-/// None has passed its gate.
-pub const GATED_SIGNALS: &[GatedSignal] = &[];
+/// A child's permission prompt (146c) for Claude Code and OpenCode:
+/// G-146-P passed locally on 2026-10-29 with Claude Code 2.1.312 and
+/// OpenCode 1.19.4 (`tests/lifecycle_gate.rs`). Its VM 113 run is the
+/// operator's.
+pub const GATED_SIGNALS: &[GatedSignal] = &[
+    GatedSignal {
+        provider: "claude-code",
+        signal: "permission_prompt",
+        source: "provider_hook",
+    },
+    GatedSignal {
+        provider: "opencode",
+        signal: "permission_prompt",
+        source: "provider_hook",
+    },
+];
 
 /// One agent's final message as a round's result (145c), once its gate
 /// (G-145-R-<provider>) passes. The server's `round::RESULT_SOURCES` is the
@@ -148,11 +163,13 @@ impl Gates {
             .any(|g| g.provider == provider && g.signal == signal && g.source == PROVIDER_HOOK)
     }
 
-    /// What `provider`'s hooks report under these lists.
-    pub fn hooks(&self, provider: &str) -> Hooks {
+    /// What `provider`'s hooks report under these lists. A gated
+    /// permission prompt signal is a child's only (146c): nobody watches
+    /// its terminal, and every other session's config stays as it was.
+    pub fn hooks(&self, provider: &str, child: bool) -> Hooks {
         Hooks {
             attention: self.permission_prompt.contains(&provider)
-                || self.signal(provider, PERMISSION_PROMPT),
+                || (child && self.signal(provider, PERMISSION_PROMPT)),
             idle: self.signal(provider, IDLE),
             usage_limit: self.signal(provider, USAGE_LIMIT),
             result: self
@@ -297,7 +314,8 @@ fn new_uuid() -> String {
 /// Code's settings file and checked there (token sync, AM71). `hooks` adds
 /// what its gated lists switch on (134-9's permission prompt, 144b's
 /// signals, 145c's final message, 144c's waker); with none of it every file
-/// is as before.
+/// is as before. `allow` is Claude Code's `permissions.allow` for Storm's own
+/// tools (decision 146a), checked in the written file; empty writes none.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     provider: &str,
@@ -308,6 +326,7 @@ pub fn launch(
     resume: Option<&str>,
     synced: Option<&serde_json::Map<String, serde_json::Value>>,
     hooks: &Hooks,
+    allow: &[String],
 ) -> Result<(LaunchExtras, Option<String>)> {
     let env = vec![
         (HANDLE_ENV.into(), handle.into()),
@@ -333,6 +352,9 @@ pub fn launch(
                 claude_attention_hooks(&mut settings, exe);
             }
             claude_lifecycle_hooks(&mut settings, exe, hooks);
+            if !allow.is_empty() {
+                settings["permissions"] = json!({ "allow": allow });
+            }
             if let Some(pins) = synced {
                 settings
                     .as_object_mut()
@@ -347,6 +369,9 @@ pub fn launch(
             write_private(&path, settings.to_string().as_bytes())?;
             if let Some(pins) = synced {
                 crate::credential::verify_settings(&std::fs::read(&path)?, pins)?;
+            }
+            if !allow.is_empty() {
+                verify_allow(&std::fs::read(&path)?, allow)?;
             }
             args.extend(["--settings".into(), path.into_os_string()]);
             Ok((
@@ -401,14 +426,28 @@ pub fn launch(
     }
 }
 
+/// Re-reads written Claude Code settings (146a): a file that lost Storm's
+/// allows, which Claude Code would ignore with only a warning if invalid,
+/// fails the start rather than leave a child stopped on a prompt.
+pub fn verify_allow(bytes: &[u8], allow: &[String]) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(
+        parsed["permissions"]["allow"] == json!(allow),
+        "the settings lost Storm's allowed tools"
+    );
+    Ok(())
+}
+
 fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Claude Code's hooks for a permission prompt (134-9): `PermissionRequest`
-/// as its dialog opens and `Notification` named `permission_prompt` set it;
-/// a tool's end, a new prompt and the turn's end clear it. `idle_prompt`, the
-/// notification for an agent waiting at its prompt, is never matched.
+/// Claude Code's hooks for a permission prompt (134-9, 146c):
+/// `PermissionRequest` as its dialog opens and `Notification` named
+/// `permission_prompt` set it; a tool's end (the person answered), a new
+/// prompt and the turn's end or failure clear it. An Esc at the prompt runs
+/// no hook, so the flag then clears at the next turn boundary. `idle_prompt`,
+/// the notification for an agent waiting at its prompt, is never matched.
 fn claude_attention_hooks(settings: &mut serde_json::Value, exe: &Path) {
     let command = |kind: &str| {
         json!([{"type": "command", "command": format!(
@@ -425,6 +464,7 @@ fn claude_attention_hooks(settings: &mut serde_json::Value, exe: &Path) {
         "PostToolUseFailure",
         "UserPromptSubmit",
         "Stop",
+        "StopFailure",
     ] {
         hooks[event] = json!([{"hooks": command(ATTENTION_CLEAR)}]);
     }
@@ -1119,6 +1159,7 @@ mod tests {
             None,
             None,
             &Hooks::default(),
+            &[],
         )
         .unwrap();
         let id = id.unwrap();
@@ -1164,6 +1205,7 @@ mod tests {
             None,
             Some(&pins),
             &Hooks::default(),
+            &[],
         )
         .unwrap();
         let at = extras.args.iter().position(|a| a == "--settings").unwrap();
@@ -1270,6 +1312,7 @@ export const StormHarness = async () => {
                 None,
                 None,
                 &Hooks::attention(attention),
+                &[],
             )
             .unwrap();
             let bytes = std::fs::read(dir.path().join("claude-settings.json")).unwrap();
@@ -1296,6 +1339,7 @@ export const StormHarness = async () => {
             "PostToolUseFailure",
             "UserPromptSubmit",
             "Stop",
+            "StopFailure",
         ] {
             assert_eq!(command(event), clear, "{event}");
         }
@@ -1324,6 +1368,7 @@ export const StormHarness = async () => {
             Some(uuid),
             None,
             &Hooks::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(
@@ -1342,6 +1387,7 @@ export const StormHarness = async () => {
             Some(ses),
             None,
             &Hooks::default(),
+            &[],
         )
         .unwrap();
         assert_eq!(oc.args, ["-s", ses]);
@@ -1360,6 +1406,7 @@ export const StormHarness = async () => {
             None,
             None,
             &Hooks::default(),
+            &[],
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -1387,6 +1434,7 @@ export const StormHarness = async () => {
                 None,
                 None,
                 &Hooks::default(),
+                &[],
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -1408,10 +1456,11 @@ export const StormHarness = async () => {
         body.split_whitespace().collect()
     }
 
-    /// Each gated list here is the server's, spelled the same, and every
-    /// one is empty until the operator's real-CLI gates pass.
+    /// Each gated list here is the server's, spelled the same; only a
+    /// child's permission prompt is on (G-146-P), and only a child's hooks
+    /// report it.
     #[test]
-    fn the_gated_lists_are_the_servers_and_empty() {
+    fn the_gated_lists_are_the_servers() {
         let server = |file: &str| {
             std::fs::read_to_string(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1427,14 +1476,29 @@ export const StormHarness = async () => {
             ("WAKE", "events.rs", "WAKE"),
         ] {
             assert_eq!(list(here, name), list(&server(file), theirs), "{name}");
-            assert_eq!(list(here, name), "", "{name} switched on");
         }
-        assert!(GATED_SIGNALS.is_empty() && RESULT_SOURCES.is_empty() && WAKE.is_empty());
+        assert!(RESULT_SOURCES.is_empty() && WAKE.is_empty());
+        let on: Vec<(&str, &str, &str)> = GATED_SIGNALS
+            .iter()
+            .map(|g| (g.provider, g.signal, g.source))
+            .collect();
+        assert_eq!(
+            on,
+            [
+                ("claude-code", PERMISSION_PROMPT, PROVIDER_HOOK),
+                ("opencode", PERMISSION_PROMPT, PROVIDER_HOOK)
+            ]
+        );
         for provider in ["claude-code", "opencode", "codex", "cursor", "shell"] {
             assert_eq!(
-                Gates::COMPILED.hooks(provider),
+                Gates::COMPILED.hooks(provider, false),
                 Hooks::default(),
                 "{provider}"
+            );
+            assert_eq!(
+                Gates::COMPILED.hooks(provider, true),
+                Hooks::attention(matches!(provider, "claude-code" | "opencode")),
+                "{provider}'s child"
             );
         }
     }
@@ -1450,22 +1514,28 @@ export const StormHarness = async () => {
             None,
             None,
             hooks,
+            &[],
         )
         .unwrap();
         std::fs::read_to_string(dir.path().join("claude-settings.json")).unwrap()
     }
 
-    /// With no gate passed no hook, plugin code or waker is installed: the
-    /// files are byte for byte what they were before 144's runtime half.
+    /// A session that is not a child gets no hook, plugin code or waker:
+    /// its files are byte for byte what they were before 144's runtime
+    /// half. A child gets only the permission prompt's (146c).
     #[test]
     fn with_nothing_gated_the_configs_are_byte_identical() {
-        let hooks = Gates::COMPILED.hooks("claude-code");
+        let hooks = Gates::COMPILED.hooks("claude-code", false);
         assert_eq!(
             settings_of(&hooks),
             r#"{"hooks":{"SessionStart":[{"hooks":[{"command":"'/x' harness-session","type":"command"}]}]}}"#
         );
-        let js = plugin(Path::new("/x"), &Gates::COMPILED.hooks("opencode"));
+        let js = plugin(Path::new("/x"), &Gates::COMPILED.hooks("opencode", false));
         assert_eq!(js, plugin(Path::new("/x"), &Hooks::default()));
+        assert_eq!(
+            settings_of(&Gates::COMPILED.hooks("claude-code", true)),
+            settings_of(&Hooks::attention(true))
+        );
         for absent in [
             "harness-wake",
             "promptAsync",
@@ -1525,7 +1595,11 @@ export const StormHarness = async () => {
         );
         assert_eq!(
             names("StopFailure", None),
-            ["harness-signal stop-failure", "harness-wake"]
+            [
+                "attention none",
+                "harness-signal stop-failure",
+                "harness-wake"
+            ]
         );
         assert_eq!(
             names("Notification", Some("idle_prompt")),

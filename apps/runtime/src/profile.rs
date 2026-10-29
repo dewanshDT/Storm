@@ -212,6 +212,40 @@ pub fn model_args(provider: &str, model: &str) -> Result<Vec<String>, String> {
     }
 }
 
+/// What a permission mode the person chose (decision 146b) adds to a
+/// launch: the agent's own flag, or keys in Storm's OpenCode config layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionLaunch {
+    pub args: Vec<String>,
+    pub opencode_permission: Vec<(String, String)>,
+}
+
+/// A permission mode as `provider` takes it (146b), by
+/// `docs/agent-permission-mode-vectors.json`'s rule, which the server applies
+/// too. `default` adds nothing. Claude Code takes `--permission-mode
+/// acceptEdits|auto`, OpenCode `edit: allow` for `accept_edits`; anything
+/// else, and every bypass, is refused, so the start fails rather than fall
+/// back.
+pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
+    let flag = |value: &str| PermissionLaunch {
+        args: vec!["--permission-mode".into(), value.into()],
+        ..Default::default()
+    };
+    match (provider, mode) {
+        (_, "default") => Ok(PermissionLaunch::default()),
+        ("claude-code", "accept_edits") => Ok(flag("acceptEdits")),
+        ("claude-code", "auto") => Ok(flag("auto")),
+        ("opencode", "accept_edits") => Ok(PermissionLaunch {
+            opencode_permission: vec![("edit".into(), "allow".into())],
+            ..Default::default()
+        }),
+        _ => Err(format!(
+            "{:?} is not a permission mode Storm gives {provider}",
+            mode.chars().take(40).collect::<String>()
+        )),
+    }
+}
+
 /// Whether Storm can give `id`'s sessions their own MCP servers: `Some` for
 /// a built-in, `None` for an id it knows nothing about (the server keeps its
 /// older behaviour for those).
@@ -299,6 +333,71 @@ mod tests {
             )
             .unwrap();
             crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &args).unwrap();
+        }
+    }
+
+    fn mode_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../docs/agent-permission-mode-vectors.json"
+        ))
+        .unwrap()
+    }
+
+    /// 146b (A-146-2): each mode becomes exactly the table's flag or config
+    /// key, as the server's copy of the rule offers it; every other mode,
+    /// bypass included, is refused; and every flag passes the Windows
+    /// batch-file rules unescaped.
+    #[test]
+    fn a_146_2_a_mode_is_mapped_exactly_as_the_vectors_say() {
+        let v = mode_vectors();
+        for case in v["accepted"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            let args: Vec<String> = serde_json::from_value(case["args"].clone()).unwrap();
+            let opencode: Vec<(String, String)> = case["opencode_permission"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            let got = permission_mode(agent, mode).unwrap();
+            assert_eq!(
+                got,
+                PermissionLaunch {
+                    args: args.clone(),
+                    opencode_permission: opencode
+                },
+                "{agent} {mode}"
+            );
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &args).unwrap();
+        }
+        for case in v["refused"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            assert!(permission_mode(agent, mode).is_err(), "{agent} {mode:?}");
+        }
+        for (agent, modes) in v["offered"].as_object().unwrap() {
+            for mode in v["order"].as_array().unwrap() {
+                let mode = mode.as_str().unwrap();
+                assert_eq!(
+                    permission_mode(agent, mode).is_ok(),
+                    modes.as_array().unwrap().iter().any(|m| m == mode),
+                    "{agent} {mode}"
+                );
+            }
+        }
+        for agent in ["claude-code", "opencode", "codex"] {
+            for mode in ["accept_edits", "auto"] {
+                if let Ok(l) = permission_mode(agent, mode) {
+                    for a in &l.args {
+                        assert!(!a.contains("bypass") && !a.contains("skip"), "{a}");
+                    }
+                }
+            }
         }
     }
 

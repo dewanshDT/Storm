@@ -170,23 +170,38 @@ fn a_blocked_result_is_its_rounds_and_the_next_round_clears_it() {
 
 const PROMPT: &str = "permission_prompt";
 
+/// 146c: a permission prompt is taken only from an agent whose G-146-P
+/// passed (Claude Code and OpenCode), and only through its hook; 134-9's
+/// per-adapter list stays empty.
 #[test]
-fn no_adapter_reports_a_permission_prompt_until_its_gate_passes() {
-    assert!(super::attention::GATED_SIGNALS.is_empty());
+fn only_a_gated_agent_reports_a_permission_prompt() {
+    assert!(super::attention::PERMISSION_PROMPT_ADAPTERS.is_empty());
     let gated: Vec<&str> = super::attention::GATED_SIGNALS
         .iter()
         .filter(|g| g.signal == PROMPT && g.source == super::events::PROVIDER_HOOK)
         .map(|g| g.provider)
         .collect();
-    assert_eq!(gated, super::attention::PERMISSION_PROMPT_ADAPTERS);
+    assert_eq!(gated, ["claude-code", "opencode"]);
+    assert_eq!(super::attention::GATED_SIGNALS.len(), gated.len());
     let f = fixture();
-    for provider in ["claude-code", "opencode", "codex", "shell"] {
+    for (provider, taken) in [
+        ("claude-code", true),
+        ("opencode", true),
+        ("codex", false),
+        ("shell", false),
+    ] {
         let s = f.launch(provider).id;
         f.report(
             &s,
             serde_json::json!({"status": "running", "attention": PROMPT}),
         );
-        assert_eq!(f.attention(&s), None, "{provider}");
+        assert_eq!(f.attention(&s), taken.then_some(PROMPT), "{provider}");
+        f.report(
+            &s,
+            serde_json::json!({"status": "running", "attention": PROMPT,
+                "attention_source": "output_pattern"}),
+        );
+        assert_eq!(f.attention(&s), None, "{provider}: not from a pattern");
     }
 }
 

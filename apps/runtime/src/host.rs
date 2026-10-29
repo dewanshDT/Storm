@@ -113,6 +113,16 @@ pub enum Command {
         /// server's `spawn_asks` (134-8, retired by 145a) is ignored.
         #[serde(default)]
         model: Option<String>,
+        /// The permission mode the person chose (decision 146b), mapped by
+        /// `profile::permission_mode` to the agent's own flag or config;
+        /// absent is `default`. A mode the agent does not take fails the
+        /// start, never a silent fallback.
+        #[serde(default)]
+        permission_mode: Option<String>,
+        /// Launched with the spawn switch on (146a): the spawn tools are
+        /// allowed in the agent's own config.
+        #[serde(default)]
+        spawn: bool,
         /// A resume's predecessor (decision 136e): on an isolated host its
         /// kept conversation is what the new home gets.
         #[serde(default)]
@@ -1532,6 +1542,8 @@ impl Host {
                 resume,
                 provider_credential,
                 model,
+                permission_mode,
+                spawn,
                 resumed_from,
                 child_of,
             } => {
@@ -1547,6 +1559,7 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
+                    (permission_mode, spawn),
                 )
                 .await
             }
@@ -1691,6 +1704,7 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
+        (permission_mode, spawn): (Option<String>, bool),
     ) {
         let (resume, resumed_from) = match resume {
             Some((r, from)) => (Some(r), from),
@@ -1745,6 +1759,17 @@ impl Host {
             Some(Ok(args)) => Some(args),
             Some(Err(why)) => {
                 tracing::warn!(session = %id, reason = %why, "start refused: model_unavailable");
+                return self.post_start_failure(&id).await;
+            }
+        };
+        // 146b: checked here too; a mode this agent does not take fails.
+        let mode = match crate::profile::permission_mode(
+            &provider_id,
+            permission_mode.as_deref().unwrap_or("default"),
+        ) {
+            Ok(mode) => mode,
+            Err(why) => {
+                tracing::warn!(session = %id, reason = %why, "start refused: permission_mode_unavailable");
                 return self.post_start_failure(&id).await;
             }
         };
@@ -1885,8 +1910,15 @@ impl Host {
             storm_only,
             taken: &taken,
         };
-        let spawned =
-            child_of.is_some() && mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION);
+        let reads_storm = mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION);
+        let spawned = child_of.is_some() && reads_storm;
+        // 146a: a child's own Storm tools, and a spawning parent's spawn
+        // tools, are allowed outright; every other session's layer is empty.
+        let layer = crate::mcp::StormLayer::new(
+            spawned,
+            spawn && reads_storm && child_of.is_none(),
+            mode.opencode_permission.clone(),
+        );
         let plugin_plan = match self.mcp_launch(
             &id,
             &provider_id,
@@ -1894,6 +1926,7 @@ impl Host {
             &mcp,
             &plugin_servers,
             &own,
+            &layer,
         ) {
             Ok((extras, plan)) => {
                 launch.args.extend(extras.args);
@@ -1930,7 +1963,11 @@ impl Host {
             }
             None => serde_json::Value::Null,
         };
-        let hooks = self.gates.lock().unwrap().hooks(&provider_id);
+        let hooks = self
+            .gates
+            .lock()
+            .unwrap()
+            .hooks(&provider_id, child_of.is_some());
         let events = Arc::new(Events::new(
             self.config.scrollback_bytes,
             crate::profile::get(&provider_id).is_none_or(|p| p.titles),
@@ -1942,17 +1979,22 @@ impl Host {
             .unwrap()
             .insert(id.clone(), events.leader.subscribe());
         let pins = synced.as_ref().map(|(pins, _)| pins);
-        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins) {
+        let allow = if is_claude {
+            layer.claude_allow()
+        } else {
+            Vec::new()
+        };
+        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins, &allow) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
             }
             // A session that cannot report its id still runs; it only cannot
             // be resumed. A resume still names its conversation, and a synced
-            // session's pins live in the same file.
+            // session's pins and Storm's allows (146a) live in the same file.
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
-                if resume.is_some() || is_synced {
+                if resume.is_some() || is_synced || !allow.is_empty() {
                     return self.post_start_failure(&id).await;
                 }
             }
@@ -1993,6 +2035,7 @@ impl Host {
         if let Some(args) = model_args {
             launch.args.extend(args.into_iter().map(Into::into));
         }
+        launch.args.extend(mode.args.into_iter().map(Into::into));
         // A resumed conversation has read its note already.
         let launch = crate::mcp::with_opening_prompt(
             launch,
@@ -2319,9 +2362,10 @@ impl Host {
         grants: &[crate::mcp::McpGrant],
         plugin_servers: &serde_json::Map<String, serde_json::Value>,
         own: &crate::mcp::AgentServers,
+        layer: &crate::mcp::StormLayer,
     ) -> Result<(crate::mcp::LaunchExtras, Option<crate::plugins::Plan>)> {
         use crate::profile::Mcp;
-        if grants.is_empty() && !own.storm_only {
+        if grants.is_empty() && !own.storm_only && layer.opencode_permission.is_empty() {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
@@ -2388,6 +2432,8 @@ impl Host {
                     self.opencode_settings.as_ref(),
                     plugin_servers,
                     own,
+                    layer,
+                    &|| crate::mcp::opencode_account_text(own.storm_only),
                 )?,
                 None,
             )
@@ -2432,6 +2478,7 @@ impl Host {
         resume: Option<&str>,
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
+        allow: &[String],
     ) -> Result<crate::mcp::LaunchExtras> {
         if !crate::profile::resumable(provider) {
             return Ok(Default::default());
@@ -2447,6 +2494,7 @@ impl Host {
             resume,
             synced,
             &events.hooks,
+            allow,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -3414,6 +3462,8 @@ mod tests {
                 resume: None,
                 provider_credential: None,
                 model: None,
+                permission_mode: None,
+                spawn: false,
                 resumed_from: None,
                 child_of: None,
             })
@@ -3546,6 +3596,8 @@ mod tests {
             resume: resume.map(str::to_string),
             provider_credential: None,
             model: None,
+            permission_mode: None,
+            spawn: false,
             resumed_from: None,
             child_of: None,
         }
@@ -4969,6 +5021,8 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 resume: None,
                 provider_credential: None,
                 model: None,
+                permission_mode: None,
+                spawn: false,
                 resumed_from: None,
                 child_of: None,
             })
@@ -5064,6 +5118,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 resume: None,
                 provider_credential: None,
                 model: None,
+                permission_mode: None,
+                spawn: false,
                 resumed_from: None,
                 child_of: None,
             })
@@ -6318,6 +6374,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resume: None,
             provider_credential: None,
             model: None,
+            permission_mode: None,
+            spawn: false,
             resumed_from: None,
             child_of: None,
         }
@@ -6641,6 +6699,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resume: None,
             provider_credential: kind.map(str::to_string),
             model: None,
+            permission_mode: None,
+            spawn: false,
             resumed_from: None,
             child_of: None,
         }
@@ -6836,6 +6896,185 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         );
         for tool in ["start_agent", "send_message", "end_agent", "wait_agent"] {
             assert!(!env.contains(tool), "{tool}");
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A-146-1 on the host: a parent launched with spawn on gets its spawn
+    /// tools allowed outright, as `permissions.allow` in Claude Code's
+    /// `--settings` (re-read before launch) and as allow keys after the
+    /// connection's ask in OpenCode's config; a session that cannot spawn
+    /// and is not a child gets exactly what it got before, and a spawn
+    /// start without Storm's connection allows nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_146_1_a_spawning_parent_allows_its_spawn_tools_and_no_other_session_changes() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let start = |session: &str, provider: &str, storm: bool, spawn: bool| -> Command {
+            let mcp = if storm {
+                serde_json::json!([{"id": "storm", "slug": "storm"}])
+            } else {
+                serde_json::json!([])
+            };
+            serde_json::from_value(serde_json::json!({
+                "type": "start", "session": session, "workspace": "w", "provider": provider,
+                "terminal": {"cols": 80, "rows": 24}, "mcp": mcp, "spawn": spawn,
+            }))
+            .unwrap()
+        };
+        for (id, provider, storm, spawn) in [
+            ("ags_CCSPAWN", "claude-code", true, true),
+            ("ags_OCSPAWN", "opencode", true, true),
+            ("ags_CCPLAIN", "claude-code", true, false),
+            ("ags_OCPLAIN", "opencode", true, false),
+            ("ags_NOSTORM", "claude-code", false, true),
+        ] {
+            host.clone().handle(start(id, provider, storm, spawn)).await;
+        }
+        for id in [
+            "ags_CCSPAWN",
+            "ags_OCSPAWN",
+            "ags_CCPLAIN",
+            "ags_OCPLAIN",
+            "ags_NOSTORM",
+        ] {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some()
+            })
+            .await;
+        }
+        let settings = |id: &str| -> serde_json::Value {
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            let at = lines.iter().position(|l| *l == "--settings").unwrap();
+            serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap()
+        };
+        let opencode = |id: &str| -> serde_json::Value {
+            let env = recorded(roots.path(), "env", id).unwrap();
+            serde_json::from_str(
+                env.lines()
+                    .find_map(|l| l.strip_prefix("OPENCODE_CONFIG_CONTENT="))
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+        let rules: Vec<String> = crate::mcp::SPAWN_ALLOWED_TOOLS
+            .iter()
+            .map(|t| format!("mcp__storm__{t}"))
+            .collect();
+        assert_eq!(
+            settings("ags_CCSPAWN")["permissions"],
+            serde_json::json!({ "allow": rules })
+        );
+        let mut parent = settings("ags_CCSPAWN");
+        parent.as_object_mut().unwrap().remove("permissions");
+        assert_eq!(parent, settings("ags_CCPLAIN"), "nothing else changes");
+        assert!(settings("ags_CCPLAIN").get("permissions").is_none());
+        assert!(settings("ags_NOSTORM").get("permissions").is_none());
+        let mut want = serde_json::json!({"storm_*": "ask"});
+        for t in crate::mcp::SPAWN_ALLOWED_TOOLS {
+            want[format!("storm_{t}")] = "allow".into();
+        }
+        assert_eq!(opencode("ags_OCSPAWN")["permission"], want);
+        assert_eq!(
+            opencode("ags_OCPLAIN")["permission"],
+            serde_json::json!({"storm_*": "ask"}),
+            "byte for byte the plain config"
+        );
+        for tool in ["create_note", "update_note", "delete_note"] {
+            assert!(
+                !recorded(roots.path(), "env", "ags_OCSPAWN")
+                    .unwrap()
+                    .contains(tool)
+            );
+            assert!(!settings("ags_CCSPAWN").to_string().contains(tool));
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A-146-2 on the host: each mode reaches the agent exactly as the
+    /// table says (Claude Code's flag before the prompt, OpenCode's
+    /// `edit: allow` in Storm's layer even without grants); a mode the agent
+    /// does not take, bypass included, fails the start and the CLI never
+    /// runs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_146_2_a_mode_reaches_the_agent_and_any_other_fails_the_start() {
+        let (host, seen, _state, roots) = synced_host(&[]).await;
+        let moded = |id: &str, provider: &str, mode: &str| {
+            let mut start = synced_start(id, provider, None);
+            if let Command::Start {
+                permission_mode,
+                context,
+                ..
+            } = &mut start
+            {
+                *permission_mode = Some(mode.into());
+                *context = true;
+            }
+            start
+        };
+        for (id, provider, mode) in [
+            ("ags_CCEDIT", "claude-code", "accept_edits"),
+            ("ags_CCAUTO", "claude-code", "auto"),
+            ("ags_CCDEF", "claude-code", "default"),
+            ("ags_OCEDIT", "opencode", "accept_edits"),
+        ] {
+            host.clone().handle(moded(id, provider, mode)).await;
+        }
+        for (id, flag) in [
+            ("ags_CCEDIT", Some("acceptEdits")),
+            ("ags_CCAUTO", Some("auto")),
+            ("ags_CCDEF", None),
+        ] {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
+            })
+            .await;
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            match flag {
+                Some(flag) => {
+                    let at = lines
+                        .iter()
+                        .position(|l| *l == "--permission-mode")
+                        .unwrap();
+                    assert_eq!(lines[at + 1], flag);
+                    let prompt = lines.iter().position(|l| *l == crate::mcp::OPENING_PROMPT);
+                    assert!(prompt.is_none_or(|p| at < p), "{args}");
+                }
+                None => assert!(!args.contains("--permission-mode"), "{args}"),
+            }
+        }
+        wait_for("OpenCode's env", || {
+            recorded(roots.path(), "env", "ags_OCEDIT").is_some()
+        })
+        .await;
+        let env = recorded(roots.path(), "env", "ags_OCEDIT").unwrap();
+        let config: serde_json::Value = serde_json::from_str(
+            env.lines()
+                .find_map(|l| l.strip_prefix("OPENCODE_CONFIG_CONTENT="))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(config["permission"], serde_json::json!({"edit": "allow"}));
+        assert!(
+            !recorded(roots.path(), "args", "ags_OCEDIT")
+                .unwrap()
+                .contains("--permission-mode")
+        );
+
+        for (id, provider, mode) in [
+            ("ags_OCAUTO", "opencode", "auto"),
+            ("ags_CXEDIT", "codex", "accept_edits"),
+            ("ags_BYPASS", "claude-code", "bypass"),
+            ("ags_BYPASS2", "claude-code", "bypassPermissions"),
+            ("ags_CAMEL", "claude-code", "acceptEdits"),
+        ] {
+            host.clone().handle(moded(id, provider, mode)).await;
+            assert!(host.session(id).is_none(), "{id}");
+            assert!(start_failed(&seen, id), "{id}");
+            assert_eq!(recorded(roots.path(), "args", id), None, "{id}");
         }
         host.shutdown(Duration::from_millis(200)).await;
     }
@@ -7161,7 +7400,12 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             let gates = if gated {
                 ALL_GATES
             } else {
-                crate::harness::Gates::COMPILED
+                crate::harness::Gates {
+                    permission_prompt: &[],
+                    signals: &[],
+                    results: &[],
+                    wakes: &[],
+                }
             };
             let (host, seen, _helper, state, _roots, children) =
                 spawned_child(&script, gates).await;
@@ -7211,6 +7455,34 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             }
             host.shutdown(Duration::from_millis(200)).await;
         }
+    }
+
+    /// A-146-1 and 146c at the host: the vectors' child start (Claude Code,
+    /// reading Storm) gets its own Storm tools allowed in its `--settings`,
+    /// and, with the compiled lists, the permission prompt's hooks.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_146_a_childs_settings_allow_its_storm_tools_and_report_its_prompt() {
+        let (host, _seen, _helper, state, _roots, _children) =
+            spawned_child("exec sleep 1000", crate::harness::Gates::COMPILED).await;
+        let settings: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(
+                crate::mcp::session_dir(state.path(), "ags_CHILD").join("claude-settings.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let rules: Vec<String> = crate::mcp::CHILD_ALLOWED_TOOLS
+            .iter()
+            .map(|t| format!("mcp__storm__{t}"))
+            .collect();
+        assert_eq!(settings["permissions"], json!({ "allow": rules }));
+        assert!(
+            settings["hooks"]["PermissionRequest"].is_array(),
+            "{settings}"
+        );
+        assert!(host.session("ags_CHILD").unwrap().events.attention_hooks);
+        host.shutdown(Duration::from_millis(200)).await;
     }
 
     /// A-144-11 at the host: a hook's signal, result or waker with the
