@@ -2054,8 +2054,6 @@ pub struct SetSpawn {
 #[derive(Debug, Serialize)]
 pub struct SpawnSwitch {
     pub enabled: bool,
-    /// Pending requests that turning it off refused, `revoked`.
-    pub refused_requests: usize,
 }
 
 /// `PUT /v1/agent/sessions/{id}/spawn`. Every accepted change and every
@@ -2084,7 +2082,6 @@ pub async fn set_session_spawn(
                 "session_id": id,
                 "host_id": record.host_id,
                 "was": change.was,
-                "refused_requests": change.refused,
             }),
         ),
         Err(code) => (
@@ -2117,29 +2114,25 @@ pub async fn set_session_spawn(
     }
     Ok(SpawnSwitch {
         enabled: change.enabled,
-        refused_requests: change.refused,
     })
 }
 
-// ---- Agent spawning: the approval engine (decision 134-3) -----------------
+// ---- Agent spawning: a parent's acts (decisions 134-3, 145a) ---------------
 //
-// A person's device decides on the session tier, owner only (A5): no key, no
-// agent, no host.
+// A start, a message and an end act at once: the launch toggle is the
+// person's standing approval (145a). Each act is checked as 134 checks it,
+// written to the session's act log and audited. The person reads the log
+// on the session tier, owner only.
 
-pub const EVENT_SPAWN_REQUEST: &str = "spawn_request";
-pub const EVENT_SPAWN_REQUEST_REFUSED: &str = "spawn_request_refused";
-pub const EVENT_SPAWN_REQUEST_DECIDED: &str = "spawn_request_decided";
-pub const EVENT_SPAWN_REQUEST_EXPIRED: &str = "spawn_request_expired";
+/// A parent started, messaged or ended a child. Metadata only: never the
+/// task's or the message's text.
+pub const EVENT_SPAWN_START: &str = "spawn_start";
+pub const EVENT_SPAWN_MESSAGE: &str = "spawn_message";
+pub const EVENT_SPAWN_END: &str = "spawn_end";
+pub const EVENT_SPAWN_ACT_REFUSED: &str = "spawn_act_refused";
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ApproveRequest {
-    /// D2: the child may write the parent's own write vault. Off unless the
-    /// person ticks it.
-    #[serde(default)]
-    pub write_vault: bool,
-}
-
-/// A request as its decision left it.
+/// An act as its log row left it. Rows an older server left were decided by
+/// a person, or expired.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestView {
     pub id: String,
@@ -2154,9 +2147,6 @@ pub struct RequestView {
     pub outcome: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// For `refused: limit`, the cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cap: Option<String>,
     /// For `started`, the child.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -2165,7 +2155,7 @@ pub struct RequestView {
 }
 
 impl RequestView {
-    fn of(r: crate::agent::store::spawn::Request, cap: Option<&str>) -> Self {
+    fn of(r: crate::agent::store::spawn::Request) -> Self {
         Self {
             id: r.id,
             kind: r.kind,
@@ -2176,24 +2166,10 @@ impl RequestView {
             expires_at: r.expires_at,
             outcome: r.outcome,
             reason: r.reason,
-            cap: cap.map(Into::into),
             session: r.session,
             decided_at: r.decided_at,
         }
     }
-}
-
-fn request_detail(r: &RequestView) -> serde_json::Value {
-    serde_json::json!({
-        "request_id": r.id,
-        "kind": r.kind,
-        "requester": r.requester,
-        "target": r.target,
-        "outcome": r.outcome,
-        "reason": r.reason,
-        "cap": r.cap,
-        "session": r.session,
-    })
 }
 
 async fn record_spawn_event(
@@ -2210,129 +2186,11 @@ async fn record_spawn_event(
         &crate::index::now_rfc3339(),
         &detail.to_string(),
     ) {
-        tracing::warn!(error = %e, kind, "could not audit a spawn request");
+        tracing::warn!(error = %e, kind, "could not audit a spawn act");
     }
 }
 
-/// P-2, for the request tools: the requesting session's agent asks. A
-/// refusal names its reason and, for `limit`, the cap; both outcomes are
-/// audited.
-pub async fn create_spawn_request(
-    state: &Shared,
-    requester: &str,
-    new: crate::agent::store::spawn::NewRequest,
-) -> ApiResult<std::result::Result<RequestView, crate::agent::store::spawn::Refusal>> {
-    let record = state.agent.get(requester).map_err(agent_error)?;
-    let created = state
-        .agent
-        .create_request(requester, new)
-        .map_err(agent_error)?;
-    match &created {
-        Ok(r) => {
-            let view = RequestView::of(r.clone(), None);
-            record_spawn_event(
-                state,
-                EVENT_SPAWN_REQUEST,
-                Some(&record.owner_user_id),
-                None,
-                &request_detail(&view),
-            )
-            .await;
-        }
-        Err(refusal) => {
-            record_spawn_event(
-                state,
-                EVENT_SPAWN_REQUEST_REFUSED,
-                Some(&record.owner_user_id),
-                None,
-                &serde_json::json!({"requester": requester, "reason": refusal.reason,
-                    "cap": refusal.cap}),
-            )
-            .await;
-        }
-    }
-    Ok(created.map(|r| RequestView::of(r, None)))
-}
-
-/// The owner's request, or 404.
-fn owners_request(
-    state: &Shared,
-    owner: &str,
-    id: &str,
-) -> ApiResult<crate::agent::store::spawn::Request> {
-    let request = state.agent.request(id).map_err(agent_error)?;
-    match state.agent.get(&request.requester) {
-        Ok(r) if r.owner_user_id == owner => Ok(request),
-        _ => Err(not_found("no such request")),
-    }
-}
-
-fn decided(decision: crate::agent::store::spawn::Decision) -> ApiResult<RequestView> {
-    use crate::agent::store::spawn::Decision as D;
-    match decision {
-        D::Decided { request, cap, .. } => Ok(RequestView::of(request, cap)),
-        // Single use (P-3, P-6): what the app showed is stale.
-        D::Taken(_) => Err(conflict("already_decided")),
-    }
-}
-
-/// `POST /v1/agent/requests/{id}/approve`. Re-checked against current state
-/// at approval; the answer is the outcome, a refusal included.
-pub async fn approve_spawn_request(
-    state: &Shared,
-    actor: &Actor,
-    device: &str,
-    id: &str,
-    req: ApproveRequest,
-) -> ApiResult<RequestView> {
-    let owner = crews_owner(actor)?;
-    let request = owners_request(state, owner, id)?;
-    // 143d: what a person's own launch on the child's host would name now.
-    let deliverable = state
-        .agent
-        .get(&request.requester)
-        .ok()
-        .and_then(|r| deliverable_credential(state, &r.host_id));
-    let decision = state
-        .agent
-        .approve_request(id, device, req.write_vault, deliverable)
-        .map_err(agent_error)?;
-    let view = decided(decision)?;
-    record_spawn_event(
-        state,
-        EVENT_SPAWN_REQUEST_DECIDED,
-        Some(owner),
-        Some(device),
-        &request_detail(&view),
-    )
-    .await;
-    Ok(view)
-}
-
-/// `POST /v1/agent/requests/{id}/deny`.
-pub async fn deny_spawn_request(
-    state: &Shared,
-    actor: &Actor,
-    device: &str,
-    id: &str,
-) -> ApiResult<RequestView> {
-    let owner = crews_owner(actor)?;
-    owners_request(state, owner, id)?;
-    let decision = state.agent.deny_request(id, device).map_err(agent_error)?;
-    let view = decided(decision)?;
-    record_spawn_event(
-        state,
-        EVENT_SPAWN_REQUEST_DECIDED,
-        Some(owner),
-        Some(device),
-        &request_detail(&view),
-    )
-    .await;
-    Ok(view)
-}
-
-/// A request as a person's card shows it (134-10): its decision so far and
-/// what it asks, word for word.
+/// An act as the person's log shows it (145a): what it did, word for word.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestCard {
     #[serde(flatten)]
@@ -2357,76 +2215,63 @@ pub struct RequestCard {
     /// A start's child runs another agent than its parent.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub agent_differs: bool,
-    /// What a start's child would sign in with if approved now:
-    /// `synced_login` (the account's synced Claude login) or `host_setup`
-    /// (whatever the host has for that agent: Storm cannot see which).
+    /// A start's model (145b).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub credential: Option<&'static str>,
+    pub model: Option<String>,
+    /// A start's role, titled as it was then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// A message's text, exactly as the agent sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// The live sessions sharing the requester's workspace now, other than
-    /// it and its own tree (decision 141b).
-    pub shared_with: u32,
+    /// A message's round (145).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i64>,
 }
 
-/// How many of a session's requests its list carries, newest first.
+/// How many of a session's acts its log carries, newest first.
 const REQUESTS_LISTED: usize = 50;
 
-/// What a card says of its requester: its own agent, and what a child's
-/// agent would sign in with on its host now (143c).
-struct CardContext<'a> {
-    parent: &'a crate::agent::store::SessionRecord,
-    credential: &'a dyn Fn(&str) -> &'static str,
-    shared_with: u32,
-}
-
 impl RequestCard {
-    fn of(r: crate::agent::store::spawn::Request, cx: &CardContext<'_>) -> Self {
+    fn of(
+        r: crate::agent::store::spawn::Request,
+        parent: &crate::agent::store::SessionRecord,
+    ) -> Self {
         let payload: serde_json::Value =
             serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
         let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
-        let (task, name, provider, message) =
-            (text("task"), text("name"), text("provider"), text("text"));
+        let (task, name, provider, message, model) = (
+            text("task"),
+            text("name"),
+            text("provider"),
+            text("text"),
+            text("model"),
+        );
         let context_note = payload
             .get("context_note")
             .filter(|v| v.is_object())
             .cloned();
-        let agent = (r.kind == "start").then(|| {
-            provider
-                .clone()
-                .unwrap_or_else(|| cx.parent.provider.clone())
-        });
+        let role = payload
+            .pointer("/role/title")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let round = payload.get("round").and_then(serde_json::Value::as_i64);
+        let agent = (r.kind == "start")
+            .then(|| provider.clone().unwrap_or_else(|| parent.provider.clone()));
         Self {
-            parent_agent: agent.as_ref().map(|_| cx.parent.provider.clone()),
-            agent_differs: agent.as_ref().is_some_and(|a| *a != cx.parent.provider),
-            credential: agent.as_deref().map(cx.credential),
+            parent_agent: agent.as_ref().map(|_| parent.provider.clone()),
+            agent_differs: agent.as_ref().is_some_and(|a| *a != parent.provider),
             agent,
-            request: RequestView::of(r, None),
+            request: RequestView::of(r),
             task,
             name,
             context_note,
             provider,
+            model,
+            role,
             text: message,
-            shared_with: cx.shared_with,
+            round,
         }
-    }
-}
-
-/// A card's word for the credential a child running `agent` on `parent`'s
-/// host would get now (143c, 143d).
-fn card_credential(
-    state: &Shared,
-    parent: &crate::agent::store::SessionRecord,
-    agent: &str,
-) -> &'static str {
-    let deliverable = deliverable_credential(state, &parent.host_id);
-    match state
-        .agent
-        .child_credential(&parent.host_id, agent, deliverable)
-    {
-        crate::agent::credential::CredentialOutcome::Synced(_) => "synced_login",
-        _ => "host_setup",
     }
 }
 
@@ -2435,8 +2280,8 @@ pub struct SessionRequests {
     pub requests: Vec<RequestCard>,
 }
 
-/// `GET /v1/agent/sessions/{id}/requests`: what a session asked a person
-/// for and what became of each, newest first (134-10). Owner only.
+/// `GET /v1/agent/sessions/{id}/requests`: the session's acts (its starts,
+/// messages and ends), newest first (134-10, 145a). Owner only.
 pub async fn session_requests(
     state: &Shared,
     actor: &Actor,
@@ -2446,59 +2291,42 @@ pub async fn session_requests(
     let mut requests = state.agent.requests_of(id).map_err(agent_error)?;
     requests.reverse();
     requests.truncate(REQUESTS_LISTED);
-    let shared_with = state.agent.shared_with(id).map_err(agent_error)?;
     let parent = state.agent.get(id).map_err(agent_error)?;
-    let cx = CardContext {
-        parent: &parent,
-        credential: &|agent| card_credential(state, &parent, agent),
-        shared_with,
-    };
     Ok(SessionRequests {
         requests: requests
             .into_iter()
-            .map(|r| RequestCard::of(r, &cx))
+            .map(|r| RequestCard::of(r, &parent))
             .collect(),
     })
 }
 
-/// `GET /v1/agent/requests/{id}`: one request as its card shows it.
-pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestCard> {
-    let owner = crews_owner(actor)?;
-    let request = owners_request(state, owner, id)?;
-    let shared_with = state
-        .agent
-        .shared_with(&request.requester)
-        .map_err(agent_error)?;
-    let parent = state.agent.get(&request.requester).map_err(agent_error)?;
-    let cx = CardContext {
-        parent: &parent,
-        credential: &|agent| card_credential(state, &parent, agent),
-        shared_with,
+/// Audits an act or its refusal, never with its text.
+async fn audit_act(
+    state: &Shared,
+    caller: &str,
+    kind: &str,
+    target: Option<&str>,
+    refusal: Option<crate::agent::store::spawn::Refusal>,
+) {
+    let Ok(r) = state.agent.get(caller) else {
+        return;
     };
-    Ok(RequestCard::of(request, &cx))
-}
-
-/// The expiry sweeper's pass (P-5), audited per request.
-pub async fn sweep_spawn_requests(state: &Shared) {
-    let swept = match state.agent.expire_requests() {
-        Ok(swept) => swept,
-        Err(e) => {
-            tracing::warn!(error = ?e, "could not sweep spawn requests");
-            return;
-        }
+    let (event, detail) = match refusal {
+        None => (
+            match kind {
+                "start" => EVENT_SPAWN_START,
+                "message" => EVENT_SPAWN_MESSAGE,
+                _ => EVENT_SPAWN_END,
+            },
+            serde_json::json!({"requester": caller, "host_id": r.host_id, "target": target}),
+        ),
+        Some(refusal) => (
+            EVENT_SPAWN_ACT_REFUSED,
+            serde_json::json!({"requester": caller, "host_id": r.host_id, "kind": kind,
+                "target": target, "reason": refusal.reason, "cap": refusal.cap}),
+        ),
     };
-    for r in swept {
-        let owner = state.agent.get(&r.requester).ok().map(|s| s.owner_user_id);
-        let view = RequestView::of(r, None);
-        record_spawn_event(
-            state,
-            EVENT_SPAWN_REQUEST_EXPIRED,
-            owner.as_deref(),
-            None,
-            &request_detail(&view),
-        )
-        .await;
-    }
+    record_spawn_event(state, event, Some(&r.owner_user_id), None, &detail).await;
 }
 
 /// An approved child the server stopped before its `start` went out,
@@ -2527,6 +2355,31 @@ pub async fn fail_children_left_creating(state: &Shared) -> anyhow::Result<()> {
                 "parent_session": parent, "end_reason": r.end_reason}),
         )
         .await;
+    }
+    Ok(())
+}
+
+/// An `agent.db` upgrade ran (145i's crew trees): what it moved.
+pub const EVENT_AGENT_MIGRATION: &str = "agent_migration";
+
+/// At startup: each `agent.db` upgrade that ran is audited once, with what
+/// it did. The upgrade and its record are one transaction; the audit row
+/// is written after, and marked so a restart never writes it twice.
+pub async fn audit_agent_migrations(state: &Shared) -> anyhow::Result<()> {
+    let owner = state.auth_db.lock().await.account()?.map(|a| a.id);
+    for m in state.agent.unaudited_migrations()? {
+        let detail: serde_json::Value =
+            serde_json::from_str(&m.detail).unwrap_or(serde_json::Value::Null);
+        state.auth_db.lock().await.record_event(
+            EVENT_AGENT_MIGRATION,
+            owner.as_deref(),
+            None,
+            &m.applied_at,
+            &serde_json::json!({"migration": m.name, "detail": detail}).to_string(),
+        )?;
+        state
+            .agent
+            .mark_migration_audited(&m.name, &crate::index::now_rfc3339())?;
     }
     Ok(())
 }
@@ -2560,9 +2413,11 @@ impl From<crate::agent::store::spawn::Lineage> for LineageView {
     }
 }
 
-/// A result as its parent reads it: what the child said, untrusted (134h).
+/// A result as its parent reads it: what the child said, untrusted (134h),
+/// for its round (145).
 #[derive(Debug, Clone, Serialize)]
 pub struct ResultView {
+    pub round: i64,
     pub outcome: String,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2573,6 +2428,7 @@ pub struct ResultView {
 impl From<crate::agent::store::spawn::SpawnResult> for ResultView {
     fn from(r: crate::agent::store::spawn::SpawnResult) -> Self {
         Self {
+            round: r.round,
             outcome: r.outcome,
             summary: r.summary,
             details: r.details,
@@ -2588,7 +2444,13 @@ pub struct AgentView {
     pub id: String,
     pub name: String,
     pub provider: String,
+    /// The model it started on (145b), when one was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     pub status: String,
+    /// The round it is in (145): 1 for its task, then one per message
+    /// after a result.
+    pub round: i64,
     /// 144b: `working` or `idle` only from a gated idle signal, `unknown`
     /// otherwise while it is live; absent once ended.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2607,20 +2469,24 @@ pub struct AgentView {
     pub ended_at: Option<String>,
     #[serde(flatten)]
     pub lineage: LineageView,
-    /// Ended, or reported a result: what a wait waits for.
+    /// Ended, or reported a result for its round: what a wait waits for.
     pub settled: bool,
     /// Only on `agent_status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Its latest result, of whatever round.
     pub result: Option<ResultView>,
+    /// Only on `agent_status`: every round's result, oldest first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<ResultView>>,
     /// Only on `agent_status`: the caller's messages to it, by state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<SentMessage>>,
 }
 
-/// A message a parent asked to send, as it stands (134j): `pending_approval`,
-/// `queued`, `delivered`, `acknowledged`, `denied`, `expired` or
-/// `undeliverable`.
+/// A message a parent sent, as it stands (134j): `queued`, `delivered`,
+/// `acknowledged` or `undeliverable` (and, from before 145a,
+/// `pending_approval`, `denied` or `expired`).
 #[derive(Debug, Clone, Serialize)]
 pub struct SentMessage {
     pub request_id: Option<String>,
@@ -2646,10 +2512,16 @@ fn agent_view(
 ) -> ApiResult<AgentView> {
     let lineage = state.agent.lineage(&r.id).map_err(agent_error)?;
     let result = state.agent.result_of(&r.id).map_err(agent_error)?;
+    let round = state.agent.round_of(&r.id).map_err(agent_error)?;
+    let model = state
+        .agent
+        .launch_of(&r.id)
+        .map_err(internal)?
+        .and_then(|l| l.model);
     let activity = state.agent.health_activity(&r);
     let needs_attention = state.agent.needs_attention(&r).map_err(agent_error)?;
     let pending_events = state.agent.pending_events(&r.id).map_err(agent_error)?;
-    let (task, messages) = match detail_for {
+    let (task, messages, results) = match detail_for {
         Some(caller) => (
             state.agent.task_of(&r.id).map_err(agent_error)?,
             Some(
@@ -2665,16 +2537,27 @@ fn agent_view(
                     })
                     .collect(),
             ),
+            Some(
+                state
+                    .agent
+                    .results_of(&r.id)
+                    .map_err(agent_error)?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            ),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     let name = session_name(state, &r)?;
     Ok(AgentView {
-        settled: crate::agent::scope::settled(&r, result.as_ref()),
+        settled: crate::agent::scope::settled(&r, result.as_ref(), round),
         id: r.id,
         name,
         provider: r.provider,
+        model,
         status: r.status,
+        round,
         activity,
         needs_attention,
         pending_events,
@@ -2685,6 +2568,7 @@ fn agent_view(
         lineage: lineage.into(),
         task,
         result: result.map(Into::into),
+        results,
         messages,
     })
 }
@@ -2717,10 +2601,15 @@ fn spawned_caller(state: &Shared, actor: &Actor) -> ApiResult<String> {
     }
 }
 
-/// An agent a parent may ask for (agent discovery, 143b).
+/// An agent a parent may start (agent discovery, 143b), with the model
+/// forms it takes (145b).
 #[derive(Debug, Clone, Serialize)]
 pub struct StartableAgent {
     pub provider: String,
+    /// What `model` may be for it, as a sentence; absent where Storm passes
+    /// no model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<String>,
 }
 
 /// C4's caps, as numbers.
@@ -2729,15 +2618,25 @@ pub struct SpawnLimits {
     pub depth: i64,
     pub children: i64,
     pub tree: i64,
-    pub pending: i64,
+}
+
+/// A crew role a start may name (145b).
+#[derive(Debug, Clone, Serialize)]
+pub struct StartableRole {
+    pub title: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListAgents {
     pub agents: Vec<StartableAgent>,
+    /// The roles in Kit a start may name, by title or path.
+    pub roles: Vec<StartableRole>,
     pub limits: SpawnLimits,
-    /// The cap a start would hit now, if any. Advisory: a request is
-    /// counted again when it is made (P-6).
+    /// The cap a start would hit now, if any. Advisory: a start is counted
+    /// again when it is made.
     pub start_refused: Option<&'static str>,
     /// The longest one `wait_agent` holds, in seconds (134i).
     pub wait_cap_secs: u64,
@@ -2746,12 +2645,21 @@ pub struct ListAgents {
     pub wake: bool,
 }
 
-/// `list_agents`: what the calling parent may ask to start, and how close it
-/// is to its caps.
+/// `list_agents`: what the calling parent may start, and how close it is to
+/// its caps.
 pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents> {
-    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_PENDING, MAX_TREE};
+    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_TREE};
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.get(&caller).map_err(agent_error)?;
+    let roles = role_catalog(state, &r.owner_user_id)
+        .await
+        .into_iter()
+        .map(|(note, _)| StartableRole {
+            title: note.title,
+            path: note.path,
+            summary: note.summary,
+        })
+        .collect();
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
@@ -2761,21 +2669,50 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
             .startable_agents(&caller)
             .map_err(agent_error)?
             .into_iter()
-            .map(|provider| StartableAgent { provider })
+            .map(|provider| StartableAgent {
+                models: crate::agent::model::MODEL_AGENTS
+                    .contains(&provider.as_str())
+                    .then(|| crate::agent::model::accepted_forms(&provider)),
+                provider,
+            })
             .collect(),
+        roles,
         limits: SpawnLimits {
             depth: MAX_DEPTH.min(BUILT_DEPTH),
             children: MAX_CHILDREN,
             tree: MAX_TREE,
-            pending: MAX_PENDING,
         },
     })
 }
 
-/// `agent_status {id}`: one of the caller's descendants, with its task.
+/// The descendant `to` names (145b): its id, or the name of one of the
+/// caller's own children, the live one first, else the latest. Anything
+/// else is not found.
+fn resolve_agent(state: &Shared, caller: &str, to: &str) -> ApiResult<String> {
+    let to = to.trim();
+    if state.agent.descendant(caller, to).is_ok() {
+        return Ok(to.to_string());
+    }
+    let mut named = Vec::new();
+    for child in state.agent.children_of(caller).map_err(agent_error)? {
+        if session_name(state, &child)? == to {
+            named.push(child);
+        }
+    }
+    named
+        .iter()
+        .find(|c| !c.is_ended())
+        .or(named.last())
+        .map(|c| c.id.clone())
+        .ok_or_else(|| not_found("no such agent among your descendants"))
+}
+
+/// `agent_status {id}`: one of the caller's descendants, by id or name,
+/// with its task and every round's result.
 pub async fn agent_status(state: &Shared, actor: &Actor, id: &str) -> ApiResult<AgentView> {
     let caller = spawning_caller(state, actor)?;
-    let r = state.agent.descendant(&caller, id).map_err(agent_error)?;
+    let id = resolve_agent(state, &caller, id)?;
+    let r = state.agent.descendant(&caller, &id).map_err(agent_error)?;
     agent_view(state, r, Some(&caller))
 }
 
@@ -2795,14 +2732,7 @@ pub struct Children {
     pub agents: Vec<AgentView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub predecessor_results: Vec<PredecessorResult>,
-    /// The caller's own start requests, newest first: how a parent learns
-    /// what a person decided after `start_agent` answered.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub starts: Vec<RequestView>,
 }
-
-/// How many of its start requests `list_children` shows a parent.
-const STARTS_SHOWN: usize = 10;
 
 /// `list_children`: the caller's own children, oldest first, and the
 /// results its resumed predecessors' children reported (C3).
@@ -2829,81 +2759,118 @@ pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Children>
             result: result.into(),
         });
     }
-    let starts = state
-        .agent
-        .requests_of(&caller)
-        .map_err(agent_error)?
-        .into_iter()
-        .rev()
-        .filter(|r| r.kind == "start")
-        .take(STARTS_SHOWN)
-        .map(|r| RequestView::of(r, None))
-        .collect();
     Ok(Children {
         agents,
         predecessor_results,
-        starts,
     })
 }
 
 /// The longest name a parent may give a child, in characters.
-pub const MAX_AGENT_NAME_CHARS: usize = 80;
+pub const MAX_AGENT_NAME_CHARS: usize = crate::agent::store::spawn::MAX_NAME_CHARS;
 
-/// What `start_agent` asks a person to approve (134o).
-#[derive(Debug, Clone)]
+/// What `start_agent` starts (145b).
+#[derive(Debug, Clone, Default)]
 pub struct StartAgent {
     pub task: String,
     pub name: Option<String>,
     pub context_note: Option<crate::agent::ContextRef>,
-    pub provider: Option<String>,
-    /// Seconds to wait for the person's decision, capped as `wait_agent`
-    /// is; none answers at once.
-    pub wait: Option<u64>,
+    /// The child's agent; the caller's own when absent.
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    /// A role note in Kit, by title or path.
+    pub role: Option<String>,
+    /// `false` waits for the child's first result, within the caller's
+    /// wait bound. Default `true`.
+    pub background: Option<bool>,
+    /// For a foreground start, seconds to wait at most, capped as
+    /// `wait_agent` is.
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StartRequested {
-    /// What a person decides on; none when Storm refused it at once.
-    pub request_id: Option<String>,
-    /// `pending`, `decided`, or `refused` when Storm refused it at once.
+pub struct StartedAgent {
+    /// `started`, or `refused`.
     pub state: &'static str,
-    /// Once decided: `started`, `denied`, `expired` or `refused`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<String>,
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// For `refused: limit` at once, the cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cap: Option<&'static str>,
-    /// For `started`, the new agent's id.
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
-    /// For `agent_unavailable`, which agents it can ask for instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// For a foreground start: its status when the wait ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// For a foreground start: its first result, the child's own words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultView>,
+    /// A foreground start whose wait ended before the child reported.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub still_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// For `refused: limit`, the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<&'static str>,
+    /// What to do instead, for a refusal that has one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
-/// `start_agent {task, name?, context_note?, provider?, wait?}` (134-5):
-/// asks a person to approve a new agent on the caller's host, in its own
-/// workspace, running the caller's agent or another its host can start
-/// (143a), with no more than the caller's grants (134e). Answered at once, or after at most `wait` seconds below
-/// the caller's tool-call timeout (134i); `list_children` shows a decision
-/// that comes later.
+impl StartedAgent {
+    fn refused(reason: &'static str, cap: Option<&'static str>, message: Option<String>) -> Self {
+        Self {
+            state: "refused",
+            id: None,
+            name: None,
+            agent: None,
+            model: None,
+            status: None,
+            result: None,
+            still_running: false,
+            reason: Some(reason),
+            cap,
+            message,
+        }
+    }
+}
+
+/// Every role note in Kit with its frontmatter `model:`, read as the
+/// account. No Kit vault is no roles.
+async fn role_catalog(state: &Shared, owner: &str) -> Vec<(RoleNote, Option<String>)> {
+    let actor = Actor::Session {
+        user_id: owner.to_string(),
+    };
+    role_notes(state, &actor).await.unwrap_or_default()
+}
+
+/// `start_agent {task, name?, agent?, model?, role?, background?,
+/// context_note?}` (134-5, 145b): starts a child at once on the caller's
+/// host, in its own workspace, running the caller's agent or another its
+/// host can start (143a), on `model` (checked for that agent), with no more
+/// than the caller's grants (134e). In the background (the default) it
+/// answers at once; `background: false` waits for its first result within
+/// the caller's wait bound, else answers `still_running`.
 pub async fn start_agent(
     state: &Shared,
     actor: &Actor,
     req: StartAgent,
-) -> ApiResult<StartRequested> {
-    use crate::agent::store::spawn::NewRequest;
+) -> ApiResult<StartedAgent> {
+    use crate::agent::store::spawn::StartPayload;
     let caller = spawning_caller(state, actor)?;
     if req.task.trim().is_empty() {
         return Err(bad_request("a start needs a task"));
     }
     let name = match req.name.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(n) if n.chars().count() > MAX_AGENT_NAME_CHARS || n.chars().any(char::is_control) => {
+        Some(n)
+            if n.chars().count() > MAX_AGENT_NAME_CHARS
+                || n.chars().any(char::is_control)
+                || n.starts_with("ags_") =>
+        {
             return Err(bad_request(format!(
-                "a name is one line of at most {MAX_AGENT_NAME_CHARS} characters"
+                "a name is one line of at most {MAX_AGENT_NAME_CHARS} characters, not an id"
             )));
         }
         Some(n) => Some(n.to_string()),
@@ -2921,68 +2888,155 @@ pub async fn start_agent(
             })
         }
     };
-    let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
-    let asked = req.provider.clone();
-    let new = NewRequest::Start {
-        task: req.task,
-        provider: req.provider,
-        name,
-        context_note,
-    };
-    let created = match create_spawn_request(state, &caller, new).await? {
-        Ok(r) => r,
-        Err(refusal) => {
-            let message = (refusal.reason == "agent_unavailable")
-                .then(|| state.agent.startable_agents(&caller))
-                .transpose()
-                .map_err(agent_error)?
-                .map(|agents| {
-                    format!(
-                        "Storm cannot start {} on this host for a child. The agents it can start here: {}.",
-                        asked.as_deref().unwrap_or("that agent"),
-                        agents.join(", ")
-                    )
+    let parent = state.agent.get(&caller).map_err(agent_error)?;
+    let agent = req.agent.clone().unwrap_or_else(|| parent.provider.clone());
+    let (role, role_model) = match req.role.as_deref().map(str::trim) {
+        None | Some("") => (None, None),
+        Some(asked) => {
+            let wanted = asked.trim_end_matches(".md");
+            let found = role_catalog(state, &parent.owner_user_id)
+                .await
+                .into_iter()
+                .find(|(r, _)| {
+                    r.path.trim_end_matches(".md") == wanted || r.title.eq_ignore_ascii_case(asked)
                 });
-            return Ok(StartRequested {
-                request_id: None,
-                state: "refused",
-                outcome: None,
-                reason: Some(refusal.reason.into()),
-                cap: refusal.cap,
-                agent: None,
-                message,
-            });
+            match found {
+                Some((r, model)) => (
+                    Some(crate::agent::store::Context {
+                        vault_id: r.vault_id,
+                        note_id: r.note_id,
+                        title: r.title,
+                    }),
+                    model,
+                ),
+                None => {
+                    audit_act(
+                        state,
+                        &caller,
+                        "start",
+                        None,
+                        Some(crate::agent::store::spawn::Refusal {
+                            reason: "role_unknown",
+                            cap: None,
+                        }),
+                    )
+                    .await;
+                    return Ok(StartedAgent::refused(
+                        "role_unknown",
+                        None,
+                        Some(
+                            "No role in Kit has that title or path: list_agents names them.".into(),
+                        ),
+                    ));
+                }
+            }
         }
     };
-    let bound = crate::agent::scope::wait_bound(
-        &provider,
-        Some(std::time::Duration::from_secs(req.wait.unwrap_or(0))),
-    );
-    let r = if bound.is_zero() {
-        state.agent.request(&created.id).map_err(agent_error)?
-    } else {
-        state
-            .agent
-            .wait_request(&created.id, bound)
-            .await
-            .map_err(agent_error)?
+    // A role's own model counts only where its agent takes it.
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) => Some(m.to_string()),
+        None => role_model.filter(|m| crate::agent::model::check(&agent, m).is_ok()),
     };
-    let decided = r.state == "decided";
-    Ok(StartRequested {
-        request_id: Some(r.id),
-        state: if decided { "decided" } else { "pending" },
-        outcome: r.outcome,
-        reason: r.reason,
+    if let Some(m) = &model
+        && let Err(sentence) = crate::agent::model::check(&agent, m)
+    {
+        audit_act(
+            state,
+            &caller,
+            "start",
+            None,
+            Some(crate::agent::store::spawn::Refusal {
+                reason: "model_unavailable",
+                cap: None,
+            }),
+        )
+        .await;
+        return Ok(StartedAgent::refused(
+            "model_unavailable",
+            None,
+            Some(sentence),
+        ));
+    }
+    let deliverable = deliverable_credential(state, &parent.host_id);
+    let payload = StartPayload {
+        task: req.task,
+        provider: req.agent.clone(),
+        name,
+        context_note,
+        model: model.clone(),
+        role,
+    };
+    let child = match state
+        .agent
+        .start_child(&caller, payload, deliverable)
+        .map_err(agent_error)?
+    {
+        Ok(child) => {
+            audit_act(state, &caller, "start", Some(&child.id), None).await;
+            child
+        }
+        Err(refusal) => {
+            audit_act(state, &caller, "start", None, Some(refusal)).await;
+            let message = match refusal.reason {
+                "agent_unavailable" => Some(format!(
+                    "Storm cannot start {agent} on this host for a child. The agents it can start here: {}.",
+                    state
+                        .agent
+                        .startable_agents(&caller)
+                        .map_err(agent_error)?
+                        .join(", ")
+                )),
+                "name_taken" => Some(
+                    "One of your live children already has that name: continue it with send_message, or choose another name."
+                        .into(),
+                ),
+                "limit" => Some(
+                    "End children you are done with (end_agent) before starting another.".into(),
+                ),
+                _ => None,
+            };
+            return Ok(StartedAgent::refused(refusal.reason, refusal.cap, message));
+        }
+    };
+    let name = session_name(state, &child)?;
+    let mut started = StartedAgent {
+        state: "started",
+        id: Some(child.id.clone()),
+        name: Some(name),
+        agent: Some(child.provider.clone()),
+        model,
+        status: None,
+        result: None,
+        still_running: false,
+        reason: None,
         cap: None,
-        agent: r.session,
         message: None,
-    })
+    };
+    if req.background.unwrap_or(true) {
+        return Ok(started);
+    }
+    let bound = crate::agent::scope::wait_bound(
+        &parent.provider,
+        req.timeout.map(std::time::Duration::from_secs),
+    );
+    let agent = state.agent.clone();
+    let offered = caller.clone();
+    let (now, result) = state
+        .agent
+        .wait_first_result(&child.id, bound, &move || agent.spawn_offered(&offered))
+        .await
+        .map_err(agent_error)?;
+    started.still_running = result.is_none() && !now.is_ended();
+    started.status = Some(now.status);
+    started.result = result.map(Into::into);
+    Ok(started)
 }
 
 /// What `wait_agent` is asked (134i, 144a).
 #[derive(Debug, Clone, Default)]
 pub struct WaitAgent {
-    /// Descendants to hear of; all the caller's children when empty.
+    /// Descendants to hear of, by id or name; all the caller's children
+    /// when empty.
     pub ids: Vec<String>,
     /// The cursor last returned: acknowledges up to it, and reads after it.
     /// Without it the read starts from the caller's acknowledged cursor.
@@ -3008,9 +3062,9 @@ pub struct WaitAgents {
 /// `wait_agent {ids?, after?, timeout?, until?}`: a bounded long-poll over
 /// the caller's child events (144a), returning on the first, or with
 /// `until: "settled"` once every listed descendant has ended or reported
-/// (134i). Either way at most the caller's adapter's cap, which stays
-/// below its tool-call timeout. Anything outside the caller's descendants
-/// is `not_permitted` (144d).
+/// for its round (134i, 145). Either way at most the caller's adapter's
+/// cap, which stays below its tool-call timeout. Anything outside the
+/// caller's descendants is `not_permitted` (144d).
 pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiResult<WaitAgents> {
     let caller = spawning_caller(state, actor)
         .map_err(|e| ApiError(e.0, format!("not_permitted: {}", e.1)))?;
@@ -3019,6 +3073,13 @@ pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiRes
         Some("settled") => true,
         Some(_) => return Err(bad_request("until is `event` or `settled`")),
     };
+    // A name resolves to its id; anything else is left for the scope check
+    // below to refuse as it always has.
+    let ids: Vec<String> = req
+        .ids
+        .iter()
+        .map(|id| resolve_agent(state, &caller, id).unwrap_or_else(|_| id.clone()))
+        .collect();
     let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
     let bound =
         crate::agent::scope::wait_bound(&provider, req.timeout.map(std::time::Duration::from_secs));
@@ -3028,12 +3089,12 @@ pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiRes
     if settled {
         let (records, timed_out) = state
             .agent
-            .wait_agents(&caller, &req.ids, bound, &still_offered)
+            .wait_agents(&caller, &ids, bound, &still_offered)
             .await
             .map_err(agent_error)?;
         let read = state
             .agent
-            .events_now(&caller, &req.ids, req.after)
+            .events_now(&caller, &ids, req.after)
             .map_err(agent_error)?;
         return Ok(WaitAgents {
             events: read.events,
@@ -3047,14 +3108,13 @@ pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiRes
     }
     let read = state
         .agent
-        .wait_events(&caller, &req.ids, req.after, bound, &still_offered)
+        .wait_events(&caller, &ids, req.after, bound, &still_offered)
         .await
         .map_err(agent_error)?;
-    let records = if req.ids.is_empty() {
+    let records = if ids.is_empty() {
         state.agent.children_of(&caller).map_err(agent_error)?
     } else {
-        req.ids
-            .iter()
+        ids.iter()
             .map(|id| state.agent.descendant(&caller, id))
             .collect::<Result<_, _>>()
             .map_err(agent_error)?
@@ -3071,7 +3131,7 @@ pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiRes
 }
 
 /// `report_result {outcome, summary, details?}` (134h): the calling spawned
-/// session's own result. Audited without its text.
+/// session's own result for its round (145). Audited without its text.
 pub async fn report_result(
     state: &Shared,
     actor: &Actor,
@@ -3091,7 +3151,7 @@ pub async fn report_result(
         Some(&r.owner_user_id),
         None,
         &serde_json::json!({"session_id": caller, "host_id": r.host_id,
-            "outcome": result.outcome}),
+            "outcome": result.outcome, "round": result.round}),
     )
     .await;
     Ok(result.into())
@@ -3099,9 +3159,9 @@ pub async fn report_result(
 
 // ---- The inbox (decision 134-6) ----------------------------------------
 //
-// A parent's message is a request a person decides (134o); approved, it
-// enters only the child's inbox (A2), and the child reads it with
-// `read_messages`. Nothing is written to any terminal (C9, G-134-3).
+// A parent's message enters only its child's inbox, at once (145a), and the
+// child reads it with `read_messages`. Nothing is written to any terminal
+// (C9, G-134-3).
 
 /// A child stopped after its parent ended by itself (C9), with the notice
 /// it was given 30 s before. Metadata only.
@@ -3109,73 +3169,95 @@ pub const EVENT_SPAWN_PARENT_ENDED: &str = "spawn_parent_ended";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageSent {
-    /// What a person decides on; none when Storm refused it at once.
-    pub request_id: Option<String>,
-    /// `pending`, or `refused`.
-    pub state: &'static str,
+    pub delivered: bool,
+    /// The child's round the message belongs to: the next one when it came
+    /// after the child's result (145).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
-    /// For `refused: limit`, the cap: `pending` or `inbox`.
+    /// For `refused: limit`, the cap: `inbox`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cap: Option<&'static str>,
 }
 
-/// `send_message {id, text}`: asks a person to approve a message to one of
-/// the caller's descendants. Answered at once; `agent_status` shows the
-/// message's state after.
+/// `send_message {to, text}` (134-6, 145d): a message into one of the
+/// caller's live descendants' inbox, at once, by id or name. Answers
+/// `{delivered, round}`.
 pub async fn send_message(
     state: &Shared,
     actor: &Actor,
-    id: &str,
+    to: &str,
     text: &str,
 ) -> ApiResult<MessageSent> {
-    use crate::agent::store::spawn::NewRequest;
     let caller = spawning_caller(state, actor)?;
     if text.trim().is_empty() {
         return Err(bad_request("a message needs text"));
     }
-    let new = NewRequest::Message {
-        target: id.to_string(),
-        text: text.to_string(),
-    };
-    request_for_descendant(state, &caller, new).await
-}
-
-/// `end_agent {id}` (134-7): asks a person to approve ending one of the
-/// caller's descendants. Answered at once like `send_message`; approved, the
-/// target is sent `end`, and its own descendants follow it (C1).
-pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<MessageSent> {
-    use crate::agent::store::spawn::NewRequest;
-    let caller = spawning_caller(state, actor)?;
-    let new = NewRequest::End {
-        target: id.to_string(),
-    };
-    request_for_descendant(state, &caller, new).await
-}
-
-/// Asks a person to approve `new`, answered as `send_message` and
-/// `end_agent` answer.
-async fn request_for_descendant(
-    state: &Shared,
-    caller: &str,
-    new: crate::agent::store::spawn::NewRequest,
-) -> ApiResult<MessageSent> {
-    match create_spawn_request(state, caller, new).await? {
-        Ok(r) => Ok(MessageSent {
-            request_id: Some(r.id),
-            state: "pending",
-            reason: None,
-            cap: None,
-        }),
-        Err(refusal) if refusal.reason == "not_found" => {
-            Err(not_found("no such agent among your descendants"))
+    let target = resolve_agent(state, &caller, to)?;
+    match state
+        .agent
+        .message_child(&caller, &target, text)
+        .map_err(agent_error)?
+    {
+        Ok(round) => {
+            audit_act(state, &caller, "message", Some(&target), None).await;
+            Ok(MessageSent {
+                delivered: true,
+                round: Some(round),
+                reason: None,
+                cap: None,
+            })
         }
-        Err(refusal) => Ok(MessageSent {
-            request_id: None,
-            state: "refused",
-            reason: Some(refusal.reason),
-            cap: refusal.cap,
-        }),
+        Err(refusal) => {
+            audit_act(state, &caller, "message", Some(&target), Some(refusal)).await;
+            if refusal.reason == "not_found" {
+                return Err(not_found("no such live agent among your descendants"));
+            }
+            Ok(MessageSent {
+                delivered: false,
+                round: None,
+                reason: Some(refusal.reason),
+                cap: refusal.cap,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentEnded {
+    pub ended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// `end_agent {id}` (134-7): ends one of the caller's live descendants at
+/// once, by id or name; its own descendants follow it (C1).
+pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<AgentEnded> {
+    let caller = spawning_caller(state, actor)?;
+    let target = resolve_agent(state, &caller, id)?;
+    match state
+        .agent
+        .end_child(&caller, &target)
+        .map_err(agent_error)?
+    {
+        Ok(()) => {
+            audit_act(state, &caller, "end", Some(&target), None).await;
+            Ok(AgentEnded {
+                ended: true,
+                reason: None,
+            })
+        }
+        Err(refusal) => {
+            audit_act(state, &caller, "end", Some(&target), Some(refusal)).await;
+            if refusal.reason == "not_found" {
+                return Err(not_found("no such live agent among your descendants"));
+            }
+            Ok(AgentEnded {
+                ended: false,
+                reason: Some(refusal.reason),
+            })
+        }
     }
 }
 
@@ -3845,6 +3927,9 @@ pub struct SessionView {
     /// The role it was launched with (138f), titled as it was then. Fixed:
     /// changing the label never changes it.
     pub launch_role: Option<crate::agent::store::Context>,
+    /// The model it was started on (145b), when one was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -3916,9 +4001,9 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id, launch_role) = match launch {
-        Some(l) => (l.name, l.context, l.write_vault_id, l.role),
-        None => (session.workspace.clone(), None, None, None),
+    let (name, context, write_vault_id, launch_role, model) = match launch {
+        Some(l) => (l.name, l.context, l.write_vault_id, l.role, l.model),
+        None => (session.workspace.clone(), None, None, None, None),
     };
     Ok(SessionView {
         session,
@@ -3941,6 +4026,7 @@ fn session_view(
         recent_events,
         spawn,
         launch_role,
+        model,
     })
 }
 
@@ -4141,7 +4227,6 @@ pub async fn launch_session(
             "session_id": session.id,
             "host_id": session.host_id,
             "was": false,
-            "refused_requests": 0,
         });
         state
             .auth_db
@@ -4246,6 +4331,7 @@ pub async fn launch_session(
         recent_events: None,
         spawn,
         launch_role: launch.role,
+        model: launch.model,
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;
@@ -4795,6 +4881,16 @@ const ROLE_SUMMARY_MAX: usize = 160;
 /// error: the launcher then offers only None.
 pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote>> {
     crews_owner(actor)?;
+    Ok(role_notes(state, actor)
+        .await?
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect())
+}
+
+/// Every role note in Kit with its frontmatter `model:`, the default model
+/// a start with that role gets (145b).
+async fn role_notes(state: &Shared, actor: &Actor) -> ApiResult<Vec<(RoleNote, Option<String>)>> {
     let Ok(vault_id) = kit_vault_id(state).await else {
         return Ok(Vec::new());
     };
@@ -4806,8 +4902,13 @@ pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote
             continue;
         }
         let content = ix.vault.read(&note.path)?;
-        let summary = crate::frontmatter::parse(&content)
-            .frontmatter
+        let frontmatter = crate::frontmatter::parse(&content).frontmatter;
+        let model = frontmatter
+            .as_ref()
+            .and_then(|fm| crate::frontmatter::get_scalar(&fm.raw, "model"))
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        let summary = frontmatter
             .and_then(|fm| crate::frontmatter::get_scalar(&fm.raw, "summary"))
             .and_then(|s| s.lines().next().map(str::trim).map(str::to_string))
             .filter(|s| !s.is_empty())
@@ -4820,16 +4921,19 @@ pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote
             .rsplit_once('/')
             .map(|(dir, _)| dir.to_string())
             .unwrap_or_default();
-        roles.push(RoleNote {
-            vault_id: vault_id.clone(),
-            note_id: note.id,
-            title: note.title,
-            path: note.path,
-            folder,
-            summary,
-        });
+        roles.push((
+            RoleNote {
+                vault_id: vault_id.clone(),
+                note_id: note.id,
+                title: note.title,
+                path: note.path,
+                folder,
+                summary,
+            },
+            model,
+        ));
     }
-    roles.sort_by(|a, b| {
+    roles.sort_by(|(a, _), (b, _)| {
         (a.folder != "agents", &a.folder, a.title.to_lowercase()).cmp(&(
             b.folder != "agents",
             &b.folder,

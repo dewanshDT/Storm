@@ -1,8 +1,6 @@
 //! `needs_attention` (decision 134p, slice 134-9; 144b): beside `activity`,
 //! not a status, and never inferred from idle (A3). One kind at a time:
 //!
-//! - `approval`: a request the session made (start, message, end) waits for
-//!   a person's decision (134o);
 //! - `permission_prompt`: the agent's own CLI prompt waits, as its host
 //!   reports it — only through a signal on the gated list below, which is
 //!   empty;
@@ -20,7 +18,7 @@
 
 use super::events::{self, Extra, LiveSignals, OUTPUT_PATTERN, PROVIDER_HOOK};
 use super::store::SessionRecord;
-use super::{AgentManager, AgentResult, StatusReport, now};
+use super::{AgentManager, AgentResult, StatusReport};
 
 /// One provider's signal, through one source, switched on once its gate
 /// (G-144-S-<provider>-<signal>; G-134-7 for the permission prompt) passes
@@ -45,7 +43,6 @@ pub const GATED_SIGNALS: &[GatedSignal] = &[];
 #[cfg(test)]
 pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
 
-pub const APPROVAL: &str = "approval";
 pub const PERMISSION_PROMPT: &str = "permission_prompt";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const BLOCKED: &str = "blocked";
@@ -148,8 +145,7 @@ impl AgentManager {
     }
 
     /// The session's `needs_attention`, if any. An ended session needs none.
-    /// A waiting request comes first, since a person can answer it in Storm;
-    /// a signal shows only while the session runs, as activity does.
+    /// A signal shows only while the session runs, as activity does.
     pub fn needs_attention(&self, r: &SessionRecord) -> AgentResult<Option<&'static str>> {
         let live = self.live_signals(&r.id);
         let store = self.store.lock().unwrap();
@@ -157,7 +153,6 @@ impl AgentManager {
             &store.conn,
             r,
             live.attention.as_deref(),
-            &now(),
         )?)
     }
 

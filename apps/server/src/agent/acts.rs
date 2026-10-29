@@ -1,16 +1,15 @@
-//! The approval engine (decision 134-3): requests for start, message and end
-//! wait for a person's decision (134o, A5), under P-1…P-6 of "Decision 134 —
-//! dependencies".
+//! A parent's acts (decision 134-3 as amended by 145a): a start, a message
+//! and an end act at once, with no approval card. The launch toggle is the
+//! person's standing approval (141e); every check of 134 stays (C0, the
+//! switch, scope, the caps), and every act is recorded and audited.
 //!
 //! Dark: C0 refuses on every host until a host's own report says its
 //! identity and isolation are verified.
 
-use std::time::{Duration, Instant};
-
-use super::credential::{self, CredentialOutcome};
+use super::credential;
 use super::store::SessionRecord;
 use super::store::spawn::{
-    Decision, HostNow, MAX_MESSAGE_BYTES, MAX_TASK_BYTES, NewRequest, Refusal, Request,
+    HostNow, MAX_MESSAGE_BYTES, MAX_TASK_BYTES, Refusal, Request, StartPayload,
 };
 use super::{AgentError, AgentManager, AgentResult, Capabilities, now};
 
@@ -58,164 +57,99 @@ impl AgentManager {
             .collect())
     }
 
-    /// The credential a child running `agent` on `host_id` would start on
-    /// now (143d): what a person's own launch of it there would name, from
-    /// `deliverable`, the synced login the account would deliver to that
-    /// host. A host away is told nothing.
-    pub fn child_credential(
-        &self,
-        host_id: &str,
-        agent: &str,
-        deliverable: Option<&'static str>,
-    ) -> CredentialOutcome {
-        let caps = self.with_live(host_id, Clone::clone).unwrap_or_default();
-        credential::decide(agent, deliverable, &caps)
-    }
-
-    fn requests_changed(&self) {
-        self.requests.send_modify(|v| *v += 1);
-    }
-
-    /// P-2: a session's agent asks for a start, a message or an end. The
-    /// inner error is the refusal, naming the cap for `limit`; nothing is
-    /// recorded then.
-    pub fn create_request(
+    /// A start (145b), at once: the inner error is the refusal, naming the
+    /// cap for `limit`; nothing is recorded then. The child's host is told
+    /// after commit, with `deliverable`, the synced login a person's launch
+    /// on that host would name now (143d).
+    pub fn start_child(
         &self,
         requester: &str,
-        new: NewRequest,
-    ) -> AgentResult<std::result::Result<Request, Refusal>> {
-        match &new {
-            NewRequest::Start { task, .. } if task.len() > MAX_TASK_BYTES => {
-                return Err(AgentError::BadRequest(format!(
-                    "a task is at most {MAX_TASK_BYTES} bytes"
-                )));
-            }
-            NewRequest::Message { text, .. } if text.len() > MAX_MESSAGE_BYTES => {
-                return Err(AgentError::BadRequest(format!(
-                    "a message is at most {MAX_MESSAGE_BYTES} bytes"
-                )));
-            }
-            _ => {}
+        payload: StartPayload,
+        deliverable: Option<&'static str>,
+    ) -> AgentResult<std::result::Result<SessionRecord, Refusal>> {
+        if payload.task.len() > MAX_TASK_BYTES {
+            return Err(AgentError::BadRequest(format!(
+                "a task is at most {MAX_TASK_BYTES} bytes"
+            )));
         }
         self.get(requester)?;
-        let id = crate::auth::identity::random_id("agr_");
-        let live = self.live_signals(requester);
-        let created = self.store.lock().unwrap().create_request(
-            &id,
+        let act = crate::auth::identity::random_id("agr_");
+        let started =
+            self.store
+                .lock()
+                .unwrap()
+                .start_child(&act, requester, &payload, &now(), &|host| {
+                    self.host_check(host)
+                })?;
+        if let Ok(child) = &started {
+            self.dispatch_spawned(child, deliverable)?;
+        }
+        Ok(started.map(|child| self.get(&child.id).unwrap_or(child)))
+    }
+
+    /// A message to a live descendant (145d), at once: the round it belongs
+    /// to, and the child's waiting read is woken.
+    pub fn message_child(
+        &self,
+        requester: &str,
+        target: &str,
+        text: &str,
+    ) -> AgentResult<std::result::Result<i64, Refusal>> {
+        if text.len() > MAX_MESSAGE_BYTES {
+            return Err(AgentError::BadRequest(format!(
+                "a message is at most {MAX_MESSAGE_BYTES} bytes"
+            )));
+        }
+        self.get(requester)?;
+        let act = crate::auth::identity::random_id("agr_");
+        let sent = self.store.lock().unwrap().message_child(
+            &act,
             requester,
-            &new,
+            target,
+            text,
             &now(),
             &|host| self.host_check(host),
-            &live,
         )?;
-        if created.is_ok() {
-            self.requests_changed();
+        if sent.is_ok() {
+            self.bump(target);
         }
-        Ok(created)
+        Ok(sent)
     }
 
-    pub fn request(&self, id: &str) -> AgentResult<Request> {
-        self.store
-            .lock()
-            .unwrap()
-            .request(id)?
-            .ok_or(AgentError::NotFound("no such request"))
-    }
-
-    /// P-3: a person's device approves. `write_vault` is D2's toggle. A
-    /// start's child is told to its host after the decision commits, with
-    /// `deliverable`, the synced login a person's launch on that host would
-    /// name now (143d).
-    pub fn approve_request(
+    /// An end of a live descendant (134-7), at once: it is sent `end`, and
+    /// its own descendants are stopped when its end is recorded
+    /// (`human_end`, C1). A host that dropped since the check leaves it
+    /// running, and the parent may end it again.
+    pub fn end_child(
         &self,
-        id: &str,
-        device: &str,
-        write_vault: bool,
-        deliverable: Option<&'static str>,
-    ) -> AgentResult<Decision> {
-        let decision = self
-            .store
-            .lock()
-            .unwrap()
-            .approve_request(id, device, write_vault, &now(), &|host| {
-                self.host_check(host)
-            })?
-            .ok_or(AgentError::NotFound("no such request"))?;
-        if let Decision::Decided { child, request, .. } = &decision {
-            if let Some(child) = child {
-                self.dispatch_spawned(child, deliverable)?;
-            }
-            match (request.outcome.as_deref(), request.target.as_deref()) {
-                // A delivered message wakes the child's read (134-6).
-                (Some("delivered"), Some(target)) => self.bump(target),
-                // An approved end (134-7). Its own descendants are stopped
-                // when its end is recorded (`human_end`, C1); a host that
-                // dropped since the re-check leaves it running, and the
-                // parent may ask again.
-                (Some("ended"), Some(target)) => {
-                    if let Err(e) = self.send_end(target) {
-                        tracing::warn!(session = target, error = ?e, "approved end not sent");
-                    }
-                }
-                _ => {}
-            }
-            self.requests_changed();
+        requester: &str,
+        target: &str,
+    ) -> AgentResult<std::result::Result<(), Refusal>> {
+        self.get(requester)?;
+        let act = crate::auth::identity::random_id("agr_");
+        let ended =
+            self.store
+                .lock()
+                .unwrap()
+                .end_child(&act, requester, target, &now(), &|host| {
+                    self.host_check(host)
+                })?;
+        if ended.is_ok()
+            && let Err(e) = self.send_end(target)
+        {
+            tracing::warn!(session = target, error = ?e, "an agent's end not sent");
         }
-        Ok(decision)
+        Ok(ended)
     }
 
-    pub fn deny_request(&self, id: &str, device: &str) -> AgentResult<Decision> {
-        let decision = self
-            .store
-            .lock()
-            .unwrap()
-            .deny_request(id, device, &now())?
-            .ok_or(AgentError::NotFound("no such request"))?;
-        if matches!(decision, Decision::Decided { .. }) {
-            self.requests_changed();
-        }
-        Ok(decision)
-    }
-
-    /// Every request a session made, oldest first.
+    /// Every act a session made, oldest first.
     pub fn requests_of(&self, requester: &str) -> AgentResult<Vec<Request>> {
         Ok(self.store.lock().unwrap().requests_of(requester)?)
     }
 
-    /// The sweeper's pass (P-5): the requests it expired.
-    pub fn expire_requests(&self) -> AgentResult<Vec<Request>> {
-        let swept = self.store.lock().unwrap().expire_requests(&now())?;
-        if !swept.is_empty() {
-            self.requests_changed();
-        }
-        Ok(swept)
-    }
-
-    /// Waits up to `timeout` for a request to be decided, and answers with it
-    /// as it then is: what 134-5's tools wait on, below each adapter's
-    /// tool-call timeout (134i).
-    pub async fn wait_request(&self, id: &str, timeout: Duration) -> AgentResult<Request> {
-        let deadline = Instant::now() + timeout;
-        let mut changed = self.requests.subscribe();
-        loop {
-            changed.borrow_and_update();
-            let r = self.request(id)?;
-            let left = deadline.saturating_duration_since(Instant::now());
-            if r.state == "decided" || left.is_zero() {
-                return Ok(r);
-            }
-            // An ending or a dismissal refuses requests without a bump; the
-            // tick bounds how late a waiter hears of it.
-            let _ =
-                tokio::time::timeout(left.min(Duration::from_millis(500)), changed.changed()).await;
-        }
-    }
-
-    /// After anything the host says about itself: P-4 refuses the pending
-    /// requests of its sessions while C0 fails on a live link, and its
-    /// agents with spawn on are told their tools changed when C0 flips. A
-    /// host that is away keeps its requests until they expire (L-6), and
-    /// hears of a flip when it is back.
+    /// After anything the host says about itself: its agents with spawn on
+    /// are told their tools changed when C0 flips. A host that is away hears
+    /// of a flip when it is back.
     pub(super) fn reassess_spawn_gate(&self, host_id: &str) {
         let gate = self.spawn_gate(host_id);
         let flipped = {
@@ -227,23 +161,6 @@ impl AgentManager {
             let told = live.c0.insert(host_id.to_string(), gate.is_ok());
             told.unwrap_or(false) != gate.is_ok()
         };
-        if let Err(reason) = gate {
-            match self
-                .store
-                .lock()
-                .unwrap()
-                .refuse_requests_on_host(host_id, reason, &now())
-            {
-                Ok(0) => {}
-                Ok(refused) => {
-                    tracing::info!(host = host_id, reason, refused, "spawn requests refused");
-                    self.requests_changed();
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, host = host_id, "could not refuse spawn requests")
-                }
-            }
-        }
         if flipped {
             self.tell_spawning_agents(host_id);
         }
@@ -275,14 +192,13 @@ impl AgentManager {
         }
     }
 
-    /// The host is told of an approved child after commit (P-3): its start
-    /// names the parent's workspace and the parent, so the host makes the
-    /// child's own workspace from it (137-1) before it starts; the child
-    /// runs its own agent (143a) with its narrowed grants, the spawned
-    /// opening prompt and the asks (134-8), on the credential a person's
-    /// launch of that agent there would get (143d). The decision cannot change once
-    /// made, so a start that fails here or on the host is the child's own
-    /// `failed`, and the request keeps `started`.
+    /// The host is told of a child after its start commits: its start names
+    /// the parent's workspace and the parent, so the host makes the child's
+    /// own workspace from it (137-1) before it starts; the child runs its
+    /// own agent (143a) on its model (145b) with its narrowed grants and the
+    /// spawned opening prompt, on the credential a person's launch of that
+    /// agent there would get (143d). A start that fails here or on the host
+    /// is the child's own `failed`, and its act keeps `started`.
     pub(super) fn dispatch_spawned(
         &self,
         child: &SessionRecord,
@@ -297,11 +213,11 @@ impl AgentManager {
         let parent = parent.map(|p| self.get(&p)).transpose()?;
         let start = parent.and_then(|parent| {
             let caps = self.host_live(&child.host_id).capabilities?;
-            let (mcp, asks) = {
+            let (mcp, model) = {
                 let store = self.store.lock().unwrap();
                 (
                     store.grants_of(&child.id).ok()?,
-                    store.spawn_asks(&child.id).ok()?,
+                    store.launch(&child.id).ok()?.and_then(|l| l.model),
                 )
             };
             let reads_storm = mcp
@@ -323,7 +239,7 @@ impl AgentManager {
                     context: reads_storm,
                     resume: None,
                     provider_credential: credential.kind().map(Into::into),
-                    spawn_asks: asks.then_some(super::SpawnStart { spawned: true }),
+                    model,
                     resumed_from: None,
                     child_of: Some(parent.id.clone()),
                 },
@@ -384,7 +300,8 @@ impl AgentManager {
         )
     }
 
-    /// Test-only: a request written as it is, past every check.
+    /// Test-only: a request written as it is, past every check, as an
+    /// older server left one.
     #[cfg(test)]
     pub fn insert_request_for_tests(&self, r: &Request) {
         self.store.lock().unwrap().insert_request(r).unwrap();

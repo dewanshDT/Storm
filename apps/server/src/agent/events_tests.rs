@@ -14,7 +14,6 @@ use super::cache::Read;
 use super::events::{
     self, ChildEvent, EventsRead, IDLE_EVENT_AFTER, MAX_EVENTS_PER_CHILD, NOT_PERMITTED,
 };
-use super::store::spawn::NewRequest;
 use super::{AgentError, AgentManager, AgentResult, Command, Envelope, Hello, Launch, LaunchMeta};
 
 fn hello() -> Hello {
@@ -226,24 +225,15 @@ async fn a_144_1_a_childs_changes_are_events_in_order_and_wake_its_waiting_paren
     assert_eq!(read.events[0].id, format!("evt_{p}_{}", read.events[0].seq));
     assert!(f.m.result_of(&c).unwrap().is_none(), "not settled");
 
-    f.m.create_request(
-        &c,
-        NewRequest::Message {
-            target: g.clone(),
-            text: "look at the tests".into(),
-        },
-    )
-    .unwrap()
-    .unwrap();
+    // 145a: a message acts at once, so nothing waits for approval and no
+    // `needs_approval` comes between.
+    f.m.message_child(&c, &g, "look at the tests")
+        .unwrap()
+        .unwrap();
     f.m.report_result(&c, "succeeded", "done", None).unwrap();
-    assert_eq!(
-        f.kinds(&p),
-        [events::STARTED, events::NEEDS_APPROVAL, events::REPORTED]
-    );
+    assert_eq!(f.kinds(&p), [events::STARTED, events::REPORTED]);
     let all = f.events(&p);
-    assert_eq!(all[1].reason.as_deref(), Some("message"));
-    assert_eq!(all[1].state.needs_attention.as_deref(), Some("approval"));
-    assert_eq!(all[2].reason.as_deref(), Some("succeeded"));
+    assert_eq!(all[1].reason.as_deref(), Some("succeeded"));
     let seqs: Vec<i64> = all.iter().map(|e| e.seq).collect();
     assert!(seqs.windows(2).all(|w| w[0] < w[1]), "{seqs:?}");
 }
@@ -544,24 +534,12 @@ async fn a_144_8_no_child_text_is_ever_in_an_event() {
     let c = f.running_child(&p, "claude-code");
     f.m.force_spawn_for_tests(&c);
     let g = f.m.spawn_child_for_tests(&c, "deeper").id;
-    f.m.create_request(
-        &c,
-        NewRequest::Message {
-            target: g.clone(),
-            text: format!("{CANARY} message"),
-        },
-    )
-    .unwrap()
-    .unwrap();
-    f.m.create_request(
-        &p,
-        NewRequest::Message {
-            target: c.clone(),
-            text: format!("{CANARY} from the parent"),
-        },
-    )
-    .unwrap()
-    .unwrap();
+    f.m.message_child(&c, &g, &format!("{CANARY} message"))
+        .unwrap()
+        .unwrap();
+    f.m.message_child(&p, &c, &format!("{CANARY} from the parent"))
+        .unwrap()
+        .unwrap();
     f.m.report_result(
         &c,
         "blocked",
@@ -770,17 +748,7 @@ fn a_144_11_a_hook_report_has_no_authority() {
     let p = f.parent();
     let c = f.running_child(&p, "claude-code");
     f.m.force_spawn_for_tests(&c);
-    let g = f.m.spawn_child_for_tests(&c, "deeper").id;
-    let request =
-        f.m.create_request(
-            &c,
-            NewRequest::Message {
-                target: g.clone(),
-                text: "hi".into(),
-            },
-        )
-        .unwrap()
-        .unwrap();
+    f.m.spawn_child_for_tests(&c, "deeper");
     f.m.report_result(&c, "blocked", "stuck", None).unwrap();
     f.sent();
     let events_before = f.events(&p);
@@ -812,8 +780,7 @@ fn a_144_11_a_hook_report_has_no_authority() {
         Err(AgentError::NotYours)
     ));
 
-    let r = f.m.request(&request.id).unwrap();
-    assert_eq!(r.state, "pending", "nothing approved or refused it");
+    assert!(f.m.requests_of(&c).unwrap().is_empty(), "nor acted for it");
     assert_eq!(f.m.result_of(&c).unwrap().unwrap().outcome, "blocked");
     assert_eq!(f.m.get(&c).unwrap().status, "running", "nor ended it");
     assert_eq!(f.m.children_of(&c).unwrap().len(), 1, "nor started one");

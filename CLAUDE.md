@@ -615,28 +615,30 @@ Specification*; the slices are decisions 81 and 81a onward):
   else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
-- **Decision 134's CLI asks are written at launch, never later** (134-8,
-  `mcp::PINNED_ASK_TOOLS`/`EXEMPT_TOOLS`, pinned in the host and checked
-  against the server's lists by a test). Only a `start` carrying
-  `spawn_asks` — sent where C0 holds, for a spawning adapter with the storm
-  connection — gets them, and only such a session's switch turns on
-  (`launched_without_asks`); every other config is byte for byte as before.
-  **The switch turns on only for a session launched with it** (141e): a
-  launch's `spawn: true` is refused `spawn_unavailable` unless its `start`
-  carries `spawn_asks`, and is written on, and audited `spawn_enabled`,
+- **A parent's acts need no approval; the launch toggle is consent**
+  (decision 145a). `start_agent`, `send_message` and `end_agent` act at
+  once (`Store::start_child`/`message_child`/`end_child`), each checked as
+  134 checks it (C0, the switch, scope, C4's caps, depth) in one
+  transaction that also writes its already-decided row in `agent_requests`,
+  now the session's act log (About reads it), and audited `spawn_start`/
+  `spawn_message`/`spawn_end` with codes only. A row an older server left
+  `pending` is expired at open. No host writes a CLI ask for them: no
+  `start` carries `spawn_asks` (an old server's is ignored), so they ask
+  like any other Storm tool. **The switch turns on only for a session
+  launched with it** (141e): a launch's `spawn: true` is refused
+  `spawn_unavailable` unless the session reads Storm, runs a spawning
+  adapter and C0 holds, and is written on, and audited `spawn_enabled`,
   before `start` goes out, so the CLI's one `tools/list` has the tools
   (Claude Code never re-fetches on `list_changed`). Any other session's
   switch is refused `launched_without_spawn`; a spawn tool called while a
   launched-on session's switch is off answers `spawn_off` with a sentence.
-  Claude Code: `permissions.ask` for `start_agent`, `send_message`,
-  `end_agent` and `allow` for the exemptions in its `--settings` file (an
-  ask beats any allow; G-134-5). OpenCode: each pinned ask under a key no
-  account config has (`storm_start_agent`, else with more `*`), so the merge
-  appends it after the account's keys, at the top level and in every agent
-  the account or `runtime.toml` defines; exemptions only where the account
-  names no such key. Exemptions only on a host whose own identity is
-  verified and whose isolation self-test has passed. Codex: nothing new,
-  every Storm tool already prompts.
+- **A model reaches argv only in its agent's form** (145b,
+  `agent::model`, `profile::model_args`): `haiku`/`sonnet`/`opus` or
+  `claude-…` for Claude Code (`--model`), `provider/model` for OpenCode
+  (`--model`), an id for Codex (`-m`), ASCII letters, digits and `._:/-`
+  only, never a leading `-`, bounded; anything else is `model_unavailable`
+  on the server and a failed start on the host.
+  `docs/agent-model-vectors.json` holds both crates to one rule.
 - **C0 is the live link's word, both halves** (134r): `spawn_gate` needs
   `identity` and `isolation` exactly `verified` in what the host's current
   link has itself sent (`hello` or an inventory; a new link's carried-over
@@ -644,27 +646,35 @@ Specification*; the slices are decisions 81 and 81a onward):
   **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
   names for one directory, or one inside the other, are one workspace, and
   a name the host gives no directory for is shared with every other. Since
-  decision 141 it only *reports* sharing — a request card's `shared_with`,
-  the live sessions there outside the requester's own tree — and refuses
-  neither a launch nor the spawn switch.
-- **An approved child is started in a workspace of its own, never its
+  decision 141 it refuses neither a launch nor the spawn switch.
+- **A child is started in a workspace of its own, never its
   parent's** (134-5): its `start` names the parent's workspace and
   `child_of`, the host has the helper make the child's W2 clone or W3
   scratch before it starts it (and refuses a child on a host without
   isolation), and the child's record is `children/<id>`, which the host
   reports in `workspace_paths` once made. Its grants are the parent's live
-  ones at approval; its agent the parent's or any other its host reports
-  installed with `mcp: true`, never `shell` (143a, `approval::child_agents`;
-  else `agent_unavailable`, checked at creation and again at approval); its
+  ones at its start; its agent the parent's or any other its host reports
+  installed with `mcp: true`, never `shell` (143a, `acts::child_agents`;
+  else `agent_unavailable`); its name unique among the parent's live
+  children, and accepted wherever an id is (145b); its
   credential what a person's launch of that agent there would get (143d:
   the synced login for Claude Code when deliverable, else the host's own
-  136f setup); it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
-  starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
-  grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
-  holds the two crates' tests to one `start`.
+  136f setup); it gets the constant `mcp::SPAWNED_OPENING_PROMPT`, which
+  has it report each round with `report_result` and then wait on
+  `read_messages` for the next (145): a message after its round's result
+  starts the next round (`session_round`), and results are kept per round.
+  A child starts none (`store::spawn::BUILT_DEPTH`) until a decision says
+  how a grandchild reads its parent's own workspace.
+  `docs/spawned-start-vectors.json` holds the two crates' tests to one
+  `start` and to the prompt's words.
+- **A crew holds whole trees** (145i): only a root has a `crew_members`
+  row; a child's crew is its root's (`store::crew_root`), so a move or a
+  create naming a child acts on its root and its tree goes with it. The
+  one-time upgrade that took children's rows out is recorded in
+  `agent_migrations` with what it moved and audited once at startup.
 - **A child's changes are events in its parent's durable queue** (decision
   144, `agent/events.rs`): written in the transaction that records the
-  change (`Store::update_with`, `record_result`, `create_request`), only on
+  change (`Store::update_with`, `record_result`), only on
   a transition, at most `MAX_EVENTS_PER_CHILD` per child except the
   terminal kinds. `wait_agent` returns on the first event after a cursor;
   `after` acknowledges, so an unacknowledged event comes back after a

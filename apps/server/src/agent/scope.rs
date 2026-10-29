@@ -32,10 +32,10 @@ pub fn wait_bound(provider: &str, requested: Option<Duration>) -> Duration {
 /// At most one tree's worth of sessions per wait.
 pub const MAX_WAIT_IDS: usize = MAX_TREE as usize;
 
-/// Whether a session counts as done for a wait: it ended, or it reported.
-/// Idle is never done (134h).
-pub fn settled(r: &SessionRecord, result: Option<&SpawnResult>) -> bool {
-    r.is_ended() || result.is_some()
+/// Whether a session counts as done for a wait: it ended, or it reported
+/// for the round it is in (145). Idle is never done (134h).
+pub fn settled(r: &SessionRecord, result: Option<&SpawnResult>, round: i64) -> bool {
+    r.is_ended() || result.is_some_and(|res| res.round >= round)
 }
 
 impl AgentManager {
@@ -49,6 +49,25 @@ impl AgentManager {
 
     pub fn result_of(&self, session_id: &str) -> AgentResult<Option<SpawnResult>> {
         Ok(self.store.lock().unwrap().result(session_id)?)
+    }
+
+    /// Every round's result, oldest first (145).
+    pub fn results_of(&self, session_id: &str) -> AgentResult<Vec<SpawnResult>> {
+        Ok(self.store.lock().unwrap().results(session_id)?)
+    }
+
+    /// The round a child is in (145).
+    pub fn round_of(&self, session_id: &str) -> AgentResult<i64> {
+        Ok(self.store.lock().unwrap().round(session_id)?)
+    }
+
+    /// Whether a descendant has settled for its round now.
+    pub fn settled_now(&self, r: &SessionRecord) -> AgentResult<bool> {
+        Ok(settled(
+            r,
+            self.result_of(&r.id)?.as_ref(),
+            self.round_of(&r.id)?,
+        ))
     }
 
     /// Whether a session is offered the spawned tools now: it was started
@@ -126,16 +145,18 @@ impl AgentManager {
             )));
         }
         let result = SpawnResult {
+            round: 0,
             outcome: outcome.to_string(),
             summary: summary.to_string(),
             details: details.map(str::to_string),
             reported_at: now(),
         };
         let live = self.live_signals(caller);
-        self.store
-            .lock()
-            .unwrap()
-            .record_result(caller, &result, &live)?;
+        let result = {
+            let store = self.store.lock().unwrap();
+            store.record_result(caller, &result, &live)?;
+            store.result(caller)?.expect("just recorded")
+        };
         self.bump(caller);
         Ok(result)
     }
@@ -173,7 +194,7 @@ impl AgentManager {
             let mut all = true;
             for id in ids {
                 let r = self.descendant(caller, id)?;
-                all &= settled(&r, self.result_of(id)?.as_ref());
+                all &= self.settled_now(&r)?;
                 now_seen.push(r);
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -190,8 +211,35 @@ impl AgentManager {
         }
     }
 
-    /// Test-only: a running child of `parent`, recorded as an approval
-    /// records one.
+    /// `start_agent {background: false}` (145b): waits up to `bound` for a
+    /// child to report its first result or end, re-checking the caller's
+    /// offer on each wake. The child as it then is, with its result.
+    pub async fn wait_first_result(
+        &self,
+        child: &str,
+        bound: Duration,
+        still_offered: &(dyn Fn() -> bool + Send + Sync),
+    ) -> AgentResult<(SessionRecord, Option<SpawnResult>)> {
+        let deadline = Instant::now() + bound;
+        let mut changed = self.watch(child);
+        loop {
+            changed.borrow_and_update();
+            let r = self.get(child)?;
+            let result = self.result_of(child)?;
+            let left = deadline.saturating_duration_since(Instant::now());
+            if result.is_some() || r.is_ended() || left.is_zero() {
+                return Ok((r, result));
+            }
+            if !still_offered() {
+                return Err(AgentError::Conflict("not_permitted".into()));
+            }
+            let _ =
+                tokio::time::timeout(left.min(Duration::from_millis(500)), changed.changed()).await;
+        }
+    }
+
+    /// Test-only: a running child of `parent`, recorded as a start records
+    /// one.
     #[cfg(test)]
     pub fn spawn_child_for_tests(&self, parent: &str, task: &str) -> SessionRecord {
         let child = self

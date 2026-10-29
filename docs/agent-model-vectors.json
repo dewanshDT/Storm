@@ -1,0 +1,252 @@
+{
+  "about": "Decision 145b: the model a start may name, per agent. The server (apps/server/src/agent/model.rs) refuses anything not accepted here with model_unavailable before a start goes out; the host (apps/runtime/src/profile.rs, model_args) refuses it again and turns an accepted one into exactly `args`, the agent's own launch flag. Neither crate depends on the other: this file keeps them on one rule. Every accepted value is ASCII letters, digits and . _ : / - only, starts with a letter or digit, and is bounded, so it can reach argv (and a Windows .cmd shim) unescaped.",
+  "max_len": {
+    "claude-code": 64,
+    "opencode": 128,
+    "codex": 64
+  },
+  "accepted": [
+    {
+      "agent": "claude-code",
+      "model": "haiku",
+      "args": [
+        "--model",
+        "haiku"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "sonnet",
+      "args": [
+        "--model",
+        "sonnet"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "opus",
+      "args": [
+        "--model",
+        "opus"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-sonnet-4-5",
+      "args": [
+        "--model",
+        "claude-sonnet-4-5"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-opus-4-1-20250805",
+      "args": [
+        "--model",
+        "claude-opus-4-1-20250805"
+      ]
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-3.5-haiku",
+      "args": [
+        "--model",
+        "claude-3.5-haiku"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/claude-sonnet-4-5",
+      "args": [
+        "--model",
+        "anthropic/claude-sonnet-4-5"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "openrouter/meta-llama/llama-3.1-70b",
+      "args": [
+        "--model",
+        "openrouter/meta-llama/llama-3.1-70b"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "ollama/qwen2.5:7b",
+      "args": [
+        "--model",
+        "ollama/qwen2.5:7b"
+      ]
+    },
+    {
+      "agent": "opencode",
+      "model": "github-copilot/gpt-4o",
+      "args": [
+        "--model",
+        "github-copilot/gpt-4o"
+      ]
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5-codex",
+      "args": [
+        "-m",
+        "gpt-5-codex"
+      ]
+    },
+    {
+      "agent": "codex",
+      "model": "o3",
+      "args": [
+        "-m",
+        "o3"
+      ]
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5.1",
+      "args": [
+        "-m",
+        "gpt-5.1"
+      ]
+    }
+  ],
+  "refused": [
+    {
+      "agent": "claude-code",
+      "model": ""
+    },
+    {
+      "agent": "claude-code",
+      "model": "Haiku"
+    },
+    {
+      "agent": "claude-code",
+      "model": "--dangerously-skip-permissions"
+    },
+    {
+      "agent": "claude-code",
+      "model": "-m"
+    },
+    {
+      "agent": "claude-code",
+      "model": "haiku sonnet"
+    },
+    {
+      "agent": "claude-code",
+      "model": " haiku"
+    },
+    {
+      "agent": "claude-code",
+      "model": "gpt-4o"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-Opus"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-x;rm"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-%PATH%"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-a\"b"
+    },
+    {
+      "agent": "claude-code",
+      "model": "anthropic/claude-sonnet-4-5"
+    },
+    {
+      "agent": "claude-code",
+      "model": "claude-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "agent": "opencode",
+      "model": "claude-sonnet-4-5"
+    },
+    {
+      "agent": "opencode",
+      "model": "/claude"
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/"
+    },
+    {
+      "agent": "opencode",
+      "model": "-a/b"
+    },
+    {
+      "agent": "opencode",
+      "model": "a/-b"
+    },
+    {
+      "agent": "opencode",
+      "model": "a b/c"
+    },
+    {
+      "agent": "opencode",
+      "model": "Anthropic/claude"
+    },
+    {
+      "agent": "opencode",
+      "model": "a/b%c"
+    },
+    {
+      "agent": "opencode",
+      "model": "a/b&c"
+    },
+    {
+      "agent": "opencode",
+      "model": "a/b\nc"
+    },
+    {
+      "agent": "opencode",
+      "model": "anthropic/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "agent": "codex",
+      "model": ""
+    },
+    {
+      "agent": "codex",
+      "model": "-m"
+    },
+    {
+      "agent": "codex",
+      "model": "gpt 5"
+    },
+    {
+      "agent": "codex",
+      "model": "openai/gpt-5"
+    },
+    {
+      "agent": "codex",
+      "model": "gpt-5!"
+    },
+    {
+      "agent": "codex",
+      "model": "ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg"
+    },
+    {
+      "agent": "shell",
+      "model": "haiku"
+    },
+    {
+      "agent": "cursor",
+      "model": "haiku"
+    },
+    {
+      "agent": "command-code",
+      "model": "haiku"
+    }
+  ]
+}

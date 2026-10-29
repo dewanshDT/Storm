@@ -16,7 +16,7 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
-pub mod approval;
+pub mod acts;
 pub mod attention;
 pub mod cache;
 pub mod cascade;
@@ -25,11 +25,12 @@ pub mod events;
 pub mod images;
 pub mod inbox;
 pub mod jobs;
+pub mod model;
 pub mod scope;
 pub mod store;
 
 #[cfg(test)]
-mod approval_tests;
+mod acts_tests;
 #[cfg(test)]
 mod attention_tests;
 #[cfg(test)]
@@ -62,23 +63,13 @@ pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
 /// The adapters that may be a spawning parent (decision 134, "candidate").
 pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
 
-/// What a `start` tells the host about a session decision 134 may offer
-/// its tools (134-8).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpawnStart {
-    /// A child, whose `session_context` is exempt too.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub spawned: bool,
-}
-
-/// A spawn switch a person set: the session, what it was, what it is now,
-/// and how many pending requests turning it off refused.
+/// A spawn switch a person set: the session, what it was and what it is
+/// now.
 #[derive(Debug)]
 pub struct SpawnChange {
     pub session: SessionRecord,
     pub was: bool,
     pub enabled: bool,
-    pub refused: usize,
 }
 
 /// A session's spawn switch on its view (134-10).
@@ -128,12 +119,11 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
-        /// The session may be offered decision 134's tools while it runs,
-        /// so its CLI's config gets the pinned asks and, on a verified host,
-        /// the A6 exemptions (134-8). Sent only where C0 holds, so omitted
-        /// on every host today.
+        /// The model the agent starts on (decision 145b), checked for its
+        /// agent; the host's profile checks it again and passes it as the
+        /// agent's own flag. Omitted when none is chosen.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        spawn_asks: Option<SpawnStart>,
+        model: Option<String>,
         /// A resume's predecessor (decision 136e): an isolated host copies
         /// the conversation from that session's kept files, never from
         /// another's. Omitted on a fresh launch; an old host ignores it.
@@ -646,10 +636,15 @@ pub struct Launch {
     /// and the session's first role label. A resume ignores it.
     #[serde(default)]
     pub role: Option<ContextRef>,
-    /// Launch with the spawn switch on (141e). Refused unless the `start`
-    /// carries `spawn_asks`.
+    /// Launch with the spawn switch on (141e). Refused unless the session
+    /// could be offered the spawn tools: it reads Storm, runs a spawning
+    /// adapter and C0 holds.
     #[serde(default)]
     pub spawn: bool,
+    /// The model the agent starts on (145b): checked for its agent, else
+    /// `model_unavailable`. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -845,8 +840,6 @@ pub struct AgentManager {
     new_workspaces: Mutex<HashMap<String, HostPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
-    /// Bumped whenever the approval engine decides a request.
-    requests: watch::Sender<u64>,
     /// The signals taken from hosts (134-9, 144b).
     signals: Mutex<&'static [attention::GatedSignal]>,
     /// Added to the wall clock that times idle spells; only tests move it.
@@ -947,7 +940,6 @@ impl AgentManager {
             new_workspaces: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
-            requests: watch::channel(0).0,
             signals: Mutex::new(attention::GATED_SIGNALS),
             clock_skew: Mutex::new(std::time::Duration::ZERO),
         })
@@ -1422,25 +1414,6 @@ impl AgentManager {
         Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
     }
 
-    fn workspace_paths(&self, host_id: &str) -> HashMap<String, String> {
-        self.with_live(host_id, |caps| caps.workspace_paths.clone())
-            .unwrap_or_default()
-    }
-
-    /// How many live sessions share `session_id`'s workspace on its host,
-    /// leaving out the session's own tree (decision 141b), for the approval
-    /// card. Judged as WS-9 judged it (137-2).
-    pub fn shared_with(&self, session_id: &str) -> AgentResult<u32> {
-        let r = self.get(session_id)?;
-        let paths = self.workspace_paths(&r.host_id);
-        let store = self.store.lock().unwrap();
-        let root = store.lineage(&r.id)?.root_session;
-        let mut tree = store.descendants(&root, false)?;
-        tree.push(root);
-        tree.push(r.id.clone());
-        Ok(store.workspace_sharers(&r.host_id, &r.workspace, &tree, &paths)?)
-    }
-
     /// Why turning a session's switch on would be refused now, in 134-2's
     /// order, or `None` when it would not. A shared workspace is not a
     /// reason (decision 141a): the approval card says so instead.
@@ -1453,9 +1426,6 @@ impl AgentManager {
         }
         if let Err(code) = self.spawn_gate(&r.host_id) {
             return Ok(Some(code));
-        }
-        if !store.spawn_asks(&r.id)? {
-            return Ok(Some("launched_without_asks"));
         }
         if !store.spawn_launched(&r.id)? {
             return Ok(Some("launched_without_spawn"));
@@ -1485,9 +1455,9 @@ impl AgentManager {
     }
 
     /// A person turns a session's spawn switch on or off (134c, B1, B2).
-    /// Off always succeeds and refuses the session's pending requests at
-    /// once. On needs a live session of a spawning adapter and C0;
-    /// otherwise the inner error is the refusal's code.
+    /// Off always succeeds and stops the session's next act at once. On
+    /// needs a live session of a spawning adapter launched with it on, and
+    /// C0; otherwise the inner error is the refusal's code.
     pub fn set_spawn(
         &self,
         session_id: &str,
@@ -1500,12 +1470,11 @@ impl AgentManager {
         if enabled && let Some(code) = self.enable_refusal(&r, &store)? {
             return Ok(Err(code));
         }
-        let refused = store.set_spawn(session_id, enabled, device, &now())?;
+        store.set_spawn(session_id, enabled, device, &now())?;
         Ok(Ok(SpawnChange {
             session: r,
             was,
             enabled,
-            refused,
         }))
     }
 
@@ -1939,14 +1908,30 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
-        // 134-8: written now, since a switch turned on later cannot add asks
-        // to a config the CLI has already read.
-        let spawn_asks = (reads_storm
+        // 141e: the CLI lists its tools once, at start, so only a session
+        // that could be offered them then is launched with the switch on.
+        let may_spawn = reads_storm
             && SPAWN_PROVIDERS.contains(&provider.id.as_str())
-            && self.spawn_gate(&req.host_id).is_ok())
-        .then_some(SpawnStart::default());
-        if req.spawn && spawn_asks.is_none() {
+            && self.spawn_gate(&req.host_id).is_ok();
+        if req.spawn && !may_spawn {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let model = match resume.as_ref() {
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.model)
+                .filter(|m| model::check(&provider.id, m).is_ok()),
+            None => req.model.clone().filter(|m| !m.is_empty()),
+        };
+        if let Some(m) = &model
+            && let Err(sentence) = model::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "model_unavailable: {sentence}"
+            )));
         }
         let launch = {
             let mut store = self.store.lock().unwrap();
@@ -1969,6 +1954,7 @@ impl AgentManager {
                 // and cannot read a role note (138g).
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
                 role: meta.role.filter(|_| reads_storm),
+                model: model.clone(),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -1978,9 +1964,6 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
-            if spawn_asks.is_some() {
-                store.record_spawn_asks(&record.id, &record.created_at)?;
-            }
             if req.spawn {
                 store.record_spawn_launch(
                     &record.id,
@@ -2026,6 +2009,7 @@ impl AgentManager {
                 Some(CrewJoin::After(old)) => {
                     if let Some(m) = store.membership(&old)? {
                         let members = store.members(&m.id)?;
+                        let old = store::crew_root(&store.conn, &old)?;
                         let before = members
                             .iter()
                             .position(|s| *s == old)
@@ -2060,7 +2044,7 @@ impl AgentManager {
                 resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
-                spawn_asks,
+                model,
                 child_of: None,
             },
         );
@@ -2558,6 +2542,21 @@ impl AgentManager {
         self.store.lock().unwrap().crews()
     }
 
+    /// Test-only: a crew's stored rows, which hold only roots (145i).
+    #[cfg(test)]
+    pub fn stored_members_for_tests(&self, crew_id: &str) -> Vec<String> {
+        self.store.lock().unwrap().members(crew_id).unwrap()
+    }
+
+    /// `agent.db`'s upgrades not yet audited (145i).
+    pub fn unaudited_migrations(&self) -> Result<Vec<store::Migration>> {
+        self.store.lock().unwrap().unaudited_migrations()
+    }
+
+    pub fn mark_migration_audited(&self, name: &str, now: &str) -> Result<()> {
+        self.store.lock().unwrap().mark_migration_audited(name, now)
+    }
+
     pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
         self.store.lock().unwrap().membership(session_id)
     }
@@ -2999,6 +2998,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
             },
             meta,
             grants,
@@ -3022,6 +3022,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3694,6 +3695,7 @@ mod tests {
                     crew: None,
                     role: None,
                     spawn: false,
+                    model: None,
                 },
                 meta,
                 offered(),
@@ -3907,6 +3909,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -4484,7 +4487,7 @@ mod tests {
         assert_eq!(v["type"], "terminal.replay");
 
         // A native `start` is byte for byte what it was before token sync.
-        let start_with = |provider_credential: Option<String>, spawn_asks| Envelope {
+        let start_with = |provider_credential: Option<String>, model: Option<String>| Envelope {
             cmd_seq: 1,
             command: Command::Start {
                 session: "ags_X".into(),
@@ -4496,7 +4499,7 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
-                spawn_asks,
+                model,
                 resumed_from: None,
                 child_of: None,
             },
@@ -4511,15 +4514,10 @@ mod tests {
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
         );
-        // 134-8: a start decision 134 may offer its tools to says so.
+        // 145b: a model, when one is chosen, and no asks (145a).
         assert_eq!(
-            serde_json::to_string(&start_with(None, Some(SpawnStart::default()))).unwrap(),
-            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"spawn_asks":{}}"#
-        );
-        assert!(
-            serde_json::to_string(&start_with(None, Some(SpawnStart { spawned: true })))
-                .unwrap()
-                .ends_with(r#""spawn_asks":{"spawned":true}}"#)
+            serde_json::to_string(&start_with(None, Some("haiku".into()))).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"model":"haiku"}"#
         );
     }
 

@@ -1,6 +1,6 @@
 //! Decision 134-6: a child's inbox (134j) and C9's notice. A parent's
-//! message reaches only its own descendant's inbox, after a person approves
-//! it (A2, 134o); a child reads it with `read_messages`. Nothing here, or
+//! message reaches only its own descendant's inbox, at once since 145a; a
+//! child reads it with `read_messages`. Nothing here, or
 //! anywhere an agent reaches, writes to a terminal: a child learns of a
 //! message only by asking.
 

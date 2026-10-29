@@ -101,6 +101,8 @@ pub struct LaunchRecord {
     /// handed to the agent through `session_context`. Only a session that
     /// reads Storm has one; for any other the role is a label only (138g).
     pub role: Option<Context>,
+    /// The model it was started on (decision 145b), checked for its agent.
+    pub model: Option<String>,
 }
 
 /// The note a session was started from, or its launch role. The title is a
@@ -331,6 +333,7 @@ impl Store {
             ("session_launch", "role_vault_id"),
             ("session_launch", "role_note_id"),
             ("session_launch", "role_title"),
+            ("session_launch", "model"),
         ] {
             let has = conn
                 .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
@@ -341,6 +344,17 @@ impl Store {
         }
         spawn::init(&conn)?;
         super::events::init(&conn)?;
+        conn.execute_batch(
+            "-- One-time upgrades, each recorded with what it did and when the
+             -- server audited it.
+             CREATE TABLE IF NOT EXISTS agent_migrations (
+                 name       TEXT PRIMARY KEY,
+                 applied_at TEXT NOT NULL,
+                 detail     TEXT NOT NULL,
+                 audited_at TEXT
+             );",
+        )?;
+        migrate_crew_trees(&conn)?;
         Ok(Self {
             conn,
             events: tokio::sync::watch::channel(0).0,
@@ -462,12 +476,8 @@ impl Store {
                 r.harness_session
             ],
         )?;
-        if r.is_ended() {
-            let now = crate::index::now_rfc3339();
-            spawn::refuse_requests_of_in(&tx, &r.id, "requester_ended", &now)?;
-            if !was_ended {
-                spawn::on_ended(&tx, r, &now)?;
-            }
+        if r.is_ended() && !was_ended {
+            spawn::on_ended(&tx, r, &crate::index::now_rfc3339())?;
         }
         let now = crate::index::now_rfc3339();
         let mut wrote = false;
@@ -648,7 +658,7 @@ impl Store {
             .conn
             .query_row(
                 "SELECT session_id, name, context_vault_id, context_note_id, context_title,
-                     write_vault_id, role_vault_id, role_note_id, role_title
+                     write_vault_id, role_vault_id, role_note_id, role_title, model
                  FROM session_launch WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -671,6 +681,7 @@ impl Store {
                         context: note(2)?,
                         write_vault_id: r.get(5)?,
                         role: note(6)?,
+                        model: r.get(9)?,
                     })
                 },
             )
@@ -821,12 +832,15 @@ impl Store {
         members_of(&self.conn, crew_id)
     }
 
+    /// The crew a session is in: its tree root's (decision 145i). A spawned
+    /// child has no row of its own.
     pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
+        let root = crew_root(&self.conn, session_id)?;
         Ok(self
             .conn
             .query_row(
                 "SELECT crew_id, ord FROM crew_members WHERE session_id = ?1",
-                params![session_id],
+                params![root],
                 |r| {
                     Ok(Membership {
                         id: r.get(0)?,
@@ -835,6 +849,30 @@ impl Store {
                 },
             )
             .optional()?)
+    }
+
+    /// Upgrades that ran but the server has not audited yet.
+    pub fn unaudited_migrations(&self) -> Result<Vec<Migration>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT name, applied_at, detail FROM agent_migrations
+             WHERE audited_at IS NULL ORDER BY applied_at, name",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok(Migration {
+                name: r.get(0)?,
+                applied_at: r.get(1)?,
+                detail: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    pub fn mark_migration_audited(&self, name: &str, now: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE agent_migrations SET audited_at = ?2 WHERE name = ?1",
+            params![name, now],
+        )?;
+        Ok(())
     }
 
     /// Creates a crew at the end of the list and moves `sessions` into it, in
@@ -856,7 +894,14 @@ impl Store {
             params![crew.id, owner_user_id, crew.name, crew.color, order, now],
         )?;
         let mut removed = Vec::new();
-        for (i, s) in sessions.iter().enumerate() {
+        let mut roots: Vec<String> = Vec::new();
+        for s in sessions {
+            let root = crew_root(&tx, s)?;
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+        for (i, s) in roots.iter().enumerate() {
             if let Some(emptied) = leave_crew(&tx, s)? {
                 removed.push(emptied);
             }
@@ -919,10 +964,10 @@ impl Store {
         Ok(gone)
     }
 
-    /// Puts a session in `crew_id` before `before` (or last), or takes it out
-    /// of any crew when `crew_id` is `None`. A crew the move empties is
-    /// deleted and returned (138c). The caller checks that the crew and
-    /// `before` exist.
+    /// Puts a session's tree in `crew_id` before `before`'s (or last), or
+    /// takes it out of any crew when `crew_id` is `None`: a child moves its
+    /// root (145i). A crew the move empties is deleted and returned (138c).
+    /// The caller checks that the crew and `before` exist.
     pub fn move_session(
         &mut self,
         session_id: &str,
@@ -930,6 +975,10 @@ impl Store {
         before: Option<&str>,
     ) -> Result<Option<Crew>> {
         let tx = self.conn.transaction()?;
+        let session_id = crew_root(&tx, session_id)?;
+        let session_id = session_id.as_str();
+        let before = before.map(|b| crew_root(&tx, b)).transpose()?;
+        let before = before.as_deref();
         let from: Option<String> = tx
             .query_row(
                 "SELECT crew_id FROM crew_members WHERE session_id = ?1",
@@ -1133,8 +1182,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
              context_title, write_vault_id, created_at, role_vault_id, role_note_id,
-             role_title)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+             role_title, model)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
             l.session_id,
             l.name,
@@ -1145,9 +1194,112 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
             now,
             role_vault,
             role_note,
-            role_title
+            role_title,
+            l.model
         ],
     )?;
+    Ok(())
+}
+
+/// The session whose crew row stands for `session_id`'s: its tree's root
+/// (decision 145i), or itself.
+pub(super) fn crew_root(conn: &Connection, session_id: &str) -> Result<String> {
+    Ok(conn
+        .query_row(
+            "SELECT root_session FROM session_lineage WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or_else(|| session_id.to_string()))
+}
+
+/// One child's row the 145i upgrade took out of a crew.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MovedRow {
+    pub session_id: String,
+    pub crew_id: String,
+    pub root: String,
+    /// The root joined that crew, having been in none.
+    pub root_joined: bool,
+}
+
+/// A one-time upgrade of `agent.db`, recorded once with what it did, and
+/// audited once by the server (decision 145i).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Migration {
+    pub name: String,
+    pub applied_at: String,
+    pub detail: String,
+}
+
+pub const CREW_TREES_MIGRATION: &str = "145i_crew_trees";
+
+/// 145i, once: every child's crew row goes, and its root joins that crew if
+/// the root is in none, in one transaction with the record that it ran.
+fn migrate_crew_trees(conn: &Connection) -> Result<()> {
+    let done = conn
+        .prepare("SELECT 1 FROM agent_migrations WHERE name = ?1")?
+        .exists([CREW_TREES_MIGRATION])?;
+    if done {
+        return Ok(());
+    }
+    let tx = conn.unchecked_transaction()?;
+    let rows: Vec<(String, String, String)> = {
+        let mut stmt = tx.prepare(
+            "SELECT m.session_id, m.crew_id, l.root_session FROM crew_members m
+             JOIN session_lineage l ON l.session_id = m.session_id
+             ORDER BY m.crew_id, m.ord, m.session_id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut moved = Vec::new();
+    for (session_id, crew_id, root) in rows {
+        tx.execute(
+            "DELETE FROM crew_members WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        let root_in_one = tx
+            .prepare("SELECT 1 FROM crew_members WHERE session_id = ?1")?
+            .exists([&root])?;
+        let root_exists = tx
+            .prepare("SELECT 1 FROM sessions WHERE id = ?1")?
+            .exists([&root])?;
+        let root_joined = !root_in_one && root_exists;
+        if root_joined {
+            tx.execute(
+                "INSERT INTO crew_members (session_id, crew_id, ord)
+                 VALUES (?1, ?2, (SELECT COALESCE(MAX(ord) + 1, 0) FROM crew_members
+                                  WHERE crew_id = ?2))",
+                params![root, crew_id],
+            )?;
+        }
+        moved.push(MovedRow {
+            session_id,
+            crew_id,
+            root,
+            root_joined,
+        });
+    }
+    let emptied: Vec<String> = moved
+        .iter()
+        .map(|m| m.crew_id.clone())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter_map(|c| delete_if_empty(&tx, &c).transpose())
+        .map(|c| c.map(|c| c.id))
+        .collect::<Result<_>>()?;
+    let detail = serde_json::json!({"moved": moved, "emptied_crews": emptied});
+    tx.execute(
+        "INSERT INTO agent_migrations (name, applied_at, detail) VALUES (?1, ?2, ?3)",
+        params![
+            CREW_TREES_MIGRATION,
+            crate::index::now_rfc3339(),
+            detail.to_string()
+        ],
+    )?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1286,7 +1438,10 @@ pub mod spawn {
     pub const MAX_SUMMARY_BYTES: usize = 4 * 1024;
     pub const MAX_DETAILS_BYTES: usize = 16 * 1024;
 
-    /// 134o: start, message and end wait here for a person's decision.
+    /// 134o's requests, since decision 145a the log of a parent's acts:
+    /// each start, message and end is written here already decided, with no
+    /// one asked. A row left `pending` by an older server is expired once,
+    /// at open.
     const REQUESTS_TABLE: &str = "
     CREATE TABLE IF NOT EXISTS agent_requests (
         id                TEXT PRIMARY KEY,
@@ -1478,6 +1633,45 @@ pub mod spawn {
             ))?;
         }
         conn.execute_batch(REQUESTS_INDEXES)?;
+        conn.execute_batch(
+            "-- 145: a child's round. Absent is round 1; a message after the
+             -- round's result starts the next.
+             CREATE TABLE IF NOT EXISTS session_round (
+                 session_id TEXT PRIMARY KEY,
+                 round      INTEGER NOT NULL CHECK (round >= 1),
+                 changed_at TEXT NOT NULL
+             );
+             -- 145: every round's result, as report_result left it.
+             CREATE TABLE IF NOT EXISTS session_round_result (
+                 session_id  TEXT NOT NULL,
+                 round       INTEGER NOT NULL,
+                 outcome     TEXT NOT NULL CHECK (outcome != ''),
+                 summary     TEXT NOT NULL,
+                 details     TEXT,
+                 reported_at TEXT NOT NULL,
+                 PRIMARY KEY (session_id, round)
+             );",
+        )?;
+        let has_round = conn
+            .prepare("SELECT 1 FROM pragma_table_info('session_result') WHERE name = 'round'")?
+            .exists([])?;
+        if !has_round {
+            conn.execute(
+                "ALTER TABLE session_result ADD COLUMN round INTEGER NOT NULL DEFAULT 1",
+                [],
+            )?;
+        }
+        // 145a: nothing waits for a person any more. What an older server
+        // left waiting expires, and its messages with it.
+        let now = crate::index::now_rfc3339();
+        let expired = conn.execute(
+            "UPDATE agent_requests SET state = 'decided', outcome = 'expired', decided_at = ?1
+             WHERE state IN ('pending', 'approving')",
+            params![now],
+        )?;
+        if expired > 0 {
+            settle_messages(conn)?;
+        }
         Ok(())
     }
 
@@ -1492,6 +1686,9 @@ pub mod spawn {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct SpawnResult {
+        /// The round it answers (145): 1 for the task, then one per message
+        /// that came after a result.
+        pub round: i64,
         pub outcome: String,
         pub summary: String,
         pub details: Option<String>,
@@ -1549,39 +1746,11 @@ pub mod spawn {
 
     const ENDED: &str = "('completed', 'failed', 'stopped')";
 
-    /// Whether two of a host's workspaces may share files (WS-9, 137-2): by
-    /// the canonical directories the host reports for both, and otherwise
-    /// yes, since two names can be one directory (a symlinked or nested
-    /// root) and nothing here can rule it out.
-    pub fn shares_workspace(
-        a: &str,
-        b: &str,
-        paths: &std::collections::HashMap<String, String>,
-    ) -> bool {
-        match (paths.get(a), paths.get(b)) {
-            (Some(a), Some(b)) => same_workspace(a, b),
-            _ => true,
-        }
-    }
-
-    /// The same directory, or one inside the other. Only separators are
-    /// normalized: the paths are the host's own canonical ones.
-    pub fn same_workspace(a: &str, b: &str) -> bool {
-        let sep = |c: char| c == '/' || c == '\\';
-        let (a, b) = (a.trim_end_matches(sep), b.trim_end_matches(sep));
-        let inside = |inner: &str, outer: &str| {
-            inner
-                .strip_prefix(outer)
-                .is_some_and(|rest| rest.starts_with(sep))
-        };
-        a == b || inside(a, b) || inside(b, a)
-    }
-
-    // ---- 134-3: the approval engine (P-1…P-6) -------------------------------
+    // ---- 145a: a parent's acts (134-3's checks, no approval) -----------------
     //
-    // Every step below runs in one transaction of the store, whose lock the
-    // manager holds throughout: that lock is P-1's serialization point, for
-    // every tree at once.
+    // Every act runs in one transaction of the store, whose lock the manager
+    // holds throughout: that lock is the serialization point for the caps,
+    // for every tree at once.
 
     /// C4's hard caps. Counted here rather than held as constraints, so a
     /// revisit needs no migration.
@@ -1593,14 +1762,11 @@ pub mod spawn {
     pub const BUILT_DEPTH: i64 = 1;
     pub const MAX_CHILDREN: i64 = 3;
     pub const MAX_TREE: i64 = 6;
-    pub const MAX_PENDING: i64 = 2;
-    /// A5: undecided for ten minutes, a request expires.
-    pub const REQUEST_TTL_SECS: i64 = 600;
 
-    /// 134j: at most this many unacknowledged messages (`pending_approval`,
-    /// `queued`, `delivered`) in one inbox. A parent's messages may take all
-    /// but one: the last is kept for C9's notice, which is never refused, so
-    /// the cap holds with it.
+    /// 134j: at most this many unacknowledged messages (`queued`,
+    /// `delivered`) in one inbox. A parent's messages may take all but one:
+    /// the last is kept for C9's notice, which is never refused, so the cap
+    /// holds with it.
     pub const MAX_INBOX: i64 = 32;
     const UNACKED: &str = "('pending_approval', 'queued', 'delivered')";
     /// C9: Storm's own words, fixed, with nothing of the parent's in them.
@@ -1609,85 +1775,42 @@ pub mod spawn {
     /// C9: the stop follows the notice after this long; no session extends it.
     pub const NOTICE_GRACE_SECS: i64 = 30;
 
-    /// What an agent asks a person to approve (134o).
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum NewRequest {
-        Start {
-            task: String,
-            /// The child's agent; the parent's own when absent. Another must
-            /// be one the parent's host can start a child in (143a).
-            provider: Option<String>,
-            /// What the child is called; the workspace's name otherwise.
-            name: Option<String>,
-            /// A note the parent can read, the child's own context note.
-            context_note: Option<super::Context>,
-        },
-        Message {
-            target: String,
-            text: String,
-        },
-        End {
-            target: String,
-        },
-    }
+    /// The longest name a parent may give a child, in characters.
+    pub const MAX_NAME_CHARS: usize = 80;
 
-    impl NewRequest {
-        fn kind(&self) -> &'static str {
-            match self {
-                Self::Start { .. } => "start",
-                Self::Message { .. } => "message",
-                Self::End { .. } => "end",
-            }
-        }
-
-        fn target(&self) -> Option<&str> {
-            match self {
-                Self::Start { .. } => None,
-                Self::Message { target, .. } | Self::End { target } => Some(target),
-            }
-        }
-
-        fn payload(&self) -> String {
-            match self {
-                Self::Start {
-                    task,
-                    provider,
-                    name,
-                    context_note,
-                } => serde_json::to_string(&StartPayload {
-                    task: task.clone(),
-                    provider: provider.clone(),
-                    name: name.clone(),
-                    context_note: context_note.clone(),
-                }),
-                Self::Message { text, .. } => {
-                    serde_json::to_string(&MessagePayload { text: text.clone() })
-                }
-                Self::End { .. } => Ok("{}".into()),
-            }
-            .expect("serializable")
-        }
-    }
-
-    /// A start request's payload: the exact task a person approves.
-    #[derive(Debug, Clone, Serialize, Deserialize)]
+    /// A start's payload, as its act row keeps it (145b).
+    #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
     pub struct StartPayload {
         pub task: String,
+        /// The child's agent; the parent's own when absent. Another must be
+        /// one the parent's host can start a child in (143a).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub provider: Option<String>,
+        /// Unique among the parent's live children; one made from the task
+        /// otherwise.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub name: Option<String>,
+        /// A note the parent can read, the child's own context note.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub context_note: Option<super::Context>,
+        /// Checked for the child's agent before the act (145b).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub model: Option<String>,
+        /// A crew role (138), applied as a launch role is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub role: Option<super::Context>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct MessagePayload {
         pub text: String,
+        /// The round the message belongs to (145).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub round: Option<i64>,
     }
 
-    /// Why a request was refused: one of 134o's reasons, and for `limit`,
-    /// the cap. `not_found` is creation's answer for a target out of scope.
+    /// Why an act was refused, and for `limit`, the cap. `not_found` is the
+    /// answer for a target out of scope.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct Refusal {
         pub reason: &'static str,
@@ -1720,10 +1843,10 @@ pub mod spawn {
     /// What the host's live link says now: C0's refusal, or what it reports.
     pub type HostCheck<'a> = &'a dyn Fn(&str) -> std::result::Result<HostNow, &'static str>;
 
-    /// The child's agent and its kind: the parent's own when the request
+    /// The child's agent and its kind: the parent's own when the start
     /// names none or names it, else one its host reports it can start a
     /// child in (143a). `None` is `agent_unavailable`.
-    fn child_agent(
+    pub fn child_agent(
         parent: &SessionRecord,
         named: Option<&str>,
         host: &HostNow,
@@ -1735,30 +1858,6 @@ pub mod spawn {
             }
             Some(p) => host.agents.iter().find(|(id, _)| id == p).cloned(),
         }
-    }
-
-    /// How an approval or a denial came out.
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    pub enum Decision {
-        /// It was no longer pending: something else decided it first.
-        Taken(Request),
-        Decided {
-            request: Request,
-            /// The child a start's approval recorded, before its host is told.
-            child: Option<Box<SessionRecord>>,
-            /// The cap a `refused: limit` names. Not stored: the schema keeps
-            /// the reason only.
-            cap: Option<&'static str>,
-        },
-    }
-
-    enum Act {
-        Expired,
-        Refused(Refusal),
-        Started(Box<SessionRecord>),
-        Delivered,
-        /// An approved end: its target is sent `end` after commit.
-        Ended,
     }
 
     /// A cascade target whose stop is due (L-3, L-8): immediate for a
@@ -1810,7 +1909,6 @@ pub mod spawn {
                     continue;
                 }
                 let r = get_in(&tx, &id)?.expect("just updated");
-                refuse_requests_of_in(&tx, &id, "requester_ended", now)?;
                 on_ended(&tx, &r, now)?;
                 crate::agent::events::record_in(
                     &tx,
@@ -1887,7 +1985,7 @@ pub mod spawn {
             requester: &SessionRecord,
             max_sessions: u32,
         ) -> Result<Option<&'static str>> {
-            over_cap(&self.conn, requester, "start", max_sessions, "")
+            over_cap(&self.conn, requester, max_sessions)
         }
 
         /// Test-only: a child recorded exactly as an approval records one,
@@ -1904,9 +2002,7 @@ pub mod spawn {
             let parent = get_in(&tx, parent)?.expect("a parent");
             let payload = StartPayload {
                 task: task.into(),
-                provider: None,
-                name: None,
-                context_note: None,
+                ..StartPayload::default()
             };
             let agent = (parent.provider.clone(), parent.provider_kind.clone());
             let mut child = spawn_child(&tx, &parent, agent, &payload, write_vault, &now)?;
@@ -1977,28 +2073,6 @@ pub mod spawn {
                 .optional()?)
         }
 
-        /// Records that a session's start carried `spawn_asks` (134-8).
-        pub fn record_spawn_asks(&self, session_id: &str, now: &str) -> Result<()> {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO session_spawn_asks (session_id, created_at) VALUES (?1, ?2)",
-                params![session_id, now],
-            )?;
-            Ok(())
-        }
-
-        /// Whether a session's CLI config was written with the pinned asks.
-        pub fn spawn_asks(&self, session_id: &str) -> Result<bool> {
-            Ok(self
-                .conn
-                .query_row(
-                    "SELECT 1 FROM session_spawn_asks WHERE session_id = ?1",
-                    params![session_id],
-                    |_| Ok(()),
-                )
-                .optional()?
-                .is_some())
-        }
-
         /// Records a launch with the switch on (141e) and turns it on, before
         /// the host is sent `start`.
         pub fn record_spawn_launch(
@@ -2039,18 +2113,16 @@ pub mod spawn {
                 .unwrap_or(false))
         }
 
-        /// Turns a session's spawn switch on or off. Turning it off refuses
-        /// that session's pending requests, `revoked`, in the same
-        /// transaction (B2, P-4); how many it refused.
+        /// Turns a session's spawn switch on or off (B2). Off stops its next
+        /// act at once (145a): nothing waits to be refused.
         pub fn set_spawn(
             &mut self,
             session_id: &str,
             enabled: bool,
             device: Option<&str>,
             now: &str,
-        ) -> Result<usize> {
-            let tx = self.conn.transaction()?;
-            tx.execute(
+        ) -> Result<()> {
+            self.conn.execute(
                 "INSERT INTO session_spawn (session_id, enabled, changed_by_device, changed_at)
                  VALUES (?1, ?2, ?3, ?4)
                  ON CONFLICT (session_id) DO UPDATE SET enabled = excluded.enabled,
@@ -2058,35 +2130,7 @@ pub mod spawn {
                      changed_at = excluded.changed_at",
                 params![session_id, enabled, device, now],
             )?;
-            let refused = if enabled {
-                0
-            } else {
-                refuse_where(&tx, "requester = ?1", session_id, "revoked", now)?
-            };
-            tx.commit()?;
-            Ok(refused)
-        }
-
-        /// How many live sessions on `host_id` share `workspace` (WS-9, 137-2,
-        /// now only reported: decision 141a), leaving out `except`. `unknown`
-        /// is live. Nested workspaces share files, so they count as one.
-        pub fn workspace_sharers(
-            &self,
-            host_id: &str,
-            workspace: &str,
-            except: &[String],
-            paths: &std::collections::HashMap<String, String>,
-        ) -> Result<u32> {
-            let mut n = 0;
-            for r in self.for_host(host_id)? {
-                if !r.is_ended()
-                    && !except.contains(&r.id)
-                    && shares_workspace(&r.workspace, workspace, paths)
-                {
-                    n += 1;
-                }
-            }
-            Ok(n)
+            Ok(())
         }
 
         pub fn task(&self, session_id: &str) -> Result<Option<String>> {
@@ -2106,15 +2150,7 @@ pub mod spawn {
             if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
                 bail!("{} is not a result outcome", r.outcome);
             }
-            self.conn.execute(
-                "INSERT INTO session_result (session_id, outcome, summary, details, reported_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (session_id) DO UPDATE SET outcome = excluded.outcome,
-                     summary = excluded.summary, details = excluded.details,
-                     reported_at = excluded.reported_at",
-                params![session_id, r.outcome, r.summary, r.details, r.reported_at],
-            )?;
-            Ok(())
+            write_result(&self.conn, session_id, r)
         }
 
         /// `report_result` (134h) with its events (144a), in one
@@ -2132,23 +2168,15 @@ pub mod spawn {
             let Some(session) = get_in(&tx, session_id)? else {
                 bail!("no session {session_id}");
             };
-            let before = events::needs_attention_in(
-                &tx,
-                &session,
-                live.attention.as_deref(),
-                &r.reported_at,
-            )?;
+            let before = events::needs_attention_in(&tx, &session, live.attention.as_deref())?;
             if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
                 bail!("{} is not a result outcome", r.outcome);
             }
-            tx.execute(
-                "INSERT INTO session_result (session_id, outcome, summary, details, reported_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)
-                 ON CONFLICT (session_id) DO UPDATE SET outcome = excluded.outcome,
-                     summary = excluded.summary, details = excluded.details,
-                     reported_at = excluded.reported_at",
-                params![session_id, r.outcome, r.summary, r.details, r.reported_at],
-            )?;
+            let r = &SpawnResult {
+                round: round_of(&tx, session_id)?,
+                ..r.clone()
+            };
+            write_result(&tx, session_id, r)?;
             let mut wrote = events::record_in(
                 &tx,
                 &session,
@@ -2158,12 +2186,7 @@ pub mod spawn {
                 live,
                 &r.reported_at,
             )?;
-            let after = events::needs_attention_in(
-                &tx,
-                &session,
-                live.attention.as_deref(),
-                &r.reported_at,
-            )?;
+            let after = events::needs_attention_in(&tx, &session, live.attention.as_deref())?;
             if after == Some(crate::agent::attention::BLOCKED) && before != after {
                 wrote |= events::record_in(
                     &tx,
@@ -2186,19 +2209,27 @@ pub mod spawn {
             Ok(self
                 .conn
                 .query_row(
-                    "SELECT outcome, summary, details, reported_at FROM session_result
+                    "SELECT outcome, summary, details, reported_at, round FROM session_result
                      WHERE session_id = ?1",
                     params![session_id],
-                    |r| {
-                        Ok(SpawnResult {
-                            outcome: r.get(0)?,
-                            summary: r.get(1)?,
-                            details: r.get(2)?,
-                            reported_at: r.get(3)?,
-                        })
-                    },
+                    result_from_row,
                 )
                 .optional()?)
+        }
+
+        /// Every round's result, oldest first (145).
+        pub fn results(&self, session_id: &str) -> Result<Vec<SpawnResult>> {
+            let mut stmt = self.conn.prepare(
+                "SELECT outcome, summary, details, reported_at, round FROM session_round_result
+                 WHERE session_id = ?1 ORDER BY round",
+            )?;
+            let rows = stmt.query_map(params![session_id], result_from_row)?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+
+        /// The round a child is in: 1 until a message comes after a result.
+        pub fn round(&self, session_id: &str) -> Result<i64> {
+            round_of(&self.conn, session_id)
         }
 
         /// Records a new request, `pending`.
@@ -2221,19 +2252,16 @@ pub mod spawn {
             Ok(())
         }
 
-        pub fn request(&self, id: &str) -> Result<Option<Request>> {
-            request_of(&self.conn, id)
-        }
-
-        /// Refuses a requester's pending requests with `reason` (L-7, P-4).
         #[cfg(test)]
-        pub fn refuse_requests_of(
-            &self,
-            requester: &str,
-            reason: &str,
-            now: &str,
-        ) -> Result<usize> {
-            refuse_where(&self.conn, "requester = ?1", requester, reason, now)
+        pub fn request(&self, id: &str) -> Result<Option<Request>> {
+            Ok(self
+                .conn
+                .query_row(
+                    &format!("SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE id = ?1"),
+                    params![id],
+                    request_from_row,
+                )
+                .optional()?)
         }
 
         /// Puts a message in a session's inbox at the next sequence number.
@@ -2494,234 +2522,148 @@ pub mod spawn {
                 .optional()?)
         }
 
-        /// P-2: checks C0, scope and every cap, counting live sessions and
-        /// pending requests, and records the request `pending`, in one
-        /// transaction. A refusal writes nothing.
-        pub fn create_request(
+        /// A start, at once (145a, 145b): the switch, C0, the child's agent,
+        /// its name and every cap are checked, then the child is recorded
+        /// (its record, lineage, task, narrowed grants and launch) with the
+        /// act, in one transaction. A refusal writes nothing; the host is
+        /// told after commit.
+        pub fn start_child(
             &mut self,
-            id: &str,
+            act: &str,
             requester: &str,
-            new: &NewRequest,
+            payload: &StartPayload,
             now: &str,
             host: HostCheck<'_>,
-            signals: &crate::agent::events::LiveSignals,
-        ) -> Result<std::result::Result<Request, Refusal>> {
+        ) -> Result<std::result::Result<SessionRecord, Refusal>> {
             let tx = self.conn.transaction()?;
             let Some(r) = get_in(&tx, requester)? else {
                 bail!("no session {requester}");
             };
-            if let Err(mut refusal) = may_request(&tx, &r, new.kind(), new.target(), host) {
-                // A switch that is off was never on for this request.
-                if refusal.reason == "revoked" {
-                    refusal.reason = "not_permitted";
-                }
+            if let Err(refusal) = may_act(&tx, &r, None, host) {
                 return Ok(Err(refusal));
             }
             let live = host(&r.host_id).unwrap_or_default();
-            if let NewRequest::Start { provider, .. } = new
-                && child_agent(&r, provider.as_deref(), &live).is_none()
-            {
+            let Some(agent) = child_agent(&r, payload.provider.as_deref(), &live) else {
                 return Ok(Err(Refusal::because("agent_unavailable")));
+            };
+            if let Some(name) = &payload.name
+                && live_child_names(&tx, &r.id)?.contains(name)
+            {
+                return Ok(Err(Refusal::because("name_taken")));
             }
-            if let Some(cap) = over_cap(&tx, &r, new.kind(), live.max_sessions, id)? {
+            if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
-            if let NewRequest::Message { target, .. } = new
-                && inbox_full(&tx, target, None)?
-            {
-                return Ok(Err(Refusal::limit("inbox")));
-            }
-            let request = Request {
-                id: id.to_string(),
-                kind: new.kind().to_string(),
-                requester: requester.to_string(),
-                target: new.target().map(Into::into),
-                payload: new.payload(),
-                created_at: now.to_string(),
-                expires_at: plus_secs(now, REQUEST_TTL_SECS),
-                state: "pending".into(),
-                decided_by_device: None,
-                decided_at: None,
-                outcome: None,
-                reason: None,
-                session: None,
-            };
-            let waited = crate::agent::events::awaits_decision_in(&tx, requester, now)?;
-            tx.execute(
-                "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
-                     expires_at, state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')",
-                params![
-                    request.id,
-                    request.kind,
-                    request.requester,
-                    request.target,
-                    request.payload,
-                    request.created_at,
-                    request.expires_at
-                ],
+            let child = spawn_child(&tx, &r, agent, payload, false, now)?;
+            insert_act(
+                &tx,
+                act,
+                "start",
+                requester,
+                None,
+                &serde_json::to_string(payload)?,
+                "started",
+                Some(&child.id),
+                now,
             )?;
-            if let NewRequest::Message { target, text } = new {
-                insert_message(
-                    &tx,
-                    target,
-                    requester,
-                    text,
-                    Some(id),
-                    "pending_approval",
-                    now,
-                )?;
-            }
-            // A child's first waiting request (144a); one more while one
-            // already waits changes nothing its parent can see.
-            let wrote = !waited
-                && crate::agent::events::record_in(
-                    &tx,
-                    &r,
-                    crate::agent::events::NEEDS_APPROVAL,
-                    Some(new.kind()),
-                    crate::agent::events::STORM,
-                    signals,
-                    now,
-                )?;
             tx.commit()?;
-            if wrote {
-                self.notify_events();
-            }
-            Ok(Ok(request))
+            Ok(Ok(child))
         }
 
-        /// P-3: takes the request `pending` → `approving` (single use), then
-        /// re-checks it against current state and acts, recording the
-        /// outcome in the same transaction. `None` when there is no such
-        /// request. A start's child is recorded here with its lineage, task
-        /// and narrowed grants; its host is told after commit.
-        pub fn approve_request(
+        /// A message to a live descendant, at once: into its inbox `queued`,
+        /// as the round it belongs to. A message after the target's result
+        /// for its round starts the next round (145d); the round is
+        /// returned.
+        pub fn message_child(
             &mut self,
-            id: &str,
-            device: &str,
-            write_vault: bool,
+            act: &str,
+            requester: &str,
+            target: &str,
+            text: &str,
             now: &str,
             host: HostCheck<'_>,
-        ) -> Result<Option<Decision>> {
+        ) -> Result<std::result::Result<i64, Refusal>> {
             let tx = self.conn.transaction()?;
-            let claimed = tx.execute(
-                "UPDATE agent_requests SET state = 'approving' WHERE id = ?1 AND state = 'pending'",
-                params![id],
-            )? == 1;
-            let Some(request) = request_of(&tx, id)? else {
-                return Ok(None);
+            let Some(r) = get_in(&tx, requester)? else {
+                bail!("no session {requester}");
             };
-            if !claimed {
-                return Ok(Some(Decision::Taken(request)));
+            if let Err(refusal) = may_act(&tx, &r, Some(target), host) {
+                return Ok(Err(refusal));
             }
-            let (outcome, reason, cap, child) =
-                match recheck_and_act(&tx, &request, write_vault, now, host)? {
-                    Act::Expired => ("expired", None, None, None),
-                    Act::Refused(r) => ("refused", Some(r.reason), r.cap, None),
-                    Act::Started(child) => ("started", None, None, Some(child)),
-                    Act::Delivered => ("delivered", None, None, None),
-                    Act::Ended => ("ended", None, None, None),
-                };
-            let session = child.as_ref().map(|c| c.id.as_str());
-            decide(&tx, id, outcome, reason, session, Some(device), now)?;
-            let request = request_of(&tx, id)?.expect("just decided");
-            tx.commit()?;
-            Ok(Some(Decision::Decided {
-                request,
-                child,
-                cap,
-            }))
-        }
-
-        /// A person denies a pending request; one already past its expiry is
-        /// recorded `expired` instead (P-5). `None` when there is no such
-        /// request.
-        pub fn deny_request(
-            &mut self,
-            id: &str,
-            device: &str,
-            now: &str,
-        ) -> Result<Option<Decision>> {
-            let tx = self.conn.transaction()?;
-            let claimed = tx.execute(
-                "UPDATE agent_requests SET state = 'approving' WHERE id = ?1 AND state = 'pending'",
-                params![id],
-            )? == 1;
-            let Some(request) = request_of(&tx, id)? else {
-                return Ok(None);
-            };
-            if !claimed {
-                return Ok(Some(Decision::Taken(request)));
+            if inbox_full(&tx, target)? {
+                return Ok(Err(Refusal::limit("inbox")));
             }
-            let outcome = if expired(now, &request.expires_at) {
-                "expired"
-            } else {
-                "denied"
-            };
-            decide(&tx, id, outcome, None, None, Some(device), now)?;
-            let request = request_of(&tx, id)?.expect("just decided");
-            tx.commit()?;
-            Ok(Some(Decision::Decided {
-                request,
-                child: None,
-                cap: None,
-            }))
-        }
-
-        /// The sweeper (P-5): every pending request past its expiry becomes
-        /// `expired`. Returns those it expired.
-        pub fn expire_requests(&mut self, now: &str) -> Result<Vec<Request>> {
-            let due: Vec<String> = {
-                let mut stmt = self.conn.prepare_cached(
-                    "SELECT id, expires_at FROM agent_requests WHERE state = 'pending'
-                     ORDER BY created_at, id",
+            let mut round = round_of(&tx, target)?;
+            let answered = tx
+                .prepare("SELECT 1 FROM session_round_result WHERE session_id = ?1 AND round = ?2")?
+                .exists(params![target, round])?;
+            if answered {
+                round += 1;
+                tx.execute(
+                    "INSERT INTO session_round (session_id, round, changed_at) VALUES (?1, ?2, ?3)
+                     ON CONFLICT (session_id) DO UPDATE SET round = excluded.round,
+                         changed_at = excluded.changed_at",
+                    params![target, round, now],
                 )?;
-                let rows =
-                    stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
-                    .into_iter()
-                    .filter(|(_, expires)| expired(now, expires))
-                    .map(|(id, _)| id)
-                    .collect()
+            }
+            let payload = MessagePayload {
+                text: text.to_string(),
+                round: Some(round),
             };
-            // The store is held `&mut`, so nothing can decide these between the
-            // read and the write; most sweeps find none and write nothing.
-            if due.is_empty() {
-                return Ok(Vec::new());
-            }
-            let tx = self.conn.transaction()?;
-            let mut swept = Vec::new();
-            for id in due {
-                decide(&tx, &id, "expired", None, None, None, now)?;
-                swept.push(request_of(&tx, &id)?.expect("just decided"));
-            }
+            insert_act(
+                &tx,
+                act,
+                "message",
+                requester,
+                Some(target),
+                &serde_json::to_string(&payload)?,
+                "delivered",
+                None,
+                now,
+            )?;
+            insert_message(&tx, target, requester, text, Some(act), "queued", now)?;
             tx.commit()?;
-            Ok(swept)
+            Ok(Ok(round))
         }
 
-        /// P-4 for a host downgrade: refuses the pending requests of every
-        /// session on the host with C0's reason. How many it refused.
-        pub fn refuse_requests_on_host(
-            &self,
-            host_id: &str,
-            reason: &str,
+        /// An end of a live descendant, at once: recorded here, and the
+        /// manager sends `end` after commit. Its own descendants follow it
+        /// when its end is recorded (`human_end`, C1).
+        pub fn end_child(
+            &mut self,
+            act: &str,
+            requester: &str,
+            target: &str,
             now: &str,
-        ) -> Result<usize> {
-            refuse_where(
-                &self.conn,
-                "requester IN (SELECT id FROM sessions WHERE host_id = ?1)",
-                host_id,
-                reason,
+            host: HostCheck<'_>,
+        ) -> Result<std::result::Result<(), Refusal>> {
+            let tx = self.conn.transaction()?;
+            let Some(r) = get_in(&tx, requester)? else {
+                bail!("no session {requester}");
+            };
+            if let Err(refusal) = may_act(&tx, &r, Some(target), host) {
+                return Ok(Err(refusal));
+            }
+            insert_act(
+                &tx,
+                act,
+                "end",
+                requester,
+                Some(target),
+                "{}",
+                "ended",
+                None,
                 now,
-            )
+            )?;
+            tx.commit()?;
+            Ok(Ok(()))
         }
 
         /// The requests a session made, oldest first.
         pub fn requests_of(&self, requester: &str) -> Result<Vec<Request>> {
             let mut stmt = self.conn.prepare(&format!(
                 "SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE requester = ?1
-                 ORDER BY created_at, id"
+                 ORDER BY created_at, rowid"
             ))?;
             let rows = stmt.query_map(params![requester], request_from_row)?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -2747,16 +2689,6 @@ pub mod spawn {
             reason: r.get(11)?,
             session: r.get(12)?,
         })
-    }
-
-    fn request_of(conn: &Connection, id: &str) -> Result<Option<Request>> {
-        Ok(conn
-            .query_row(
-                &format!("SELECT {REQUEST_COLUMNS} FROM agent_requests WHERE id = ?1"),
-                params![id],
-                request_from_row,
-            )
-            .optional()?)
     }
 
     fn spawn_on(conn: &Connection, session_id: &str) -> Result<bool> {
@@ -2787,37 +2719,32 @@ pub mod spawn {
         crate::index::rfc3339_minus_secs(stamp, -secs)
     }
 
-    /// What creation and approval both require of the requester and its
-    /// target: live, spawn on, a spawning adapter, C0, and a target that is
-    /// its live descendant. Creation answers an out-of-scope target
-    /// `not_found`; approval, `target_gone`.
-    fn may_request(
+    /// What every act requires of the requester and its target: live, its
+    /// switch on, a spawning adapter, C0, and a target that is its live
+    /// descendant (`not_found` otherwise).
+    fn may_act(
         conn: &Connection,
         r: &SessionRecord,
-        kind: &str,
         target: Option<&str>,
         host: HostCheck<'_>,
     ) -> std::result::Result<(), Refusal> {
         let fail = |e: anyhow::Error| {
-            tracing::warn!(error = %e, "a spawn request's check failed");
+            tracing::warn!(error = %e, "a spawn act's check failed");
             Refusal::because("not_permitted")
         };
-        // Being ended asks for nothing more: a request it made now could
-        // add a child its cascade never snapshotted (AP-3).
+        // Being ended asks for nothing more: a child it started now could be
+        // one its cascade never snapshotted (AP-3).
         if r.is_ended() || doomed(conn, &r.id).map_err(fail)? {
             return Err(Refusal::because("requester_ended"));
         }
         if !spawn_on(conn, &r.id).map_err(fail)? {
-            return Err(Refusal::because("revoked"));
+            return Err(Refusal::because("spawn_off"));
         }
         if !crate::agent::SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
             return Err(Refusal::because("not_permitted"));
         }
         host(&r.host_id).map_err(Refusal::because)?;
-        if kind != "start" {
-            let Some(target) = target else {
-                return Err(Refusal::because("not_found"));
-            };
+        if let Some(target) = target {
             let live = descendants_of(conn, &r.id, true).map_err(fail)?;
             if !live.iter().any(|d| d == target) {
                 return Err(Refusal::because("not_found"));
@@ -2826,39 +2753,16 @@ pub mod spawn {
         Ok(())
     }
 
-    /// The cap this request would break, counting live sessions and pending
-    /// requests and the request itself once (C4). `except` is its own id,
-    /// so an approval does not count it twice.
+    /// The cap a start by `r` would break, counting live sessions and the
+    /// start itself (C4).
     fn over_cap(
         conn: &Connection,
         r: &SessionRecord,
-        kind: &str,
         max_sessions: u32,
-        except: &str,
     ) -> Result<Option<&'static str>> {
-        let open: Vec<(String, String)> = {
-            let mut stmt = conn.prepare(
-                "SELECT kind, requester FROM agent_requests
-                 WHERE state IN ('pending', 'approving') AND id != ?1",
-            )?;
-            let rows = stmt.query_map(params![except], |row| Ok((row.get(0)?, row.get(1)?)))?;
-            rows.collect::<rusqlite::Result<_>>()?
-        };
-        let starts_by = |who: &dyn Fn(&str) -> bool| {
-            open.iter()
-                .filter(|(k, requester)| k == "start" && who(requester))
-                .count() as i64
-        };
         let lineage = lineage_of(conn, &r.id)?;
-        if kind == "start" && lineage.depth + 1 > MAX_DEPTH.min(BUILT_DEPTH) {
+        if lineage.depth + 1 > MAX_DEPTH.min(BUILT_DEPTH) {
             return Ok(Some("depth"));
-        }
-        let mine = open.iter().filter(|(_, q)| *q == r.id).count() as i64;
-        if mine + 1 > MAX_PENDING {
-            return Ok(Some("pending"));
-        }
-        if kind != "start" {
-            return Ok(None);
         }
         let children: i64 = conn.query_row(
             &format!(
@@ -2868,86 +2772,117 @@ pub mod spawn {
             params![r.id],
             |row| row.get(0),
         )?;
-        if children + starts_by(&|q| q == r.id) + 1 > MAX_CHILDREN {
+        if children + 1 > MAX_CHILDREN {
             return Ok(Some("children"));
         }
         let root = &lineage.root_session;
-        let members: Vec<String> = std::iter::once(root.clone())
-            .chain(descendants_of(conn, root, false)?)
-            .collect();
         let root_live = get_in(conn, root)?.is_some_and(|s| !s.is_ended());
         let tree_live = root_live as i64 + descendants_of(conn, root, true)?.len() as i64;
-        if tree_live + starts_by(&|q| members.iter().any(|m| m == q)) + 1 > MAX_TREE {
+        if tree_live + 1 > MAX_TREE {
             return Ok(Some("tree"));
         }
         if max_sessions > 0 {
-            let on_host: Vec<(String, bool)> = {
-                let mut stmt = conn.prepare(&format!(
-                    "SELECT id, status NOT IN {ENDED} FROM sessions WHERE host_id = ?1"
-                ))?;
-                let rows =
-                    stmt.query_map(params![r.host_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect::<rusqlite::Result<_>>()?
-            };
-            let live = on_host.iter().filter(|(_, live)| *live).count() as i64;
-            let pending = starts_by(&|q| on_host.iter().any(|(id, _)| id == q));
-            if live + pending + 1 > max_sessions as i64 {
+            let live: i64 = conn.query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM sessions WHERE host_id = ?1 AND status NOT IN {ENDED}"
+                ),
+                params![r.host_id],
+                |row| row.get(0),
+            )?;
+            if live + 1 > max_sessions as i64 {
                 return Ok(Some("max_sessions"));
             }
         }
         Ok(None)
     }
 
-    /// P-3's re-check against current state, then the act.
-    fn recheck_and_act(
+    /// An act, written already decided (145a): no one is asked.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_act(
         conn: &Connection,
-        request: &Request,
-        write_vault: bool,
+        id: &str,
+        kind: &str,
+        requester: &str,
+        target: Option<&str>,
+        payload: &str,
+        outcome: &str,
+        session: Option<&str>,
         now: &str,
-        host: HostCheck<'_>,
-    ) -> Result<Act> {
-        if expired(now, &request.expires_at) {
-            return Ok(Act::Expired);
+    ) -> Result<()> {
+        conn.execute(
+            "INSERT INTO agent_requests (id, kind, requester, target, payload, created_at,
+                 expires_at, state, decided_at, outcome, session)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, 'decided', ?6, ?7, ?8)",
+            params![id, kind, requester, target, payload, now, outcome, session],
+        )?;
+        Ok(())
+    }
+
+    /// The names of `parent`'s live children (145b).
+    fn live_child_names(conn: &Connection, parent: &str) -> Result<Vec<String>> {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT n.name FROM session_launch n
+             JOIN session_lineage l ON l.session_id = n.session_id
+             JOIN sessions s ON s.id = n.session_id
+             WHERE l.parent_session = ?1 AND s.status NOT IN {ENDED}"
+        ))?;
+        let rows = stmt.query_map(params![parent], |r| r.get(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    fn round_of(conn: &Connection, session_id: &str) -> Result<i64> {
+        Ok(conn
+            .query_row(
+                "SELECT round FROM session_round WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(1))
+    }
+
+    fn result_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<SpawnResult> {
+        Ok(SpawnResult {
+            outcome: r.get(0)?,
+            summary: r.get(1)?,
+            details: r.get(2)?,
+            reported_at: r.get(3)?,
+            round: r.get(4)?,
+        })
+    }
+
+    /// A result as the latest and as its round's: a later report in the
+    /// same round replaces the earlier one.
+    fn write_result(conn: &Connection, session_id: &str, r: &SpawnResult) -> Result<()> {
+        if !RESULT_OUTCOMES.contains(&r.outcome.as_str()) {
+            bail!("{} is not a result outcome", r.outcome);
         }
-        let Some(r) = get_in(conn, &request.requester)? else {
-            return Ok(Act::Refused(Refusal::because("requester_ended")));
-        };
-        if let Err(mut refusal) =
-            may_request(conn, &r, &request.kind, request.target.as_deref(), host)
-        {
-            if refusal.reason == "not_found" {
-                refusal.reason = "target_gone";
-            }
-            return Ok(Act::Refused(refusal));
+        for table in ["session_result", "session_round_result"] {
+            let key = if table == "session_result" {
+                "session_id"
+            } else {
+                "session_id, round"
+            };
+            conn.execute(
+                &format!(
+                    "INSERT INTO {table} (session_id, outcome, summary, details, reported_at,
+                         round)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                     ON CONFLICT ({key}) DO UPDATE SET outcome = excluded.outcome,
+                         summary = excluded.summary, details = excluded.details,
+                         reported_at = excluded.reported_at, round = excluded.round"
+                ),
+                params![
+                    session_id,
+                    r.outcome,
+                    r.summary,
+                    r.details,
+                    r.reported_at,
+                    r.round
+                ],
+            )?;
         }
-        match (request.kind.as_str(), request.target.as_deref()) {
-            ("start", _) => {}
-            ("message", Some(target)) => {
-                if inbox_full(conn, target, Some(&request.id))? {
-                    return Ok(Act::Refused(Refusal::limit("inbox")));
-                }
-                deliver(conn, request, target, now)?;
-                return Ok(Act::Delivered);
-            }
-            ("end", Some(_)) => return Ok(Act::Ended),
-            (kind, _) => bail!("a {kind} request without its target"),
-        }
-        let payload: StartPayload = serde_json::from_str(&request.payload)?;
-        let live = host(&r.host_id).unwrap_or_default();
-        let Some(agent) = child_agent(&r, payload.provider.as_deref(), &live) else {
-            return Ok(Act::Refused(Refusal::because("agent_unavailable")));
-        };
-        if let Some(cap) = over_cap(conn, &r, "start", live.max_sessions, &request.id)? {
-            return Ok(Act::Refused(Refusal::limit(cap)));
-        }
-        Ok(Act::Started(Box::new(spawn_child(
-            conn,
-            &r,
-            agent,
-            &payload,
-            write_vault,
-            now,
-        )?)))
+        Ok(())
     }
 
     /// The workspace name a child is recorded under: its own directory,
@@ -2961,10 +2896,11 @@ pub mod spawn {
 
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
-    /// parent's write vault only when the person ticked it (D2). Spawn is
-    /// off: a child has no switch row, but its start carries the asks
-    /// (134-8), recorded here. Its workspace is its own (137-1), its agent
-    /// `agent` (143a).
+    /// parent's write vault only when `write_vault` (D2; no act sets it
+    /// since 145a). Spawn is off: a child has no switch row. Its workspace
+    /// is its own (137-1), its agent `agent` (143a), its name the one asked
+    /// for or one made from the task, unique among its live siblings, and
+    /// its model and role the start's (145b).
     fn spawn_child(
         conn: &Connection,
         parent: &SessionRecord,
@@ -3026,34 +2962,41 @@ pub mod spawn {
             .flatten();
         let write_vault_id = parent_vault.filter(|_| write_vault && reads_storm);
         insert_grants(conn, &child.id, write_vault_id.is_some(), &grants, now)?;
-        let live_names: Vec<String> = {
-            let mut stmt = conn.prepare(&format!(
-                "SELECT l.name FROM session_launch l JOIN sessions s ON s.id = l.session_id
-                 WHERE s.status NOT IN {ENDED}"
-            ))?;
-            let rows = stmt.query_map([], |r| r.get(0))?;
-            rows.collect::<rusqlite::Result<_>>()?
+        let name = match &payload.name {
+            Some(name) => name.clone(),
+            None => {
+                let from_task: String = payload
+                    .task
+                    .split_whitespace()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let titled = payload
+                    .context_note
+                    .as_ref()
+                    .map_or(from_task.as_str(), |c| c.title.as_str());
+                let siblings = live_child_names(conn, &parent.id)?;
+                crate::agent::session_name(Some(titled), &parent.workspace, &siblings)
+            }
         };
-        let titled = payload
-            .name
-            .as_deref()
-            .or(payload.context_note.as_ref().map(|c| c.title.as_str()));
+        let role = payload.role.clone().filter(|_| reads_storm);
         insert_launch(
             conn,
             &LaunchRecord {
                 session_id: child.id.clone(),
-                name: crate::agent::session_name(titled, &parent.workspace, &live_names),
+                name,
                 context: payload.context_note.clone(),
                 write_vault_id,
-                // 134-5 with 138d: only a person sets a role.
-                role: None,
+                role: role.clone(),
+                model: payload.model.clone(),
             },
             now,
         )?;
-        if reads_storm {
+        if let Some(role) = &payload.role {
             conn.execute(
-                "INSERT OR IGNORE INTO session_spawn_asks (session_id, created_at) VALUES (?1, ?2)",
-                params![child.id, now],
+                "INSERT INTO session_role (session_id, vault_id, note_id, set_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![child.id, role.vault_id, role.note_id, now],
             )?;
         }
         let named: Vec<SessionIntegration> = {
@@ -3076,28 +3019,6 @@ pub mod spawn {
             .collect();
         insert_integrations(conn, &child.id, &integrations)?;
         Ok(child)
-    }
-
-    fn decide(
-        conn: &Connection,
-        id: &str,
-        outcome: &str,
-        reason: Option<&str>,
-        session: Option<&str>,
-        device: Option<&str>,
-        now: &str,
-    ) -> Result<()> {
-        let changed = conn.execute(
-            "UPDATE agent_requests SET state = 'decided', outcome = ?2, reason = ?3,
-                 session = ?4, decided_by_device = ?5, decided_at = ?6
-             WHERE id = ?1 AND state IN ('pending', 'approving')",
-            params![id, outcome, reason, session, device, now],
-        )?;
-        if changed != 1 {
-            bail!("request {id} is not open");
-        }
-        settle_messages(conn)?;
-        Ok(())
     }
 
     fn insert_spawned(
@@ -3180,43 +3101,10 @@ pub mod spawn {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
-    fn refuse_where(
-        conn: &Connection,
-        clause: &str,
-        session_id: &str,
-        reason: &str,
-        now: &str,
-    ) -> Result<usize> {
-        let refused = conn.execute(
-            &format!(
-                "UPDATE agent_requests SET state = 'decided', outcome = 'refused', reason = ?2,
-                     decided_at = ?3
-                 WHERE state IN ('pending', 'approving') AND {clause}"
-            ),
-            params![session_id, reason, now],
-        )?;
-        if refused > 0 {
-            settle_messages(conn)?;
-        }
-        Ok(refused)
-    }
-
-    pub(super) fn refuse_requests_of_in(
-        conn: &Connection,
-        requester: &str,
-        reason: &str,
-        now: &str,
-    ) -> Result<usize> {
-        refuse_where(conn, "requester = ?1", requester, reason, now)
-    }
-
-    /// What a dismissal takes with a session (C8): its switch, task, result
-    /// and inbox. Requests still pending from or to it are refused; decided
-    /// ones, its lineage and cascades stay as history.
+    /// What a dismissal takes with a session (C8): its switch, task,
+    /// results, rounds and inbox. Its acts, its lineage and cascades stay as
+    /// history.
     pub(super) fn forget(conn: &Connection, session_id: &str) -> Result<()> {
-        let now = crate::index::now_rfc3339();
-        refuse_where(conn, "requester = ?1", session_id, "requester_ended", &now)?;
-        refuse_where(conn, "target = ?1", session_id, "target_gone", &now)?;
         for table in [
             "session_spawn",
             "session_spawn_asks",
@@ -3224,6 +3112,8 @@ pub mod spawn {
             "session_child_workspace",
             "session_task",
             "session_result",
+            "session_round",
+            "session_round_result",
             "session_inbox",
         ] {
             conn.execute(
@@ -3288,55 +3178,21 @@ pub mod spawn {
     }
 
     /// Whether one more message from a parent would break the inbox's cap.
-    /// Messages waiting for approval count, so an approval can never
-    /// overfill it; `except` is the request being approved.
-    fn inbox_full(conn: &Connection, session_id: &str, except: Option<&str>) -> Result<bool> {
+    fn inbox_full(conn: &Connection, session_id: &str) -> Result<bool> {
         let waiting: i64 = conn.query_row(
             &format!(
                 "SELECT COUNT(*) FROM session_inbox
-                 WHERE session_id = ?1 AND state IN {UNACKED}
-                   AND (?2 IS NULL OR request_id IS NOT ?2)"
+                 WHERE session_id = ?1 AND state IN {UNACKED}"
             ),
-            params![session_id, except],
+            params![session_id],
             |r| r.get(0),
         )?;
         Ok(waiting + 1 > MAX_INBOX - 1)
     }
 
-    /// An approved message enters the inbox `queued`, numbered then, so the
-    /// child's cursor only ever moves forward whatever order approvals
-    /// come in.
-    fn deliver(conn: &Connection, request: &Request, target: &str, now: &str) -> Result<()> {
-        let seq: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) + 1 FROM session_inbox
-             WHERE session_id = ?1 AND request_id IS NOT ?2",
-            params![target, request.id],
-            |r| r.get(0),
-        )?;
-        let moved = conn.execute(
-            "UPDATE session_inbox SET state = 'queued', seq = ?3, at = ?4
-             WHERE session_id = ?1 AND request_id = ?2 AND state = 'pending_approval'",
-            params![target, request.id, seq, now],
-        )?;
-        if moved == 0 {
-            // A request recorded without its inbox row, as before 134-6.
-            let payload: MessagePayload = serde_json::from_str(&request.payload)?;
-            insert_message(
-                conn,
-                target,
-                &request.requester,
-                &payload.text,
-                Some(&request.id),
-                "queued",
-                now,
-            )?;
-        }
-        Ok(())
-    }
-
-    /// A message whose request was decided any way but `delivered` leaves
-    /// `pending_approval` for the matching state; a refusal of any reason
-    /// is `undeliverable`.
+    /// A message an older server left `pending_approval` takes its
+    /// request's end: `denied`, `expired`, else `undeliverable`. Only at
+    /// open: since 145a no message waits.
     fn settle_messages(conn: &Connection) -> Result<()> {
         conn.execute(
             "UPDATE session_inbox SET state = CASE
@@ -3437,9 +3293,6 @@ pub mod spawn {
             if cause == "parent_end" || report_first {
                 queue_notice(conn, t, now)?;
             }
-        }
-        if cause != "end_all_children" {
-            refuse_where(conn, "requester = ?1", parent, "requester_ended", now)?;
         }
         Ok(targets)
     }

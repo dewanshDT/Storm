@@ -1199,19 +1199,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     ops::fail_children_left_creating(&state)
         .await
         .context("failing spawned sessions a restart left creating")?;
-
-    // P-5: expired spawn requests are marked, at boot and then every few
-    // seconds. An approval checks expiry itself, so this is for the record.
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                ops::sweep_spawn_requests(&state).await;
-            }
-        });
-    }
+    ops::audit_agent_migrations(&state)
+        .await
+        .context("auditing agent.db's upgrades")?;
 
     // Cascades (134-6, 134-7): each target is stopped once its stop is due,
     // at once for a person's end and after C9's grace otherwise, and an

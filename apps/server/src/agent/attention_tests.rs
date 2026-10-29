@@ -3,7 +3,6 @@
 //! field through the real routes is tested in `api.rs`.
 
 use super::store::SessionRecord;
-use super::store::spawn::{NewRequest, Request};
 use super::{AgentManager, Hello, Launch, LaunchMeta, McpGrant};
 
 fn hello() -> Hello {
@@ -41,13 +40,6 @@ fn fixture() -> Fixture {
         generation,
         _link: link,
     }
-}
-
-fn stamp(offset_ms: i64) -> String {
-    use time::format_description::well_known::Rfc3339;
-    (time::OffsetDateTime::now_utc() + time::Duration::milliseconds(offset_ms))
-        .format(&Rfc3339)
-        .unwrap()
 }
 
 impl Fixture {
@@ -105,91 +97,22 @@ impl Fixture {
         self.m.report_children_for_tests("hst_A");
         (parent, "ags_C1".into())
     }
-
-    fn message(&self, parent: &str, child: &str) -> Request {
-        self.m
-            .create_request(
-                parent,
-                NewRequest::Message {
-                    target: child.into(),
-                    text: "check the cap".into(),
-                },
-            )
-            .unwrap()
-            .unwrap()
-    }
-
-    fn raw_request(&self, id: &str, requester: &str, expires_at: &str) {
-        self.m.insert_request_for_tests(&Request {
-            id: id.into(),
-            kind: "start".into(),
-            requester: requester.into(),
-            target: None,
-            payload: r#"{"task":"write the tests"}"#.into(),
-            created_at: stamp(-1000),
-            expires_at: expires_at.into(),
-            state: "pending".into(),
-            decided_by_device: None,
-            decided_at: None,
-            outcome: None,
-            reason: None,
-            session: None,
-        });
-    }
 }
 
-// ---- approval ---------------------------------------------------------------
+// ---- no approval (145a) -------------------------------------------------------
 
+/// A-145-1: an act waits for no one, so it never makes its requester need
+/// a person, whatever kind it is.
 #[test]
-fn a_pending_request_needs_its_requester_approved_until_it_is_decided() {
+fn an_act_never_needs_a_persons_approval() {
     let f = fixture();
     let (parent, child) = f.tree();
-    assert_eq!(f.attention(&parent), None);
-
-    let approved = f.message(&parent, &child);
-    assert_eq!(f.attention(&parent), Some("approval"));
-    assert_eq!(f.attention(&child), None, "only the requester waits");
-    f.m.approve_request(&approved.id, "dev_A", false, None)
-        .unwrap();
-    assert_eq!(f.attention(&parent), None, "cleared by approval");
-
-    let denied = f.message(&parent, &child);
-    assert_eq!(f.attention(&parent), Some("approval"));
-    f.m.deny_request(&denied.id, "dev_A").unwrap();
-    assert_eq!(f.attention(&parent), None, "cleared by denial");
-
-    f.message(&parent, &child);
-    assert_eq!(f.attention(&parent), Some("approval"));
-    f.m.set_spawn(&parent, false, Some("dev_A"))
+    f.m.message_child(&parent, &child, "check the cap")
         .unwrap()
         .unwrap();
-    assert_eq!(f.attention(&parent), None, "cleared by revocation (B2)");
-}
-
-#[test]
-fn an_expired_request_needs_no_one_even_before_the_sweeper() {
-    let f = fixture();
-    let (parent, _) = f.tree();
-    f.raw_request("agr_LATE", &parent, &stamp(-1));
-    assert_eq!(f.attention(&parent), None, "past its expiry");
-    f.raw_request("agr_LIVE", &parent, &stamp(60_000));
-    assert_eq!(f.attention(&parent), Some("approval"));
-    f.raw_request("agr_BAD", &parent, "not a time");
-    f.m.expire_requests().unwrap();
-    assert_eq!(f.attention(&parent), Some("approval"), "one still waits");
-    f.m.deny_request("agr_LIVE", "dev_A").unwrap();
     assert_eq!(f.attention(&parent), None);
-}
-
-#[test]
-fn an_ended_requester_needs_no_one() {
-    let f = fixture();
-    let (parent, child) = f.tree();
-    f.message(&parent, &child);
-    f.report(
-        &parent,
-        serde_json::json!({"status": "completed", "exit_code": 0}),
-    );
+    assert_eq!(f.attention(&child), None);
+    f.m.end_child(&parent, &child).unwrap().unwrap();
     assert_eq!(f.attention(&parent), None);
 }
 
@@ -226,16 +149,21 @@ fn a_blocked_result_needs_attention_until_another_replaces_it_or_the_session_end
     assert_eq!(f.attention(&child), None, "cleared by its end");
 }
 
+/// 145: a blocked result is its round's: a message that starts the next
+/// round clears it.
 #[test]
-fn a_waiting_request_comes_before_a_blocked_result() {
+fn a_blocked_result_is_its_rounds_and_the_next_round_clears_it() {
     let f = fixture();
-    let (_, child) = f.tree();
+    let (parent, child) = f.tree();
     f.m.report_result(&child, "blocked", "need a key", None)
         .unwrap();
-    f.raw_request("agr_CHILD", &child, &stamp(60_000));
-    assert_eq!(f.attention(&child), Some("approval"));
-    f.m.deny_request("agr_CHILD", "dev_A").unwrap();
     assert_eq!(f.attention(&child), Some("blocked"));
+    assert_eq!(
+        f.m.message_child(&parent, &child, "here is the key")
+            .unwrap(),
+        Ok(2)
+    );
+    assert_eq!(f.attention(&child), None);
 }
 
 // ---- permission_prompt ------------------------------------------------------

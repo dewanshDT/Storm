@@ -32,7 +32,6 @@ pub const MAX_EVENTS_PER_WAIT: usize = 100;
 pub const RECENT_EVENTS: usize = 5;
 
 pub const STARTED: &str = "started";
-pub const NEEDS_APPROVAL: &str = "needs_approval";
 pub const NEEDS_ATTENTION: &str = "needs_attention";
 pub const IDLE_TIMEOUT: &str = "idle_timeout";
 pub const USAGE_LIMIT_EVENT: &str = "usage_limit";
@@ -205,33 +204,17 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn awaits_decision_in(conn: &Connection, requester: &str, now: &str) -> Result<bool> {
-    let mut stmt = conn.prepare(
-        "SELECT expires_at FROM agent_requests WHERE requester = ?1 AND state = 'pending'",
-    )?;
-    let rows = stmt.query_map(params![requester], |r| r.get::<_, String>(0))?;
-    for expires in rows {
-        if !super::store::spawn::expired(now, &expires?) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-/// 134p's `needs_attention` with 144b's `usage_limit`: a waiting request
-/// first, then what a gated signal says while the session runs, then a
-/// `blocked` result. An ended session needs none.
+/// 134p's `needs_attention` with 144b's `usage_limit`: what a gated signal
+/// says while the session runs, then a `blocked` result for the round it is
+/// in (145). An ended session needs none; since 145a nothing waits for a
+/// person's approval.
 pub(super) fn needs_attention_in(
     conn: &Connection,
     r: &SessionRecord,
     live_attention: Option<&str>,
-    now: &str,
 ) -> Result<Option<&'static str>> {
     if r.is_ended() {
         return Ok(None);
-    }
-    if awaits_decision_in(conn, &r.id, now)? {
-        return Ok(Some(super::attention::APPROVAL));
     }
     if r.status == "running" {
         match live_attention {
@@ -242,7 +225,9 @@ pub(super) fn needs_attention_in(
     }
     let blocked = conn
         .query_row(
-            "SELECT outcome FROM session_result WHERE session_id = ?1",
+            "SELECT outcome FROM session_result WHERE session_id = ?1
+               AND round >= COALESCE(
+                   (SELECT round FROM session_round WHERE session_id = ?1), 1)",
             params![r.id],
             |row| row.get::<_, String>(0),
         )
@@ -251,17 +236,11 @@ pub(super) fn needs_attention_in(
     Ok(blocked.then_some(BLOCKED))
 }
 
-fn state_in(
-    conn: &Connection,
-    r: &SessionRecord,
-    live: &LiveSignals,
-    now: &str,
-) -> Result<EventState> {
+fn state_in(conn: &Connection, r: &SessionRecord, live: &LiveSignals) -> Result<EventState> {
     Ok(EventState {
         status: r.status.clone(),
         activity: health_activity(r, live),
-        needs_attention: needs_attention_in(conn, r, live.attention.as_deref(), now)?
-            .map(Into::into),
+        needs_attention: needs_attention_in(conn, r, live.attention.as_deref())?.map(Into::into),
     })
 }
 
@@ -298,7 +277,7 @@ pub(super) fn record_in(
             return Ok(false);
         }
     }
-    let state = state_in(conn, child, live, now)?;
+    let state = state_in(conn, child, live)?;
     conn.execute(
         "INSERT INTO child_event_cursor (parent, last_seq, acked) VALUES (?1, 1, 0)
          ON CONFLICT (parent) DO UPDATE SET last_seq = last_seq + 1",

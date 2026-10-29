@@ -7,7 +7,7 @@
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::store::SessionRecord;
-use super::store::spawn::{Decision, NOTICE_GRACE_SECS, NewRequest, PARENT_ENDED_NOTICE};
+use super::store::spawn::{NOTICE_GRACE_SECS, PARENT_ENDED_NOTICE};
 use super::{
     AgentError, AgentManager, Command, Envelope, Hello, Launch, LaunchMeta, McpGrant,
     ReportedSession, StatusReport,
@@ -469,45 +469,23 @@ fn lt6_a_cascade_resumes_after_a_server_restart_and_completes_once() {
     );
 }
 
-/// LT-7: revoking spawn refuses pending requests at once and every new
-/// one; children keep running.
+/// LT-7: turning spawn off refuses every next act at once (`spawn_off`,
+/// 145a); children keep running.
 #[test]
-fn lt7_revocation_refuses_requests_and_leaves_children_running() {
+fn lt7_revocation_refuses_acts_and_leaves_children_running() {
     let mut f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
-    let pending =
-        f.m.create_request(
-            &p.id,
-            NewRequest::End {
-                target: c.id.clone(),
-            },
-        )
-        .unwrap()
-        .unwrap();
     f.m.set_spawn(&p.id, false, Some("dev_A")).unwrap().unwrap();
-    let r = f.m.request(&pending.id).unwrap();
-    assert_eq!(
-        (r.outcome.as_deref(), r.reason.as_deref()),
-        (Some("refused"), Some("revoked"))
-    );
-    let refused =
-        f.m.create_request(
-            &p.id,
-            NewRequest::End {
-                target: c.id.clone(),
-            },
-        )
-        .unwrap()
-        .unwrap_err();
-    assert_eq!(refused.reason, "not_permitted");
+    let refused = f.m.end_child(&p.id, &c.id).unwrap().unwrap_err();
+    assert_eq!(refused.reason, "spawn_off");
     assert_eq!(f.get(&c.id).0, "running");
     assert!(f.stops(&after_secs(NOTICE_GRACE_SECS + 1)).is_empty());
     assert!(f.ends().is_empty());
 }
 
 /// LT-8: "End all children" stops every descendant and leaves the parent
-/// running, its spawn switch and its pending requests as they were.
+/// running, its spawn switch and its acts as they were.
 #[test]
 fn lt8_end_all_children_leaves_the_parent_as_it_was() {
     let mut f = fixture();
@@ -515,16 +493,7 @@ fn lt8_end_all_children_leaves_the_parent_as_it_was() {
     let c = f.child(&p.id);
     f.m.force_spawn_for_tests(&c.id);
     let g = f.child(&c.id);
-    let pending =
-        f.m.create_request(
-            &p.id,
-            NewRequest::Message {
-                target: c.id.clone(),
-                text: "hi".into(),
-            },
-        )
-        .unwrap()
-        .unwrap();
+    f.m.message_child(&p.id, &c.id, "hi").unwrap().unwrap();
     assert!(matches!(
         f.m.end_children(&p.id, std::slice::from_ref(&c.id), false),
         Err(AgentError::Conflict(_))
@@ -548,7 +517,7 @@ fn lt8_end_all_children_leaves_the_parent_as_it_was() {
     assert_eq!(f.get(&g.id), ended("cascade"));
     assert_eq!(f.get(&p.id), (s("running"), None));
     assert!(f.m.store.lock().unwrap().spawn_enabled(&p.id).unwrap());
-    assert_eq!(f.m.request(&pending.id).unwrap().state, "pending");
+    assert_eq!(f.m.requests_of(&p.id).unwrap().len(), 1);
     // Nothing is left to end.
     assert!(matches!(
         f.m.end_children(&p.id, &[], false),
@@ -594,23 +563,20 @@ fn lt9_a_resumed_parent_reads_its_predecessors_results_and_nothing_more() {
         Err(AgentError::NotFound(_))
     ));
     assert!(f.m.children_of(&resumed.id).unwrap().is_empty());
-    for new in [
-        NewRequest::End {
-            target: c.id.clone(),
-        },
-        NewRequest::Message {
-            target: c.id.clone(),
-            text: "hi".into(),
-        },
-    ] {
-        assert_eq!(
-            f.m.create_request(&resumed.id, new)
-                .unwrap()
-                .unwrap_err()
-                .reason,
-            "not_found"
-        );
-    }
+    assert_eq!(
+        f.m.end_child(&resumed.id, &c.id)
+            .unwrap()
+            .unwrap_err()
+            .reason,
+        "not_found"
+    );
+    assert_eq!(
+        f.m.message_child(&resumed.id, &c.id, "hi")
+            .unwrap()
+            .unwrap_err()
+            .reason,
+        "not_found"
+    );
     // A session that resumes nothing reads nothing.
     assert!(f.m.predecessor_results(&p.id).unwrap().is_empty());
 }
@@ -731,15 +697,10 @@ fn lt11_a_resumed_child_is_a_new_top_level_session() {
     );
     f.m.force_spawn_for_tests(&p.id);
     assert_eq!(
-        f.m.create_request(
-            &p.id,
-            NewRequest::End {
-                target: resumed.id.clone()
-            }
-        )
-        .unwrap()
-        .unwrap_err()
-        .reason,
+        f.m.end_child(&p.id, &resumed.id)
+            .unwrap()
+            .unwrap_err()
+            .reason,
         "not_found"
     );
     // Its old parent's end does not reach it.
@@ -933,31 +894,21 @@ fn end_all_children_with_the_host_away_retries_on_its_return() {
     assert!(f.m.cascade(&cascade.id).unwrap().completed_at.is_some());
 }
 
-/// An approved `end_agent` sends its target `end`; the target's own
+/// `end_agent` sends its target `end` at once (145a); the target's own
 /// descendants follow it at once as `cascade` (C1).
 #[test]
-fn an_approved_end_stops_its_target_and_the_targets_descendants() {
+fn an_end_agent_stops_its_target_and_the_targets_descendants() {
     let mut f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
     f.m.force_spawn_for_tests(&c.id);
     let g = f.child(&c.id);
-    let r =
-        f.m.create_request(
-            &p.id,
-            NewRequest::End {
-                target: c.id.clone(),
-            },
-        )
-        .unwrap()
-        .unwrap();
     f.ends();
-    match f.m.approve_request(&r.id, "dev_A", false, None).unwrap() {
-        Decision::Decided { request, .. } => {
-            assert_eq!(request.outcome.as_deref(), Some("ended"))
-        }
-        other => panic!("{other:?}"),
-    }
+    f.m.end_child(&p.id, &c.id).unwrap().unwrap();
+    assert_eq!(
+        f.m.requests_of(&p.id).unwrap()[0].outcome.as_deref(),
+        Some("ended")
+    );
     assert_eq!(f.ends(), std::slice::from_ref(&c.id));
     f.report(&c.id, "stopped");
     assert_eq!(f.get(&c.id), (s("stopped"), None), "a person's stop");
@@ -977,44 +928,14 @@ fn a_session_being_ended_cannot_ask_for_anything() {
     f.m.force_spawn_for_tests(&c.id);
     let g = f.child(&c.id);
     f.report(&p.id, "completed");
-    let refused =
-        f.m.create_request(
-            &c.id,
-            NewRequest::Message {
-                target: g.id.clone(),
-                text: "hi".into(),
-            },
-        )
-        .unwrap()
-        .unwrap_err();
+    let refused = f.m.message_child(&c.id, &g.id, "hi").unwrap().unwrap_err();
     assert_eq!(refused.reason, "requester_ended");
     // A parent a person is ending, before its end is recorded, too.
     let q = f.parent("other");
     let qc = f.child(&q.id);
-    let pending =
-        f.m.create_request(
-            &q.id,
-            NewRequest::End {
-                target: qc.id.clone(),
-            },
-        )
-        .unwrap()
-        .unwrap();
     f.m.end_by_person(&q.id, Some(std::slice::from_ref(&qc.id)), false)
         .unwrap();
-    assert_eq!(
-        f.m.request(&pending.id).unwrap().reason.as_deref(),
-        Some("requester_ended")
-    );
-    let refused =
-        f.m.create_request(
-            &q.id,
-            NewRequest::End {
-                target: qc.id.clone(),
-            },
-        )
-        .unwrap()
-        .unwrap_err();
+    let refused = f.m.end_child(&q.id, &qc.id).unwrap().unwrap_err();
     assert_eq!(refused.reason, "requester_ended");
 }
 
