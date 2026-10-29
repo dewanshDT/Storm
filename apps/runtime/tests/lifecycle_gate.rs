@@ -1,4 +1,4 @@
-//! The real-CLI gates of decisions 144 and 145's runtime half, for Claude
+//! The real-CLI gates of decisions 144, 145 and 146's runtime half, for Claude
 //! Code and OpenCode: each runs the real agent in a terminal that is only
 //! typed into like a person would, with the hooks or plugin Storm's own
 //! writer produces when every list is on, reporting to a socket this test
@@ -15,6 +15,20 @@
 //!   OpenCode's plugin `client.session.promptAsync`), and the model then
 //!   receives exactly Storm's fixed sentence (a parent's for 144, a
 //!   child's for 145). Positive control: without the wake it stays idle.
+//! - **G-146-A-claude-code**: a child's Storm tools allowed in Storm's
+//!   `--settings` run with no prompt, and a note write still asks.
+//!   Positive control: without the allow, `report_result` asks.
+//! - **G-146-M-<provider>**: a permission mode reaches the agent and works:
+//!   Claude Code's `--permission-mode acceptEdits` and `auto` run an edit
+//!   with no prompt over an account whose own mode asks, OpenCode's
+//!   `edit: allow` in Storm's layer over the account's `edit: ask`.
+//!   Positive control: the account's mode alone asks.
+//! - **G-146-P-<provider>**: a permission prompt sets the flag and the
+//!   person's answer clears it (Claude Code: `PermissionRequest`, then
+//!   `PostToolUse`; after an Esc, the next turn; OpenCode:
+//!   `permission.asked`, then `permission.replied`). The test plays the
+//!   person, typing the answer into the terminal; Storm never does.
+//!   Positive control: a turn with no tool sets nothing.
 //!
 //! Runs only with `STORM_LIFECYCLE_GATE=1` (`make gate-lifecycle`); never in
 //! CI. By default each agent talks to a stand-in model server started here
@@ -126,23 +140,36 @@ class H(http.server.BaseHTTPRequestHandler):
         last = text_of(users[-1]) if users else ""
         # The newest prompt only: a turn after a failed one is sent with it.
         newest = last.strip().split("\n")[-1] if last.strip() else ""
-        LOG.write(json.dumps({"t": time.time(), "model": body.get("model"), "last": last[-4000:]}) + "\n"); LOG.flush()
+        LOG.write(json.dumps({"t": time.time(), "model": body.get("model"), "last": last[-4000:], "tools": [t.get("name") for t in body.get("tools") or []]}) + "\n"); LOG.flush()
         if "LIMIT" in newest and "Storm" not in newest:
             hdr = [("anthropic-ratelimit-unified-status", "rejected"), ("retry-after", "3600"), ("x-should-retry", "false")]
             return self.send_json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "This request would exceed your account's rate limit. Please try again later."}}, hdr)
         reply = "Done."
         if "ECHO:" in newest:
             reply = newest.split("ECHO:", 1)[1].split()[0]
+        # A tool call the turn asks for, only where the request offers it.
+        tools = [t.get("name") for t in body.get("tools") or []]
+        call = None
+        if "WRITE:" in newest and "Write" in tools:
+            call = ("Write", {"file_path": newest.split("WRITE:", 1)[1].split()[0], "content": "storm gate\n"})
+        elif "CALL:" in newest and newest.split("CALL:", 1)[1].split()[0] in tools:
+            call = (newest.split("CALL:", 1)[1].split()[0], {})
         model = body.get("model", "m")
+        tid = "toolu_gate%d" % int(time.time() * 1000)
         if not body.get("stream"):
-            return self.send_json(200, {"id": "msg_x", "type": "message", "role": "assistant", "model": model, "content": [{"type": "text", "text": reply}], "stop_reason": "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 5}})
+            content = [{"type": "tool_use", "id": tid, "name": call[0], "input": call[1]}] if call else [{"type": "text", "text": reply}]
+            return self.send_json(200, {"id": "msg_x", "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 5}})
         ev = []
         def e(t, d): ev.append("event: %s\ndata: %s\n\n" % (t, json.dumps(d)))
         e("message_start", {"type": "message_start", "message": {"id": "msg_%d" % int(time.time() * 1000), "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 1}}})
-        e("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-        e("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}})
+        if call:
+            e("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": tid, "name": call[0], "input": {}}})
+            e("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(call[1])}})
+        else:
+            e("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+            e("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}})
         e("content_block_stop", {"type": "content_block_stop", "index": 0})
-        e("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 5}})
+        e("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 5}})
         e("message_stop", {"type": "message_stop"})
         data = "".join(ev).encode()
         self.send_response(200)
@@ -181,7 +208,16 @@ class H(http.server.BaseHTTPRequestHandler):
             c = {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m", "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]}
             if usage: c["usage"] = usage
             return "data: " + json.dumps(c) + "\n\n"
-        out = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})]
+        usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        tools = [(t.get("function") or {}).get("name") for t in body.get("tools") or []]
+        answered = bool(msgs) and msgs[-1].get("role") == "tool"
+        if "WRITE:" in last and "write" in tools and not answered:
+            path = last.split("WRITE:", 1)[1].split()[0].strip('"\\')
+            args = json.dumps({"filePath": path, "content": "storm gate\n"})
+            call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": "write", "arguments": args}}
+            out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
+        else:
+            out = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop", usage)]
         self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
         for c in out + ["data: [DONE]\n\n"]:
             self.wfile.write(c.encode()); self.wfile.flush()
@@ -256,6 +292,15 @@ impl FakeHost {
         self.since(at)
             .iter()
             .filter_map(|v| v["signal"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// What the permission prompt hooks said: `permission_prompt` or
+    /// `none`.
+    fn attention(&self, at: Instant) -> Vec<String> {
+        self.since(at)
+            .iter()
+            .filter_map(|v| v["attention"].as_str().map(str::to_string))
             .collect()
     }
 
@@ -455,6 +500,24 @@ impl Checks {
         self.results.push((name.to_string(), None));
     }
 
+    /// `finish` for a gate whose sessions are already gone.
+    fn finish_quiet(self) {
+        let failed: Vec<&String> = self
+            .results
+            .iter()
+            .filter(|(_, ok)| *ok == Some(false))
+            .map(|(n, _)| n)
+            .collect();
+        let skipped = self.results.iter().any(|(_, ok)| ok.is_none());
+        let word = match (failed.is_empty(), skipped) {
+            (false, _) => "FAIL",
+            (true, true) => "PASS (with skips)",
+            (true, false) => "PASS",
+        };
+        eprintln!("{} {word}", self.gate);
+        assert!(failed.is_empty(), "{} failed: {failed:?}", self.gate);
+    }
+
     fn finish(self, agent: &Agent) {
         let failed: Vec<&String> = self
             .results
@@ -481,6 +544,10 @@ struct Session {
     agent: Agent,
     host: FakeHost,
     model: Option<Model>,
+    /// Its workspace.
+    ws: PathBuf,
+    /// The stand-in Storm MCP server's log of tool calls, when it has one.
+    mcp_log: Option<PathBuf>,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -488,6 +555,58 @@ impl Session {
     fn requests(&self) -> Vec<String> {
         self.model.as_ref().map(Model::requests).unwrap_or_default()
     }
+
+    /// The tools the stand-in Storm server ran.
+    fn storm_calls(&self) -> Vec<String> {
+        self.mcp_log
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v["name"].as_str().map(str::to_string))
+            .collect()
+    }
+}
+
+/// A stand-in for Storm's MCP server, named `storm` as the host names it:
+/// it lists a child's tools and a note write, and logs every call.
+const FAKE_STORM_MCP: &str = r#"
+import json, sys
+LOG = open(sys.argv[1], "a")
+TOOLS = ["session_context", "report_result", "read_messages", "create_note"]
+for line in sys.stdin:
+    try:
+        m = json.loads(line)
+    except Exception:
+        continue
+    if m.get("id") is None:
+        continue
+    method = m.get("method")
+    if method == "initialize":
+        res = {"protocolVersion": (m.get("params") or {}).get("protocolVersion", "2025-06-18"), "capabilities": {"tools": {}}, "serverInfo": {"name": "storm", "version": "0"}}
+    elif method == "tools/list":
+        res = {"tools": [{"name": t, "description": "Storm gate stand-in: " + t, "inputSchema": {"type": "object", "properties": {}}} for t in TOOLS]}
+    elif method == "tools/call":
+        LOG.write(json.dumps(m.get("params")) + "\n"); LOG.flush()
+        res = {"content": [{"type": "text", "text": "ok"}]}
+    else:
+        res = {}
+    sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": res}) + "\n")
+    sys.stdout.flush()
+"#;
+
+/// How a gate's Claude Code is launched beyond Storm's hooks: extra flags
+/// (a permission mode), Storm's allows in its `--settings` (146a), and the
+/// stand-in Storm server.
+#[derive(Default)]
+struct ClaudeOpts {
+    args: Vec<String>,
+    allow: Vec<String>,
+    storm_mcp: bool,
+    /// The account's own `permissions.defaultMode` (its user settings).
+    /// Claude Code 2.1.312's own default is `auto`; `manual` is what asks.
+    account_mode: Option<&'static str>,
 }
 
 fn workspace() -> tempfile::TempDir {
@@ -517,6 +636,10 @@ fn env_of(extras: &storm_runtime::provider::LaunchExtras) -> Vec<(String, String
 const FAKE_KEY: &str = "sk-ant-api03-STORMGATE000000000000000000000000000000000000000000000000000000000000000000000000-AAAAAAAA";
 
 fn claude() -> Session {
+    claude_with(ClaudeOpts::default())
+}
+
+fn claude_with(opts: ClaudeOpts) -> Session {
     let bin = std::env::var("STORM_CLAUDE_BIN").unwrap_or_else(|_| "claude".into());
     let ws = workspace();
     let state = tempfile::tempdir().unwrap();
@@ -532,11 +655,26 @@ fn claude() -> Session {
         None,
         None,
         &Hooks::all(),
-        &[],
+        &opts.allow,
     )
     .unwrap();
     let mut argv = vec![bin];
     argv.extend(extras.args.iter().map(|a| a.to_string_lossy().to_string()));
+    argv.extend(opts.args);
+    let mcp_log = opts.storm_mcp.then(|| state.path().join("storm-mcp.log"));
+    if let Some(log) = &mcp_log {
+        let config = state.path().join("mcp.json");
+        std::fs::write(
+            &config,
+            json!({"mcpServers": {"storm": {
+                "type": "stdio", "command": "python3",
+                "args": ["-c", FAKE_STORM_MCP, log.display().to_string()],
+            }}})
+            .to_string(),
+        )
+        .unwrap();
+        argv.extend(["--mcp-config".to_string(), config.display().to_string()]);
+    }
     let mut env = env_of(&extras);
     let model = if real() {
         let m = std::env::var("STORM_GATE_CLAUDE_MODEL").unwrap_or_else(|_| "haiku".into());
@@ -561,6 +699,15 @@ fn claude() -> Session {
             .to_string(),
         )
         .unwrap();
+        if let Some(mode) = opts.account_mode {
+            let dir = home.path().join(".claude");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("settings.json"),
+                json!({"permissions": {"defaultMode": mode}}).to_string(),
+            )
+            .unwrap();
+        }
         env.extend([
             ("HOME".to_string(), home.path().display().to_string()),
             (
@@ -572,6 +719,11 @@ fn claude() -> Session {
         Some(model)
     };
     env.push(("DISABLE_AUTOUPDATER".to_string(), "1".to_string()));
+    if opts.storm_mcp {
+        // So the stand-in model is offered the MCP tools themselves, not
+        // Claude Code's tool search in front of them.
+        env.push(("ENABLE_TOOL_SEARCH".to_string(), "false".to_string()));
+    }
     let mut agent = Agent::start(argv, env, ws.path(), state.path().join("screen"));
     let started = Instant::now();
     // Ready: its SessionStart hook reported the conversation and armed the
@@ -593,11 +745,25 @@ fn claude() -> Session {
         agent,
         host,
         model,
+        ws: ws.path().canonicalize().unwrap(),
+        mcp_log,
         _dirs: vec![ws, state, home],
     }
 }
 
+/// How a gate's OpenCode is launched: the account's own permission rules
+/// (its global config) and Storm's layer on top (`OPENCODE_CONFIG_CONTENT`).
+#[derive(Default)]
+struct OpencodeOpts {
+    account_permission: Option<Value>,
+    storm_permission: Option<Value>,
+}
+
 fn opencode() -> Session {
+    opencode_with(OpencodeOpts::default())
+}
+
+fn opencode_with(opts: OpencodeOpts) -> Session {
     let bin = std::env::var("STORM_OPENCODE_BIN").unwrap_or_else(|_| "opencode".into());
     let ws = workspace();
     let state = tempfile::tempdir().unwrap();
@@ -619,10 +785,17 @@ fn opencode() -> Session {
     let model = if real() {
         let m = std::env::var("STORM_GATE_OPENCODE_MODEL")
             .expect("STORM_GATE_OPENCODE_MODEL names the model, as provider/model");
-        env.push((
-            "OPENCODE_CONFIG_CONTENT".to_string(),
-            json!({"model": m, "small_model": m}).to_string(),
-        ));
+        let mut config = json!({"model": m, "small_model": m});
+        if let Some(p) = &opts.storm_permission {
+            config["permission"] = p.clone();
+        }
+        env.push(("OPENCODE_CONFIG_CONTENT".to_string(), config.to_string()));
+        // The account's own rule, as a config OpenCode merges under Storm's.
+        if let Some(p) = &opts.account_permission {
+            let file = state.path().join("account-opencode.json");
+            std::fs::write(&file, json!({"permission": p}).to_string()).unwrap();
+            env.push(("OPENCODE_CONFIG".to_string(), file.display().to_string()));
+        }
         None
     } else {
         let model = Model::start(FAKE_OPENAI, state.path());
@@ -639,11 +812,24 @@ fn opencode() -> Session {
                 "models": {"m": {"name": "m", "tool_call": true}},
             }},
         });
+        let mut config = config;
+        if let Some(p) = &opts.storm_permission {
+            config["permission"] = p.clone();
+        }
         let xdg = |name: &str| {
             let dir = state.path().join(name);
             std::fs::create_dir_all(&dir).unwrap();
             dir.display().to_string()
         };
+        if let Some(p) = &opts.account_permission {
+            let dir = state.path().join("config").join("opencode");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("opencode.json"),
+                json!({"$schema": "https://opencode.ai/config.json", "permission": p}).to_string(),
+            )
+            .unwrap();
+        }
         env.extend([
             ("XDG_CONFIG_HOME".to_string(), xdg("config")),
             ("XDG_DATA_HOME".to_string(), xdg("data")),
@@ -674,6 +860,8 @@ fn opencode() -> Session {
         agent,
         host,
         model,
+        ws: ws.path().canonicalize().unwrap(),
+        mcp_log: None,
         _dirs: vec![ws, state],
     }
 }
@@ -921,4 +1109,332 @@ fn g_145_w_claude_code() {
 #[test]
 fn g_145_w_opencode() {
     wake("opencode", "message");
+}
+
+/// Waits for a turn to end: the hooks' `idle` since `at`.
+fn idle_since(s: &Session, at: Instant, secs: u64) -> bool {
+    wait_until(secs, || s.host.signals(at).iter().any(|k| k == "idle"))
+}
+
+fn asked(s: &Session, at: Instant, secs: u64) -> bool {
+    wait_until(secs, || {
+        s.host
+            .attention(at)
+            .iter()
+            .any(|k| k == "permission_prompt")
+    })
+}
+
+/// G-146-A: Storm's own tools are pre-allowed (146a, A-146-1) on the real
+/// Claude Code: a child whose `--settings` allows `mcp__storm__<tool>` runs
+/// `report_result`, `session_context` and `read_messages` with no prompt,
+/// while a note write still asks. Positive control: the same call without
+/// the allow stops on Claude Code's own prompt, as VM 113's child did.
+#[test]
+fn g_146_a_claude_code() {
+    let gate = "G-146-A-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let mut control = claude_with(ClaudeOpts {
+        storm_mcp: true,
+        account_mode: Some("manual"),
+        ..Default::default()
+    });
+    let at = Instant::now();
+    control.agent.prompt("CALL:mcp__storm__report_result");
+    c.check(
+        "control: without the allow, report_result stops on the CLI's prompt",
+        asked(&control, at, 90) && control.storm_calls().is_empty(),
+    );
+    drop(control);
+
+    let allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+        .iter()
+        .map(|t| format!("mcp__storm__{t}"))
+        .collect();
+    let mut s = claude_with(ClaudeOpts {
+        allow,
+        storm_mcp: true,
+        account_mode: Some("manual"),
+        ..Default::default()
+    });
+    for tool in storm_runtime::mcp::CHILD_ALLOWED_TOOLS {
+        let at = Instant::now();
+        s.agent.prompt(&format!("CALL:mcp__storm__{tool}"));
+        let ran = wait_until(90, || s.storm_calls().iter().any(|t| t == tool));
+        idle_since(&s, at, 60);
+        c.check(
+            &format!("{tool} runs with no prompt ({:?})", s.host.attention(at)),
+            ran && !s
+                .host
+                .attention(at)
+                .iter()
+                .any(|k| k == "permission_prompt"),
+        );
+    }
+    let at = Instant::now();
+    s.agent.prompt("CALL:mcp__storm__create_note");
+    c.check(
+        "a note write still asks",
+        asked(&s, at, 90) && !s.storm_calls().iter().any(|t| t == "create_note"),
+    );
+    c.finish(&s.agent);
+}
+
+/// G-146-M-claude-code: the host's Claude Code takes `--permission-mode
+/// acceptEdits` and `auto` (146b) and they behave as documented: an edit in
+/// the workspace runs with no prompt. Positive control: `default` (no flag)
+/// prompts for the same edit and does not write it.
+#[test]
+fn g_146_m_claude_code() {
+    let gate = "G-146-M-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let edit = |s: &mut Session| -> (bool, bool, PathBuf) {
+        let file = s.ws.join("gate-edit.txt");
+        let at = Instant::now();
+        s.agent.prompt(&format!("WRITE:{}", file.display()));
+        let written = wait_until(60, || file.exists());
+        let asked = !s
+            .host
+            .attention(at)
+            .iter()
+            .all(|k| k != "permission_prompt")
+            || asked(s, at, if written { 3 } else { 30 });
+        (written, asked, file)
+    };
+    // `default` passes no flag: the CLI's own default, whatever it is.
+    c.check(
+        "default adds no flag",
+        storm_runtime::profile::permission_mode("claude-code", "default")
+            .unwrap()
+            .args
+            .is_empty(),
+    );
+    let mut own = claude();
+    let (written, prompted, _) = edit(&mut own);
+    let says_auto = own.agent.screen_has("auto mode on");
+    drop(own);
+    if prompted && !written {
+        c.check("default (no flag) prompts for an edit", true);
+    } else {
+        c.skip(
+            "default (no flag) prompts for an edit",
+            &format!(
+                "this CLI's own default did not ask (written {written}, prompted {prompted}, \
+                 footer says auto mode: {says_auto}); the operator decides what default means"
+            ),
+        );
+    }
+    let mut control = claude_with(ClaudeOpts {
+        account_mode: Some("manual"),
+        ..Default::default()
+    });
+    let (written, prompted, _) = edit(&mut control);
+    c.check(
+        "control: with the account's manual mode and no flag, an edit prompts and is not written",
+        prompted && !written,
+    );
+    drop(control);
+
+    let mode_args = |m: &str| {
+        storm_runtime::profile::permission_mode("claude-code", m)
+            .unwrap()
+            .args
+    };
+    for (mode, flag) in [("accept_edits", "acceptEdits"), ("auto", "auto")] {
+        let args = mode_args(mode);
+        c.check(
+            &format!("{mode} is --permission-mode {flag}"),
+            args == ["--permission-mode", flag],
+        );
+        let mut s = claude_with(ClaudeOpts {
+            args,
+            account_mode: Some("manual"),
+            ..Default::default()
+        });
+        let accepted = s
+            .host
+            .lines
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, v)| v.get("harness_session").is_some());
+        c.check(
+            &format!("the CLI accepts --permission-mode {flag} and starts"),
+            accepted && s.agent.child.try_wait().ok().flatten().is_none(),
+        );
+        let (written, prompted, _) = edit(&mut s);
+        c.check(
+            &format!(
+                "{flag}: the edit runs with no prompt (written {written}, prompted {prompted})"
+            ),
+            written && !prompted,
+        );
+    }
+    c.finish_quiet();
+}
+
+/// G-146-M-opencode: `accept_edits` is `edit: allow` in Storm's config
+/// layer, and it holds over the account's own `edit: ask`. Positive
+/// control: with the account's rule alone, the edit asks.
+#[test]
+fn g_146_m_opencode() {
+    let gate = "G-146-M-opencode";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let layer = storm_runtime::profile::permission_mode("opencode", "accept_edits").unwrap();
+    let storm: serde_json::Map<String, Value> = layer
+        .opencode_permission
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(v)))
+        .collect();
+    c.check(
+        "accept_edits is edit: allow",
+        Value::Object(storm.clone()) == json!({"edit": "allow"}),
+    );
+    for (storm, want_prompt) in [(None, true), (Some(Value::Object(storm)), false)] {
+        let mut s = opencode_with(OpencodeOpts {
+            account_permission: Some(json!({"edit": "ask"})),
+            storm_permission: storm,
+        });
+        let file = s.ws.join("gate-edit.txt");
+        let at = Instant::now();
+        s.agent.prompt(&format!("WRITE:{}", file.display()));
+        let written = wait_until(60, || file.exists());
+        let prompted = asked(&s, at, if written { 3 } else { 30 });
+        if want_prompt {
+            c.check(
+                &format!(
+                    "control: the account's edit: ask asks (prompted {prompted}, written {written})"
+                ),
+                prompted && !written,
+            );
+        } else {
+            c.check(
+                &format!("Storm's edit: allow runs it with no prompt (prompted {prompted}, written {written})"),
+                written && !prompted,
+            );
+        }
+    }
+    c.finish_quiet();
+}
+
+/// G-146-P-<provider>: the prompt flag is set and cleared by the real
+/// CLI's own hooks or plugin (146c). The test plays the person at the
+/// terminal and answers the prompt; Storm's code never does. Positive
+/// control: a turn with no tool call sets nothing.
+fn prompt_flag(provider: &str) {
+    let gate = format!("G-146-P-{provider}");
+    if !enabled(&gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(&gate);
+    let mut s = match provider {
+        "claude-code" => claude_with(ClaudeOpts {
+            account_mode: Some("manual"),
+            ..Default::default()
+        }),
+        _ => opencode_with(OpencodeOpts {
+            account_permission: Some(json!({"edit": "ask"})),
+            ..Default::default()
+        }),
+    };
+    let (at, ended) = turn(&mut s, "Say hello", 120);
+    c.check(
+        &format!(
+            "control: a turn with no tool sets nothing ({:?})",
+            s.host.attention(at)
+        ),
+        ended
+            && !s
+                .host
+                .attention(at)
+                .iter()
+                .any(|k| k == "permission_prompt"),
+    );
+    let file = s.ws.join("gate-prompt.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", file.display()));
+    let set = asked(&s, at, 90);
+    c.check(
+        &format!(
+            "the prompt sets permission_prompt ({:?})",
+            s.host.attention(at)
+        ),
+        set && !file.exists(),
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    c.check(
+        "it stays set while nobody answers",
+        !file.exists()
+            && s.host.attention(at).last().map(String::as_str) == Some("permission_prompt"),
+    );
+    // The person, at the terminal: Enter takes the highlighted "allow once".
+    let answered = Instant::now();
+    s.agent.keys("\r");
+    let written = wait_until(60, || file.exists());
+    let cleared = wait_until(60, || {
+        s.host.attention(answered).iter().any(|k| k == "none")
+    });
+    c.check(
+        &format!(
+            "the person's answer runs the tool and clears it (written {written}, {:?})",
+            s.host.attention(answered)
+        ),
+        written && cleared,
+    );
+    if provider == "claude-code" {
+        // Esc runs no hook: the flag clears on the next turn boundary.
+        let file = s.ws.join("gate-esc.txt");
+        let at = Instant::now();
+        s.agent.prompt(&format!("WRITE:{}", file.display()));
+        let set = asked(&s, at, 90);
+        let esc = Instant::now();
+        s.agent.keys("\x1b");
+        std::thread::sleep(Duration::from_secs(4));
+        let held = !s.host.attention(esc).iter().any(|k| k == "none");
+        let next = Instant::now();
+        s.agent.prompt("Say hello");
+        let cleared = wait_until(60, || s.host.attention(next).iter().any(|k| k == "none"));
+        c.check(
+            &format!(
+                "after Esc it clears at the next turn (set {set}, held {held}, cleared {cleared})"
+            ),
+            set && cleared && !file.exists(),
+        );
+    }
+    c.finish(&s.agent);
+}
+
+#[test]
+fn g_146_p_claude_code() {
+    prompt_flag("claude-code");
+}
+
+#[test]
+fn g_146_p_opencode() {
+    prompt_flag("opencode");
 }

@@ -623,8 +623,16 @@ Specification*; the slices are decisions 81 and 81a onward):
   now the session's act log (About reads it), and audited `spawn_start`/
   `spawn_message`/`spawn_end` with codes only. A row an older server left
   `pending` is expired at open. No host writes a CLI ask for them: no
-  `start` carries `spawn_asks` (an old server's is ignored), so they ask
-  like any other Storm tool. **The switch turns on only for a session
+  `start` carries `spawn_asks` (an old server's is ignored). **Storm's own
+  tools are pre-allowed where they are the session's own** (146a,
+  `mcp::StormLayer`): a child's `session_context`/`report_result`/
+  `read_messages`, and a parent launched with the switch on (`start`'s
+  `spawn: true`) its spawn tools, `read_output` included, as
+  `mcp__storm__<tool>` in Claude Code's `--settings` `permissions.allow`
+  (re-read before launch) and as OpenCode `allow` keys after the
+  connection's ask, under a key no account config uses. Nothing else is
+  allowed, note writes included; Codex keeps its prompts; a session that
+  cannot spawn and is not a child gets a byte-identical config. **The switch turns on only for a session
   launched with it** (141e): a launch's `spawn: true` is refused
   `spawn_unavailable` unless the session reads Storm, runs a spawning
   adapter and C0 holds, and is written on, and audited `spawn_enabled`,
@@ -632,6 +640,17 @@ Specification*; the slices are decisions 81 and 81a onward):
   (Claude Code never re-fetches on `list_changed`). Any other session's
   switch is refused `launched_without_spawn`; a spawn tool called while a
   launched-on session's switch is off answers `spawn_off` with a sentence.
+- **A permission mode is the person's, and a child is never looser**
+  (146b, `agent::permission`): `default` (stored and sent as nothing),
+  `accept_edits` or `auto`, offered per agent (Claude Code all three,
+  OpenCode the first two, everything else `default`), else
+  `permission_mode_unavailable`. Only a person sets one at launch; a
+  resume keeps it; it is audited (`permission_mode`) and on every view.
+  `start_agent`'s `permission_mode` above its parent's is
+  `permission_mode_wider`; left out, the child gets the parent's, or the
+  nearest stricter one its agent offers. `docs/agent-permission-mode-vectors.json`
+  holds both crates to one table. Claude Code 2.1.312's own default (no
+  flag) is `auto`.
 - **A model reaches argv only in its agent's form** (145b,
   `agent::model`, `profile::model_args`): `haiku`/`sonnet`/`opus` or
   `claude-…` for Claude Code (`--model`), `provider/model` for OpenCode
@@ -683,7 +702,7 @@ Specification*; the slices are decisions 81 and 81a onward):
   reconnect or restart, and `until: "settled"` is 134i's wait. An event
   holds codes, never a child's text (A-144-8). A host's attention or idle
   word counts only through `attention::GATED_SIGNALS` (provider, signal,
-  source; empty until each gate passes), so without a gated idle signal a
+  source; each on only once its gate passes), so without a gated idle signal a
   child's activity is `unknown`, never `working`. No provider has a `wake`
   (`events::WAKE`), and no event path writes to a terminal (A-144-12 scans
   for one). Round events (`reported`, `failed`, `ended`, `parked`) carry
@@ -693,8 +712,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   (144b/c, 145c–e). The host reports only what `harness::{GATED_SIGNALS,
   RESULT_SOURCES, WAKE}` hold; the server takes only what
   `attention::GATED_SIGNALS`, `round::RESULT_SOURCES` and `events::WAKE`
-  hold; a test in each crate holds them equal, and all are empty until
-  `make gate-lifecycle` (G-144-S/W, G-145-R/W) passes on VM 113. With none
+  hold; a test in each crate holds them equal, and each entry goes on only
+  when its `make gate-lifecycle` gate (G-144-S/W, G-145-R/W, G-146-P)
+  passes. A child's permission prompt (146c) is `permission_prompt`: set by
+  Claude Code's `PermissionRequest`/`Notification permission_prompt` or
+  OpenCode's `permission.asked`, cleared by `PostToolUse`/
+  `PostToolUseFailure`/`UserPromptSubmit`/`Stop`/`StopFailure` or
+  `permission.replied`; the parent gets `needs_attention` and only the
+  person answers it, in the child's terminal. With none
   on, every config is byte-identical to before. A hook's line is taken only
   through its session's own handle, socket and uid (`Host::hook_session`)
   and can only be shown. A gated final message (`Stop`'s
@@ -730,8 +755,12 @@ Specification*; the slices are decisions 81 and 81a onward):
   pass on a signed-in account. Both slugs are the CLIs' own — Command Code's
   is `@sindresorhus/slugify`, and a non-ASCII path fails the start rather
   than guess; `tests/cursor_command_code_gate.rs` checks them against the
-  real binaries. No profile passes a flag that turns an agent's own
-  permission prompts off.
+  real binaries. **No profile turns an agent's own permission prompts off on
+  its own** (146b): only a mode the person chose at launch is passed
+  (`profile::permission_mode`: Claude Code `--permission-mode
+  acceptEdits|auto`, OpenCode `edit: allow` in Storm's config layer;
+  anything else fails the start), and no bypass or skip-permissions value
+  exists in the API, the store, the launcher or `start_agent`.
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,

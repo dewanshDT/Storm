@@ -1,7 +1,10 @@
 #!/bin/sh
-# The real-CLI gates of decisions 144 and 145 (G-144-S, G-144-W, G-145-R,
-# G-145-W), for Claude Code and OpenCode, as the operator runs them on
-# VM 113 before any list is switched on. `make gate-lifecycle` runs this.
+# The real-CLI gates of decisions 144, 145 and 146 (G-144-S, G-144-W,
+# G-145-R, G-145-W; G-146-A, G-146-M, G-146-P), for Claude Code and
+# OpenCode, as the operator runs them on VM 113 before any list is switched
+# on. `make gate-lifecycle` runs this. The G-146 gates need the stand-in
+# model (it calls the tools that ask) and show as SKIP with REAL=1; in
+# G-146-P the test plays the person at the terminal and answers the prompt.
 #
 # Procedure, on the VM, as the account the agents run as:
 #
@@ -33,7 +36,10 @@
 #          `harness::GATED_SIGNALS` (runtime), {provider, signal, source};
 #        - final message: `round::RESULT_SOURCES` and
 #          `harness::RESULT_SOURCES`, {provider, source};
-#        - wake: `events::WAKE` and `harness::WAKE`, {provider, mechanism}.
+#        - wake: `events::WAKE` and `harness::WAKE`, {provider, mechanism};
+#        - a child's permission prompt (G-146-P): `attention::GATED_SIGNALS`
+#          and `harness::GATED_SIGNALS`, {provider, "permission_prompt",
+#          "provider_hook"}.
 #      A test in each crate holds the two lists equal.
 #
 # Variables: CLAUDE_BIN, OPENCODE_BIN (default: on PATH), REAL=1,
@@ -71,7 +77,7 @@ cargo test --quiet --test lifecycle_gate ${GATES:-} -- --nocapture --test-thread
 	>>"$LOG" 2>&1 || status=$?
 
 echo "--- results (the whole run is in $LOG) ---"
-grep -E '^G-14[45]-' "$LOG" | grep -vE ': running$' || true
+grep -E '^G-14[456]-' "$LOG" | grep -vE ': running$' || true
 if [ "$status" -ne 0 ]; then
 	echo "a gate failed (exit $status): see $LOG" >&2
 fi
