@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/nav_memory.dart';
@@ -141,15 +142,22 @@ class _AppShellState extends ConsumerState<AppShell> {
       onBackButtonPressed: _back,
       child: widget.child,
     );
-    if (!context.isExpanded) return child;
-    return Scaffold(
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          ActivityRail(current: activityOf(Uri.parse(widget.location).path)),
-          Expanded(child: PaneSemantics(child: child)),
-        ],
-      ),
+    // Outermost on both sides of the breakpoint, so crossing it keeps the
+    // watch (decision 149c).
+    return DeleteRequestWatcher(
+      child: !context.isExpanded
+          ? child
+          : Scaffold(
+              body: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  ActivityRail(
+                    current: activityOf(Uri.parse(widget.location).path),
+                  ),
+                  Expanded(child: PaneSemantics(child: child)),
+                ],
+              ),
+            ),
     );
   }
 }

@@ -30,6 +30,7 @@ import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'delete_request.dart';
 import 'mode_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
@@ -182,6 +183,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// The confirmations spawning adds below the header.
   List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
+    if (s.deleteRequest case final r? when r.pending && !s.ended)
+      Padding(
+        padding: padding,
+        child: DeleteRequestCard(session: s),
+      ),
     if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
       Padding(
         padding: padding,

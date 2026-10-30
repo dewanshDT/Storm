@@ -453,6 +453,8 @@ String shortCommit(String? commit) =>
 /// A permission prompt shows nothing: only a child reports one, and a child
 /// never asks the person (decision 148).
 String? attentionLabel(String? kind) => switch (kind) {
+  // Decision 149c: a deletion waits for the person's Approve.
+  'delete_approval' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,

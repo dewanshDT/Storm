@@ -532,6 +532,7 @@ class AgentSession {
     this.model,
     this.permissionMode,
     this.modeRequest,
+    this.deleteRequest,
   }) : name = name ?? workspace;
 
   final String id;
@@ -618,6 +619,10 @@ class AgentSession {
   /// Its agent's request for auto (decision 147c), while it waits for the
   /// person or once approved; null otherwise.
   final ModeRequest? modeRequest;
+
+  /// Its agent's deletion waiting for the person (decision 149); null
+  /// otherwise.
+  final DeleteRequest? deleteRequest;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -760,6 +765,7 @@ class AgentSession {
     model: model,
     permissionMode: permissionMode,
     modeRequest: modeRequest,
+    deleteRequest: deleteRequest,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -822,6 +828,73 @@ class AgentSession {
     modeRequest: _map(j['mode_request']) == null
         ? null
         : ModeRequest.fromJson(_map(j['mode_request'])!),
+    deleteRequest: _map(j['delete_request']) == null
+        ? null
+        : DeleteRequest.fromJson(_map(j['delete_request'])!),
+  );
+}
+
+/// An agent's deletion waiting for the person (decision 149). The reason is
+/// the agent's own words: shown as plain data, never rendered or followed.
+class DeleteRequest {
+  const DeleteRequest({
+    required this.id,
+    required this.sessionId,
+    required this.vaultId,
+    required this.kind,
+    required this.path,
+    required this.reason,
+    required this.notes,
+    required this.size,
+    required this.paths,
+    required this.state,
+    this.noteId,
+    this.title,
+    this.modified,
+    this.decidedBy,
+  });
+
+  final String id;
+  final String sessionId;
+  final String vaultId;
+
+  /// `note` or `folder`.
+  final String kind;
+  final String? noteId;
+  final String path;
+  final String? title;
+  final String reason;
+  final int notes;
+  final int size;
+  final String? modified;
+
+  /// A folder's paths, sorted; the first ones only.
+  final List<String> paths;
+
+  /// `pending`, `deleted`, `declined`, `timed_out` or `gone`.
+  final String state;
+
+  /// The device that answered, by name.
+  final String? decidedBy;
+
+  bool get pending => state == 'pending';
+  bool get isFolder => kind == 'folder';
+
+  factory DeleteRequest.fromJson(Map<String, dynamic> j) => DeleteRequest(
+    id: j['id'] as String,
+    sessionId: j['session_id'] as String? ?? '',
+    vaultId: j['vault_id'] as String? ?? '',
+    kind: j['kind'] as String? ?? 'note',
+    noteId: j['note_id'] as String?,
+    path: j['path'] as String? ?? '',
+    title: j['title'] as String?,
+    reason: j['reason'] as String? ?? '',
+    notes: (j['notes'] as num?)?.toInt() ?? 0,
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    modified: j['modified'] as String?,
+    paths: [for (final p in j['paths'] as List? ?? const []) '$p'],
+    state: j['state'] as String? ?? 'pending',
+    decidedBy: j['decided_by'] as String?,
   );
 }
 
