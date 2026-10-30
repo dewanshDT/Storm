@@ -1773,15 +1773,15 @@ mod tests {
         .0
     }
 
-    /// WT-3 through the helper: an ended child's committed work reaches the
-    /// parent's workspace only through Apply, as `storm/<child>`; its
-    /// uncommitted work never does; the export and the Apply each run as
+    /// WT-3 through the helper: an ended child's work reaches the parent's
+    /// workspace only through Apply, as `storm/<child>`, what it left
+    /// uncommitted as Storm's commit on top; the export and the Apply each run as
     /// the review identity in a unit that sees only what it reads, and
     /// writes only what it must.
     #[test]
     fn wt_3_a_childs_work_reaches_its_parent_only_through_apply() {
         let f = fixture();
-        let (_, tip) = ended_clone_child(&f);
+        let (_, child_tip) = ended_clone_child(&f);
         let parent = PathBuf::from(f.workspace());
         let branches = || {
             git(
@@ -1792,17 +1792,22 @@ mod tests {
         assert_eq!(branches(), "refs/heads/main", "nothing before Apply");
         let v = export_child(&f);
         assert_eq!(v["ok"], true, "{v}");
-        assert_eq!(
-            (v["mode"].clone(), v["tip"].clone()),
-            (json!("clone"), json!(tip))
-        );
+        assert_eq!(v["mode"], "clone");
+        let tip = v["tip"].as_str().unwrap().to_string();
+        assert_ne!(tip, child_tip);
         assert_eq!(
             (v["child"].clone(), v["parent"].clone()),
             (json!("ags_C"), json!("ags_P"))
         );
-        assert_eq!(v["commits"][0]["subject"], "child work");
-        assert!(v["patch"].as_str().unwrap().contains("+the child's"));
-        assert!(!v["patch"].as_str().unwrap().contains("uncommitted"));
+        assert_eq!(v["commits"][0]["subject"], crate::review::SNAPSHOT_SUBJECT);
+        assert_eq!(
+            (
+                v["commits"][1]["id"].clone(),
+                v["commits"][1]["subject"].clone()
+            ),
+            (json!(child_tip), json!("child work"))
+        );
+        assert!(v["patch"].as_str().unwrap().contains("+uncommitted"));
         assert_eq!(branches(), "refs/heads/main", "an export changes nothing");
         // Asked again, the same answer, and no second unit.
         assert_eq!(export_child(&f), v);
@@ -2073,7 +2078,7 @@ mod tests {
     #[test]
     fn g_137_2_an_interrupted_export_or_apply_is_finished_once() {
         let f = fixture();
-        let (_, tip) = ended_clone_child(&f);
+        ended_clone_child(&f);
         // An export unit still loaded when the helper restarted.
         f.units.units.lock().unwrap().insert(
             review_unit_name("ags_C"),
@@ -2089,7 +2094,9 @@ mod tests {
         f.helper.recover().unwrap();
         let calls = f.units.calls.lock().unwrap().clone();
         assert!(calls.contains(&"stop storm-child-ags_C-review.service".to_string()));
-        assert_eq!(export_child(&f)["ok"], true);
+        let exported = export_child(&f);
+        assert_eq!(exported["ok"], true);
+        let tip = exported["tip"].as_str().unwrap().to_string();
         // The Apply made the branch, then the helper died before it was
         // recorded: the same Apply finishes; nothing else is let through.
         let parent = PathBuf::from(f.workspace());
