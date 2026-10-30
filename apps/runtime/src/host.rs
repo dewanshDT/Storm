@@ -1921,9 +1921,10 @@ impl Host {
         let spawned = child_of.is_some() && reads_storm;
         // 146a: a child's own Storm tools, and a spawning parent's spawn
         // tools, are allowed outright, as is a top-level Claude Code
-        // session's request for auto (147c), so the person sees Storm's card
-        // and never the CLI's prompt for it. A child's OpenCode asks are
-        // denies (148a).
+        // session's request for auto (147c) and a top-level session's
+        // deletes (149b), so the person sees Storm's card or dialog and
+        // never the CLI's prompt for it. A child's OpenCode asks are denies
+        // (148a).
         let mut layer = crate::mcp::StormLayer::new(
             spawned,
             spawn && reads_storm && child_of.is_none(),
@@ -1931,6 +1932,9 @@ impl Host {
         );
         if is_claude && reads_storm && child_of.is_none() {
             layer = layer.asking_for_modes();
+        }
+        if reads_storm && child_of.is_none() {
+            layer = layer.deleting();
         }
         if mode.deny_asks {
             layer = layer.denying_asks();
@@ -6963,10 +6967,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         assert_eq!(
             settings("ags_SPAWN")["permissions"],
             serde_json::json!({
-                "allow": ["mcp__storm__request_permission_mode"],
+                "allow": [
+                    "mcp__storm__request_permission_mode",
+                    "mcp__storm__delete_note",
+                    "mcp__storm__delete_folder"
+                ],
                 "disableAutoMode": "disable"
             }),
-            "only 147c's tool and setting"
+            "only 147c's and 149b's tools and 147c's setting"
         );
         assert_eq!(settings("ags_SPAWN"), settings("ags_PLAIN"));
         let env = recorded(roots.path(), "env", "ags_OCSPAWN").unwrap();
@@ -6977,8 +6985,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         let config: serde_json::Value = serde_json::from_str(config).unwrap();
         assert_eq!(
             config["permission"],
-            serde_json::json!({"storm_*": "ask"}),
-            "only the server's own ask"
+            serde_json::json!({"storm_*": "ask", "storm_delete_note": "allow",
+                "storm_delete_folder": "allow"}),
+            "only the server's own ask and 149b's allows"
         );
         for tool in ["start_agent", "send_message", "end_agent", "wait_agent"] {
             assert!(!env.contains(tool), "{tool}");
@@ -7052,6 +7061,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
         rules.push(mode_tool.into());
+        // 149b: every top-level session reading Storm allows its deletes.
+        let deletes: Vec<String> = crate::mcp::DELETE_ALLOWED_TOOLS
+            .iter()
+            .map(|t| format!("mcp__storm__{t}"))
+            .collect();
+        rules.extend(deletes.iter().cloned());
+        let mut plain_rules = vec![mode_tool.to_string()];
+        plain_rules.extend(deletes.iter().cloned());
         // 147c's setting is every non-auto Claude Code session's.
         let auto_off = serde_json::json!({"disableAutoMode": "disable"});
         assert_eq!(
@@ -7059,24 +7076,28 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             serde_json::json!({ "allow": rules, "disableAutoMode": "disable" })
         );
         let mut parent = settings("ags_CCSPAWN");
-        parent["permissions"]["allow"] = serde_json::json!([mode_tool]);
+        parent["permissions"]["allow"] = serde_json::json!(plain_rules);
         assert_eq!(parent, settings("ags_CCPLAIN"), "nothing else changes");
         assert_eq!(
             settings("ags_CCPLAIN")["permissions"],
-            serde_json::json!({"allow": [mode_tool], "disableAutoMode": "disable"})
+            serde_json::json!({"allow": plain_rules, "disableAutoMode": "disable"})
         );
         assert_eq!(settings("ags_NOSTORM")["permissions"], auto_off);
         let mut want = serde_json::json!({"storm_*": "ask"});
         for t in crate::mcp::SPAWN_ALLOWED_TOOLS {
             want[format!("storm_{t}")] = "allow".into();
         }
+        for t in crate::mcp::DELETE_ALLOWED_TOOLS {
+            want[format!("storm_{t}")] = "allow".into();
+        }
         assert_eq!(opencode("ags_OCSPAWN")["permission"], want);
         assert_eq!(
             opencode("ags_OCPLAIN")["permission"],
-            serde_json::json!({"storm_*": "ask"}),
-            "byte for byte the plain config"
+            serde_json::json!({"storm_*": "ask", "storm_delete_note": "allow",
+                "storm_delete_folder": "allow"}),
+            "the plain config, with 149b's allows"
         );
-        for tool in ["create_note", "update_note", "delete_note"] {
+        for tool in ["create_note", "update_note"] {
             assert!(
                 !recorded(roots.path(), "env", "ags_OCSPAWN")
                     .unwrap()
@@ -7679,8 +7700,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
 
     /// A-146-1, 146c and 148a at the host: the vectors' child start (Claude
     /// Code, reading Storm) runs `dontAsk` with its own Storm tools and the
-    /// child baseline allowed in its `--settings`, never `request_permission_mode`,
-    /// and, with the compiled lists, the permission prompt's hooks as a
+    /// child baseline allowed in its `--settings`, never `request_permission_mode`
+    /// or the delete tools (149d), and, with the compiled lists, the permission prompt's hooks as a
     /// fault detector and the denial hooks.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(target_os = "linux")]

@@ -159,12 +159,18 @@ pub const SPAWN_ALLOWED_TOOLS: [&str; 8] = [
 /// the CLI's own prompt for the call first.
 pub const MODE_ALLOWED_TOOLS: [&str; 1] = ["request_permission_mode"];
 
+/// The Storm tools a top-level session deletes with (149b), allowed
+/// outright so the person sees only Storm's dialog, which every deletion
+/// waits on whatever the mode, never the CLI's prompt first. The server
+/// offers them only to a session with vault writes.
+pub const DELETE_ALLOWED_TOOLS: [&str; 2] = ["delete_note", "delete_folder"];
+
 /// What Storm's own layer of a session's CLI config says about permissions
-/// (decisions 146, 148): the Storm tools allowed outright, the keys a
+/// (decisions 146, 148, 149): the Storm tools allowed outright, the keys a
 /// permission mode sets in OpenCode's config, and whether every other
 /// OpenCode ask becomes a deny (a child's, 148a). Empty for a session that
-/// cannot spawn, is not a child, cannot ask for auto and runs in
-/// `default`, whose config is then byte-identical to before.
+/// does not read Storm and runs in `default`, whose config is then
+/// byte-identical to before.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StormLayer {
     pub allow: Vec<&'static str>,
@@ -193,6 +199,12 @@ impl StormLayer {
     /// With `request_permission_mode` allowed too (147c).
     pub fn asking_for_modes(mut self) -> Self {
         self.allow.extend(MODE_ALLOWED_TOOLS);
+        self
+    }
+
+    /// With the delete tools allowed too (149b).
+    pub fn deleting(mut self) -> Self {
+        self.allow.extend(DELETE_ALLOWED_TOOLS);
         self
     }
 
