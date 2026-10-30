@@ -1,4 +1,5 @@
 import 'agent_api.dart';
+import 'agent_models.dart';
 import 'spawn_models.dart';
 
 /// The spawning routes (decisions 134, 137 and 145), owner only on the
@@ -16,6 +17,21 @@ extension SpawnApi on AgentApi {
         if (r is Map<String, dynamic>) AgentAct.fromJson(r),
     ];
   }
+
+  /// The person's answer to the agent's request for auto (decision 147c):
+  /// approving switches the session; its request then names where to.
+  Future<ModeRequest> decideModeRequest(
+    String sessionId,
+    String requestId, {
+    required bool approve,
+  }) async => ModeRequest.fromJson(
+    await send(
+          'POST',
+          '${_s(sessionId)}/mode-requests/${Uri.encodeComponent(requestId)}',
+          body: {'decision': approve ? 'approve' : 'deny'},
+        )
+        as Map<String, dynamic>,
+  );
 
   /// Turns a session's spawn switch (141e: off in About, on only for a
   /// session launched with it).

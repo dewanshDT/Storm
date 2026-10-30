@@ -531,6 +531,7 @@ class AgentSession {
     this.launchRole,
     this.model,
     this.permissionMode,
+    this.modeRequest,
   }) : name = name ?? workspace;
 
   final String id;
@@ -613,6 +614,10 @@ class AgentSession {
   /// `accept_edits` or `auto` as the person chose at launch, or inherited
   /// (decision 146b); null for the agent's own.
   final String? permissionMode;
+
+  /// Its agent's request for auto (decision 147c), while it waits for the
+  /// person or once approved; null otherwise.
+  final ModeRequest? modeRequest;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -754,6 +759,7 @@ class AgentSession {
     launchRole: launchRole,
     model: model,
     permissionMode: permissionMode,
+    modeRequest: modeRequest,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -813,6 +819,48 @@ class AgentSession {
         : RoleRef.fromJson(_map(j['launch_role'])!),
     model: j['model'] as String?,
     permissionMode: permissionModeOf(j['permission_mode']),
+    modeRequest: _map(j['mode_request']) == null
+        ? null
+        : ModeRequest.fromJson(_map(j['mode_request'])!),
+  );
+}
+
+/// An agent's request for auto (decision 147c). The reason is the agent's
+/// own words: shown as data, never acted on.
+class ModeRequest {
+  const ModeRequest({
+    required this.id,
+    required this.mode,
+    required this.reason,
+    required this.expiresAt,
+    required this.state,
+    this.switchedTo,
+    this.switchFailed = false,
+  });
+
+  final String id;
+  final String mode;
+  final String reason;
+  final DateTime? expiresAt;
+
+  /// `pending`, `approved`, `denied` or `expired`.
+  final String state;
+
+  /// The session the approved switch resumed into.
+  final String? switchedTo;
+  final bool switchFailed;
+
+  bool get pending => state == 'pending';
+  bool get approved => state == 'approved';
+
+  factory ModeRequest.fromJson(Map<String, dynamic> j) => ModeRequest(
+    id: j['id'] as String,
+    mode: j['mode'] as String? ?? 'auto',
+    reason: j['reason'] as String? ?? '',
+    expiresAt: DateTime.tryParse(j['expires_at'] as String? ?? ''),
+    state: j['state'] as String? ?? 'pending',
+    switchedTo: j['switched_to'] as String?,
+    switchFailed: j['switch_failed'] == true,
   );
 }
 
@@ -837,11 +885,12 @@ String? permissionModeWord(String? mode) => switch (mode) {
   _ => null,
 };
 
-/// The launcher's and About's name for a mode.
+/// The launcher's and About's name for a mode. The one that asks is
+/// Manual, as Claude Code itself now calls it (decision 147a).
 String permissionModeLabel(String mode) => switch (mode) {
   'accept_edits' => 'Accept edits',
   'auto' => 'Auto',
-  _ => 'Default (the agent asks)',
+  _ => 'Manual (asks)',
 };
 
 /// Everything the launch answer says out loud: the MCP notice, then the

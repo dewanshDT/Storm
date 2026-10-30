@@ -1,3 +1,10 @@
+## 5.2.0+storm.2
+
+- Kitty keyboard protocol: a key's release is reported only when the
+  application asked for event types, and a modifier key on its own only when
+  it asked for all keys as escape codes. Before, a release went out encoded
+  as a second press (Storm decision 147b).
+
 ## 5.2.0+storm.1
 
 - `TerminalView.contentInsertionConfiguration`: the keyboard may insert

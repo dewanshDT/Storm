@@ -94,7 +94,7 @@ void main() {
         final c = await launcher(t, agents);
         await t.tap(find.byKey(const Key('launcher-permission-mode')));
         await t.pumpAndSettle();
-        expect(find.text('Default (the agent asks)'), findsWidgets);
+        expect(find.text('Manual (asks)'), findsWidgets);
         expect(find.text('Accept edits'), findsOneWidget);
         expect(find.text('Auto'), findsOneWidget);
         expect(

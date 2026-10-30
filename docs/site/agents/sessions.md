@@ -20,7 +20,7 @@ launcher asks for:
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's row shows it. |
-| **Permission mode** | How much the agent may do without asking you: **Default** (the agent asks, as it always does), **Accept edits** (file edits go ahead without a prompt) or **Auto** (the agent's own safety check decides routine calls). Claude Code offers all three, OpenCode Default and Accept edits; other agents always ask. There is never an option that turns the agent's prompts off. Agents the session starts get the same mode or a stricter one. The session's row and About show it, and a resume keeps it. |
+| **Permission mode** | How much the agent may do without asking you: **Manual** (the agent asks; the default), **Accept edits** (file edits go ahead without a prompt; shell commands still ask) or **Auto** (the agent's own safety check decides routine calls, shell commands included). Claude Code offers all three, OpenCode Manual and Accept edits; other agents always ask. There is never an option that turns the agent's prompts off. Agents the session starts get the same mode or a stricter one. The session's row and About show it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
@@ -51,12 +51,27 @@ Sessions working toward one goal can be grouped into a
   Android (including Gboard's image keyboard). It is staged on the host and
   handed to the agent as a file path.
 - **Links** in the terminal open in your browser.
-- **On a phone**, extra keys (Esc, Tab, arrows, Ctrl) sit above the keyboard.
+- **Tab and Shift+Tab go to the agent** while the terminal has focus: in
+  Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
+  move focus out of the terminal with the keyboard, press **Escape, then
+  Tab**, or click outside it.
+- **On a phone**, extra keys (Esc, Tab, ⇧Tab, arrows, Ctrl) sit above the
+  keyboard.
 - **Settings › Terminal** sets the text size, line spacing and padding.
 
 Beside the terminal, **Context**, **Wrote** and **About** show the note it
 started from, the notes it has written, and how it was launched. A note an
 agent wrote says so on its version line, linking back to the session.
+
+## Switching to Auto
+
+Unless you launched a Claude Code session in **Auto**, Auto is not among the
+modes Shift+Tab cycles through. The agent can ask for it: a card on the
+session shows its reason, word for word, with **Approve Auto** and **Deny**,
+and expires after 10 minutes. Approving restarts the session in Auto with
+its conversation kept, and takes you to it. An agent another agent started
+can ask only while that agent is in Auto, and a session with agents of its
+own running can't ask until they end.
 
 ## When it ends
 

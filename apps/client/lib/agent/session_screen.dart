@@ -30,6 +30,7 @@ import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'mode_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
 import 'session_inspector.dart';
@@ -181,6 +182,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// The confirmations spawning adds below the header.
   List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
+    if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
+      Padding(
+        padding: padding,
+        child: ModeRequestCard(session: s),
+      ),
     if (_endTree && !s.ended)
       Padding(
         padding: padding,
@@ -1769,7 +1775,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
   }
 }
 
-/// Esc, Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
+/// Esc, Tab, Shift+Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
 /// keyboard lacks (freeze §10, AC-F4). Shown while the session is live;
 /// Done appears with the keyboard and only puts it away (plan §5.1).
 class _ExtraKeys extends StatelessWidget {
@@ -1830,6 +1836,13 @@ class _ExtraKeys extends StatelessWidget {
                         tooltip: 'Shift, for the next key',
                         active: term.stickyShift,
                         onTap: () => term.stickyShift = !term.stickyShift,
+                      ),
+                      // Claude Code's mode switch (decision 147b).
+                      _Key(
+                        key: const Key('key-backtab'),
+                        label: '⇧Tab',
+                        tooltip: 'Shift+Tab: switch the agent’s mode',
+                        onTap: term.backTab,
                       ),
                       _Key(label: '←', tooltip: 'Left', onTap: term.left),
                       _Key(label: '→', tooltip: 'Right', onTap: term.right),
