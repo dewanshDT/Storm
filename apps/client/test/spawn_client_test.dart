@@ -254,6 +254,41 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('turning it on shows Allow in sight, however short the '
+        'window', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': false}),
+        ],
+      );
+      final spawning = FakeSpawning(agents);
+      const size = Size(1280, 560);
+      final c = await open(
+        tester,
+        agents,
+        size: size,
+        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+      );
+      final toggle = find.byKey(const Key('spawn-switch'));
+      await tester.ensureVisible(toggle);
+      await tester.pumpAndSettle();
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      final allow = find.descendant(
+        of: find.byKey(const Key('spawn-on-confirm')),
+        matching: find.byKey(const Key('banner-action')),
+      );
+      final r = tester.getRect(allow);
+      expect(r.bottom, lessThanOrEqualTo(size.height));
+      expect(r.top, greaterThanOrEqualTo(0));
+      await tester.tap(allow);
+      await tester.pumpAndSettle();
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isNotEmpty);
+      expect(spawning.acts, isEmpty);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('141e: launched with it, off and on again from About', (
       tester,
     ) async {

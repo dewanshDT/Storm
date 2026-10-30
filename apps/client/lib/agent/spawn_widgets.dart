@@ -183,6 +183,21 @@ class SpawnSwitchRow extends ConsumerStatefulWidget {
 class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
   bool _confirm = false;
   bool _busy = false;
+  final _confirmKey = GlobalKey();
+
+  /// Its Allow sits below the switch, often past the bottom of About.
+  void _ask() {
+    setState(() => _confirm = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final at = _confirmKey.currentContext;
+      if (at == null || !at.mounted) return;
+      Scrollable.ensureVisible(
+        at,
+        duration: const Duration(milliseconds: 200),
+        alignmentPolicy: ScrollPositionAlignmentPolicy.keepVisibleAtEnd,
+      );
+    });
+  }
 
   Future<void> _set(bool enabled) async {
     final api = agentApi(ref);
@@ -231,7 +246,7 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
           enabled: !_busy && (sw.enabled || canTurnOn),
           onChanged: (on) {
             if (on) {
-              setState(() => _confirm = true);
+              _ask();
             } else if (_confirm) {
               setState(() => _confirm = false);
             } else {
@@ -262,13 +277,16 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
         ),
         if (_confirm && !sw.enabled) ...[
           SizedBox(height: t.sp),
-          _Banner(
-            key: const Key('spawn-on-confirm'),
-            title: spawnOnConfirmText(s.displayName, widget.host),
-            action: 'Allow',
-            accent: true,
-            onAction: _busy ? null : () => _set(true),
-            onCancel: () => setState(() => _confirm = false),
+          KeyedSubtree(
+            key: _confirmKey,
+            child: _Banner(
+              key: const Key('spawn-on-confirm'),
+              title: spawnOnConfirmText(s.displayName, widget.host),
+              action: 'Allow',
+              accent: true,
+              onAction: _busy ? null : () => _set(true),
+              onCancel: () => setState(() => _confirm = false),
+            ),
           ),
         ],
       ],
