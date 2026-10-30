@@ -4117,6 +4117,10 @@ pub struct SessionView {
     /// Its permission mode (146b), absent for `default`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// Its agent's request for auto (147c) while it waits, or once approved
+    /// (with where the switch went); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_request: Option<crate::agent::mode::ModeRequest>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -4199,6 +4203,7 @@ fn session_view(
         ),
         None => (session.workspace.clone(), None, None, None, None, None),
     };
+    let mode_request = shown_mode_request(state, &session.id)?;
     Ok(SessionView {
         session,
         name,
@@ -4222,7 +4227,20 @@ fn session_view(
         launch_role,
         model,
         permission_mode,
+        mode_request,
     })
+}
+
+/// The request a session's view carries: one waiting, or one approved.
+fn shown_mode_request(
+    state: &Shared,
+    session_id: &str,
+) -> ApiResult<Option<crate::agent::mode::ModeRequest>> {
+    Ok(state
+        .agent
+        .mode_request_of(session_id)
+        .map_err(agent_error)?
+        .filter(|r| r.pending() || r.state == crate::agent::mode::APPROVED))
 }
 
 /// Names each view's role by its note's title now, so a rename follows and a
@@ -4539,6 +4557,7 @@ pub async fn launch_session(
         launch_role: launch.role,
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),
+        mode_request: None,
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;
@@ -5205,6 +5224,378 @@ pub async fn set_session_role(
         .agent
         .set_role(session_id, label.as_ref())
         .map_err(agent_error)
+}
+
+// ---- decision 147c: an agent asks for auto, the person decides -------------
+
+/// A request for auto made, with the reason's length, never its text.
+pub const EVENT_PERMISSION_MODE_REQUEST: &str = "permission_mode_request";
+/// The person's answer, or its expiry.
+pub const EVENT_PERMISSION_MODE_DECISION: &str = "permission_mode_decision";
+/// The approved switch: the session it left and the one it resumed into.
+pub const EVENT_PERMISSION_MODE_SWITCH: &str = "permission_mode_switch";
+
+/// How long the approved tool call has to reach the agent before its
+/// session is stopped for the switch.
+pub const SWITCH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long the switch waits for the session to stop, or a child to park.
+const SWITCH_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+const APPROVED_SENTENCE: &str = "The person approved auto mode. Storm now restarts this \
+    session in auto with its conversation kept: end your turn here and do nothing else. The \
+    person continues the conversation in the restarted session, where auto lets you run routine \
+    commands without asking, each checked by Claude Code's own safety classifier.";
+const DENIED_SENTENCE: &str = "The person denied auto mode. Carry on in your current mode: \
+    ask for each action as before, and do not ask for auto again unless the person says so.";
+const EXPIRED_SENTENCE: &str = "Nobody answered within 10 minutes, so the request expired. \
+    Carry on in your current mode.";
+const PENDING_SENTENCE: &str = "The person has not answered yet. Call request_permission_mode \
+    again with the same mode to keep waiting; it shows the same card, never a second one.";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModeRequestAnswer {
+    /// `pending`, `approved`, `denied`, `expired`, `already` or `refused`.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// A refusal's code: `permission_mode_unavailable`,
+    /// `permission_mode_wider`, `live_children` or `session_not_live`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    pub message: String,
+}
+
+impl ModeRequestAnswer {
+    fn refused(reason: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: "refused",
+            request: None,
+            expires_at: None,
+            reason: Some(reason),
+            message: message.into(),
+        }
+    }
+
+    fn of(r: &crate::agent::mode::ModeRequest) -> Self {
+        use crate::agent::mode;
+        let (status, message) = match r.state.as_str() {
+            mode::APPROVED => ("approved", APPROVED_SENTENCE),
+            mode::DENIED => ("denied", DENIED_SENTENCE),
+            mode::EXPIRED => ("expired", EXPIRED_SENTENCE),
+            _ => ("pending", PENDING_SENTENCE),
+        };
+        Self {
+            status,
+            request: Some(r.id.clone()),
+            expires_at: Some(r.expires_at.clone()),
+            reason: None,
+            message: message.into(),
+        }
+    }
+}
+
+async fn audit_mode(
+    state: &Shared,
+    kind: &str,
+    owner: &str,
+    device: Option<&str>,
+    detail: serde_json::Value,
+) {
+    let _ = state.auth_db.lock().await.record_event(
+        kind,
+        Some(owner),
+        device,
+        &crate::index::now_rfc3339(),
+        &detail.to_string(),
+    );
+}
+
+/// `request_permission_mode {mode, reason}` (147c): only a Claude Code
+/// session, only for `auto`, and a child only while its parent is in auto.
+/// Makes one card (a repeat while it waits shows the same one), then waits
+/// up to the agent's wait cap for the person.
+pub async fn request_permission_mode(
+    state: &Shared,
+    actor: &Actor,
+    mode: &str,
+    reason: &str,
+) -> ApiResult<ModeRequestAnswer> {
+    use crate::agent::mode::Refusal;
+    let Actor::Agent { session_id, .. } = actor else {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "only an agent session asks for a permission mode".into(),
+        ));
+    };
+    let session = state.agent.get(session_id).map_err(agent_error)?;
+    let made = match state
+        .agent
+        .request_mode(session_id, mode, reason)
+        .map_err(agent_error)?
+    {
+        Ok(made) => made,
+        Err(refusal) => {
+            let answer = match refusal {
+                Refusal::Unavailable(why) => {
+                    ModeRequestAnswer::refused("permission_mode_unavailable", why)
+                }
+                Refusal::Wider(why) => ModeRequestAnswer::refused("permission_mode_wider", why),
+                Refusal::LiveChildren => ModeRequestAnswer::refused(
+                    "live_children",
+                    "Switching restarts this session, which the agents you started would not \
+                     survive: end them first, then ask again.",
+                ),
+                Refusal::NotLive => {
+                    ModeRequestAnswer::refused("session_not_live", "This session is not running.")
+                }
+                Refusal::AlreadyAuto => ModeRequestAnswer {
+                    status: "already",
+                    request: None,
+                    expires_at: None,
+                    reason: None,
+                    message: "This session is already in auto mode.".into(),
+                },
+            };
+            if answer.status == "refused" {
+                audit_mode(
+                    state,
+                    EVENT_PERMISSION_MODE_REQUEST,
+                    &session.owner_user_id,
+                    None,
+                    serde_json::json!({
+                        "session_id": session.id,
+                        "refused": answer.reason,
+                    }),
+                )
+                .await;
+            }
+            return Ok(answer);
+        }
+    };
+    let (request, new) = made;
+    if new {
+        audit_mode(
+            state,
+            EVENT_PERMISSION_MODE_REQUEST,
+            &session.owner_user_id,
+            None,
+            serde_json::json!({
+                "session_id": session.id,
+                "request_id": request.id,
+                "permission_mode": request.mode,
+                "reason_bytes": request.reason.len(),
+            }),
+        )
+        .await;
+    }
+    let bound = crate::agent::scope::wait_cap(&session.provider);
+    let waited = state
+        .agent
+        .wait_mode(&request.id, bound)
+        .await
+        .map_err(agent_error)?;
+    if waited.state == crate::agent::mode::EXPIRED {
+        audit_expired(state, &session.owner_user_id, &waited).await;
+    }
+    Ok(ModeRequestAnswer::of(&waited))
+}
+
+async fn audit_expired(state: &Shared, owner: &str, r: &crate::agent::mode::ModeRequest) {
+    audit_mode(
+        state,
+        EVENT_PERMISSION_MODE_DECISION,
+        owner,
+        None,
+        serde_json::json!({
+            "session_id": r.session_id,
+            "request_id": r.id,
+            "outcome": r.state,
+        }),
+    )
+    .await;
+}
+
+/// `POST /v1/agent/sessions/{id}/mode-requests/{request}`'s body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecideMode {
+    /// `approve` or `deny`.
+    pub decision: String,
+}
+
+/// The person's answer to a request for auto (147c), on the session tier
+/// only. Approval switches the session in the background
+/// ([`switch_to_auto`]); the request's `switched_to` names where it went.
+pub async fn decide_mode_request(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    session_id: &str,
+    request_id: &str,
+    req: DecideMode,
+) -> ApiResult<crate::agent::mode::ModeRequest> {
+    let (owner, _) = owners_session(state, actor, session_id)?;
+    let approve = match req.decision.as_str() {
+        "approve" => true,
+        "deny" => false,
+        _ => return Err(bad_request("decision is approve or deny")),
+    };
+    let decided = match state
+        .agent
+        .decide_mode(session_id, request_id, approve, device)
+    {
+        Ok(d) => d,
+        Err(crate::agent::AgentError::Conflict(code)) if code == "request_expired" => {
+            if let Ok(Some(r)) = state.agent.mode_request(request_id) {
+                audit_expired(state, &owner, &r).await;
+            }
+            return Err(conflict(code));
+        }
+        Err(e) => return Err(agent_error(e)),
+    };
+    audit_mode(
+        state,
+        EVENT_PERMISSION_MODE_DECISION,
+        &owner,
+        device,
+        serde_json::json!({
+            "session_id": session_id,
+            "request_id": request_id,
+            "outcome": decided.state,
+        }),
+    )
+    .await;
+    if approve {
+        let (state, actor) = (state.clone(), actor.clone());
+        let (device, id) = (device.map(str::to_string), request_id.to_string());
+        let session = session_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(SWITCH_GRACE).await;
+            let to = switch_to_auto(&state, &actor, device.as_deref(), &session).await;
+            if let Err(e) = &to {
+                tracing::warn!(session = %session, error = %e.1, "the switch to auto failed");
+            }
+            let to = to.ok();
+            let _ = state.agent.record_switch(&id, to.as_deref());
+            audit_mode(
+                &state,
+                EVENT_PERMISSION_MODE_SWITCH,
+                &owner,
+                device.as_deref(),
+                serde_json::json!({
+                    "session_id": session,
+                    "request_id": id,
+                    "permission_mode": crate::agent::permission::AUTO,
+                    "mechanism": "resume",
+                    "switched_to": to,
+                }),
+            )
+            .await;
+        });
+    }
+    Ok(decided)
+}
+
+/// Waits until `session_id` is ended, or parked when `parked` is accepted.
+async fn stopped(state: &Shared, session_id: &str, parked: bool) -> bool {
+    let deadline = std::time::Instant::now() + SWITCH_STOP_WAIT;
+    let mut changed = state.agent.watch(session_id);
+    loop {
+        changed.borrow_and_update();
+        match state.agent.get(session_id) {
+            Ok(r) if r.is_ended() || (parked && r.status == "parked") => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let _ = tokio::time::timeout(
+            left.min(std::time::Duration::from_millis(500)),
+            changed.changed(),
+        )
+        .await;
+    }
+}
+
+/// The approved switch (147c). G-147 found Claude Code does not re-read its
+/// `--settings` while running, so auto is reached by a restart that keeps
+/// the conversation: a top-level session is stopped and resumed in auto as
+/// a new session (decision 89's Resume, the mode replaced); a child is
+/// parked and resumed as itself with its stored mode now auto (145e).
+/// Returns the session that runs in auto.
+async fn switch_to_auto(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    session_id: &str,
+) -> ApiResult<String> {
+    let r = state.agent.get(session_id).map_err(agent_error)?;
+    let child = state
+        .agent
+        .lineage(session_id)
+        .map_err(agent_error)?
+        .parent_session
+        .is_some();
+    if child {
+        state
+            .agent
+            .set_mode_for_switch(session_id)
+            .map_err(agent_error)?;
+        state
+            .agent
+            .park_for_switch(session_id)
+            .map_err(agent_error)?;
+        if !stopped(state, session_id, true).await {
+            return Err(conflict("the session did not stop for the switch"));
+        }
+        let deliverable = deliverable_credential(state, &r.host_id);
+        if !state
+            .agent
+            .resume_parked(session_id, deliverable)
+            .map_err(agent_error)?
+        {
+            return Err(conflict("the session could not be resumed"));
+        }
+        if let Ok(r) = state.agent.get(session_id) {
+            audit_permission_mode(state, &r, crate::agent::permission::AUTO, None).await;
+        }
+        return Ok(session_id.to_string());
+    }
+    if !r.is_ended() {
+        state
+            .agent
+            .end_by_person(session_id, None, false)
+            .map_err(agent_error)?;
+    }
+    if !stopped(state, session_id, false).await {
+        return Err(conflict("the session did not stop for the switch"));
+    }
+    let launch = crate::agent::Launch {
+        host_id: r.host_id.clone(),
+        workspace: r.workspace.clone(),
+        provider: Some(r.provider.clone()),
+        interaction: r.interaction.clone(),
+        terminal: crate::agent::TerminalSize {
+            cols: r.cols,
+            rows: r.rows,
+        },
+        context: None,
+        write_vault_id: None,
+        allow_vault_writes: false,
+        resume_of: Some(session_id.to_string()),
+        crew: None,
+        role: None,
+        spawn: false,
+        model: None,
+        permission_mode: None,
+        switch_mode: Some(crate::agent::permission::AUTO.into()),
+    };
+    let launched = launch_session(state, actor, device, launch).await?;
+    Ok(launched.session.session.id)
 }
 
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
@@ -6400,6 +6791,8 @@ struct Authorized {
     spawned: bool,
     /// The session was launched with spawning on and a person turned it off.
     spawn_off: bool,
+    /// The session's agent is Claude Code, so it may ask for auto (147c).
+    mode_request: bool,
 }
 
 impl Authorized {
@@ -6414,6 +6807,7 @@ impl Authorized {
                     && (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
+                    && (self.mode_request || !crate::mcp::MODE_TOOLS.contains(&name))
             }
         }
     }
@@ -6554,6 +6948,7 @@ async fn authorize_call(
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
+        mode_request: session.provider == "claude-code",
     })
 }
 

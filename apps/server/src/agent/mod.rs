@@ -25,6 +25,7 @@ pub mod events;
 pub mod images;
 pub mod inbox;
 pub mod jobs;
+pub mod mode;
 pub mod model;
 pub mod park;
 pub mod permission;
@@ -686,6 +687,10 @@ pub struct Launch {
     /// no bypass. A resume keeps its predecessor's.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// Set only by Storm, never by a request: the mode an approved switch
+    /// (147c) resumes into, instead of the predecessor's.
+    #[serde(skip)]
+    pub switch_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2010,6 +2015,7 @@ impl AgentManager {
             )));
         }
         let permission_mode = match resume.as_ref() {
+            Some(_) if req.switch_mode.is_some() => req.switch_mode.clone(),
             Some((old, _)) => self
                 .store
                 .lock()
@@ -3179,6 +3185,7 @@ mod tests {
                 spawn: false,
                 model: None,
                 permission_mode: None,
+                switch_mode: None,
             },
             meta,
             grants,
@@ -3204,6 +3211,7 @@ mod tests {
                 spawn: false,
                 model: None,
                 permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3878,6 +3886,7 @@ mod tests {
                     spawn: false,
                     model: None,
                     permission_mode: None,
+                    switch_mode: None,
                 },
                 meta,
                 offered(),
@@ -4093,6 +4102,7 @@ mod tests {
                 spawn: false,
                 model: None,
                 permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             Vec::new(),

@@ -557,6 +557,10 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         // The spawn switch (decision 134-2): owner only, checked in ops.
         .route("/v1/agent/sessions/{id}/spawn", put(agent_session_spawn))
+        .route(
+            "/v1/agent/sessions/{id}/mode-requests/{request}",
+            post(agent_session_mode_request),
+        )
         // A session's acts, for the person's log (134-10, 145a).
         .route(
             "/v1/agent/sessions/{id}/requests",
@@ -2260,6 +2264,20 @@ async fn agent_session_spawn(
     let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
     Ok(Json(
         crate::ops::set_session_spawn(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+/// The person's answer to an agent's request for auto (decision 147c).
+async fn agent_session_mode_request(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path((id, request)): Path<(String, String)>,
+    Json(req): Json<crate::ops::DecideMode>,
+) -> ApiResult<Json<crate::agent::mode::ModeRequest>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::decide_mode_request(&state, &actor, device, &id, &request, req).await?,
     ))
 }
 
@@ -17616,7 +17634,12 @@ pub(crate) mod tests {
         assert_eq!(view["needs_attention"], "permission_prompt", "Needs you");
 
         let tools = f.storm_tools(&parent).await;
-        for t in &tools {
+        // 147c's request asks the person for a mode on a card of Storm's
+        // own; it answers no CLI prompt (A-147-4).
+        for t in tools
+            .iter()
+            .filter(|t| !crate::mcp::MODE_TOOLS.contains(&t.as_str()))
+        {
             for word in ["answer", "approve", "permission", "respond", "allow"] {
                 assert!(!t.contains(word), "{t} could answer a prompt");
             }
@@ -18362,5 +18385,435 @@ pub(crate) mod tests {
         assert!(view(&f, before).await.get("spawn").is_none());
         assert_eq!(f.spawn(&session, false).await.0, StatusCode::OK);
         assert!(view(&f, session).await.get("spawn").is_none());
+    }
+
+    // ---- decision 147: permission modes in the terminal ----
+
+    impl GatewayFixture {
+        /// A running Claude Code session reading Storm, launched with `extra`,
+        /// its conversation known; its storm connection initialized.
+        async fn moded_session(&mut self, extra: serde_json::Value) -> String {
+            let (status, body) = self.launch_body(extra).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let id = body["id"].as_str().unwrap().to_string();
+            let (code, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/runtime/sessions/{id}/status"),
+                    serde_json::json!({"status": "running",
+                        "harness_session": "9b2f6a0e-2c4d-4e8f-9a1b-3c5d7e9f1a2b"}),
+                    &self.host_bearer,
+                ),
+            )
+            .await;
+            assert!(code.is_success());
+            self.initialize(&id, "storm").await;
+            self.sent();
+            id
+        }
+
+        async fn decide(
+            &self,
+            session: &str,
+            request: &str,
+            decision: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            send(
+                &self.app,
+                post_json_with_auth(
+                    &format!("/v1/agent/sessions/{session}/mode-requests/{request}"),
+                    serde_json::json!({"decision": decision}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await
+        }
+
+        async fn events_of(&self, kind: &str) -> Vec<serde_json::Value> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(k, _)| k == kind)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+
+        /// The request waiting on `session`'s view, by polling it.
+        async fn waiting_request(&self, session: &str) -> String {
+            for _ in 0..400 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
+                if view["mode_request"]["state"] == "pending" {
+                    return view["mode_request"]["id"].as_str().unwrap().to_string();
+                }
+            }
+            let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
+            panic!("no request is waiting on {session}: {view}");
+        }
+    }
+
+    fn ask(mode: &str) -> serde_json::Value {
+        serde_json::json!({"mode": mode, "reason": "The test suite runs many shell commands."})
+    }
+
+    /// A-147-4: the request for auto. The tool is offered to a Claude Code
+    /// session; only `auto` can be asked for, bypass never; one card however
+    /// often the agent asks; deny returns `denied` and changes nothing; an
+    /// unanswered card returns `expired`; approval resumes the conversation
+    /// in auto (G-147: no settings reload) and is audited; a child is refused
+    /// `permission_mode_wider` unless its parent is in auto.
+    #[tokio::test]
+    async fn a_147_4_the_request_for_auto() {
+        let dir = tempdir::TempDir::new("storm-147-4").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        // A host that resumes Claude Code and runs OpenCode.
+        f.spawning_parent().await;
+        let s = f.moded_session(serde_json::json!({})).await;
+        let open = f
+            .moded_session(serde_json::json!({"provider": "opencode"}))
+            .await;
+        let theirs = f
+            .mcp(
+                &open,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        assert!(
+            theirs[0]["message"]["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|t| t["name"] != "request_permission_mode"),
+            "Claude Code's alone"
+        );
+
+        let listed = f
+            .mcp(
+                &s,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+            )
+            .await;
+        assert!(
+            listed[0]["message"]["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|t| t["name"] == "request_permission_mode"),
+            "offered to Claude Code"
+        );
+
+        // Bypass, and any mode but auto, is no request at all.
+        for mode in [
+            "bypassPermissions",
+            "bypass",
+            "dangerously-skip-permissions",
+            "dontAsk",
+            "default",
+            "accept_edits",
+            "plan",
+        ] {
+            let refused = structured(&f.tool(&s, "request_permission_mode", ask(mode)).await);
+            assert_eq!(refused["status"], "refused", "{mode} {refused}");
+            assert_eq!(
+                refused["reason"], "permission_mode_unavailable",
+                "{refused}"
+            );
+        }
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{s}")).await;
+        assert!(view.get("mode_request").is_none(), "no card: {view}");
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // One card, asked twice; deny answers both and changes nothing.
+        let (first, second, request) = {
+            let a = f.tool(&s, "request_permission_mode", ask("auto"));
+            let b = async {
+                let id = f.waiting_request(&s).await;
+                let again = f.tool(&s, "request_permission_mode", ask("auto"));
+                let deny = async {
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    let (code, body) = f.decide(&s, &id, "deny").await;
+                    assert_eq!(code, StatusCode::OK, "{body}");
+                    assert_eq!(body["state"], "denied");
+                };
+                let (again, ()) = tokio::join!(again, deny);
+                (again, id)
+            };
+            let (a, (b, id)) = tokio::join!(a, b);
+            (structured(&a), structured(&b), id)
+        };
+        assert_eq!(first["status"], "denied", "{first}");
+        assert_eq!(second["status"], "denied", "{second}");
+        assert_eq!(first["request"], request.as_str());
+        assert_eq!(second["request"], request.as_str(), "the same card");
+        assert_eq!(
+            f.events_of(crate::ops::EVENT_PERMISSION_MODE_REQUEST)
+                .await
+                .iter()
+                .filter(|e| e["session_id"] == s.as_str() && e.get("request_id").is_some())
+                .count(),
+            1,
+            "exactly one card"
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{s}")).await;
+        assert!(
+            view.get("permission_mode").is_none(),
+            "still default: {view}"
+        );
+        assert!(view.get("mode_request").is_none(), "{view}");
+        assert!(
+            f.sent()
+                .iter()
+                .all(|m| m["type"] != "end" && m["type"] != "start"),
+            "a denial stops nothing"
+        );
+        let (code, _) = f.decide(&s, &request, "approve").await;
+        assert_eq!(code, StatusCode::CONFLICT, "decided once");
+
+        // The gateway takes 10 calls a session a second.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // Unanswered: expired, and too late to approve.
+        let expiring = {
+            let a = f.tool(&s, "request_permission_mode", ask("auto"));
+            let b = async {
+                let id = f.waiting_request(&s).await;
+                f.state.agent.expire_mode_requests_for_tests(&s);
+                id
+            };
+            let (a, id) = tokio::join!(a, b);
+            assert_eq!(structured(&a)["request"], id.as_str());
+            (structured(&a), id)
+        };
+        assert_eq!(expiring.0["status"], "expired", "{}", expiring.0);
+        let (code, body) = f.decide(&s, &expiring.1, "approve").await;
+        assert_eq!(code, StatusCode::CONFLICT, "{body}");
+        assert!(
+            f.events_of(crate::ops::EVENT_PERMISSION_MODE_DECISION)
+                .await
+                .iter()
+                .any(|e| e["request_id"] == expiring.1.as_str() && e["outcome"] == "expired"),
+            "the expiry is audited"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        // Only a person answers: the host's credential cannot.
+        let pending = {
+            let a = f.tool(&s, "request_permission_mode", ask("auto"));
+            let b = async {
+                let id = f.waiting_request(&s).await;
+                let (code, _) = send(
+                    &f.app,
+                    post_json_with_auth(
+                        &format!("/v1/agent/sessions/{s}/mode-requests/{id}"),
+                        serde_json::json!({"decision": "approve"}),
+                        &f.host_bearer,
+                    ),
+                )
+                .await;
+                assert!(code.is_client_error(), "{code}");
+                let (code, body) = f.decide(&s, &id, "approve").await;
+                assert_eq!(code, StatusCode::OK, "{body}");
+                id
+            };
+            let (a, id) = tokio::join!(a, b);
+            assert_eq!(structured(&a)["status"], "approved", "{a:?}");
+            id
+        };
+        // The switch: the session is stopped, then resumed in auto.
+        let mut ended = false;
+        for _ in 0..100 {
+            if f.sent()
+                .iter()
+                .any(|m| m["type"] == "end" && m["session"] == s.as_str())
+            {
+                ended = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(ended, "the switch stops the session");
+        f.report(&s, "stopped").await;
+        let mut start = None;
+        for _ in 0..100 {
+            start = f.sent().into_iter().find(|m| m["type"] == "start");
+            if start.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let start = start.expect("the switch resumes the session");
+        assert_eq!(start["permission_mode"], "auto", "{start}");
+        assert_eq!(
+            start["resume"], "9b2f6a0e-2c4d-4e8f-9a1b-3c5d7e9f1a2b",
+            "the conversation is kept"
+        );
+        assert_eq!(start["resumed_from"], s.as_str());
+        let resumed = start["session"].as_str().unwrap().to_string();
+        let mut switched = serde_json::Value::Null;
+        for _ in 0..100 {
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{s}")).await;
+            switched = view["mode_request"].clone();
+            if switched.get("switched_to").is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(switched["id"], pending.as_str());
+        assert_eq!(switched["state"], "approved");
+        assert_eq!(switched["switched_to"], resumed.as_str(), "{switched}");
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{resumed}")).await;
+        assert_eq!(view["permission_mode"], "auto", "{view}");
+        let switch = f.events_of(crate::ops::EVENT_PERMISSION_MODE_SWITCH).await;
+        assert_eq!(switch.len(), 1, "{switch:?}");
+        assert_eq!(switch[0]["session_id"], s.as_str());
+        assert_eq!(switch[0]["switched_to"], resumed.as_str());
+        assert_eq!(switch[0]["mechanism"], "resume");
+        assert!(
+            f.events_of(crate::ops::EVENT_PERMISSION_MODE_DECISION)
+                .await
+                .iter()
+                .any(|e| e["request_id"] == pending.as_str() && e["outcome"] == "approved"),
+        );
+        assert!(
+            f.events_of(crate::ops::EVENT_PERMISSION_MODE)
+                .await
+                .iter()
+                .any(|e| e["session_id"] == resumed.as_str() && e["permission_mode"] == "auto"),
+            "the resumed session's mode is audited"
+        );
+        for (_, detail) in f.state.auth_db.lock().await.all_events().unwrap() {
+            assert!(
+                !detail.contains("shell commands"),
+                "no reason text in the audit: {detail}"
+            );
+        }
+        // In auto, there is nothing to ask for; and a resume keeps it.
+        f.report(&resumed, "running").await;
+        f.initialize(&resumed, "storm").await;
+        let already = structured(
+            &f.tool(&resumed, "request_permission_mode", ask("auto"))
+                .await,
+        );
+        assert_eq!(already["status"], "already", "{already}");
+    }
+
+    /// A-147-4, children: a child's request is `permission_mode_wider`
+    /// unless its parent is in auto, and a parent with live children is
+    /// refused (the switch's restart would end them).
+    #[tokio::test]
+    async fn a_147_4_a_child_asks_only_under_an_auto_parent() {
+        let dir = tempdir::TempDir::new("storm-147-4c").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent_in("claude-code", "accept_edits").await;
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "t", "name": "c"}))
+            .await;
+        let refused = structured(&f.tool(&child, "request_permission_mode", ask("auto")).await);
+        assert_eq!(refused["reason"], "permission_mode_wider", "{refused}");
+        let busy = structured(
+            &f.tool(&parent, "request_permission_mode", ask("auto"))
+                .await,
+        );
+        assert_eq!(busy["reason"], "live_children", "{busy}");
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert!(view.get("mode_request").is_none());
+        assert!(
+            f.events_of(crate::ops::EVENT_PERMISSION_MODE_REQUEST)
+                .await
+                .iter()
+                .any(|e| e["session_id"] == child.as_str()
+                    && e["refused"] == "permission_mode_wider"),
+            "the refusal is audited"
+        );
+
+        let auto = f.spawning_parent_in("claude-code", "auto").await;
+        let strict = f
+            .start_child(
+                &auto,
+                serde_json::json!({"task": "t", "name": "strict", "permission_mode": "default"}),
+            )
+            .await;
+        let asked = {
+            let a = f.tool(&strict, "request_permission_mode", ask("auto"));
+            let b = async {
+                let id = f.waiting_request(&strict).await;
+                let (code, body) = f.decide(&strict, &id, "deny").await;
+                assert_eq!(code, StatusCode::OK, "{body}");
+            };
+            let (a, ()) = tokio::join!(a, b);
+            structured(&a)
+        };
+        assert_eq!(
+            asked["status"], "denied",
+            "under an auto parent it asks: {asked}"
+        );
+
+        // Approved, a child switches as itself: parked, then resumed in auto
+        // from its own conversation, its lineage kept.
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{strict}/status"),
+                serde_json::json!({"status": "running",
+                    "harness_session": "4a6c8e0a-1b3d-4f5a-8c7e-9d1f3b5a7c9e"}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        f.sent();
+        let approved = {
+            let a = f.tool(&strict, "request_permission_mode", ask("auto"));
+            let b = async {
+                let id = f.waiting_request(&strict).await;
+                let (code, body) = f.decide(&strict, &id, "approve").await;
+                assert_eq!(code, StatusCode::OK, "{body}");
+            };
+            let (a, ()) = tokio::join!(a, b);
+            structured(&a)
+        };
+        assert_eq!(approved["status"], "approved", "{approved}");
+        let mut parked = false;
+        for _ in 0..100 {
+            if f.sent()
+                .iter()
+                .any(|m| m["type"] == "park" && m["session"] == strict.as_str())
+            {
+                parked = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(parked, "the child is parked for the switch");
+        f.report(&strict, "parked").await;
+        let mut start = None;
+        for _ in 0..100 {
+            start = f
+                .sent()
+                .into_iter()
+                .find(|m| m["type"] == "start" && m["session"] == strict.as_str());
+            if start.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        let start = start.expect("the child resumes as itself");
+        assert_eq!(start["permission_mode"], "auto", "{start}");
+        assert_eq!(start["resume"], "4a6c8e0a-1b3d-4f5a-8c7e-9d1f3b5a7c9e");
+        assert_eq!(start["child_of"], auto.as_str());
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{strict}")).await;
+        assert_eq!(view["permission_mode"], "auto", "{view}");
+        assert_eq!(view["parent_session"], auto.as_str());
+        let bypass = structured(
+            &f.tool(&strict, "request_permission_mode", ask("bypassPermissions"))
+                .await,
+        );
+        assert_eq!(bypass["reason"], "permission_mode_unavailable");
     }
 }
