@@ -563,8 +563,9 @@ class AgentSession {
   /// `working` or `idle` while running, when the agent says.
   final String? activity;
 
-  /// What every surface calls the session.
-  String get displayName => title ?? name;
+  /// What every surface calls the session. A child goes by the name its
+  /// parent gave it (145b), never by its agent's terminal title.
+  String get displayName => spawn.isChild ? name : title ?? name;
 
   bool get working => activity == 'working';
 
