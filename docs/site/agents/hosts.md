@@ -254,8 +254,9 @@ Two caps in `runtime.toml`, in bytes, keep clones from filling the disk:
 them, default 20 GiB); a child that would go over either does not start.
 When the new session ends its workspace is kept, and belongs to a separate
 system user, `storm-review`, which `on` creates. You read what it did, and
-**Apply** it if you want it: in a git repository its commits become a new
-branch, `storm/<session>`, beside yours (Storm never merges, never moves an
+**Apply** it if you want it: in a git repository its commits, and what it
+left uncommitted (as one more commit by Storm, `.gitignore` respected),
+become a new branch, `storm/<session>`, beside yours (Storm never merges, never moves an
 existing branch and never touches the branch you have checked out); anywhere
 else its files are copied into a new folder in your workspace that you name,
 never over one that exists. Storm reads or applies a workspace only for a
