@@ -251,6 +251,29 @@ impl Db {
                 opened_at  TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_note_access_at ON note_access(opened_at);
+
+            -- The trash (decision 150). Its files are under `<vault>/.trash/<id>/`;
+            -- who deleted them, and which ids they carry, exist only here, so
+            -- these rows ride the index snapshot into every backup.
+            CREATE TABLE IF NOT EXISTS trash (
+                id             TEXT PRIMARY KEY,
+                kind           TEXT NOT NULL,
+                original_path  TEXT NOT NULL,
+                deleted_at     TEXT NOT NULL,
+                by_kind        TEXT NOT NULL,
+                by_id          TEXT,
+                by_name        TEXT,
+                session_id     TEXT,
+                reason         TEXT,
+                folders        TEXT NOT NULL DEFAULT '[]'
+            );
+            CREATE TABLE IF NOT EXISTS trash_items (
+                trash_id  TEXT NOT NULL,
+                path      TEXT NOT NULL,
+                note_id   TEXT,
+                title     TEXT,
+                PRIMARY KEY (trash_id, path)
+            );
             "#,
         )?;
 
@@ -422,29 +445,135 @@ impl Db {
 
     pub fn delete_note(&mut self, id: &str, at: &str) -> Result<i64> {
         let tx = self.conn.transaction()?;
-        let version: i64 = tx
-            .query_row(
-                "SELECT version FROM notes WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-
-        tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
-        tx.execute("DELETE FROM links WHERE src_id = ?1", params![id])?;
-        tx.execute("DELETE FROM tags WHERE note_id = ?1", params![id])?;
-        tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
-        tx.execute("DELETE FROM note_access WHERE note_id = ?1", params![id])?;
-        // note_versions is kept deliberately: a delete that arrives while
-        // another device was editing must still be recoverable.
-        tx.execute(
-            "INSERT INTO change_log (note_id, kind, version, at) VALUES (?1, ?2, ?3, ?4)",
-            params![id, KIND_DELETED, version, at],
-        )?;
-        let seq = tx.last_insert_rowid();
+        let seq = tombstone(&tx, id, at)?;
         tx.commit()?;
         Ok(seq)
+    }
+
+    // ---- trash ---------------------------------------------------------
+
+    /// Records a trash entry and tombstones its notes in one transaction, so
+    /// a note is never both live and in the trash, nor in neither.
+    pub fn trash(&mut self, entry: &TrashRow, items: &[TrashItem]) -> Result<Vec<i64>> {
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO trash (id, kind, original_path, deleted_at, by_kind, by_id, by_name,
+                                session_id, reason, folders)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                entry.id,
+                entry.kind,
+                entry.original_path,
+                entry.deleted_at,
+                entry.by.kind,
+                entry.by.id,
+                entry.by.name,
+                entry.by.session_id,
+                entry.by.reason,
+                serde_json::to_string(&entry.folders)?,
+            ],
+        )?;
+        let mut seqs = Vec::new();
+        for item in items {
+            tx.execute(
+                "INSERT INTO trash_items (trash_id, path, note_id, title) VALUES (?1, ?2, ?3, ?4)",
+                params![entry.id, item.path, item.note_id, item.title],
+            )?;
+            if let Some(id) = &item.note_id {
+                seqs.push(tombstone(&tx, id, &entry.deleted_at)?);
+            }
+        }
+        tx.commit()?;
+        Ok(seqs)
+    }
+
+    /// Every trash entry, newest first.
+    pub fn list_trash(&self) -> Result<Vec<TrashRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, kind, original_path, deleted_at, by_kind, by_id, by_name, session_id,
+                    reason, folders
+             FROM trash ORDER BY deleted_at DESC, id",
+        )?;
+        let rows = stmt.query_map([], Self::trash_from_row)?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    pub fn get_trash(&self, id: &str) -> Result<Option<TrashRow>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, kind, original_path, deleted_at, by_kind, by_id, by_name, session_id,
+                        reason, folders
+                 FROM trash WHERE id = ?1",
+                params![id],
+                Self::trash_from_row,
+            )
+            .optional()?)
+    }
+
+    fn trash_from_row(row: &rusqlite::Row) -> rusqlite::Result<TrashRow> {
+        let folders: String = row.get(9)?;
+        Ok(TrashRow {
+            id: row.get(0)?,
+            kind: row.get(1)?,
+            original_path: row.get(2)?,
+            deleted_at: row.get(3)?,
+            by: DeletedBy {
+                kind: row.get(4)?,
+                id: row.get(5)?,
+                name: row.get(6)?,
+                session_id: row.get(7)?,
+                reason: row.get(8)?,
+            },
+            folders: serde_json::from_str(&folders).unwrap_or_default(),
+        })
+    }
+
+    #[cfg(test)]
+    pub fn set_trash_deleted_at_for_test(&self, trash_id: &str, at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE trash SET deleted_at = ?2 WHERE id = ?1",
+            params![trash_id, at],
+        )?;
+        Ok(())
+    }
+
+    pub fn trash_items(&self, trash_id: &str) -> Result<Vec<TrashItem>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT path, note_id, title FROM trash_items WHERE trash_id = ?1 ORDER BY path",
+        )?;
+        let rows = stmt.query_map(params![trash_id], |r| {
+            Ok(TrashItem {
+                path: r.get(0)?,
+                note_id: r.get(1)?,
+                title: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// Drops a trash entry. With `history`, the version history of its notes
+    /// goes too: Delete forever (150b) leaves nothing to restore from.
+    pub fn forget_trash(&mut self, trash_id: &str, history: bool) -> Result<()> {
+        let tx = self.conn.transaction()?;
+        if history {
+            // A note live again under its id (put back by hand) keeps its history.
+            tx.execute(
+                "DELETE FROM note_versions WHERE note_id IN (
+                     SELECT note_id FROM trash_items
+                     WHERE trash_id = ?1 AND note_id IS NOT NULL
+                       AND note_id NOT IN (SELECT id FROM notes)
+                 )",
+                params![trash_id],
+            )?;
+        }
+        tx.execute(
+            "DELETE FROM trash_items WHERE trash_id = ?1",
+            params![trash_id],
+        )?;
+        tx.execute("DELETE FROM trash WHERE id = ?1", params![trash_id])?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// Writes a consistent snapshot of the index to [dest].
@@ -587,6 +716,19 @@ impl Db {
         Ok(())
     }
 
+    /// Forgets `path` and every recorded folder beneath it, returning them.
+    pub fn forget_folders_under(&self, path: &str) -> Result<Vec<String>> {
+        let gone: Vec<String> = self
+            .list_folders()?
+            .into_iter()
+            .filter(|f| f == path || f.starts_with(&format!("{path}/")))
+            .collect();
+        for f in &gone {
+            self.forget_folder(f)?;
+        }
+        Ok(gone)
+    }
+
     /// Re-points recorded folders after a folder rename, `from` and everything
     /// beneath it.
     pub fn rename_folder_records(&mut self, from: &str, to: &str) -> Result<()> {
@@ -720,6 +862,66 @@ impl Db {
         let rows = stmt.query_map(params![tag], Self::note_from_row)?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
+}
+
+/// Removes a note from the index and logs its `deleted` change.
+fn tombstone(tx: &rusqlite::Transaction, id: &str, at: &str) -> Result<i64> {
+    let version: i64 = tx
+        .query_row(
+            "SELECT version FROM notes WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(0);
+
+    tx.execute("DELETE FROM notes WHERE id = ?1", params![id])?;
+    tx.execute("DELETE FROM links WHERE src_id = ?1", params![id])?;
+    tx.execute("DELETE FROM tags WHERE note_id = ?1", params![id])?;
+    tx.execute("DELETE FROM notes_fts WHERE note_id = ?1", params![id])?;
+    tx.execute("DELETE FROM note_access WHERE note_id = ?1", params![id])?;
+    // note_versions is kept deliberately: a delete that arrives while
+    // another device was editing must still be recoverable, and a restore
+    // from the trash is the same note with the same history (decision 150a).
+    tx.execute(
+        "INSERT INTO change_log (note_id, kind, version, at) VALUES (?1, ?2, ?3, ?4)",
+        params![id, KIND_DELETED, version, at],
+    )?;
+    Ok(tx.last_insert_rowid())
+}
+
+/// Who deleted something (decision 150a). `kind` is `person`, `key`,
+/// `agent` or `sync`; `id` is the device, key or host, `name` the device's
+/// name, and an agent's delete carries its session and its reason.
+#[derive(Debug, Clone, Default, Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DeletedBy {
+    pub kind: String,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub session_id: Option<String>,
+    pub reason: Option<String>,
+}
+
+/// One trash entry: a note, or a folder holding any number of notes.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrashRow {
+    pub id: String,
+    pub kind: String,
+    pub original_path: String,
+    pub deleted_at: String,
+    pub by: DeletedBy,
+    /// Folders recorded in `folders` that went with it, so a restore records
+    /// them again and an empty one survives.
+    pub folders: Vec<String>,
+}
+
+/// A file in a trash entry, at its original vault path. Notes carry their
+/// id; an attachment has none.
+#[derive(Debug, Clone, Serialize)]
+pub struct TrashItem {
+    pub path: String,
+    pub note_id: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Writes a consistent snapshot of any Storm database to `dest`.
@@ -931,6 +1133,42 @@ mod tests {
             "# A\n\nsearchable body\n"
         );
         assert_eq!(restored.search("searchable", 10).unwrap().len(), 1);
+    }
+
+    /// Decision 150c: a restore from backup restores the trash's records,
+    /// which nothing on disk could rebuild.
+    #[test]
+    fn a_snapshot_carries_the_trash() {
+        let dir = tempdir::TempDir::new("storm-snap-trash").unwrap();
+        let mut db = Db::open(&dir.path().join("index.db"), "v1").unwrap();
+        record(&mut db, &note("a", "A.md", 1), "a\n", KIND_CREATED);
+        let row = TrashRow {
+            id: "0f3a".into(),
+            kind: "note".into(),
+            original_path: "A.md".into(),
+            deleted_at: "2026-10-30T10:00:00Z".into(),
+            by: DeletedBy {
+                kind: "person".into(),
+                ..DeletedBy::default()
+            },
+            folders: Vec::new(),
+        };
+        let item = TrashItem {
+            path: "A.md".into(),
+            note_id: Some("a".into()),
+            title: None,
+        };
+        db.trash(&row, &[item]).unwrap();
+        let dest = dir.path().join("backup.db");
+        db.snapshot_to(&dest).unwrap();
+
+        let restored = Db::open(&dest, "v1").unwrap();
+        assert_eq!(restored.list_trash().unwrap()[0].original_path, "A.md");
+        assert_eq!(
+            restored.trash_items("0f3a").unwrap()[0].note_id.as_deref(),
+            Some("a")
+        );
+        assert!(restored.version_content("a", 1).unwrap().is_some());
     }
 
     #[test]

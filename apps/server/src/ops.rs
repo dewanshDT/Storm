@@ -657,12 +657,57 @@ pub async fn update_note(
     Ok(result)
 }
 
-pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<i64> {
+/// Where a delete came from, beyond the actor: the person's device, and an
+/// agent's reason (decision 149 passes one; nothing does yet).
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOrigin {
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub reason: Option<String>,
+}
+
+fn deleted_by(actor: &Actor, origin: &DeleteOrigin) -> crate::db::DeletedBy {
+    use crate::db::DeletedBy;
+    match actor {
+        Actor::Session { .. } => {
+            DeletedBy::person(origin.device_id.clone(), origin.device_name.clone())
+        }
+        Actor::Key { key_id, .. } => DeletedBy::key(key_id),
+        Actor::Agent {
+            session_id,
+            host_id,
+            ..
+        } => DeletedBy::agent(host_id, session_id, origin.reason.clone()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeletedNote {
+    pub seq: i64,
+    /// Where it went (decision 150); `None` only for a note whose file was
+    /// already gone and whose history held nothing to keep.
+    pub trash_id: Option<String>,
+}
+
+/// Deletes a note: it moves to the vault's trash (decision 150a).
+pub async fn delete_note(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+    origin: &DeleteOrigin,
+) -> ApiResult<DeletedNote> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(id)?;
-    broadcast_latest(state, &ix, seq);
-    Ok(seq)
+    let trashed = ix.delete_note(id, &deleted_by(actor, origin))?;
+    let seq = trashed.seqs.last().copied().unwrap_or(0);
+    for seq in &trashed.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(DeletedNote {
+        seq,
+        trash_id: trashed.trash_id,
+    })
 }
 
 /// Moves a note to a new path. Identity is the id, so this is a metadata
@@ -753,17 +798,146 @@ pub async fn create_folder(
     Ok(())
 }
 
-/// Refused rather than recursive: deleting someone's notes because they
-/// tapped "delete folder" is not something to do quietly.
+/// Deletes a folder. Without `to_trash` a folder holding anything is
+/// refused, as it always was: deleting someone's notes because they tapped
+/// "delete folder" is not something to do quietly. With it — the person
+/// confirmed "Delete folder X and its N notes?" — the folder and everything
+/// in it go to the trash as one entry (decision 150a).
 pub async fn delete_folder(
     state: &Shared,
     actor: &Actor,
     vault: &str,
     path: &str,
-) -> ApiResult<()> {
+    to_trash: bool,
+    origin: &DeleteOrigin,
+) -> ApiResult<crate::trash::Trashed> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
-    handle.indexer.lock().await.delete_folder(path)?;
+    let mut ix = handle.indexer.lock().await;
+    if !to_trash {
+        ix.delete_folder(path)?;
+        return Ok(crate::trash::Trashed {
+            trash_id: None,
+            notes: 0,
+            seqs: Vec::new(),
+        });
+    }
+    let trashed = ix.trash_folder(path, &deleted_by(actor, origin))?;
+    for seq in &trashed.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(trashed)
+}
+
+// ---- trash (decision 150) ----------------------------------------------
+//
+// The person's alone (150c): no MCP tool reaches these, and an agent or a
+// key that found its way here is refused before the vault is touched.
+
+fn person_only(actor: &Actor) -> ApiResult<()> {
+    match actor {
+        Actor::Session { .. } => Ok(()),
+        _ => Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "the trash is reachable only from the app".into(),
+        )),
+    }
+}
+
+/// A trash entry, with the agent session's name when an agent deleted it.
+#[derive(Debug, Serialize)]
+pub struct TrashListing {
+    #[serde(flatten)]
+    pub entry: crate::trash::TrashEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrashPage {
+    pub items: Vec<TrashListing>,
+    /// Days an item is kept, `None` for never.
+    pub retention_days: Option<i64>,
+}
+
+pub async fn list_trash(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<TrashPage> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    let entries = ix.list_trash()?;
+    let retention_days = ix.trash_retention_days();
+    drop(ix);
+    let items = entries
+        .into_iter()
+        .map(|entry| {
+            let session_name = entry.deleted_by.session_id.as_deref().and_then(|id| {
+                let launch = state.agent.launch_of(id).ok().flatten();
+                launch
+                    .map(|l| l.name)
+                    .or_else(|| state.agent.get(id).ok().map(|s| s.workspace))
+            });
+            TrashListing {
+                entry,
+                session_name,
+            }
+        })
+        .collect();
+    Ok(TrashPage {
+        items,
+        retention_days,
+    })
+}
+
+/// Restore: the same ids at the original paths, with `created` changes so
+/// every client picks them up (150b).
+pub async fn restore_trash(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    trash_id: &str,
+) -> ApiResult<crate::trash::Restored> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let restored = ix.restore_trash(trash_id)?;
+    for seq in &restored.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(restored)
+}
+
+/// Delete forever. The client asks first; this is the act.
+pub async fn purge_trash(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    trash_id: &str,
+) -> ApiResult<()> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.purge_trash(trash_id)?;
     Ok(())
+}
+
+/// Empty trash, returning how many entries went.
+pub async fn empty_trash(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<usize> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    Ok(handle.indexer.lock().await.empty_trash()?)
+}
+
+/// The hourly retention sweep (150b) over every open vault. One vault's
+/// failure is logged and does not stop the others.
+pub async fn purge_expired_trash(state: &Shared) {
+    let handles: Vec<_> = state.vaults.read().await.open.values().cloned().collect();
+    let now = time::OffsetDateTime::now_utc();
+    for handle in handles {
+        let mut ix = handle.indexer.lock().await;
+        match ix.purge_expired_trash(now) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(purged = n, "trash: items past retention purged"),
+            Err(e) => tracing::warn!(error = format!("{e:#}"), "trash: retention sweep failed"),
+        }
+    }
 }
 
 /// Renames a folder, returning how many notes moved with it.
@@ -7167,9 +7341,16 @@ mod tests {
             ),
             (
                 "delete_folder",
-                delete_folder(&state, &agent, &home, "Keep")
-                    .await
-                    .map(|_| ()),
+                delete_folder(
+                    &state,
+                    &agent,
+                    &home,
+                    "Keep",
+                    true,
+                    &DeleteOrigin::default(),
+                )
+                .await
+                .map(|_| ()),
             ),
             (
                 "rename_folder",
@@ -7200,6 +7381,84 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{what}");
             assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED, "{what}");
         }
+    }
+
+    /// A-150-1 and A-150-5 (decision 150): an agent's delete lands in the
+    /// trash with its session and reason, and the trash itself is the
+    /// person's: an agent or a key is refused every trash operation.
+    #[tokio::test]
+    async fn an_agents_delete_is_in_the_trash_and_only_the_person_reaches_it() {
+        let dir = tempdir::TempDir::new("storm-ops-trash").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let note = must(create_note(&state, &owner(), &work, "A.md", "a\n").await).note;
+        let origin = DeleteOrigin {
+            reason: Some("a duplicate of B".into()),
+            ..DeleteOrigin::default()
+        };
+        let deleted = must(delete_note(&state, &agent, &work, &note.id, &origin).await);
+        let trash_id = deleted.trash_id.unwrap();
+
+        let key = Actor::Key {
+            key_id: "key_test".into(),
+            user_id: "usr_test".into(),
+        };
+        for actor in [&agent, &key] {
+            for (what, result) in [
+                ("list", list_trash(&state, actor, &work).await.map(|_| ())),
+                (
+                    "restore",
+                    restore_trash(&state, actor, &work, &trash_id)
+                        .await
+                        .map(|_| ()),
+                ),
+                ("purge", purge_trash(&state, actor, &work, &trash_id).await),
+                ("empty", empty_trash(&state, actor, &work).await.map(|_| ())),
+            ] {
+                assert_eq!(
+                    refused(result).0,
+                    axum::http::StatusCode::FORBIDDEN,
+                    "{what}"
+                );
+            }
+        }
+
+        let page = must(list_trash(&state, &owner(), &work).await);
+        assert_eq!(page.retention_days, Some(30));
+        let by = &page.items[0].entry.deleted_by;
+        assert_eq!(
+            (
+                by.kind.as_str(),
+                by.session_id.as_deref(),
+                by.reason.as_deref()
+            ),
+            ("agent", Some("ags_test"), Some("a duplicate of B"))
+        );
+        let restored = must(restore_trash(&state, &owner(), &work, &trash_id).await);
+        assert_eq!(restored.notes[0].id, note.id);
+        assert_eq!(
+            must(get_note(&state, &owner(), &work, &note.id).await)
+                .note
+                .path,
+            "A.md"
+        );
+    }
+
+    /// A-150-2: a folder holding notes goes only once the person confirmed.
+    #[tokio::test]
+    async fn a_folder_with_notes_needs_the_confirm() {
+        let dir = tempdir::TempDir::new("storm-ops-folder-trash").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "P/A.md", "a\n").await);
+        let none = DeleteOrigin::default();
+        let (status, message) =
+            refused(delete_folder(&state, &owner(), &work, "P", false, &none).await);
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(message.contains("1 note"), "{message}");
+
+        let trashed = must(delete_folder(&state, &owner(), &work, "P", true, &none).await);
+        assert_eq!(trashed.notes, 1);
+        assert!(trashed.trash_id.is_some());
     }
 
     #[tokio::test]

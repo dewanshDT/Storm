@@ -457,6 +457,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/vaults/{vault}/folders", post(create_folder))
         .route("/v1/vaults/{vault}/folders/rename", post(rename_folder))
         .route("/v1/vaults/{vault}/folders/{*path}", delete(delete_folder))
+        // The trash (decision 150): the session tier only, never MCP.
+        .route(
+            "/v1/vaults/{vault}/trash",
+            get(list_trash).delete(empty_trash),
+        )
+        .route("/v1/vaults/{vault}/trash/{id}", delete(purge_trash))
+        .route("/v1/vaults/{vault}/trash/{id}/restore", post(restore_trash))
         .route("/v1/vaults/{vault}/search", get(search))
         .route("/v1/vaults/{vault}/tags", get(tags))
         .route("/v1/vaults/{vault}/tags/{tag}", get(notes_by_tag))
@@ -3428,13 +3435,27 @@ async fn move_note(
     ))
 }
 
+/// The device a session signed in on, which a trash entry names (150a).
+fn delete_origin(auth: Option<Extension<SessionAuth>>) -> crate::ops::DeleteOrigin {
+    let device = auth.map(|Extension(a)| a.authenticated.device);
+    crate::ops::DeleteOrigin {
+        device_id: device.as_ref().map(|d| d.id.clone()),
+        device_name: device.map(|d| d.name),
+        reason: None,
+    }
+}
+
 async fn delete_note(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
     Path((vault, id)): Path<(String, String)>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let seq = crate::ops::delete_note(&state, &actor, &vault, &id).await?;
-    Ok(Json(serde_json::json!({ "seq": seq })))
+    let deleted =
+        crate::ops::delete_note(&state, &actor, &vault, &id, &delete_origin(auth)).await?;
+    Ok(Json(
+        serde_json::json!({ "seq": deleted.seq, "trash_id": deleted.trash_id }),
+    ))
 }
 
 // ---- folders -----------------------------------------------------------
@@ -3454,13 +3475,72 @@ async fn create_folder(
     Ok(Json(serde_json::json!({ "path": body.path })))
 }
 
+#[derive(Deserialize, Default)]
+struct DeleteFolderQuery {
+    /// The person confirmed: a folder holding notes goes to the trash.
+    #[serde(default)]
+    trash: bool,
+}
+
 async fn delete_folder(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
     Path((vault, path)): Path<(String, String)>,
+    Query(query): Query<DeleteFolderQuery>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    crate::ops::delete_folder(&state, &actor, &vault, &path).await?;
-    Ok(Json(serde_json::json!({ "deleted": path })))
+    let trashed = crate::ops::delete_folder(
+        &state,
+        &actor,
+        &vault,
+        &path,
+        query.trash,
+        &delete_origin(auth),
+    )
+    .await?;
+    Ok(Json(serde_json::json!({
+        "deleted": path,
+        "trash_id": trashed.trash_id,
+        "notes": trashed.notes,
+    })))
+}
+
+// ---- trash (decision 150) ----------------------------------------------
+
+async fn list_trash(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(vault): Path<String>,
+) -> ApiResult<Json<crate::ops::TrashPage>> {
+    Ok(Json(crate::ops::list_trash(&state, &actor, &vault).await?))
+}
+
+async fn restore_trash(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((vault, id)): Path<(String, String)>,
+) -> ApiResult<Json<crate::trash::Restored>> {
+    Ok(Json(
+        crate::ops::restore_trash(&state, &actor, &vault, &id).await?,
+    ))
+}
+
+async fn purge_trash(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((vault, id)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    crate::ops::purge_trash(&state, &actor, &vault, &id).await?;
+    Ok(Json(serde_json::json!({ "purged": id })))
+}
+
+async fn empty_trash(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(vault): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let purged = crate::ops::empty_trash(&state, &actor, &vault).await?;
+    Ok(Json(serde_json::json!({ "purged": purged })))
 }
 
 #[derive(Deserialize)]
@@ -14118,6 +14198,89 @@ pub(crate) mod tests {
             .await;
             f.read_only(false);
             assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        }
+
+        /// Decision 150: the trash routes, end to end through the router.
+        #[tokio::test]
+        async fn a_delete_goes_to_the_trash_and_the_routes_restore_and_purge_it() {
+            let f = fixture().await;
+            let trash = format!("/v1/vaults/{}/trash", f.vault);
+            let id = f.note_id("Ideas.md").await;
+            let (status, body) = send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/notes/{id}", f.vault), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let trash_id = body["trash_id"].as_str().unwrap().to_string();
+            assert!(body["seq"].as_i64().unwrap() > 0);
+            assert!(
+                f.vault_dir
+                    .join(".trash")
+                    .join(&trash_id)
+                    .join("Ideas.md")
+                    .exists()
+            );
+
+            let (status, body) = send(&f.app, get_with_auth(&trash, &f.bearer)).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let item = &body["items"][0];
+            assert_eq!(item["id"], trash_id.as_str());
+            assert_eq!(item["name"], "Ideas");
+            assert_eq!(item["kind"], "note");
+            assert_eq!(item["deleted_by"]["kind"], "person");
+            assert!(item["deleted_by"]["name"].is_string(), "{item}");
+            assert_eq!(body["retention_days"], 30);
+
+            let (status, body) = send(
+                &f.app,
+                post_json_with_auth(
+                    &format!("{trash}/{trash_id}/restore"),
+                    serde_json::json!({}),
+                    &f.bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["notes"][0]["id"], id.as_str());
+            assert_eq!(body["notes"][0]["path"], "Ideas.md");
+
+            f.note_id("P/A.md").await;
+            let folder = format!("/v1/vaults/{}/folders/P", f.vault);
+            let (status, _) = send(&f.app, delete_with_auth(&folder, &f.bearer)).await;
+            assert_eq!(status, StatusCode::CONFLICT, "not without the confirm");
+            let (status, body) = send(
+                &f.app,
+                delete_with_auth(&format!("{folder}?trash=true"), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["notes"], 1);
+            let folder_trash = body["trash_id"].as_str().unwrap().to_string();
+
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("{trash}/{folder_trash}"), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(!f.vault_dir.join(".trash").join(&folder_trash).exists());
+            let (status, _) = send(
+                &f.app,
+                delete_with_auth(&format!("{trash}/{folder_trash}"), &f.bearer),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+
+            send(
+                &f.app,
+                delete_with_auth(&format!("/v1/vaults/{}/notes/{id}", f.vault), &f.bearer),
+            )
+            .await;
+            let (status, body) = send(&f.app, delete_with_auth(&trash, &f.bearer)).await;
+            assert_eq!((status, body["purged"].as_i64()), (StatusCode::OK, Some(1)));
+            let (_, body) = send(&f.app, get_with_auth(&trash, &f.bearer)).await;
+            assert_eq!(body["items"], serde_json::json!([]));
         }
 
         #[tokio::test]
