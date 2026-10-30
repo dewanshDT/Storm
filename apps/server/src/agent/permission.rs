@@ -3,6 +3,10 @@
 //! inherits its parent's and may only be stricter. The host's profile checks
 //! a mode again and turns it into the agent's own flag or config;
 //! `docs/agent-permission-mode-vectors.json` holds both crates to one rule.
+//!
+//! A child never asks (decision 148a): its host runs its mode in a no-prompt
+//! form (Claude Code `dontAsk` with the child baseline, OpenCode with every
+//! ask denied), so only the agents that have one are started as children.
 
 pub const DEFAULT: &str = "default";
 pub const ACCEPT_EDITS: &str = "accept_edits";
@@ -14,6 +18,25 @@ pub const ORDER: [&str; 3] = [DEFAULT, ACCEPT_EDITS, AUTO];
 /// How loose `mode` is, or `None` for anything that is not a mode.
 pub fn rank(mode: &str) -> Option<usize> {
     ORDER.iter().position(|m| *m == mode)
+}
+
+/// The agents a child may run (148a): those whose host can keep them from
+/// ever asking. Codex prompts for every Storm tool (132c), and nothing
+/// documented stops it.
+pub const UNATTENDED: [&str; 2] = ["claude-code", "opencode"];
+
+pub fn unattended(agent: &str) -> bool {
+    UNATTENDED.contains(&agent)
+}
+
+/// Why Codex, which has Storm's servers, is not started as a child, for
+/// `agent_unavailable`.
+pub fn not_unattended(agent: &str) -> String {
+    format!(
+        "{} cannot run as a child: nothing documented keeps it from stopping on its own \
+         permission prompts, and a child never asks anyone.",
+        label(agent)
+    )
 }
 
 /// The modes `agent` offers, strictest first.
@@ -117,6 +140,17 @@ mod tests {
                 i["child"].as_str().unwrap(),
                 "{i}"
             );
+        }
+        let child: Vec<&str> = v["child"]["unattended"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        assert_eq!(child, UNATTENDED);
+        for r in v["child"]["refused"].as_array().unwrap() {
+            let agent = r["agent"].as_str().unwrap();
+            assert!(!unattended(agent) || check(agent, r["mode"].as_str().unwrap()).is_err());
         }
         for agent in ["claude-code", "opencode", "codex", "shell"] {
             for bypass in [

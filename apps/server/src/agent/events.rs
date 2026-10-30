@@ -44,6 +44,14 @@ pub const PARKED: &str = "parked";
 /// The child's host link was lost, or the server restarted: nothing is
 /// known of it until its host reports again (77c).
 pub const UNKNOWN: &str = "unknown";
+/// 148b: a tool call the child's own permissions refused. The one kind that
+/// carries child-originated text, `tool` and a bounded `detail`, as data.
+pub const DENIED: &str = "denied";
+
+/// The longest `detail` a denial keeps, in characters.
+pub const MAX_DENIAL_DETAIL: usize = 500;
+/// The longest tool name a denial keeps.
+pub const MAX_DENIAL_TOOL: usize = 128;
 
 /// The kinds still written past [`MAX_EVENTS_PER_CHILD`].
 pub const KEPT_PAST_CAP: &[&str] = &[REPORTED, FAILED, ENDED, PARKED];
@@ -79,6 +87,11 @@ pub struct GatedWake {
 /// (`harness::WAKE`), spelled the same: a test holds the two equal.
 pub const WAKE: &[GatedWake] = &[];
 
+/// The agents whose children's denials are taken (148b), once G-148 passes
+/// for them; it passed locally on 2026-10-30 (Claude Code 2.1.312, OpenCode
+/// 1.19.4). The host keeps the same list (`harness::DENIALS`).
+pub const DENIALS: &[&str] = &["claude-code", "opencode"];
+
 #[cfg(test)]
 pub fn wake_on(provider: &str) -> bool {
     WAKE.iter().any(|w| w.provider == provider)
@@ -102,6 +115,17 @@ impl Usage {
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }
+}
+
+/// What a host reports when a child's tool call is denied (148b).
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct DeniedReport {
+    pub tool: String,
+    #[serde(default)]
+    pub detail: String,
+    /// `provider_hook`, the only source there is.
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 /// A child's state after the change an event records.
@@ -135,6 +159,15 @@ pub struct ChildEvent {
     /// Only where the agent itself reported it; never guessed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// A `denied` event's tool, the command or path it was refused (the
+    /// child's own text, bounded, as data), and how many identical denials
+    /// of its round it stands for (148b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub count: Option<i64>,
 }
 
 /// What the host last said of a session, already through its gates: the
@@ -249,11 +282,15 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              PRIMARY KEY (session_id, round)
          );",
     )?;
-    // 145f, additive: a queue from before it gains the round's columns.
+    // 145f and 148b, additive: a queue from before them gains the round's
+    // columns and a denial's.
     for (column, kind) in [
         ("round", "INTEGER"),
         ("duration_ms", "INTEGER"),
         ("usage", "TEXT"),
+        ("tool", "TEXT"),
+        ("detail", "TEXT"),
+        ("count", "INTEGER"),
     ] {
         let has = conn
             .prepare("SELECT 1 FROM pragma_table_info('child_events') WHERE name = ?1")?
@@ -468,7 +505,7 @@ pub(super) fn forget_in(conn: &Connection, session_id: &str) -> Result<()> {
 }
 
 const EVENT_COLUMNS: &str = "parent, seq, child, kind, reason, status, activity, \
-    needs_attention, source, confidence, at, round, duration_ms, usage";
+    needs_attention, source, confidence, at, round, duration_ms, usage, tool, detail, count";
 
 fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChildEvent> {
     let parent: String = r.get(0)?;
@@ -492,7 +529,49 @@ fn event_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ChildEvent> {
         usage: r
             .get::<_, Option<String>>(13)?
             .and_then(|t| serde_json::from_str(&t).ok()),
+        tool: r.get(14)?,
+        detail: r.get(15)?,
+        count: r.get(16)?,
     })
+}
+
+fn bounded(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// A child's denial (148b) in its parent's queue, in the caller's
+/// transaction: a new `denied` event, or, for an identical one (same tool
+/// and detail) already written in the same round, that event's count one
+/// higher. Nothing past the per-child cap. Returns whether a new event was
+/// written.
+pub(super) fn record_denied_in(
+    conn: &Connection,
+    child: &SessionRecord,
+    tool: &str,
+    detail: &str,
+    live: &LiveSignals,
+    now: &str,
+) -> Result<bool> {
+    let tool = bounded(tool, MAX_DENIAL_TOOL);
+    let detail = bounded(detail, MAX_DENIAL_DETAIL);
+    let (round, _) = round_start(conn, child)?;
+    let merged = conn.execute(
+        "UPDATE child_events SET count = count + 1
+         WHERE child = ?1 AND kind = ?2 AND round = ?3 AND tool = ?4 AND detail = ?5",
+        params![child.id, DENIED, round, tool, detail],
+    )?;
+    if merged > 0 {
+        return Ok(false);
+    }
+    if !record_in(conn, child, DENIED, None, PROVIDER_HOOK, live, now)? {
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE child_events SET round = ?2, tool = ?3, detail = ?4, count = 1
+         WHERE child = ?1 AND seq = (SELECT MAX(seq) FROM child_events WHERE child = ?1)",
+        params![child.id, round, tool, detail],
+    )?;
+    Ok(true)
 }
 
 impl Store {
@@ -512,6 +591,23 @@ impl Store {
     ) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let wrote = record_in(&tx, child, kind, reason, source, live, &now())?;
+        tx.commit()?;
+        if wrote {
+            self.notify_events();
+        }
+        Ok(wrote)
+    }
+
+    /// [`record_denied_in`] in a transaction of its own.
+    pub fn record_denied(
+        &self,
+        child: &SessionRecord,
+        tool: &str,
+        detail: &str,
+        live: &LiveSignals,
+    ) -> Result<bool> {
+        let tx = self.conn.unchecked_transaction()?;
+        let wrote = record_denied_in(&tx, child, tool, detail, live, &now())?;
         tx.commit()?;
         if wrote {
             self.notify_events();
@@ -715,6 +811,39 @@ impl AgentManager {
             let _ =
                 tokio::time::timeout(left.min(Duration::from_millis(500)), changed.changed()).await;
         }
+    }
+
+    /// A host's report of a child's denial (148b): taken only from the
+    /// child's own host, for a running spawned session whose agent's gate
+    /// lets denials through, from its agent's own hook; otherwise dropped,
+    /// with nothing written. Evidence, never authority (144d): it tells the
+    /// parent and decides nothing. Returns whether a new event was written.
+    pub fn denied(
+        &self,
+        host_id: &str,
+        session_id: &str,
+        report: &DeniedReport,
+    ) -> AgentResult<bool> {
+        let r = self.owned_by(host_id, session_id)?;
+        if r.status != "running" || !DENIALS.contains(&r.provider.as_str()) {
+            return Ok(false);
+        }
+        if !matches!(report.source.as_deref(), None | Some(PROVIDER_HOOK)) {
+            return Ok(false);
+        }
+        let tool = report.tool.trim();
+        if tool.is_empty() || tool.chars().any(char::is_control) {
+            return Ok(false);
+        }
+        let live = self.live_signals(session_id);
+        let store = self.store.lock().unwrap();
+        if store.lineage(session_id)?.parent_session.is_none() {
+            return Ok(false);
+        }
+        let wrote = store.record_denied(&r, tool, &report.detail, &live)?;
+        drop(store);
+        self.bump(session_id);
+        Ok(wrote)
     }
 
     /// The events a settled wait carries, read once without waiting.

@@ -708,11 +708,12 @@ fn a_144_10_each_event_says_its_source_and_confidence() {
         ),
         (
             events::NEEDS_ATTENTION,
-            Some(PERMISSION_PROMPT),
+            Some(crate::agent::attention::UNEXPECTED_PROMPT),
             events::PROVIDER_HOOK,
             "reported"
         )
     );
+    assert_eq!(e.state.needs_attention.as_deref(), Some(PERMISSION_PROMPT));
     assert_eq!(e.state.needs_attention.as_deref(), Some(PERMISSION_PROMPT));
 
     f.report(

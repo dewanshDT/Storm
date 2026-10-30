@@ -4,9 +4,9 @@
 //! denies, and which expires after [`EXPIRES_AFTER_SECS`]. Approval switches
 //! the session by resuming its conversation in auto (`ops::switch_to_auto`):
 //! G-147 found that Claude Code does not re-read Storm's `--settings` while
-//! it runs, so auto cannot be put back in its cycle in place. A child may ask
-//! only while its parent is in auto (146b). Only `auto` can be asked for;
-//! nothing reaches bypass.
+//! it runs, so auto cannot be put back in its cycle in place. A child never
+//! asks (148): it is not offered the tool, and a call is refused. Only
+//! `auto` can be asked for; nothing reaches bypass.
 
 use std::time::{Duration, Instant};
 
@@ -161,8 +161,6 @@ fn cut(reason: &str) -> String {
 pub enum Refusal {
     /// Only `auto` can be asked for, and only by Claude Code.
     Unavailable(String),
-    /// A child whose parent is not in auto (146b).
-    Wider(String),
     /// Already in auto: nothing to ask.
     AlreadyAuto,
     /// The switch restarts the session, which its live children would not
@@ -213,19 +211,17 @@ impl AgentManager {
             ))));
         }
         let store = self.store.lock().unwrap();
+        if store.lineage(session_id)?.parent_session.is_some() {
+            return Ok(Err(Refusal::Unavailable(
+                "A child never asks the person for anything (decision 148): when you need \
+                 more than you are allowed, say so in report_result with outcome blocked, and \
+                 the agent that started you decides."
+                    .into(),
+            )));
+        }
         let own = store.launch(session_id)?.and_then(|l| l.permission_mode);
         if own.as_deref() == Some(permission::AUTO) {
             return Ok(Err(Refusal::AlreadyAuto));
-        }
-        if let Some(parent) = store.lineage(session_id)?.parent_session {
-            let parents = store.launch(&parent)?.and_then(|l| l.permission_mode);
-            if parents.as_deref() != Some(permission::AUTO) {
-                return Ok(Err(Refusal::Wider(
-                    "A child is never looser than the agent that started it, and that agent \
-                     is not in auto."
-                        .into(),
-                )));
-            }
         }
         if !store.descendants(session_id, true)?.is_empty() {
             return Ok(Err(Refusal::LiveChildren));

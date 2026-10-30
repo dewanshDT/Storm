@@ -1858,12 +1858,16 @@ pub mod spawn {
 
     /// The child's agent and its kind: the parent's own when the start
     /// names none or names it, else one its host reports it can start a
-    /// child in (143a). `None` is `agent_unavailable`.
+    /// child in (143a). `None` is `agent_unavailable`, as is an agent that
+    /// cannot run without asking (148a).
     pub fn child_agent(
         parent: &SessionRecord,
         named: Option<&str>,
         host: &HostNow,
     ) -> Option<(String, String)> {
+        if !crate::agent::permission::unattended(named.unwrap_or(&parent.provider)) {
+            return None;
+        }
         match named {
             None => Some((parent.provider.clone(), parent.provider_kind.clone())),
             Some(p) if p == parent.provider => {

@@ -923,6 +923,32 @@ fn a_child_runs_an_agent_its_host_can_start_or_nothing() {
     );
 }
 
+/// 148a (A-148-4): Codex never runs as a child, even installed with Storm's
+/// servers: it would stop on a prompt nobody answers. It is not offered,
+/// and a start naming it is `agent_unavailable` with nothing sent.
+#[test]
+fn codex_is_never_a_child() {
+    let mut f = fixture(16);
+    let mut hello = caps(VERIFIED, 16);
+    for provider in &mut hello.capabilities.providers {
+        if provider.id == "codex" {
+            provider.available = true;
+        }
+    }
+    f.m.inventory("hst_A", hello.capabilities).unwrap();
+    let p = f.parent();
+    f.starts();
+    assert_eq!(
+        f.start_as(&p.id, Some("codex")),
+        Err(because("agent_unavailable"))
+    );
+    assert!(f.starts().is_empty());
+    assert_eq!(
+        f.m.startable_agents(&p.id).unwrap(),
+        ["claude-code", "opencode"]
+    );
+}
+
 /// 143a, 143d: a Claude Code parent's OpenCode child starts as OpenCode,
 /// with the parent's grants, and is named no synced login even when the
 /// account has one for that host: the host's own setup for OpenCode

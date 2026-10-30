@@ -1,5 +1,5 @@
 {
-  "about": "Decisions 146b and 147a/c: the permission mode a person chooses at launch, or a start_agent names, per agent. The server (apps/server/src/agent/permission.rs) refuses a mode an agent does not offer with permission_mode_unavailable, a start's mode looser than its parent's with permission_mode_wider, and gives a start without one its parent's mode or the nearest stricter one its agent offers (`inherit`). The host (apps/runtime/src/profile.rs, permission_mode) refuses it again and turns an accepted one into exactly `args` (the agent's own launch flag) and `opencode_permission` (keys Storm's OpenCode config layer sets). `default` is the mode that asks: a start omits the field; Claude Code gets `--permission-mode default` (147a: its own default became auto in 2.1.312, and `default` is a spelling every version takes), every other agent nothing. `auto_off` is Claude Code's `permissions.disableAutoMode: \"disable\"` in Storm's --settings (147c): auto stays out of its Shift+Tab cycle unless the person launched in auto. No bypass or skip-permissions mode exists anywhere. Neither crate depends on the other: this file keeps them on one rule.",
+  "about": "Decisions 146b and 147a/c: the permission mode a person chooses at launch, or a start_agent names, per agent. The server (apps/server/src/agent/permission.rs) refuses a mode an agent does not offer with permission_mode_unavailable, a start's mode looser than its parent's with permission_mode_wider, and gives a start without one its parent's mode or the nearest stricter one its agent offers (`inherit`). The host (apps/runtime/src/profile.rs, permission_mode) refuses it again and turns an accepted one into exactly `args` (the agent's own launch flag) and `opencode_permission` (keys Storm's OpenCode config layer sets). `default` is the mode that asks: a start omits the field; Claude Code gets `--permission-mode default` (147a: its own default became auto in 2.1.312, and `default` is a spelling every version takes), every other agent nothing. `auto_off` is Claude Code's `permissions.disableAutoMode: \"disable\"` in Storm's --settings (147c): auto stays out of its Shift+Tab cycle unless the person launched in auto. `child` is decision 148a: a spawned child never asks. The host (profile::child_permission_mode) turns a child's mode, which the server still derives by `inherit`, into its no-prompt form: Claude Code `--permission-mode dontAsk` with the `allow` baseline for every mode (G-148: auto falls back to asking after repeated blocks, and no documented setting makes that a denial), OpenCode `edit` and `bash` allowed and every other ask denied (`deny_asks`). Only the `unattended` agents run as a child; the server refuses any other agent_unavailable, Codex included. No bypass or skip-permissions mode exists anywhere. Neither crate depends on the other: this file keeps them on one rule.",
   "order": ["default", "accept_edits", "auto"],
   "offered": {
     "claude-code": ["default", "accept_edits", "auto"],
@@ -36,6 +36,25 @@
     {"agent": "opencode", "mode": "bypass"},
     {"agent": "codex", "mode": "bypass"}
   ],
+  "child": {
+    "unattended": ["claude-code", "opencode"],
+    "accepted": [
+      {"agent": "claude-code", "mode": "default", "args": ["--permission-mode", "dontAsk"], "allow": ["Edit(./**)", "Read(./**)", "Bash"], "opencode_permission": {}, "deny_asks": false, "auto_off": true},
+      {"agent": "claude-code", "mode": "accept_edits", "args": ["--permission-mode", "dontAsk"], "allow": ["Edit(./**)", "Read(./**)", "Bash"], "opencode_permission": {}, "deny_asks": false, "auto_off": true},
+      {"agent": "claude-code", "mode": "auto", "args": ["--permission-mode", "dontAsk"], "allow": ["Edit(./**)", "Read(./**)", "Bash"], "opencode_permission": {}, "deny_asks": false, "auto_off": true},
+      {"agent": "opencode", "mode": "default", "args": [], "allow": [], "opencode_permission": {"bash": "allow", "edit": "allow"}, "deny_asks": true, "auto_off": false},
+      {"agent": "opencode", "mode": "accept_edits", "args": [], "allow": [], "opencode_permission": {"bash": "allow", "edit": "allow"}, "deny_asks": true, "auto_off": false}
+    ],
+    "refused": [
+      {"agent": "codex", "mode": "default"},
+      {"agent": "cursor", "mode": "default"},
+      {"agent": "shell", "mode": "default"},
+      {"agent": "opencode", "mode": "auto"},
+      {"agent": "claude-code", "mode": "bypass"},
+      {"agent": "claude-code", "mode": "dontAsk"},
+      {"agent": "claude-code", "mode": "bypassPermissions"}
+    ]
+  },
   "inherit": [
     {"parent": "default", "agent": "claude-code", "child": "default"},
     {"parent": "accept_edits", "agent": "claude-code", "child": "accept_edits"},

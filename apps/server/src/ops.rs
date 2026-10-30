@@ -3084,14 +3084,28 @@ pub async fn start_agent(
         Err(refusal) => {
             audit_act(state, &caller, "start", None, Some(refusal)).await;
             let message = match refusal.reason {
-                "agent_unavailable" => Some(format!(
-                    "Storm cannot start {agent} on this host for a child. The agents it can start here: {}.",
-                    state
+                "agent_unavailable" => {
+                    let startable = state
                         .agent
                         .startable_agents(&caller)
                         .map_err(agent_error)?
-                        .join(", ")
-                )),
+                        .join(", ");
+                    let startable = if startable.is_empty() {
+                        "none".to_string()
+                    } else {
+                        startable
+                    };
+                    Some(if agent != "codex" {
+                        format!(
+                            "Storm cannot start {agent} on this host for a child. The agents it can start here: {startable}."
+                        )
+                    } else {
+                        format!(
+                            "{} The agents it can start here: {startable}.",
+                            crate::agent::permission::not_unattended(&agent)
+                        )
+                    })
+                }
                 "name_taken" => Some(
                     "One of your live children already has that name: continue it with send_message, or choose another name."
                         .into(),
@@ -5341,7 +5355,6 @@ pub async fn request_permission_mode(
                 Refusal::Unavailable(why) => {
                     ModeRequestAnswer::refused("permission_mode_unavailable", why)
                 }
-                Refusal::Wider(why) => ModeRequestAnswer::refused("permission_mode_wider", why),
                 Refusal::LiveChildren => ModeRequestAnswer::refused(
                     "live_children",
                     "Switching restarts this session, which the agents you started would not \
@@ -5734,17 +5747,41 @@ pub fn runtime_output(
         .map_err(agent_error)
 }
 
-pub fn runtime_status(
+/// A child stopped on its CLI's own prompt (148b): its no-prompt mode
+/// failed. Audited with codes only; the person is shown nothing.
+pub const EVENT_SPAWN_UNEXPECTED_PROMPT: &str = "spawn_unexpected_prompt";
+
+/// A child's session record while a permission prompt shows on it.
+fn child_at_prompt(state: &Shared, session: &str) -> Option<crate::agent::store::SessionRecord> {
+    let r = state.agent.get(session).ok()?;
+    state.agent.lineage(session).ok()?.parent_session.as_ref()?;
+    let attention = state.agent.needs_attention(&r).ok()??;
+    (attention == crate::agent::attention::PERMISSION_PROMPT).then_some(r)
+}
+
+pub async fn runtime_status(
     state: &Shared,
     host_id: &str,
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
+    let prompt_before = child_at_prompt(state, session).is_some();
     state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
     sweep_gateway_sessions(state);
+    if !prompt_before && let Some(r) = child_at_prompt(state, session) {
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_UNEXPECTED_PROMPT,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": session, "host_id": host_id,
+                "reason": crate::agent::attention::UNEXPECTED_PROMPT}),
+        )
+        .await;
+    }
     Ok(())
 }
 
@@ -5778,6 +5815,23 @@ pub async fn runtime_final_message(
         )
         .await;
     }
+    Ok(())
+}
+
+/// `POST /v1/runtime/sessions/{id}/denied`: a host's report of a child's
+/// denied tool call (148b), from the agent's own hook or plugin. The parent
+/// hears it as a `denied` event; never an error to the host otherwise,
+/// since it is evidence, not a request.
+pub fn runtime_denied(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    report: &crate::agent::events::DeniedReport,
+) -> ApiResult<()> {
+    state
+        .agent
+        .denied(host_id, session, report)
+        .map_err(agent_error)?;
     Ok(())
 }
 
@@ -6791,7 +6845,8 @@ struct Authorized {
     spawned: bool,
     /// The session was launched with spawning on and a person turned it off.
     spawn_off: bool,
-    /// The session's agent is Claude Code, so it may ask for auto (147c).
+    /// The session's agent is Claude Code, so it may ask for auto (147c),
+    /// and it is not a child, which never asks (148).
     mode_request: bool,
 }
 
@@ -6948,7 +7003,11 @@ async fn authorize_call(
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
-        mode_request: session.provider == "claude-code",
+        mode_request: session.provider == "claude-code"
+            && state
+                .agent
+                .lineage(session_id)
+                .is_ok_and(|l| l.parent_session.is_none()),
     })
 }
 

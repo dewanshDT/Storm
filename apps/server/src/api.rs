@@ -374,6 +374,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/runtime/sessions/{id}/final-message",
             post(runtime_final_message),
         )
+        .route("/v1/runtime/sessions/{id}/denied", post(runtime_denied))
         .route(
             "/v1/runtime/sessions/{id}/terminal/images/{image}",
             get(runtime_image).post(runtime_image_staged),
@@ -1870,7 +1871,7 @@ async fn runtime_status(
     Path(id): Path<String>,
     Json(report): Json<crate::agent::StatusReport>,
 ) -> ApiResult<StatusCode> {
-    crate::ops::runtime_status(&state, &auth.host.id, &id, &report)?;
+    crate::ops::runtime_status(&state, &auth.host.id, &id, &report).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1882,6 +1883,17 @@ async fn runtime_final_message(
     Json(message): Json<crate::agent::round::FinalMessage>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_final_message(&state, &auth.host.id, &id, &message).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// A child's denied tool call, from its agent's hook (decision 148b).
+async fn runtime_denied(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(report): Json<crate::agent::events::DeniedReport>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_denied(&state, &auth.host.id, &id, &report)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -16234,7 +16246,7 @@ pub(crate) mod tests {
                 .collect::<Vec<_>>(),
             ["claude-code", "opencode"]
         );
-        for other in ["shell", "codex", "cursor", "nope"] {
+        for other in ["shell", "cursor", "nope"] {
             let refused = structured(
                 &f.tool(
                     &parent,
@@ -16252,6 +16264,23 @@ pub(crate) mod tests {
                 "{other}"
             );
         }
+        // 148a: Codex is never a child, installed or not.
+        let codex = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "agent": "codex"}),
+            )
+            .await,
+        );
+        assert_eq!(codex["reason"], "agent_unavailable");
+        assert_eq!(
+            codex["message"],
+            format!(
+                "{} The agents it can start here: claude-code, opencode.",
+                crate::agent::permission::not_unattended("codex")
+            )
+        );
 
         let started = structured(
             &f.tool(
@@ -17226,10 +17255,26 @@ pub(crate) mod tests {
         )
         .await;
         assert!(code.is_success());
+        // 148a (A-148-4): Codex never runs as a child, whatever its model.
+        let refused = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "agent": "codex", "model": "gpt-5-codex"}),
+            )
+            .await,
+        );
+        assert_eq!(refused["reason"], "agent_unavailable", "{refused}");
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .starts_with("Codex cannot run as a child"),
+            "{refused}"
+        );
         for (agent, model) in [
             ("claude-code", "haiku"),
             ("opencode", "anthropic/claude-sonnet-4-5"),
-            ("codex", "gpt-5-codex"),
         ] {
             let child = f
                 .start_child(
@@ -17575,13 +17620,13 @@ pub(crate) mod tests {
         );
     }
 
-    /// A-146-4, the server's half: a gated permission prompt on a child
-    /// shows on its row, is a `needs_attention`/`permission_prompt` event
-    /// that returns its parent's `wait_agent`, and clears when answered.
-    /// Nothing the parent has can answer it.
+    /// A-148-3 (amending A-146-4): a gated permission prompt on a child is
+    /// a fault, since a child never asks: its parent's `wait_agent` returns
+    /// with `needs_attention`/`unexpected_prompt`, it is audited, and it
+    /// clears when the prompt goes. Nothing the parent has can answer it.
     #[tokio::test]
-    async fn a_146_4_a_waiting_prompt_is_surfaced_and_cleared() {
-        let dir = tempdir::TempDir::new("storm-146-4").unwrap();
+    async fn a_148_3_a_childs_prompt_is_a_fault_for_its_parent_only() {
+        let dir = tempdir::TempDir::new("storm-148-3").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
         f.state
             .agent
@@ -17603,13 +17648,12 @@ pub(crate) mod tests {
                 &f.host_bearer,
             )
         };
-        let (code, _) = send(
-            &f.app,
-            status(serde_json::json!({"status": "running",
-                "attention": "permission_prompt", "attention_source": "provider_hook"})),
-        )
-        .await;
-        assert!(code.is_success());
+        let prompt = serde_json::json!({"status": "running",
+            "attention": "permission_prompt", "attention_source": "provider_hook"});
+        for _ in 0..2 {
+            let (code, _) = send(&f.app, status(prompt.clone())).await;
+            assert!(code.is_success());
+        }
         let woke = structured(
             &f.tool(
                 &parent,
@@ -17619,23 +17663,33 @@ pub(crate) mod tests {
             .await,
         );
         assert_eq!(woke["timed_out"], false, "{woke}");
-        let event = woke["events"]
+        let events: Vec<&serde_json::Value> = woke["events"]
             .as_array()
             .unwrap()
             .iter()
-            .find(|e| e["kind"] == "needs_attention")
-            .unwrap_or_else(|| panic!("{woke}"))
-            .clone();
+            .filter(|e| e["kind"] == "needs_attention")
+            .collect();
+        assert_eq!(events.len(), 1, "{woke}");
         assert_eq!(
-            (event["child"].as_str(), event["reason"].as_str()),
-            (Some(child.as_str()), Some("permission_prompt"))
+            (events[0]["child"].as_str(), events[0]["reason"].as_str()),
+            (Some(child.as_str()), Some("unexpected_prompt"))
         );
-        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
-        assert_eq!(view["needs_attention"], "permission_prompt", "Needs you");
+        let audited: Vec<serde_json::Value> = f
+            .state
+            .auth_db
+            .lock()
+            .await
+            .all_events()
+            .unwrap()
+            .into_iter()
+            .filter(|(kind, _)| kind == crate::ops::EVENT_SPAWN_UNEXPECTED_PROMPT)
+            .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+            .collect();
+        assert_eq!(audited.len(), 1, "one audit row per prompt: {audited:?}");
+        assert_eq!(audited[0]["session_id"], child.as_str());
+        assert_eq!(audited[0]["reason"], "unexpected_prompt");
 
         let tools = f.storm_tools(&parent).await;
-        // 147c's request asks the person for a mode on a card of Storm's
-        // own; it answers no CLI prompt (A-147-4).
         for t in tools
             .iter()
             .filter(|t| !crate::mcp::MODE_TOOLS.contains(&t.as_str()))
@@ -17644,10 +17698,159 @@ pub(crate) mod tests {
                 assert!(!t.contains(word), "{t} could answer a prompt");
             }
         }
+        assert!(
+            !f.storm_tools(&child)
+                .await
+                .iter()
+                .any(|t| crate::mcp::MODE_TOOLS.contains(&t.as_str())),
+            "a child is never offered a way to ask the person"
+        );
         let (code, _) = send(&f.app, status(serde_json::json!({"status": "running"}))).await;
         assert!(code.is_success());
         let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
-        assert!(view["needs_attention"].is_null(), "answered: {view}");
+        assert!(view["needs_attention"].is_null(), "gone: {view}");
+    }
+
+    /// A-148-2: each denial a child's host reports gives its parent one
+    /// `denied` event with the tool and a bounded detail, and returns its
+    /// `wait_agent`; identical ones in the same round merge into a count,
+    /// and a new round starts afresh. Only the child's own host is heard,
+    /// only for a child, and only from its agent's hook.
+    #[tokio::test]
+    async fn a_148_2_a_childs_denials_reach_its_parent() {
+        let dir = tempdir::TempDir::new("storm-148-2").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "t", "name": "poet"}))
+            .await;
+        let first = structured(
+            &f.tool(&parent, "wait_agent", serde_json::json!({"timeout": 1}))
+                .await,
+        );
+        let mut cursor = first["cursor"].clone();
+        let deny = |session: &str, body: serde_json::Value| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{session}/denied"),
+                body,
+                &f.host_bearer,
+            )
+        };
+        let long = "x".repeat(900);
+        for body in [
+            serde_json::json!({"tool": "Write", "detail": "/elsewhere/a", "source": "provider_hook"}),
+            serde_json::json!({"tool": "Write", "detail": "/elsewhere/a", "source": "provider_hook"}),
+            serde_json::json!({"tool": "Bash", "detail": long, "source": "provider_hook"}),
+        ] {
+            let (code, _) = send(&f.app, deny(&child, body)).await;
+            assert_eq!(code, StatusCode::NO_CONTENT);
+        }
+        let woke = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"after": cursor, "timeout": 5}),
+            )
+            .await,
+        );
+        assert_eq!(woke["timed_out"], false, "{woke}");
+        cursor = woke["cursor"].clone();
+        let denied: Vec<serde_json::Value> = woke["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "denied")
+            .cloned()
+            .collect();
+        assert_eq!(denied.len(), 2, "{woke}");
+        assert_eq!(
+            (
+                denied[0]["tool"].as_str(),
+                denied[0]["detail"].as_str(),
+                denied[0]["source"].as_str(),
+                denied[0]["confidence"].as_str()
+            ),
+            (
+                Some("Write"),
+                Some("/elsewhere/a"),
+                Some("provider_hook"),
+                Some("reported")
+            )
+        );
+        assert_eq!(
+            denied[1]["detail"].as_str().unwrap().chars().count(),
+            crate::agent::events::MAX_DENIAL_DETAIL
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        let recent = view.to_string();
+        assert!(recent.contains("\"count\":2"), "merged: {recent}");
+
+        // A new round: the same denial is new again.
+        structured(
+            &f.tool(
+                &child,
+                "report_result",
+                serde_json::json!({"outcome": "blocked", "summary": "refused"}),
+            )
+            .await,
+        );
+        structured(
+            &f.tool(
+                &parent,
+                "send_message",
+                serde_json::json!({"to": child, "text": "next"}),
+            )
+            .await,
+        );
+        let (code, _) = send(
+            &f.app,
+            deny(
+                &child,
+                serde_json::json!({"tool": "Write", "detail": "/elsewhere/a"}),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        let later = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"after": cursor, "timeout": 5}),
+            )
+            .await,
+        );
+        assert!(
+            later["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|e| e["kind"] == "denied" && e["count"] == 1),
+            "{later}"
+        );
+
+        // Not a child, not the agent's hook, no tool: nothing.
+        let events_before = f.state.agent.events_of_for_tests(&parent).len();
+        for (session, body) in [
+            (
+                parent.as_str(),
+                serde_json::json!({"tool": "Bash", "detail": "x"}),
+            ),
+            (
+                child.as_str(),
+                serde_json::json!({"tool": "Bash", "detail": "y", "source": "output_pattern"}),
+            ),
+            (
+                child.as_str(),
+                serde_json::json!({"tool": " ", "detail": "z"}),
+            ),
+        ] {
+            let (code, _) = send(&f.app, deny(session, body)).await;
+            assert_eq!(code, StatusCode::NO_CONTENT);
+        }
+        assert_eq!(
+            f.state.agent.events_of_for_tests(&parent).len(),
+            events_before
+        );
     }
 
     /// A-145-4: a name addresses its agent wherever an id does, and is
@@ -18702,118 +18905,50 @@ pub(crate) mod tests {
         assert_eq!(already["status"], "already", "{already}");
     }
 
-    /// A-147-4, children: a child's request is `permission_mode_wider`
-    /// unless its parent is in auto, and a parent with live children is
-    /// refused (the switch's restart would end them).
+    /// A-147-4 as 148 amends it (A-148-3, A-148-4): a child never asks the
+    /// person, under any parent: it is not offered `request_permission_mode`,
+    /// a call is refused before any card, and the op refuses a child too. A
+    /// parent with live children is refused (the switch's restart would end
+    /// them).
     #[tokio::test]
-    async fn a_147_4_a_child_asks_only_under_an_auto_parent() {
-        let dir = tempdir::TempDir::new("storm-147-4c").unwrap();
+    async fn a_148_4_a_child_never_asks_for_a_mode() {
+        let dir = tempdir::TempDir::new("storm-148-4").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
-        let parent = f.spawning_parent_in("claude-code", "accept_edits").await;
-        let child = f
-            .start_child(&parent, serde_json::json!({"task": "t", "name": "c"}))
-            .await;
-        let refused = structured(&f.tool(&child, "request_permission_mode", ask("auto")).await);
-        assert_eq!(refused["reason"], "permission_mode_wider", "{refused}");
-        let busy = structured(
-            &f.tool(&parent, "request_permission_mode", ask("auto"))
-                .await,
-        );
-        assert_eq!(busy["reason"], "live_children", "{busy}");
-        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
-        assert!(view.get("mode_request").is_none());
-        assert!(
-            f.events_of(crate::ops::EVENT_PERMISSION_MODE_REQUEST)
-                .await
-                .iter()
-                .any(|e| e["session_id"] == child.as_str()
-                    && e["refused"] == "permission_mode_wider"),
-            "the refusal is audited"
-        );
-
-        let auto = f.spawning_parent_in("claude-code", "auto").await;
-        let strict = f
-            .start_child(
-                &auto,
-                serde_json::json!({"task": "t", "name": "strict", "permission_mode": "default"}),
-            )
-            .await;
-        let asked = {
-            let a = f.tool(&strict, "request_permission_mode", ask("auto"));
-            let b = async {
-                let id = f.waiting_request(&strict).await;
-                let (code, body) = f.decide(&strict, &id, "deny").await;
-                assert_eq!(code, StatusCode::OK, "{body}");
-            };
-            let (a, ()) = tokio::join!(a, b);
-            structured(&a)
-        };
-        assert_eq!(
-            asked["status"], "denied",
-            "under an auto parent it asks: {asked}"
-        );
-
-        // Approved, a child switches as itself: parked, then resumed in auto
-        // from its own conversation, its lineage kept.
-        let (code, _) = send(
-            &f.app,
-            post_json_with_auth(
-                &format!("/v1/runtime/sessions/{strict}/status"),
-                serde_json::json!({"status": "running",
-                    "harness_session": "4a6c8e0a-1b3d-4f5a-8c7e-9d1f3b5a7c9e"}),
-                &f.host_bearer,
-            ),
-        )
-        .await;
-        assert!(code.is_success());
-        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        f.sent();
-        let approved = {
-            let a = f.tool(&strict, "request_permission_mode", ask("auto"));
-            let b = async {
-                let id = f.waiting_request(&strict).await;
-                let (code, body) = f.decide(&strict, &id, "approve").await;
-                assert_eq!(code, StatusCode::OK, "{body}");
-            };
-            let (a, ()) = tokio::join!(a, b);
-            structured(&a)
-        };
-        assert_eq!(approved["status"], "approved", "{approved}");
-        let mut parked = false;
-        for _ in 0..100 {
-            if f.sent()
-                .iter()
-                .any(|m| m["type"] == "park" && m["session"] == strict.as_str())
-            {
-                parked = true;
-                break;
+        for mode in ["accept_edits", "auto"] {
+            let parent = f.spawning_parent_in("claude-code", mode).await;
+            let p = &parent;
+            let child = f
+                .start_child(p, serde_json::json!({"task": "t", "name": "c"}))
+                .await;
+            assert!(
+                !f.storm_tools(&child)
+                    .await
+                    .contains(&"request_permission_mode".to_string())
+            );
+            assert_eq!(
+                error_code(&f.tool(&child, "request_permission_mode", ask("auto")).await)
+                    .as_deref(),
+                Some("tool_not_allowed")
+            );
+            let refused =
+                crate::ops::request_permission_mode(&f.state, &f.agent(&child), "auto", "please")
+                    .await
+                    .ok()
+                    .unwrap();
+            let refused = serde_json::to_value(refused).unwrap();
+            assert_eq!(
+                refused["reason"], "permission_mode_unavailable",
+                "{refused}"
+            );
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+            assert!(view.get("mode_request").is_none(), "no card: {view}");
+            if mode == "accept_edits" {
+                let busy = structured(
+                    &f.tool(&parent, "request_permission_mode", ask("auto"))
+                        .await,
+                );
+                assert_eq!(busy["reason"], "live_children", "{busy}");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        assert!(parked, "the child is parked for the switch");
-        f.report(&strict, "parked").await;
-        let mut start = None;
-        for _ in 0..100 {
-            start = f
-                .sent()
-                .into_iter()
-                .find(|m| m["type"] == "start" && m["session"] == strict.as_str());
-            if start.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-        let start = start.expect("the child resumes as itself");
-        assert_eq!(start["permission_mode"], "auto", "{start}");
-        assert_eq!(start["resume"], "4a6c8e0a-1b3d-4f5a-8c7e-9d1f3b5a7c9e");
-        assert_eq!(start["child_of"], auto.as_str());
-        let (_, view) = f.get(&format!("/v1/agent/sessions/{strict}")).await;
-        assert_eq!(view["permission_mode"], "auto", "{view}");
-        assert_eq!(view["parent_session"], auto.as_str());
-        let bypass = structured(
-            &f.tool(&strict, "request_permission_mode", ask("bypassPermissions"))
-                .await,
-        );
-        assert_eq!(bypass["reason"], "permission_mode_unavailable");
     }
 }
