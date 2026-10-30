@@ -113,8 +113,13 @@ pub struct ResultSource {
     pub source: &'static str,
 }
 
-/// None has passed its gate.
-pub const RESULT_SOURCES: &[ResultSource] = &[];
+/// G-145-R-claude-code passed locally on 2026-10-31 with Claude Code
+/// 2.1.314 (`tests/lifecycle_gate.rs`): its `Stop` hook's final message and
+/// the turn's tokens from its transcript.
+pub const RESULT_SOURCES: &[ResultSource] = &[ResultSource {
+    provider: "claude-code",
+    source: "provider_hook",
+}];
 
 /// One agent's documented wake (144c, 145d), once its gates
 /// (G-144-W-<provider>, G-145-W-<provider>) pass. The server's
@@ -187,10 +192,12 @@ impl Gates {
                 || (child && self.signal(provider, PERMISSION_PROMPT)),
             idle: self.signal(provider, IDLE),
             usage_limit: self.signal(provider, USAGE_LIMIT),
-            result: self
-                .results
-                .iter()
-                .any(|r| r.provider == provider && r.source == PROVIDER_HOOK),
+            // Only a child's final message is a round's result (145c).
+            result: child
+                && self
+                    .results
+                    .iter()
+                    .any(|r| r.provider == provider && r.source == PROVIDER_HOOK),
             wake: self.wakes.iter().any(|w| w.provider == provider),
             denied: child && self.denials.contains(&provider),
         }
@@ -1702,8 +1709,9 @@ export const StormHarness = async () => {
     }
 
     /// Each gated list here is the server's, spelled the same; only a
-    /// child's permission prompt (G-146-P) and its denials (G-148) are on,
-    /// and only a child's hooks report them.
+    /// child's permission prompt (G-146-P), its denials (G-148) and Claude
+    /// Code's final message (G-145-R) are on, and only a child's hooks
+    /// report them.
     #[test]
     fn the_gated_lists_are_the_servers() {
         let server = |file: &str| {
@@ -1724,7 +1732,14 @@ export const StormHarness = async () => {
             assert_eq!(list(here, name), list(&server(file), theirs), "{name}");
         }
         assert_eq!(DENIALS, ["claude-code", "opencode"]);
-        assert!(RESULT_SOURCES.is_empty() && WAKE.is_empty());
+        assert_eq!(
+            RESULT_SOURCES,
+            [ResultSource {
+                provider: "claude-code",
+                source: PROVIDER_HOOK
+            }]
+        );
+        assert!(WAKE.is_empty());
         let on: Vec<(&str, &str, &str)> = GATED_SIGNALS
             .iter()
             .map(|g| (g.provider, g.signal, g.source))
@@ -1747,6 +1762,7 @@ export const StormHarness = async () => {
                 Gates::COMPILED.hooks(provider, true),
                 Hooks {
                     denied: gated,
+                    result: provider == "claude-code",
                     ..Hooks::attention(gated)
                 },
                 "{provider}'s child"
@@ -1773,8 +1789,8 @@ export const StormHarness = async () => {
 
     /// A session that is not a child gets no hook, plugin code or waker:
     /// its files are byte for byte what they were before 144's runtime
-    /// half. A child gets only the permission prompt's (146c) and its
-    /// denials' (148b).
+    /// half. A child gets only the permission prompt's (146c), its
+    /// denials' (148b) and, for Claude Code, its final message's (145c).
     #[test]
     fn with_nothing_gated_the_configs_are_byte_identical() {
         let hooks = Gates::COMPILED.hooks("claude-code", false);
@@ -1788,6 +1804,7 @@ export const StormHarness = async () => {
             settings_of(&Gates::COMPILED.hooks("claude-code", true)),
             settings_of(&Hooks {
                 denied: true,
+                result: true,
                 ..Hooks::attention(true)
             })
         );

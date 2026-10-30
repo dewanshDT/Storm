@@ -253,6 +253,52 @@ void main() {
     await disposeShell(tester, c);
   });
 
+  testWidgets('a child’s round shows what it took, tokens included (145f)', (
+    tester,
+  ) async {
+    const reportedAt = '2026-10-27T10:06:00Z';
+    final agents = FakeAgentServer(
+      hosts: [agentHost()],
+      sessions: [
+        spawnSession('ags_p', spawn: {'enabled': true}),
+        spawnSession(
+          'ags_c',
+          name: 'counter',
+          parent: 'ags_p',
+          depth: 1,
+          recentEvents: [
+            childEvent(
+              'ags_p',
+              1,
+              'ags_c',
+              'reported',
+              reason: 'succeeded',
+              round: 2,
+              durationMs: 14200,
+              usage: {
+                'input_tokens': 10,
+                'cache_read_tokens': 12000,
+                'cache_write_tokens': 300,
+                'output_tokens': 456,
+              },
+              at: reportedAt,
+            ),
+          ],
+        ),
+      ],
+    );
+    FakeSpawning(agents);
+    final c = await about(tester, agents, 'ags_p');
+    expect(
+      find.text(
+        'Reported: succeeded · Round 2 · 14s · 12k in · 456 out · '
+        '${clockAt(DateTime.parse(reportedAt))}',
+      ),
+      findsOneWidget,
+    );
+    await disposeShell(tester, c);
+  });
+
   test('the view’s events parse, and every label is plain', () {
     final facts = SpawnFacts.fromJson(family()[1]);
     expect(facts.childActivity, 'unknown');
@@ -304,6 +350,11 @@ void main() {
     expect(denied.count, 1);
     expect(denied.detail, '/x');
     expect(evidenceLabel(event('started')), isNull);
+    expect(roundLabel(event('started')), isNull);
+    final noUsage = ChildEvent.fromJson(
+      childEvent('ags_p', 3, 'ags_c', 'ended', round: 1, durationMs: 125000),
+    );
+    expect(roundLabel(noUsage), 'Round 1 · 2m 5s', reason: 'never guessed');
 
     final session = AgentSession.fromJson({
       ...agentSession('ags_x'),

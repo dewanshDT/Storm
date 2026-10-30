@@ -5739,8 +5739,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
     /// a child started by the server's `start` works in its W2 clone and
     /// commits, then ends by itself; at its lease end the helper keeps its
     /// workspace for review, and the vector's `child.workspace` commands
-    /// export its work and apply it as `storm/<child>` through the helper's
-    /// own export and Apply code with real git. The parent's every existing
+    /// export its work, with what it left uncommitted as Storm's commit on
+    /// top, and apply it as `storm/<child>` through the helper's own export
+    /// and Apply code with real git. The parent's every existing
     /// ref, `HEAD`, index and working tree are as they were; a second Apply
     /// is refused.
     #[tokio::test(flavor = "multi_thread")]
@@ -5839,24 +5840,27 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         let (exported, want) = run("export").await;
         let review = &exported["answer"];
         assert_eq!(keys(review), keys(&want), "{review}");
-        assert_eq!(
-            (review["base"].clone(), review["tip"].clone()),
-            (base.clone().into(), tip.clone().into())
-        );
+        let child_tip = tip;
+        let tip = review["tip"].as_str().unwrap().to_string();
+        assert_ne!(tip, child_tip, "what it left uncommitted is on top");
+        assert_eq!(review["base"], base);
         assert_eq!(
             review["commits"],
-            serde_json::json!([{"id": tip, "subject": "the child's work"}])
+            serde_json::json!([
+                {"id": tip, "subject": storm_runtime_isolation::review::SNAPSHOT_SUBJECT},
+                {"id": child_tip, "subject": "the child's work"}
+            ])
         );
         assert_eq!(
             review["files"],
-            serde_json::json!([{"path": "WORK.md", "added": 1, "removed": 0}])
+            serde_json::json!([
+                {"path": "UNCOMMITTED.md", "added": 1, "removed": 0},
+                {"path": "WORK.md", "added": 1, "removed": 0}
+            ])
         );
         let patch = review["patch"].as_str().unwrap();
         assert!(patch.contains("+done"), "{patch}");
-        assert!(
-            !patch.contains("left over"),
-            "uncommitted work never leaves"
-        );
+        assert!(patch.contains("+left over"), "{patch}");
         assert_eq!(
             refs(),
             refs_before,
@@ -5878,6 +5882,10 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             "HEAD, index and working tree as they were"
         );
         assert_eq!(git(&parent, &["show", "storm/ags_CHILD:WORK.md"]), "done");
+        assert_eq!(
+            git(&parent, &["show", "storm/ags_CHILD:UNCOMMITTED.md"]),
+            "left over"
+        );
 
         let (again, _) = run("import").await;
         assert_eq!(again, serde_json::json!({"refused": "branch_exists"}));

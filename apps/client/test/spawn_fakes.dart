@@ -72,6 +72,9 @@ Map<String, dynamic> childEvent(
   String? tool,
   String? detail,
   int? count,
+  int? round,
+  int? durationMs,
+  Map<String, dynamic>? usage,
 }) => {
   'id': 'evt_${parent}_$seq',
   'seq': seq,
@@ -89,6 +92,9 @@ Map<String, dynamic> childEvent(
   'tool': ?tool,
   'detail': ?detail,
   'count': ?count,
+  'round': ?round,
+  'duration_ms': ?durationMs,
+  'usage': ?usage,
 };
 
 const _ended = ['completed', 'stopped', 'failed'];

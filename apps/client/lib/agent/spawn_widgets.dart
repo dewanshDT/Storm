@@ -970,6 +970,7 @@ class ChildEventsTile extends StatelessWidget {
                   Text(
                     [
                       childEventLabel(e),
+                      ?roundLabel(e),
                       if (DateTime.tryParse(e.at) case final at?) clockAt(at),
                     ].join(' · '),
                     style: agentMono(t),

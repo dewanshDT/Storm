@@ -93,6 +93,10 @@ class ChildEvent {
     this.tool,
     this.detail,
     this.count = 1,
+    this.round,
+    this.durationMs,
+    this.inputTokens,
+    this.outputTokens,
   });
 
   final String id;
@@ -114,6 +118,14 @@ class ChildEvent {
   /// Identical denials in one round, merged (148b).
   final int count;
 
+  /// A round's `reported`, `failed`, `ended` or `parked` (145f): which
+  /// round, how long it ran, and its tokens where the agent counted them
+  /// (cache reads and writes are input).
+  final int? round;
+  final int? durationMs;
+  final int? inputTokens;
+  final int? outputTokens;
+
   /// `host_process`, `storm`, `provider_hook` or `output_pattern` (144b).
   final String source;
 
@@ -127,6 +139,18 @@ class ChildEvent {
     final state = j['state'] is Map<String, dynamic>
         ? j['state'] as Map<String, dynamic>
         : const <String, dynamic>{};
+    final usage = j['usage'] is Map<String, dynamic>
+        ? j['usage'] as Map<String, dynamic>
+        : null;
+    int? tokens(List<String> keys) {
+      if (usage == null) return null;
+      final counts = [
+        for (final k in keys)
+          if (usage[k] case final num n) n.toInt(),
+      ];
+      return counts.isEmpty ? null : counts.reduce((a, b) => a + b);
+    }
+
     return ChildEvent(
       id: j['id'] as String? ?? '',
       seq: (j['seq'] as num?)?.toInt() ?? 0,
@@ -139,6 +163,14 @@ class ChildEvent {
       tool: j['tool'] as String?,
       detail: j['detail'] as String?,
       count: (j['count'] as num?)?.toInt() ?? 1,
+      round: (j['round'] as num?)?.toInt(),
+      durationMs: (j['duration_ms'] as num?)?.toInt(),
+      inputTokens: tokens(const [
+        'input_tokens',
+        'cache_read_tokens',
+        'cache_write_tokens',
+      ]),
+      outputTokens: tokens(const ['output_tokens']),
       source: j['source'] as String? ?? 'storm',
       confidence: j['confidence'] as String? ?? 'certain',
       at: j['at'] as String? ?? '',
@@ -162,6 +194,31 @@ String childEventLabel(ChildEvent e) => switch (e.kind) {
   'unknown' => 'Lost touch',
   _ => e.kind,
 };
+
+/// "Round 2 · 14s · 12.3k in · 456 out": what a round took (145f), its
+/// tokens only where the agent counted them. Null for any other event.
+String? roundLabel(ChildEvent e) {
+  final parts = [
+    if (e.round case final r?) 'Round $r',
+    if (e.durationMs case final ms?) _duration(ms),
+    if (e.inputTokens case final n?) '${_count(n)} in',
+    if (e.outputTokens case final n?) '${_count(n)} out',
+  ];
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
+String _duration(int ms) {
+  final s = (ms / 1000).round();
+  if (s < 60) return '${s}s';
+  final m = s ~/ 60;
+  return m < 60 ? '${m}m ${s % 60}s' : '${m ~/ 60}h ${m % 60}m';
+}
+
+String _count(int n) {
+  if (n < 1000) return '$n';
+  if (n < 1000000) return '${(n / 1000).toStringAsFixed(n < 10000 ? 1 : 0)}k';
+  return '${(n / 1000000).toStringAsFixed(1)}M';
+}
 
 /// "Denied Bash ×3": what a child was refused (148b). Its detail is shown
 /// beside it, as plain text.

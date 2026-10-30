@@ -24,10 +24,14 @@ pub struct ResultSource {
     pub source: &'static str,
 }
 
-/// No agent's final message has passed its gate. The host keeps the same
-/// list (`harness::RESULT_SOURCES`), spelled the same: a test holds the two
+/// The agents whose final message has passed its gate: Claude Code's
+/// (G-145-R-claude-code, 2026-10-31). The host keeps the same list
+/// (`harness::RESULT_SOURCES`), spelled the same: a test holds the two
 /// equal.
-pub const RESULT_SOURCES: &[ResultSource] = &[];
+pub const RESULT_SOURCES: &[ResultSource] = &[ResultSource {
+    provider: "claude-code",
+    source: "provider_hook",
+}];
 
 /// What a host reports when a child's turn ends.
 #[derive(Debug, Clone, Default, Deserialize)]

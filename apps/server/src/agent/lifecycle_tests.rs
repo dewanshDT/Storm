@@ -180,10 +180,15 @@ fn usage(input: u64, output: u64) -> Usage {
 fn a_145_6_a_gated_final_message_is_the_rounds_result_and_never_an_event() {
     const CANARY: &str = "CANARY-145-6";
     let f = fixture();
-    assert!(
-        RESULT_SOURCES.is_empty(),
-        "no final message has passed its gate"
+    assert_eq!(
+        RESULT_SOURCES,
+        [ResultSource {
+            provider: "claude-code",
+            source: PROVIDER_HOOK
+        }],
+        "only Claude Code's final message has passed its gate"
     );
+    f.m.gate_result_sources_for_tests(&[]);
     let p = f.launch(None);
     let c = f.child(&p, "count the tests");
     let before = f.events(&p).len();
