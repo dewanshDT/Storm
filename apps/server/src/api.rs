@@ -14951,7 +14951,8 @@ pub(crate) mod tests {
         let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
         assert_eq!(
             listed["agents"],
-            serde_json::json!([{"provider": "claude-code",
+            serde_json::json!([{"agent": "claude-code", "title": "Claude Code",
+                "provider": "claude-code",
                 "models": crate::agent::model::accepted_forms("claude-code")}])
         );
         assert_eq!(listed["roles"], serde_json::json!([]));
@@ -16457,16 +16458,29 @@ pub(crate) mod tests {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|a| a["provider"].as_str().unwrap())
+                .map(|a| (
+                    a["agent"].as_str().unwrap(),
+                    a["provider"].as_str().unwrap(),
+                    a["title"].as_str().unwrap()
+                ))
                 .collect::<Vec<_>>(),
-            ["claude-code", "opencode"]
+            [
+                ("claude-code", "claude-code", "Claude Code"),
+                ("opencode", "opencode", "OpenCode")
+            ]
         );
-        for other in ["shell", "cursor", "nope"] {
+        // An unknown agent is named as such, before any model is checked.
+        for (other, model) in [
+            ("shell", None),
+            ("cursor", None),
+            ("nope", Some("haiku")),
+            ("gpt", Some("anthropic/claude-haiku-4-5")),
+        ] {
             let refused = structured(
                 &f.tool(
                     &parent,
                     "start_agent",
-                    serde_json::json!({"task": "t", "agent": other}),
+                    serde_json::json!({"task": "t", "agent": other, "model": model}),
                 )
                 .await,
             );
@@ -16474,8 +16488,8 @@ pub(crate) mod tests {
                 refused,
                 serde_json::json!({"state": "refused",
                     "reason": "agent_unavailable",
-                    "message": format!("Storm cannot start {other} on this host for a child. \
-                        The agents it can start here: claude-code, opencode.")}),
+                    "message": format!("Storm cannot start \"{other}\" on this host for a child. \
+                        The agents it can start here (pass one as agent): claude-code, opencode.")}),
                 "{other}"
             );
         }
@@ -16492,10 +16506,32 @@ pub(crate) mod tests {
         assert_eq!(
             codex["message"],
             format!(
-                "{} The agents it can start here: claude-code, opencode.",
+                "{} The agents it can start here (pass one as agent): claude-code, opencode.",
                 crate::agent::permission::not_unattended("codex")
             )
         );
+
+        // "claude" can mean only Claude Code; its model is then checked as
+        // Claude Code's.
+        for alias in ["claude", "Claude Code"] {
+            let started = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "agent": alias, "model": "haiku"}),
+                )
+                .await,
+            );
+            assert_eq!(started["state"], "started", "{alias}: {started}");
+            assert_eq!(started["agent"], "claude-code");
+            let start = f.sent().into_iter().find(|m| m["type"] == "start").unwrap();
+            assert_eq!(start["provider"], "claude-code", "{start}");
+            assert_eq!(start["model"], "haiku", "{start}");
+            let id = started["id"].as_str().unwrap();
+            f.state.agent.end_by_person(id, None, false).unwrap();
+            f.report(id, "stopped").await;
+            f.sent();
+        }
 
         let started = structured(
             &f.tool(
@@ -17517,7 +17553,6 @@ pub(crate) mod tests {
             ("claude-code", "gpt-4o"),
             ("claude-code", "--dangerously-skip-permissions"),
             ("opencode", "sonnet"),
-            ("codex", "openai/gpt-5"),
         ] {
             // Past the gateway's per-second limit: the tool is the same op.
             let refused = serde_json::to_value(

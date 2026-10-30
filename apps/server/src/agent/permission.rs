@@ -39,6 +39,23 @@ pub fn not_unattended(agent: &str) -> String {
     )
 }
 
+/// The agent id a start names: an id as given, or a name that can mean
+/// only one agent ("claude", "Claude Code", "open code").
+pub fn agent_id(asked: &str) -> String {
+    let folded: String = asked
+        .trim()
+        .chars()
+        .filter(|c| !matches!(c, ' ' | '-' | '_'))
+        .flat_map(char::to_lowercase)
+        .collect();
+    match folded.as_str() {
+        "claude" | "claudecode" => "claude-code".into(),
+        "opencode" => "opencode".into(),
+        "codex" => "codex".into(),
+        _ => asked.trim().to_string(),
+    }
+}
+
 /// The modes `agent` offers, strictest first.
 pub fn offered(agent: &str) -> &'static [&'static str] {
     match agent {
@@ -48,7 +65,7 @@ pub fn offered(agent: &str) -> &'static [&'static str] {
     }
 }
 
-fn label(agent: &str) -> &str {
+pub fn label(agent: &str) -> &str {
     match agent {
         "claude-code" => "Claude Code",
         "opencode" => "OpenCode",
@@ -102,6 +119,23 @@ mod tests {
             "../../../../docs/agent-permission-mode-vectors.json"
         ))
         .unwrap()
+    }
+
+    #[test]
+    fn a_name_that_means_one_agent_is_its_id() {
+        for (asked, id) in [
+            ("claude", "claude-code"),
+            ("Claude Code", "claude-code"),
+            ("claude_code", "claude-code"),
+            ("claude-code", "claude-code"),
+            ("Open Code", "opencode"),
+            ("opencode", "opencode"),
+            ("Codex", "codex"),
+            ("claude-haiku", "claude-haiku"),
+            ("gpt", "gpt"),
+        ] {
+            assert_eq!(agent_id(asked), id, "{asked}");
+        }
     }
 
     /// 146b: the server offers exactly what the host's profile maps, and

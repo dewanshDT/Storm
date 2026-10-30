@@ -2787,6 +2787,11 @@ fn spawned_caller(state: &Shared, actor: &Actor) -> ApiResult<String> {
 /// forms it takes (145b).
 #[derive(Debug, Clone, Serialize)]
 pub struct StartableAgent {
+    /// The id start_agent's `agent` takes.
+    pub agent: String,
+    /// Its name, as people call it.
+    pub title: String,
+    /// The same id, for older callers.
     pub provider: String,
     /// What `model` may be for it, as a sentence; absent where Storm passes
     /// no model.
@@ -2855,6 +2860,8 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
                 models: crate::agent::model::MODEL_AGENTS
                     .contains(&provider.as_str())
                     .then(|| crate::agent::model::accepted_forms(&provider)),
+                agent: provider.clone(),
+                title: crate::agent::permission::label(&provider).to_string(),
                 provider,
             })
             .collect(),
@@ -3106,6 +3113,32 @@ async fn role_catalog(state: &Shared, owner: &str) -> Vec<(RoleNote, Option<Stri
     role_notes(state, &actor).await.unwrap_or_default()
 }
 
+/// `agent_unavailable`'s sentence: the ids list_agents gives, which
+/// start_agent's `agent` takes.
+fn agent_unavailable(state: &Shared, caller: &str, agent: &str) -> ApiResult<String> {
+    let startable = state
+        .agent
+        .startable_agents(caller)
+        .map_err(agent_error)?
+        .join(", ");
+    let startable = if startable.is_empty() {
+        "none".to_string()
+    } else {
+        startable
+    };
+    let shown: String = agent.chars().take(64).collect();
+    Ok(if agent == "codex" {
+        format!(
+            "{} The agents it can start here (pass one as agent): {startable}.",
+            crate::agent::permission::not_unattended(agent)
+        )
+    } else {
+        format!(
+            "Storm cannot start {shown:?} on this host for a child. The agents it can start here (pass one as agent): {startable}."
+        )
+    })
+}
+
 /// `start_agent {task, name?, agent?, model?, role?, background?,
 /// context_note?}` (134-5, 145b): starts a child at once on the caller's
 /// host, in its own workspace, running the caller's agent or another its
@@ -3150,7 +3183,31 @@ pub async fn start_agent(
         }
     };
     let parent = state.agent.get(&caller).map_err(agent_error)?;
-    let agent = req.agent.clone().unwrap_or_else(|| parent.provider.clone());
+    let asked = req
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(crate::agent::permission::agent_id);
+    let agent = asked.clone().unwrap_or_else(|| parent.provider.clone());
+    // Before the model, so a wrong agent is never blamed on its model.
+    if !state
+        .agent
+        .startable_agents(&caller)
+        .map_err(agent_error)?
+        .contains(&agent)
+    {
+        let refusal = crate::agent::store::spawn::Refusal {
+            reason: "agent_unavailable",
+            cap: None,
+        };
+        audit_act(state, &caller, "start", None, Some(refusal)).await;
+        return Ok(StartedAgent::refused(
+            refusal.reason,
+            None,
+            Some(agent_unavailable(state, &caller, &agent)?),
+        ));
+    }
     let (role, role_model) = match req.role.as_deref().map(str::trim) {
         None | Some("") => (None, None),
         Some(asked) => {
@@ -3236,7 +3293,7 @@ pub async fn start_agent(
     let deliverable = deliverable_credential(state, &parent.host_id);
     let payload = StartPayload {
         task: req.task,
-        provider: req.agent.clone(),
+        provider: asked,
         name,
         context_note,
         model: model.clone(),
@@ -3258,28 +3315,7 @@ pub async fn start_agent(
         Err(refusal) => {
             audit_act(state, &caller, "start", None, Some(refusal)).await;
             let message = match refusal.reason {
-                "agent_unavailable" => {
-                    let startable = state
-                        .agent
-                        .startable_agents(&caller)
-                        .map_err(agent_error)?
-                        .join(", ");
-                    let startable = if startable.is_empty() {
-                        "none".to_string()
-                    } else {
-                        startable
-                    };
-                    Some(if agent != "codex" {
-                        format!(
-                            "Storm cannot start {agent} on this host for a child. The agents it can start here: {startable}."
-                        )
-                    } else {
-                        format!(
-                            "{} The agents it can start here: {startable}.",
-                            crate::agent::permission::not_unattended(&agent)
-                        )
-                    })
-                }
+                "agent_unavailable" => Some(agent_unavailable(state, &caller, &agent)?),
                 "name_taken" => Some(
                     "One of your live children already has that name: continue it with send_message, or choose another name."
                         .into(),
