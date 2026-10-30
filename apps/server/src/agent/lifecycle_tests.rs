@@ -527,6 +527,43 @@ fn a_145_10_the_peek_is_stripped_and_bounded() {
     assert!(f.m.output_tail("ags_nobody", 10).is_empty());
 }
 
+/// Round 2: `read_output` gave a Claude Code child's spinner, never its
+/// words. Claude Code 2.1.314 draws by cursor position, with no newline
+/// between frames; these are its bytes for two turns (a stand-in model's
+/// answers) at 100×30. The peek is its screen.
+#[test]
+fn a_claude_code_childs_peek_is_its_screen_not_its_spinner() {
+    let bytes = include_bytes!("claude_code_screen.bin");
+    let lines = super::screen_lines(bytes, (100, 30), 200);
+    let text = lines.join("\n");
+    for words in [
+        "ECHO:first-answer-words",
+        "● first-answer-words",
+        "ECHO:second-answer-words",
+        "● second-answer-words",
+    ] {
+        assert!(lines.iter().any(|l| l.contains(words)), "{words}: {text}");
+    }
+    assert!(
+        !text.contains("Gesticulating"),
+        "a spinner frame since redrawn: {text}"
+    );
+    assert!(!text.contains('\x1b'));
+    let first = lines.iter().position(|l| l.contains("● first")).unwrap();
+    let second = lines.iter().position(|l| l.contains("● second")).unwrap();
+    assert!(first < second, "{text}");
+
+    let f = fixture();
+    let p = f.launch(None);
+    let c = f.child(&p, "say it");
+    f.m.host_output("hst_A", &c, 0, bytes).unwrap();
+    let tail = f.m.output_tail(&c, 200);
+    assert!(
+        tail.iter().any(|l| l.contains("● second-answer-words")),
+        "{tail:?}"
+    );
+}
+
 // ---- wake marks (144c, 145d) ---------------------------------------------------
 
 #[test]

@@ -2886,7 +2886,8 @@ impl AgentManager {
     }
 
     /// 145g: the last `lines` lines of a session's terminal, from the
-    /// output cache, without escape sequences. Empty when nothing is cached.
+    /// output cache, as its screen and scrollback show them. Empty when
+    /// nothing is cached.
     pub fn output_tail(&self, id: &str, lines: usize) -> Vec<String> {
         let bytes = {
             let live = self.live.lock().unwrap();
@@ -2902,7 +2903,11 @@ impl AgentManager {
                 _ => return Vec::new(),
             }
         };
-        tail_lines(&bytes, lines)
+        let size = match self.store.lock().unwrap().get(id) {
+            Ok(Some(r)) => (r.cols, r.rows),
+            _ => (80, 24),
+        };
+        screen_lines(&bytes, size, lines)
     }
 }
 
@@ -2910,42 +2915,35 @@ impl AgentManager {
 const TAIL_BYTES: u64 = 256 * 1024;
 /// The longest line a peek returns, in characters.
 const TAIL_LINE_CHARS: usize = 1000;
+/// The scrollback a peek renders into, above the screen.
+const TAIL_SCROLLBACK: usize = 1000;
 
-/// Terminal output as plain lines: escape sequences (CSI, OSC, and any
-/// other `ESC` pair) and control characters removed, a carriage return
-/// starting its line again, and the last `n` non-empty lines kept, each
-/// bounded.
-pub fn tail_lines(bytes: &[u8], n: usize) -> Vec<String> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut lines: Vec<String> = Vec::new();
-    let mut line = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\x1b' => match chars.next() {
-                Some('[') => while chars.next().is_some_and(|c| !('@'..='~').contains(&c)) {},
-                Some(']' | 'P' | '_' | '^') => {
-                    while let Some(c) = chars.next() {
-                        if c == '\x07' || (c == '\x1b' && chars.next_if_eq(&'\\').is_some()) {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            },
-            '\n' => lines.push(std::mem::take(&mut line)),
-            '\r' => {
-                if chars.peek() != Some(&'\n') {
-                    line.clear();
-                }
-            }
-            '\t' => line.push(' '),
-            c if c.is_control() => {}
-            c => line.push(c),
+/// Terminal output as the person would see it at `(cols, rows)`: run
+/// through a terminal emulator, then its scrollback and screen as plain
+/// lines, the last `n` non-empty ones kept, each bounded. A TUI that draws
+/// by cursor position (Claude Code) reads as its screen, not as every
+/// spinner frame it drew.
+pub fn screen_lines(bytes: &[u8], (cols, rows): (u16, u16), n: usize) -> Vec<String> {
+    let (cols, rows) = (cols.clamp(20, 500), rows.clamp(5, 300));
+    let size = |n: u16| std::num::NonZeroU16::new(n).expect("clamped above 0");
+    let mut parser = vt100::Parser::new(size(rows), size(cols), TAIL_SCROLLBACK);
+    parser.process(bytes);
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let back = parser.screen().scrollback();
+    let rows = usize::from(rows);
+    let mut all: Vec<String> = vec![String::new(); back + rows];
+    let mut offset = back;
+    loop {
+        parser.screen_mut().set_scrollback(offset);
+        for (r, row) in parser.screen().rows(0, cols).enumerate() {
+            all[back - offset + r] = row;
         }
+        if offset == 0 {
+            break;
+        }
+        offset = offset.saturating_sub(rows);
     }
-    lines.push(line);
-    let kept: Vec<String> = lines
+    let kept: Vec<String> = all
         .into_iter()
         .map(|l| {
             l.trim_end()

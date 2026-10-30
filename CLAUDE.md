@@ -831,7 +831,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   `resume.from == session` only for a child `child_create` took back). A
   parked child survives neither a host nor a helper restart: its resume
   then fails and it ends. `read_output` (145g) gives a parent its own
-  child's last lines, ANSI stripped, audited without text.
+  child's last lines as its screen and scrollback show them (the cached
+  bytes run through `vt100` at the session's size: Claude Code draws by
+  cursor position, and read as lines its bytes were its spinner), audited
+  without text.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
