@@ -316,6 +316,7 @@ fn new_uuid() -> String {
 /// signals, 145c's final message, 144c's waker); with none of it every file
 /// is as before. `allow` is Claude Code's `permissions.allow` for Storm's own
 /// tools (decision 146a), checked in the written file; empty writes none.
+/// Auto stays in Claude Code's mode cycle; [`launch_with`] can take it out.
 #[allow(clippy::too_many_arguments)]
 pub fn launch(
     provider: &str,
@@ -328,6 +329,56 @@ pub fn launch(
     hooks: &Hooks,
     allow: &[String],
 ) -> Result<(LaunchExtras, Option<String>)> {
+    launch_with(
+        provider,
+        dir,
+        handle,
+        socket,
+        exe,
+        resume,
+        synced,
+        hooks,
+        Permissions {
+            allow,
+            auto_off: false,
+        },
+    )
+}
+
+/// What Storm's own Claude Code settings say about permissions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Permissions<'a> {
+    /// `permissions.allow`: Storm's own tools (146a).
+    pub allow: &'a [String],
+    /// `permissions.disableAutoMode: "disable"` (147c): auto is out of the
+    /// Shift+Tab cycle for a session the person did not launch in auto.
+    pub auto_off: bool,
+}
+
+/// Claude Code's documented setting that takes auto out of its mode cycle
+/// (G-147: Shift+Tab never reaches auto with it, and does without it).
+pub const DISABLE_AUTO_MODE: (&str, &str) = ("disableAutoMode", "disable");
+
+/// Whether Claude Code re-reads Storm's `--settings` file while it runs.
+/// G-147 found it does not (2.1.312: an edit to that file never brought
+/// auto back, though an edit to the user's or project's own files does), so
+/// an approved switch to auto resumes the conversation instead (147c).
+pub const SETTINGS_FLAG_RELOADS: bool = false;
+
+/// [`launch`], with Storm's permission settings.
+#[allow(clippy::too_many_arguments)]
+pub fn launch_with(
+    provider: &str,
+    dir: &Path,
+    handle: &str,
+    socket: &Path,
+    exe: &Path,
+    resume: Option<&str>,
+    synced: Option<&serde_json::Map<String, serde_json::Value>>,
+    hooks: &Hooks,
+    permissions: Permissions,
+) -> Result<(LaunchExtras, Option<String>)> {
+    let allow = permissions.allow;
     let env = vec![
         (HANDLE_ENV.into(), handle.into()),
         (crate::mcp::SOCKET_ENV.into(), socket.as_os_str().to_owned()),
@@ -353,7 +404,10 @@ pub fn launch(
             }
             claude_lifecycle_hooks(&mut settings, exe, hooks);
             if !allow.is_empty() {
-                settings["permissions"] = json!({ "allow": allow });
+                settings["permissions"]["allow"] = json!(allow);
+            }
+            if permissions.auto_off {
+                settings["permissions"][DISABLE_AUTO_MODE.0] = json!(DISABLE_AUTO_MODE.1);
             }
             if let Some(pins) = synced {
                 settings
@@ -372,6 +426,9 @@ pub fn launch(
             }
             if !allow.is_empty() {
                 verify_allow(&std::fs::read(&path)?, allow)?;
+            }
+            if permissions.auto_off {
+                verify_auto_off(&std::fs::read(&path)?)?;
             }
             args.extend(["--settings".into(), path.into_os_string()]);
             Ok((
@@ -424,6 +481,17 @@ pub fn launch(
         }
         _ => Ok((LaunchExtras::default(), None)),
     }
+}
+
+/// Re-reads written Claude Code settings (147c): a file that lost the
+/// setting would put auto back in the person's Shift+Tab cycle.
+pub fn verify_auto_off(bytes: &[u8]) -> Result<()> {
+    let parsed: serde_json::Value = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(
+        parsed["permissions"][DISABLE_AUTO_MODE.0] == DISABLE_AUTO_MODE.1,
+        "the settings lost Storm's disableAutoMode"
+    );
+    Ok(())
 }
 
 /// Re-reads written Claude Code settings (146a): a file that lost Storm's

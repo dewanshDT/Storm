@@ -218,20 +218,29 @@ pub fn model_args(provider: &str, model: &str) -> Result<Vec<String>, String> {
 pub struct PermissionLaunch {
     pub args: Vec<String>,
     pub opencode_permission: Vec<(String, String)>,
+    /// Auto is out of Claude Code's Shift+Tab cycle (147c): every mode but
+    /// `auto` itself.
+    pub auto_off: bool,
 }
 
-/// A permission mode as `provider` takes it (146b), by
+/// A permission mode as `provider` takes it (146b, 147a), by
 /// `docs/agent-permission-mode-vectors.json`'s rule, which the server applies
-/// too. `default` adds nothing. Claude Code takes `--permission-mode
-/// acceptEdits|auto`, OpenCode `edit: allow` for `accept_edits`; anything
-/// else, and every bypass, is refused, so the start fails rather than fall
-/// back.
+/// too. Claude Code always gets a flag, since its own default became auto
+/// (2.1.312): `default` is `--permission-mode default`, the mode that asks,
+/// a spelling every Claude Code takes (2.1.312 calls it Manual and takes
+/// `manual` too; an older one knows only `default`), so no version check is
+/// needed. `accept_edits` is `acceptEdits`, `auto` is `auto`; every mode but
+/// auto takes auto out of the cycle. OpenCode takes `edit: allow` for
+/// `accept_edits`; anything else, and every bypass, is refused, so the start
+/// fails rather than fall back.
 pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
     let flag = |value: &str| PermissionLaunch {
         args: vec!["--permission-mode".into(), value.into()],
+        auto_off: value != "auto",
         ..Default::default()
     };
     match (provider, mode) {
+        ("claude-code", "default") => Ok(flag("default")),
         (_, "default") => Ok(PermissionLaunch::default()),
         ("claude-code", "accept_edits") => Ok(flag("acceptEdits")),
         ("claude-code", "auto") => Ok(flag("auto")),
@@ -367,7 +376,8 @@ mod tests {
                 got,
                 PermissionLaunch {
                     args: args.clone(),
-                    opencode_permission: opencode
+                    opencode_permission: opencode,
+                    auto_off: case["auto_off"].as_bool().unwrap(),
                 },
                 "{agent} {mode}"
             );

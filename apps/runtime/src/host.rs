@@ -1984,17 +1984,29 @@ impl Host {
         } else {
             Vec::new()
         };
-        match self.harness_launch(&id, &provider_id, resume.as_deref(), &events, pins, &allow) {
+        let permissions = crate::harness::Permissions {
+            allow: &allow,
+            auto_off: is_claude && mode.auto_off,
+        };
+        match self.harness_launch(
+            &id,
+            &provider_id,
+            resume.as_deref(),
+            &events,
+            pins,
+            permissions,
+        ) {
             Ok(extras) => {
                 launch.args.extend(extras.args);
                 launch.env.extend(extras.env);
             }
             // A session that cannot report its id still runs; it only cannot
             // be resumed. A resume still names its conversation, and a synced
-            // session's pins and Storm's allows (146a) live in the same file.
+            // session's pins, Storm's allows (146a) and the setting that
+            // keeps auto out of its cycle (147c) live in the same file.
             Err(e) => {
                 tracing::warn!(session = %id, error = %format!("{e:#}"), "could not set up resume");
-                if resume.is_some() || is_synced || !allow.is_empty() {
+                if resume.is_some() || is_synced || !allow.is_empty() || permissions.auto_off {
                     return self.post_start_failure(&id).await;
                 }
             }
@@ -2478,14 +2490,14 @@ impl Host {
         resume: Option<&str>,
         events: &Arc<Events>,
         synced: Option<&serde_json::Map<String, serde_json::Value>>,
-        allow: &[String],
+        permissions: crate::harness::Permissions,
     ) -> Result<crate::mcp::LaunchExtras> {
         if !crate::profile::resumable(provider) {
             return Ok(Default::default());
         }
         let handle = crate::mcp::new_handle();
         let exe = std::env::current_exe().context("finding this binary for the hook")?;
-        let (extras, known) = crate::harness::launch(
+        let (extras, known) = crate::harness::launch_with(
             provider,
             &crate::mcp::session_dir(&self.state_dir, session),
             &handle,
@@ -2494,7 +2506,7 @@ impl Host {
             resume,
             synced,
             &events.hooks,
-            allow,
+            permissions,
         )?;
         *events.harness.lock().unwrap() = known;
         self.harness_handles.lock().unwrap().insert(
@@ -6881,7 +6893,11 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             let at = lines.iter().position(|l| *l == "--settings").unwrap();
             serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap()
         };
-        assert!(settings("ags_SPAWN").get("permissions").is_none());
+        assert_eq!(
+            settings("ags_SPAWN")["permissions"],
+            serde_json::json!({"disableAutoMode": "disable"}),
+            "only 147c's setting"
+        );
         assert_eq!(settings("ags_SPAWN"), settings("ags_PLAIN"));
         let env = recorded(roots.path(), "env", "ags_OCSPAWN").unwrap();
         let config = env
@@ -6962,15 +6978,20 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .iter()
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
+        // 147c's setting is every non-auto Claude Code session's.
+        let auto_off = serde_json::json!({"disableAutoMode": "disable"});
         assert_eq!(
             settings("ags_CCSPAWN")["permissions"],
-            serde_json::json!({ "allow": rules })
+            serde_json::json!({ "allow": rules, "disableAutoMode": "disable" })
         );
         let mut parent = settings("ags_CCSPAWN");
-        parent.as_object_mut().unwrap().remove("permissions");
+        parent["permissions"]
+            .as_object_mut()
+            .unwrap()
+            .remove("allow");
         assert_eq!(parent, settings("ags_CCPLAIN"), "nothing else changes");
-        assert!(settings("ags_CCPLAIN").get("permissions").is_none());
-        assert!(settings("ags_NOSTORM").get("permissions").is_none());
+        assert_eq!(settings("ags_CCPLAIN")["permissions"], auto_off);
+        assert_eq!(settings("ags_NOSTORM")["permissions"], auto_off);
         let mut want = serde_json::json!({"storm_*": "ask"});
         for t in crate::mcp::SPAWN_ALLOWED_TOOLS {
             want[format!("storm_{t}")] = "allow".into();
@@ -7025,7 +7046,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         for (id, flag) in [
             ("ags_CCEDIT", Some("acceptEdits")),
             ("ags_CCAUTO", Some("auto")),
-            ("ags_CCDEF", None),
+            ("ags_CCDEF", Some("default")),
         ] {
             wait_for("the CLI's args", || {
                 recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
@@ -7075,6 +7096,101 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             assert!(host.session(id).is_none(), "{id}");
             assert!(start_failed(&seen, id), "{id}");
             assert_eq!(recorded(roots.path(), "args", id), None, "{id}");
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A-147-1: a Claude Code start in `default` (a start without the
+    /// field) carries `--permission-mode default`, the mode that asks, never
+    /// no flag: Claude Code 2.1.312's own default is auto. OpenCode and Codex
+    /// get nothing, as before.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_147_1_a_default_launch_carries_the_manual_flag() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        let mut named = synced_start("ags_NAMED", "claude-code", None);
+        if let Command::Start {
+            permission_mode, ..
+        } = &mut named
+        {
+            *permission_mode = Some("default".into());
+        }
+        host.clone().handle(named).await;
+        host.clone()
+            .handle(synced_start("ags_ABSENT", "claude-code", None))
+            .await;
+        host.clone()
+            .handle(synced_start("ags_OCDEF", "opencode", None))
+            .await;
+        for id in ["ags_NAMED", "ags_ABSENT"] {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
+            })
+            .await;
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            let at = lines
+                .iter()
+                .position(|l| *l == "--permission-mode")
+                .unwrap_or_else(|| panic!("no flag: {args}"));
+            assert_eq!(lines[at + 1], "default", "{id}");
+            assert_eq!(
+                lines.iter().filter(|l| **l == "--permission-mode").count(),
+                1
+            );
+        }
+        wait_for("OpenCode's args", || {
+            recorded(roots.path(), "args", "ags_OCDEF").is_some()
+        })
+        .await;
+        assert!(
+            !recorded(roots.path(), "args", "ags_OCDEF")
+                .unwrap()
+                .contains("--permission-mode")
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A-147-3: a manual or accept-edits Claude Code session's settings take
+    /// auto out of the Shift+Tab cycle (`permissions.disableAutoMode`), and
+    /// an auto launch keeps it in.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_147_3_auto_is_out_of_the_cycle_unless_launched_in_auto() {
+        let (host, _seen, _state, roots) = synced_host(&[]).await;
+        for (id, mode) in [
+            ("ags_MAN", "default"),
+            ("ags_EDIT", "accept_edits"),
+            ("ags_AUTO", "auto"),
+        ] {
+            let mut start = synced_start(id, "claude-code", None);
+            if let Command::Start {
+                permission_mode, ..
+            } = &mut start
+            {
+                *permission_mode = Some(mode.into());
+            }
+            host.clone().handle(start).await;
+        }
+        for (id, off) in [("ags_MAN", true), ("ags_EDIT", true), ("ags_AUTO", false)] {
+            wait_for("the CLI's args", || {
+                recorded(roots.path(), "args", id).is_some_and(|a| a.contains("--settings"))
+            })
+            .await;
+            let args = recorded(roots.path(), "args", id).unwrap();
+            let lines: Vec<&str> = args.lines().collect();
+            let at = lines.iter().position(|l| *l == "--settings").unwrap();
+            let settings: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(lines[at + 1]).unwrap()).unwrap();
+            if off {
+                assert_eq!(
+                    settings["permissions"]["disableAutoMode"], "disable",
+                    "{id}: {settings}"
+                );
+            } else {
+                assert!(settings.get("permissions").is_none(), "{id}: {settings}");
+            }
+            assert!(!args.contains("bypass") && !args.contains("skip-permissions"));
         }
         host.shutdown(Duration::from_millis(200)).await;
     }
@@ -7207,8 +7323,10 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             "nothing is pulled for a launch that cannot use it"
         );
 
-        // The settings file cannot be written: fatal when synced only.
-        for session in ["ags_SETS", "ags_SETN"] {
+        // The settings file cannot be written: fatal when synced, and for a
+        // session whose cycle must leave auto out (147c); an auto launch
+        // that is not synced still runs.
+        for session in ["ags_SETS", "ags_SETN", "ags_SETD"] {
             std::fs::create_dir_all(
                 crate::mcp::session_dir(state.path(), session).join("claude-settings.json"),
             )
@@ -7220,10 +7338,26 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         assert!(host.session("ags_SETS").is_none());
         assert!(start_failed(&seen, "ags_SETS"));
         assert_eq!(recorded(roots.path(), "env", "ags_SETS"), None);
+        let mut auto = synced_start("ags_SETN", "claude-code", None);
+        if let Command::Start {
+            permission_mode, ..
+        } = &mut auto
+        {
+            *permission_mode = Some("auto".into());
+        }
+        host.clone().handle(auto).await;
+        assert!(
+            host.session("ags_SETN").is_some(),
+            "unsynced auto still runs"
+        );
         host.clone()
-            .handle(synced_start("ags_SETN", "claude-code", None))
+            .handle(synced_start("ags_SETD", "claude-code", None))
             .await;
-        assert!(host.session("ags_SETN").is_some(), "unsynced still runs");
+        assert!(
+            host.session("ags_SETD").is_none(),
+            "auto would be back in the cycle"
+        );
+        assert!(start_failed(&seen, "ags_SETD"));
         host.shutdown(Duration::from_millis(200)).await;
     }
 
@@ -7476,7 +7610,10 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .iter()
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
-        assert_eq!(settings["permissions"], json!({ "allow": rules }));
+        assert_eq!(
+            settings["permissions"],
+            json!({ "allow": rules, "disableAutoMode": "disable" })
+        );
         assert!(
             settings["hooks"]["PermissionRequest"].is_array(),
             "{settings}"

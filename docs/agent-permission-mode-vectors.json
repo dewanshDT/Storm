@@ -1,5 +1,5 @@
 {
-  "about": "Decision 146b: the permission mode a person chooses at launch, or a start_agent names, per agent. The server (apps/server/src/agent/permission.rs) refuses a mode an agent does not offer with permission_mode_unavailable, a start's mode looser than its parent's with permission_mode_wider, and gives a start without one its parent's mode or the nearest stricter one its agent offers (`inherit`). The host (apps/runtime/src/profile.rs, permission_mode) refuses it again and turns an accepted one into exactly `args` (the agent's own launch flag) and `opencode_permission` (keys Storm's OpenCode config layer sets). `default` is the agent's own behaviour: no flag, no key, and a start omits the field. No bypass or skip-permissions mode exists anywhere. Neither crate depends on the other: this file keeps them on one rule.",
+  "about": "Decisions 146b and 147a/c: the permission mode a person chooses at launch, or a start_agent names, per agent. The server (apps/server/src/agent/permission.rs) refuses a mode an agent does not offer with permission_mode_unavailable, a start's mode looser than its parent's with permission_mode_wider, and gives a start without one its parent's mode or the nearest stricter one its agent offers (`inherit`). The host (apps/runtime/src/profile.rs, permission_mode) refuses it again and turns an accepted one into exactly `args` (the agent's own launch flag) and `opencode_permission` (keys Storm's OpenCode config layer sets). `default` is the mode that asks: a start omits the field; Claude Code gets `--permission-mode default` (147a: its own default became auto in 2.1.312, and `default` is a spelling every version takes), every other agent nothing. `auto_off` is Claude Code's `permissions.disableAutoMode: \"disable\"` in Storm's --settings (147c): auto stays out of its Shift+Tab cycle unless the person launched in auto. No bypass or skip-permissions mode exists anywhere. Neither crate depends on the other: this file keeps them on one rule.",
   "order": ["default", "accept_edits", "auto"],
   "offered": {
     "claude-code": ["default", "accept_edits", "auto"],
@@ -10,13 +10,13 @@
     "shell": ["default"]
   },
   "accepted": [
-    {"agent": "claude-code", "mode": "default", "args": [], "opencode_permission": {}},
-    {"agent": "claude-code", "mode": "accept_edits", "args": ["--permission-mode", "acceptEdits"], "opencode_permission": {}},
-    {"agent": "claude-code", "mode": "auto", "args": ["--permission-mode", "auto"], "opencode_permission": {}},
-    {"agent": "opencode", "mode": "default", "args": [], "opencode_permission": {}},
-    {"agent": "opencode", "mode": "accept_edits", "args": [], "opencode_permission": {"edit": "allow"}},
-    {"agent": "codex", "mode": "default", "args": [], "opencode_permission": {}},
-    {"agent": "shell", "mode": "default", "args": [], "opencode_permission": {}}
+    {"agent": "claude-code", "mode": "default", "args": ["--permission-mode", "default"], "opencode_permission": {}, "auto_off": true},
+    {"agent": "claude-code", "mode": "accept_edits", "args": ["--permission-mode", "acceptEdits"], "opencode_permission": {}, "auto_off": true},
+    {"agent": "claude-code", "mode": "auto", "args": ["--permission-mode", "auto"], "opencode_permission": {}, "auto_off": false},
+    {"agent": "opencode", "mode": "default", "args": [], "opencode_permission": {}, "auto_off": false},
+    {"agent": "opencode", "mode": "accept_edits", "args": [], "opencode_permission": {"edit": "allow"}, "auto_off": false},
+    {"agent": "codex", "mode": "default", "args": [], "opencode_permission": {}, "auto_off": false},
+    {"agent": "shell", "mode": "default", "args": [], "opencode_permission": {}, "auto_off": false}
   ],
   "refused": [
     {"agent": "opencode", "mode": "auto"},
