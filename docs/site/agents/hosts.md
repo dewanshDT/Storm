@@ -554,7 +554,7 @@ checkout, clone or move it into the workspace root.
 
 **Never run a Runtime Host under the server's account, or under any account
 that can read or write the vaults.** Storm enforces what a session may do
-(read only, its one write vault, never delete) in the server, on the tools
+(read only, its one write vault, deletes only with your Approve) in the server, on the tools
 it offers. An agent is a process: it can also do anything its OS account can
 do to files. A host running as the server's user, or as a member of its group,
 can edit or delete vault files on disk and bypass all of that. The 2026-10-08

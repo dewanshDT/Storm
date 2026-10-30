@@ -595,9 +595,9 @@ Specification*; the slices are decisions 81 and 81a onward):
   only unsolicited ones use the link's `mcp.message`. A call's progress and
   elicitations die with it.
 - **The host is told connection ids and slugs, never a credential** (AM23);
-  `shell` and a host without `mcp_bridge` get no grants. **Agents never see
-  `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
-  account's identity, read through `user_id()`.
+  `shell` and a host without `mcp_bridge` get no grants. **An agent deletes
+  only with the person's Approve** (decision 149, below; `mcp::DELETE_TOOLS`),
+  and `Actor::Agent` is the account's identity, read through `user_id()`.
 - **The bridge never retries, and replays `initialize` only on
   `session_unknown`** (81f, spec §11). `apps/runtime/src/bridge.rs`'s six
   rules each have a test, and `gateway_e2e.py` catches the gates' `leak_init`,
@@ -642,9 +642,11 @@ Specification*; the slices are decisions 81 and 81a onward):
   connection's ask, under a key no account config uses. Nothing else is
   allowed, note writes included; Codex keeps its prompts. A top-level
   Claude Code session reading Storm also gets `request_permission_mode`
-  allowed, so the person sees only Storm's card (147c); a session that
-  cannot spawn, is not a child and does not read Storm gets a
-  byte-identical config (apart from 147c's `disableAutoMode`). **The switch turns on only for a session
+  allowed, so the person sees only Storm's card (147c), and every top-level
+  session reading Storm gets `delete_note`/`delete_folder` allowed
+  (`mcp::DELETE_ALLOWED_TOOLS`, 149b; G-149 shows Claude Code then never
+  prompts first); a session that does not read Storm gets a byte-identical
+  config (apart from 147c's `disableAutoMode`). **The switch turns on only for a session
   launched with it** (141e): a launch's `spawn: true` is refused
   `spawn_unavailable` unless the session reads Storm, runs a spawning
   adapter and C0 holds, and is written on, and audited `spawn_enabled`,
@@ -714,6 +716,25 @@ Specification*; the slices are decisions 81 and 81a onward):
   stored mode now auto. Request, decision and switch are audited
   (`permission_mode_request`/`_decision`/`_switch`) with codes only, never
   the reason's text.
+- **An agent deletes only with the person's Approve** (decision 149,
+  `agent::deletes`, `ops::agent_deletes`): `delete_note`/`delete_folder`
+  `{…, reason}` are offered only to a session with vault writes that no
+  agent started (`Authorized::deletes`; a child never asks, 149d). A call
+  makes one `delete_requests` row per session (the same target again waits
+  on it; another is `busy`), bound to the target as asked (a note's
+  version and path, a hash of a folder's notes and versions), waited on up
+  to the wait cap (`pending`), else `timed_out` after 10 minutes or when
+  its session ends. **The delete runs when the person approves** (`POST
+  …/delete-requests/{id}`, session tier only), under the vault's indexer
+  lock, as the agent and to the trash (150), and a decline takes the same
+  lock, so nothing lands between the check and the delete: a changed
+  target is `gone` and nothing is deleted. The first answer wins (a
+  second is 409 `request_<state>`); `GET /v1/agent/delete-requests` is the
+  clients' long poll for the dialog. The permission mode never skips it.
+  `_storm` is refused; a reason is 1–500 characters. Request and decision
+  are audited (`agent_delete_request`/`_decision`) with codes and the
+  target, never the reason's text. A person's own MCP client keeps a
+  direct `delete_note` (to the trash) and gets no `delete_folder`.
 - **A model reaches argv only in its agent's form** (145b,
   `agent::model`, `profile::model_args`): `haiku`/`sonnet`/`opus` or
   `claude-…` for Claude Code (`--model`), `provider/model` for OpenCode

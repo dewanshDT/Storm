@@ -54,7 +54,8 @@ server keeps the last version it had.
   per vault in the Trash view (7, 30 or 90 days, or never); it is stored as
   `storm.trash.retention` in `_storm/vault.md`.
 
-Agents never see the Trash: no MCP tool lists, restores or empties it, and
+An agent's deletion lands here only after you
+[approve it](/docs/agents/sessions/#deletes-wait-for-you). Agents never see the Trash: no MCP tool lists, restores or empties it, and
 trashed notes appear in no search, listing or backlinks.
 
 ## Moving the storage root

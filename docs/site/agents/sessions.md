@@ -73,6 +73,26 @@ its conversation kept, and takes you to it. An agent another agent started
 can ask only while that agent is in Auto, and a session with agents of its
 own running can't ask until they end.
 
+### Deletes wait for you
+
+An agent that may write to a vault can ask to delete a note or a folder
+there, saying why. Nothing is deleted until you answer: a dialog opens on
+every device you're signed in on, with the agent, its session (and the note
+it started from), what would go (a note's path, size and last change, or a
+folder's note count and first paths) and the agent's reason, shown as plain
+text.
+
+- **Approve** moves it to the vault's [Trash](/docs/notes/vaults/#trash).
+  **Decline**, Esc or closing the dialog keeps it. There is no "always
+  allow", and Auto mode does not skip the dialog.
+- The first answer wins; the dialog on your other devices closes and says
+  where it was answered. While it waits, the session shows **Needs you**,
+  and **Review** reopens the dialog.
+- If the note is edited or moved, or the folder's notes change, before you
+  approve, nothing is deleted and the agent is told to look again.
+- Unanswered, it times out after 10 minutes. An agent asks for one deletion
+  at a time, and an agent another agent started can't delete at all.
+
 ## When it ends
 
 An ended Claude Code, OpenCode or Codex session can be **resumed**: it reopens the
@@ -82,7 +102,8 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
 ## What an agent can touch
 
 - It reads your notes through Storm's tools, and writes only to the vault
-  chosen at launch. It is never offered `delete_note`.
+  chosen at launch. It deletes there only when you
+  [approve it](#deletes-wait-for-you).
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
 - **Claude Code keeps its own MCP servers:** the ones in your
