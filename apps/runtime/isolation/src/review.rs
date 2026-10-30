@@ -7,7 +7,10 @@
 //!   fetched through git's transport into a fresh repository of the
 //!   review's own, so nothing of the child's `.git` but its objects comes
 //!   across, and every object is checked as it arrives; from there come its
-//!   commits since the base, its diff, and a bundle of it. A scratch
+//!   commits since the base, its diff, and a bundle of it. Whatever it
+//!   left uncommitted (modified or untracked, `.gitignore` respected) is
+//!   committed there as Storm on top of its `HEAD`, never in its own
+//!   repository, so Apply carries it. A scratch
 //!   directory is listed, never followed.
 //! - **Import** writes into the parent's workspace and nowhere else: for a
 //!   clone the bundle's objects and one new branch, `storm/<child>`, made
@@ -35,6 +38,8 @@ use crate::clone::{GIT, Git, HOME, commit_ok, environment, protections};
 pub const BUNDLE: &str = "export.bundle";
 const EXPORT_REPO: &str = "export.git";
 const EXPORT_REF: &str = "refs/heads/export";
+const SNAPSHOT_INDEX: &str = "snapshot.index";
+pub const SNAPSHOT_SUBJECT: &str = "Storm: the child's uncommitted work when it ended";
 pub const MAX_COMMITS: usize = 200;
 pub const MAX_FILES: usize = 1000;
 /// The diff the person reads before Apply; a longer one is cut here and
@@ -189,6 +194,7 @@ pub fn export_clone(
     if !commit_ok(&tip) {
         return Err(Failure::Unreadable);
     }
+    let tip = snapshot(&g, &repo, child, dir, &tip)?;
     if crate::children::disk_usage(dir).map_err(|_| Failure::Failed)? > budget {
         return Err(Failure::WorkspaceCap);
     }
@@ -271,6 +277,58 @@ pub fn export_clone(
         "patch": patch,
         "patch_truncated": truncated,
     }))
+}
+
+/// The child's working tree over `head`, read through the export's own
+/// repository and a fresh index, so neither its `.git` configuration nor
+/// its index is used: `head` itself when nothing is uncommitted, else a
+/// new commit on top of it.
+fn snapshot(g: &Git, repo: &Path, child: &Path, dir: &Path, head: &str) -> Result<String, Failure> {
+    let index = dir.join(SNAPSHOT_INDEX);
+    let mut env = g.env.clone();
+    env.extend([
+        ("GIT_DIR", path(repo)),
+        ("GIT_WORK_TREE", path(child)),
+        ("GIT_INDEX_FILE", path(&index)),
+        ("GIT_AUTHOR_NAME", "Storm".to_string()),
+        ("GIT_AUTHOR_EMAIL", "storm@localhost".to_string()),
+        ("GIT_COMMITTER_NAME", "Storm".to_string()),
+        ("GIT_COMMITTER_EMAIL", "storm@localhost".to_string()),
+    ]);
+    let mut config = g.config.clone();
+    config.push("core.bare=false".into());
+    let w = Git {
+        git: g.git,
+        env,
+        config,
+    };
+    let made = (|| {
+        w.run(child, &["read-tree", head])?;
+        // A file git cannot add (a socket, an unreadable one) is left out,
+        // not the whole export.
+        let _ = w.run(child, &["add", "--all", "--ignore-errors", "--", "."]);
+        let tree = w.run(child, &["write-tree"])?;
+        let tree = String::from_utf8_lossy(&tree).trim().to_string();
+        let was = w.run(
+            child,
+            &["rev-parse", "--verify", &format!("{head}^{{tree}}")],
+        )?;
+        if String::from_utf8_lossy(&was).trim() == tree {
+            return Ok(head.to_string());
+        }
+        let made = w.run(
+            child,
+            &["commit-tree", &tree, "-p", head, "-m", SNAPSHOT_SUBJECT],
+        )?;
+        let made = String::from_utf8_lossy(&made).trim().to_string();
+        if !commit_ok(&made) {
+            return Err(());
+        }
+        w.run(child, &["update-ref", EXPORT_REF, &made, head])?;
+        Ok(made)
+    })();
+    let _ = std::fs::remove_file(&index);
+    made.map_err(|()| Failure::Unreadable)
 }
 
 /// A diff's text as it is, but for its cut: at a character.
@@ -1040,9 +1098,10 @@ pub mod tests {
         git(&child, &["commit", "-q", "--allow-empty", "-m", "and more"]);
         let tip = git(&child, &["rev-parse", "HEAD"]);
         plant(&plants, &child, "child");
-        // Uncommitted work is not the child's to hand over (137e).
         std::fs::write(child.join("a.txt"), "uncommitted\n").unwrap();
         std::fs::write(child.join("untracked.txt"), "x").unwrap();
+        std::fs::write(child.join(".gitignore"), "ignored.log\n").unwrap();
+        std::fs::write(child.join("ignored.log"), "noise").unwrap();
         let home = t.join("home");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
@@ -1126,8 +1185,8 @@ pub mod tests {
 
     /// WT-3's export half: a hostile child's repository is read as data.
     /// Nothing it or the account configures runs; its commits since the
-    /// base, its diff and a bundle of its tip come out, and its
-    /// uncommitted work does not.
+    /// base, what it left uncommitted (as Storm's commit on top), its diff
+    /// and a bundle of that tip come out.
     #[test]
     fn wt_3_an_export_runs_nothing_from_a_hostile_child() {
         let t = tempfile::tempdir().unwrap();
@@ -1135,7 +1194,8 @@ pub mod tests {
         let dir = t.path().join("review");
         let v = export(&c, &dir);
         assert_eq!(c.plants.ran(), Vec::<String>::new());
-        assert_eq!(v["tip"], c.tip);
+        let tip = v["tip"].as_str().unwrap().to_string();
+        assert_ne!(tip, c.tip);
         assert_eq!(v["base_found"], true);
         let subjects: Vec<&str> = v["commits"]
             .as_array()
@@ -1143,22 +1203,31 @@ pub mod tests {
             .iter()
             .map(|c| c["subject"].as_str().unwrap())
             .collect();
-        assert_eq!(subjects, ["and more", "the child's work"]);
+        assert_eq!(subjects, [SNAPSHOT_SUBJECT, "and more", "the child's work"]);
         let mut files: BTreeMap<String, Value> = BTreeMap::new();
         for f in v["files"].as_array().unwrap() {
             files.insert(f["path"].as_str().unwrap().into(), f.clone());
         }
         assert_eq!(
             files.keys().cloned().collect::<Vec<_>>(),
-            ["a.txt", "bin.dat", "moved.txt", "new.txt"]
+            [
+                ".gitignore",
+                "a.txt",
+                "bin.dat",
+                "moved.txt",
+                "new.txt",
+                "untracked.txt"
+            ]
         );
-        assert_eq!(files["a.txt"]["added"], 1);
         assert_eq!(files["bin.dat"]["added"], Value::Null, "binary");
         let patch = v["patch"].as_str().unwrap();
-        assert!(patch.contains("+two"), "{patch}");
-        assert!(!patch.contains("uncommitted"));
+        assert!(patch.contains("+uncommitted"), "{patch}");
+        assert!(!patch.contains("noise"), "ignored files stay out");
         assert!(!patch.contains("evil"), "no driver or textconv ran");
         assert_eq!(v["patch_truncated"], false);
+        // The child's own repository is untouched.
+        assert_eq!(git(&c.child, &["rev-parse", "HEAD"]), c.tip);
+        assert!(git(&c.child, &["status", "--porcelain"]).contains("?? untracked.txt"));
         // The bundle holds the tip, and only the bundle is left.
         let names: Vec<String> = std::fs::read_dir(&dir)
             .unwrap()
@@ -1169,9 +1238,32 @@ pub mod tests {
             t.path(),
             &["bundle", "list-heads", dir.join(BUNDLE).to_str().unwrap()],
         );
-        assert!(heads.starts_with(&c.tip), "{heads}");
+        assert!(heads.starts_with(&tip), "{heads}");
         // It parses back as the helper reads it.
         assert_eq!(parse_export(&line(&Ok(v.clone()))), Some(Ok(v)));
+    }
+
+    /// F1 of the round-2 test: a child that only wrote a file and never
+    /// committed still has work to apply; one that left nothing is its
+    /// `HEAD`.
+    #[test]
+    fn an_untracked_file_is_the_childs_work() {
+        let t = tempfile::tempdir().unwrap();
+        let child = t.path().join("child");
+        let base = repo(&child, &[("README", "x")]);
+        let dir = t.path().join("review");
+        std::fs::create_dir(&dir).unwrap();
+        let run =
+            || export_clone(Path::new(GIT), &child, &dir, &base, BIG, Path::new(HOME)).unwrap();
+        let v = run();
+        assert_eq!(v["tip"], base);
+        assert_eq!(v["commits"].as_array().unwrap().len(), 0);
+        std::fs::write(child.join("hello.txt"), "hello\n").unwrap();
+        let v = run();
+        assert_ne!(v["tip"], base);
+        assert_eq!(v["commits"][0]["subject"], SNAPSHOT_SUBJECT);
+        assert_eq!(v["files"][0]["path"], "hello.txt");
+        assert!(v["patch"].as_str().unwrap().contains("+hello"));
     }
 
     /// A child that rewrote its history away from where it started is
