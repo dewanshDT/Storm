@@ -1,11 +1,13 @@
 #!/bin/sh
-# The real-CLI gates of decisions 144, 145, 146 and 147 (G-144-S, G-144-W,
-# G-145-R, G-145-W; G-146-A, G-146-M, G-146-P; G-147), for Claude Code and
+# The real-CLI gates of decisions 144 to 148 (G-144-S, G-144-W, G-145-R,
+# G-145-W; G-146-A, G-146-M, G-146-P; G-147; G-148), for Claude Code and
 # OpenCode, as the operator runs them on VM 113 before any list is switched
-# on. `make gate-lifecycle` runs this. The G-146 and G-147 gates need the
-# stand-in model (it calls the tools that ask) and show as SKIP with REAL=1;
-# in G-146-P the test plays the person at the terminal and answers the
-# prompt, and in G-147 it presses Shift+Tab (`ESC [ Z`) as the person would.
+# on. `make gate-lifecycle` runs this. The G-146, G-147 and G-148 gates need
+# the stand-in model (it calls the tools that ask) and show as SKIP with
+# REAL=1; in G-146-P the test plays the person at the terminal and answers
+# the prompt, and in G-147 it presses Shift+Tab (`ESC [ Z`) as the person
+# would. G-148 runs a child as the host configures it and shows that no
+# prompt ever appears, and that a denial reaches the agent and the host.
 #
 # Procedure, on the VM, as the account the agents run as:
 #
@@ -40,7 +42,9 @@
 #        - wake: `events::WAKE` and `harness::WAKE`, {provider, mechanism};
 #        - a child's permission prompt (G-146-P): `attention::GATED_SIGNALS`
 #          and `harness::GATED_SIGNALS`, {provider, "permission_prompt",
-#          "provider_hook"}.
+#          "provider_hook"};
+#        - a child's denials (G-148): `events::DENIALS` and
+#          `harness::DENIALS`, the provider.
 #      A test in each crate holds the two lists equal.
 #
 # Variables: CLAUDE_BIN, OPENCODE_BIN (default: on PATH), REAL=1,
@@ -78,7 +82,7 @@ cargo test --quiet --test lifecycle_gate ${GATES:-} -- --nocapture --test-thread
 	>>"$LOG" 2>&1 || status=$?
 
 echo "--- results (the whole run is in $LOG) ---"
-grep -E '^G-14[4567]-' "$LOG" | grep -vE ': running$' || true
+grep -E '^G-14[45678]-' "$LOG" | grep -vE ': running$' || true
 if [ "$status" -ne 0 ]; then
 	echo "a gate failed (exit $status): see $LOG" >&2
 fi

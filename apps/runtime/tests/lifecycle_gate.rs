@@ -1,4 +1,4 @@
-//! The real-CLI gates of decisions 144, 145, 146 and 147's runtime half, for Claude
+//! The real-CLI gates of decisions 144 to 148's runtime half, for Claude
 //! Code and OpenCode: each runs the real agent in a terminal that is only
 //! typed into like a person would, with the hooks or plugin Storm's own
 //! writer produces when every list is on, reporting to a socket this test
@@ -28,6 +28,15 @@
 //!   cycle while the test plays the person (positive control: without it,
 //!   auto is reached); and whether an edit to the `--settings` file while
 //!   the CLI runs is picked up (positive control: the user settings are).
+//! - **G-148-<provider>**: a child never asks (148a/b): Claude Code in
+//!   `dontAsk` with the child baseline, OpenCode with Storm's layer turning
+//!   every ask into a deny, each run a command inside the baseline (it runs)
+//!   and outside it (it is denied), with no prompt ever; the denial reaches
+//!   the agent (its tool result) and the host (`harness-denied`). Positive
+//!   control: the same outside call in a parent's manual mode prompts. For
+//!   Claude Code also whether auto falls back to asking after repeated
+//!   blocks, which `profile::AUTO_CAN_ASK` records, and which hook auto's
+//!   denials run.
 //! - **G-146-P-<provider>**: a permission prompt sets the flag and the
 //!   person's answer clears it (Claude Code: `PermissionRequest`, then
 //!   `PostToolUse`; after an Esc, the next turn; OpenCode:
@@ -145,7 +154,12 @@ class H(http.server.BaseHTTPRequestHandler):
         last = text_of(users[-1]) if users else ""
         # The newest prompt only: a turn after a failed one is sent with it.
         newest = last.strip().split("\n")[-1] if last.strip() else ""
-        LOG.write(json.dumps({"t": time.time(), "model": body.get("model"), "last": last[-4000:], "tools": [t.get("name") for t in body.get("tools") or []]}) + "\n"); LOG.flush()
+        results = []
+        for b in (users[-1].get("content") if users and isinstance(users[-1].get("content"), list) else []):
+            if b.get("type") == "tool_result":
+                c = b.get("content")
+                results.append(c if isinstance(c, str) else json.dumps(c))
+        LOG.write(json.dumps({"t": time.time(), "model": body.get("model"), "last": last[-4000:], "results": results, "tools": [t.get("name") for t in body.get("tools") or []]}) + "\n"); LOG.flush()
         if "LIMIT" in newest and "Storm" not in newest:
             hdr = [("anthropic-ratelimit-unified-status", "rejected"), ("retry-after", "3600"), ("x-should-retry", "false")]
             return self.send_json(429, {"type": "error", "error": {"type": "rate_limit_error", "message": "This request would exceed your account's rate limit. Please try again later."}}, hdr)
@@ -157,6 +171,8 @@ class H(http.server.BaseHTTPRequestHandler):
         call = None
         if "WRITE:" in newest and "Write" in tools:
             call = ("Write", {"file_path": newest.split("WRITE:", 1)[1].split()[0], "content": "storm gate\n"})
+        elif "BASH:" in newest and "Bash" in tools:
+            call = ("Bash", {"command": newest.split("BASH:", 1)[1].strip(), "description": "gate"})
         elif "CALL:" in newest and newest.split("CALL:", 1)[1].split()[0] in tools:
             call = (newest.split("CALL:", 1)[1].split()[0], {})
         model = body.get("model", "m")
@@ -202,7 +218,8 @@ class H(http.server.BaseHTTPRequestHandler):
         users = [m for m in msgs if m.get("role") == "user"]
         last = users[-1].get("content") if users else ""
         last = last if isinstance(last, str) else json.dumps(last)
-        LOG.write(json.dumps({"t": time.time(), "last": last[-4000:]}) + "\n"); LOG.flush()
+        results = [m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content")) for m in msgs[-1:] if m.get("role") == "tool"]
+        LOG.write(json.dumps({"t": time.time(), "last": last[-4000:], "results": results}) + "\n"); LOG.flush()
         if "LIMIT" in last and "Storm" not in last:
             b = json.dumps({"error": {"message": "Rate limit reached for requests", "type": "rate_limit_error", "code": "rate_limit_exceeded"}}).encode()
             self.send_response(429); self.send_header("content-type", "application/json"); self.send_header("retry-after", "1"); self.send_header("content-length", str(len(b))); self.end_headers(); self.wfile.write(b); return
@@ -220,6 +237,11 @@ class H(http.server.BaseHTTPRequestHandler):
             path = last.split("WRITE:", 1)[1].split()[0].strip('"\\')
             args = json.dumps({"filePath": path, "content": "storm gate\n"})
             call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": "write", "arguments": args}}
+            out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
+        elif "BASH:" in last and "bash" in tools and not answered:
+            cmd = last.split("BASH:", 1)[1].strip().strip('"\\')
+            args = json.dumps({"command": cmd, "description": "gate"})
+            call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": "bash", "arguments": args}}
             out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
         else:
             out = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop", usage)]
@@ -309,6 +331,14 @@ impl FakeHost {
             .collect()
     }
 
+    /// The denials the hooks or plugin reported (148b).
+    fn denied(&self, at: Instant) -> Vec<Value> {
+        self.since(at)
+            .into_iter()
+            .filter_map(|v| v.get("denied").cloned())
+            .collect()
+    }
+
     fn results(&self, at: Instant) -> Vec<Value> {
         self.since(at)
             .into_iter()
@@ -373,6 +403,25 @@ impl Model {
             .lines()
             .filter_map(|l| serde_json::from_str::<Value>(l).ok())
             .map(|v| v["last"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+}
+
+impl Model {
+    /// Every tool result the agent sent back to the model so far.
+    fn tool_results(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .flat_map(|v| {
+                v["results"]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|r| r.as_str().map(str::to_string))
+            })
             .collect()
     }
 }
@@ -1645,4 +1694,310 @@ fn g_147_claude_code() {
         starts == Some("manual"),
     );
     c.finish(&m.agent);
+}
+
+fn no_prompt(s: &Session, at: Instant) -> bool {
+    !s.host
+        .attention(at)
+        .iter()
+        .any(|k| k == "permission_prompt")
+}
+
+/// G-148-claude-code (decision 148a/b): a child as the host launches it,
+/// whatever its parent's mode: `--permission-mode dontAsk` with Storm's
+/// child tools and the baseline (edits and reads in its workspace,
+/// commands) allowed, and the denial hooks. An edit and a command inside
+/// the baseline run; an edit outside its workspace and a note write are
+/// denied, with no prompt ever, the denial in the agent's tool result and
+/// at the host. Positive control: the same edit in a parent's manual mode
+/// prompts. Finding: whether auto falls back to asking after repeated
+/// blocks (`profile::AUTO_CAN_ASK`), and that auto's denials run
+/// `PermissionDenied`.
+#[test]
+fn g_148_claude_code() {
+    let gate = "G-148-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let modes: Vec<_> = ["default", "accept_edits", "auto"]
+        .iter()
+        .map(|m| storm_runtime::profile::child_permission_mode("claude-code", m).unwrap())
+        .collect();
+    let child = modes[0].clone();
+    c.check(
+        "every parent's mode gives the child dontAsk with the baseline, auto's too",
+        child.args == ["--permission-mode", "dontAsk"]
+            && child.auto_off
+            && modes.iter().all(|m| *m == child)
+            && storm_runtime::profile::AUTO_CAN_ASK,
+    );
+    let outside = tempfile::tempdir().unwrap();
+
+    // Positive control: a parent in manual is asked for the same edit.
+    let manual = storm_runtime::profile::permission_mode("claude-code", "default").unwrap();
+    let mut parent = claude_with(ClaudeOpts {
+        args: manual.args.clone(),
+        auto_off: true,
+        ..Default::default()
+    });
+    let file = outside.path().join("parent.txt");
+    let at = Instant::now();
+    parent.agent.prompt(&format!("WRITE:{}", file.display()));
+    c.check(
+        "control: in a parent's manual mode the outside edit prompts",
+        asked(&parent, at, 60) && !file.exists(),
+    );
+    drop(parent);
+
+    let mut allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+        .iter()
+        .map(|t| format!("mcp__storm__{t}"))
+        .collect();
+    allow.extend(child.allow.iter().cloned());
+    let mut s = claude_with(ClaudeOpts {
+        args: child.args.clone(),
+        allow,
+        auto_off: true,
+        storm_mcp: true,
+        ..Default::default()
+    });
+    let started = Instant::now();
+    let inside = s.ws.join("inside.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", inside.display()));
+    let written = wait_until(60, || inside.exists());
+    idle_since(&s, at, 60);
+    c.check(
+        &format!("an edit in its workspace runs (written {written})"),
+        written && no_prompt(&s, at),
+    );
+    let ran = s.ws.join("ran.txt");
+    let at = Instant::now();
+    s.agent
+        .prompt(&format!("BASH:echo storm > {} && uname", ran.display()));
+    let done = wait_until(60, || ran.exists());
+    idle_since(&s, at, 60);
+    c.check(
+        &format!("a command runs (ran {done})"),
+        done && no_prompt(&s, at),
+    );
+    let at = Instant::now();
+    s.agent.prompt("CALL:mcp__storm__report_result");
+    let reported = wait_until(60, || s.storm_calls().iter().any(|t| t == "report_result"));
+    idle_since(&s, at, 60);
+    c.check(
+        "report_result runs with no prompt",
+        reported && no_prompt(&s, at),
+    );
+
+    let file = outside.path().join("child.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", file.display()));
+    let reached = wait_until(60, || {
+        s.host
+            .denied(at)
+            .iter()
+            .any(|d| d["tool"] == "Write" && d["detail"] == file.display().to_string())
+    });
+    idle_since(&s, at, 60);
+    let told = s
+        .model
+        .as_ref()
+        .unwrap()
+        .tool_results()
+        .iter()
+        .any(|r| r.contains("Permission to use Write has been denied"));
+    c.check(
+        &format!(
+            "an edit outside its workspace is denied with no prompt: the agent is told \
+             ({told}) and the host hears it ({:?})",
+            s.host.denied(at)
+        ),
+        reached && told && !file.exists() && no_prompt(&s, at),
+    );
+    let at = Instant::now();
+    s.agent.prompt("CALL:mcp__storm__create_note");
+    let reached = wait_until(60, || {
+        s.host
+            .denied(at)
+            .iter()
+            .any(|d| d["tool"] == "mcp__storm__create_note")
+    });
+    idle_since(&s, at, 60);
+    c.check(
+        "a note write is denied with no prompt, and the host hears it",
+        reached && !s.storm_calls().iter().any(|t| t == "create_note") && no_prompt(&s, at),
+    );
+    c.check(
+        &format!("no prompt ever ({:?})", s.host.attention(started)),
+        no_prompt(&s, started),
+    );
+    drop(s);
+
+    // Finding: auto with the stand-in, whose answers its classifier cannot
+    // read, blocks a command again and again.
+    let auto = storm_runtime::profile::permission_mode("claude-code", "auto").unwrap();
+    let mut a = claude_with(ClaudeOpts {
+        args: auto.args.clone(),
+        ..Default::default()
+    });
+    let started = Instant::now();
+    let mut prompted = false;
+    for n in 0..5 {
+        let at = Instant::now();
+        a.agent
+            .prompt(&format!("BASH:curl -s http://127.0.0.1:9/{n}"));
+        if asked(&a, at, 40) {
+            prompted = true;
+            break;
+        }
+        idle_since(&a, at, 30);
+    }
+    let denials = a.host.denied(started);
+    eprintln!(
+        "  finding: auto falls back to asking after repeated blocks: {prompted} \
+         (PermissionDenied reported {} denials first)",
+        denials.len()
+    );
+    c.check(
+        &format!(
+            "auto falls back to asking: {prompted}, as AUTO_CAN_ASK ({}) says, so a child \
+             never runs in auto",
+            storm_runtime::profile::AUTO_CAN_ASK
+        ),
+        prompted == storm_runtime::profile::AUTO_CAN_ASK,
+    );
+    c.check(
+        &format!("auto's denials run PermissionDenied ({denials:?})"),
+        !denials.is_empty() && denials.iter().all(|d| d["tool"] == "Bash"),
+    );
+    c.finish(&a.agent);
+}
+
+/// G-148-opencode (decision 148a/b): a child as the host configures it,
+/// over an account whose own rules ask: Storm's layer turns every ask into
+/// a deny and allows `edit` and `bash`. An edit and a command inside the
+/// workspace run; an edit outside it is denied with no prompt ever, the
+/// denial in the agent's tool result and at the host (the tool part that
+/// failed on a deny rule). Positive control: the same edit under the
+/// account's rules alone prompts.
+#[test]
+fn g_148_opencode() {
+    let gate = "G-148-opencode";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let account = json!({"edit": "ask", "bash": "ask", "webfetch": "ask"});
+    let outside = tempfile::tempdir().unwrap();
+
+    let mut control = opencode_with(OpencodeOpts {
+        account_permission: Some(account.clone()),
+        ..Default::default()
+    });
+    let file = outside.path().join("parent.txt");
+    let at = Instant::now();
+    control.agent.prompt(&format!("WRITE:{}", file.display()));
+    c.check(
+        "control: under the account's rules the outside edit prompts",
+        asked(&control, at, 90) && !file.exists(),
+    );
+    drop(control);
+
+    let mode = storm_runtime::profile::child_permission_mode("opencode", "default").unwrap();
+    let layer =
+        storm_runtime::mcp::StormLayer::new(true, false, mode.opencode_permission).denying_asks();
+    let dir = tempfile::tempdir().unwrap();
+    let account_file = json!({"permission": account}).to_string();
+    let extras = storm_runtime::mcp::write_provider_config(
+        "opencode",
+        dir.path(),
+        &[],
+        "h_gate",
+        Path::new("/s"),
+        Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
+        None,
+        &Default::default(),
+        &storm_runtime::mcp::AgentServers {
+            storm_only: false,
+            taken: &Default::default(),
+        },
+        &layer,
+        &move || Ok(vec![account_file.clone()]),
+    )
+    .unwrap();
+    let written: Value = serde_json::from_str(
+        extras
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut s = opencode_with(OpencodeOpts {
+        account_permission: Some(account),
+        storm_permission: Some(written["permission"].clone()),
+    });
+    let started = Instant::now();
+    let inside = s.ws.join("inside.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", inside.display()));
+    let written = wait_until(60, || inside.exists());
+    std::thread::sleep(Duration::from_secs(3));
+    c.check(
+        &format!("an edit in its workspace runs (written {written})"),
+        written && no_prompt(&s, at),
+    );
+    let ran = s.ws.join("ran.txt");
+    let at = Instant::now();
+    s.agent
+        .prompt(&format!("BASH:echo storm > {}", ran.display()));
+    let done = wait_until(60, || ran.exists());
+    std::thread::sleep(Duration::from_secs(3));
+    c.check(
+        &format!("a command runs (ran {done})"),
+        done && no_prompt(&s, at),
+    );
+    let file = outside.path().join("child.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", file.display()));
+    let reached = wait_until(60, || {
+        s.host
+            .denied(at)
+            .iter()
+            .any(|d| d["tool"] == "write" && d["detail"] == file.display().to_string())
+    });
+    std::thread::sleep(Duration::from_secs(3));
+    let told = s
+        .model
+        .as_ref()
+        .unwrap()
+        .tool_results()
+        .iter()
+        .any(|r| r.contains(storm_runtime::harness::OPENCODE_DENIED));
+    c.check(
+        &format!(
+            "an edit outside its workspace is denied with no prompt: the agent is told \
+             ({told}) and the host hears it once ({:?})",
+            s.host.denied(at)
+        ),
+        reached && told && !file.exists() && no_prompt(&s, at) && s.host.denied(at).len() == 1,
+    );
+    c.check(
+        &format!("no prompt ever ({:?})", s.host.attention(started)),
+        no_prompt(&s, started),
+    );
+    c.finish(&s.agent);
 }

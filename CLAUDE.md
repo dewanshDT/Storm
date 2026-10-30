@@ -640,9 +640,11 @@ Specification*; the slices are decisions 81 and 81a onward):
   `mcp__storm__<tool>` in Claude Code's `--settings` `permissions.allow`
   (re-read before launch) and as OpenCode `allow` keys after the
   connection's ask, under a key no account config uses. Nothing else is
-  allowed, note writes included; Codex keeps its prompts; a session that
-  cannot spawn and is not a child gets a byte-identical config (apart from
-  147c's `disableAutoMode`). **The switch turns on only for a session
+  allowed, note writes included; Codex keeps its prompts. A top-level
+  Claude Code session reading Storm also gets `request_permission_mode`
+  allowed, so the person sees only Storm's card (147c); a session that
+  cannot spawn, is not a child and does not read Storm gets a
+  byte-identical config (apart from 147c's `disableAutoMode`). **The switch turns on only for a session
   launched with it** (141e): a launch's `spawn: true` is refused
   `spawn_unavailable` unless the session reads Storm, runs a spawning
   adapter and C0 holds, and is written on, and audited `spawn_enabled`,
@@ -667,6 +669,34 @@ Specification*; the slices are decisions 81 and 81a onward):
   auto** (147c): every other Claude Code session's `--settings` carries
   `permissions.disableAutoMode: "disable"`, re-read before launch, and a
   file that cannot carry it fails the start (G-147).
+- **A child never asks** (148a, `profile::child_permission_mode`): whatever
+  its 146b mode, its host runs it with no prompt. Claude Code gets
+  `--permission-mode dontAsk` with `CHILD_BASELINE` (`Edit(./**)`,
+  `Read(./**)`, `Bash`) beside its Storm tools in `permissions.allow`, for
+  an auto parent too: G-148 found auto falls back to asking after repeated
+  blocks and no documented setting makes that a denial
+  (`profile::AUTO_CAN_ASK`). OpenCode gets Storm's layer turning every ask
+  into a deny (the connections', Storm's settings', the account's at the
+  top level and per agent under the same keys, OpenCode's defaults:
+  `doom_loop`, `question`, `plan_enter`, `external_directory`, `.env`
+  reads), then `edit` and `bash` allowed under keys that follow every deny;
+  an account config Storm cannot parse fails the start. Only
+  `permission::UNATTENDED` agents run as children: Codex is
+  `agent_unavailable`, never listed. The isolation (136/137) and Apply are
+  the boundary, never a prompt nobody answers; no bypass, ever.
+- **A child's denials go to its parent, never the person** (148b). A
+  child's host gets `harness-denied` hooks (Claude Code `PostToolBatch`,
+  whose result for a `dontAsk` refusal is the denial sentence and which is
+  the only hook such a refusal runs, and `PermissionDenied`, auto's;
+  OpenCode's tool part that failed on a deny rule, since it publishes no
+  denial event), posts `…/denied {tool, detail}` (detail the command or
+  path, 500 characters), and the parent gets a `denied` event
+  (`provider_hook`, `reported`), the one kind carrying child text, bounded,
+  as data; identical ones in a round merge into `count`. The gated lists
+  are `harness::DENIALS` and `events::DENIALS`. A child's prompt is a fault:
+  `needs_attention` reason `unexpected_prompt` for the parent and a
+  `spawn_unexpected_prompt` audit row; the client shows no Needs you. A
+  child is never offered `request_permission_mode`, and a call is refused.
 - **An agent asks for auto; only the person grants it** (147c,
   `agent::mode`, `ops::request_permission_mode`): `request_permission_mode
   {mode: "auto", reason}` is offered to Claude Code sessions only (the
@@ -674,8 +704,8 @@ Specification*; the slices are decisions 81 and 81a onward):
   (a repeat waits on it), waited on up to the wait cap and answered
   `pending` until the person decides on the session tier (`POST
   …/mode-requests/{id}`), else `expired` after 10 minutes. Only `auto` can
-  be asked for; a child only while its parent is in auto
-  (`permission_mode_wider`); a session with live children is refused
+  be asked for; never by a child (148: `permission_mode_unavailable`, and
+  not offered); a session with live children is refused
   (`live_children`). **Approval resumes, never reloads**: G-147 found
   Claude Code does not re-read its `--settings` file while running
   (`harness::SETTINGS_FLAG_RELOADS`), so a top-level session is ended and
@@ -746,14 +776,15 @@ Specification*; the slices are decisions 81 and 81a onward):
   RESULT_SOURCES, WAKE}` hold; the server takes only what
   `attention::GATED_SIGNALS`, `round::RESULT_SOURCES` and `events::WAKE`
   hold; a test in each crate holds them equal, and each entry goes on only
-  when its `make gate-lifecycle` gate (G-144-S/W, G-145-R/W, G-146-P)
-  passes; G-147 checks the manual flag, the cycle setting and the reload
-  finding there too. A child's permission prompt (146c) is `permission_prompt`: set by
-  Claude Code's `PermissionRequest`/`Notification permission_prompt` or
-  OpenCode's `permission.asked`, cleared by `PostToolUse`/
-  `PostToolUseFailure`/`UserPromptSubmit`/`Stop`/`StopFailure` or
-  `permission.replied`; the parent gets `needs_attention` and only the
-  person answers it, in the child's terminal. With none
+  when its `make gate-lifecycle` gate (G-144-S/W, G-145-R/W, G-146-P,
+  G-148) passes; G-147 checks the manual flag, the cycle setting and the
+  reload finding there too. A child's permission prompt (146c) is
+  `permission_prompt`: set by Claude Code's `PermissionRequest`/
+  `Notification permission_prompt` or OpenCode's `permission.asked`,
+  cleared by `PostToolUse`/`PostToolUseFailure`/`UserPromptSubmit`/`Stop`/
+  `StopFailure` or `permission.replied`; since 148b it is only a fault
+  detector (`unexpected_prompt` for the parent), and nothing in Storm
+  answers it. With none
   on, every config is byte-identical to before. A hook's line is taken only
   through its session's own handle, socket and uid (`Host::hook_session`)
   and can only be shown. A gated final message (`Stop`'s
@@ -793,8 +824,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   its own** (146b): only a mode the person chose at launch is passed
   (`profile::permission_mode`: Claude Code `--permission-mode
   default|acceptEdits|auto`, OpenCode `edit: allow` in Storm's config layer;
-  anything else fails the start), and no bypass or skip-permissions value
-  exists in the API, the store, the launcher or `start_agent`.
+  anything else fails the start), or a child's no-prompt form of it (148a,
+  `dontAsk`, which refuses rather than asks), and no bypass or
+  skip-permissions value exists in the API, the store, the launcher or
+  `start_agent`.
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,
