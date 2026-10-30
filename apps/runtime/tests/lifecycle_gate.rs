@@ -1,4 +1,4 @@
-//! The real-CLI gates of decisions 144 to 148's runtime half, for Claude
+//! The real-CLI gates of decisions 144 to 149's runtime half, for Claude
 //! Code and OpenCode: each runs the real agent in a terminal that is only
 //! typed into like a person would, with the hooks or plugin Storm's own
 //! writer produces when every list is on, reporting to a socket this test
@@ -37,6 +37,11 @@
 //!   Claude Code also whether auto falls back to asking after repeated
 //!   blocks, which `profile::AUTO_CAN_ASK` records, and which hook auto's
 //!   denials run.
+//! - **G-149-claude-code**: a top-level session's Storm deletes are
+//!   pre-allowed (149b): with the host's layer in Storm's `--settings`,
+//!   `delete_note` and `delete_folder` reach Storm with no CLI prompt, in
+//!   manual and in auto, so the person sees only Storm's dialog. Positive
+//!   control: without the allow, `delete_note` stops on the CLI's prompt.
 //! - **G-146-P-<provider>**: a permission prompt sets the flag and the
 //!   person's answer clears it (Claude Code: `PermissionRequest`, then
 //!   `PostToolUse`; after an Esc, the next turn; OpenCode:
@@ -667,11 +672,12 @@ impl Session {
 }
 
 /// A stand-in for Storm's MCP server, named `storm` as the host names it:
-/// it lists a child's tools and a note write, and logs every call.
+/// it lists a child's tools, a note write and the deletes, and logs every
+/// call.
 const FAKE_STORM_MCP: &str = r#"
 import json, sys
 LOG = open(sys.argv[1], "a")
-TOOLS = ["session_context", "report_result", "read_messages", "create_note"]
+TOOLS = ["session_context", "report_result", "read_messages", "create_note", "delete_note", "delete_folder"]
 for line in sys.stdin:
     try:
         m = json.loads(line)
@@ -2000,4 +2006,67 @@ fn g_148_opencode() {
         no_prompt(&s, started),
     );
     c.finish(&s.agent);
+}
+
+/// G-149-claude-code: Storm's deletes are pre-allowed (149b) on the real
+/// Claude Code, so an agent's delete reaches Storm, whose dialog asks the
+/// person, without the CLI's own prompt first, in manual and in auto.
+/// Positive control: without the allow, `delete_note` stops on the CLI's
+/// prompt and never reaches Storm.
+#[test]
+fn g_149_claude_code() {
+    let gate = "G-149-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let manual: Vec<String> = ["--permission-mode", "default"].map(String::from).into();
+    let mut control = claude_with(ClaudeOpts {
+        args: manual.clone(),
+        auto_off: true,
+        storm_mcp: true,
+        account_mode: Some("manual"),
+        ..Default::default()
+    });
+    let at = Instant::now();
+    control.agent.prompt("CALL:mcp__storm__delete_note");
+    c.check(
+        "control: without the allow, delete_note stops on the CLI's prompt",
+        asked(&control, at, 90) && control.storm_calls().is_empty(),
+    );
+    drop(control);
+
+    let layer = storm_runtime::mcp::StormLayer::new(false, false, Vec::new())
+        .asking_for_modes()
+        .deleting();
+    let auto: Vec<String> = ["--permission-mode", "auto"].map(String::from).into();
+    let mut last = None;
+    for (mode, args, auto_off) in [("manual", manual, true), ("auto", auto, false)] {
+        let mut s = claude_with(ClaudeOpts {
+            args,
+            allow: layer.claude_allow(),
+            auto_off,
+            storm_mcp: true,
+            account_mode: Some("manual"),
+        });
+        for tool in storm_runtime::mcp::DELETE_ALLOWED_TOOLS {
+            let at = Instant::now();
+            s.agent.prompt(&format!("CALL:mcp__storm__{tool}"));
+            let ran = wait_until(90, || s.storm_calls().iter().any(|t| t == tool));
+            idle_since(&s, at, 60);
+            c.check(
+                &format!(
+                    "{mode}: {tool} reaches Storm with no CLI prompt ({:?})",
+                    s.host.attention(at)
+                ),
+                ran && no_prompt(&s, at),
+            );
+        }
+        last = Some(s);
+    }
+    c.finish(&last.unwrap().agent);
 }
