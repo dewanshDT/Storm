@@ -606,27 +606,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             child: Row(
               children: [
                 Expanded(
-                  // Scrolls rather than overflowing at the inspector's
-                  // narrowest.
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: PanelTabs<SessionTab>(
-                      tabs: [
-                        (SessionTab.context, 'Context'),
-                        (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
-                        (SessionTab.about, 'About'),
-                        if (showsActs(s)) (SessionTab.requests, 'Activity'),
-                        if (s.spawn.isChild) (SessionTab.work, 'Work'),
-                      ],
-                      selected: tab,
-                      onSelected: (next) {
-                        if (next == tab) {
-                          setState(() => _wroteNote = null);
-                        } else {
-                          _pickTab(next);
-                        }
-                      },
-                    ),
+                  // Wraps rather than hiding a tab past the edge: a
+                  // child's Work tab was out of sight at 320px.
+                  child: PanelTabs<SessionTab>(
+                    wrap: true,
+                    tabs: [
+                      (SessionTab.context, 'Context'),
+                      (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
+                      (SessionTab.about, 'About'),
+                      if (showsActs(s)) (SessionTab.requests, 'Activity'),
+                      if (s.spawn.isChild) (SessionTab.work, 'Work'),
+                    ],
+                    selected: tab,
+                    onSelected: (next) {
+                      if (next == tab) {
+                        setState(() => _wroteNote = null);
+                      } else {
+                        _pickTab(next);
+                      }
+                    },
                   ),
                 ),
                 IconButton(

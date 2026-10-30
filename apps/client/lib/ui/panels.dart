@@ -7,61 +7,68 @@ import 'package:flutter/material.dart';
 import 'controls.dart';
 import 'tokens.dart';
 
-/// Active `accent` 600 on `accentSoft`; inactive `text3` 500.
+/// Active `accent` 600 on `accentSoft`; inactive `text3` 500. With [wrap],
+/// tabs that do not fit go on a second line rather than out of sight.
 class PanelTabs<T> extends StatelessWidget {
   const PanelTabs({
     super.key,
     required this.tabs,
     required this.selected,
     required this.onSelected,
+    this.wrap = false,
   });
 
   final List<(T, String)> tabs;
   final T selected;
   final ValueChanged<T> onSelected;
+  final bool wrap;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final radius = BorderRadius.circular(t.rControl);
-    return Row(
-      children: [
-        for (final (value, label) in tabs) ...[
-          Semantics(
-            selected: value == selected,
-            button: true,
-            label: label,
-            excludeSemantics: true,
-            onTap: () => onSelected(value),
-            child: Material(
-              color: value == selected ? t.accentSoft : Colors.transparent,
+    final items = [
+      for (final (value, label) in tabs)
+        Semantics(
+          selected: value == selected,
+          button: true,
+          label: label,
+          excludeSemantics: true,
+          onTap: () => onSelected(value),
+          child: Material(
+            color: value == selected ? t.accentSoft : Colors.transparent,
+            borderRadius: radius,
+            child: InkWell(
+              key: Key('panel-tab-$value'),
               borderRadius: radius,
-              child: InkWell(
-                key: Key('panel-tab-$value'),
-                borderRadius: radius,
-                onTap: () => onSelected(value),
-                child: Padding(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: t.sp * 1.5,
-                    vertical: t.sp * 0.75,
-                  ),
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      fontWeight: value == selected
-                          ? FontWeight.w600
-                          : FontWeight.w500,
-                      color: value == selected ? t.accent : t.text3,
-                    ),
+              onTap: () => onSelected(value),
+              child: Padding(
+                padding: EdgeInsets.symmetric(
+                  horizontal: t.sp * 1.5,
+                  vertical: t.sp * 0.75,
+                ),
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.codeSize,
+                    fontWeight: value == selected
+                        ? FontWeight.w600
+                        : FontWeight.w500,
+                    color: value == selected ? t.accent : t.text3,
                   ),
                 ),
               ),
             ),
           ),
-          SizedBox(width: t.sp * 0.5),
-        ],
+        ),
+    ];
+    if (wrap) {
+      return Wrap(spacing: t.sp * 0.5, runSpacing: t.sp * 0.5, children: items);
+    }
+    return Row(
+      children: [
+        for (final item in items) ...[item, SizedBox(width: t.sp * 0.5)],
       ],
     );
   }

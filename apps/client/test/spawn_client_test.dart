@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/session_inspector.dart';
 import 'package:storm/agent/spawn_models.dart';
 import 'package:storm/agent/spawn_widgets.dart';
 import 'package:storm/router.dart';
@@ -680,6 +681,55 @@ void main() {
         childWorkspace: {'mode': mode, 'commit': 'abc1234def0000'},
       ),
     ];
+
+    for (final width in [kInspectorWidth, kInspectorMinWidth]) {
+      testWidgets(
+        'every tab of a child’s panel is in sight at a desktop width, '
+        'the inspector at ${width.toInt()}px',
+        (tester) async {
+          final agents = FakeAgentServer(
+            hosts: [agentHost()],
+            sessions: [
+              spawnSession('ags_p'),
+              spawnSession(
+                'ags_c',
+                name: 'test-gateway',
+                parent: 'ags_p',
+                depth: 1,
+                spawn: {'enabled': false},
+                childWorkspace: {'mode': 'clone', 'commit': 'abc1234def0000'},
+              ),
+            ],
+          );
+          FakeSpawning(agents).work['ags_c'] = cloneWork();
+          final c = await open(
+            tester,
+            agents,
+            size: const Size(1280, 800),
+            at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
+          );
+          c.read(sessionInspectorWidthProvider.notifier).state = width;
+          await tester.pumpAndSettle();
+          final close = tester.getRect(
+            find.byKey(const Key('inspector-close')),
+          );
+          for (final tab in SessionTab.values) {
+            final found = find.byKey(Key('panel-tab-$tab'));
+            if (tab == SessionTab.wrote || tab == SessionTab.context) {
+              expect(found, findsOneWidget);
+            }
+            if (found.evaluate().isEmpty) continue;
+            final r = tester.getRect(found);
+            expect(r.right, lessThanOrEqualTo(close.left), reason: '$tab');
+            expect(r.left, greaterThanOrEqualTo(1280 - width - 1));
+          }
+          await tester.tap(find.byKey(const Key('panel-tab-SessionTab.work')));
+          await tester.pumpAndSettle();
+          expect(where(c).queryParameters['tab'], SessionTab.work.name);
+          await disposeShell(tester, c);
+        },
+      );
+    }
 
     testWidgets('a clone: its diff, Apply as storm/<child>, once', (
       tester,
