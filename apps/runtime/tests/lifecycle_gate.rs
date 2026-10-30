@@ -1713,7 +1713,8 @@ fn no_prompt(s: &Session, at: Instant) -> bool {
 /// whatever its parent's mode: `--permission-mode dontAsk` with Storm's
 /// child tools and the baseline (edits and reads in its workspace,
 /// commands) allowed, and the denial hooks. An edit and a command inside
-/// the baseline run; an edit outside its workspace and a note write are
+/// the baseline run, the command's output reaching the agent; an edit
+/// outside its workspace and a note write are
 /// denied, with no prompt ever, the denial in the agent's tool result and
 /// at the host. Positive control: the same edit in a parent's manual mode
 /// prompts. Finding: whether auto falls back to asking after repeated
@@ -1792,6 +1793,41 @@ fn g_148_claude_code() {
         &format!("a command runs (ran {done})"),
         done && no_prompt(&s, at),
     );
+    let at = Instant::now();
+    s.agent.prompt(&format!("BASH:ls {}", s.ws.display()));
+    let listed = wait_until(60, || {
+        s.model
+            .as_ref()
+            .unwrap()
+            .tool_results()
+            .iter()
+            .any(|r| r.contains("inside.txt") && r.contains("ran.txt"))
+    });
+    idle_since(&s, at, 60);
+    c.check(
+        &format!("a command's output reaches the agent (listed {listed})"),
+        listed && no_prompt(&s, at),
+    );
+    std::fs::write(outside.path().join("sentinel.txt"), "").unwrap();
+    let at = Instant::now();
+    s.agent
+        .prompt(&format!("BASH:ls {}", outside.path().display()));
+    let seen = wait_until(30, || {
+        s.model
+            .as_ref()
+            .unwrap()
+            .tool_results()
+            .iter()
+            .any(|r| r.contains("sentinel.txt") || r.contains("Permission to use Bash"))
+    });
+    idle_since(&s, at, 60);
+    let results = s.model.as_ref().unwrap().tool_results();
+    eprintln!(
+        "  finding: ls outside its workspace: listed {}, denied {} (answered {seen})",
+        results.iter().any(|r| r.contains("sentinel.txt")),
+        results.iter().any(|r| r.contains("Permission to use Bash")),
+    );
+    c.check("ls outside its workspace never prompts", no_prompt(&s, at));
     let at = Instant::now();
     s.agent.prompt("CALL:mcp__storm__report_result");
     let reported = wait_until(60, || s.storm_calls().iter().any(|t| t == "report_result"));
