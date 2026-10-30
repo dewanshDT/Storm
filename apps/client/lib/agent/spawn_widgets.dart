@@ -68,31 +68,6 @@ class AttentionTag extends StatelessWidget {
   }
 }
 
-/// "Needs you" for a child waiting at its permission prompt, shown on its
-/// parent's row or its crew (146c): a tap opens that child, whose terminal
-/// is where the person answers. Storm never answers it.
-class NeedsYouBadge extends StatelessWidget {
-  const NeedsYouBadge({super.key, required this.waiting});
-
-  final AgentSession waiting;
-
-  @override
-  Widget build(BuildContext context) => Semantics(
-    button: true,
-    label: 'Needs you: ${waiting.displayName} is waiting at a prompt',
-    excludeSemantics: true,
-    child: Tooltip(
-      message: '${waiting.displayName} is waiting at a prompt',
-      child: InkWell(
-        key: Key('needs-you-${waiting.id}'),
-        borderRadius: BorderRadius.circular(999),
-        onTap: () => openAgentSession(context, waiting.id),
-        child: const AttentionTag(kind: 'permission_prompt'),
-      ),
-    ),
-  );
-}
-
 /// "↳ from gateway-impl · own copy of storm": a child's sub-line in a list,
 /// or null for a session nobody started.
 String? lineageLine(AgentSession s, AgentOverview? o) {
@@ -679,7 +654,10 @@ class ActsPanel extends ConsumerWidget {
     final t = context.tokens;
     final list = ref.watch(sessionActsProvider(session.id)).value;
     final o = ref.watch(agentOverviewProvider).value;
-    if (list == null || list.isEmpty) {
+    final denials = o == null
+        ? const <(AgentSession, ChildEvent)>[]
+        : deniedOf(o, session.id);
+    if ((list == null || list.isEmpty) && denials.isEmpty) {
       return Padding(
         padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
         child: Text(
@@ -696,7 +674,41 @@ class ActsPanel extends ConsumerWidget {
       physics: sheet ? const NeverScrollableScrollPhysics() : null,
       padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
       children: [
-        for (final r in list)
+        for (final (k, e) in denials)
+          Container(
+            key: Key('act-denied-${e.id}'),
+            padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
+            decoration: BoxDecoration(
+              border: Border(
+                bottom: BorderSide(color: t.border, width: t.bw),
+              ),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  [
+                    'DENIED',
+                    if (DateTime.tryParse(e.at) case final at?) clockAt(at),
+                  ].join(' · '),
+                  style: agentKey(t, color: t.text3),
+                ),
+                SizedBox(height: t.sp * 0.5),
+                Text(
+                  '${k.displayName}: ${deniedLabel(e)}',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: agentSans(t),
+                ),
+                if ((e.detail ?? '').isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(top: t.sp * 0.5),
+                    child: DeniedDetail(event: e, lines: 4),
+                  ),
+              ],
+            ),
+          ),
+        for (final r in list ?? const <AgentAct>[])
           Container(
             key: Key('act-${r.id}'),
             padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
@@ -730,6 +742,38 @@ class ActsPanel extends ConsumerWidget {
             ),
           ),
       ],
+    );
+  }
+}
+
+/// What [parent]'s children were refused (decision 148b), newest first:
+/// a child never asks the person, so its denials come to its parent.
+List<(AgentSession, ChildEvent)> deniedOf(AgentOverview o, String parent) {
+  final out = [
+    for (final k in childrenOf(o, parent))
+      for (final e in k.spawn.recentEvents)
+        if (e.kind == 'denied') (k, e),
+  ];
+  out.sort((a, b) => b.$2.at.compareTo(a.$2.at));
+  return out;
+}
+
+/// A denial's command or path: the child's own text, shown only as plain
+/// data.
+class DeniedDetail extends StatelessWidget {
+  const DeniedDetail({super.key, required this.event, this.lines = 1});
+
+  final ChildEvent event;
+  final int lines;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Text(
+      event.detail ?? '',
+      maxLines: lines,
+      overflow: TextOverflow.ellipsis,
+      style: agentMono(t, color: t.text2),
     );
   }
 }
@@ -937,6 +981,8 @@ class ChildEventsTile extends StatelessWidget {
                       color: t.amber,
                       fill: t.amberSoft,
                     ),
+                  if (e.kind == 'denied' && (e.detail ?? '').isNotEmpty)
+                    DeniedDetail(key: Key('event-detail-${e.id}'), event: e),
                 ],
               ),
             ),

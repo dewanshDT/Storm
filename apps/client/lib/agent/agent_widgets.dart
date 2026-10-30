@@ -8,8 +8,7 @@ import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'crew_widgets.dart' show RoleTagRow;
 import 'mode_request.dart' show ModeAskTag;
-import 'spawn_widgets.dart'
-    show AttentionTag, NeedsYouBadge, childWorkspaceLabel;
+import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -157,7 +156,6 @@ class SessionRow extends StatelessWidget {
     this.phone = false,
     this.lineage,
     this.onLongPress,
-    this.waiting,
   });
 
   final AgentSession session;
@@ -168,9 +166,6 @@ class SessionRow extends StatelessWidget {
 
   /// A spawned child's "↳ from …" in place of the sub-line (134l).
   final String? lineage;
-
-  /// One of its children waiting at a permission prompt (146c).
-  final AgentSession? waiting;
 
   /// The phone's crew and role sheet (decision 138n).
   final VoidCallback? onLongPress;
@@ -211,9 +206,6 @@ class SessionRow extends StatelessWidget {
                   if (!s.ended && s.spawn.needsAttention != null) ...[
                     SizedBox(width: t.sp * 0.75),
                     Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
-                  ] else if (waiting case final w?) ...[
-                    SizedBox(width: t.sp * 0.75),
-                    Flexible(child: NeedsYouBadge(waiting: w)),
                   ] else if (!s.ended && (s.modeRequest?.pending ?? false)) ...[
                     SizedBox(width: t.sp * 0.75),
                     const Flexible(child: ModeAskTag()),

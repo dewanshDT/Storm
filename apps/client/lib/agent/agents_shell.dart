@@ -127,7 +127,6 @@ class AgentsSidebar extends ConsumerWidget {
           host: o?.hostName(s.hostId) ?? 'host',
           selected: s.id == selected || selection.contains(s.id),
           lineage: lineageLine(s, o),
-          waiting: o?.waitingChildOf(s),
           onTap: () => click(s),
         ),
       );

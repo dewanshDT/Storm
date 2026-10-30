@@ -16,7 +16,9 @@ import 'spawn_fakes.dart';
 /// Decision 144 in the client: a parent's About lists each child's latest
 /// events, how many its agent has not read, and where a less-than-certain
 /// signal came from; a child's activity reads "Unknown" until a gated
-/// signal says more, and never as working.
+/// signal says more, and never as working. Since decision 148 a child's
+/// denials show there and in its parent's Activity, and its prompt is a
+/// fault, never Needs you.
 void main() {
   const edge = Size(900, 700);
   const wide = Size(1400, 900);
@@ -45,6 +47,7 @@ void main() {
 
   const startedAt = '2026-10-27T10:00:00Z';
   const promptAt = '2026-10-27T10:04:00Z';
+  const deniedAt = '2026-10-27T10:05:00Z';
 
   List<Map<String, dynamic>> family() => [
     spawnSession('ags_p', spawn: {'enabled': true}),
@@ -70,7 +73,7 @@ void main() {
           2,
           'ags_c',
           'needs_attention',
-          reason: 'permission_prompt',
+          reason: 'unexpected_prompt',
           needsAttention: 'permission_prompt',
           source: 'provider_hook',
           confidence: 'reported',
@@ -95,6 +98,18 @@ void main() {
           source: 'output_pattern',
           confidence: 'heuristic',
           at: promptAt,
+        ),
+        childEvent(
+          'ags_p',
+          4,
+          'ags_w',
+          'denied',
+          tool: 'Bash',
+          detail: 'curl https://example.com/[x](y)',
+          count: 3,
+          source: 'provider_hook',
+          confidence: 'reported',
+          at: deniedAt,
         ),
       ],
     ),
@@ -126,8 +141,21 @@ void main() {
           findsOneWidget,
         );
         expect(
-          find.text('Needs you · ${clockAt(DateTime.parse(promptAt))}'),
+          find.text('Unexpected prompt · ${clockAt(DateTime.parse(promptAt))}'),
           findsOneWidget,
+        );
+        expect(find.textContaining('Needs you'), findsNothing);
+        expect(
+          find.text('Denied Bash ×3 · ${clockAt(DateTime.parse(deniedAt))}'),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('event-detail-evt_ags_p_4')),
+            matching: find.text('curl https://example.com/[x](y)'),
+          ),
+          findsOneWidget,
+          reason: 'the detail is the child’s own text, shown as it is',
         );
         // Certain evidence carries no badge; a hook's word says so.
         expect(
@@ -153,6 +181,37 @@ void main() {
       },
     );
   }
+
+  testWidgets('A-148-2: the parent’s Activity lists its children’s denials', (
+    tester,
+  ) async {
+    final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
+    FakeSpawning(agents);
+    final c = shellContainer(agentClient: agents.client);
+    await pumpShell(tester, c, size: wide);
+    c
+        .read(routerProvider)
+        .go(Routes.agentSession('ags_p', tab: SessionTab.requests.name));
+    await tester.pumpAndSettle();
+    final row = find.byKey(const Key('act-denied-evt_ags_p_4'));
+    expect(row, findsOneWidget);
+    expect(
+      find.descendant(
+        of: row,
+        matching: find.text('spike-notes: Denied Bash ×3'),
+      ),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: row,
+        matching: find.text('curl https://example.com/[x](y)'),
+      ),
+      findsOneWidget,
+    );
+    expect(find.byKey(const Key('acts-empty')), findsNothing);
+    await disposeShell(tester, c);
+  });
 
   testWidgets('a child’s unknown activity reads Unknown, never working', (
     tester,
@@ -234,6 +293,16 @@ void main() {
     expect(childEventLabel(event('unknown')), 'Lost touch');
     expect(childEventLabel(event('usage_limit')), 'Out of usage');
     expect(childEventLabel(event('parked')), 'Parked until its next message');
+    expect(
+      childEventLabel(event('needs_attention', reason: 'unexpected_prompt')),
+      'Unexpected prompt',
+    );
+    final denied = ChildEvent.fromJson(
+      childEvent('ags_p', 2, 'ags_c', 'denied', tool: 'Write', detail: '/x'),
+    );
+    expect(childEventLabel(denied), 'Denied Write');
+    expect(denied.count, 1);
+    expect(denied.detail, '/x');
     expect(evidenceLabel(event('started')), isNull);
 
     final session = AgentSession.fromJson({

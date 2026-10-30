@@ -90,6 +90,9 @@ class ChildEvent {
     this.status,
     this.activity,
     this.needsAttention,
+    this.tool,
+    this.detail,
+    this.count = 1,
   });
 
   final String id;
@@ -102,6 +105,14 @@ class ChildEvent {
   final String? status;
   final String? activity;
   final String? needsAttention;
+
+  /// A `denied` event's tool and what it was refused for: the command or
+  /// path, the child's own text, shown only as data (decision 148b).
+  final String? tool;
+  final String? detail;
+
+  /// Identical denials in one round, merged (148b).
+  final int count;
 
   /// `host_process`, `storm`, `provider_hook` or `output_pattern` (144b).
   final String source;
@@ -125,6 +136,9 @@ class ChildEvent {
       status: state['status'] as String?,
       activity: state['activity'] as String?,
       needsAttention: state['needs_attention'] as String?,
+      tool: j['tool'] as String?,
+      detail: j['detail'] as String?,
+      count: (j['count'] as num?)?.toInt() ?? 1,
       source: j['source'] as String? ?? 'storm',
       confidence: j['confidence'] as String? ?? 'certain',
       at: j['at'] as String? ?? '',
@@ -136,7 +150,9 @@ class ChildEvent {
 String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
   'needs_approval' => 'Asked for approval',
-  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Needs you',
+  // A child never asks (148a): a prompt there is a fault its parent hears.
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Unexpected prompt',
+  'denied' => deniedLabel(e),
   'idle_timeout' => 'Idle for 10 minutes',
   'usage_limit' => 'Out of usage',
   'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
@@ -146,6 +162,13 @@ String childEventLabel(ChildEvent e) => switch (e.kind) {
   'unknown' => 'Lost touch',
   _ => e.kind,
 };
+
+/// "Denied Bash ×3": what a child was refused (148b). Its detail is shown
+/// beside it, as plain text.
+String deniedLabel(ChildEvent e) => [
+  e.tool == null || e.tool!.isEmpty ? 'Denied' : 'Denied ${e.tool}',
+  if (e.count > 1) '×${e.count}',
+].join(' ');
 
 /// Where a signal came from, when it is not certain (144b): null for what
 /// the host's process or Storm itself saw.
@@ -427,8 +450,9 @@ String shortCommit(String? commit) =>
     commit == null ? '' : commit.substring(0, commit.length.clamp(0, 7));
 
 /// What a session waiting for a person shows beside its activity (134p).
+/// A permission prompt shows nothing: only a child reports one, and a child
+/// never asks the person (decision 148).
 String? attentionLabel(String? kind) => switch (kind) {
-  'permission_prompt' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,

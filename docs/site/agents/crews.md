@@ -54,10 +54,13 @@ all running**. They can't be moved on their own; where a move would be,
 they say "moves with the agent that started it". Moving the session that
 started them, or making a crew from it, takes them along.
 
-When one of them stops at its own permission prompt, it shows **Needs you**,
-and so do the session that started it and its crew. Tap the badge to open
-that agent and answer in its terminal: no agent, and nothing in Storm,
-answers it for you.
+Agents a session started never ask you anything. They run without
+permission prompts, inside their own copy of the workspace, and whatever
+their permissions don't cover is refused rather than asked. Each refusal
+goes to the session that started them, which decides what to do next: give
+the agent another task, do the step itself (which may ask you, in its own
+terminal), end it or start another. You deal only with the session you
+started. Its **Activity** and its list of children show what was refused.
 
 Collapsing a crew, or the whole CREWS section, is remembered on each device
 separately. Everything else about a crew is kept on your server, so your

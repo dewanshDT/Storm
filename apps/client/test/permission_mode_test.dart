@@ -13,16 +13,13 @@ import 'shell_harness.dart';
 import 'spawn_fakes.dart';
 
 /// Decision 146 in the client: the launcher's Permission mode (146b), the
-/// mode on a session's row and in About, and Needs you for a child waiting
-/// at its CLI's own permission prompt, on the child, its parent and its
-/// crew (146c).
+/// mode on a session's row and in About; and since decision 148 no Needs
+/// you for a child, which never asks the person.
 void main() {
   const wide = Size(1400, 900);
   const phone = Size(899, 900);
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
-
-  String location(ProviderContainer c) => c.read(routerProvider).state.uri.path;
 
   Future<ProviderContainer> open(
     WidgetTester t,
@@ -180,7 +177,7 @@ void main() {
     });
   });
 
-  group('Needs you (146c)', () {
+  group('children never ask (148)', () {
     Map<String, dynamic> inCrew(Map<String, dynamic> s) => {
       ...s,
       'crew': {'id': 'crw_1', 'order': 0},
@@ -198,88 +195,34 @@ void main() {
       return crew ? [inCrew(parent), inCrew(child)] : [parent, child];
     }
 
-    test('A-146-4: the label is Needs you', () {
-      expect(attentionLabel('permission_prompt'), 'Needs you');
+    test('A-148-3: a permission prompt has no label', () {
+      expect(attentionLabel('permission_prompt'), isNull);
+      expect(attentionLabel('blocked'), 'Blocked');
+      expect(attentionLabel('usage_limit'), 'Out of usage');
     });
 
     for (final size in [wide, phone]) {
       testWidgets(
-        'A-146-4: the child and its parent show Needs you, and a tap opens '
-        'the child at ${size.width.toInt()}px',
+        'A-148-3: a child at an unexpected prompt shows no Needs you on '
+        'itself, its parent or its crew at ${size.width.toInt()}px',
         (t) async {
           final agents = FakeAgentServer(
             hosts: [agentHost()],
-            sessions: family(),
+            crews: [agentCrew('crw_1')],
+            sessions: family(crew: true),
           );
           final spawning = FakeSpawning(agents);
           final c = await open(t, agents, size: size);
+          expect(find.text('Needs you'), findsNothing);
+          expect(find.byKey(const Key('needs-you-ags_c')), findsNothing);
           expect(
             find.byKey(const Key('attention-permission_prompt')),
-            findsWidgets,
+            findsNothing,
           );
-          final badge = find.byKey(const Key('needs-you-ags_c'));
-          expect(badge, findsOneWidget, reason: 'on the parent’s row');
-          await t.tap(badge);
-          await t.pumpAndSettle();
-          expect(location(c), '/agents/s/ags_c');
           expect(spawning.terminalWrites, 0);
           await disposeShell(t, c);
         },
       );
-
-      testWidgets('A-146-4: a crew holding the child shows Needs you at '
-          '${size.width.toInt()}px', (t) async {
-        final agents = FakeAgentServer(
-          hosts: [agentHost()],
-          crews: [agentCrew('crw_1')],
-          sessions: family(crew: true),
-        );
-        FakeSpawning(agents);
-        final c = await open(t, agents, size: size);
-        final crewHeader = find.byKey(const Key('crew-crw_1'));
-        expect(crewHeader, findsWidgets);
-        expect(
-          find.descendant(
-            of: crewHeader.first,
-            matching: find.byKey(const Key('needs-you-ags_c')),
-          ),
-          findsOneWidget,
-        );
-        await t.tap(
-          find
-              .descendant(
-                of: crewHeader.first,
-                matching: find.byKey(const Key('needs-you-ags_c')),
-              )
-              .first,
-        );
-        await t.pumpAndSettle();
-        expect(location(c), '/agents/s/ags_c');
-        await disposeShell(t, c);
-      });
     }
-
-    testWidgets('nothing waits once the prompt is answered', (t) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [
-          spawnSession('ags_p', name: 'gateway-impl'),
-          spawnSession(
-            'ags_c',
-            name: 'test-gateway',
-            parent: 'ags_p',
-            depth: 1,
-          ),
-        ],
-      );
-      FakeSpawning(agents);
-      final c = await open(t, agents);
-      expect(find.byKey(const Key('needs-you-ags_c')), findsNothing);
-      expect(
-        find.byKey(const Key('attention-permission_prompt')),
-        findsNothing,
-      );
-      await disposeShell(t, c);
-    });
   });
 }

@@ -69,6 +69,9 @@ Map<String, dynamic> childEvent(
   String source = 'storm',
   String confidence = 'certain',
   String at = '2026-10-27T10:00:00Z',
+  String? tool,
+  String? detail,
+  int? count,
 }) => {
   'id': 'evt_${parent}_$seq',
   'seq': seq,
@@ -83,6 +86,9 @@ Map<String, dynamic> childEvent(
   'source': source,
   'confidence': confidence,
   'at': at,
+  'tool': ?tool,
+  'detail': ?detail,
+  'count': ?count,
 };
 
 const _ended = ['completed', 'stopped', 'failed'];
