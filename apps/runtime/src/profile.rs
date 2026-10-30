@@ -221,6 +221,10 @@ pub struct PermissionLaunch {
     /// Auto is out of Claude Code's Shift+Tab cycle (147c): every mode but
     /// `auto` itself.
     pub auto_off: bool,
+    /// A child's baseline in Claude Code's `permissions.allow` (148a).
+    pub allow: Vec<String>,
+    /// OpenCode: Storm's layer turns every ask into a deny (148a).
+    pub deny_asks: bool,
 }
 
 /// A permission mode as `provider` takes it (146b, 147a), by
@@ -251,6 +255,49 @@ pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, S
         _ => Err(format!(
             "{:?} is not a permission mode Storm gives {provider}",
             mode.chars().take(40).collect::<String>()
+        )),
+    }
+}
+
+/// What a child is allowed outright in Claude Code `dontAsk` (148a): edits
+/// and reads inside its own workspace, and commands. Its workspace, user and
+/// namespace are already its own (136, 137), and nothing reaches the
+/// person's workspace until they Apply it.
+pub const CHILD_BASELINE: [&str; 3] = ["Edit(./**)", "Read(./**)", "Bash"];
+
+/// Whether Claude Code's auto mode can fall back to asking the person.
+/// G-148 found it does (2.1.312: after repeated classifier blocks the call
+/// goes to the CLI's own prompt), and no documented setting turns that into
+/// a denial (`autoMode` takes only classifier rules), so a child never runs
+/// in auto.
+pub const AUTO_CAN_ASK: bool = true;
+
+/// A child's mode as `provider` takes it (148a): never a prompt, whatever its
+/// parent's mode. Claude Code runs `dontAsk` with [`CHILD_BASELINE`], for an
+/// auto parent too: G-148 found auto falls back to asking after repeated
+/// blocks, and no documented setting turns that into a denial. OpenCode
+/// gets `edit` and `bash` allowed and every other ask denied. `mode` is still
+/// checked as [`permission_mode`] checks it; any other agent is refused,
+/// since nothing documented keeps it from asking.
+pub fn child_permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
+    permission_mode(provider, mode)?;
+    match provider {
+        "claude-code" => Ok(PermissionLaunch {
+            args: vec!["--permission-mode".into(), "dontAsk".into()],
+            auto_off: true,
+            allow: CHILD_BASELINE.map(String::from).to_vec(),
+            ..Default::default()
+        }),
+        "opencode" => Ok(PermissionLaunch {
+            opencode_permission: vec![
+                ("bash".into(), "allow".into()),
+                ("edit".into(), "allow".into()),
+            ],
+            deny_asks: true,
+            ..Default::default()
+        }),
+        _ => Err(format!(
+            "{provider} cannot run as a child: nothing documented keeps it from asking"
         )),
     }
 }
@@ -378,6 +425,7 @@ mod tests {
                     args: args.clone(),
                     opencode_permission: opencode,
                     auto_off: case["auto_off"].as_bool().unwrap(),
+                    ..Default::default()
                 },
                 "{agent} {mode}"
             );
@@ -408,6 +456,68 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// 148a (A-148-1, A-148-4): a child's mode is the vectors' no-prompt
+    /// form for every mode its agent offers; Codex and every other agent
+    /// are refused as a child, and nothing reaches bypass.
+    #[test]
+    fn a_148_a_childs_mode_never_asks() {
+        let v = mode_vectors();
+        let child = &v["child"];
+        for case in child["accepted"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            let strings =
+                |key: &str| -> Vec<String> { serde_json::from_value(case[key].clone()).unwrap() };
+            let got = child_permission_mode(agent, mode).unwrap();
+            assert_eq!(
+                got,
+                PermissionLaunch {
+                    args: strings("args"),
+                    opencode_permission: case["opencode_permission"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                        .collect(),
+                    auto_off: case["auto_off"].as_bool().unwrap(),
+                    allow: strings("allow"),
+                    deny_asks: case["deny_asks"].as_bool().unwrap(),
+                },
+                "{agent} {mode}"
+            );
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &got.args)
+                .unwrap();
+            let text = format!("{got:?}");
+            assert!(!text.contains("bypass") && !text.contains("skip"), "{text}");
+        }
+        for case in child["refused"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            assert!(
+                child_permission_mode(agent, mode).is_err(),
+                "{agent} {mode:?}"
+            );
+        }
+        let unattended: Vec<&str> = child["unattended"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        for p in BUILT_IN {
+            assert_eq!(
+                child_permission_mode(p.id, "default").is_ok(),
+                unattended.contains(&p.id),
+                "{}",
+                p.id
+            );
         }
     }
 

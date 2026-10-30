@@ -1762,8 +1762,15 @@ impl Host {
                 return self.post_start_failure(&id).await;
             }
         };
-        // 146b: checked here too; a mode this agent does not take fails.
-        let mode = match crate::profile::permission_mode(
+        // 146b: checked here too; a mode this agent does not take fails. A
+        // child's is its no-prompt form (148a), and an agent with none
+        // does not start as a child.
+        let mode_of = if child_of.is_some() {
+            crate::profile::child_permission_mode
+        } else {
+            crate::profile::permission_mode
+        };
+        let mode = match mode_of(
             &provider_id,
             permission_mode.as_deref().unwrap_or("default"),
         ) {
@@ -1913,12 +1920,21 @@ impl Host {
         let reads_storm = mcp.iter().any(|g| g.id == crate::mcp::STORM_CONNECTION);
         let spawned = child_of.is_some() && reads_storm;
         // 146a: a child's own Storm tools, and a spawning parent's spawn
-        // tools, are allowed outright; every other session's layer is empty.
-        let layer = crate::mcp::StormLayer::new(
+        // tools, are allowed outright, as is a top-level Claude Code
+        // session's request for auto (147c), so the person sees Storm's card
+        // and never the CLI's prompt for it. A child's OpenCode asks are
+        // denies (148a).
+        let mut layer = crate::mcp::StormLayer::new(
             spawned,
             spawn && reads_storm && child_of.is_none(),
             mode.opencode_permission.clone(),
         );
+        if is_claude && reads_storm && child_of.is_none() {
+            layer = layer.asking_for_modes();
+        }
+        if mode.deny_asks {
+            layer = layer.denying_asks();
+        }
         let plugin_plan = match self.mcp_launch(
             &id,
             &provider_id,
@@ -1980,7 +1996,9 @@ impl Host {
             .insert(id.clone(), events.leader.subscribe());
         let pins = synced.as_ref().map(|(pins, _)| pins);
         let allow = if is_claude {
-            layer.claude_allow()
+            let mut allow = layer.claude_allow();
+            allow.extend(mode.allow.iter().cloned());
+            allow
         } else {
             Vec::new()
         };
@@ -2445,7 +2463,7 @@ impl Host {
                     plugin_servers,
                     own,
                     layer,
-                    &|| crate::mcp::opencode_account_text(own.storm_only),
+                    &|| crate::mcp::opencode_account_files(own.storm_only),
                 )?,
                 None,
             )
@@ -2947,6 +2965,39 @@ impl Host {
             .await;
     }
 
+    /// A child's tool call its own permissions refused (148b), passed to the
+    /// server as data, bounded again here: the server tells the parent.
+    /// Only from a spawned child whose agent's gate lets denials through.
+    async fn denied_reported(&self, report: crate::harness::DeniedLine, peer: Peer) {
+        let Some((session, events)) = self.hook_session(&report.handle, peer).await else {
+            return;
+        };
+        if !events.hooks.denied || !events.spawned || !*self.link_up.borrow() {
+            return;
+        }
+        let denied = report.denied;
+        let tool: String = denied
+            .tool
+            .chars()
+            .take(crate::harness::MAX_DENIAL_TOOL)
+            .collect();
+        if tool.is_empty() {
+            return;
+        }
+        let detail: String = denied
+            .detail
+            .chars()
+            .take(crate::harness::MAX_DENIAL_DETAIL)
+            .collect();
+        tracing::info!(%session, %tool, "a child's tool call was denied");
+        let _ = self
+            .post(
+                &format!("/v1/runtime/sessions/{session}/denied"),
+                &json!({"tool": tool, "detail": detail, "source": crate::harness::PROVIDER_HOOK}),
+            )
+            .await;
+    }
+
     /// A waker (144c, 145d): held until Storm says something new is unread
     /// for the session, then told its kind, once per mark. One waiter per
     /// session: a newer one releases this one. The session's end, or the
@@ -3071,6 +3122,9 @@ impl Host {
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::ResultLine>(&line) {
             return self.result_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::DeniedLine>(&line) {
+            return self.denied_reported(report, peer).await;
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::WakeLine>(&line) {
             return self.waiter(report, peer, write).await;
@@ -3719,6 +3773,18 @@ mod tests {
                         output_tokens: Some(3),
                         ..Default::default()
                     }),
+                },
+            )
+            .unwrap(),
+            // 148b's denial, with its own handle.
+            "deny" => crate::harness::send_line(
+                socket(),
+                &crate::harness::DeniedLine {
+                    handle: handle(),
+                    denied: crate::harness::Denial {
+                        tool: "Bash".into(),
+                        detail: arg.into(),
+                    },
                 },
             )
             .unwrap(),
@@ -6856,7 +6922,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
     /// 145a: a start from an older server still carrying `spawn_asks`
     /// parses, and no session writes asks: a parent that may start agents
     /// gets the Claude Code settings a plain session gets, with no
-    /// `permissions` of Storm's, and an OpenCode config naming no spawn tool.
+    /// `permissions` of Storm's but 147c's, and an OpenCode config naming no
+    /// spawn tool.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(unix)]
     async fn no_start_writes_spawn_asks() {
@@ -6895,8 +6962,11 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         };
         assert_eq!(
             settings("ags_SPAWN")["permissions"],
-            serde_json::json!({"disableAutoMode": "disable"}),
-            "only 147c's setting"
+            serde_json::json!({
+                "allow": ["mcp__storm__request_permission_mode"],
+                "disableAutoMode": "disable"
+            }),
+            "only 147c's tool and setting"
         );
         assert_eq!(settings("ags_SPAWN"), settings("ags_PLAIN"));
         let env = recorded(roots.path(), "env", "ags_OCSPAWN").unwrap();
@@ -6974,10 +7044,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             )
             .unwrap()
         };
-        let rules: Vec<String> = crate::mcp::SPAWN_ALLOWED_TOOLS
+        // 147c's request for auto is allowed for every top-level Claude Code
+        // session reading Storm, so the person sees only Storm's card.
+        let mode_tool = "mcp__storm__request_permission_mode";
+        let mut rules: Vec<String> = crate::mcp::SPAWN_ALLOWED_TOOLS
             .iter()
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
+        rules.push(mode_tool.into());
         // 147c's setting is every non-auto Claude Code session's.
         let auto_off = serde_json::json!({"disableAutoMode": "disable"});
         assert_eq!(
@@ -6985,12 +7059,12 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             serde_json::json!({ "allow": rules, "disableAutoMode": "disable" })
         );
         let mut parent = settings("ags_CCSPAWN");
-        parent["permissions"]
-            .as_object_mut()
-            .unwrap()
-            .remove("allow");
+        parent["permissions"]["allow"] = serde_json::json!([mode_tool]);
         assert_eq!(parent, settings("ags_CCPLAIN"), "nothing else changes");
-        assert_eq!(settings("ags_CCPLAIN")["permissions"], auto_off);
+        assert_eq!(
+            settings("ags_CCPLAIN")["permissions"],
+            serde_json::json!({"allow": [mode_tool], "disableAutoMode": "disable"})
+        );
         assert_eq!(settings("ags_NOSTORM")["permissions"], auto_off);
         let mut want = serde_json::json!({"storm_*": "ask"});
         for t in crate::mcp::SPAWN_ALLOWED_TOOLS {
@@ -7471,6 +7545,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             provider: "claude-code",
             source: "provider_hook",
         }],
+        denials: &["claude-code"],
         wakes: &[crate::harness::GatedWake {
             provider: "claude-code",
             mechanism: "async_rewake",
@@ -7516,18 +7591,19 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
     /// A-144-10 at the host: a gated agent's hooks are reported as
     /// `provider_hook` evidence (its turn as `activity`, a usage limit as
     /// `attention`), and a child's final message goes to the server with
-    /// the tokens its agent counted; the same hooks with no gate passed
-    /// report nothing, and its settings gain nothing.
+    /// the tokens its agent counted, as does a denial (148b); the same hooks
+    /// with no gate passed report nothing, and its settings gain nothing.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(target_os = "linux")]
     async fn a_144_10_a_gated_childs_hooks_are_evidence_and_an_ungated_ones_nothing() {
         let marker = "99999999-9999-4999-8999-999999999999";
         let script = format!(
-            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; {}; {}; exec sleep 1000",
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; {}; {}; {}; exec sleep 1000",
             probe("signal working", false),
             probe("signal idle", false),
             probe("signal usage_limit", false),
             probe("result the answer is 42", false),
+            probe("deny curl example.com", false),
             probe(&format!("send {marker}"), false),
         );
         for gated in [true, false] {
@@ -7539,6 +7615,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                     signals: &[],
                     results: &[],
                     wakes: &[],
+                    denials: &[],
                 }
             };
             let (host, seen, _helper, state, _roots, children) =
@@ -7549,6 +7626,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .unwrap();
             assert_eq!(settings.contains("asyncRewake"), gated, "{settings}");
             assert_eq!(settings.contains("harness-result"), gated, "{settings}");
+            assert_eq!(settings.contains("harness-denied"), gated, "{settings}");
             std::fs::write(children.path().join("ags_CHILD/workspace/go"), "").unwrap();
             wait_for("the marker", || {
                 child_posts(&seen, "status")
@@ -7576,6 +7654,13 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                         "usage": {"input_tokens": 12, "output_tokens": 3}})
                     ]
                 );
+                wait_for("the denial", || !child_posts(&seen, "denied").is_empty()).await;
+                assert_eq!(
+                    child_posts(&seen, "denied"),
+                    [
+                        json!({"tool": "Bash", "detail": "curl example.com", "source": "provider_hook"})
+                    ]
+                );
             } else {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let posts = child_posts(&seen, "status");
@@ -7586,18 +7671,21 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                     "{posts:?}"
                 );
                 assert!(child_posts(&seen, "final-message").is_empty());
+                assert!(child_posts(&seen, "denied").is_empty());
             }
             host.shutdown(Duration::from_millis(200)).await;
         }
     }
 
-    /// A-146-1 and 146c at the host: the vectors' child start (Claude Code,
-    /// reading Storm) gets its own Storm tools allowed in its `--settings`,
-    /// and, with the compiled lists, the permission prompt's hooks.
+    /// A-146-1, 146c and 148a at the host: the vectors' child start (Claude
+    /// Code, reading Storm) runs `dontAsk` with its own Storm tools and the
+    /// child baseline allowed in its `--settings`, never `request_permission_mode`,
+    /// and, with the compiled lists, the permission prompt's hooks as a
+    /// fault detector and the denial hooks.
     #[tokio::test(flavor = "multi_thread")]
     #[cfg(target_os = "linux")]
     async fn a_146_a_childs_settings_allow_its_storm_tools_and_report_its_prompt() {
-        let (host, _seen, _helper, state, _roots, _children) =
+        let (host, _seen, helper, state, _roots, _children) =
             spawned_child("exec sleep 1000", crate::harness::Gates::COMPILED).await;
         let settings: serde_json::Value = serde_json::from_slice(
             &std::fs::read(
@@ -7606,18 +7694,31 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .unwrap(),
         )
         .unwrap();
-        let rules: Vec<String> = crate::mcp::CHILD_ALLOWED_TOOLS
+        let mut rules: Vec<String> = crate::mcp::CHILD_ALLOWED_TOOLS
             .iter()
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
+        rules.extend(crate::profile::CHILD_BASELINE.map(String::from));
         assert_eq!(
             settings["permissions"],
             json!({ "allow": rules, "disableAutoMode": "disable" })
         );
+        for hook in ["PermissionRequest", "PostToolBatch", "PermissionDenied"] {
+            assert!(settings["hooks"][hook].is_array(), "{hook}: {settings}");
+        }
+        let launch = helper.seen.lock().unwrap().launches[0].clone();
+        let args: Vec<&str> = launch["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|a| a.as_str())
+            .collect();
         assert!(
-            settings["hooks"]["PermissionRequest"].is_array(),
-            "{settings}"
+            args.windows(2)
+                .any(|w| w == ["--permission-mode", "dontAsk"]),
+            "{args:?}"
         );
+        assert!(!args.concat().contains("bypass"), "{args:?}");
         assert!(host.session("ags_CHILD").unwrap().events.attention_hooks);
         host.shutdown(Duration::from_millis(200)).await;
     }

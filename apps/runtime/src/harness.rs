@@ -129,6 +129,19 @@ pub struct GatedWake {
 /// None has passed its gate.
 pub const WAKE: &[GatedWake] = &[];
 
+/// The agents whose denials a child's hooks or plugin report (148b), once
+/// G-148 passes for them: Claude Code's `PostToolBatch` (a `dontAsk`
+/// denial runs no other hook) and `PermissionDenied` (auto's), OpenCode's
+/// tool part that failed on a deny rule. G-148 passed locally on 2026-10-30
+/// with Claude Code 2.1.312 and OpenCode 1.19.4 (`tests/lifecycle_gate.rs`).
+/// The server's `events::DENIALS` is the same list.
+pub const DENIALS: &[&str] = &["claude-code", "opencode"];
+
+/// The longest `detail` a denial carries, in characters (148b).
+pub const MAX_DENIAL_DETAIL: usize = 500;
+/// The longest tool name a denial carries.
+pub const MAX_DENIAL_TOOL: usize = 128;
+
 pub const IDLE: &str = "idle";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const PROVIDER_HOOK: &str = "provider_hook";
@@ -147,6 +160,7 @@ pub struct Gates {
     pub signals: &'static [GatedSignal],
     pub results: &'static [ResultSource],
     pub wakes: &'static [GatedWake],
+    pub denials: &'static [&'static str],
 }
 
 impl Gates {
@@ -155,6 +169,7 @@ impl Gates {
         signals: GATED_SIGNALS,
         results: RESULT_SOURCES,
         wakes: WAKE,
+        denials: DENIALS,
     };
 
     fn signal(&self, provider: &str, signal: &str) -> bool {
@@ -177,6 +192,7 @@ impl Gates {
                 .iter()
                 .any(|r| r.provider == provider && r.source == PROVIDER_HOOK),
             wake: self.wakes.iter().any(|w| w.provider == provider),
+            denied: child && self.denials.contains(&provider),
         }
     }
 }
@@ -195,6 +211,8 @@ pub struct Hooks {
     pub result: bool,
     /// 144c, 145d: the waker.
     pub wake: bool,
+    /// 148b: a child's denials.
+    pub denied: bool,
 }
 
 impl Hooks {
@@ -214,6 +232,7 @@ impl Hooks {
             usage_limit: true,
             result: true,
             wake: true,
+            denied: true,
         }
     }
 
@@ -268,6 +287,20 @@ pub struct WakeAnswer {
     pub wake: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub release: bool,
+}
+
+/// One line from `harness-denied`: a tool call the agent's own permissions
+/// refused (148b). Data only: the command or path, bounded.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DeniedLine {
+    pub handle: String,
+    pub denied: Denial,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Denial {
+    pub tool: String,
+    pub detail: String,
 }
 
 /// The longest final message the hook sends; the server keeps less.
@@ -578,7 +611,11 @@ fn add_hook(
 ///   tokens from its transcript;
 /// - wake: an `asyncRewake` waker armed on `SessionStart`,
 ///   `UserPromptSubmit`, `Stop` and `StopFailure` (an interrupt fires no
-///   `Stop`), with a day's timeout since Claude Code enforces it.
+///   `Stop`), with a day's timeout since Claude Code enforces it;
+/// - a child's denials (148b, G-148 on 2.1.312): `PostToolBatch`, whose
+///   result for a call `dontAsk` refused is the CLI's denial sentence (no
+///   `PermissionDenied` or `PostToolUseFailure` runs for one), and
+///   `PermissionDenied`, which only auto's refusals run.
 fn claude_lifecycle_hooks(settings: &mut serde_json::Value, exe: &Path, hooks: &Hooks) {
     let exe = shell_quote(&exe.display().to_string());
     let command = |args: &str| json!({"type": "command", "command": format!("{exe} {args}")});
@@ -610,6 +647,20 @@ fn claude_lifecycle_hooks(settings: &mut serde_json::Value, exe: &Path, hooks: &
     if hooks.result {
         add_hook(settings, "Stop", None, command("harness-result"));
     }
+    if hooks.denied {
+        add_hook(
+            settings,
+            "PostToolBatch",
+            None,
+            command("harness-denied post-tool-batch"),
+        );
+        add_hook(
+            settings,
+            "PermissionDenied",
+            None,
+            command("harness-denied permission-denied"),
+        );
+    }
     if hooks.wake {
         for event in ["SessionStart", "UserPromptSubmit", "Stop", "StopFailure"] {
             let mut waker = command("harness-wake");
@@ -624,6 +675,17 @@ fn claude_lifecycle_hooks(settings: &mut serde_json::Value, exe: &Path, hooks: &
 /// and 86400 was accepted by 2.1.310.
 pub const WAKER_TIMEOUT_SECS: u64 = 86_400;
 
+/// How OpenCode 1.19.4 words a tool call a deny rule refused (its
+/// `PermissionDeniedError`): it publishes no event of its own, so the tool
+/// part that failed with it is the denial (G-148).
+pub const OPENCODE_DENIED: &str =
+    "The user has specified a rule which prevents you from using this specific tool call.";
+
+/// How Claude Code 2.1.312 begins the result of a call its permissions
+/// refused, `dontAsk`'s included: `Permission to use <tool> has been
+/// denied…` (G-148).
+const CLAUDE_DENIED: (&str, &str) = ("Permission to use ", " has been denied");
+
 /// The OpenCode plugin. A subagent's session has a parent and is never the
 /// one to resume; an id is reported once per change. With `hooks.attention`,
 /// it also reports while any permission it was asked is unanswered (134-9),
@@ -637,10 +699,13 @@ pub const WAKER_TIMEOUT_SECS: u64 = 86_400;
 /// - wake: `harness-wake --plugin` waits on the host, and once it names
 ///   something unread the plugin sends its fixed sentence with
 ///   `client.session.promptAsync` when the session is idle, never through
-///   the TUI.
+///   the TUI;
+/// - a child's denials (148b): a tool part that failed on a deny rule, once
+///   per part.
 fn plugin(exe: &Path, hooks: &Hooks) -> String {
     let exe = serde_json::to_string(&exe.display().to_string()).expect("a string serializes");
     let lifecycle = hooks.any_signal() || hooks.result || hooks.wake;
+    let runs = hooks.attention || lifecycle || hooks.denied;
     let client = if hooks.result || hooks.wake {
         "{ client }"
     } else {
@@ -648,7 +713,7 @@ fn plugin(exe: &Path, hooks: &Hooks) -> String {
     };
     let mut state = String::new();
     let mut handlers = String::new();
-    if hooks.attention || lifecycle {
+    if runs {
         state.push_str(&format!(
             r#"
   let told = Promise.resolve();
@@ -783,6 +848,26 @@ fn plugin(exe: &Path, hooks: &Hooks) -> String {
         const now = event.properties?.status?.type !== "idle";
         if (now === busy) return;
         busy = now;{on_turn}
+        return;
+      }}"#
+        ));
+    }
+    if hooks.denied {
+        let prefix = serde_json::to_string(OPENCODE_DENIED).expect("a string serializes");
+        state.push_str(
+            r#"
+  const denied = new Set();"#,
+        );
+        handlers.push_str(&format!(
+            r#"
+      if (event.type === "message.part.updated") {{
+        const part = event.properties?.part;
+        const error = part?.state?.error;
+        if (part?.type === "tool" && part.state.status === "error" && typeof error === "string"
+            && error.startsWith({prefix}) && !denied.has(part.id)) {{
+          denied.add(part.id);
+          run(["harness-denied", "opencode"], JSON.stringify({{ tool: part.tool, input: part.state.input ?? {{}} }}));
+        }}
         return;
       }}"#
         ));
@@ -1111,6 +1196,98 @@ pub fn wake(plugin: bool) -> i32 {
         eprintln!("{text}");
     }
     2
+}
+
+/// `storm-runtime harness-denied KIND`: the tool calls the agent's own
+/// permissions refused (148b), from Claude Code's `PostToolBatch` or
+/// `PermissionDenied` input, or OpenCode's plugin (`opencode`). Always
+/// successful, and prints nothing.
+pub fn report_denied(kind: &str) {
+    let input = read_hook_input();
+    let found = denials(kind, input.as_ref());
+    let (Ok(handle), Some(socket)) = (
+        std::env::var(HANDLE_ENV),
+        std::env::var_os(crate::mcp::SOCKET_ENV),
+    ) else {
+        return;
+    };
+    for denied in found {
+        let _ = send_line(
+            &socket,
+            &DeniedLine {
+                handle: handle.clone(),
+                denied,
+            },
+        );
+    }
+}
+
+/// The denials a hook's input holds: every call of a `PostToolBatch` whose
+/// result is Claude Code's denial sentence, a `PermissionDenied`'s call, or
+/// the call OpenCode's plugin passes on.
+pub fn denials(kind: &str, input: Option<&serde_json::Value>) -> Vec<Denial> {
+    let Some(input) = input else {
+        return Vec::new();
+    };
+    match kind {
+        "post-tool-batch" => input["tool_calls"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|call| {
+                call["tool_response"].as_str().is_some_and(|r| {
+                    r.starts_with(CLAUDE_DENIED.0)
+                        && r.split('.')
+                            .next()
+                            .is_some_and(|s| s.contains(CLAUDE_DENIED.1))
+                })
+            })
+            .filter_map(|call| denial(call["tool_name"].as_str()?, &call["tool_input"]))
+            .collect(),
+        "permission-denied" => input["tool_name"]
+            .as_str()
+            .and_then(|tool| denial(tool, &input["tool_input"]))
+            .into_iter()
+            .collect(),
+        "opencode" => input["tool"]
+            .as_str()
+            .and_then(|tool| denial(tool, &input["input"]))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn bounded(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// A denial as data: the tool, and the command or path it was refused
+/// (else its input), each bounded.
+fn denial(tool: &str, input: &serde_json::Value) -> Option<Denial> {
+    if tool.is_empty() {
+        return None;
+    }
+    let detail = [
+        "command",
+        "file_path",
+        "filePath",
+        "notebook_path",
+        "path",
+        "url",
+        "pattern",
+    ]
+    .iter()
+    .find_map(|k| input[*k].as_str().map(str::to_string))
+    .unwrap_or_else(|| match input {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Object(o) if o.is_empty() => String::new(),
+        other => other.to_string(),
+    });
+    Some(Denial {
+        tool: bounded(tool, MAX_DENIAL_TOOL),
+        detail: bounded(&detail, MAX_DENIAL_DETAIL),
+    })
 }
 
 pub(crate) fn send_line(socket: impl AsRef<Path>, line: &impl Serialize) -> Result<()> {
@@ -1525,8 +1702,8 @@ export const StormHarness = async () => {
     }
 
     /// Each gated list here is the server's, spelled the same; only a
-    /// child's permission prompt is on (G-146-P), and only a child's hooks
-    /// report it.
+    /// child's permission prompt (G-146-P) and its denials (G-148) are on,
+    /// and only a child's hooks report them.
     #[test]
     fn the_gated_lists_are_the_servers() {
         let server = |file: &str| {
@@ -1542,9 +1719,11 @@ export const StormHarness = async () => {
             ("GATED_SIGNALS", "attention.rs", "GATED_SIGNALS"),
             ("RESULT_SOURCES", "round.rs", "RESULT_SOURCES"),
             ("WAKE", "events.rs", "WAKE"),
+            ("DENIALS", "events.rs", "DENIALS"),
         ] {
             assert_eq!(list(here, name), list(&server(file), theirs), "{name}");
         }
+        assert_eq!(DENIALS, ["claude-code", "opencode"]);
         assert!(RESULT_SOURCES.is_empty() && WAKE.is_empty());
         let on: Vec<(&str, &str, &str)> = GATED_SIGNALS
             .iter()
@@ -1563,9 +1742,13 @@ export const StormHarness = async () => {
                 Hooks::default(),
                 "{provider}"
             );
+            let gated = matches!(provider, "claude-code" | "opencode");
             assert_eq!(
                 Gates::COMPILED.hooks(provider, true),
-                Hooks::attention(matches!(provider, "claude-code" | "opencode")),
+                Hooks {
+                    denied: gated,
+                    ..Hooks::attention(gated)
+                },
                 "{provider}'s child"
             );
         }
@@ -1590,7 +1773,8 @@ export const StormHarness = async () => {
 
     /// A session that is not a child gets no hook, plugin code or waker:
     /// its files are byte for byte what they were before 144's runtime
-    /// half. A child gets only the permission prompt's (146c).
+    /// half. A child gets only the permission prompt's (146c) and its
+    /// denials' (148b).
     #[test]
     fn with_nothing_gated_the_configs_are_byte_identical() {
         let hooks = Gates::COMPILED.hooks("claude-code", false);
@@ -1602,7 +1786,10 @@ export const StormHarness = async () => {
         assert_eq!(js, plugin(Path::new("/x"), &Hooks::default()));
         assert_eq!(
             settings_of(&Gates::COMPILED.hooks("claude-code", true)),
-            settings_of(&Hooks::attention(true))
+            settings_of(&Hooks {
+                denied: true,
+                ..Hooks::attention(true)
+            })
         );
         for absent in [
             "harness-wake",
@@ -1890,5 +2077,86 @@ export const StormHarness = async () => {
         .unwrap();
         assert_eq!(transcript_usage(&path, "all done"), None, "never guessed");
         assert_eq!(transcript_usage(&dir.path().join("none"), "x"), None);
+    }
+
+    /// 148b: a child's denials are read from each hook's input as G-148
+    /// found them: a `PostToolBatch` call whose result is Claude Code's
+    /// denial sentence (and no other call), a `PermissionDenied`, and
+    /// OpenCode's plugin's report; each carries the tool and the command or
+    /// path, bounded, as data.
+    #[test]
+    fn a_148_b_denials_are_read_from_each_hook() {
+        let batch = serde_json::json!({"hook_event_name": "PostToolBatch", "tool_calls": [
+            {"tool_name": "Write", "tool_input": {"file_path": "/elsewhere/x", "content": "c"},
+             "tool_response": "Permission to use Write has been denied because Claude Code is running in don't ask mode. IMPORTANT: …"},
+            {"tool_name": "Bash", "tool_input": {"command": "echo hi"},
+             "tool_response": "(Bash completed with no output)"},
+            {"tool_name": "Bash", "tool_input": {"command": "cat log"},
+             "tool_response": {"stdout": "Permission to use Bash has been denied."}},
+            {"tool_name": "mcp__storm__create_note", "tool_input": {},
+             "tool_response": "Permission to use mcp__storm__create_note has been denied because Claude Code is running in don't ask mode."}
+        ]});
+        assert_eq!(
+            denials("post-tool-batch", Some(&batch)),
+            [
+                Denial {
+                    tool: "Write".into(),
+                    detail: "/elsewhere/x".into()
+                },
+                Denial {
+                    tool: "mcp__storm__create_note".into(),
+                    detail: String::new()
+                }
+            ]
+        );
+        let long = "x".repeat(2000);
+        let auto = serde_json::json!({"hook_event_name": "PermissionDenied", "tool_name": "Bash",
+            "tool_input": {"command": long}, "reason": "blocked"});
+        let got = denials("permission-denied", Some(&auto));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].detail.chars().count(), MAX_DENIAL_DETAIL);
+        let opencode = serde_json::json!({"tool": "write", "input": {"filePath": "/outside/y"}});
+        assert_eq!(
+            denials("opencode", Some(&opencode)),
+            [Denial {
+                tool: "write".into(),
+                detail: "/outside/y".into()
+            }]
+        );
+        assert!(denials("opencode", None).is_empty());
+        assert!(denials("other", Some(&batch)).is_empty());
+
+        let on: serde_json::Value = serde_json::from_str(&settings_of(&Hooks {
+            denied: true,
+            ..Hooks::default()
+        }))
+        .unwrap();
+        for (event, kind) in [
+            ("PostToolBatch", "post-tool-batch"),
+            ("PermissionDenied", "permission-denied"),
+        ] {
+            assert_eq!(
+                on["hooks"][event][0]["hooks"][0]["command"],
+                format!("'/x' harness-denied {kind}"),
+                "{event}"
+            );
+        }
+        let js = plugin(
+            Path::new("/x"),
+            &Hooks {
+                denied: true,
+                ..Hooks::default()
+            },
+        );
+        assert!(
+            js.contains("harness-denied") && js.contains(OPENCODE_DENIED),
+            "{js}"
+        );
+        for off in [
+            settings_of(&Hooks::default()),
+            plugin(Path::new("/x"), &Hooks::default()),
+        ] {
+            assert!(!off.contains("harness-denied"));
+        }
     }
 }

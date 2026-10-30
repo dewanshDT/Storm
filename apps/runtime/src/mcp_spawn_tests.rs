@@ -54,7 +54,7 @@ fn opencode(dir: &Path, grants: &[McpGrant], settings: Option<&Value>, storm_onl
         &Default::default(),
         &own,
         &crate::mcp::StormLayer::default(),
-        &|| Ok(String::new()),
+        &|| Ok(Vec::new()),
     )
     .unwrap();
     if storm_only {
@@ -116,7 +116,7 @@ fn every_config_is_byte_identical_to_a_session_without_spawning() {
             taken: &none,
         },
         &crate::mcp::StormLayer::default(),
-        &|| Ok(String::new()),
+        &|| Ok(Vec::new()),
     )
     .unwrap();
     assert_eq!(
@@ -203,7 +203,7 @@ fn opencode_with(dir: &Path, layer: &StormLayer, account: &str, storm_only: bool
         &Default::default(),
         &own,
         layer,
-        &move || Ok(account.clone()),
+        &move || Ok(vec![account.clone()]),
     )
     .unwrap();
     let text = if storm_only {
@@ -351,7 +351,7 @@ fn a_146_2_opencodes_accept_edits_is_storms_edit_allow() {
         &Default::default(),
         &own,
         &layer,
-        &|| Ok(String::new()),
+        &|| Ok(Vec::new()),
     )
     .unwrap();
     let content = extras
@@ -374,8 +374,65 @@ fn a_146_2_opencodes_accept_edits_is_storms_edit_allow() {
         &Default::default(),
         &own,
         &layer,
-        &|| Ok(String::new()),
+        &|| Ok(Vec::new()),
     )
     .unwrap();
     assert_eq!(claude, LaunchExtras::default());
+}
+
+/// A-148-1 for OpenCode: a child's layer turns every ask into a deny (the
+/// connections' own, Storm's settings', the account's at the top level and
+/// per agent, kept under their keys, and OpenCode's defaults), and then
+/// allows its Storm tools, `edit` and `bash` under keys that follow every
+/// deny. A config Storm cannot read fails the start. A plain session's
+/// layer is unchanged.
+#[test]
+fn a_148_1_an_opencode_childs_asks_are_denies() {
+    let t = tempfile::tempdir().unwrap();
+    let mode = crate::profile::child_permission_mode("opencode", "default").unwrap();
+    let layer = StormLayer::new(true, false, mode.opencode_permission).denying_asks();
+    let account = r#"{
+      // the account's own rules
+      "permission": {"webfetch": "ask", "edit": "ask", "read": {"*": "allow", "*.secret": "ask"},},
+      "agent": {"build": {"permission": {"task": "ask"}}},
+    }"#;
+    let config = opencode_with(&t.path().join("c"), &layer, account, false);
+    let permission = config["permission"].as_object().unwrap();
+    assert_eq!(permission["storm_*"], "deny");
+    assert_eq!(permission["github_*"], "deny");
+    assert_eq!(permission["webfetch"], "deny");
+    assert_eq!(permission["edit"], "deny");
+    assert_eq!(permission["bash"], "deny", "Storm's own setting's ask");
+    assert_eq!(permission["edit*"], "allow");
+    assert_eq!(permission["bash*"], "allow");
+    for key in ["doom_loop", "question", "plan_enter"] {
+        assert_eq!(permission[key], "deny", "{key}");
+    }
+    assert_eq!(permission["external_directory"], json!({"*": "deny"}));
+    assert_eq!(
+        permission["read"],
+        json!({"*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*.secret": "deny"})
+    );
+    assert_eq!(config["agent"]["build"]["permission"]["task"], "deny");
+    assert_eq!(config["agent"]["build"]["permission"]["*"], "allow");
+    for tool in CHILD_ALLOWED_TOOLS {
+        assert_eq!(permission[&format!("storm_{tool}")], "allow", "{tool}");
+    }
+    assert!(!config.to_string().contains("\"ask\""), "{config}");
+    let keys: Vec<&String> = permission.keys().collect();
+    let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
+    assert!(at("edit*") > at("edit") && at("bash*") > at("bash"));
+    assert!(at("storm_report_result") > at("storm_*"));
+
+    let unreadable = std::panic::catch_unwind(|| {
+        opencode_with(&t.path().join("u"), &layer, "{ not json", false)
+    });
+    assert!(
+        unreadable.is_err(),
+        "a config Storm cannot read fails the start"
+    );
+
+    let plain = opencode_with(&t.path().join("p"), &StormLayer::default(), account, false);
+    assert_eq!(plain["permission"]["storm_*"], "ask");
+    assert!(plain["permission"].get("doom_loop").is_none());
 }

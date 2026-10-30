@@ -26,7 +26,7 @@
     "model": "haiku",
     "child_of": "ags_PARENT"
   },
-  "opening_prompt": "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round.",
+  "opening_prompt": "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round. Nobody can answer a prompt of yours: if something you need is refused, say so in report_result with outcome blocked and stop that path.",
   "child_work": {
     "about": "The integration of 137-3 with 134: once the child has ended, a person reads its work and applies it by its session. The server's test (api.rs, the_full_flow_applies_an_ended_childs_work_by_its_session) sends these commands and is answered with these answers; the host's test (host.rs, an_ended_childs_work_is_exported_and_applied_into_its_parent) runs these commands through a helper whose export and Apply are the helper's own code with real git, and checks its answers carry exactly these keys. `<base>` and `<tip>` stand for the commit the child started from and the one it ended at; `request` and `cmd_seq` are the server's to choose.",
     "placeholders": {

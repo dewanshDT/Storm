@@ -100,6 +100,11 @@ enum Command {
     /// hook's input on stdin. Run by the agent's own hook or plugin.
     #[command(hide = true)]
     HarnessResult,
+    /// A child's tool call its own permissions refused (decision 148b),
+    /// from its hook's input on stdin. Run by the agent's own hook or
+    /// plugin, never by hand.
+    #[command(hide = true)]
+    HarnessDenied { kind: String },
     /// Waits until the host says something is unread, then wakes the agent
     /// the way it documents (decisions 144c, 145d). Run by the agent's own
     /// hook or plugin, never by hand.
@@ -201,6 +206,10 @@ async fn main() -> Result<()> {
         }
         Command::HarnessResult => {
             storm_runtime::harness::report_result();
+            Ok(())
+        }
+        Command::HarnessDenied { kind } => {
+            storm_runtime::harness::report_denied(&kind);
             Ok(())
         }
         Command::HarnessWake { plugin } => std::process::exit(storm_runtime::harness::wake(plugin)),
