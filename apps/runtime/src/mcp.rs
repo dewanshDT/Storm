@@ -165,6 +165,25 @@ pub const MODE_ALLOWED_TOOLS: [&str; 1] = ["request_permission_mode"];
 /// offers them only to a session with vault writes.
 pub const DELETE_ALLOWED_TOOLS: [&str; 2] = ["delete_note", "delete_folder"];
 
+/// The Storm tools that only read, allowed outright for a top-level session
+/// reading Storm, so its reads before a delete or a spawn never stop on
+/// the CLI's prompt. Every server tool not in its write, spawn or mode
+/// lists, held to them by a test.
+pub const READ_ALLOWED_TOOLS: [&str; 12] = [
+    "list_vaults",
+    "get_vault",
+    "search",
+    "get_note",
+    "get_related_notes",
+    "list_tags",
+    "recent_notes",
+    "get_note_history",
+    "get_note_version",
+    "session_context",
+    "list_scripts",
+    "get_script",
+];
+
 /// What Storm's own layer of a session's CLI config says about permissions
 /// (decisions 146, 148, 149): the Storm tools allowed outright, the keys a
 /// permission mode sets in OpenCode's config, and whether every other
@@ -199,6 +218,12 @@ impl StormLayer {
     /// With `request_permission_mode` allowed too (147c).
     pub fn asking_for_modes(mut self) -> Self {
         self.allow.extend(MODE_ALLOWED_TOOLS);
+        self
+    }
+
+    /// With the read-only tools allowed too.
+    pub fn reading(mut self) -> Self {
+        self.allow.extend(READ_ALLOWED_TOOLS);
         self
     }
 

@@ -37,11 +37,13 @@
 //!   Claude Code also whether auto falls back to asking after repeated
 //!   blocks, which `profile::AUTO_CAN_ASK` records, and which hook auto's
 //!   denials run.
-//! - **G-149-claude-code**: a top-level session's Storm deletes are
-//!   pre-allowed (149b): with the host's layer in Storm's `--settings`,
-//!   `delete_note` and `delete_folder` reach Storm with no CLI prompt, in
-//!   manual and in auto, so the person sees only Storm's dialog. Positive
-//!   control: without the allow, `delete_note` stops on the CLI's prompt.
+//! - **G-149-<provider>**: a top-level session's Storm reads and deletes
+//!   are pre-allowed (149b): with the host's layer in Storm's `--settings`
+//!   or OpenCode config, `list_vaults`, `search`, `get_note`, `delete_note`
+//!   and `delete_folder` reach Storm with no CLI prompt (Claude Code in
+//!   manual and in auto), so the person sees only Storm's dialog. Positive
+//!   control: without the allow, a delete or a read stops on the CLI's
+//!   prompt.
 //! - **G-146-P-<provider>**: a permission prompt sets the flag and the
 //!   person's answer clears it (Claude Code: `PermissionRequest`, then
 //!   `PostToolUse`; after an Esc, the next turn; OpenCode:
@@ -242,6 +244,10 @@ class H(http.server.BaseHTTPRequestHandler):
             path = last.split("WRITE:", 1)[1].split()[0].strip('"\\')
             args = json.dumps({"filePath": path, "content": "storm gate\n"})
             call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": "write", "arguments": args}}
+            out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
+        elif "CALL:" in last and last.split("CALL:", 1)[1].split()[0].strip('"\\') in tools and not answered:
+            name = last.split("CALL:", 1)[1].split()[0].strip('"\\')
+            call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": name, "arguments": "{}"}}
             out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
         elif "BASH:" in last and "bash" in tools and not answered:
             cmd = last.split("BASH:", 1)[1].strip().strip('"\\')
@@ -672,12 +678,12 @@ impl Session {
 }
 
 /// A stand-in for Storm's MCP server, named `storm` as the host names it:
-/// it lists a child's tools, a note write and the deletes, and logs every
+/// it lists a child's tools, some reads, a note write and the deletes, and logs every
 /// call.
 const FAKE_STORM_MCP: &str = r#"
 import json, sys
 LOG = open(sys.argv[1], "a")
-TOOLS = ["session_context", "report_result", "read_messages", "create_note", "delete_note", "delete_folder"]
+TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder"]
 for line in sys.stdin:
     try:
         m = json.loads(line)
@@ -867,6 +873,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
 struct OpencodeOpts {
     account_permission: Option<Value>,
     storm_permission: Option<Value>,
+    storm_mcp: bool,
 }
 
 fn opencode() -> Session {
@@ -892,6 +899,7 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
     )
     .unwrap();
     let mut env = env_of(&extras);
+    let mcp_log = opts.storm_mcp.then(|| state.path().join("storm-mcp.log"));
     let model = if real() {
         let m = std::env::var("STORM_GATE_OPENCODE_MODEL")
             .expect("STORM_GATE_OPENCODE_MODEL names the model, as provider/model");
@@ -925,6 +933,12 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
         let mut config = config;
         if let Some(p) = &opts.storm_permission {
             config["permission"] = p.clone();
+        }
+        if let Some(log) = &mcp_log {
+            config["mcp"] = json!({"storm": {
+                "type": "local", "enabled": true,
+                "command": ["python3", "-c", FAKE_STORM_MCP, log.display().to_string()],
+            }});
         }
         let xdg = |name: &str| {
             let dir = state.path().join(name);
@@ -971,7 +985,7 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
         host,
         model,
         ws: ws.path().canonicalize().unwrap(),
-        mcp_log: None,
+        mcp_log,
         settings: None,
         home: None,
         _dirs: vec![ws, state],
@@ -1427,6 +1441,7 @@ fn g_146_m_opencode() {
         let mut s = opencode_with(OpencodeOpts {
             account_permission: Some(json!({"edit": "ask"})),
             storm_permission: storm,
+            ..Default::default()
         });
         let file = s.ws.join("gate-edit.txt");
         let at = Instant::now();
@@ -1991,6 +2006,7 @@ fn g_148_opencode() {
     let mut s = opencode_with(OpencodeOpts {
         account_permission: Some(account),
         storm_permission: Some(written["permission"].clone()),
+        ..Default::default()
     });
     let started = Instant::now();
     let inside = s.ws.join("inside.txt");
@@ -2044,11 +2060,14 @@ fn g_148_opencode() {
     c.finish(&s.agent);
 }
 
-/// G-149-claude-code: Storm's deletes are pre-allowed (149b) on the real
+/// The read tools the stand-in Storm serves.
+const GATE_READS: [&str; 3] = ["list_vaults", "search", "get_note"];
+
+/// G-149-claude-code: Storm's reads and deletes are pre-allowed (149b) on the real
 /// Claude Code, so an agent's delete reaches Storm, whose dialog asks the
 /// person, without the CLI's own prompt first, in manual and in auto.
-/// Positive control: without the allow, `delete_note` stops on the CLI's
-/// prompt and never reaches Storm.
+/// Positive control: without the allow, `delete_note` and `search` stop on
+/// the CLI's prompt and never reach Storm.
 #[test]
 fn g_149_claude_code() {
     let gate = "G-149-claude-code";
@@ -2075,9 +2094,24 @@ fn g_149_claude_code() {
         asked(&control, at, 90) && control.storm_calls().is_empty(),
     );
     drop(control);
+    let mut control = claude_with(ClaudeOpts {
+        args: manual.clone(),
+        auto_off: true,
+        storm_mcp: true,
+        account_mode: Some("manual"),
+        ..Default::default()
+    });
+    let at = Instant::now();
+    control.agent.prompt("CALL:mcp__storm__search");
+    c.check(
+        "control: without the allow, search stops on the CLI's prompt",
+        asked(&control, at, 90) && control.storm_calls().is_empty(),
+    );
+    drop(control);
 
     let layer = storm_runtime::mcp::StormLayer::new(false, false, Vec::new())
         .asking_for_modes()
+        .reading()
         .deleting();
     let auto: Vec<String> = ["--permission-mode", "auto"].map(String::from).into();
     let mut last = None;
@@ -2089,7 +2123,10 @@ fn g_149_claude_code() {
             storm_mcp: true,
             account_mode: Some("manual"),
         });
-        for tool in storm_runtime::mcp::DELETE_ALLOWED_TOOLS {
+        for tool in GATE_READS
+            .iter()
+            .chain(storm_runtime::mcp::DELETE_ALLOWED_TOOLS.iter())
+        {
             let at = Instant::now();
             s.agent.prompt(&format!("CALL:mcp__storm__{tool}"));
             let ran = wait_until(90, || s.storm_calls().iter().any(|t| t == tool));
@@ -2105,4 +2142,92 @@ fn g_149_claude_code() {
         last = Some(s);
     }
     c.finish(&last.unwrap().agent);
+}
+
+/// G-149-opencode: Storm's reads and deletes are pre-allowed on the real
+/// OpenCode, after the connection's own ask, so a read before a delete
+/// never stops on OpenCode's prompt. Positive control: with only the ask,
+/// `storm_list_vaults` prompts and never reaches Storm, as round 2's M8 did.
+#[test]
+fn g_149_opencode() {
+    let gate = "G-149-opencode";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call a tool)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let mut control = opencode_with(OpencodeOpts {
+        storm_permission: Some(json!({"storm_*": "ask"})),
+        storm_mcp: true,
+        ..Default::default()
+    });
+    let at = Instant::now();
+    control.agent.prompt("CALL:storm_list_vaults");
+    c.check(
+        "control: with only the ask, storm_list_vaults prompts",
+        asked(&control, at, 90) && control.storm_calls().is_empty(),
+    );
+    drop(control);
+
+    let layer = storm_runtime::mcp::StormLayer::new(false, false, Vec::new())
+        .reading()
+        .deleting();
+    let dir = tempfile::tempdir().unwrap();
+    let extras = storm_runtime::mcp::write_provider_config(
+        "opencode",
+        dir.path(),
+        &[storm_runtime::mcp::McpGrant {
+            id: "storm".into(),
+            slug: "storm".into(),
+            plugin_origin: None,
+        }],
+        "h_gate",
+        Path::new("/s"),
+        Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
+        None,
+        &Default::default(),
+        &storm_runtime::mcp::AgentServers {
+            storm_only: false,
+            taken: &Default::default(),
+        },
+        &layer,
+        &|| Ok(Vec::new()),
+    )
+    .unwrap();
+    let written: Value = serde_json::from_str(
+        extras
+            .env
+            .iter()
+            .find(|(k, _)| k == "OPENCODE_CONFIG_CONTENT")
+            .unwrap()
+            .1
+            .to_str()
+            .unwrap(),
+    )
+    .unwrap();
+    let mut s = opencode_with(OpencodeOpts {
+        storm_permission: Some(written["permission"].clone()),
+        storm_mcp: true,
+        ..Default::default()
+    });
+    for tool in GATE_READS
+        .iter()
+        .chain(storm_runtime::mcp::DELETE_ALLOWED_TOOLS.iter())
+    {
+        let at = Instant::now();
+        s.agent.prompt(&format!("CALL:storm_{tool}"));
+        let ran = wait_until(90, || s.storm_calls().iter().any(|t| t == tool));
+        idle_since(&s, at, 60);
+        c.check(
+            &format!(
+                "{tool} reaches Storm with no OpenCode prompt ({:?})",
+                s.host.attention(at)
+            ),
+            ran && no_prompt(&s, at),
+        );
+    }
+    c.finish(&s.agent);
 }

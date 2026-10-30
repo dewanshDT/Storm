@@ -325,6 +325,49 @@ fn the_allowed_tools_are_the_servers() {
     assert_eq!(child, CHILD_ALLOWED_TOOLS);
 }
 
+/// The read tools a top-level session allows are every server tool that is
+/// not a write, a spawn, a child's or a mode tool.
+#[test]
+fn the_read_tools_are_every_server_tool_that_only_reads() {
+    let src = std::fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../server/src/mcp.rs"),
+    )
+    .unwrap();
+    let list = |name: &str| -> Vec<String> {
+        let at = src
+            .find(&format!("pub const {name}: &[&str] = &["))
+            .unwrap();
+        let body = &src[at..at + src[at..].find("];").unwrap()];
+        body.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(str::to_string)
+            .collect()
+    };
+    let not_reads: Vec<String> = ["WRITE_TOOLS", "SPAWN_TOOLS", "SPAWNED_TOOLS", "MODE_TOOLS"]
+        .iter()
+        .flat_map(|n| list(n))
+        .collect();
+    let mut tools = Vec::new();
+    for part in src.split("#[tool(").skip(1) {
+        let at = part.find("async fn ").unwrap() + "async fn ".len();
+        let name: String = part[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        tools.push(name);
+    }
+    assert!(tools.len() > 20, "{tools:?}");
+    let reads: Vec<String> = tools
+        .into_iter()
+        .filter(|t| !not_reads.contains(t))
+        .collect();
+    assert_eq!(reads, READ_ALLOWED_TOOLS);
+    for t in READ_ALLOWED_TOOLS {
+        assert!(!t.starts_with("create") && !t.starts_with("update") && !t.starts_with("delete"));
+    }
+}
+
 /// A-146-2: OpenCode's `accept_edits` is `edit: allow` in Storm's layer,
 /// and an OpenCode session gets that layer even without grants; Claude
 /// Code's mode is a flag, never in its MCP config.

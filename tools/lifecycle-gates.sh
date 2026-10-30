@@ -8,8 +8,8 @@
 # the prompt, and in G-147 it presses Shift+Tab (`ESC [ Z`) as the person
 # would. G-148 runs a child as the host configures it and shows that no
 # prompt ever appears, and that a denial reaches the agent and the host.
-# G-149 shows a top-level session's Storm deletes reach Storm with no
-# Claude Code prompt first, in manual and in auto.
+# G-149 shows a top-level session's Storm reads and deletes reach Storm with
+# no Claude Code or OpenCode prompt first (Claude Code in manual and in auto).
 #
 # Procedure, on the VM, as the account the agents run as:
 #

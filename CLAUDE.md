@@ -644,8 +644,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   Claude Code session reading Storm also gets `request_permission_mode`
   allowed, so the person sees only Storm's card (147c), and every top-level
   session reading Storm gets `delete_note`/`delete_folder` allowed
-  (`mcp::DELETE_ALLOWED_TOOLS`, 149b; G-149 shows Claude Code then never
-  prompts first); a session that does not read Storm gets a byte-identical
+  (`mcp::DELETE_ALLOWED_TOOLS`, 149b) and Storm's read-only tools
+  (`mcp::READ_ALLOWED_TOOLS`, every server tool not a write, spawn, child's
+  or mode tool, held to the server's lists by a test); G-149 shows Claude
+  Code and OpenCode then never prompt first; a session that does not read Storm gets a byte-identical
   config (apart from 147c's `disableAutoMode`). **The switch turns on only for a session
   launched with it** (141e): a launch's `spawn: true` is refused
   `spawn_unavailable` unless the session reads Storm, runs a spawning
