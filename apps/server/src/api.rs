@@ -569,6 +569,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/sessions/{id}/mode-requests/{request}",
             post(agent_session_mode_request),
         )
+        // An agent's deletion waits for the person (decision 149): the
+        // session tier only, so no key or agent answers it.
+        .route("/v1/agent/delete-requests", get(agent_delete_requests))
+        .route(
+            "/v1/agent/sessions/{id}/delete-requests/{request}",
+            post(agent_session_delete_request),
+        )
         // A session's acts, for the person's log (134-10, 145a).
         .route(
             "/v1/agent/sessions/{id}/requests",
@@ -2297,6 +2304,41 @@ async fn agent_session_mode_request(
     let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
     Ok(Json(
         crate::ops::decide_mode_request(&state, &actor, device, &id, &request, req).await?,
+    ))
+}
+
+#[derive(Deserialize, Default)]
+struct DeleteRequestsQuery {
+    after: Option<u64>,
+    wait: Option<u64>,
+}
+
+/// The deletions waiting for the person, and those just answered; waits for
+/// a change when `after` is the current version (decision 149c).
+async fn agent_delete_requests(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(query): Query<DeleteRequestsQuery>,
+) -> ApiResult<Json<crate::ops::DeleteRequestsPage>> {
+    Ok(Json(
+        crate::ops::delete_requests(&state, &actor, query.after, query.wait).await?,
+    ))
+}
+
+/// The person's answer to an agent's deletion (decision 149b).
+async fn agent_session_delete_request(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path((id, request)): Path<(String, String)>,
+    Json(req): Json<crate::ops::DecideDelete>,
+) -> ApiResult<Json<crate::agent::deletes::DeleteRequest>> {
+    let device = auth
+        .as_ref()
+        .map(|a| &a.authenticated.device)
+        .map(|d| (d.id.as_str(), d.name.as_str()));
+    Ok(Json(
+        crate::ops::decide_delete_request(&state, &actor, device, &id, &request, req).await?,
     ))
 }
 
@@ -9016,7 +9058,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn an_agent_writes_only_to_its_write_vault_under_agent_writes_and_never_deletes() {
+    async fn an_agent_writes_only_to_its_write_vault_under_agent_writes() {
         let dir = tempdir::TempDir::new("storm-gateway-builtin").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
         let work = f.vault("Work").await;
@@ -9063,7 +9105,8 @@ pub(crate) mod tests {
         assert!(!tools.contains(&"create_note".to_string()), "{tools:?}");
 
         // A write vault with `agent_writes` on: writes there, refused
-        // elsewhere at the vault seam with a stable code, never deletes.
+        // elsewhere at the vault seam with a stable code; it asks to delete
+        // only there (decision 149).
         let (status, launched) = f
             .launch_body(serde_json::json!({"write_vault_id": work}))
             .await;
@@ -9076,7 +9119,7 @@ pub(crate) mod tests {
         f.initialize(&s3, "storm").await;
         let tools = tools_of(f.mcp(&s3, "storm", list.clone()).await);
         assert!(tools.contains(&"create_note".to_string()), "{tools:?}");
-        assert!(!tools.contains(&"delete_note".to_string()), "{tools:?}");
+        assert!(tools.contains(&"delete_note".to_string()), "{tools:?}");
         let made = f
             .tool(
                 &s3,
@@ -9126,9 +9169,18 @@ pub(crate) mod tests {
             )
             .await;
         assert_eq!(structured(&lines)["title"], "Theirs", "reads anywhere");
+        let lines = f
+            .tool(
+                &s3,
+                "delete_note",
+                serde_json::json!({"vault": personal, "note_id": theirs["id"],
+                    "reason": "It duplicates another note."}),
+            )
+            .await;
         assert_eq!(
-            error_code(&f.call(&s3, "storm", "delete_note").await).as_deref(),
-            Some("tool_not_allowed")
+            error_code(&lines).as_deref(),
+            Some(crate::auth::authz::AGENT_WRITE_REFUSED),
+            "no request outside its write vault: {lines:?}"
         );
 
         // The MCP switches no longer touch agents, and `agent_writes` applies
@@ -19112,6 +19164,496 @@ pub(crate) mod tests {
                 );
                 assert_eq!(busy["reason"], "live_children", "{busy}");
             }
+        }
+    }
+
+    // ---- decision 149: agents delete with approval ----
+
+    impl GatewayFixture {
+        /// A writable top-level session (`extra` on top), running, its
+        /// storm connection initialized, in vault `work` with agent writes on.
+        async fn deleter(&mut self, work: &str, extra: serde_json::Value) -> String {
+            self.agent_writes(true).await;
+            let mut body = serde_json::json!({"write_vault_id": work});
+            for (k, v) in extra.as_object().unwrap() {
+                body[k] = v.clone();
+            }
+            let (status, launched) = self.launch_body(body).await;
+            assert_eq!(status, StatusCode::OK, "{launched}");
+            let id = launched["id"].as_str().unwrap().to_string();
+            self.initialize(&id, "storm").await;
+            id
+        }
+
+        /// The deletion waiting on `session`'s view, by polling it.
+        async fn waiting_delete(&self, session: &str) -> serde_json::Value {
+            for _ in 0..400 {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
+                if view["delete_request"]["state"] == "pending" {
+                    assert_eq!(view["needs_attention"], "delete_approval", "{view}");
+                    return view["delete_request"].clone();
+                }
+            }
+            panic!("no deletion is waiting on {session}");
+        }
+
+        async fn answer_delete(
+            &self,
+            session: &str,
+            request: &serde_json::Value,
+            decision: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            send(
+                &self.app,
+                post_json_with_auth(
+                    &format!(
+                        "/v1/agent/sessions/{session}/delete-requests/{}",
+                        request["id"].as_str().unwrap()
+                    ),
+                    serde_json::json!({"decision": decision}),
+                    &self.owner_bearer,
+                ),
+            )
+            .await
+        }
+
+        /// Asks to delete with `tool`, and `answer`s the request once it
+        /// waits: the tool's answer and the request as the session showed it.
+        async fn ask_delete(
+            &self,
+            session: &str,
+            tool: &str,
+            args: serde_json::Value,
+            answer: Option<&str>,
+        ) -> (serde_json::Value, serde_json::Value) {
+            let call = self.tool(session, tool, args);
+            let decide = async {
+                let request = self.waiting_delete(session).await;
+                match answer {
+                    Some(decision) => {
+                        let (code, body) = self.answer_delete(session, &request, decision).await;
+                        assert_eq!(code, StatusCode::OK, "{body}");
+                    }
+                    None => self.state.agent.expire_delete_requests_for_tests(session),
+                }
+                request
+            };
+            let (lines, request) = tokio::join!(call, decide);
+            (structured(&lines), request)
+        }
+
+        async fn trash_items(&self, vault: &str) -> Vec<serde_json::Value> {
+            let (_, page) = self.get(&format!("/v1/vaults/{vault}/trash")).await;
+            page["items"].as_array().cloned().unwrap_or_default()
+        }
+
+        async fn note_exists(&self, vault: &str, id: &str) -> bool {
+            self.get(&format!("/v1/vaults/{vault}/notes/{id}")).await.0 == StatusCode::OK
+        }
+
+        async fn delete_events(&self, kind: &str) -> Vec<serde_json::Value> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(k, _)| k == kind)
+                .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
+                .collect()
+        }
+    }
+
+    const WHY: &str = "The note duplicates Plan.md.";
+
+    fn note_args(vault: &str, note: &serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"vault": vault, "note_id": note["id"], "reason": WHY})
+    }
+
+    fn folder_args(vault: &str, path: &str) -> serde_json::Value {
+        serde_json::json!({"vault": vault, "path": path, "reason": "An old project, finished."})
+    }
+
+    /// A-149-1: a writable top-level session lists both delete tools; a
+    /// read-only one and a child of a writable parent list neither, and
+    /// cannot call them.
+    #[tokio::test]
+    async fn a_149_1_offered_by_write() {
+        let dir = tempdir::TempDir::new("storm-149-1").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        let writable = f.deleter(&work, serde_json::json!({})).await;
+        let tools = f.storm_tools(&writable).await;
+        for t in ["delete_note", "delete_folder"] {
+            assert!(tools.contains(&t.to_string()), "{t}: {tools:?}");
+        }
+        let (_, read_only) = f.launch_body(serde_json::json!({})).await;
+        let read_only = read_only["id"].as_str().unwrap().to_string();
+        f.initialize(&read_only, "storm").await;
+        let parent = f.deleter(&work, serde_json::json!({"spawn": true})).await;
+        assert!(
+            f.storm_tools(&parent)
+                .await
+                .contains(&"delete_folder".to_string())
+        );
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "tidy", "name": "c"}))
+            .await;
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+        assert_eq!(
+            view["write_vault_id"],
+            work.as_str(),
+            "the child writes: {view}"
+        );
+        for s in [&read_only, &child] {
+            let tools = f.storm_tools(s).await;
+            for t in ["delete_note", "delete_folder"] {
+                assert!(!tools.contains(&t.to_string()), "{t}: {tools:?}");
+                assert_eq!(
+                    error_code(&f.tool(s, t, folder_args(&work, "P")).await).as_deref(),
+                    Some("tool_not_allowed")
+                );
+            }
+        }
+        let refused = crate::ops::agent_delete(
+            &f.state,
+            &f.agent(&child),
+            &work,
+            crate::ops::AgentDelete::Folder("P".into()),
+            "please",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
+    }
+
+    /// A-149-2: nothing is deleted without Approve. A note and a folder
+    /// survive a decline and a time-out; each is in the trash, as the
+    /// agent's with its reason, only after Approve; a session in auto asks
+    /// just the same.
+    #[tokio::test]
+    async fn a_149_2_nothing_without_approve() {
+        let dir = tempdir::TempDir::new("storm-149-2").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        for mode in [None, Some("auto")] {
+            let extra = match mode {
+                Some(m) => serde_json::json!({"permission_mode": m}),
+                None => serde_json::json!({}),
+            };
+            let s = f.deleter(&work, extra).await;
+            let tag = mode.unwrap_or("manual");
+            let note = f.note(&work, &format!("{tag}/Dup.md"), "# Dup\n").await;
+            let id = note["id"].as_str().unwrap();
+            f.note(&work, &format!("{tag}-old/A.md"), "# A\n").await;
+            f.note(&work, &format!("{tag}-old/B.md"), "# B\n").await;
+            let folder = format!("{tag}-old");
+            let before = f.trash_items(&work).await.len();
+
+            for (tool, args) in [
+                ("delete_note", note_args(&work, &note)),
+                ("delete_folder", folder_args(&work, &folder)),
+            ] {
+                tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                let (declined, _) = f.ask_delete(&s, tool, args.clone(), Some("decline")).await;
+                assert_eq!(declined["status"], "declined", "{declined}");
+                let (timed_out, _) = f.ask_delete(&s, tool, args.clone(), None).await;
+                assert_eq!(timed_out["status"], "timed_out", "{timed_out}");
+                assert!(f.note_exists(&work, id).await);
+                assert_eq!(f.trash_items(&work).await.len(), before, "{tool}");
+                let (_, tree) = f.get(&format!("/v1/vaults/{work}/tree")).await;
+                assert!(tree.to_string().contains(&format!("{folder}/B.md")));
+            }
+
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            let (deleted, request) = f
+                .ask_delete(&s, "delete_note", note_args(&work, &note), Some("approve"))
+                .await;
+            assert_eq!(deleted["status"], "deleted", "{deleted}");
+            assert_eq!(request["title"], "Dup");
+            assert!(!f.note_exists(&work, id).await);
+            let (deleted, request) = f
+                .ask_delete(
+                    &s,
+                    "delete_folder",
+                    folder_args(&work, &folder),
+                    Some("approve"),
+                )
+                .await;
+            assert_eq!(deleted["status"], "deleted", "{deleted}");
+            assert_eq!(request["notes"], 2);
+            let trash = f.trash_items(&work).await;
+            assert_eq!(trash.len(), before + 2, "{trash:?}");
+            let folder_entry = trash
+                .iter()
+                .find(|t| t["id"] == deleted["trash_id"])
+                .expect("the folder's entry");
+            assert_eq!(folder_entry["kind"], "folder");
+            assert_eq!(folder_entry["note_count"], 2);
+            assert_eq!(folder_entry["deleted_by"]["kind"], "agent");
+            assert_eq!(folder_entry["deleted_by"]["session_id"], s.as_str());
+            assert_eq!(
+                folder_entry["deleted_by"]["reason"],
+                "An old project, finished."
+            );
+        }
+    }
+
+    /// A-149-3: approval is bound to the target as asked for. An edit or a
+    /// move of the note, or a new note in the folder, between the request
+    /// and Approve answers `gone`, and nothing is deleted.
+    #[tokio::test]
+    async fn a_149_3_bound_to_the_target() {
+        let dir = tempdir::TempDir::new("storm-149-3").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        let s = f.deleter(&work, serde_json::json!({})).await;
+        let note = f.note(&work, "Ideas.md", "# Ideas\n").await;
+        let id = note["id"].as_str().unwrap().to_string();
+        f.note(&work, "Old/A.md", "# A\n").await;
+
+        for (tool, change) in [
+            ("delete_note", "edit"),
+            ("delete_note", "move"),
+            ("delete_folder", "add"),
+        ] {
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            let args = if tool == "delete_note" {
+                serde_json::json!({"vault": work, "note_id": id, "reason": WHY})
+            } else {
+                folder_args(&work, "Old")
+            };
+            let call = f.tool(&s, tool, args);
+            let decide = async {
+                let request = f.waiting_delete(&s).await;
+                let (code, body) = match change {
+                    "edit" => {
+                        let (_, n) = f.get(&format!("/v1/vaults/{work}/notes/{id}")).await;
+                        send(
+                            &f.app,
+                            put_json_with_auth(
+                                &format!("/v1/vaults/{work}/notes/{id}"),
+                                serde_json::json!({"base_version": n["version"],
+                                    "content": "# Ideas\n\nmore\n"}),
+                                &f.owner_bearer,
+                            ),
+                        )
+                        .await
+                    }
+                    "move" => {
+                        send(
+                            &f.app,
+                            post_json_with_auth(
+                                &format!("/v1/vaults/{work}/notes/{id}/move"),
+                                serde_json::json!({"new_path": "Moved/Ideas.md"}),
+                                &f.owner_bearer,
+                            ),
+                        )
+                        .await
+                    }
+                    _ => (StatusCode::OK, f.note(&work, "Old/New.md", "# New\n").await),
+                };
+                assert!(code.is_success(), "{change}: {body}");
+                let (code, body) = f.answer_delete(&s, &request, "approve").await;
+                assert_eq!(code, StatusCode::OK, "{body}");
+                assert_eq!(body["state"], "gone", "{body}");
+            };
+            let (lines, ()) = tokio::join!(call, decide);
+            assert_eq!(structured(&lines)["status"], "gone", "{lines:?}");
+            assert!(f.trash_items(&work).await.is_empty(), "nothing deleted");
+        }
+        assert!(f.note_exists(&work, &id).await);
+        let (_, tree) = f.get(&format!("/v1/vaults/{work}/tree")).await;
+        assert!(tree.to_string().contains("Old/New.md"), "{tree}");
+    }
+
+    /// A-149-4, the server's half: the requests every client lists carry
+    /// the agent, the session, the target, its count and the reason as
+    /// the agent wrote it; the first answer wins, a second is a conflict,
+    /// and the list then says which device answered so others can close.
+    #[tokio::test]
+    async fn a_149_4_the_dialogs_request_and_the_first_answer_wins() {
+        let dir = tempdir::TempDir::new("storm-149-4").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        let s = f
+            .deleter(&work, serde_json::json!({"model": "sonnet"}))
+            .await;
+        for i in 0..7 {
+            f.note(&work, &format!("Projects/Old/N{i}.md"), "# N\n")
+                .await;
+        }
+        let (_, page) = f.get("/v1/agent/delete-requests").await;
+        let version = page["version"].as_u64().unwrap();
+        assert_eq!(page["requests"], serde_json::json!([]));
+        let reason = "Finished in 2024 — see [the plan](http://example.com) and **this**.";
+        let call = f.tool(
+            &s,
+            "delete_folder",
+            serde_json::json!({"vault": work, "path": "Projects/Old/", "reason": reason}),
+        );
+        let clients = async {
+            // A client waiting on the list hears of it at once.
+            let (_, page) = f
+                .get(&format!(
+                    "/v1/agent/delete-requests?after={version}&wait=20"
+                ))
+                .await;
+            let r = page["requests"][0].clone();
+            assert_eq!(r["state"], "pending", "{page}");
+            assert_eq!(r["kind"], "folder");
+            assert_eq!(r["path"], "Projects/Old");
+            assert_eq!(r["notes"], 7);
+            assert_eq!(r["paths"].as_array().unwrap().len(), 7);
+            assert_eq!(r["paths"][0], "Projects/Old/N0.md");
+            assert_eq!(r["reason"], reason, "as the agent wrote it");
+            assert_eq!(r["session"]["id"], s.as_str());
+            assert_eq!(r["session"]["provider"], "claude-code");
+            assert_eq!(r["session"]["model"], "sonnet");
+            assert!(r["session"]["name"].as_str().is_some());
+            assert!(r.get("fingerprint").is_none());
+            let (first, second) = tokio::join!(
+                f.answer_delete(&s, &r, "approve"),
+                f.answer_delete(&s, &r, "decline"),
+            );
+            let codes = [first.0, second.0];
+            assert!(codes.contains(&StatusCode::OK), "{first:?} {second:?}");
+            assert!(
+                codes.contains(&StatusCode::CONFLICT),
+                "{first:?} {second:?}"
+            );
+            let (winner, loser) = if first.0 == StatusCode::OK {
+                (first.1, second.1)
+            } else {
+                (second.1, first.1)
+            };
+            assert_eq!(
+                loser["error"].as_str().unwrap_or(""),
+                format!("request_{}", winner["state"].as_str().unwrap()),
+                "{loser}"
+            );
+            let (_, page) = f.get("/v1/agent/delete-requests").await;
+            let shown = &page["requests"][0];
+            assert_eq!(shown["state"], winner["state"]);
+            assert!(shown["decided_by"].as_str().is_some(), "{page}");
+            winner
+        };
+        let (lines, winner) = tokio::join!(call, clients);
+        let answer = structured(&lines);
+        let want = if winner["state"] == "deleted" {
+            "deleted"
+        } else {
+            "declined"
+        };
+        assert_eq!(answer["status"], want, "{answer}");
+        // Only a person answers: the host's credential cannot list or answer.
+        let (code, _) = send(
+            &f.app,
+            get_with_auth("/v1/agent/delete-requests", &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_client_error(), "{code}");
+    }
+
+    /// A-149-5: bounds. The settings folder is refused; a missing or too
+    /// long reason is a bad request; a second request while one waits is
+    /// `busy` (the same target waits on the first); every request has an
+    /// audit row, with codes and the target, never the reason's text.
+    #[tokio::test]
+    async fn a_149_5_bounds() {
+        let dir = tempdir::TempDir::new("storm-149-5").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        let s = f.deleter(&work, serde_json::json!({})).await;
+        let a = f.note(&work, "A.md", "# A\n").await;
+        let b = f.note(&work, "B.md", "# B\n").await;
+
+        let refused = tool_error(
+            &f.tool(&s, "delete_folder", folder_args(&work, "_storm"))
+                .await,
+        );
+        assert!(refused.contains("_storm"), "{refused}");
+        for reason in [None, Some(""), Some("   "), Some(&*"x".repeat(501))] {
+            let mut args = serde_json::json!({"vault": work, "note_id": a["id"]});
+            if let Some(r) = reason {
+                args["reason"] = r.into();
+            }
+            let refused = tool_error(&f.tool(&s, "delete_note", args).await);
+            assert!(refused.contains("reason is required"), "{refused}");
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        }
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{s}")).await;
+        assert!(view.get("delete_request").is_none(), "no request: {view}");
+        assert!(
+            f.delete_events(crate::ops::agent_deletes::EVENT_DELETE_REQUEST)
+                .await
+                .is_empty()
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        let first = f.tool(&s, "delete_note", note_args(&work, &a));
+        let others = async {
+            let request = f.waiting_delete(&s).await;
+            let busy = structured(&f.tool(&s, "delete_note", note_args(&work, &b)).await);
+            assert_eq!(busy["status"], "busy", "{busy}");
+            assert_eq!(busy["request"], request["id"]);
+            let same = f.tool(&s, "delete_note", note_args(&work, &a));
+            let answer = async {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let (code, body) = f.answer_delete(&s, &request, "decline").await;
+                assert_eq!(code, StatusCode::OK, "{body}");
+            };
+            let (same, ()) = tokio::join!(same, answer);
+            (structured(&same), request)
+        };
+        let (first, (same, request)) = tokio::join!(first, others);
+        assert_eq!(structured(&first)["status"], "declined");
+        assert_eq!(same["status"], "declined", "the same request: {same}");
+        assert_eq!(same["request"], request["id"]);
+
+        let requests = f
+            .delete_events(crate::ops::agent_deletes::EVENT_DELETE_REQUEST)
+            .await;
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|e| e.get("request_id").is_some())
+                .count(),
+            1,
+            "{requests:?}"
+        );
+        let made = requests
+            .iter()
+            .find(|e| e.get("request_id").is_some())
+            .unwrap();
+        assert_eq!(made["session_id"], s.as_str());
+        assert_eq!(made["note_id"], a["id"]);
+        assert_eq!(made["provider"], "claude-code");
+        assert!(
+            requests
+                .iter()
+                .any(|e| e["refused"] == "busy" && e["note_id"] == b["id"])
+        );
+        let decisions = f
+            .delete_events(crate::ops::agent_deletes::EVENT_DELETE_DECISION)
+            .await;
+        assert!(
+            decisions
+                .iter()
+                .any(|e| e["outcome"] == "declined" && e["request_id"] == request["id"])
+        );
+        for (_, detail) in f.state.auth_db.lock().await.all_events().unwrap() {
+            assert!(
+                !detail.contains("duplicates"),
+                "no reason text in the audit: {detail}"
+            );
         }
     }
 }

@@ -348,6 +348,7 @@ impl Store {
         spawn::init(&conn)?;
         super::events::init(&conn)?;
         super::mode::init(&conn)?;
+        super::deletes::init(&conn)?;
         conn.execute_batch(
             "-- One-time upgrades, each recorded with what it did and when the
              -- server audited it.

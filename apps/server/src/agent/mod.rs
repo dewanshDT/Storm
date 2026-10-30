@@ -21,6 +21,7 @@ pub mod attention;
 pub mod cache;
 pub mod cascade;
 pub mod credential;
+pub mod deletes;
 pub mod events;
 pub mod images;
 pub mod inbox;
@@ -904,6 +905,8 @@ pub struct AgentManager {
     /// Something a wake mark depends on changed outside the event queue:
     /// a message, a read, a host's return.
     pub(crate) wake_poke: tokio::sync::Notify,
+    /// Bumped whenever the delete requests a client lists change (149).
+    deletes_changed: watch::Sender<u64>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -1005,6 +1008,7 @@ impl AgentManager {
             result_sources: Mutex::new(round::RESULT_SOURCES),
             wakes: Mutex::new(events::WAKE),
             wake_poke: tokio::sync::Notify::new(),
+            deletes_changed: watch::channel(0).0,
         })
     }
 

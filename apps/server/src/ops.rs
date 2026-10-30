@@ -4309,6 +4309,10 @@ pub struct SessionView {
     /// (with where the switch went); absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mode_request: Option<crate::agent::mode::ModeRequest>,
+    /// Its agent's deletion waiting for the person (149c), shown under its
+    /// Needs you; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_request: Option<crate::agent::deletes::DeleteRequest>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -4392,6 +4396,15 @@ fn session_view(
         None => (session.workspace.clone(), None, None, None, None, None),
     };
     let mode_request = shown_mode_request(state, &session.id)?;
+    let delete_request = state
+        .agent
+        .pending_delete_of(&session.id)
+        .map_err(agent_error)?;
+    let needs_attention = if delete_request.is_some() {
+        Some(crate::agent::attention::DELETE_APPROVAL)
+    } else {
+        needs_attention
+    };
     Ok(SessionView {
         session,
         name,
@@ -4416,6 +4429,7 @@ fn session_view(
         model,
         permission_mode,
         mode_request,
+        delete_request,
     })
 }
 
@@ -4746,6 +4760,7 @@ pub async fn launch_session(
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),
         mode_request: None,
+        delete_request: None,
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;
@@ -7022,6 +7037,9 @@ struct Authorized {
     /// The session's agent is Claude Code, so it may ask for auto (147c),
     /// and it is not a child, which never asks (148).
     mode_request: bool,
+    /// The delete tools are offered (149a): vault writes, and not a child,
+    /// which never asks the person (149d).
+    deletes: bool,
 }
 
 impl Authorized {
@@ -7032,8 +7050,8 @@ impl Authorized {
         match &self.connection {
             Some(c) => c.tool_allowlist.iter().any(|a| a == name),
             None => {
-                !crate::mcp::NEVER_FOR_AGENTS.contains(&name)
-                    && (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                    && (self.deletes || !crate::mcp::DELETE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
                     && (self.mode_request || !crate::mcp::MODE_TOOLS.contains(&name))
@@ -7167,6 +7185,10 @@ async fn authorize_call(
         && state
             .agent_writes
             .load(std::sync::atomic::Ordering::Relaxed);
+    let top_level = state
+        .agent
+        .lineage(session_id)
+        .is_ok_and(|l| l.parent_session.is_none());
     Ok(Authorized {
         owner: session.owner_user_id,
         connection,
@@ -7177,11 +7199,8 @@ async fn authorize_call(
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
-        mode_request: session.provider == "claude-code"
-            && state
-                .agent
-                .lineage(session_id)
-                .is_ok_and(|l| l.parent_session.is_none()),
+        mode_request: session.provider == "claude-code" && top_level,
+        deletes: vault_writes && top_level,
     })
 }
 
@@ -7581,6 +7600,7 @@ async fn connect_builtin(
     let handler = crate::mcp::Storm::for_agent(
         state.clone(),
         authorized.vault_writes,
+        authorized.deletes,
         authorized.has_context,
         authorized.has_role,
         actor,
@@ -7656,6 +7676,12 @@ pub fn sweep_gateway_sessions(state: &Shared) {
 }
 
 pub(crate) mod provider_wire;
+
+pub mod agent_deletes;
+pub use agent_deletes::{
+    AgentDelete, DecideDelete, DeleteRequestsPage, agent_delete, decide_delete_request,
+    delete_requests,
+};
 pub use provider_wire::runtime_provider_credential;
 
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------

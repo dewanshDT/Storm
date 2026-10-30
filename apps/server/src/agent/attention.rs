@@ -67,6 +67,9 @@ pub const PERMISSION_PROMPT: &str = "permission_prompt";
 pub const UNEXPECTED_PROMPT: &str = "unexpected_prompt";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const BLOCKED: &str = "blocked";
+/// 149c: a top-level session's deletion waits for the person's Approve.
+/// Only on its view; never a child's, so never in an event.
+pub const DELETE_APPROVAL: &str = "delete_approval";
 /// The signal behind `activity` (144b).
 pub const IDLE: &str = "idle";
 

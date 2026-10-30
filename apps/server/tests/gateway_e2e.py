@@ -437,7 +437,7 @@ args = ["-i"]
         a.initialize("storm", 101)
         a.send("storm", {"jsonrpc": "2.0", "id": 102, "method": "tools/list"})
         stools = [t["name"] for t in a.answer("storm", 102)["result"]["tools"]]
-        check("the built-in storm connection is read-only without the flags, and never deletes",
+        check("the built-in storm connection is read-only without the flags, and offers no delete",
               "list_vaults" in stools and "create_note" not in stools and "delete_note" not in stools, stools)
         a.tool("storm", 103, "list_vaults")
         check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
@@ -719,8 +719,9 @@ args = ["-i"]
         w.initialize("storm", 1)
         w.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         wtools = [t["name"] for t in w.answer("storm", 2)["result"]["tools"]]
-        check("with a write vault and agent writes on, the agent may write, and still never delete",
-              "create_note" in wtools and "update_note" in wtools and "delete_note" not in wtools, wtools)
+        check("with a write vault and agent writes on, the agent may write, and ask to delete (decision 149)",
+              "create_note" in wtools and "update_note" in wtools and "delete_note" in wtools
+              and "delete_folder" in wtools, wtools)
         w.tool("storm", 3, "create_note", {"vault": vault, "path": "Agents/Plan.md",
                                            "content": "# Plan\n\nfirst: draft\n\nsecond: draft\n"})
         made = w.answer("storm", 3)["result"].get("structuredContent", {})
@@ -738,8 +739,23 @@ args = ["-i"]
         check("both edits are in the note", "from the phone" in body and "from the agent" in body, body)
         w.tool("storm", 5, "delete_note", {"vault": vault, "note_id": note_id})
         refused = w.answer("storm", 5)
-        check("and the agent cannot delete it (G-D5)",
-              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+        check("a delete without a reason is refused",
+              refused.get("result", {}).get("isError") is True
+              and "reason is required" in json.dumps(refused), refused)
+        w.tool("storm", 51, "delete_note", {"vault": vault, "note_id": note_id,
+                                            "reason": "The e2e suite tidies up."})
+        waiting = wait(lambda: [r for r in call("GET", "/v1/agent/delete-requests", auth=owner)[1]
+                                .get("requests", []) if r["state"] == "pending"],
+                       "the agent's deletion to wait for the person")
+        _, still = call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)
+        check("nothing is deleted while it waits (decision 149)", still.get("id") == note_id, still)
+        status, decided = call("POST", f"/v1/agent/sessions/{wid}/delete-requests/{waiting[0]['id']}",
+                               {"decision": "decline"}, auth=owner)
+        check("the person declines", status == 200 and decided["state"] == "declined", decided)
+        declined = w.answer("storm", 51)["result"].get("structuredContent", {})
+        check("and the agent is told declined, with the note kept",
+              declined.get("status") == "declined"
+              and call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)[0] == 200, declined)
         w.tool("storm", 6, "create_note", {"vault": elsewhere["id"], "path": "Stray.md", "content": "x"})
         refused = w.answer("storm", 6)
         check("a write outside its write vault is refused with a stable code",

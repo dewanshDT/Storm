@@ -55,6 +55,7 @@ pub const WRITE_TOOLS: &[&str] = &[
     "create_note",
     "update_note",
     "delete_note",
+    "delete_folder",
     "create_script",
     "update_script",
 ];
@@ -353,6 +354,31 @@ pub struct MessageParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteNoteParams {
+    /// The vault's id, as returned by `list_vaults`.
+    pub vault: String,
+    /// The note's id.
+    pub note_id: String,
+    /// Why it should go, in your own words, 1 to 500 characters. Required
+    /// for an agent session: the person reads it before approving.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DeleteFolderParams {
+    /// The vault's id, as returned by `list_vaults`.
+    pub vault: String,
+    /// The folder, relative to the vault, for example `Projects/Old`. It
+    /// goes with every note and folder under it.
+    pub path: String,
+    /// Why it should go, in your own words, 1 to 500 characters. The person
+    /// reads it before approving.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ModeParams {
     /// The mode asked for: only `auto`.
     pub mode: String,
@@ -417,13 +443,18 @@ pub struct Storm {
     context: bool,
     /// An agent session launched with a role note (decision 138f).
     role: bool,
+    /// An agent session offered the delete tools (decision 149a).
+    deletes: bool,
 }
 
-/// Tools an agent is never offered, whatever its write flags (G-D5).
-pub const NEVER_FOR_AGENTS: &[&str] = &["delete_note"];
+/// The tools an agent deletes with, each waiting for the person's Approve
+/// (decision 149, amending G-D5): offered by the gateway only to a session
+/// with vault writes that no agent started.
+pub const DELETE_TOOLS: &[&str] = &["delete_note", "delete_folder"];
 
-/// Tools only an agent session is offered.
-pub const ONLY_FOR_AGENTS: &[&str] = &["session_context"];
+/// Tools only an agent session is offered. A person's own MCP client
+/// deletes a folder in the app, where the confirm is.
+pub const ONLY_FOR_AGENTS: &[&str] = &["session_context", "delete_folder"];
 
 /// Decision 134's tools for a session whose spawn switch is on (134c), offered
 /// by the gateway only while the switch is on and C0 holds. 134-4 built the
@@ -520,14 +551,17 @@ impl Storm {
             actor,
             context: false,
             role: false,
+            deletes: false,
         }
     }
 
     /// The built-in `storm` connection's handler: the same tools, served in
-    /// process to the gateway as `Actor::Agent`, never with `delete_note`.
+    /// process to the gateway as `Actor::Agent`. Its deletes wait for the
+    /// person (decision 149).
     pub fn for_agent(
         state: Shared,
         writable: bool,
+        deletes: bool,
         context: bool,
         role: bool,
         actor: Actor,
@@ -538,13 +572,13 @@ impl Storm {
             actor: Some(actor),
             context,
             role,
+            deletes,
         }
     }
 
     /// Built for an agent in a session, as the MCP Gateway's built-in `storm`
     /// connection (spec §5, decision 81e). Read off the actor, so the two can
-    /// never disagree. **`delete_note` is never offered to an agent** (G-D5),
-    /// writable or not.
+    /// never disagree.
     fn is_agent(&self) -> bool {
         matches!(self.actor, Some(Actor::Agent { .. }))
     }
@@ -568,15 +602,16 @@ impl Storm {
                 router.remove_route(name);
             }
         }
-        let removed = if self.is_agent() {
-            NEVER_FOR_AGENTS
+        if self.is_agent() {
+            if !self.deletes {
+                for name in DELETE_TOOLS {
+                    router.remove_route(name);
+                }
+            }
         } else {
-            ONLY_FOR_AGENTS
-        };
-        for name in removed {
-            router.remove_route(name);
-        }
-        if !self.is_agent() {
+            for name in ONLY_FOR_AGENTS {
+                router.remove_route(name);
+            }
             for name in SPAWN_TOOLS.iter().chain(SPAWNED_TOOLS).chain(MODE_TOOLS) {
                 router.remove_route(name);
             }
@@ -958,22 +993,65 @@ impl Storm {
     }
 
     #[tool(
-        description = "Delete a note. It goes to the vault's Trash, where the person can restore it or delete it for good; nothing here reaches the Trash."
+        description = "Delete a note, saying why in reason. It goes to the vault's Trash, where the person can restore it or delete it for good; nothing here reaches the Trash. From an agent session nothing is deleted until the person approves it in Storm, which shows them you, the note and your reason; auto mode does not skip this. The call waits for them up to a limit and returns {status}: deleted (with trash_id), declined, timed_out (nobody answered in 10 minutes), gone (the note was edited, moved or deleted after you asked: read it again, and ask again if it should still go), pending (call again with the same note to keep waiting; it never asks twice) or busy (another of your deletions is waiting: finish it first). Ask only for what the person's task needs gone."
     )]
     async fn delete_note(
         &self,
-        Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
+        Parameters(DeleteNoteParams {
+            vault,
+            note_id,
+            reason,
+        }): Parameters<DeleteNoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
+        let actor = self.actor()?;
+        if self.is_agent() {
+            return respond_object(
+                crate::ops::agent_delete(
+                    &self.state,
+                    actor,
+                    &vault,
+                    crate::ops::AgentDelete::Note(note_id),
+                    reason.as_deref().unwrap_or(""),
+                )
+                .await,
+            );
+        }
         respond(
             crate::ops::delete_note(
                 &self.state,
-                self.actor()?,
+                actor,
                 &vault,
                 &note_id,
-                &crate::ops::DeleteOrigin::default(),
+                &crate::ops::DeleteOrigin {
+                    reason,
+                    ..Default::default()
+                },
             )
             .await,
             None,
+        )
+    }
+
+    #[tool(
+        description = "Delete a folder and every note and folder under it, saying why in reason. Nothing is deleted until the person approves it in Storm, which shows them you, the folder, how many notes it holds and your reason; auto mode does not skip this. It goes to the vault's Trash as one item, which only the person can restore. The folder that holds the vault's settings (_storm) cannot be deleted. The call waits for the person up to a limit and returns {status}: deleted (with trash_id), declined, timed_out (nobody answered in 10 minutes), gone (a note in it was added, edited, moved or deleted after you asked: look again, and ask again if it should still go), pending (call again with the same folder to keep waiting; it never asks twice) or busy (another of your deletions is waiting: finish it first)."
+    )]
+    async fn delete_folder(
+        &self,
+        Parameters(DeleteFolderParams {
+            vault,
+            path,
+            reason,
+        }): Parameters<DeleteFolderParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(
+            crate::ops::agent_delete(
+                &self.state,
+                self.actor()?,
+                &vault,
+                crate::ops::AgentDelete::Folder(path),
+                reason.as_deref().unwrap_or(""),
+            )
+            .await,
         )
     }
 
@@ -1023,8 +1101,7 @@ impl ServerHandler for Storm {
                  also create and update notes: always read a note before updating it and \
                  send back its base_version, so a change made on another device is merged \
                  rather than overwritten. You may write only to the vault this session \
-                 was given; a write anywhere else is refused. Notes cannot be deleted \
-                 from here."
+                 was given; a write anywhere else is refused."
         } else if self.writable {
             "Storm is a self-hosted markdown notes server. Notes live in vaults and are \
                  addressed by vault id and note id — never by file path. Start with \
@@ -1042,6 +1119,17 @@ impl ServerHandler for Storm {
                  scripts in the kit vault are readable with list_scripts and get_script. \
                  These tools are read-only: this server does not allow changes."
         });
+        if self.is_agent() && self.writable {
+            instructions.push_str(if self.deletes {
+                " You may also delete a note or a folder there with delete_note or \
+                 delete_folder, giving your reason: nothing is deleted until the person \
+                 approves it in Storm, and it goes to the vault's Trash, which only they \
+                 can open. Ask only for what their task needs gone, one at a time."
+            } else {
+                " You cannot delete anything: say in your result what should go, and the \
+                 agent that started you decides."
+            });
+        }
         instructions.push_str(match (self.context, self.role) {
             (true, true) => {
                 " This session was started from a note and with a role note. Call \
@@ -1288,6 +1376,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Decision 149: the delete tools are write tools, each tells the agent
+    /// the person approves it and what it may answer, and a person's own
+    /// client is never offered the folder delete.
+    #[test]
+    fn the_delete_tools_wait_for_the_person() {
+        for name in DELETE_TOOLS {
+            assert!(WRITE_TOOLS.contains(name), "{name}");
+            let d = Storm::tool_router()
+                .list_all()
+                .into_iter()
+                .find(|t| t.name == *name)
+                .and_then(|t| t.description.map(|d| d.to_string()))
+                .unwrap_or_else(|| panic!("{name}"));
+            for taught in [
+                "reason",
+                "approves",
+                "auto mode does not skip",
+                "declined",
+                "timed_out",
+                "gone",
+                "pending",
+                "busy",
+                "Trash",
+            ] {
+                assert!(d.contains(taught), "{name}: {taught}: {d}");
+            }
+        }
+        assert!(ONLY_FOR_AGENTS.contains(&"delete_folder"));
+        assert!(!ONLY_FOR_AGENTS.contains(&"delete_note"));
     }
 
     /// A-150-5 (decision 150c): the trash is the person's. No tool lists,
