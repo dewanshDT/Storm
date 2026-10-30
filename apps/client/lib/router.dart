@@ -26,6 +26,7 @@ import 'ui/shell/notes_home.dart';
 import 'ui/shell/vault_shell.dart';
 import 'ui/starting_screen.dart';
 import 'ui/tags_screen.dart';
+import 'ui/trash_screen.dart';
 
 /// Where the app can be.
 ///
@@ -78,6 +79,7 @@ abstract final class Routes {
   static String browse(String vaultId) => '${vault(vaultId)}/browse';
   static String search(String vaultId) => '${vault(vaultId)}/search';
   static String tags(String vaultId) => '${vault(vaultId)}/tags';
+  static String trash(String vaultId) => '${vault(vaultId)}/trash';
 
   /// [session] marks a note pushed from that agent session, which its back
   /// link then names.
@@ -262,6 +264,10 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: '/v/:vault/tags',
                 builder: (_, _) => _leaf(const TagsScreen()),
+              ),
+              GoRoute(
+                path: '/v/:vault/trash',
+                builder: (_, _) => _leaf(const TrashScreen()),
               ),
             ],
           ),

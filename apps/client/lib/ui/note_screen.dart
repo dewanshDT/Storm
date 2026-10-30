@@ -244,7 +244,7 @@ class _NoteScreenState extends ConsumerState<NoteScreen> {
       builder: (c) => AlertDialog(
         title: const Text('Delete note?'),
         content: Text(
-          '“${note.path}” will be removed from the vault on the server.',
+          '“${note.path}” goes to Trash, where you can restore it.',
         ),
         actions: [
           TextButton(

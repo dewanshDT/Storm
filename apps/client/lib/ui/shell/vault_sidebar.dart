@@ -85,12 +85,41 @@ class VaultSidebar extends ConsumerWidget {
                     unseen: unseen ?? unseenIds.contains,
                   ),
                 ),
+                if (vaultId.isNotEmpty) TrashRow(vaultId: vaultId),
               ],
             ),
           ),
         ],
       ),
       footer: const _Footer(),
+    );
+  }
+}
+
+/// The vault's Trash, under its folders (decision 150b).
+class TrashRow extends StatelessWidget {
+  const TrashRow({super.key, required this.vaultId});
+
+  final String vaultId;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final selected =
+        GoRouterState.of(context).uri.path == Routes.trash(vaultId);
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 1.5),
+      child: SidebarRow(
+        key: const Key('sidebar-trash'),
+        label: 'Trash',
+        selected: selected,
+        leading: Icon(
+          LucideIcons.trash_2,
+          size: t.uiSize,
+          color: selected ? t.accent : t.text3,
+        ),
+        onTap: () => context.go(Routes.trash(vaultId)),
+      ),
     );
   }
 }
