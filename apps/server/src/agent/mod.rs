@@ -1473,6 +1473,22 @@ impl AgentManager {
         on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
     }
 
+    /// Whether an approved switch (147c) carries a session's switch: it was
+    /// launched with it on and the person has not turned it off since.
+    pub fn spawn_carried(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store.spawn_launched(session_id).unwrap_or(false)
+            && store.spawn_enabled(session_id).unwrap_or(false)
+    }
+
+    pub fn spawn_launched(&self, session_id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .spawn_launched(session_id)
+            .unwrap_or(false)
+    }
+
     /// Whether a session launched with the switch on has it off now, so a
     /// spawn tool call can say how to turn it back on (141e).
     pub fn spawn_turned_off(&self, session_id: &str) -> bool {
@@ -1998,7 +2014,16 @@ impl AgentManager {
         let may_spawn = reads_storm
             && SPAWN_PROVIDERS.contains(&provider.id.as_str())
             && self.spawn_gate(&req.host_id).is_ok();
-        if req.spawn && !may_spawn {
+        // A resume never turns on more than its predecessor launched with,
+        // and an approved switch (147c) keeps the switch only if it can.
+        if let Some((old, _)) = resume.as_ref()
+            && req.spawn
+            && !self.store.lock().unwrap().spawn_launched(old)?
+        {
+            return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let spawn = req.spawn && (may_spawn || req.switch_mode.is_none());
+        if spawn && !may_spawn {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
         let model = match resume.as_ref() {
@@ -2072,7 +2097,7 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
-            if req.spawn {
+            if spawn {
                 store.record_spawn_launch(
                     &record.id,
                     meta.device.as_deref(),
@@ -2154,7 +2179,7 @@ impl AgentManager {
                 provider_credential: credential.kind().map(Into::into),
                 model,
                 permission_mode,
-                spawn: req.spawn,
+                spawn,
                 child_of: None,
             },
         );
@@ -2272,7 +2297,6 @@ impl AgentManager {
         self.store.lock().unwrap().grant(session_id, connection_id)
     }
 
-    #[cfg(test)]
     pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
         self.store.lock().unwrap().grants_of(session_id)
     }

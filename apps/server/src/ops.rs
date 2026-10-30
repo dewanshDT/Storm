@@ -4594,12 +4594,27 @@ pub async fn launch_session(
     // Every non-disabled connection of the owner scoped to this host, plus
     // `storm` (spec §6, G-D9, decision 121). Snapshotted here; the manager
     // drops them for `shell` and for a host that cannot bridge.
+    // An approved switch (147c) is the same session in another mode: it
+    // keeps the connections it had, never one added since.
+    let kept = match (&req.switch_mode, &req.resume_of) {
+        (Some(_), Some(old)) => Some(
+            state
+                .agent
+                .grants_of(old)
+                .map_err(internal)?
+                .into_iter()
+                .map(|g| g.id)
+                .collect::<std::collections::HashSet<_>>(),
+        ),
+        _ => None,
+    };
     let (connections, mut origins) = {
         let store = gateway_store(state);
         let mut out = Vec::new();
         let mut origins = std::collections::HashMap::new();
         for c in store.connections_of(actor.user_id()).map_err(internal)? {
             if c.status != status::DISABLED
+                && kept.as_ref().is_none_or(|k| k.contains(&c.id))
                 && store.in_host_scope(&c.id, &req.host_id).map_err(internal)?
             {
                 if let Some((plugin, server)) = store.plugin_origin(&c.id).map_err(internal)? {
@@ -4645,7 +4660,7 @@ pub async fn launch_session(
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
-    if spawn {
+    if spawn && state.agent.spawn_launched(&session.id) {
         let detail = serde_json::json!({
             "session_id": session.id,
             "host_id": session.host_id,
@@ -5767,6 +5782,7 @@ async fn switch_to_auto(
         }
         return Ok(session_id.to_string());
     }
+    let spawn = state.agent.spawn_carried(session_id);
     if !r.is_ended() {
         state
             .agent
@@ -5791,7 +5807,7 @@ async fn switch_to_auto(
         resume_of: Some(session_id.to_string()),
         crew: None,
         role: None,
-        spawn: false,
+        spawn,
         model: None,
         permission_mode: None,
         switch_mode: Some(crate::agent::permission::AUTO.into()),

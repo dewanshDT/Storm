@@ -19167,6 +19167,144 @@ pub(crate) mod tests {
         }
     }
 
+    impl GatewayFixture {
+        /// Asks for auto on `s`, approves it, and returns the session it was
+        /// switched to with the `start` that resumed it.
+        async fn approved_switch(&mut self, s: &str) -> (String, serde_json::Value) {
+            let (asked, ()) = tokio::join!(
+                self.tool(s, "request_permission_mode", ask("auto")),
+                async {
+                    let id = self.waiting_request(s).await;
+                    let (code, body) = self.decide(s, &id, "approve").await;
+                    assert_eq!(code, StatusCode::OK, "{body}");
+                }
+            );
+            assert_eq!(structured(&asked)["status"], "approved", "{asked:?}");
+            for _ in 0..100 {
+                if self.ended(s) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            self.report(s, "stopped").await;
+            for _ in 0..100 {
+                if let Some(start) = self.sent().into_iter().find(|m| m["type"] == "start") {
+                    let id = start["session"].as_str().unwrap().to_string();
+                    self.report(&id, "running").await;
+                    self.initialize(&id, "storm").await;
+                    return (id, start);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            panic!("{s} was not resumed");
+        }
+
+        fn ended(&self, s: &str) -> bool {
+            self.state
+                .agent
+                .get(s)
+                .is_ok_and(|r| r.status == "stopping" || r.is_ended())
+        }
+    }
+
+    /// An approved switch (147c) is the same session in another mode: the
+    /// spawn switch, while still on, its write vault, model and connections
+    /// carry over; a switch the person turned off stays off; and no Resume
+    /// turns on a switch its predecessor was not launched with.
+    #[tokio::test]
+    async fn the_switch_to_auto_keeps_the_launch() {
+        let dir = tempdir::TempDir::new("storm-147-keeps").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.agent_writes(true).await;
+        f.spawning_parent().await;
+        for keep_spawn in [true, false] {
+            let s = f
+                .moded_session(serde_json::json!({
+                    "spawn": true, "model": "haiku", "write_vault_id": work,
+                }))
+                .await;
+            if !keep_spawn {
+                assert_eq!(f.spawn(&s, false).await.0, StatusCode::OK);
+            }
+            let (status, added) = send(
+                &f.app,
+                post_json_with_auth(
+                    CONNECTIONS,
+                    serde_json::json!({
+                        "display_name": format!("Later {keep_spawn}"),
+                        "url": "http://127.0.0.1:9/mcp",
+                        "auth_kind": "static",
+                        "credential": {"header": "X-Api-Key", "value": "later"},
+                    }),
+                    &f.owner_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::CREATED, "{added}");
+            let (_, fresh) = f.launch_body(serde_json::json!({})).await;
+            assert!(
+                fresh["mcp"]["connections"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|g| g["id"] == added["id"]),
+                "a new launch would get it: {fresh}"
+            );
+            f.report(fresh["id"].as_str().unwrap(), "completed").await;
+            f.sent();
+            tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+            let (resumed, start) = f.approved_switch(&s).await;
+            assert_eq!(start["permission_mode"], "auto", "{start}");
+            assert_eq!(start["model"], "haiku", "{start}");
+            assert_eq!(
+                start["spawn"].as_bool().unwrap_or(false),
+                keep_spawn,
+                "{start}"
+            );
+            let mut granted: Vec<String> = start["mcp"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|g| g["id"].as_str().unwrap().to_string())
+                .collect();
+            granted.sort();
+            let mut before: Vec<String> = f
+                .state
+                .agent
+                .grants_of(&s)
+                .unwrap()
+                .into_iter()
+                .map(|g| g.id)
+                .collect();
+            before.sort();
+            assert_eq!(granted, before, "none added since: {start}");
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{resumed}")).await;
+            assert_eq!(view["write_vault_id"], work.as_str(), "{view}");
+            assert_eq!(view["model"], "haiku", "{view}");
+            assert_eq!(view["spawn"]["enabled"], keep_spawn, "{view}");
+            assert_eq!(view["spawn"]["launched_on"], keep_spawn, "{view}");
+            let tools = f.storm_tools(&resumed).await;
+            assert_eq!(
+                tools.contains(&"start_agent".to_string()),
+                keep_spawn,
+                "{tools:?}"
+            );
+            assert!(tools.contains(&"delete_note".to_string()), "{tools:?}");
+            f.report(&resumed, "completed").await;
+        }
+
+        let plain = f.moded_session(serde_json::json!({})).await;
+        f.report(&plain, "completed").await;
+        let (status, body) = f
+            .launch_body(serde_json::json!({"resume_of": plain, "spawn": true}))
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert!(body.to_string().contains("spawn_unavailable"), "{body}");
+        let (status, body) = f.launch_body(serde_json::json!({"resume_of": plain})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
     // ---- decision 149: agents delete with approval ----
 
     impl GatewayFixture {
