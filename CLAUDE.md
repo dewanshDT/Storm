@@ -257,6 +257,15 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   reports the colour scheme to the agent on every non-identical theme while
   DEC 2031 is on; a report after the agent restored echo prints as
   `^[[?997;1n` in the scrollback.
+- **Tab and Shift+Tab are the agent's while the terminal has focus**
+  (decision 147b): `StormTerminal` sends `\t` and `ESC [ Z` itself, before
+  xterm2's encoding or Flutter's focus traversal, on every platform; the
+  way out is Escape, then Tab, within `escapeThenTab` (WCAG 2.1.2, said in
+  the terminal's accessible name), and the phone key bar has Tab and ⇧Tab.
+  The vendored xterm2 (`5.2.0+storm.2`) reports a kitty-protocol release
+  only when the agent asked for event types and a lone modifier only when
+  it asked for all keys: before, Claude Code's `>5u` made one Shift+Tab
+  two mode steps and one Escape a double Escape.
 - **A terminal link opens only for `http`, `https` and `mailto`, and a tap
   asks first** (decision 122). Agent output is untrusted and an OSC 8 link's
   text can differ from its target, so the touch sheet shows the real target;
@@ -632,7 +641,8 @@ Specification*; the slices are decisions 81 and 81a onward):
   (re-read before launch) and as OpenCode `allow` keys after the
   connection's ask, under a key no account config uses. Nothing else is
   allowed, note writes included; Codex keeps its prompts; a session that
-  cannot spawn and is not a child gets a byte-identical config. **The switch turns on only for a session
+  cannot spawn and is not a child gets a byte-identical config (apart from
+  147c's `disableAutoMode`). **The switch turns on only for a session
   launched with it** (141e): a launch's `spawn: true` is refused
   `spawn_unavailable` unless the session reads Storm, runs a spawning
   adapter and C0 holds, and is written on, and audited `spawn_enabled`,
@@ -650,7 +660,30 @@ Specification*; the slices are decisions 81 and 81a onward):
   `permission_mode_wider`; left out, the child gets the parent's, or the
   nearest stricter one its agent offers. `docs/agent-permission-mode-vectors.json`
   holds both crates to one table. Claude Code 2.1.312's own default (no
-  flag) is `auto`.
+  flag) is `auto`, so **a Claude Code session always gets a flag** (147a):
+  `default` is `--permission-mode default`, the asking mode's config name,
+  which every version takes (2.1.312 also takes `manual`), so there is no
+  version check. **Auto is out of the Shift+Tab cycle unless launched in
+  auto** (147c): every other Claude Code session's `--settings` carries
+  `permissions.disableAutoMode: "disable"`, re-read before launch, and a
+  file that cannot carry it fails the start (G-147).
+- **An agent asks for auto; only the person grants it** (147c,
+  `agent::mode`, `ops::request_permission_mode`): `request_permission_mode
+  {mode: "auto", reason}` is offered to Claude Code sessions only (the
+  gateway's `MODE_TOOLS`), and makes one `mode_requests` card per session
+  (a repeat waits on it), waited on up to the wait cap and answered
+  `pending` until the person decides on the session tier (`POST
+  …/mode-requests/{id}`), else `expired` after 10 minutes. Only `auto` can
+  be asked for; a child only while its parent is in auto
+  (`permission_mode_wider`); a session with live children is refused
+  (`live_children`). **Approval resumes, never reloads**: G-147 found
+  Claude Code does not re-read its `--settings` file while running
+  (`harness::SETTINGS_FLAG_RELOADS`), so a top-level session is ended and
+  resumed in auto as a new session (`Launch::switch_mode`, which no
+  request can set), and a child is parked and resumed as itself with its
+  stored mode now auto. Request, decision and switch are audited
+  (`permission_mode_request`/`_decision`/`_switch`) with codes only, never
+  the reason's text.
 - **A model reaches argv only in its agent's form** (145b,
   `agent::model`, `profile::model_args`): `haiku`/`sonnet`/`opus` or
   `claude-…` for Claude Code (`--model`), `provider/model` for OpenCode
@@ -714,7 +747,8 @@ Specification*; the slices are decisions 81 and 81a onward):
   `attention::GATED_SIGNALS`, `round::RESULT_SOURCES` and `events::WAKE`
   hold; a test in each crate holds them equal, and each entry goes on only
   when its `make gate-lifecycle` gate (G-144-S/W, G-145-R/W, G-146-P)
-  passes. A child's permission prompt (146c) is `permission_prompt`: set by
+  passes; G-147 checks the manual flag, the cycle setting and the reload
+  finding there too. A child's permission prompt (146c) is `permission_prompt`: set by
   Claude Code's `PermissionRequest`/`Notification permission_prompt` or
   OpenCode's `permission.asked`, cleared by `PostToolUse`/
   `PostToolUseFailure`/`UserPromptSubmit`/`Stop`/`StopFailure` or
@@ -758,7 +792,7 @@ Specification*; the slices are decisions 81 and 81a onward):
   real binaries. **No profile turns an agent's own permission prompts off on
   its own** (146b): only a mode the person chose at launch is passed
   (`profile::permission_mode`: Claude Code `--permission-mode
-  acceptEdits|auto`, OpenCode `edit: allow` in Storm's config layer;
+  default|acceptEdits|auto`, OpenCode `edit: allow` in Storm's config layer;
   anything else fails the start), and no bypass or skip-permissions value
   exists in the API, the store, the launcher or `start_agent`.
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),

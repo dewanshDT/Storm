@@ -1,4 +1,4 @@
-//! The real-CLI gates of decisions 144, 145 and 146's runtime half, for Claude
+//! The real-CLI gates of decisions 144, 145, 146 and 147's runtime half, for Claude
 //! Code and OpenCode: each runs the real agent in a terminal that is only
 //! typed into like a person would, with the hooks or plugin Storm's own
 //! writer produces when every list is on, reporting to a socket this test
@@ -23,6 +23,11 @@
 //!   with no prompt over an account whose own mode asks, OpenCode's
 //!   `edit: allow` in Storm's layer over the account's `edit: ask`.
 //!   Positive control: the account's mode alone asks.
+//! - **G-147-claude-code**: Storm's manual flag starts in Manual and an edit
+//!   prompts; Storm's `disableAutoMode` keeps auto out of the Shift+Tab
+//!   cycle while the test plays the person (positive control: without it,
+//!   auto is reached); and whether an edit to the `--settings` file while
+//!   the CLI runs is picked up (positive control: the user settings are).
 //! - **G-146-P-<provider>**: a permission prompt sets the flag and the
 //!   person's answer clears it (Claude Code: `PermissionRequest`, then
 //!   `PostToolUse`; after an Esc, the next turn; OpenCode:
@@ -428,32 +433,72 @@ impl Agent {
         String::from_utf8_lossy(&raw).contains(text)
     }
 
+    /// How much the terminal has shown so far.
+    fn shown(&self) -> usize {
+        std::fs::metadata(&self.screen).map_or(0, |m| m.len() as usize)
+    }
+
+    /// The permission mode Claude Code's footer last said after `from`.
+    fn mode_since(&self, from: usize) -> Option<&'static str> {
+        let raw = std::fs::read(&self.screen).unwrap_or_default();
+        let text = plain(&String::from_utf8_lossy(&raw[from.min(raw.len())..])).to_lowercase();
+        MODES
+            .iter()
+            .filter_map(|(word, mode)| text.rfind(word).map(|at| (at, *mode)))
+            .max_by_key(|(at, _)| *at)
+            .map(|(_, mode)| mode)
+    }
+
+    /// Plays the person: Shift+Tab `n` times, the footer's mode after each.
+    fn cycle(&mut self, n: usize) -> Vec<&'static str> {
+        (0..n)
+            .map(|_| {
+                let at = self.shown();
+                self.keys("\x1b[Z");
+                std::thread::sleep(Duration::from_millis(1500));
+                self.mode_since(at).unwrap_or("?")
+            })
+            .collect()
+    }
+
     /// The end of what the terminal showed, without escape sequences.
     fn tail(&self) -> String {
         let raw = std::fs::read(&self.screen).unwrap_or_default();
-        let text = String::from_utf8_lossy(&raw);
-        let mut out = String::new();
-        let mut chars = text.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '\x1b' {
-                match chars.next() {
-                    Some('[') => {
-                        while chars
-                            .next()
-                            .is_some_and(|c| !c.is_ascii_alphabetic() && c != '~')
-                        {
-                        }
-                    }
-                    Some(']') => while chars.next().is_some_and(|c| c != '\x07') {},
-                    _ => {}
-                }
-            } else if !c.is_control() || c == '\n' {
-                out.push(c);
-            }
-        }
+        let out = plain(&String::from_utf8_lossy(&raw));
         let start = out.len().saturating_sub(2500);
         out[out.floor_char_boundary(start)..].to_string()
     }
+}
+
+/// Claude Code's footer word for each mode it cycles through.
+const MODES: [(&str, &str); 4] = [
+    ("manual mode on", "manual"),
+    ("accept edits on", "acceptEdits"),
+    ("plan mode on", "plan"),
+    ("auto mode on", "auto"),
+];
+
+/// Terminal output without escape sequences.
+fn plain(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.next() {
+                Some('[') => {
+                    while chars
+                        .next()
+                        .is_some_and(|c| !c.is_ascii_alphabetic() && c != '~')
+                    {}
+                }
+                Some(']') => while chars.next().is_some_and(|c| c != '\x07') {},
+                _ => {}
+            }
+        } else if !c.is_control() || c == '\n' {
+            out.push(c);
+        }
+    }
+    out
 }
 
 impl Drop for Agent {
@@ -548,6 +593,9 @@ struct Session {
     ws: PathBuf,
     /// The stand-in Storm MCP server's log of tool calls, when it has one.
     mcp_log: Option<PathBuf>,
+    /// Claude Code's: Storm's `--settings` file and its throwaway home.
+    settings: Option<PathBuf>,
+    home: Option<PathBuf>,
     _dirs: Vec<tempfile::TempDir>,
 }
 
@@ -603,6 +651,8 @@ for line in sys.stdin:
 struct ClaudeOpts {
     args: Vec<String>,
     allow: Vec<String>,
+    /// Storm's `permissions.disableAutoMode` in its `--settings` (147c).
+    auto_off: bool,
     storm_mcp: bool,
     /// The account's own `permissions.defaultMode` (its user settings).
     /// Claude Code 2.1.312's own default is `auto`; `manual` is what asks.
@@ -646,7 +696,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
     let home = tempfile::tempdir().unwrap();
     let socket = state.path().join("mcp.sock");
     let host = FakeHost::listen(&socket);
-    let (extras, _) = storm_runtime::harness::launch(
+    let (extras, _) = storm_runtime::harness::launch_with(
         "claude-code",
         &state.path().join("session"),
         "h_gate",
@@ -655,7 +705,10 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         None,
         None,
         &Hooks::all(),
-        &opts.allow,
+        storm_runtime::harness::Permissions {
+            allow: &opts.allow,
+            auto_off: opts.auto_off,
+        },
     )
     .unwrap();
     let mut argv = vec![bin];
@@ -747,6 +800,8 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         model,
         ws: ws.path().canonicalize().unwrap(),
         mcp_log,
+        settings: Some(state.path().join("session").join("claude-settings.json")),
+        home: Some(home.path().to_path_buf()),
         _dirs: vec![ws, state, home],
     }
 }
@@ -862,6 +917,8 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
         model,
         ws: ws.path().canonicalize().unwrap(),
         mcp_log: None,
+        settings: None,
+        home: None,
         _dirs: vec![ws, state],
     }
 }
@@ -1215,13 +1272,13 @@ fn g_146_m_claude_code() {
             || asked(s, at, if written { 3 } else { 30 });
         (written, asked, file)
     };
-    // `default` passes no flag: the CLI's own default, whatever it is.
+    // 147a: `default` is the CLI's asking mode by name, never no flag.
     c.check(
-        "default adds no flag",
+        "default is --permission-mode default (147a)",
         storm_runtime::profile::permission_mode("claude-code", "default")
             .unwrap()
             .args
-            .is_empty(),
+            == ["--permission-mode", "default"],
     );
     let mut own = claude();
     let (written, prompted, _) = edit(&mut own);
@@ -1437,4 +1494,155 @@ fn g_146_p_claude_code() {
 #[test]
 fn g_146_p_opencode() {
     prompt_flag("opencode");
+}
+
+/// G-147-claude-code (decision 147): on the real CLI,
+/// - 147a: Storm's `default` is `--permission-mode default`, which starts in
+///   Manual over the CLI's own default (auto) and makes an edit prompt;
+///   `manual`, the newer spelling, is the same mode. Positive control: with
+///   no flag and no account mode the CLI starts in auto.
+/// - 147c: with Storm's `permissions.disableAutoMode` in its `--settings`,
+///   the person's Shift+Tab (the test plays the person) never reaches auto
+///   and cycles manual, accept edits and plan. Positive control: without
+///   it, auto is reached. An auto launch, which gets no such setting, keeps
+///   auto in the cycle.
+/// - Reload: whether an edit to the `--settings` file while the CLI runs is
+///   picked up (taking the setting out puts auto back in the cycle). It
+///   must match `harness::SETTINGS_FLAG_RELOADS`, which Storm's switch is
+///   built on. Positive control: an edit to the account's own user
+///   settings is picked up (adding the setting takes auto out).
+#[test]
+fn g_147_claude_code() {
+    let gate = "G-147-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model and a throwaway home)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let manual = storm_runtime::profile::permission_mode("claude-code", "default").unwrap();
+    c.check(
+        "default is --permission-mode default, with auto out of the cycle",
+        manual.args == ["--permission-mode", "default"] && manual.auto_off,
+    );
+    let auto = storm_runtime::profile::permission_mode("claude-code", "auto").unwrap();
+    c.check(
+        "auto is --permission-mode auto, with auto kept in the cycle",
+        auto.args == ["--permission-mode", "auto"] && !auto.auto_off,
+    );
+
+    // Positive control: the CLI's own default, no flag, no setting.
+    let mut own = claude();
+    let starts = own.agent.mode_since(0);
+    let seen = own.agent.cycle(5);
+    c.check(
+        &format!("control: with no flag it starts in auto ({starts:?}), and Shift+Tab reaches auto ({seen:?})"),
+        starts == Some("auto") && seen.contains(&"auto"),
+    );
+    drop(own);
+
+    // Storm's manual session, as the host launches it.
+    let mut s = claude_with(ClaudeOpts {
+        args: manual.args.clone(),
+        auto_off: true,
+        ..Default::default()
+    });
+    let starts = s.agent.mode_since(0);
+    c.check(
+        &format!("--permission-mode default starts in Manual ({starts:?})"),
+        starts == Some("manual"),
+    );
+    let file = s.ws.join("gate-147.txt");
+    let at = Instant::now();
+    s.agent.prompt(&format!("WRITE:{}", file.display()));
+    let prompted = asked(&s, at, 60);
+    c.check(
+        &format!(
+            "an edit prompts in Manual (prompted {prompted}, written {})",
+            file.exists()
+        ),
+        prompted && !file.exists(),
+    );
+    s.agent.keys("\x1b");
+    std::thread::sleep(Duration::from_secs(2));
+    let seen = s.agent.cycle(8);
+    c.check(
+        &format!("with disableAutoMode, Shift+Tab never reaches auto ({seen:?})"),
+        !seen.contains(&"auto")
+            && ["manual", "acceptEdits", "plan"]
+                .iter()
+                .all(|m| seen.contains(m)),
+    );
+
+    // Reload: Storm's file loses the setting while the CLI runs.
+    let path = s.settings.clone().unwrap();
+    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    settings["permissions"]
+        .as_object_mut()
+        .unwrap()
+        .remove("disableAutoMode");
+    std::fs::write(&path, settings.to_string()).unwrap();
+    std::thread::sleep(Duration::from_secs(12));
+    let seen = s.agent.cycle(6);
+    let reloads = seen.contains(&"auto");
+    eprintln!("  finding: an edit to the --settings file while running is picked up: {reloads}");
+    c.check(
+        &format!(
+            "the --settings file is re-read while running: {reloads} ({seen:?}), as \
+             SETTINGS_FLAG_RELOADS ({}) says",
+            storm_runtime::harness::SETTINGS_FLAG_RELOADS
+        ),
+        reloads == storm_runtime::harness::SETTINGS_FLAG_RELOADS,
+    );
+    drop(s);
+
+    // Control for the reload: the account's own user settings are watched.
+    let mut watched = claude_with(ClaudeOpts {
+        args: manual.args.clone(),
+        ..Default::default()
+    });
+    let before = watched.agent.cycle(5);
+    let dir = watched.home.clone().unwrap().join(".claude");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("settings.json"),
+        json!({"permissions": {"disableAutoMode": "disable"}}).to_string(),
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_secs(12));
+    let after = watched.agent.cycle(6);
+    c.check(
+        &format!(
+            "control: an edit to the user settings is picked up (auto before {before:?}, none after {after:?})"
+        ),
+        before.contains(&"auto") && !after.contains(&"auto"),
+    );
+    drop(watched);
+
+    // An auto launch keeps auto in the cycle; the newer spelling is manual.
+    let mut a = claude_with(ClaudeOpts {
+        args: auto.args.clone(),
+        auto_off: auto.auto_off,
+        ..Default::default()
+    });
+    let starts = a.agent.mode_since(0);
+    let seen = a.agent.cycle(5);
+    c.check(
+        &format!("an auto launch starts in auto ({starts:?}) and keeps it in the cycle ({seen:?})"),
+        starts == Some("auto") && seen.contains(&"auto"),
+    );
+    drop(a);
+    let m = claude_with(ClaudeOpts {
+        args: vec!["--permission-mode".into(), "manual".into()],
+        auto_off: true,
+        ..Default::default()
+    });
+    let starts = m.agent.mode_since(0);
+    c.check(
+        &format!("--permission-mode manual is the same mode ({starts:?})"),
+        starts == Some("manual"),
+    );
+    c.finish(&m.agent);
 }
