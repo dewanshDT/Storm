@@ -130,6 +130,9 @@ class ModifyOtherKeysInputHandler implements TerminalInputHandler {
   String? call(TerminalKeyboardEvent event) {
     if (event.type == TerminalKeyEventType.release) return null;
     if (event.state.modifyOtherKeysMode != 2) return null;
+    // Storm (5.2.0+storm.3): the kitty protocol, once on, supersedes it; a
+    // key it leaves as text is text.
+    if (event.state.kittyKeyboardMode != 0) return null;
 
     final codepoint = _codepoint(event);
     if (codepoint == null) return null;
@@ -172,8 +175,10 @@ class ModifyOtherKeysInputHandler implements TerminalInputHandler {
     };
   }
 
+  // Storm (5.2.0+storm.3): only a modified key, as xterm does. An
+  // unmodified or shifted letter went out as `CSI 27;1;84~`, which Claude
+  // Code reads as a lowercase "t".
   bool _shouldModify(TerminalKeyboardEvent event, int codepoint) {
-    if (codepoint >= 0x40 && codepoint <= 0x7f) return true;
     if (event.ctrl || event.alt) return true;
     return event.shift && codepoint == 0x20;
   }

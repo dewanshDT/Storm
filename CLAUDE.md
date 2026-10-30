@@ -262,10 +262,13 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   xterm2's encoding or Flutter's focus traversal, on every platform; the
   way out is Escape, then Tab, within `escapeThenTab` (WCAG 2.1.2, said in
   the terminal's accessible name), and the phone key bar has Tab and ⇧Tab.
-  The vendored xterm2 (`5.2.0+storm.2`) reports a kitty-protocol release
+  The vendored xterm2 (`5.2.0+storm.3`) reports a kitty-protocol release
   only when the agent asked for event types and a lone modifier only when
   it asked for all keys: before, Claude Code's `>5u` made one Shift+Tab
-  two mode steps and one Escape a double Escape.
+  two mode steps and one Escape a double Escape. Its modifyOtherKeys
+  encodes only a Ctrl or Alt key, and nothing while the kitty protocol is
+  on: Claude Code also sets `>4;2m`, and read every letter sent as
+  `CSI 27;1;<code>~` lowercased (`terminal_case_test.dart`).
 - **A terminal link opens only for `http`, `https` and `mailto`, and a tap
   asks first** (decision 122). Agent output is untrusted and an OSC 8 link's
   text can differ from its target, so the touch sheet shows the real target;

@@ -1,3 +1,9 @@
+## 5.2.0+storm.3
+
+- modifyOtherKeys: only a key with Ctrl or Alt (or Shift+Space) is encoded,
+  and nothing while the kitty protocol is on. Before, every letter went out
+  as `CSI 27;1;<code>~`, which Claude Code reads lowercased (Storm round 2).
+
 ## 5.2.0+storm.2
 
 - Kitty keyboard protocol: a key's release is reported only when the
