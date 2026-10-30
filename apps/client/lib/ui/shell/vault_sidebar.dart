@@ -398,7 +398,14 @@ class _FolderTreeState extends ConsumerState<FolderTree> {
   }) {
     final t = context.tokens;
     final vaultId = VaultGate.of(context);
-    final indent = depth * t.sp * 1.75;
+    // A level starts where its folder's name does, and a guide runs down
+    // from each open folder's twisty: a root note after an open folder
+    // read as inside it when the two lined up.
+    final step = t.sp * 1.5 + t.sp * 0.75;
+    final indent = depth * step;
+    final guides = [
+      for (var d = 0; d < depth; d++) t.sp + d * step + t.sp * 0.75,
+    ];
     final entries = childrenOfFolder(widget.notes, folder, widget.knownFolders);
 
     for (final entry in entries) {
@@ -409,6 +416,7 @@ class _FolderTreeState extends ConsumerState<FolderTree> {
             key: ValueKey('folder:${entry.path}'),
             label: entry.name,
             indent: indent,
+            guides: guides,
             leading: Twisty(open: isOpen),
             unseen: !isOpen && _unseenUnder(entry.path),
             onTap: () => setState(() {
@@ -428,6 +436,7 @@ class _FolderTreeState extends ConsumerState<FolderTree> {
             note: note,
             name: entry.name,
             indent: indent,
+            guides: guides,
             selected: note.id == open,
             unseen: widget.unseen?.call(note.id) ?? false,
             onTap: () => context.go(Routes.note(vaultId, note.id)),
@@ -444,6 +453,7 @@ class _NoteTreeRow extends ConsumerWidget {
     required this.note,
     required this.name,
     required this.indent,
+    required this.guides,
     required this.selected,
     required this.unseen,
     required this.onTap,
@@ -452,6 +462,7 @@ class _NoteTreeRow extends ConsumerWidget {
   final NoteMeta note;
   final String name;
   final double indent;
+  final List<double> guides;
   final bool selected;
   final bool unseen;
   final VoidCallback onTap;
@@ -463,6 +474,7 @@ class _NoteTreeRow extends ConsumerWidget {
     return SidebarRow(
       label: name,
       indent: indent,
+      guides: guides,
       // The empty twisty column keeps a note's title under its siblings'.
       leading: SizedBox(width: t.sp * 1.5),
       selected: selected,
