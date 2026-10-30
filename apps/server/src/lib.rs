@@ -50,6 +50,7 @@ mod ops;
 mod parse;
 mod registry;
 mod relay;
+mod trash;
 mod vault;
 mod watcher;
 
@@ -1236,6 +1237,18 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 tick.tick().await;
                 ops::stop_cascade_targets(&state, &crate::index::now_rfc3339()).await;
                 ops::resume_parked_children(&state);
+            }
+        });
+    }
+
+    // Trash retention (decision 150b): hourly, and once at boot.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                ops::purge_expired_trash(&state).await;
             }
         });
     }

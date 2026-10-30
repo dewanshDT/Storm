@@ -157,4 +157,21 @@ mod tests {
         );
         assert!(dest.join("personal/.storm.yml").exists());
     }
+
+    /// Decision 150c: the trash is backed up with the vault it belongs to.
+    #[test]
+    fn the_trash_is_backed_up() {
+        let from = tempdir::TempDir::new("from").unwrap();
+        let entry = from.path().join("personal/.trash/0f3a-uuid/Projects");
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(entry.join("Old.md"), "old").unwrap();
+        let to = tempdir::TempDir::new("to").unwrap();
+        let dest = to.path().join("vaults");
+        copy_tree(from.path(), &dest).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("personal/.trash/0f3a-uuid/Projects/Old.md"))
+                .unwrap(),
+            "old"
+        );
+    }
 }

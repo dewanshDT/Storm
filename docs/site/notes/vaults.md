@@ -32,6 +32,31 @@ an id, not its name.
 Create, rename and delete folders in the app. An empty folder you created is
 kept; folders left empty by moving or deleting notes are tidied away.
 
+Deleting a folder that holds notes asks first — "Delete folder X and its N
+notes? They go to Trash." — and moves the folder and everything in it to the
+Trash as one item. Storm's own settings folder, `_storm`, cannot be deleted.
+
+## Trash
+
+Nothing you delete is gone at once. A deleted note or folder moves to the
+vault's `.trash/` folder, keeping its id and its history, and appears under
+**Trash** in the vault's sidebar with where it was, when it was deleted and
+by which device. This holds for a delete from the app, from an MCP key, and
+for a note removed outside Storm (by another machine or a sync tool): the
+server keeps the last version it had.
+
+- **Restore** puts it back where it was, as the same note. If something new
+  now has that name, the restored one is called `Name (restored).md` —
+  nothing is overwritten. Attachments only that note used come back with it.
+- **Delete forever** and **Empty trash** ask first, then remove the files
+  and their history for good.
+- Items are kept for **30 days**, then removed automatically. Change this
+  per vault in the Trash view (7, 30 or 90 days, or never); it is stored as
+  `storm.trash.retention` in `_storm/vault.md`.
+
+Agents never see the Trash: no MCP tool lists, restores or empties it, and
+trashed notes appear in no search, listing or backlinks.
+
 ## Moving the storage root
 
 **Storm never moves vault folders.** Changing the storage root (in

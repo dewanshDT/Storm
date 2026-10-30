@@ -958,15 +958,22 @@ impl Storm {
     }
 
     #[tool(
-        description = "Delete a note. Storm has no trash: the file is removed from the vault immediately. Only the server's version history still holds the text."
+        description = "Delete a note. It goes to the vault's Trash, where the person can restore it or delete it for good; nothing here reaches the Trash."
     )]
     async fn delete_note(
         &self,
         Parameters(NoteParams { vault, note_id }): Parameters<NoteParams>,
     ) -> Result<CallToolResult, ErrorData> {
         respond(
-            crate::ops::delete_note(&self.state, self.actor()?, &vault, &note_id).await,
-            Some("seq"),
+            crate::ops::delete_note(
+                &self.state,
+                self.actor()?,
+                &vault,
+                &note_id,
+                &crate::ops::DeleteOrigin::default(),
+            )
+            .await,
+            None,
         )
     }
 
@@ -1024,8 +1031,8 @@ impl ServerHandler for Storm {
                  list_vaults, then search to find notes and get_note to read one. You may \
                  also create, update and delete notes: always read a note before updating it \
                  and send back its base_version, so a change made on another device is \
-                 merged rather than overwritten. There is no trash — a deleted note is gone \
-                 from the vault immediately. Canonical scripts live in the kit vault: \
+                 merged rather than overwritten. A deleted note goes to the vault's Trash, \
+                 which only the person can see, restore from or empty. Canonical scripts live in the kit vault: \
                  list_scripts, then get_script to read one, and create_script or \
                  update_script to store one there — nowhere else."
         } else {
@@ -1280,6 +1287,31 @@ mod tests {
                      so a read-only server would serve it"
                 );
             }
+        }
+    }
+
+    /// A-150-5 (decision 150c): the trash is the person's. No tool lists,
+    /// reads, restores or purges it, and none calls the ops that do.
+    #[test]
+    fn no_tool_reaches_the_trash() {
+        for tool in Storm::tool_router().list_all() {
+            let name: String = tool.name.into();
+            assert!(
+                !name.contains("trash") && !name.contains("restore"),
+                "{name}"
+            );
+        }
+        let source = include_str!("mcp.rs");
+        for op in [
+            "list_trash(",
+            "restore_trash(",
+            "purge_trash(",
+            "empty_trash(",
+        ] {
+            assert!(
+                !source.contains(&format!("ops::{op}")),
+                "{op} is reachable from MCP"
+            );
         }
     }
 

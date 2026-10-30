@@ -86,7 +86,7 @@
     },
     {
       "name": "delete_note",
-      "description": "Delete a note. Storm has no trash: the file is removed from the vault immediately. Only the server's version history still holds the text.",
+      "description": "Delete a note. It goes to the vault's Trash, where the person can restore it or delete it for good; nothing here reaches the Trash.",
       "access": "write",
       "agents": false
     },
