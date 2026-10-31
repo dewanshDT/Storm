@@ -160,6 +160,17 @@ void main() {
         );
         // A record without a title keeps the one already known.
         expect(named.withLive(plain).displayName, 'Fix the login');
+        // A child is called what its parent named it.
+        final child = AgentSession.fromJson({
+          ...session(),
+          'name': 'outside-test',
+          'title': 'Storm session task loop',
+          'parent_session': 'ags_parent',
+          'root_session': 'ags_parent',
+          'depth': 1,
+        });
+        expect(child.displayName, 'outside-test');
+        expect(child.withLive(live).displayName, 'outside-test');
       },
     );
 

@@ -257,6 +257,18 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   reports the colour scheme to the agent on every non-identical theme while
   DEC 2031 is on; a report after the agent restored echo prints as
   `^[[?997;1n` in the scrollback.
+- **Tab and Shift+Tab are the agent's while the terminal has focus**
+  (decision 147b): `StormTerminal` sends `\t` and `ESC [ Z` itself, before
+  xterm2's encoding or Flutter's focus traversal, on every platform; the
+  way out is Escape, then Tab, within `escapeThenTab` (WCAG 2.1.2, said in
+  the terminal's accessible name), and the phone key bar has Tab and ⇧Tab.
+  The vendored xterm2 (`5.2.0+storm.3`) reports a kitty-protocol release
+  only when the agent asked for event types and a lone modifier only when
+  it asked for all keys: before, Claude Code's `>5u` made one Shift+Tab
+  two mode steps and one Escape a double Escape. Its modifyOtherKeys
+  encodes only a Ctrl or Alt key, and nothing while the kitty protocol is
+  on: Claude Code also sets `>4;2m`, and read every letter sent as
+  `CSI 27;1;<code>~` lowercased (`terminal_case_test.dart`).
 - **A terminal link opens only for `http`, `https` and `mailto`, and a tap
   asks first** (decision 122). Agent output is untrusted and an OSC 8 link's
   text can differ from its target, so the touch sheet shows the real target;
@@ -510,6 +522,14 @@ decision 77):
   while the host is offline and never queued on the server. On the host, each
   session has its own ordered writer, and every PTY write is bounded, so a hung
   agent can never hold the session against the owner's `end`.
+- **A start runs only while Storm still wants it** (round 4's stray launch).
+  A launch refused because its host is offline writes nothing and is never
+  queued. A `start` its host has not reported when the link it went down
+  closes, or within `START_ACK_DEADLINE` (120 s), has failed
+  (`start_failure`), never `unknown`; the host's first act on a start is to
+  report `starting`, which such a session answers `409 start_unwanted`, and
+  the host drops it. A host that runs one anyway (an older host) is sent
+  `end` when it reports it. The client sends a launch only on a click.
 - **`storm-runtime` is its own account and never joins the server's group**
   (decision 77e). The group mode of P3 is all that keeps a co-located runtime
   out of the vaults. Its unit never sets `MemoryDenyWriteExecute`, because
@@ -586,9 +606,9 @@ Specification*; the slices are decisions 81 and 81a onward):
   only unsolicited ones use the link's `mcp.message`. A call's progress and
   elicitations die with it.
 - **The host is told connection ids and slugs, never a credential** (AM23);
-  `shell` and a host without `mcp_bridge` get no grants. **Agents never see
-  `delete_note`** (`mcp::NEVER_FOR_AGENTS`), and `Actor::Agent` is the
-  account's identity, read through `user_id()`.
+  `shell` and a host without `mcp_bridge` get no grants. **An agent deletes
+  only with the person's Approve** (decision 149, below; `mcp::DELETE_TOOLS`),
+  and `Actor::Agent` is the account's identity, read through `user_id()`.
 - **The bridge never retries, and replays `initialize` only on
   `session_unknown`** (81f, spec §11). `apps/runtime/src/bridge.rs`'s six
   rules each have a test, and `gateway_e2e.py` catches the gates' `leak_init`,
@@ -615,28 +635,126 @@ Specification*; the slices are decisions 81 and 81a onward):
   else gets nothing. A
   config that cannot be written fails the start rather than launching
   unconfined. It holds a handle and a socket path, never a credential.
-- **Decision 134's CLI asks are written at launch, never later** (134-8,
-  `mcp::PINNED_ASK_TOOLS`/`EXEMPT_TOOLS`, pinned in the host and checked
-  against the server's lists by a test). Only a `start` carrying
-  `spawn_asks` — sent where C0 holds, for a spawning adapter with the storm
-  connection — gets them, and only such a session's switch turns on
-  (`launched_without_asks`); every other config is byte for byte as before.
-  **The switch turns on only for a session launched with it** (141e): a
-  launch's `spawn: true` is refused `spawn_unavailable` unless its `start`
-  carries `spawn_asks`, and is written on, and audited `spawn_enabled`,
+- **A parent's acts need no approval; the launch toggle is consent**
+  (decision 145a). `start_agent`, `send_message` and `end_agent` act at
+  once (`Store::start_child`/`message_child`/`end_child`), each checked as
+  134 checks it (C0, the switch, scope, C4's caps, depth) in one
+  transaction that also writes its already-decided row in `agent_requests`,
+  now the session's act log (About reads it), and audited `spawn_start`/
+  `spawn_message`/`spawn_end` with codes only. A row an older server left
+  `pending` is expired at open. No host writes a CLI ask for them: no
+  `start` carries `spawn_asks` (an old server's is ignored). **Storm's own
+  tools are pre-allowed where they are the session's own** (146a,
+  `mcp::StormLayer`): a child's `session_context`/`report_result`/
+  `read_messages`, and a parent launched with the switch on (`start`'s
+  `spawn: true`) its spawn tools, `read_output` included, as
+  `mcp__storm__<tool>` in Claude Code's `--settings` `permissions.allow`
+  (re-read before launch) and as OpenCode `allow` keys after the
+  connection's ask, under a key no account config uses. Nothing else is
+  allowed, note writes included; Codex keeps its prompts. A top-level
+  Claude Code session reading Storm also gets `request_permission_mode`
+  allowed, so the person sees only Storm's card (147c), and every top-level
+  session reading Storm gets `delete_note`/`delete_folder` allowed
+  (`mcp::DELETE_ALLOWED_TOOLS`, 149b) and Storm's read-only tools
+  (`mcp::READ_ALLOWED_TOOLS`, every server tool not a write, spawn, child's
+  or mode tool, held to the server's lists by a test); G-149 shows Claude
+  Code and OpenCode then never prompt first; a session that does not read Storm gets a byte-identical
+  config (apart from 147c's `disableAutoMode`). **The switch turns on only for a session
+  launched with it** (141e): a launch's `spawn: true` is refused
+  `spawn_unavailable` unless the session reads Storm, runs a spawning
+  adapter and C0 holds, and is written on, and audited `spawn_enabled`,
   before `start` goes out, so the CLI's one `tools/list` has the tools
   (Claude Code never re-fetches on `list_changed`). Any other session's
   switch is refused `launched_without_spawn`; a spawn tool called while a
   launched-on session's switch is off answers `spawn_off` with a sentence.
-  Claude Code: `permissions.ask` for `start_agent`, `send_message`,
-  `end_agent` and `allow` for the exemptions in its `--settings` file (an
-  ask beats any allow; G-134-5). OpenCode: each pinned ask under a key no
-  account config has (`storm_start_agent`, else with more `*`), so the merge
-  appends it after the account's keys, at the top level and in every agent
-  the account or `runtime.toml` defines; exemptions only where the account
-  names no such key. Exemptions only on a host whose own identity is
-  verified and whose isolation self-test has passed. Codex: nothing new,
-  every Storm tool already prompts.
+- **A permission mode is the person's, and a child is never looser**
+  (146b, `agent::permission`): `default` (stored and sent as nothing),
+  `accept_edits` or `auto`, offered per agent (Claude Code all three,
+  OpenCode the first two, everything else `default`), else
+  `permission_mode_unavailable`. Only a person sets one at launch; a
+  resume keeps it; it is audited (`permission_mode`) and on every view.
+  `start_agent`'s `permission_mode` above its parent's is
+  `permission_mode_wider`; left out, the child gets the parent's, or the
+  nearest stricter one its agent offers. `docs/agent-permission-mode-vectors.json`
+  holds both crates to one table. Claude Code 2.1.312's own default (no
+  flag) is `auto`, so **a Claude Code session always gets a flag** (147a):
+  `default` is `--permission-mode default`, the asking mode's config name,
+  which every version takes (2.1.312 also takes `manual`), so there is no
+  version check. **Auto is out of the Shift+Tab cycle unless launched in
+  auto** (147c): every other Claude Code session's `--settings` carries
+  `permissions.disableAutoMode: "disable"`, re-read before launch, and a
+  file that cannot carry it fails the start (G-147).
+- **A child never asks** (148a, `profile::child_permission_mode`): whatever
+  its 146b mode, its host runs it with no prompt. Claude Code gets
+  `--permission-mode dontAsk` with `CHILD_BASELINE` (`Edit(./**)`,
+  `Read(./**)`, `Bash`) beside its Storm tools in `permissions.allow`, for
+  an auto parent too: G-148 found auto falls back to asking after repeated
+  blocks and no documented setting makes that a denial
+  (`profile::AUTO_CAN_ASK`). OpenCode gets Storm's layer turning every ask
+  into a deny (the connections', Storm's settings', the account's at the
+  top level and per agent under the same keys, OpenCode's defaults:
+  `doom_loop`, `question`, `plan_enter`, `external_directory`, `.env`
+  reads), then `edit` and `bash` allowed under keys that follow every deny;
+  an account config Storm cannot parse fails the start. Only
+  `permission::UNATTENDED` agents run as children: Codex is
+  `agent_unavailable`, never listed. The isolation (136/137) and Apply are
+  the boundary, never a prompt nobody answers; no bypass, ever.
+- **A child's denials go to its parent, never the person** (148b). A
+  child's host gets `harness-denied` hooks (Claude Code `PostToolBatch`,
+  whose result for a `dontAsk` refusal is the denial sentence and which is
+  the only hook such a refusal runs, and `PermissionDenied`, auto's;
+  OpenCode's tool part that failed on a deny rule, since it publishes no
+  denial event), posts `…/denied {tool, detail}` (detail the command or
+  path, 500 characters), and the parent gets a `denied` event
+  (`provider_hook`, `reported`), the one kind carrying child text, bounded,
+  as data; identical ones in a round merge into `count`. The gated lists
+  are `harness::DENIALS` and `events::DENIALS`. A child's prompt is a fault:
+  `needs_attention` reason `unexpected_prompt` for the parent and a
+  `spawn_unexpected_prompt` audit row; the client shows no Needs you. A
+  child is never offered `request_permission_mode`, and a call is refused.
+- **An agent asks for auto; only the person grants it** (147c,
+  `agent::mode`, `ops::request_permission_mode`): `request_permission_mode
+  {mode: "auto", reason}` is offered to Claude Code sessions only (the
+  gateway's `MODE_TOOLS`), and makes one `mode_requests` card per session
+  (a repeat waits on it), waited on up to the wait cap and answered
+  `pending` until the person decides on the session tier (`POST
+  …/mode-requests/{id}`), else `expired` after 10 minutes. Only `auto` can
+  be asked for; never by a child (148: `permission_mode_unavailable`, and
+  not offered); a session with live children is refused
+  (`live_children`). **Approval resumes, never reloads**: G-147 found
+  Claude Code does not re-read its `--settings` file while running
+  (`harness::SETTINGS_FLAG_RELOADS`), so a top-level session is ended and
+  resumed in auto as a new session (`Launch::switch_mode`, which no
+  request can set), and a child is parked and resumed as itself with its
+  stored mode now auto. Request, decision and switch are audited
+  (`permission_mode_request`/`_decision`/`_switch`) with codes only, never
+  the reason's text.
+- **An agent deletes only with the person's Approve** (decision 149,
+  `agent::deletes`, `ops::agent_deletes`): `delete_note`/`delete_folder`
+  `{…, reason}` are offered only to a session with vault writes that no
+  agent started (`Authorized::deletes`; a child never asks, 149d). A call
+  makes one `delete_requests` row per session (the same target again waits
+  on it; another is `busy`), bound to the target as asked (a note's
+  version and path, a hash of a folder's notes and versions), waited on up
+  to the wait cap (`pending`), else `timed_out` after 10 minutes or when
+  its session ends. **The delete runs when the person approves** (`POST
+  …/delete-requests/{id}`, session tier only), under the vault's indexer
+  lock, as the agent and to the trash (150), and a decline takes the same
+  lock, so nothing lands between the check and the delete: a changed
+  target is `gone` and nothing is deleted. The first answer wins (a
+  second is 409 `request_<state>`); `GET /v1/agent/delete-requests` is the
+  clients' long poll for the dialog. The permission mode never skips it.
+  `_storm` is refused; a reason is 1–500 characters. Request and decision
+  are audited (`agent_delete_request`/`_decision`) with codes and the
+  target, never the reason's text. A person's own MCP client keeps a
+  direct `delete_note` (to the trash) and gets no `delete_folder`.
+- **A model reaches argv only in its agent's form** (145b,
+  `agent::model`, `profile::model_args`): `haiku`/`sonnet`/`opus` or
+  `claude-…` for Claude Code (`--model`), `provider/model` for OpenCode
+  (`--model`), an id for Codex (`-m`), ASCII letters, digits and `._:/-`
+  only, never a leading `-`, bounded; anything else is `model_unavailable`
+  on the server and a failed start on the host.
+  `docs/agent-model-vectors.json` holds both crates to one rule.
 - **C0 is the live link's word, both halves** (134r): `spawn_gate` needs
   `identity` and `isolation` exactly `verified` in what the host's current
   link has itself sent (`hello` or an inventory; a new link's carried-over
@@ -644,20 +762,94 @@ Specification*; the slices are decisions 81 and 81a onward):
   **WS-9 compares the host's canonical `workspace_paths`** (137-2): two
   names for one directory, or one inside the other, are one workspace, and
   a name the host gives no directory for is shared with every other. Since
-  decision 141 it only *reports* sharing — a request card's `shared_with`,
-  the live sessions there outside the requester's own tree — and refuses
-  neither a launch nor the spawn switch.
-- **An approved child is started in a workspace of its own, never its
+  decision 141 it refuses neither a launch nor the spawn switch.
+- **A child is started in a workspace of its own, never its
   parent's** (134-5): its `start` names the parent's workspace and
   `child_of`, the host has the helper make the child's W2 clone or W3
   scratch before it starts it (and refuses a child on a host without
   isolation), and the child's record is `children/<id>`, which the host
   reports in `workspace_paths` once made. Its grants are the parent's live
-  ones at approval, its agent the parent's (B4), its synced login only the
-  parent's; it gets the constant `mcp::SPAWNED_OPENING_PROMPT`. A child
-  starts none (`store::spawn::BUILT_DEPTH`) until a decision says how a
-  grandchild reads its parent's own workspace. `docs/spawned-start-vectors.json`
-  holds the two crates' tests to one `start`.
+  ones at its start; its agent the parent's or any other its host reports
+  installed with `mcp: true`, never `shell` (143a, `acts::child_agents`;
+  else `agent_unavailable`); its name unique among the parent's live
+  children, and accepted wherever an id is (145b); its
+  credential what a person's launch of that agent there would get (143d:
+  the synced login for Claude Code when deliverable, else the host's own
+  136f setup); it gets the constant `mcp::SPAWNED_OPENING_PROMPT`, which
+  has it report each round with `report_result` and then wait on
+  `read_messages` for the next (145): a message after its round's result
+  starts the next round (`session_round`), and results are kept per round.
+  It inherits its parent's write vault only when the parent launched with
+  one it may write (145a); nothing wider.
+  A child starts none (`store::spawn::BUILT_DEPTH`) until a decision says
+  how a grandchild reads its parent's own workspace.
+  `docs/spawned-start-vectors.json` holds the two crates' tests to one
+  `start` and to the prompt's words.
+- **A crew holds whole trees** (145i): only a root has a `crew_members`
+  row; a child's crew is its root's (`store::crew_root`), so a move or a
+  create naming a child acts on its root and its tree goes with it. The
+  one-time upgrade that took children's rows out is recorded in
+  `agent_migrations` with what it moved and audited once at startup.
+- **A child's changes are events in its parent's durable queue** (decision
+  144, `agent/events.rs`): written in the transaction that records the
+  change (`Store::update_with`, `record_result`), only on
+  a transition, at most `MAX_EVENTS_PER_CHILD` per child except the
+  terminal kinds. `wait_agent` returns on the first event after a cursor;
+  `after` acknowledges, so an unacknowledged event comes back after a
+  reconnect or restart, and `until: "settled"` is 134i's wait. An event
+  holds codes, never a child's text (A-144-8). A host's attention or idle
+  word counts only through `attention::GATED_SIGNALS` (provider, signal,
+  source; each on only once its gate passes), so without a gated idle signal a
+  child's activity is `unknown`, never `working`. No provider has a `wake`
+  (`events::WAKE`), and no event path writes to a terminal (A-144-12 scans
+  for one). Round events (`reported`, `failed`, `ended`, `parked`) carry
+  `round`, `duration_ms` by Storm's own timestamps, and `usage` only where
+  the agent itself counted it (145f).
+- **A hook is evidence, switched on per agent in two mirrored lists**
+  (144b/c, 145c–e). The host reports only what `harness::{GATED_SIGNALS,
+  RESULT_SOURCES, WAKE}` hold; the server takes only what
+  `attention::GATED_SIGNALS`, `round::RESULT_SOURCES` and `events::WAKE`
+  hold; a test in each crate holds them equal, and each entry goes on only
+  when its `make gate-lifecycle` gate (G-144-S/W, G-145-R/W, G-146-P,
+  G-148) passes; G-147 checks the manual flag, the cycle setting and the
+  reload finding there too. A child's permission prompt (146c) is
+  `permission_prompt`: set by Claude Code's `PermissionRequest`/
+  `Notification permission_prompt` or OpenCode's `permission.asked`,
+  cleared by `PostToolUse`/`PostToolUseFailure`/`UserPromptSubmit`/`Stop`/
+  `StopFailure` or `permission.replied`; since 148b it is only a fault
+  detector (`unexpected_prompt` for the parent), and nothing in Storm
+  answers it. With none
+  on, every config is byte-identical to before. A hook's line is taken only
+  through its session's own handle, socket and uid (`Host::hook_session`)
+  and can only be shown. A gated final message (`Stop`'s
+  `last_assistant_message`, OpenCode's idle) becomes the round's result,
+  `succeeded`, unless the child reported it itself; it is never in an
+  event. **The wake**: the server sends `wake {session, kind, mark}` when a
+  parent has unacknowledged events or a child a queued message
+  (`agent/wake.rs`); the host answers its one waiter per session
+  (`harness-wake`, a long-poll on the session's socket) once per mark:
+  Claude Code's `asyncRewake` hook exits 2 with a fixed stderr sentence,
+  OpenCode's plugin calls `client.session.promptAsync` — never
+  `/tui/append-prompt` or `/tui/submit-prompt`, never a PTY write. **Park**
+  (145e): a reported child idle `PARK_AFTER` by a gated idle signal is sent
+  `park`; its host stops it as `end` does, the helper's `child_park` keeps
+  its workspace (`Parked`), and it is `parked`, outside C4's live cap but
+  inside `MAX_PARKED` (12 a host) and its tree's total. A message resumes
+  the same session from its own kept conversation (the helper allows
+  `resume.from == session` only for a child `child_create` took back). A
+  parked child survives neither a host nor a helper restart: its resume
+  then fails and it ends. `read_output` (145g) gives a parent its own
+  child's last reported result and what it said (`messages`, the newest
+  20, each at most 4 KB, kept in memory per child), and its screen only
+  with `screen: true` (the cached bytes run through `vt100` at the
+  session's size: Claude Code draws by cursor position and, after
+  reporting, waits inside `read_messages`, so its screen never shows its
+  answer), audited without text. A child's words come from its own hooks
+  (`harness-said`: Claude Code's `PostToolUse` on `mcp__storm__.*` and
+  `Stop`, reading its transcript on from the offset the host keeps per
+  session; OpenCode's completed assistant text parts), posted to
+  `…/said`, gated by `harness::SAID`/`said::SAID` (G-145-O), text blocks
+  only, data only, never an event and never typed anywhere (C9).
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
@@ -672,8 +864,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   pass on a signed-in account. Both slugs are the CLIs' own — Command Code's
   is `@sindresorhus/slugify`, and a non-ASCII path fails the start rather
   than guess; `tests/cursor_command_code_gate.rs` checks them against the
-  real binaries. No profile passes a flag that turns an agent's own
-  permission prompts off.
+  real binaries. **No profile turns an agent's own permission prompts off on
+  its own** (146b): only a mode the person chose at launch is passed
+  (`profile::permission_mode`: Claude Code `--permission-mode
+  default|acceptEdits|auto`, OpenCode `edit: allow` in Storm's config layer;
+  anything else fails the start), or a child's no-prompt form of it (148a,
+  `dontAsk`, which refuses rather than asks), and no bypass or
+  skip-permissions value exists in the API, the store, the launcher or
+  `start_agent`.
 - **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,
@@ -791,7 +989,9 @@ Specification*; the slices are decisions 81 and 81a onward):
   keeps the two crates in agreement. The `SessionStart` hook prints nothing
   but a JSON `systemMessage` (decision 131a): plain stdout reaches the agent,
   a `systemMessage` only the person — checked on Claude Code 2.1.306 with a
-  positive control.
+  positive control. Every later hook command (`harness-signal`,
+  `harness-result`, `harness-wake`) prints nothing either; only the
+  waker's fixed sentence goes to stderr, which `asyncRewake` reads.
 - **Under `agent_mcp = "storm-only"`, a Claude Code session's plugins' local
   MCP servers are written into its `mcp.json` by Storm, and strict stays**
   (decision 131, `plugins.rs`); otherwise Claude Code loads its plugins

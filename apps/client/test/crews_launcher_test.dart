@@ -85,6 +85,7 @@ void main() {
       'launcher-host',
       'launcher-workspace',
       'launcher-agent',
+      'launcher-permission-mode',
       'launcher-write-vault',
       'launcher-crew',
       'launcher-role',
@@ -98,7 +99,7 @@ void main() {
         reason: key,
       );
     }
-    expect(find.byKey(const Key('select-chevron')), findsNWidgets(6));
+    expect(find.byKey(const Key('select-chevron')), findsNWidgets(7));
     expect(top(t, 'launcher-write-vault'), lessThan(top(t, 'launcher-crew')));
     expect(top(t, 'launcher-crew'), lessThan(top(t, 'launcher-role')));
     expect(inField('launcher-crew', 'None'), findsOneWidget);
@@ -288,7 +289,9 @@ void main() {
       final c = await launcher(t, agents);
       expect(find.byKey(const Key('launcher-spawn')), findsOneWidget);
       expect(
-        find.text('You approve each start, message and end.'),
+        find.text(
+          'Its starts, messages and ends act at once and show in About.',
+        ),
         findsOneWidget,
       );
       await t.tap(find.byKey(const Key('launch')));
@@ -333,6 +336,70 @@ void main() {
       await t.tap(find.byKey(const Key('launch')));
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('spawn'), isFalse);
+      await disposeShell(t, c);
+    });
+  });
+
+  group('Model (145b)', () {
+    Map<String, dynamic> three() =>
+        agentHost(providers: ['claude-code', 'opencode', 'codex', 'shell']);
+
+    testWidgets('A-145-3: the launcher sends the model it is given', (t) async {
+      final agents = server(host: three());
+      final c = await launcher(t, agents);
+      expect(find.byKey(const Key('launcher-model')), findsOneWidget);
+      expect(
+        find.text('haiku, sonnet, opus or a full id like claude-sonnet-4-5'),
+        findsOneWidget,
+      );
+      await t.enterText(find.byKey(const Key('launcher-model')), '  haiku ');
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(agents.launches.single['model'], 'haiku');
+      await disposeShell(t, c);
+    });
+
+    testWidgets('A-145-3: empty sends nothing; each agent says its form', (
+      t,
+    ) async {
+      final agents = server(host: three());
+      final c = await launcher(t, agents);
+      await pick(t, 'launcher-agent', find.text('OpenCode').last);
+      expect(
+        find.text('provider/model, e.g. anthropic/claude-sonnet-4-5'),
+        findsOneWidget,
+      );
+      await pick(t, 'launcher-agent', find.text('Codex').last);
+      expect(find.text('a model id, e.g. gpt-5-codex'), findsOneWidget);
+      await pick(t, 'launcher-agent', find.text('Shell').last);
+      expect(find.byKey(const Key('launcher-model')), findsNothing);
+      await pick(t, 'launcher-agent', find.text('Codex').last);
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(agents.launches.single.containsKey('model'), isFalse);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('A-145-3: a model the agent does not take is said plainly', (
+      t,
+    ) async {
+      final agents = server(host: three())
+        ..refuseLaunch = (
+          400,
+          'model_unavailable: Claude Code takes a model alias (haiku, '
+              'sonnet or opus) or a full model id such as claude-sonnet-4-5.',
+        );
+      final c = await launcher(t, agents);
+      await t.enterText(find.byKey(const Key('launcher-model')), 'gpt-4o');
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(
+        find.text(
+          'Claude Code takes a model alias (haiku, sonnet or opus) or a full '
+          'model id such as claude-sonnet-4-5.',
+        ),
+        findsOneWidget,
+      );
       await disposeShell(t, c);
     });
   });

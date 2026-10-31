@@ -676,6 +676,56 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    // Round 4's stray launch: a launch the server refused because the host
+    // was offline is never sent again on its own, and the launcher keeps
+    // what the person chose for their next click.
+    testWidgets('an offline refusal keeps the choices and never relaunches', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+      await tester.enterText(find.byKey(const Key('launcher-model')), 'haiku');
+      await tester.tap(find.byKey(const Key('launcher-writes')));
+      await tester.pumpAndSettle();
+      expect(find.text('Read only'), findsOneWidget);
+
+      agents.refuseLaunch = (503, 'the host is offline');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(find.text('The host is offline.'), findsOneWidget);
+      expect(agents.launches, hasLength(1));
+
+      // The host comes back: nothing is sent without a click.
+      c.invalidate(agentOverviewProvider);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 10));
+      }
+      await tester.pumpAndSettle();
+      expect(agents.launches, hasLength(1));
+      expect(find.byKey(const Key('launch')), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('launcher-model')))
+            .controller!
+            .text,
+        'haiku',
+      );
+      expect(find.text('Read only'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(agents.launches, hasLength(2));
+      expect(agents.launches.last['model'], 'haiku');
+      expect(agents.launches.last.containsKey('write_vault_id'), isFalse);
+      expect(agents.launches.last['host_id'], agents.launches.first['host_id']);
+      expect(
+        agents.launches.last['workspace'],
+        agents.launches.first['workspace'],
+      );
+      await disposeShell(tester, c);
+    });
+
     testWidgets('a refused launch is a sentence, never its code', (
       tester,
     ) async {

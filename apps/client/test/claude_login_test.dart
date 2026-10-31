@@ -456,17 +456,20 @@ void main() {
           child: MaterialApp(
             theme: StormTheme.light(),
             home: Scaffold(
-              body: NewSessionLauncher(
-                hosts: [
-                  AgentHost.fromJson(
-                    hostJson(
-                      'hst_1',
-                      'build-vm',
-                      receives: receives,
-                      isolated: isolated,
+              // Scrolls as the app's own launcher sheet does.
+              body: SingleChildScrollView(
+                child: NewSessionLauncher(
+                  hosts: [
+                    AgentHost.fromJson(
+                      hostJson(
+                        'hst_1',
+                        'build-vm',
+                        receives: receives,
+                        isolated: isolated,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),

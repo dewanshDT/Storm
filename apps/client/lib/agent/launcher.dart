@@ -99,8 +99,20 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
 
   /// "Allow this session to start agents" (141e): off by default.
   bool _spawn = false;
+
+  /// The model (decision 145b): empty is the agent's own default.
+  final _model = TextEditingController();
+
+  /// The permission mode (decision 146b), one [permissionModesOf] offers.
+  String _mode = 'default';
   String? _error;
   bool _busy = false;
+
+  @override
+  void dispose() {
+    _model.dispose();
+    super.dispose();
+  }
 
   List<AgentHost> get _online => [
     for (final h in widget.hosts)
@@ -230,6 +242,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ? null
             : (vaultId: _role!.vaultId, noteId: _role!.noteId),
         spawn: _spawn && _spawnable,
+        model: modelHint(_provider) == null ? null : _model.text.trim(),
+        permissionMode: _permissionMode,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -264,6 +278,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       (_host?.offersSpawning ?? false) &&
       kSpawnProviders.contains(_provider) &&
       _reachesStorm;
+
+  /// The chosen mode while the agent offers it, else its own.
+  String get _permissionMode =>
+      permissionModesOf(_provider).contains(_mode) ? _mode : 'default';
 
   @override
   Widget build(BuildContext context) {
@@ -407,11 +425,50 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               for (final p in host?.providers ?? const <ProviderCap>[])
                 if (!p.available) '${p.label} (not installed)',
             ],
-            onChanged: (p) => setState(() => _provider = _chosen = p),
+            onChanged: (p) => setState(() {
+              _provider = _chosen = p;
+              _mode = _permissionMode;
+            }),
           ),
         ),
         if (_provider == 'claude-code' && host != null && claudeLogin != null)
           _ClaudeLoginLine(login: claudeLogin, host: host),
+        if (modelHint(_provider) case final hint?)
+          _Field(
+            label: 'Model',
+            under: _Under(key: const Key('launcher-model-hint'), text: hint),
+            child: TextField(
+              key: const Key('launcher-model'),
+              controller: _model,
+              autocorrect: false,
+              enableSuggestions: false,
+              maxLength: 128,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.codeSize,
+                color: t.text,
+              ),
+              decoration: const InputDecoration(
+                isDense: true,
+                counterText: '',
+                hintText: 'the agent’s default',
+              ),
+            ),
+          ),
+        if (permissionModesOf(_provider).length > 1)
+          _Field(
+            label: 'Permission mode',
+            child: _Select<String>(
+              key: const Key('launcher-permission-mode'),
+              label: 'Permission mode',
+              value: _permissionMode,
+              options: [
+                for (final m in permissionModesOf(_provider))
+                  _Opt(m, permissionModeLabel(m)),
+              ],
+              onChanged: (m) => setState(() => _mode = m),
+            ),
+          ),
         if (!shell)
           _Field(
             label: 'Can write to',
@@ -504,7 +561,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             label: 'Agents',
             under: const _Under(
               key: Key('launcher-spawn-note'),
-              text: 'You approve each start, message and end.',
+              text:
+                  'Its starts, messages and ends act at once and show in About.',
             ),
             child: Row(
               children: [
@@ -878,6 +936,15 @@ class _Field extends StatelessWidget {
   }
 }
 
+/// What the launcher's Model field says for [provider], or null where Storm
+/// passes no model (decision 145b).
+String? modelHint(String? provider) => switch (provider) {
+  'claude-code' => 'haiku, sonnet, opus or a full id like claude-sonnet-4-5',
+  'opencode' => 'provider/model, e.g. anthropic/claude-sonnet-4-5',
+  'codex' => 'a model id, e.g. gpt-5-codex',
+  _ => null,
+};
+
 /// No workspace name starts with a dot, so this is never one.
 const _newWorkspaceKey = '.new';
 const _noCrew = '';
@@ -1117,6 +1184,12 @@ Future<AgentSession?> showNewSessionLauncher(
 /// a refusal code is never shown bare.
 String launchErrorText(Object e) {
   final code = e is AgentRefusal ? e.code : null;
+  // 145b: the server names the forms the agent accepts in a sentence.
+  const model = 'model_unavailable';
+  if (code != null && code.startsWith(model)) {
+    final why = code.substring(model.length).replaceFirst(RegExp(r'^:\s*'), '');
+    return why.isEmpty ? 'That model isn’t one this agent takes.' : why;
+  }
   if (code == null || !_isCode(code)) return describeFailure(e);
   return switch (code) {
     'workspace_held' => 'Another session is working in this workspace.',

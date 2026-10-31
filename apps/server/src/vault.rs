@@ -310,6 +310,109 @@ impl Vault {
         Ok(())
     }
 
+    // ---- trash (decision 150) -----------------------------------------
+    //
+    // `.trash/<trash_id>/<original path>`. A dotted directory, so the scan,
+    // the watcher and `resolve` never see it as part of the vault; the paths
+    // below are built from a trash id the index issued, never from a request.
+
+    fn trash_entry(&self, trash_id: &str) -> Result<PathBuf> {
+        if trash_id.is_empty() || !trash_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            bail!(Refusal::Invalid(format!("not a trash id: {trash_id}")));
+        }
+        Ok(self.root.join(".trash").join(trash_id))
+    }
+
+    /// Moves a file or a whole directory into a trash entry, pruning what it
+    /// leaves empty as a delete does.
+    pub fn move_to_trash(&self, rel: &str, trash_id: &str, keep: &HashSet<String>) -> Result<()> {
+        let src = self.resolve(rel)?;
+        if !src.exists() {
+            bail!(Refusal::Missing(format!("nothing at {rel}")));
+        }
+        let dst = self.trash_entry(trash_id)?.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::rename(&src, &dst).with_context(|| format!("moving {} to the trash", src.display()))?;
+        self.prune_empty_parents(&src, keep);
+        Ok(())
+    }
+
+    /// Writes a file into a trash entry: what a note deleted outside Storm
+    /// last held, from its history.
+    pub fn write_to_trash(&self, trash_id: &str, rel: &str, bytes: &[u8]) -> Result<()> {
+        self.resolve(rel)?;
+        let dst = self.trash_entry(trash_id)?.join(rel);
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        crate::fsutil::write_atomic(&dst, bytes)
+    }
+
+    /// The files and the directories in a trash entry, as original vault
+    /// paths.
+    pub fn trashed(&self, trash_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+        let entry = self.trash_entry(trash_id)?;
+        let (mut files, mut dirs) = (Vec::new(), Vec::new());
+        if !entry.is_dir() {
+            return Ok((files, dirs));
+        }
+        for item in WalkDir::new(&entry).min_depth(1).follow_links(false) {
+            let item = item?;
+            let rel = item
+                .path()
+                .strip_prefix(&entry)?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if item.file_type().is_dir() {
+                dirs.push(rel);
+            } else if item.file_type().is_file() && !rel.contains("storm-tmp") {
+                files.push(rel);
+            }
+        }
+        files.sort();
+        dirs.sort();
+        Ok((files, dirs))
+    }
+
+    /// Puts one trashed file back at `to`, which must be free.
+    pub fn restore_from_trash(&self, trash_id: &str, rel: &str, to: &str) -> Result<()> {
+        let src = self.trash_entry(trash_id)?.join(rel);
+        let dst = self.resolve(to)?;
+        if dst.exists() {
+            bail!(Refusal::Exists(format!("destination already exists: {to}")));
+        }
+        if let Some(parent) = dst.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("creating {}", parent.display()))?;
+        }
+        fs::rename(&src, &dst)
+            .with_context(|| format!("restoring {} to {}", src.display(), dst.display()))
+    }
+
+    /// Removes a trash entry's files for good.
+    pub fn purge_trash(&self, trash_id: &str) -> Result<()> {
+        let entry = self.trash_entry(trash_id)?;
+        if entry.exists() {
+            fs::remove_dir_all(&entry).with_context(|| format!("removing {}", entry.display()))?;
+        }
+        Ok(())
+    }
+
+    /// Whether `rel` is taken by anything on disk, a file or a directory.
+    pub fn occupied(&self, rel: &str) -> bool {
+        self.resolve(rel).map(|p| p.exists()).unwrap_or(true)
+    }
+
+    /// Whether the directory at `rel` holds nothing at all.
+    pub fn dir_is_empty(&self, rel: &str) -> Result<bool> {
+        let path = self.resolve(rel)?;
+        if !path.is_dir() {
+            bail!(Refusal::Missing(format!("no such folder: {rel}")));
+        }
+        Ok(fs::read_dir(&path)?.next().is_none())
+    }
+
     /// Vault-relative, forward-slashed path for an absolute path inside the
     /// vault. `None` for the root itself or anything outside.
     fn relative(&self, path: &Path) -> Option<String> {

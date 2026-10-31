@@ -13,6 +13,7 @@ import 'crew_changes.dart';
 import 'crew_screen.dart' show endAllRunning, watchEndAllPlan;
 import 'crew_widgets.dart';
 import 'session_crew.dart' show sessionReadsStorm;
+import 'spawn_models.dart' show kMovesWithParent;
 
 /// The phone's crew sheets (decision 138n, handoff §3 Phone, 4k and 4l): a
 /// long-press on a session raises its Crew and Role, two independent
@@ -149,7 +150,16 @@ class _CrewRoleSectionsState extends ConsumerState<CrewRoleSections> {
 
     final children = <Widget>[];
     // A server before decision 138 has no crews to list.
-    if (crews != null) {
+    if (crews != null && s.spawn.isChild) {
+      // 145i: a child is in its root's crew and goes with it.
+      children.addAll([
+        _Group('Crew', "where it's listed"),
+        _Note(
+          '${o?.crewOf(s)?.name ?? 'Not in a crew'} · $kMovesWithParent',
+          key: const Key('sheet-crew-moves-with-parent'),
+        ),
+      ]);
+    } else if (crews != null) {
       children.addAll([
         _Group('Crew', "where it's listed"),
         _Item(
@@ -254,7 +264,7 @@ class _Group extends StatelessWidget {
 }
 
 class _Note extends StatelessWidget {
-  const _Note(this.text);
+  const _Note(this.text, {super.key});
 
   final String text;
 

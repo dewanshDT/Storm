@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -7,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_state.dart';
+import 'package:storm/agent/session_inspector.dart';
 import 'package:storm/agent/spawn_models.dart';
 import 'package:storm/agent/spawn_widgets.dart';
 import 'package:storm/router.dart';
@@ -112,14 +112,11 @@ void main() {
         }
         expect(find.byKey(const Key('spawn-switch')), findsNothing);
         expect(find.text('Allow this session to start agents'), findsNothing);
-        expect(find.text('Requests'), findsNothing);
-        expect(find.text('REQUESTS'), findsNothing);
+        expect(find.text('Activity'), findsNothing);
+        expect(find.byKey(const Key('acts-list')), findsNothing);
         expect(find.text('Work'), findsNothing);
         expect(find.textContaining('↳'), findsNothing);
-        expect(find.byKey(const Key('approval-banner')), findsNothing);
-        expect(find.byType(ApprovalCard), findsNothing);
         expect(find.byType(AttentionTag), findsNothing);
-        expect(find.byKey(const Key('attention-approval')), findsNothing);
         // The labels 134 asks for are the host's own: identity, isolation.
         expect(
           find.textContaining('Session identity not verified'),
@@ -135,7 +132,7 @@ void main() {
           ),
           isEmpty,
         );
-        expect(spawning.requests, isEmpty);
+        expect(spawning.acts, isEmpty);
         await disposeShell(tester, c);
       });
     }
@@ -160,11 +157,10 @@ void main() {
       await tester.pumpAndSettle();
       expect(
         find.text(
-          'Allow gateway-impl to start agents? It can then ask to start, '
-          'message and end sessions on build-vm. Each request waits for '
-          'you, and children never get more access than gateway-impl. You '
-          'can turn this off at any time: requests still waiting are '
-          'refused then, and children keep running.',
+          'Allow gateway-impl to start agents? It can then start, message '
+          'and end sessions on build-vm without asking, and each shows here '
+          'as it happens. Children never get more access than gateway-impl. '
+          'You can turn this off at any time; children keep running.',
         ),
         findsOneWidget,
       );
@@ -178,26 +174,23 @@ void main() {
       ]);
       expect(
         find.text(
-          'On · you approve each start, message and end · Turn off any time',
+          'On · it starts, messages and ends its own agents · Turn off any '
+          'time',
         ),
         findsOneWidget,
       );
 
-      // Off refuses what waits, at once, and says so (138p point 6).
-      spawning.addRequest('ags_p', task: 'write tests');
+      // Off is at once and says so (141e); nothing waits to be refused.
       await tester.tap(find.byKey(const Key('spawn-switch')));
       await tester.pumpAndSettle();
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn').last, {
         'enabled': false,
       });
       expect(
-        find.text(
-          'Starting agents is off for gateway-impl. 1 waiting request was '
-          'refused.',
-        ),
+        find.text('Starting agents is off for gateway-impl.'),
         findsOneWidget,
       );
-      expect(spawning.requests.single['reason'], 'revoked');
+      expect(spawning.acts, isEmpty);
       await disposeShell(tester, c);
     });
 
@@ -206,11 +199,6 @@ void main() {
     ) async {
       for (final (code, text) in [
         ('workspace_held', 'Another session is working in this workspace'),
-        (
-          'launched_without_asks',
-          'It started before this host could offer it. Start a new session '
-              'to allow it',
-        ),
         ('provider_cannot_spawn', "Claude Code can't start agents"),
       ]) {
         final agents = FakeAgentServer(
@@ -263,6 +251,41 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('spawn-on-confirm')), findsNothing);
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('turning it on shows Allow in sight, however short the '
+        'window', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': false}),
+        ],
+      );
+      final spawning = FakeSpawning(agents);
+      const size = Size(1280, 560);
+      final c = await open(
+        tester,
+        agents,
+        size: size,
+        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+      );
+      final toggle = find.byKey(const Key('spawn-switch'));
+      await tester.ensureVisible(toggle);
+      await tester.pumpAndSettle();
+      await tester.tap(toggle);
+      await tester.pumpAndSettle();
+      final allow = find.descendant(
+        of: find.byKey(const Key('spawn-on-confirm')),
+        matching: find.byKey(const Key('banner-action')),
+      );
+      final r = tester.getRect(allow);
+      expect(r.bottom, lessThanOrEqualTo(size.height));
+      expect(r.top, greaterThanOrEqualTo(0));
+      await tester.tap(allow);
+      await tester.pumpAndSettle();
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isNotEmpty);
+      expect(spawning.acts, isEmpty);
       await disposeShell(tester, c);
     });
 
@@ -343,362 +366,127 @@ void main() {
     });
   });
 
-  group('approval cards (134o)', () {
-    testWidgets('a start: exact text, the host states, write off by default', (
-      tester,
-    ) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [parent(needs: 'approval', writeVault: 'v-work')],
-      );
-      final spawning = FakeSpawning(agents);
-      const task =
-          'Write tests for token refresh in gateway/oauth.rs. Run cargo test '
-          '-p gateway and report failures.';
-      spawning.addRequest('ags_p', task: task, name: 'test-gateway');
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      expect(find.byType(ApprovalCard), findsOneWidget);
-      expect(find.text('START'), findsOneWidget);
-      expect(
-        find.text('gateway-impl wants to start a session'),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining(RegExp(r'^expires in 8:4\d$')),
-        findsOneWidget,
-      );
-      expect(
-        find.text('gateway-impl · Claude Code · build-vm'),
-        findsOneWidget,
-      );
-      expect(find.text(task), findsOneWidget);
-      expect(
-        find.text(
-          'Claude Code on build-vm, in a workspace of its own: a copy of '
-          'storm’s last commit (uncommitted changes are not included), or '
-          'storm read-only with a scratch folder if it isn’t a git '
-          'repository',
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.text('build-vm · identity verified · isolates sessions'),
-        findsOneWidget,
-      );
-      expect(find.text('Let the child write to Work'), findsOneWidget);
-      final toggle = tester.widget<StormToggle>(
-        find.byKey(const Key('approval-write')),
-      );
-      expect(toggle.value, isFalse, reason: 'D2: off by default');
-
-      await tester.tap(find.byKey(const Key('approval-approve')));
-      await tester.pumpAndSettle();
-      expect(sent(agents, 'POST', '/v1/agent/requests/agr_1/approve'), [
-        {'write_vault': false},
-      ]);
-      expect(find.text('Approved: test-gateway is starting.'), findsOneWidget);
-      expect(spawning.terminalWrites, 0);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('a shared workspace is said on the card (141b)', (
-      tester,
-    ) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [parent(needs: 'approval')],
-      );
-      final spawning = FakeSpawning(agents);
-      spawning.addRequest('ags_p', task: 't', sharedWith: 2);
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      expect(find.text('WORKSPACE'), findsOneWidget);
-      expect(
-        find.text('storm is shared with 2 other sessions'),
-        findsOneWidget,
-      );
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('an unshared workspace says nothing of it', (tester) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [parent(needs: 'approval')],
-      );
-      FakeSpawning(agents).addRequest('ags_p', task: 't', sharedWith: 0);
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      expect(find.byType(ApprovalCard), findsOneWidget);
-      expect(find.textContaining('is shared with'), findsNothing);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('ticking the write toggle is what grants it', (tester) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [parent(needs: 'approval', writeVault: 'v-work')],
-      );
-      final spawning = FakeSpawning(agents);
-      spawning.addRequest('ags_p', task: 't');
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      await tester.tap(find.byKey(const Key('approval-write')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('approval-approve')));
-      await tester.pumpAndSettle();
-      expect(sent(agents, 'POST', '/v1/agent/requests/agr_1/approve'), [
-        {'write_vault': true},
-      ]);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('no toggle when the parent writes nowhere', (tester) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [parent(needs: 'approval')],
-      );
-      FakeSpawning(agents).addRequest('ags_p', task: 't');
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      expect(find.byKey(const Key('approval-write')), findsNothing);
-      expect(find.textContaining('Let the child write'), findsNothing);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('a message and an end: their exact text and target', (
-      tester,
-    ) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [
-          parent(needs: 'approval'),
-          spawnSession(
-            'ags_c',
-            name: 'test-gateway',
-            parent: 'ags_p',
-            depth: 1,
+  group('what the agent did (145a)', () {
+    testWidgets(
+      'A-145-1: acts are events in About, with no approve or deny anywhere',
+      (tester) async {
+        final agents = FakeAgentServer(
+          hosts: [agentHost()],
+          sessions: [parent()],
+        );
+        final spawning = FakeSpawning(agents);
+        spawning.startChild(
+          'ags_p',
+          id: 'ags_c',
+          name: 'poet',
+          task: 'write a haiku',
+          model: 'haiku',
+        );
+        spawning.addAct(
+          'ags_p',
+          kind: 'message',
+          target: 'ags_c',
+          text: 'now a limerick',
+          round: 2,
+          outcome: 'delivered',
+        );
+        spawning.addAct(
+          'ags_p',
+          kind: 'end',
+          target: 'ags_c',
+          outcome: 'ended',
+        );
+        // A row from before 145 reads harmlessly.
+        spawning.addAct('ags_p', task: 'old', outcome: 'denied');
+        final c = await open(
+          tester,
+          agents,
+          at: Routes.agentSession('ags_p', tab: SessionTab.requests.name),
+        );
+        if (find.byKey(const Key('acts-list')).evaluate().isEmpty) {
+          await tester.tap(find.byKey(const Key('inspector-toggle')));
+          await tester.pumpAndSettle();
+        }
+        expect(find.text('Activity'), findsOneWidget);
+        expect(find.byKey(const Key('acts-list')), findsOneWidget);
+        expect(find.text('Started poet · Claude Code · haiku'), findsWidgets);
+        expect(find.text('write a haiku'), findsWidgets);
+        expect(find.text('Message to poet · round 2'), findsWidgets);
+        expect(find.text('now a limerick'), findsWidgets);
+        expect(find.text('Ended poet'), findsWidgets);
+        expect(find.textContaining('· denied'), findsWidgets);
+        for (final k in [
+          'approval-approve',
+          'approval-deny',
+          'approval-banner',
+          'approval-write',
+        ]) {
+          expect(find.byKey(Key(k)), findsNothing, reason: k);
+        }
+        expect(find.text('Approve'), findsNothing);
+        expect(find.text('Deny'), findsNothing);
+        expect(
+          agents.requests.where(
+            (r) => r.url.path.startsWith('/v1/agent/requests'),
           ),
-        ],
-      );
-      final spawning = FakeSpawning(agents);
-      spawning.addRequest(
-        'ags_p',
-        kind: 'message',
-        target: 'ags_c',
-        text: 'Tests are on storm/test-gateway.\n  Review `refresh.rs`.',
-      );
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-      expect(find.text('MESSAGE'), findsWidgets);
-      expect(
-        find.text('gateway-impl wants to message test-gateway'),
-        findsOneWidget,
-      );
-      expect(find.text('test-gateway, which it started'), findsOneWidget);
-      expect(
-        find.text('Tests are on storm/test-gateway.\n  Review `refresh.rs`.'),
-        findsOneWidget,
-      );
-      await tester.tap(find.byKey(const Key('approval-deny')));
-      await tester.pumpAndSettle();
-      expect(
-        sent(agents, 'POST', '/v1/agent/requests/agr_1/deny'),
-        hasLength(1),
-      );
-      expect(find.text('Denied.'), findsOneWidget);
+          isEmpty,
+        );
+        expect(spawning.terminalWrites, 0);
+        await disposeShell(tester, c);
+      },
+    );
 
-      spawning.addRequest('ags_p', kind: 'end', target: 'ags_c');
-      c.invalidate(agentOverviewProvider);
-      await tester.pump(const Duration(seconds: 5));
-      await tester.pumpAndSettle();
-      expect(find.text('END'), findsWidgets);
-      expect(
-        find.text('gateway-impl wants to end test-gateway'),
-        findsOneWidget,
-      );
-      expect(spawning.terminalWrites, 0);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('phone: Needs approval opens the sheet; full-width buttons', (
+    testWidgets('an old server’s approval attention shows no badge', (
       tester,
     ) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
-        sessions: [parent(needs: 'approval', writeVault: 'v-work')],
-      );
-      FakeSpawning(agents).addRequest('ags_p', task: 'bench the relay');
-      final c = await open(
-        tester,
-        agents,
-        size: phone,
-        at: Routes.agentSession('ags_p'),
-      );
-      expect(find.byType(ApprovalCard), findsNothing);
-      expect(
-        find.text('gateway-impl is asking to start a session'),
-        findsOneWidget,
-      );
-      await tester.tap(find.byKey(const Key('approval-banner')));
-      await tester.pumpAndSettle();
-      expect(find.byType(ApprovalCard), findsOneWidget);
-      expect(
-        find.text('Nothing happens until you decide here.'),
-        findsOneWidget,
-      );
-      expect(find.text('bench the relay'), findsOneWidget);
-      expect(find.text('Let the child write to Work'), findsOneWidget);
-      final approve = tester.getSize(find.byKey(const Key('approval-approve')));
-      final card = tester.getSize(find.byType(ApprovalCard));
-      expect(approve.width, greaterThan(card.width * 0.9));
-      expect(
-        tester.getSize(find.byKey(const Key('approval-deny'))).width,
-        approve.width,
-      );
-      await tester.tap(find.byKey(const Key('approval-approve')));
-      await tester.pumpAndSettle();
-      expect(sent(agents, 'POST', '/v1/agent/requests/agr_1/approve'), [
-        {'write_vault': false},
-      ]);
-      expect(find.byType(ApprovalCard), findsNothing);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('desk at 900: the card is over the terminal', (tester) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
         sessions: [parent(needs: 'approval')],
       );
-      FakeSpawning(agents).addRequest('ags_p', task: 't');
+      FakeSpawning(agents);
+      final c = await open(tester, agents);
+      expect(find.byKey(const Key('attention-approval')), findsNothing);
+      expect(find.text('Needs approval'), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('A-145-3: a child’s model shows on its row and in About', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [spawnSession('ags_p', model: 'opus')],
+      );
+      final spawning = FakeSpawning(agents);
+      spawning.startChild('ags_p', id: 'ags_c', name: 'poet', model: 'haiku');
       final c = await open(
         tester,
         agents,
-        size: edge,
-        at: Routes.agentSession('ags_p'),
+        at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
       );
-      expect(find.byType(ApprovalCard), findsOneWidget);
-      expect(find.byKey(const Key('approval-banner')), findsNothing);
+      if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+        await tester.tap(find.byKey(const Key('inspector-toggle')));
+        await tester.pumpAndSettle();
+      }
+      // The child's row in the sidebar, under its parent.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-ags_c')),
+          matching: find.textContaining('haiku'),
+        ),
+        findsOneWidget,
+      );
+      // The parent's own row shows its model.
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-ags_p')),
+          matching: find.textContaining('opus'),
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('MODEL'), findsOneWidget);
       await disposeShell(tester, c);
     });
-  });
-
-  testWidgets('a decision finished after the card is gone still refreshes', (
-    tester,
-  ) async {
-    final agents = FakeAgentServer(
-      hosts: [agentHost()],
-      sessions: [parent(needs: 'approval')],
-    );
-    final spawning = FakeSpawning(agents)..holdDecisions = Completer();
-    spawning.addRequest('ags_p', task: 't', name: 'test-gateway');
-    final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
-    await tester.tap(find.byKey(const Key('approval-approve')));
-    await tester.pump();
-    c.read(routerProvider).go(Routes.agents);
-    await tester.pumpAndSettle();
-    expect(find.byType(ApprovalCard), findsNothing);
-    final before = agents.requests.length;
-    spawning.holdDecisions!.complete();
-    await tester.pumpAndSettle();
-    expect(tester.takeException(), isNull);
-    expect(spawning.requests.single['outcome'], 'started');
-    final after = agents.requests.sublist(before);
-    expect(
-      after.where(
-        (r) => r.method == 'GET' && r.url.path == '/v1/agent/sessions',
-      ),
-      isNotEmpty,
-    );
-    await disposeShell(tester, c);
-  });
-
-  testWidgets('a held crew change keeps the approval card, Requests and the '
-      'parent line', (tester) async {
-    final agents = FakeAgentServer(
-      hosts: [agentHost()],
-      crews: [agentCrew('crw_1')],
-      sessions: [
-        spawnSession('ags_p'),
-        spawnSession(
-          'ags_c',
-          name: 'test-gateway',
-          parent: 'ags_p',
-          depth: 1,
-          spawn: {'enabled': true},
-        ),
-      ],
-    );
-    FakeSpawning(agents).addRequest('ags_c', task: 't', name: 'grandchild');
-    final c = await open(
-      tester,
-      agents,
-      at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
-    );
-    void onScreen() {
-      expect(find.byType(ApprovalCard), findsOneWidget);
-      expect(find.text('Requests'), findsOneWidget);
-      expect(find.text('↳ started by gateway-impl ›'), findsOneWidget);
-    }
-
-    onScreen();
-    agents.holdCrewChanges = Completer();
-    await tester.tap(find.byKey(const Key('move-to-crew')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('move-to-crw_1')));
-    await tester.pumpAndSettle();
-    onScreen();
-    agents.holdCrewChanges!.complete();
-    await tester.pumpAndSettle();
-    expect((agents.session('ags_c')!['crew'] as Map)['id'], 'crw_1');
-    onScreen();
-    await disposeShell(tester, c);
-  });
-
-  testWidgets('the Requests tab lists every outcome to the person', (
-    tester,
-  ) async {
-    final agents = FakeAgentServer(
-      hosts: [agentHost()],
-      sessions: [parent(needs: 'approval')],
-    );
-    final spawning = FakeSpawning(agents);
-    for (final (outcome, reason, cap) in [
-      ('started', null, null),
-      ('denied', null, null),
-      ('expired', null, null),
-      ('refused', 'limit', 'children'),
-    ]) {
-      final r = spawning.addRequest('ags_p', task: 'job $outcome');
-      r
-        ..['state'] = 'decided'
-        ..['outcome'] = outcome
-        ..['reason'] = reason
-        ..['cap'] = cap
-        ..['decided_at'] = DateTime.now().toUtc().toIso8601String();
-    }
-    spawning.addRequest('ags_p', task: 'write the tests');
-    final c = await open(
-      tester,
-      agents,
-      at: Routes.agentSession('ags_p', tab: SessionTab.requests.name),
-    );
-    final list = find.byKey(const Key('requests-list'));
-    expect(
-      find.descendant(of: list, matching: find.textContaining('WAITING · 8:4')),
-      findsOneWidget,
-    );
-    for (final word in ['STARTED', 'DENIED', 'EXPIRED', 'REFUSED']) {
-      expect(
-        find.descendant(of: list, matching: find.textContaining('$word · ')),
-        findsOneWidget,
-        reason: word,
-      );
-    }
-    expect(
-      find.text('Start: “job refused” · limit: 3 live children'),
-      findsOneWidget,
-    );
-    expect(
-      find.text('Start: “job expired” · no answer in 10 min'),
-      findsOneWidget,
-    );
-    expect(spawning.terminalWrites, 0);
-    await disposeShell(tester, c);
   });
 
   group('ending (C1, C5, C9)', () {
@@ -929,6 +717,55 @@ void main() {
       ),
     ];
 
+    for (final width in [kInspectorWidth, kInspectorMinWidth]) {
+      testWidgets(
+        'every tab of a child’s panel is in sight at a desktop width, '
+        'the inspector at ${width.toInt()}px',
+        (tester) async {
+          final agents = FakeAgentServer(
+            hosts: [agentHost()],
+            sessions: [
+              spawnSession('ags_p'),
+              spawnSession(
+                'ags_c',
+                name: 'test-gateway',
+                parent: 'ags_p',
+                depth: 1,
+                spawn: {'enabled': false},
+                childWorkspace: {'mode': 'clone', 'commit': 'abc1234def0000'},
+              ),
+            ],
+          );
+          FakeSpawning(agents).work['ags_c'] = cloneWork();
+          final c = await open(
+            tester,
+            agents,
+            size: const Size(1280, 800),
+            at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
+          );
+          c.read(sessionInspectorWidthProvider.notifier).state = width;
+          await tester.pumpAndSettle();
+          final close = tester.getRect(
+            find.byKey(const Key('inspector-close')),
+          );
+          for (final tab in SessionTab.values) {
+            final found = find.byKey(Key('panel-tab-$tab'));
+            if (tab == SessionTab.wrote || tab == SessionTab.context) {
+              expect(found, findsOneWidget);
+            }
+            if (found.evaluate().isEmpty) continue;
+            final r = tester.getRect(found);
+            expect(r.right, lessThanOrEqualTo(close.left), reason: '$tab');
+            expect(r.left, greaterThanOrEqualTo(1280 - width - 1));
+          }
+          await tester.tap(find.byKey(const Key('panel-tab-SessionTab.work')));
+          await tester.pumpAndSettle();
+          expect(where(c).queryParameters['tab'], SessionTab.work.name);
+          await disposeShell(tester, c);
+        },
+      );
+    }
+
     testWidgets('a clone: its diff, Apply as storm/<child>, once', (
       tester,
     ) async {
@@ -1116,7 +953,7 @@ void main() {
         final agents = FakeAgentServer(
           hosts: [agentHost()],
           sessions: [
-            parent(needs: 'approval'),
+            parent(),
             spawnSession('ags_x', name: 'unrelated'),
             spawnSession(
               'ags_c',
@@ -1134,7 +971,6 @@ void main() {
           findsOneWidget,
         );
         expect(find.byType(LineageIndent), findsOneWidget);
-        expect(find.byKey(const Key('attention-approval')), findsOneWidget);
         final rows = [
           for (final id in ['ags_p', 'ags_c', 'ags_x'])
             tester.getTopLeft(find.byKey(Key('session-$id'))).dy,
@@ -1183,22 +1019,21 @@ void main() {
     });
   });
 
-  testWidgets('the whole flow on a fake server: approve, the child runs, '
-      'ends, and its work is applied', (tester) async {
+  testWidgets('the whole flow on a fake server: the agent starts a child, '
+      'it runs, ends, and its work is applied', (tester) async {
     final agents = FakeAgentServer(
       hosts: [agentHost()],
-      sessions: [parent(needs: 'approval', writeVault: 'v-work')],
+      sessions: [parent(writeVault: 'v-work')],
     );
     final spawning = FakeSpawning(agents);
-    spawning.addRequest('ags_p', task: 'write the tests', name: 'test-gateway');
     final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
 
-    await tester.tap(find.byKey(const Key('approval-approve')));
+    // 145a: the agent's start acts at once; nothing waits for a person.
+    const child = 'ags_c';
+    spawning.startChild('ags_p', id: child, status: 'starting');
+    c.invalidate(agentOverviewProvider);
     await tester.pumpAndSettle();
-    final child = spawning.requests.single['session'] as String;
-    expect(spawning.requests.single['outcome'], 'started');
-    expect(find.byType(ApprovalCard), findsNothing);
-    expect(find.byKey(const Key('attention-approval')), findsNothing);
+    expect(spawning.acts.single['outcome'], 'started');
 
     // The host runs it, then it ends having committed its work.
     agents.session(child)!
@@ -1227,7 +1062,7 @@ void main() {
     c.invalidate(agentOverviewProvider);
     await tester.pumpAndSettle();
 
-    await tester.tap(find.byKey(Key('session-$child')));
+    await tester.tap(find.byKey(const Key('session-$child')));
     await tester.pumpAndSettle();
     c
         .read(routerProvider)
@@ -1256,11 +1091,11 @@ void main() {
       'the host doesn’t isolate sessions',
     );
     expect(
-      hostStatesLine('unavailable', 'unavailable'),
-      'identity not verified · doesn’t isolate sessions',
+      requestRefusalText('agent_unavailable', null),
+      'the host can’t start that agent for a child',
     );
     expect(attentionLabel('blocked'), 'Blocked');
+    expect(attentionLabel('approval'), isNull);
     expect(attentionLabel(null), isNull);
-    expect(clockLeft(const Duration(minutes: 9, seconds: 5)), '9:05');
   });
 }

@@ -1,5 +1,5 @@
 {
-  "about": "Decision 134-5: the start storm-server sends a Runtime Host for an approved child. The server's test (apps/server/src/api.rs, the_full_flow_starts_an_approved_child_in_its_own_workspace) makes one through the real routes and compares it with `start`, after putting its own ids, workspace, grants and size in for the placeholders; the host's test (apps/runtime/src/host.rs, an_approved_childs_start_runs_it_in_its_own_clone) dispatches `start` itself to an isolated host. Neither crate depends on the other: this file is what keeps the two halves of the flow on one wire shape.",
+  "about": "Decisions 134-5 and 145: the start storm-server sends a Runtime Host for a child another agent started. The server's test (apps/server/src/api.rs, the_full_flow_starts_a_child_in_its_own_workspace) makes one through the real routes with start_agent {model: \"haiku\"} and compares it with `start`, after putting its own ids, workspace, grants and size in for the placeholders; the host's test (apps/runtime/src/host.rs, a_childs_start_runs_it_in_its_own_clone) dispatches `start` itself to an isolated host. `opening_prompt` is the runtime's mcp::SPAWNED_OPENING_PROMPT, word for word; the server's test checks that every Storm tool it names is one a child is offered. Since 145a a start carries no `spawn_asks`: no CLI config gets pinned asks. Neither crate depends on the other: this file is what keeps the two halves of the flow on one wire shape.",
   "placeholders": {
     "session": "ags_CHILD",
     "child_of": "ags_PARENT",
@@ -12,12 +12,21 @@
     "workspace": "w",
     "provider": "claude-code",
     "interaction": "terminal",
-    "terminal": {"cols": 80, "rows": 24},
-    "mcp": [{"id": "storm", "slug": "storm"}],
+    "terminal": {
+      "cols": 80,
+      "rows": 24
+    },
+    "mcp": [
+      {
+        "id": "storm",
+        "slug": "storm"
+      }
+    ],
     "context": true,
-    "spawn_asks": {"spawned": true},
+    "model": "haiku",
     "child_of": "ags_PARENT"
   },
+  "opening_prompt": "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round. Nobody can answer a prompt of yours: if something you need is refused, say so in report_result with outcome blocked and stop that path.",
   "child_work": {
     "about": "The integration of 137-3 with 134: once the child has ended, a person reads its work and applies it by its session. The server's test (api.rs, the_full_flow_applies_an_ended_childs_work_by_its_session) sends these commands and is answered with these answers; the host's test (host.rs, an_ended_childs_work_is_exported_and_applied_into_its_parent) runs these commands through a helper whose export and Apply are the helper's own code with real git, and checks its answers carry exactly these keys. `<base>` and `<tip>` stand for the commit the child started from and the one it ended at; `request` and `cmd_seq` are the server's to choose.",
     "placeholders": {
@@ -27,23 +36,57 @@
       "tip": "<tip>"
     },
     "list": {
-      "command": {"cmd_seq": 2, "type": "child.workspace", "request": "cwr_LIST", "op": "list"},
+      "command": {
+        "cmd_seq": 2,
+        "type": "child.workspace",
+        "request": "cwr_LIST",
+        "op": "list"
+      },
       "answer": {
-        "children": [{"child": "ags_CHILD", "parent": "ags_PARENT", "parent_workspace": "w", "mode": "clone", "stage": "ended", "live": false, "commit": "<base>", "branch": "main", "applied": null}],
+        "children": [
+          {
+            "child": "ags_CHILD",
+            "parent": "ags_PARENT",
+            "parent_workspace": "w",
+            "mode": "clone",
+            "stage": "ended",
+            "live": false,
+            "commit": "<base>",
+            "branch": "main",
+            "applied": null
+          }
+        ],
         "orphans": [],
         "unknown_entries": 0
       }
     },
     "export": {
-      "command": {"cmd_seq": 3, "type": "child.workspace", "request": "cwr_EXPORT", "op": "export", "child": "ags_CHILD"},
+      "command": {
+        "cmd_seq": 3,
+        "type": "child.workspace",
+        "request": "cwr_EXPORT",
+        "op": "export",
+        "child": "ags_CHILD"
+      },
       "answer": {
         "mode": "clone",
         "tip": "<tip>",
         "base": "<base>",
         "base_found": true,
-        "commits": [{"id": "<tip>", "subject": "the child's work"}],
+        "commits": [
+          {
+            "id": "<tip>",
+            "subject": "the child's work"
+          }
+        ],
         "more_commits": false,
-        "files": [{"path": "WORK.md", "added": 1, "removed": 0}],
+        "files": [
+          {
+            "path": "WORK.md",
+            "added": 1,
+            "removed": 0
+          }
+        ],
         "more_files": false,
         "patch": "+done\n",
         "patch_truncated": false,
@@ -53,8 +96,20 @@
       }
     },
     "import": {
-      "command": {"cmd_seq": 4, "type": "child.workspace", "request": "cwr_IMPORT", "op": "import", "child": "ags_CHILD", "parent": "ags_PARENT", "target": "storm/ags_CHILD"},
-      "answer": {"branch": "storm/ags_CHILD", "commit": "<tip>", "child": "ags_CHILD"}
+      "command": {
+        "cmd_seq": 4,
+        "type": "child.workspace",
+        "request": "cwr_IMPORT",
+        "op": "import",
+        "child": "ags_CHILD",
+        "parent": "ags_PARENT",
+        "target": "storm/ags_CHILD"
+      },
+      "answer": {
+        "branch": "storm/ags_CHILD",
+        "commit": "<tip>",
+        "child": "ags_CHILD"
+      }
     }
   }
 }

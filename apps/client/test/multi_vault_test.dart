@@ -371,7 +371,7 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('deleting a folder with notes is refused, not obeyed', (
+    testWidgets('deleting a folder with notes asks first, then trashes it', (
       tester,
     ) async {
       final c = shellContainer();
@@ -383,10 +383,20 @@ void main() {
       await tester.tap(find.text('Delete folder'));
       await tester.pumpAndSettle();
 
-      // Nothing is taken with it — the server refuses and says why.
-      final paths = serverOf(c).notes.values.map((n) => n.path);
-      expect(paths, contains('Projects/Ideas.md'));
-      expect(find.byType(SnackBar), findsOneWidget);
+      // Decision 150a: nothing is taken without the confirm.
+      expect(find.textContaining('They go to Trash.'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      Iterable<String> paths() => serverOf(c).notes.values.map((n) => n.path);
+      expect(paths(), contains('Projects/Ideas.md'));
+
+      await tester.longPress(find.text('Projects'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete folder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Delete'));
+      await tester.pumpAndSettle();
+      expect(paths(), isNot(contains('Projects/Ideas.md')));
 
       await disposeShell(tester, c);
     });

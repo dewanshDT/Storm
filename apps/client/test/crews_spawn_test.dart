@@ -37,9 +37,6 @@ void main() {
     return c;
   }
 
-  Finder within(String key, Finder f) =>
-      find.descendant(of: find.byKey(Key(key)), matching: f);
-
   Map<String, dynamic> inCrew(Map<String, dynamic> s, String crew, int order) =>
       {
         ...s,
@@ -56,11 +53,16 @@ void main() {
           crews: [agentCrew('crw_1')],
           sessions: [
             inCrew(spawnSession('ags_p', name: 'gateway-impl'), 'crw_1', 0),
-            spawnSession(
-              'ags_c',
-              name: 'test-gateway',
-              parent: 'ags_p',
-              depth: 1,
+            // 145i: both children are in their root's crew.
+            inCrew(
+              spawnSession(
+                'ags_c',
+                name: 'test-gateway',
+                parent: 'ags_p',
+                depth: 1,
+              ),
+              'crw_1',
+              0,
             ),
             inCrew(
               spawnSession(
@@ -70,7 +72,7 @@ void main() {
                 depth: 1,
               ),
               'crw_1',
-              1,
+              0,
             ),
           ],
         );
@@ -86,31 +88,10 @@ void main() {
         await t.tap(find.byKey(const Key('crew-action-endAll')));
         await t.pumpAndSettle();
 
-        expect(find.byKey(const Key('end-all-reaches')), findsOneWidget);
-        if (size == wide) {
-          expect(
-            within(
-              'end-all-reaches',
-              find.text('test-gateway · started by gateway-impl'),
-            ),
-            findsOneWidget,
-          );
-        } else {
-          expect(
-            within('end-all-reaches', find.text('test-gateway')),
-            findsOneWidget,
-          );
-          expect(
-            within('end-all-reaches', find.text('started by gateway-impl')),
-            findsOneWidget,
-          );
-        }
-        // docs-pass is a stop of its own, not listed twice.
-        expect(
-          within('end-all-reaches', find.textContaining('docs-pass')),
-          findsNothing,
-        );
-        expect(find.text('End 2 sessions'), findsOneWidget);
+        // 145i: the children are members of the crew, so each is a stop
+        // of its own, ended with its parent rather than sent again.
+        expect(find.byKey(const Key('end-all-reaches')), findsNothing);
+        expect(find.text('End 3 sessions'), findsOneWidget);
 
         await t.ensureVisible(find.byKey(const Key('end-all-confirm')));
         await t.pumpAndSettle();
@@ -161,13 +142,12 @@ void main() {
     });
   });
 
-  testWidgets('Undo after a tree dismissal brings back every crew it emptied '
-      '(138c with C8)', (t) async {
+  testWidgets('Undo after a tree dismissal brings back the crew it emptied '
+      '(138c with C8, 145i)', (t) async {
     final agents = FakeAgentServer(
       hosts: [agentHost()],
       crews: [
         agentCrew('crw_1'),
-        agentCrew('crw_2', name: 'Docs', color: 'clay', order: 1),
         agentCrew('crw_3', name: 'Relay hardening', color: 'sky', order: 2),
       ],
       sessions: [
@@ -180,7 +160,7 @@ void main() {
             depth: 1,
             status: 'completed',
           ),
-          'crw_2',
+          'crw_1',
           0,
         ),
         agentSession('ags_x', name: 'relay-probe', crew: ('crw_3', 0)),
@@ -194,13 +174,7 @@ void main() {
     await t.tap(find.text('Dismiss 2 sessions'));
     await t.pumpAndSettle();
     expect(agents.crews.map((c) => c['id']), ['crw_3']);
-    expect(
-      find.text(
-        'Gateway release and Docs were removed: their last sessions were '
-        'dismissed.',
-      ),
-      findsOneWidget,
-    );
+    expect(find.textContaining('Gateway release was removed'), findsOneWidget);
 
     await t.tap(find.text('Undo'));
     await t.pumpAndSettle();
@@ -211,15 +185,10 @@ void main() {
     ];
     expect(made, [
       {'name': 'Gateway release', 'color': 'sage', 'session_ids': <String>[]},
-      {'name': 'Docs', 'color': 'clay', 'session_ids': <String>[]},
     ]);
     final crews = [...agents.crews]
       ..sort((a, b) => (a['order'] as int).compareTo(b['order'] as int));
-    expect(crews.map((c) => c['name']), [
-      'Gateway release',
-      'Docs',
-      'Relay hardening',
-    ]);
+    expect(crews.map((c) => c['name']), ['Gateway release', 'Relay hardening']);
     await disposeShell(t, c);
   });
 
@@ -232,7 +201,7 @@ void main() {
             hosts: [agentHost()],
             crews: [agentCrew('crw_1')],
             sessions: [
-              spawnSession('ags_p', name: 'gateway-impl'),
+              inCrew(spawnSession('ags_p', name: 'gateway-impl'), 'crw_1', 0),
               {
                 ...inCrew(
                   spawnSession(
@@ -264,10 +233,10 @@ void main() {
             find.descendant(of: row, matching: find.byType(RoleTag)),
             findsOneWidget,
           );
-          // Under its crew, on the crew's solid edge, not the lineage indent.
+          // Under its crew, nested under its parent (145i).
           expect(
             find.ancestor(of: row, matching: find.byType(LineageIndent)),
-            findsNothing,
+            findsOneWidget,
           );
           expect(
             find.ancestor(of: row, matching: find.byType(CrewMembers)),
@@ -284,7 +253,7 @@ void main() {
         hosts: [agentHost()],
         crews: [agentCrew('crw_1')],
         sessions: [
-          spawnSession('ags_p', name: 'gateway-impl'),
+          inCrew(spawnSession('ags_p', name: 'gateway-impl'), 'crw_1', 0),
           inCrew(
             spawnSession(
               'ags_c',
@@ -345,8 +314,7 @@ void main() {
           );
           expect(find.textContaining('↳'), findsNothing, reason: at);
           expect(find.byType(AttentionTag), findsNothing, reason: at);
-          expect(find.byType(ApprovalCard), findsNothing, reason: at);
-          expect(find.text('Requests'), findsNothing, reason: at);
+          expect(find.text('Activity'), findsNothing, reason: at);
         }
         c.read(routerProvider).go(Routes.agentCrew('crw_1'));
         await t.pumpAndSettle();
@@ -364,9 +332,148 @@ void main() {
           ),
           isEmpty,
         );
-        expect(spawning.requests, isEmpty);
+        expect(spawning.acts, isEmpty);
         await disposeShell(t, c);
       });
     }
+  });
+
+  group('a crew holds whole trees (145i)', () {
+    FakeAgentServer tree() => FakeAgentServer(
+      hosts: [agentHost()],
+      crews: [
+        agentCrew('crw_1'),
+        agentCrew('crw_2', name: 'Docs', color: 'clay', order: 1),
+      ],
+      sessions: [
+        inCrew(spawnSession('ags_p', name: 'gateway-impl'), 'crw_1', 0),
+        agentSession('ags_x', name: 'relay-probe', crew: ('crw_1', 1)),
+        inCrew(
+          spawnSession('ags_c', name: 'poet', parent: 'ags_p', depth: 1),
+          'crw_1',
+          0,
+        ),
+        agentSession('ags_d', name: 'docs-pass', crew: ('crw_2', 0)),
+      ],
+    );
+
+    testWidgets(
+      'A-145-12: children nest under their parent, count as running, and '
+      'say they move with it',
+      (t) async {
+        final agents = tree();
+        FakeSpawning(agents);
+        final c = await open(t, agents);
+        final rows = [
+          for (final id in ['ags_p', 'ags_c', 'ags_x'])
+            t.getTopLeft(find.byKey(Key('session-$id'))).dy,
+        ];
+        // The child right under its parent, inside the crew.
+        expect(rows[0] < rows[1] && rows[1] < rows[2], isTrue);
+        expect(
+          find.ancestor(
+            of: find.byKey(const Key('session-ags_c')),
+            matching: find.byType(LineageIndent),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          t.widget<Text>(find.byKey(const Key('crew-count-crw_1')).first).data,
+          '3 running',
+        );
+        // A child is not dragged on its own.
+        expect(
+          find.ancestor(
+            of: find.byKey(const Key('session-ags_c')),
+            matching: find.byWidgetPredicate(
+              (w) => w.runtimeType.toString().startsWith('CrewDraggable'),
+            ),
+          ),
+          findsNothing,
+        );
+        c
+            .read(routerProvider)
+            .go(Routes.agentSession('ags_c', tab: SessionTab.about.name));
+        await t.pumpAndSettle();
+        if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+          await t.tap(find.byKey(const Key('inspector-toggle')));
+          await t.pumpAndSettle();
+        }
+        expect(
+          find.text('moves with the agent that started it'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('move-to-crew')), findsNothing);
+        await disposeShell(t, c);
+      },
+    );
+
+    testWidgets('A-145-12: phone: the child’s sheet says it moves with its '
+        'parent', (t) async {
+      final agents = tree();
+      FakeSpawning(agents);
+      final c = await open(t, agents, size: phone);
+      await t.longPress(find.byKey(const Key('session-ags_c')));
+      await t.pumpAndSettle();
+      expect(
+        find.byKey(const Key('sheet-crew-moves-with-parent')),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('sheet-crew-crw_2')), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('A-145-12: moving the parent takes its children along', (
+      t,
+    ) async {
+      final agents = tree();
+      FakeSpawning(agents);
+      final c = await open(
+        t,
+        agents,
+        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+      );
+      if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+        await t.tap(find.byKey(const Key('inspector-toggle')));
+        await t.pumpAndSettle();
+      }
+      await t.tap(find.byKey(const Key('move-to-crew')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('move-to-crw_2')));
+      await t.pumpAndSettle();
+      expect((agents.session('ags_c')!['crew'] as Map)['id'], 'crw_2');
+      expect(
+        t.widget<Text>(find.byKey(const Key('crew-count-crw_2')).first).data,
+        '3 running',
+      );
+      expect(
+        t.widget<Text>(find.byKey(const Key('crew-count-crw_1')).first).data,
+        '1 running',
+      );
+      await disposeShell(t, c);
+    });
+
+    testWidgets('A-145-12: End all running covers the tree', (t) async {
+      final agents = tree();
+      final spawning = FakeSpawning(agents);
+      final c = await open(t, agents, at: Routes.agentCrew('crw_1'));
+      expect(find.byKey(const Key('crew-row-ags_c')), findsOneWidget);
+      await t.tap(find.byKey(const Key('crew-page-menu')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('crew-action-endAll')));
+      await t.pumpAndSettle();
+      await t.ensureVisible(find.byKey(const Key('end-all-confirm')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('end-all-confirm')));
+      await t.pumpAndSettle();
+      for (final id in ['ags_p', 'ags_c', 'ags_x']) {
+        expect(agents.session(id)!['status'], 'stopped', reason: id);
+      }
+      expect(agents.session('ags_d')!['status'], 'running');
+      final parentEnd = spawning.ends.singleWhere((e) => e.$1 == 'end:ags_p');
+      expect(parentEnd.$2['descendants'], ['ags_c']);
+      expect(spawning.ends.where((e) => e.$1 == 'end:ags_c'), isEmpty);
+      await disposeShell(t, c);
+    });
   });
 }

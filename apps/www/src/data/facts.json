@@ -4,103 +4,134 @@
       "name": "list_vaults",
       "description": "List the vaults on this Storm server, with their ids, names and note counts. Call this first — every other tool needs a vault id.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_vault",
       "description": "Describe one vault: its note count, its folders, and the description its owner wrote for it.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "search",
       "description": "Full-text search one vault, returning matching notes with a highlighted snippet from each. The fastest way to find a note.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_note",
       "description": "Read one note in full: its markdown content and its metadata.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_related_notes",
       "description": "Notes related to this one: those linking to it, and those sharing its tags. Every relation is exact and says why it is one — there is no semantic guessing here.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "list_tags",
       "description": "Every tag in a vault with how many notes carry it.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "recent_notes",
       "description": "Notes opened most recently, across every vault. Good for 'what was I working on'.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_note_history",
       "description": "A note's revision history: version numbers, when each was written and by which device. Content is not included — fetch one with get_note_version.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_note_version",
       "description": "The full text of one earlier revision of a note.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "session_context",
       "description": "Read this agent session's launch context: the note it was started from (`context`) and its role note (`role`), each with vault and note ids, title, path, version and full markdown, or null when not set. A note deleted since is null and named in `missing`. Takes no arguments.",
       "access": "agents",
-      "agents": true
+      "agents": true,
+      "approval": false
+    },
+    {
+      "name": "request_permission_mode",
+      "description": "Ask the person to switch this session to auto mode, where Claude Code runs routine actions, shell commands included, without asking, each checked by its own safety classifier. Only mode \"auto\" can be asked for. Give the reason in a sentence: the person sees it on a card and approves or denies. Ask only when the person's own prompts are slowing work they asked for; never to get around something they refused. Returns {status}: approved (Storm restarts this session in auto with its conversation kept, so end your turn), denied, expired (after 10 minutes), pending (call again with the same mode to keep waiting; it never makes a second card), already, or refused with a reason (permission_mode_unavailable, which a child always gets: it never asks; live_children). Manual, accept edits and plan are the person's to choose with Shift+Tab; accept edits covers file edits only, never shell commands. Nothing turns permission checks off.",
+      "access": "read",
+      "agents": true,
+      "approval": false
     },
     {
       "name": "list_scripts",
       "description": "The kit vault's canonical scripts: names, sizes, modified times, Sorted. Optionally filter to one topic with prefix (e.g. 'psi-item-import/').",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "get_script",
       "description": "Fetch one canonical script from the kit vault by name (relative to its 'scripts/' root): its full text, size and vault-relative path.",
       "access": "read",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "create_note",
       "description": "Create a new note. Fails if the path is already taken. The note is stamped `source: ai` in its frontmatter so it is obvious later who wrote it.",
       "access": "write",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "update_note",
       "description": "Replace a note's content. Requires the base_version you read, so a note edited elsewhere is merged rather than overwritten. If the result says merged or conflict, the returned content is the server's — re-read before editing again.",
       "access": "write",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "delete_note",
-      "description": "Delete a note. Storm has no trash: the file is removed from the vault immediately. Only the server's version history still holds the text.",
+      "description": "Delete a note, saying why in reason. It goes to the vault's Trash, where the person can restore it or delete it for good; nothing here reaches the Trash. From an agent session nothing is deleted until the person approves it in Storm, which shows them you, the note and your reason; auto mode does not skip this. The call waits for them up to a limit and returns {status}: deleted (with trash_id), declined, timed_out (nobody answered in 10 minutes), gone (the note was edited, moved or deleted after you asked: read it again, and ask again if it should still go), pending (call again with the same note to keep waiting; it never asks twice) or busy (another of your deletions is waiting: finish it first). Ask only for what the person's task needs gone.",
       "access": "write",
-      "agents": false
+      "agents": true,
+      "approval": true
+    },
+    {
+      "name": "delete_folder",
+      "description": "Delete a folder and every note and folder under it, saying why in reason. Nothing is deleted until the person approves it in Storm, which shows them you, the folder, how many notes it holds and your reason; auto mode does not skip this. It goes to the vault's Trash as one item, which only the person can restore. The folder that holds the vault's settings (_storm) cannot be deleted. The call waits for the person up to a limit and returns {status}: deleted (with trash_id), declined, timed_out (nobody answered in 10 minutes), gone (a note in it was added, edited, moved or deleted after you asked: look again, and ask again if it should still go), pending (call again with the same folder to keep waiting; it never asks twice) or busy (another of your deletions is waiting: finish it first).",
+      "access": "agents",
+      "agents": true,
+      "approval": true
     },
     {
       "name": "create_script",
       "description": "Create a canonical script in the kit vault — the one place agents may store runnable code. name is relative to the vault's 'scripts/' root and must end in an allowed extension; content is the full text. Fails if the name is already taken; use update_script to change one. Scripts cannot be stored in any other vault.",
       "access": "write",
-      "agents": true
+      "agents": true,
+      "approval": false
     },
     {
       "name": "update_script",
       "description": "Replace an existing script in the kit vault. name must end in an allowed extension; content is the full text. Fails if no such script exists — use create_script to add one.",
       "access": "write",
-      "agents": true
+      "agents": true,
+      "approval": false
     }
   ],
   "storm_server": {

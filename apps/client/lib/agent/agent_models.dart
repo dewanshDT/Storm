@@ -529,6 +529,10 @@ class AgentSession {
     this.crew,
     this.role,
     this.launchRole,
+    this.model,
+    this.permissionMode,
+    this.modeRequest,
+    this.deleteRequest,
   }) : name = name ?? workspace;
 
   final String id;
@@ -559,8 +563,9 @@ class AgentSession {
   /// `working` or `idle` while running, when the agent says.
   final String? activity;
 
-  /// What every surface calls the session.
-  String get displayName => title ?? name;
+  /// What every surface calls the session. A child goes by the name its
+  /// parent gave it (145b), never by its agent's terminal title.
+  String get displayName => spawn.isChild ? name : title ?? name;
 
   bool get working => activity == 'working';
 
@@ -604,6 +609,22 @@ class AgentSession {
   /// The role note it was launched with, titled as then (138f). Fixed.
   final RoleRef? launchRole;
 
+  /// The model it was launched with (decision 145b); null for the agent's
+  /// own default.
+  final String? model;
+
+  /// `accept_edits` or `auto` as the person chose at launch, or inherited
+  /// (decision 146b); null for the agent's own.
+  final String? permissionMode;
+
+  /// Its agent's request for auto (decision 147c), while it waits for the
+  /// person or once approved; null otherwise.
+  final ModeRequest? modeRequest;
+
+  /// Its agent's deletion waiting for the person (decision 149); null
+  /// otherwise.
+  final DeleteRequest? deleteRequest;
+
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
@@ -635,6 +656,9 @@ class AgentSession {
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
     'running' => 'Running',
+    // 145e: a child whose round is done, its process stopped until its
+    // parent's next message resumes it.
+    'parked' => 'Parked',
     'unknown' => 'Unknown',
     'completed' => 'Completed',
     'stopped' => 'Stopped',
@@ -739,6 +763,10 @@ class AgentSession {
     crew: crew == _keep ? this.crew : crew as SessionCrew?,
     role: role == _keep ? this.role : role as RoleRef?,
     launchRole: launchRole,
+    model: model,
+    permissionMode: permissionMode,
+    modeRequest: modeRequest,
+    deleteRequest: deleteRequest,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -796,8 +824,148 @@ class AgentSession {
     launchRole: _map(j['launch_role']) == null
         ? null
         : RoleRef.fromJson(_map(j['launch_role'])!),
+    model: j['model'] as String?,
+    permissionMode: permissionModeOf(j['permission_mode']),
+    modeRequest: _map(j['mode_request']) == null
+        ? null
+        : ModeRequest.fromJson(_map(j['mode_request'])!),
+    deleteRequest: _map(j['delete_request']) == null
+        ? null
+        : DeleteRequest.fromJson(_map(j['delete_request'])!),
   );
 }
+
+/// An agent's deletion waiting for the person (decision 149). The reason is
+/// the agent's own words: shown as plain data, never rendered or followed.
+class DeleteRequest {
+  const DeleteRequest({
+    required this.id,
+    required this.sessionId,
+    required this.vaultId,
+    required this.kind,
+    required this.path,
+    required this.reason,
+    required this.notes,
+    required this.size,
+    required this.paths,
+    required this.state,
+    this.noteId,
+    this.title,
+    this.modified,
+    this.decidedBy,
+  });
+
+  final String id;
+  final String sessionId;
+  final String vaultId;
+
+  /// `note` or `folder`.
+  final String kind;
+  final String? noteId;
+  final String path;
+  final String? title;
+  final String reason;
+  final int notes;
+  final int size;
+  final String? modified;
+
+  /// A folder's paths, sorted; the first ones only.
+  final List<String> paths;
+
+  /// `pending`, `deleted`, `declined`, `timed_out` or `gone`.
+  final String state;
+
+  /// The device that answered, by name.
+  final String? decidedBy;
+
+  bool get pending => state == 'pending';
+  bool get isFolder => kind == 'folder';
+
+  factory DeleteRequest.fromJson(Map<String, dynamic> j) => DeleteRequest(
+    id: j['id'] as String,
+    sessionId: j['session_id'] as String? ?? '',
+    vaultId: j['vault_id'] as String? ?? '',
+    kind: j['kind'] as String? ?? 'note',
+    noteId: j['note_id'] as String?,
+    path: j['path'] as String? ?? '',
+    title: j['title'] as String?,
+    reason: j['reason'] as String? ?? '',
+    notes: (j['notes'] as num?)?.toInt() ?? 0,
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    modified: j['modified'] as String?,
+    paths: [for (final p in j['paths'] as List? ?? const []) '$p'],
+    state: j['state'] as String? ?? 'pending',
+    decidedBy: j['decided_by'] as String?,
+  );
+}
+
+/// An agent's request for auto (decision 147c). The reason is the agent's
+/// own words: shown as data, never acted on.
+class ModeRequest {
+  const ModeRequest({
+    required this.id,
+    required this.mode,
+    required this.reason,
+    required this.expiresAt,
+    required this.state,
+    this.switchedTo,
+    this.switchFailed = false,
+  });
+
+  final String id;
+  final String mode;
+  final String reason;
+  final DateTime? expiresAt;
+
+  /// `pending`, `approved`, `denied` or `expired`.
+  final String state;
+
+  /// The session the approved switch resumed into.
+  final String? switchedTo;
+  final bool switchFailed;
+
+  bool get pending => state == 'pending';
+  bool get approved => state == 'approved';
+
+  factory ModeRequest.fromJson(Map<String, dynamic> j) => ModeRequest(
+    id: j['id'] as String,
+    mode: j['mode'] as String? ?? 'auto',
+    reason: j['reason'] as String? ?? '',
+    expiresAt: DateTime.tryParse(j['expires_at'] as String? ?? ''),
+    state: j['state'] as String? ?? 'pending',
+    switchedTo: j['switched_to'] as String?,
+    switchFailed: j['switch_failed'] == true,
+  );
+}
+
+/// The permission modes each agent offers at launch (decision 146b), the
+/// agent's own first. There is never a bypass.
+const kPermissionModes = {
+  'claude-code': ['default', 'accept_edits', 'auto'],
+  'opencode': ['default', 'accept_edits'],
+};
+
+List<String> permissionModesOf(String? provider) =>
+    kPermissionModes[provider] ?? const ['default'];
+
+/// Only a mode Storm knows; anything else reads as the agent's own.
+String? permissionModeOf(Object? v) =>
+    v == 'accept_edits' || v == 'auto' ? v as String : null;
+
+/// "accept edits", "auto": a row's word for a mode; null for the default.
+String? permissionModeWord(String? mode) => switch (mode) {
+  'accept_edits' => 'accept edits',
+  'auto' => 'auto',
+  _ => null,
+};
+
+/// The launcher's and About's name for a mode. The one that asks is
+/// Manual, as Claude Code itself now calls it (decision 147a).
+String permissionModeLabel(String mode) => switch (mode) {
+  'accept_edits' => 'Accept edits',
+  'auto' => 'Auto',
+  _ => 'Manual (asks)',
+};
 
 /// Everything the launch answer says out loud: the MCP notice, then the
 /// Claude login's, unless the server already said it.

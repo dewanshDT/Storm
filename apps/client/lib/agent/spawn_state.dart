@@ -5,27 +5,24 @@ import 'agent_state.dart';
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 
-/// How often a session with a waiting request re-reads its requests. Status
-/// events carry no `needs_attention` (134-9), so the client re-reads.
-const spawnRequestsRefresh = Duration(seconds: 4);
+/// How often a live session that may start agents re-reads what its agent
+/// did: an act changes nothing on the session's own view.
+const spawnActsRefresh = Duration(seconds: 4);
 
-/// What a session asked a person for, newest first; null while unknown or
-/// unreachable. Re-read while one waits.
-final sessionRequestsProvider = FutureProvider.autoDispose
-    .family<List<SpawnRequest>?, String>((ref, id) async {
-      // A new request shows on the session's view first (134-9), which is
-      // re-read while it is live: read the list again when that moves.
-      await ref.watch(
-        sessionDetailProvider(id).selectAsync((s) => s?.spawn.needsAttention),
+/// What a session's agent did (145a), newest first; null while unknown or
+/// unreachable. Re-read while the session is live and may start agents.
+final sessionActsProvider = FutureProvider.autoDispose
+    .family<List<AgentAct>?, String>((ref, id) async {
+      final live = await ref.watch(
+        sessionDetailProvider(id).selectAsync(
+          (s) => s != null && !s.ended && s.spawn.switchState != null,
+        ),
       );
+      if (live) refreshProviderEvery(ref, spawnActsRefresh);
       final api = ref.watch(agentApiFactoryProvider)?.call();
       if (api == null) return null;
       try {
-        final list = await api.requests(id);
-        if (list.any((r) => r.waiting(DateTime.now()))) {
-          refreshProviderEvery(ref, spawnRequestsRefresh);
-        }
-        return list;
+        return await api.acts(id);
       } catch (_) {
         return null;
       } finally {
@@ -61,10 +58,10 @@ final childWorkProvider = FutureProvider.autoDispose.family<ChildWork, String>((
   }
 });
 
-/// After a person decides, switches or ends: everything that shows it. The
+/// After a person switches or ends: everything that shows it. The
 /// container, not a widget's ref, so it still runs once the widget is gone.
 void spawnChanged(ProviderContainer c, String sessionId) {
-  c.invalidate(sessionRequestsProvider(sessionId));
+  c.invalidate(sessionActsProvider(sessionId));
   c.invalidate(sessionDetailProvider(sessionId));
   c.invalidate(sessionDescendantsProvider(sessionId));
   c.invalidate(agentOverviewProvider);

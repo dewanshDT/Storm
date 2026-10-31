@@ -15,6 +15,9 @@ class SpawnFacts {
     this.needsAttention,
     this.childWorkspace,
     this.switchState,
+    this.childActivity,
+    this.pendingEvents,
+    this.recentEvents = const [],
   });
 
   static const none = SpawnFacts();
@@ -25,8 +28,20 @@ class SpawnFacts {
   final String? rootSession;
   final int depth;
 
-  /// `approval`, `permission_prompt` or `blocked`; never from idle (A3).
+  /// `permission_prompt`, `usage_limit` (144b) or `blocked`; never from
+  /// idle (A3). An older server's `approval` is read and shown as nothing.
   final String? needsAttention;
+
+  /// A child's activity as evidence says it (144b): `working` or `idle`
+  /// only from a signal that passed its gate, else `unknown`. Null on a
+  /// session nobody started.
+  final String? childActivity;
+
+  /// A child's events its parent has not acknowledged (144a).
+  final int? pendingEvents;
+
+  /// A child's latest events, oldest first (144a).
+  final List<ChildEvent> recentEvents;
 
   /// A child's own workspace, once its host has made it.
   final ChildWorkspace? childWorkspace;
@@ -50,9 +65,187 @@ class SpawnFacts {
           ? ChildWorkspace.fromJson(ws)
           : null,
       switchState: sw is Map<String, dynamic> ? SpawnSwitch.fromJson(sw) : null,
+      childActivity: j['child_activity'] as String?,
+      pendingEvents: (j['pending_events'] as num?)?.toInt(),
+      recentEvents: [
+        for (final e in j['recent_events'] as List? ?? const [])
+          if (e is Map<String, dynamic>) ChildEvent.fromJson(e),
+      ],
     );
   }
 }
+
+/// One change of a child's, as its parent's queue holds it (144a): codes
+/// only, never the child's own text.
+class ChildEvent {
+  const ChildEvent({
+    required this.id,
+    required this.seq,
+    required this.child,
+    required this.kind,
+    required this.source,
+    required this.confidence,
+    required this.at,
+    this.reason,
+    this.status,
+    this.activity,
+    this.needsAttention,
+    this.tool,
+    this.detail,
+    this.count = 1,
+    this.round,
+    this.durationMs,
+    this.inputTokens,
+    this.outputTokens,
+  });
+
+  final String id;
+  final int seq;
+  final String child;
+  final String kind;
+  final String? reason;
+
+  /// The child's state after the change.
+  final String? status;
+  final String? activity;
+  final String? needsAttention;
+
+  /// A `denied` event's tool and what it was refused for: the command or
+  /// path, the child's own text, shown only as data (decision 148b).
+  final String? tool;
+  final String? detail;
+
+  /// Identical denials in one round, merged (148b).
+  final int count;
+
+  /// A round's `reported`, `failed`, `ended` or `parked` (145f): which
+  /// round, how long it ran, and its tokens where the agent counted them
+  /// (cache reads and writes are input).
+  final int? round;
+  final int? durationMs;
+  final int? inputTokens;
+  final int? outputTokens;
+
+  /// `host_process`, `storm`, `provider_hook` or `output_pattern` (144b).
+  final String source;
+
+  /// `certain`, `reported` or `heuristic`.
+  final String confidence;
+  final String at;
+
+  bool get certain => confidence == 'certain';
+
+  factory ChildEvent.fromJson(Map<String, dynamic> j) {
+    final state = j['state'] is Map<String, dynamic>
+        ? j['state'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final usage = j['usage'] is Map<String, dynamic>
+        ? j['usage'] as Map<String, dynamic>
+        : null;
+    int? tokens(List<String> keys) {
+      if (usage == null) return null;
+      final counts = [
+        for (final k in keys)
+          if (usage[k] case final num n) n.toInt(),
+      ];
+      return counts.isEmpty ? null : counts.reduce((a, b) => a + b);
+    }
+
+    return ChildEvent(
+      id: j['id'] as String? ?? '',
+      seq: (j['seq'] as num?)?.toInt() ?? 0,
+      child: j['child'] as String? ?? '',
+      kind: j['kind'] as String? ?? '',
+      reason: j['reason'] as String?,
+      status: state['status'] as String?,
+      activity: state['activity'] as String?,
+      needsAttention: state['needs_attention'] as String?,
+      tool: j['tool'] as String?,
+      detail: j['detail'] as String?,
+      count: (j['count'] as num?)?.toInt() ?? 1,
+      round: (j['round'] as num?)?.toInt(),
+      durationMs: (j['duration_ms'] as num?)?.toInt(),
+      inputTokens: tokens(const [
+        'input_tokens',
+        'cache_read_tokens',
+        'cache_write_tokens',
+      ]),
+      outputTokens: tokens(const ['output_tokens']),
+      source: j['source'] as String? ?? 'storm',
+      confidence: j['confidence'] as String? ?? 'certain',
+      at: j['at'] as String? ?? '',
+    );
+  }
+}
+
+/// "Started", "Reported: succeeded": an event as a person reads it.
+String childEventLabel(ChildEvent e) => switch (e.kind) {
+  'started' => 'Started',
+  'needs_approval' => 'Asked for approval',
+  // A child never asks (148a): a prompt there is a fault its parent hears.
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Unexpected prompt',
+  'denied' => deniedLabel(e),
+  'idle_timeout' => 'Idle for 10 minutes',
+  'usage_limit' => 'Out of usage',
+  'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
+  'reported' => e.reason == null ? 'Reported' : 'Reported: ${e.reason}',
+  'ended' => e.reason == null ? 'Ended' : 'Ended: ${e.reason}',
+  'parked' => 'Parked until its next message',
+  'unknown' => 'Lost touch',
+  _ => e.kind,
+};
+
+/// "Round 2 · 14s · 12.3k in · 456 out": what a round took (145f), its
+/// tokens only where the agent counted them. Null for any other event.
+String? roundLabel(ChildEvent e) {
+  final parts = [
+    if (e.round case final r?) 'Round $r',
+    if (e.durationMs case final ms?) _duration(ms),
+    if (e.inputTokens case final n?) '${_count(n)} in',
+    if (e.outputTokens case final n?) '${_count(n)} out',
+  ];
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
+String _duration(int ms) {
+  final s = (ms / 1000).round();
+  if (s < 60) return '${s}s';
+  final m = s ~/ 60;
+  return m < 60 ? '${m}m ${s % 60}s' : '${m ~/ 60}h ${m % 60}m';
+}
+
+String _count(int n) {
+  if (n < 1000) return '$n';
+  if (n < 1000000) return '${(n / 1000).toStringAsFixed(n < 10000 ? 1 : 0)}k';
+  return '${(n / 1000000).toStringAsFixed(1)}M';
+}
+
+/// "Denied Bash ×3": what a child was refused (148b). Its detail is shown
+/// beside it, as plain text.
+String deniedLabel(ChildEvent e) => [
+  e.tool == null || e.tool!.isEmpty ? 'Denied' : 'Denied ${e.tool}',
+  if (e.count > 1) '×${e.count}',
+].join(' ');
+
+/// Where a signal came from, when it is not certain (144b): null for what
+/// the host's process or Storm itself saw.
+String? evidenceLabel(ChildEvent e) {
+  if (e.certain) return null;
+  final from = switch (e.source) {
+    'provider_hook' => 'agent hook',
+    'output_pattern' => 'output',
+    _ => e.source,
+  };
+  return '$from · ${e.confidence}';
+}
+
+/// A child's activity, said plainly: unknown is never working (144b).
+String? activityLabel(String? activity) => switch (activity) {
+  null => null,
+  'working' => 'Working',
+  'idle' => 'Idle',
+  _ => 'Unknown',
+};
 
 /// The spawn switch on a session's view (134-10).
 class SpawnSwitch {
@@ -114,15 +307,15 @@ class ChildWorkspace with _WorkspaceMode {
   );
 }
 
-/// A start, message or end an agent asked for (134o), as its card shows it.
-class SpawnRequest {
-  const SpawnRequest({
+/// A start, message or end a session's agent did (decision 145a): acted at
+/// once under the launch switch, and listed here for the person to see.
+/// Rows from before 145 may be denied or expired; they are read the same.
+class AgentAct {
+  const AgentAct({
     required this.id,
     required this.kind,
     required this.requester,
-    required this.state,
     required this.createdAt,
-    required this.expiresAt,
     this.target,
     this.outcome,
     this.reason,
@@ -132,9 +325,10 @@ class SpawnRequest {
     this.task,
     this.name,
     this.contextTitle,
-    this.provider,
+    this.agent,
+    this.model,
     this.text,
-    this.sharedWith = 0,
+    this.round,
   });
 
   final String id;
@@ -143,14 +337,10 @@ class SpawnRequest {
   final String kind;
   final String requester;
   final String? target;
-
-  /// `pending`, `approving` or `decided`.
-  final String state;
   final String createdAt;
-  final String expiresAt;
 
-  /// `started`, `start_failed`, `delivered`, `ended`, `denied`, `expired`
-  /// or `refused`.
+  /// `started`, `start_failed`, `delivered`, `ended`, or from before 145
+  /// `denied`, `expired` or `refused`.
   final String? outcome;
   final String? reason;
   final String? cap;
@@ -163,33 +353,23 @@ class SpawnRequest {
   final String? task;
   final String? name;
   final String? contextTitle;
-  final String? provider;
+
+  /// A start's child's agent and model.
+  final String? agent;
+  final String? model;
   final String? text;
 
-  /// Other live sessions in the requester's workspace, its own tree left
-  /// out (decision 141b). 0 from a server that does not say.
-  final int sharedWith;
+  /// The round a message started or joined (145).
+  final int? round;
 
-  /// Waiting for a person, and not yet past its expiry.
-  bool waiting(DateTime now) => state != 'decided' && left(now) > Duration.zero;
-
-  Duration left(DateTime now) {
-    final at = DateTime.tryParse(expiresAt);
-    if (at == null) return Duration.zero;
-    final d = at.difference(now);
-    return d.isNegative ? Duration.zero : d;
-  }
-
-  factory SpawnRequest.fromJson(Map<String, dynamic> j) {
+  factory AgentAct.fromJson(Map<String, dynamic> j) {
     final note = j['context_note'];
-    return SpawnRequest(
-      id: j['id'] as String,
+    return AgentAct(
+      id: j['id'] as String? ?? '',
       kind: j['kind'] as String? ?? 'start',
       requester: j['requester'] as String? ?? '',
       target: j['target'] as String?,
-      state: j['state'] as String? ?? 'pending',
       createdAt: j['created_at'] as String? ?? '',
-      expiresAt: j['expires_at'] as String? ?? '',
       outcome: j['outcome'] as String?,
       reason: j['reason'] as String?,
       cap: j['cap'] as String?,
@@ -198,9 +378,10 @@ class SpawnRequest {
       task: j['task'] as String?,
       name: j['name'] as String?,
       contextTitle: note is Map ? note['title'] as String? : null,
-      provider: j['provider'] as String?,
+      agent: j['agent'] as String? ?? j['provider'] as String?,
+      model: j['model'] as String?,
       text: j['text'] as String?,
-      sharedWith: (j['shared_with'] as num?)?.toInt() ?? 0,
+      round: (j['round'] as num?)?.toInt(),
     );
   }
 }
@@ -326,9 +507,12 @@ String shortCommit(String? commit) =>
     commit == null ? '' : commit.substring(0, commit.length.clamp(0, 7));
 
 /// What a session waiting for a person shows beside its activity (134p).
+/// A permission prompt shows nothing: only a child reports one, and a child
+/// never asks the person (decision 148).
 String? attentionLabel(String? kind) => switch (kind) {
-  'approval' => 'Needs approval',
-  'permission_prompt' => 'Waiting at a prompt',
+  // Decision 149c: a deletion waits for the person's Approve.
+  'delete_approval' => 'Needs you',
+  'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,
 };
@@ -340,13 +524,14 @@ String spawnRefusalText(String code, String agent) => switch (code) {
   'isolation_unverified' => "This host doesn't isolate sessions",
   'workspace_held' => 'Another session is working in this workspace',
   'provider_cannot_spawn' => "$agent can't start agents",
-  'launched_without_asks' =>
-    'It started before this host could offer it. Start a new session to '
-        'allow it',
   'launched_without_spawn' => kSpawnAtLaunch,
   'session_not_live' => 'The session has ended',
   _ => code.replaceAll('_', ' '),
 };
+
+/// What a child shows where a crew move would be offered (145i): it is in
+/// its root's crew, and goes where that goes.
+const kMovesWithParent = 'moves with the agent that started it';
 
 /// The agents that can start agents (134-2).
 const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
@@ -361,13 +546,12 @@ String capText(String? cap) => switch (cap) {
   'depth' => 'children can’t start agents yet',
   'children' => '3 live children',
   'tree' => '6 live sessions in a tree',
-  'pending' => '2 waiting requests',
   'max_sessions' => 'the host’s session limit',
   'inbox' => 'the child’s inbox is full',
   _ => cap ?? 'a limit',
 };
 
-/// Why the server refused a request when a person approved it.
+/// Why an act was refused, for rows recorded before decision 145.
 String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'limit' => 'limit: ${capText(cap)}',
   'not_permitted' => 'not permitted for this session',
@@ -376,26 +560,10 @@ String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'target_gone' => 'the session it named is gone or has ended',
   'identity_unverified' => 'the host’s session identity isn’t verified',
   'isolation_unverified' => 'the host doesn’t isolate sessions',
+  'agent_unavailable' => 'the host can’t start that agent for a child',
   null => 'refused',
   _ => reason.replaceAll('_', ' '),
 };
-
-/// "identity verified · isolates sessions": a host's two states as the
-/// card shows them (138p point 8: a state, never a fingerprint).
-String hostStatesLine(String? identity, String? isolation) => [
-  switch (identity) {
-    'verified' => 'identity verified',
-    'unsupported' => 'identity unsupported',
-    _ => 'identity not verified',
-  },
-  isolation == 'verified' ? 'isolates sessions' : 'doesn’t isolate sessions',
-].join(' · ');
-
-/// "8:42": what is left of a request's ten minutes.
-String clockLeft(Duration d) {
-  final s = d.inSeconds;
-  return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
-}
 
 /// What a scratch child's work is applied as by default: the parent's
 /// workspace and the child, `<ws>-<child>` (138p point 9). A person may

@@ -30,6 +30,8 @@ import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'delete_request.dart';
+import 'mode_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
 import 'session_inspector.dart';
@@ -181,6 +183,16 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   /// The confirmations spawning adds below the header.
   List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
+    if (s.deleteRequest case final r? when r.pending && !s.ended)
+      Padding(
+        padding: padding,
+        child: DeleteRequestCard(session: s),
+      ),
+    if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
+      Padding(
+        padding: padding,
+        child: ModeRequestCard(session: s),
+      ),
     if (_endTree && !s.ended)
       Padding(
         padding: padding,
@@ -321,49 +333,23 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     final t = context.tokens;
     final open =
         ref.watch(sessionInspectorOpenProvider) ?? context.drawerOpensByDefault;
-    final waiting = waitingRequest(ref, s);
     final terminal = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Expanded(
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: c == null
-                    ? const SizedBox.shrink()
-                    : _withPaste(
-                        c,
-                        s,
-                        StormTerminalView(
-                          terminal: c.terminal,
-                          focusNode: _focus,
-                          autofocus: true,
-                          readOnly: s.ended,
-                          prefs: ref.watch(terminalPrefsProvider),
-                        ),
-                      ),
-              ),
-              // A request waits for this device (4m): over the terminal,
-              // which it never writes to (138p point 2).
-              if (waiting != null)
-                Positioned(
-                  left: t.sp * 2,
-                  right: t.sp * 2,
-                  bottom: t.sp * 2,
-                  child: Align(
-                    alignment: Alignment.bottomCenter,
-                    child: ConstrainedBox(
-                      constraints: BoxConstraints(maxWidth: t.sp * 90),
-                      child: ApprovalCard(
-                        key: ValueKey('card-${waiting.id}'),
-                        request: waiting,
-                        requester: s,
-                      ),
-                    ),
+          child: c == null
+              ? const SizedBox.shrink()
+              : _withPaste(
+                  c,
+                  s,
+                  StormTerminalView(
+                    terminal: c.terminal,
+                    focusNode: _focus,
+                    autofocus: true,
+                    readOnly: s.ended,
+                    prefs: ref.watch(terminalPrefsProvider),
                   ),
                 ),
-            ],
-          ),
         ),
         if (s.ended)
           Container(
@@ -599,7 +585,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ),
         child: _About(session: s, host: host),
       ),
-      SessionTab.requests => RequestsPanel(session: s),
+      SessionTab.requests => ActsPanel(session: s),
       SessionTab.work => ChildWorkPanel(session: s),
     };
     return ColoredBox(
@@ -620,27 +606,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             child: Row(
               children: [
                 Expanded(
-                  // Scrolls rather than overflowing at the inspector's
-                  // narrowest.
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: PanelTabs<SessionTab>(
-                      tabs: [
-                        (SessionTab.context, 'Context'),
-                        (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
-                        (SessionTab.about, 'About'),
-                        if (showsRequests(s)) (SessionTab.requests, 'Requests'),
-                        if (s.spawn.isChild) (SessionTab.work, 'Work'),
-                      ],
-                      selected: tab,
-                      onSelected: (next) {
-                        if (next == tab) {
-                          setState(() => _wroteNote = null);
-                        } else {
-                          _pickTab(next);
-                        }
-                      },
-                    ),
+                  // Wraps rather than hiding a tab past the edge: a
+                  // child's Work tab was out of sight at 320px.
+                  child: PanelTabs<SessionTab>(
+                    wrap: true,
+                    tabs: [
+                      (SessionTab.context, 'Context'),
+                      (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
+                      (SessionTab.about, 'About'),
+                      if (showsActs(s)) (SessionTab.requests, 'Activity'),
+                      if (s.spawn.isChild) (SessionTab.work, 'Work'),
+                    ],
+                    selected: tab,
+                    onSelected: (next) {
+                      if (next == tab) {
+                        setState(() => _wroteNote = null);
+                      } else {
+                        _pickTab(next);
+                      }
+                    },
                   ),
                 ),
                 IconButton(
@@ -682,7 +666,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ApprovalBanner(session: s),
             ..._spawnBanners(
               s,
               padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp),
@@ -939,6 +922,8 @@ class _HeaderButton extends StatelessWidget {
 String phoneHeaderMeta(AgentSession s) => [
   s.statusLabel,
   providerLabel(s.provider),
+  ?s.model,
+  ?permissionModeWord(s.permissionMode),
   ?s.context?.title,
   if (s.wroteCount > 0) 'wrote ${s.wroteCount}',
 ].join(' · ');
@@ -1382,6 +1367,9 @@ List<(String, String)> aboutRows(
   AgentOverview? overview,
 }) => [
   ('Agent', providerLabel(s.provider)),
+  if (s.model != null) ('Model', s.model!),
+  if (s.permissionMode case final mode?)
+    ('Permission mode', permissionModeLabel(mode)),
   (
     'Workspace',
     s.spawn.isChild
@@ -1582,13 +1570,13 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       ),
       if (s.spawn.switchState != null && !s.ended)
         SpawnSwitchRow(session: s, host: widget.host),
-      if (showsRequests(s))
+      if (showsActs(s))
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            Text('REQUESTS', style: label),
+            Text('ACTIVITY', style: label),
             SizedBox(height: t.sp * 0.25),
-            RequestsPanel(session: s, sheet: true),
+            ActsPanel(session: s, sheet: true),
           ],
         ),
       if (s.spawn.isChild)
@@ -1791,7 +1779,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
   }
 }
 
-/// Esc, Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
+/// Esc, Tab, Shift+Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
 /// keyboard lacks (freeze §10, AC-F4). Shown while the session is live;
 /// Done appears with the keyboard and only puts it away (plan §5.1).
 class _ExtraKeys extends StatelessWidget {
@@ -1852,6 +1840,13 @@ class _ExtraKeys extends StatelessWidget {
                         tooltip: 'Shift, for the next key',
                         active: term.stickyShift,
                         onTap: () => term.stickyShift = !term.stickyShift,
+                      ),
+                      // Claude Code's mode switch (decision 147b).
+                      _Key(
+                        key: const Key('key-backtab'),
+                        label: '⇧Tab',
+                        tooltip: 'Shift+Tab: switch the agent’s mode',
+                        onTap: term.backTab,
                       ),
                       _Key(label: '←', tooltip: 'Left', onTap: term.left),
                       _Key(label: '→', tooltip: 'Right', onTap: term.right),

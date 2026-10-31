@@ -79,6 +79,10 @@ pub enum Stage {
     Ready,
     /// The child's lease ended; the workspace is kept (137g).
     Ended,
+    /// 145e: its lease ended at Storm's park; the workspace is kept, the
+    /// review identity's meanwhile, and `child_create` gives it back to
+    /// the child's next lease. Read and applied as an ended one is.
+    Parked,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +103,10 @@ pub struct ChildRecord {
     /// An Apply under way or made (137e): what it creates in the parent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub applied: Option<Applied>,
+    /// 145e: taken back from `Parked` for a start that resumes its own
+    /// kept conversation; cleared when that lease ends.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -540,6 +548,13 @@ impl Helper {
             {
                 return Ok(answer(&r, &self.layout.child_workspace(child)));
             }
+            Some(r)
+                if r.stage == Stage::Parked
+                    && r.parent == parent
+                    && r.parent_workspace == workspace =>
+            {
+                return self.readopt(r, &user);
+            }
             Some(r) if r.stage == Stage::Creating => self
                 .abandon(child)
                 .map_err(|e| failed("abandoning a child workspace", e))?,
@@ -576,6 +591,7 @@ impl Helper {
             submodules: false,
             large_files: false,
             applied: None,
+            resumed: false,
         };
         let made = self.make_child(&mut record, &user, budget);
         if let Err(why) = made {
@@ -649,6 +665,42 @@ impl Helper {
             .map_err(|e| failed("recording the child", e))
     }
 
+    /// 145e: a parked child's workspace, given to the user of its new
+    /// lease as `child_create` made it for the first (its own, `0700`), with
+    /// any review stopped first and any export made while it was parked
+    /// gone, since its work is about to change. Its kept conversation is
+    /// the start's.
+    fn readopt(&self, mut r: ChildRecord, user: &str) -> Result<Answer, Refusal> {
+        self.stop_review(&r.child)
+            .map_err(|e| failed("stopping the child's review", e))?;
+        self.forget_export(&r.child)
+            .map_err(|e| failed("clearing the child's export", e))?;
+        let (uid, gid) = (self.pool.users[user], self.pool.primary[user]);
+        let workspace = self.layout.child_workspace(&r.child);
+        files::give_tree(&workspace, uid, gid, self.deps.own.as_ref())
+            .map_err(|e| failed("giving the child its workspace back", e))?;
+        r.stage = Stage::Ready;
+        r.resumed = true;
+        self.save_child(&r)
+            .map_err(|e| failed("recording the child", e))?;
+        eprintln!("audit: child_readopted child={} user={user}", r.child);
+        Ok(answer(&r, &workspace))
+    }
+
+    /// `child_park {child}` (145e): a child whose lease ended at Storm's
+    /// park may be started again. Only an ended child with no lease, whose
+    /// workspace is already out of its old user's reach.
+    pub(crate) fn child_park(&self, child: &str) -> Result<Answer, Refusal> {
+        let _busy = self.session_busy(child)?;
+        let mut r = self.ended_child(child)?;
+        if r.stage == Stage::Ended {
+            r.stage = Stage::Parked;
+            self.save_child(&r)
+                .map_err(|e| failed("recording the child", e))?;
+        }
+        Ok((Map::new(), None))
+    }
+
     /// A creation that did not finish: its clone stopped, and nothing of
     /// it left.
     fn abandon(&self, child: &str) -> Result<()> {
@@ -670,7 +722,7 @@ impl Helper {
         };
         match r.stage {
             Stage::Creating => self.abandon(child),
-            Stage::Ready | Stage::Ended => {
+            Stage::Ready | Stage::Ended | Stage::Parked => {
                 let workspace = self.layout.child_workspace(child);
                 let own = self.deps.own.as_ref();
                 match self.pool.review {
@@ -681,13 +733,28 @@ impl Helper {
                         files::rootify(&workspace, own)?;
                     }
                 }
-                if r.stage == Stage::Ready {
-                    r.stage = Stage::Ended;
+                if r.stage == Stage::Ready || r.resumed {
+                    if r.stage == Stage::Ready {
+                        r.stage = Stage::Ended;
+                    }
+                    r.resumed = false;
                     self.save_child(&r)?;
                 }
                 Ok(())
             }
         }
+    }
+
+    fn forget_export(&self, child: &str) -> Result<()> {
+        match std::fs::remove_file(self.layout.child_export(child)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let dir = self.layout.child_review(child);
+        if dir.symlink_metadata().is_ok() {
+            files::remove_tree(&dir, self.deps.own.as_ref())?;
+        }
+        Ok(())
     }
 
     fn stop_review(&self, child: &str) -> Result<()> {
@@ -707,7 +774,7 @@ impl Helper {
             return Err(Refusal::ChildLive);
         }
         match r.stage {
-            Stage::Ended => Ok(r),
+            Stage::Ended | Stage::Parked => Ok(r),
             Stage::Ready | Stage::Creating => Err(Refusal::ChildLive),
         }
     }
@@ -1012,6 +1079,7 @@ impl Helper {
                         Stage::Creating => "creating",
                         Stage::Ready => "ready",
                         Stage::Ended => "ended",
+                        Stage::Parked => "parked",
                     };
                     children.push(serde_json::json!({
                         "child": r.child,
@@ -1534,6 +1602,126 @@ mod tests {
         assert_eq!(req("ags_P", "ags_S", &ws), "already_started");
     }
 
+    /// 145e: a child parked at Storm's word starts again in the same
+    /// workspace, given to its new lease's user, from its own kept
+    /// conversation; an ended child never does, and nothing else resumes
+    /// itself.
+    #[test]
+    fn a_parked_child_starts_again_in_its_workspace_from_its_own_conversation() {
+        const C: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
+        let f = fixture();
+        git_workspace(&f);
+        let (_, first) = parent_and_child(&f);
+        assert_eq!(create(&f)["ok"], true);
+        f.launch("ags_C");
+        let (_m, slave) = crate::tty::tests::pty();
+        let v = f
+            .call(
+                json!({"op": "start", "session": "ags_C", "user": first, "provider": "claude-code", "workspace": f.workspace()}),
+                vec![slave],
+            )
+            .0;
+        assert_eq!(v["ok"], true, "{v}");
+        let project = f.helper.layout.home("ags_C").join(".claude/projects/-w");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{C}.jsonl")), b"round one").unwrap();
+        let dest = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(dest.join("work.md"), "round one's work\n").unwrap();
+        assert_eq!(
+            f.call(json!({"op": "child_park", "child": "ags_C"}), vec![])
+                .0["error"],
+            "child_live",
+            "not while it holds its lease"
+        );
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": first}),
+            vec![],
+        );
+        assert_eq!(f.helper.child_record("ags_C").unwrap().stage, Stage::Ended);
+
+        // Ended is never started again.
+        let lease = |f: &Fixture| {
+            let (v, _) = f.ok(json!({"op": "lease", "session": "ags_C"}), vec![]);
+            let user = v["user"].as_str().unwrap().to_string();
+            f.ok(
+                json!({"op": "prepare", "session": "ags_C", "user": user}),
+                vec![],
+            );
+            user
+        };
+        let user = lease(&f);
+        assert_eq!(create(&f)["error"], "child_exists");
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": user}),
+            vec![],
+        );
+
+        f.ok(json!({"op": "child_park", "child": "ags_C"}), vec![]);
+        assert_eq!(f.helper.child_record("ags_C").unwrap().stage, Stage::Parked);
+        let listed = f.ok(json!({"op": "child_list"}), vec![]).0;
+        assert_eq!(listed["children"][0]["stage"], "parked");
+        let second = lease(&f);
+        let v = create(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["workspace"], dest.display().to_string(), "the same one");
+        let m = meta(&f, &dest);
+        assert_eq!(
+            (m.uid, m.gid, m.mode),
+            (
+                f.helper.pool.users[&second],
+                f.helper.pool.primary[&second],
+                0o700
+            ),
+            "its new user's alone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("work.md")).unwrap(),
+            "round one's work\n"
+        );
+        f.launch("ags_C");
+        let path = f.helper.layout.launch_dir().join("ags_C.json");
+        let mut launch: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        launch["resume"] = json!({"from": "ags_C", "conversation": C});
+        std::fs::write(&path, launch.to_string()).unwrap();
+        let (_m, slave) = crate::tty::tests::pty();
+        let v = f
+            .call(
+                json!({"op": "start", "session": "ags_C", "user": second, "provider": "claude-code", "workspace": f.workspace()}),
+                vec![slave],
+            )
+            .0;
+        assert_eq!(v["ok"], true, "{v}");
+        let got = f
+            .helper
+            .layout
+            .home("ags_C")
+            .join(format!(".claude/projects/-w/{C}.jsonl"));
+        assert_eq!(
+            std::fs::read(got).unwrap(),
+            b"round one",
+            "its own conversation"
+        );
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": second}),
+            vec![],
+        );
+        let r = f.helper.child_record("ags_C").unwrap();
+        assert_eq!((r.stage, r.resumed), (Stage::Ended, false));
+
+        // A session that is no parked child cannot resume itself.
+        let (v, ..) = f.start_as(
+            "ags_X",
+            "claude-code",
+            Some(json!({"from": "ags_X", "conversation": C})),
+        );
+        assert_eq!(v["error"], "bad_launch");
+        assert_eq!(
+            f.call(json!({"op": "child_park", "child": "ags_NONE"}), vec![])
+                .0["error"],
+            "no_child"
+        );
+    }
+
     /// Creation is idempotent: asked again it answers what it made;
     /// for another parent, it is refused.
     #[test]
@@ -1638,15 +1826,15 @@ mod tests {
         .0
     }
 
-    /// WT-3 through the helper: an ended child's committed work reaches the
-    /// parent's workspace only through Apply, as `storm/<child>`; its
-    /// uncommitted work never does; the export and the Apply each run as
+    /// WT-3 through the helper: an ended child's work reaches the parent's
+    /// workspace only through Apply, as `storm/<child>`, what it left
+    /// uncommitted as Storm's commit on top; the export and the Apply each run as
     /// the review identity in a unit that sees only what it reads, and
     /// writes only what it must.
     #[test]
     fn wt_3_a_childs_work_reaches_its_parent_only_through_apply() {
         let f = fixture();
-        let (_, tip) = ended_clone_child(&f);
+        let (_, child_tip) = ended_clone_child(&f);
         let parent = PathBuf::from(f.workspace());
         let branches = || {
             git(
@@ -1657,17 +1845,22 @@ mod tests {
         assert_eq!(branches(), "refs/heads/main", "nothing before Apply");
         let v = export_child(&f);
         assert_eq!(v["ok"], true, "{v}");
-        assert_eq!(
-            (v["mode"].clone(), v["tip"].clone()),
-            (json!("clone"), json!(tip))
-        );
+        assert_eq!(v["mode"], "clone");
+        let tip = v["tip"].as_str().unwrap().to_string();
+        assert_ne!(tip, child_tip);
         assert_eq!(
             (v["child"].clone(), v["parent"].clone()),
             (json!("ags_C"), json!("ags_P"))
         );
-        assert_eq!(v["commits"][0]["subject"], "child work");
-        assert!(v["patch"].as_str().unwrap().contains("+the child's"));
-        assert!(!v["patch"].as_str().unwrap().contains("uncommitted"));
+        assert_eq!(v["commits"][0]["subject"], crate::review::SNAPSHOT_SUBJECT);
+        assert_eq!(
+            (
+                v["commits"][1]["id"].clone(),
+                v["commits"][1]["subject"].clone()
+            ),
+            (json!(child_tip), json!("child work"))
+        );
+        assert!(v["patch"].as_str().unwrap().contains("+uncommitted"));
         assert_eq!(branches(), "refs/heads/main", "an export changes nothing");
         // Asked again, the same answer, and no second unit.
         assert_eq!(export_child(&f), v);
@@ -1717,6 +1910,52 @@ mod tests {
         let listed = f.ok(json!({"op": "child_list"}), vec![]).0;
         assert_eq!(listed["children"][0]["applied"], "storm/ags_C");
         assert_eq!(listed["children"][0]["stage"], "ended");
+    }
+
+    /// A child exported while parked, then started again, is exported
+    /// afresh once it ends: Apply never takes the work it had before.
+    #[test]
+    fn a_resumed_child_forgets_the_export_it_had_while_parked() {
+        let f = fixture();
+        let (_, first_tip) = ended_clone_child(&f);
+        f.ok(json!({"op": "child_park", "child": "ags_C"}), vec![]);
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        let stale = v["tip"].as_str().unwrap().to_string();
+        assert!(f.helper.layout.child_export("ags_C").exists());
+
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_C"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_C", "user": user}),
+            vec![],
+        );
+        assert_eq!(create(&f)["ok"], true);
+        assert!(!f.helper.layout.child_export("ags_C").exists());
+        assert!(!f.helper.layout.child_review("ags_C").exists());
+        assert_eq!(start_child(&f, &user)["ok"], true);
+        let dest = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(dest.join("README"), "round two\n").unwrap();
+        git(&dest, &["commit", "-q", "-am", "round two"]);
+        let second_tip = git(&dest, &["rev-parse", "HEAD"]);
+        assert_ne!(second_tip, first_tip);
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": user}),
+            vec![],
+        );
+
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            v["tip"],
+            json!(second_tip),
+            "no snapshot: nothing uncommitted"
+        );
+        assert_ne!(v["tip"], json!(stale));
+        assert_eq!(f.units.reviews.lock().unwrap().len(), 2);
+        let v = apply(&f, "storm/ags_C");
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["commit"], json!(second_tip));
     }
 
     /// What an Apply wrote in the parent's workspace is the workspace
@@ -1938,7 +2177,7 @@ mod tests {
     #[test]
     fn g_137_2_an_interrupted_export_or_apply_is_finished_once() {
         let f = fixture();
-        let (_, tip) = ended_clone_child(&f);
+        ended_clone_child(&f);
         // An export unit still loaded when the helper restarted.
         f.units.units.lock().unwrap().insert(
             review_unit_name("ags_C"),
@@ -1954,7 +2193,9 @@ mod tests {
         f.helper.recover().unwrap();
         let calls = f.units.calls.lock().unwrap().clone();
         assert!(calls.contains(&"stop storm-child-ags_C-review.service".to_string()));
-        assert_eq!(export_child(&f)["ok"], true);
+        let exported = export_child(&f);
+        assert_eq!(exported["ok"], true);
+        let tip = exported["tip"].as_str().unwrap().to_string();
         // The Apply made the branch, then the helper died before it was
         // recorded: the same Apply finishes; nothing else is let through.
         let parent = PathBuf::from(f.workspace());
@@ -2071,6 +2312,7 @@ mod tests {
                     submodules: false,
                     large_files: false,
                     applied: None,
+                    resumed: false,
                 })
                 .unwrap();
         }

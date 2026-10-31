@@ -382,7 +382,8 @@ def is_mismatch(answer):
 
 def tool_plan(vaults, notes):
     """What the agent is asked to call: every tool an agent sees, in an order
-    whose answers feed the next step. `delete_note` is never an agent's."""
+    whose answers feed the next step. The deletes wait for the person (decision 149) and
+    are left out."""
     p, k = vaults["primary"], vaults["kit"]
     seed = notes["seed"]
     return [

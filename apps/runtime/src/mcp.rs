@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 /// A granted connection, as the server's `start` names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -134,93 +134,129 @@ impl AgentServers<'_> {
 /// Phase 1 vault server).
 pub const STORM_CONNECTION: &str = "storm";
 
-/// Decision 134's tools that always get the CLI's own ask beside Storm's
-/// approval (134q), whatever the account's config allows.
-pub const PINNED_ASK_TOOLS: [&str; 3] = ["start_agent", "send_message", "end_agent"];
+/// The Storm tools a child calls on itself, allowed outright in its CLI's
+/// config (decision 146a): each is scoped by the server to the calling
+/// session and has no workspace or host effect. The host learns no tool
+/// names from the server, so they are pinned here and held to the server's
+/// lists by a test.
+pub const CHILD_ALLOWED_TOOLS: [&str; 3] = ["session_context", "report_result", "read_messages"];
 
-/// Decision 134's read and report tools: they skip the CLI's prompt on
-/// Claude Code and OpenCode on a verified host, since the server scopes each
-/// to the calling session (A6, D18's amendment to decision 132). The host
-/// learns no tool names from the server, so they are pinned here and
-/// checked against the server's lists by a test.
-pub const EXEMPT_TOOLS: [&str; 6] = [
+/// The spawn tools, allowed outright for a parent launched with the spawn
+/// switch on (146a): the person's standing consent (145a).
+pub const SPAWN_ALLOWED_TOOLS: [&str; 8] = [
     "list_agents",
+    "start_agent",
     "agent_status",
     "list_children",
     "wait_agent",
-    "read_messages",
-    "report_result",
+    "send_message",
+    "end_agent",
+    "read_output",
 ];
 
-/// A spawned session's seventh exemption (A6).
-pub const SPAWNED_EXEMPT_TOOL: &str = "session_context";
+/// The Storm tool a top-level Claude Code session asks for auto with
+/// (147c), allowed outright so the person sees only Storm's card, never
+/// the CLI's own prompt for the call first.
+pub const MODE_ALLOWED_TOOLS: [&str; 1] = ["request_permission_mode"];
 
-/// What a session that may be offered decision 134's tools adds to its
-/// CLI's config (134-8). Every other session gets `None`, which writes
-/// nothing new.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SpawnAsks {
-    /// The A6 exemptions: only while this host's identity is verified.
-    pub exempt: bool,
-    /// A child, whose `session_context` is exempt too.
-    pub spawned: bool,
+/// The Storm tools a top-level session deletes with (149b), allowed
+/// outright so the person sees only Storm's dialog, which every deletion
+/// waits on whatever the mode, never the CLI's prompt first. The server
+/// offers them only to a session with vault writes.
+pub const DELETE_ALLOWED_TOOLS: [&str; 2] = ["delete_note", "delete_folder"];
+
+/// The Storm tools that only read, allowed outright for a top-level session
+/// reading Storm, so its reads before a delete or a spawn never stop on
+/// the CLI's prompt. Every server tool not in its write, spawn or mode
+/// lists, held to them by a test.
+pub const READ_ALLOWED_TOOLS: [&str; 12] = [
+    "list_vaults",
+    "get_vault",
+    "search",
+    "get_note",
+    "get_related_notes",
+    "list_tags",
+    "recent_notes",
+    "get_note_history",
+    "get_note_version",
+    "session_context",
+    "list_scripts",
+    "get_script",
+];
+
+/// What Storm's own layer of a session's CLI config says about permissions
+/// (decisions 146, 148, 149): the Storm tools allowed outright, the keys a
+/// permission mode sets in OpenCode's config, and whether every other
+/// OpenCode ask becomes a deny (a child's, 148a). Empty for a session that
+/// does not read Storm and runs in `default`, whose config is then
+/// byte-identical to before.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StormLayer {
+    pub allow: Vec<&'static str>,
+    pub opencode_permission: Vec<(String, String)>,
+    pub deny_asks: bool,
 }
 
-impl SpawnAsks {
-    pub fn exempt_tools(&self) -> Vec<&'static str> {
-        let mut tools = Vec::new();
-        if self.exempt {
-            tools.extend(EXEMPT_TOOLS);
-            if self.spawned {
-                tools.push(SPAWNED_EXEMPT_TOOL);
-            }
+impl StormLayer {
+    /// `child`: a session another agent started, reading Storm. `spawn`: one
+    /// launched with the switch on, reading Storm.
+    pub fn new(child: bool, spawn: bool, opencode_permission: Vec<(String, String)>) -> Self {
+        let mut allow = Vec::new();
+        if child {
+            allow.extend(CHILD_ALLOWED_TOOLS);
         }
-        tools
+        if spawn {
+            allow.extend(SPAWN_ALLOWED_TOOLS);
+        }
+        Self {
+            allow,
+            opencode_permission,
+            deny_asks: false,
+        }
+    }
+
+    /// With `request_permission_mode` allowed too (147c).
+    pub fn asking_for_modes(mut self) -> Self {
+        self.allow.extend(MODE_ALLOWED_TOOLS);
+        self
+    }
+
+    /// With the read-only tools allowed too.
+    pub fn reading(mut self) -> Self {
+        self.allow.extend(READ_ALLOWED_TOOLS);
+        self
+    }
+
+    /// With the delete tools allowed too (149b).
+    pub fn deleting(mut self) -> Self {
+        self.allow.extend(DELETE_ALLOWED_TOOLS);
+        self
+    }
+
+    /// A child's OpenCode layer (148a): every ask a deny.
+    pub fn denying_asks(mut self) -> Self {
+        self.deny_asks = true;
+        self
+    }
+
+    /// Claude Code's rules for [`Self::allow`], for `permissions.allow` in
+    /// Storm's `--settings` file. The built-in connection is always
+    /// `storm` there.
+    pub fn claude_allow(&self) -> Vec<String> {
+        self.allow
+            .iter()
+            .map(|t| format!("mcp__{STORM_CONNECTION}__{t}"))
+            .collect()
     }
 }
 
-/// Claude Code's `permissions` for a spawn session's `--settings` file.
-/// Claude Code applies an ask before an allow from any source, so neither
-/// the account's allow nor a "don't ask again" skips a pinned ask; and the
-/// account's own ask on the whole server still outranks an exemption (A4).
-pub fn claude_permissions(asks: &SpawnAsks) -> Value {
-    let rule = |t: &str| format!("mcp__{STORM_CONNECTION}__{t}");
-    let mut permissions = json!({ "ask": PINNED_ASK_TOOLS.map(rule) });
-    let allow: Vec<String> = asks.exempt_tools().into_iter().map(rule).collect();
-    if !allow.is_empty() {
-        permissions["allow"] = json!(allow);
-    }
-    permissions
-}
-
-/// Re-reads written Claude Code settings: a file that lost its pinned asks
-/// fails the start.
-pub fn verify_claude_permissions(bytes: &[u8], asks: &SpawnAsks) -> Result<()> {
-    let parsed: Value = serde_json::from_slice(bytes)?;
-    anyhow::ensure!(
-        parsed["permissions"] == claude_permissions(asks),
-        "the settings lost the pinned asks"
-    );
-    Ok(())
-}
-
-/// The account's own OpenCode config, as far as a spawn session's asks must
-/// step around it (134-8).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct OpencodeAccount {
-    /// Every config and agent file's text, as read.
-    pub text: String,
-    /// Agents the account defines. Each may carry its own `permission`,
-    /// which OpenCode evaluates after the top level's.
-    pub agents: std::collections::BTreeSet<String>,
-}
-
-/// Reads the account's OpenCode config the way OpenCode finds it: the global
-/// directory (`$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`; not
-/// under `storm-only`, which replaces it), `~/.opencode`, and
-/// `$OPENCODE_CONFIG`. A file that exists but cannot be read or parsed is
-/// an error: the asks could not be placed after it.
-pub fn opencode_account(storm_only: bool) -> Result<OpencodeAccount> {
+/// The text of every OpenCode config file the account has where OpenCode
+/// finds it, one entry per file: the global directory
+/// (`$XDG_CONFIG_HOME/opencode`, else `~/.config/opencode`; not under
+/// `storm-only`, which replaces it), `~/.opencode`, and `$OPENCODE_CONFIG`.
+/// A file that exists but cannot be read is an error: Storm could not tell
+/// which keys it already uses.
+pub fn opencode_account_files(storm_only: bool) -> Result<Vec<String>> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let mut dirs = Vec::new();
     if !storm_only {
@@ -230,14 +266,6 @@ pub fn opencode_account(storm_only: bool) -> Result<OpencodeAccount> {
         dirs.extend(config.map(|c| c.join("opencode")));
     }
     dirs.extend(home.map(|h| h.join(".opencode")));
-    opencode_account_in(
-        &dirs,
-        std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from),
-    )
-}
-
-/// [`opencode_account`] over these config directories and an extra file.
-pub fn opencode_account_in(dirs: &[PathBuf], extra: Option<PathBuf>) -> Result<OpencodeAccount> {
     let mut files: Vec<PathBuf> = dirs
         .iter()
         .flat_map(|d| {
@@ -246,213 +274,198 @@ pub fn opencode_account_in(dirs: &[PathBuf], extra: Option<PathBuf>) -> Result<O
                 .map(move |f| d.join(f))
         })
         .collect();
-    files.extend(extra);
-    let mut account = OpencodeAccount::default();
-    for file in files.iter().filter(|f| f.is_file()) {
-        let text =
-            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
-        let v: Value = serde_json::from_str(&strip_jsonc(&text))
-            .with_context(|| format!("parsing {}", file.display()))?;
-        account.agents.extend(
-            v["agent"]
-                .as_object()
-                .into_iter()
-                .flatten()
-                .map(|(k, _)| k.clone()),
-        );
-        account.text.push_str(&text);
-    }
-    for dir in dirs
+    files.extend(std::env::var_os("OPENCODE_CONFIG").map(PathBuf::from));
+    files
         .iter()
-        .flat_map(|d| [d.join("agent"), d.join("agents")])
-    {
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        .filter(|f| f.is_file())
+        .map(|file| {
+            std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
+        })
+        .collect()
+}
+
+/// An OpenCode config file's JSON: JSONC's comments and trailing commas
+/// dropped first, outside strings.
+fn parse_jsonc(text: &str) -> Result<Value> {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    let mut in_string = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => in_string = false,
+                _ => {}
+            }
             continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "md") && path.is_file() {
-                account.text.push_str(
-                    &std::fs::read_to_string(&path)
-                        .with_context(|| format!("reading {}", path.display()))?,
-                );
-                account.agents.extend(
-                    path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .map(str::to_string),
-                );
-            } else if path.is_dir() {
-                anyhow::bail!("{} nests agents, which Storm cannot name", path.display());
+        }
+        match (c, chars.peek()) {
+            ('"', _) => {
+                in_string = true;
+                out.push(c);
+            }
+            ('/', Some('/')) => {
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                chars.next();
+                let mut last = ' ';
+                for c in chars.by_ref() {
+                    if last == '*' && c == '/' {
+                        break;
+                    }
+                    last = c;
+                }
+                out.push(' ');
+            }
+            (',', _) => {
+                let rest: String = chars.clone().collect();
+                let next = rest.trim_start().chars().next();
+                if !matches!(next, Some('}') | Some(']')) {
+                    out.push(c);
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    Ok(serde_json::from_str(&out)?)
+}
+
+/// OpenCode's own asks, from its defaults (1.19.4): a loop, a path outside
+/// the workspace, a question for the person, entering plan mode, and
+/// reading an env file. A child's layer denies each (148a).
+const OPENCODE_DEFAULT_ASKS: [&str; 3] = ["doom_loop", "question", "plan_enter"];
+
+/// Turns every OpenCode ask a child's config would hold into a deny
+/// (148a): Storm's own keys in place, each the account's configs give
+/// (top level and per agent) under the same key, so its merged position is
+/// kept, and OpenCode's defaults. An explicit allow or deny is left as it
+/// is. Nothing here allows anything.
+fn deny_asks(
+    config: &mut Map<String, Value>,
+    permission: &mut Map<String, Value>,
+    account: &[Value],
+) {
+    fn deny_in(v: &mut Value) {
+        match v {
+            Value::String(s) if s == "ask" => *v = json!("deny"),
+            Value::Object(m) => m.values_mut().for_each(deny_in),
+            _ => {}
+        }
+    }
+    fn merge_asks(into: &mut Map<String, Value>, theirs: &Map<String, Value>) {
+        for (key, value) in theirs {
+            match value {
+                Value::String(s) if s == "ask" => {
+                    into.insert(key.clone(), json!("deny"));
+                }
+                Value::Object(patterns) => {
+                    let asks: Vec<&String> = patterns
+                        .iter()
+                        .filter(|(_, a)| *a == "ask")
+                        .map(|(p, _)| p)
+                        .collect();
+                    if asks.is_empty() {
+                        continue;
+                    }
+                    let entry = into.entry(key.clone()).or_insert_with(|| json!({}));
+                    if let Value::Object(own) = entry {
+                        for p in asks {
+                            own.insert(p.clone(), json!("deny"));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
-    Ok(account)
-}
-
-/// JSONC as OpenCode reads it: each comment becomes a space, so no two
-/// tokens join, then a comma before a `}` or `]` is dropped.
-fn strip_jsonc(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut bare = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'"' {
-            let end = string_end(b, i);
-            bare.extend_from_slice(&b[i..end]);
-            i = end;
-        } else if b[i..].starts_with(b"//") {
-            while i < b.len() && b[i] != b'\n' {
-                i += 1;
+    permission.values_mut().for_each(deny_in);
+    let mut agents = Map::new();
+    for file in account {
+        if let Some(theirs) = file.get("permission").and_then(Value::as_object) {
+            merge_asks(permission, theirs);
+        }
+        for (name, agent) in file
+            .get("agent")
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(theirs) = agent.get("permission").and_then(Value::as_object) {
+                let own = agents
+                    .entry(name.clone())
+                    .or_insert_with(|| json!({"permission": {}}));
+                merge_asks(
+                    own["permission"].as_object_mut().expect("an object"),
+                    theirs,
+                );
             }
-            bare.push(b' ');
-        } else if b[i..].starts_with(b"/*") {
-            i = b[i + 2..]
-                .windows(2)
-                .position(|w| w == b"*/")
-                .map_or(b.len(), |at| i + 2 + at + 2);
-            bare.push(b' ');
-        } else {
-            bare.push(b[i]);
-            i += 1;
         }
     }
-    let mut out = Vec::with_capacity(bare.len());
-    let mut i = 0;
-    while i < bare.len() {
-        if bare[i] == b'"' {
-            let end = string_end(&bare, i);
-            out.extend_from_slice(&bare[i..end]);
-            i = end;
-            continue;
+    for key in OPENCODE_DEFAULT_ASKS {
+        if !matches!(permission.get(key), Some(Value::String(s)) if s != "ask") {
+            permission.insert(key.into(), json!("deny"));
         }
-        let trailing = bare[i] == b','
-            && bare[i + 1..]
-                .iter()
-                .find(|x| !x.is_ascii_whitespace())
-                .is_some_and(|x| *x == b'}' || *x == b']');
-        if !trailing {
-            out.push(bare[i]);
-        }
-        i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    for (key, patterns) in [
+        ("external_directory", json!({"*": "deny"})),
+        (
+            "read",
+            json!({"*.env": "deny", "*.env.*": "deny", "*.env.example": "allow"}),
+        ),
+    ] {
+        let entry = permission.entry(key).or_insert_with(|| json!({}));
+        if let Value::Object(own) = entry {
+            for (p, a) in patterns.as_object().expect("an object") {
+                own.entry(p.clone()).or_insert_with(|| a.clone());
+            }
+        }
+    }
+    if let Some(Value::Object(own)) = config.get_mut("agent") {
+        for agent in own.values_mut() {
+            if let Some(p) = agent.get_mut("permission") {
+                deny_in(p);
+            }
+        }
+    }
+    for (name, theirs) in agents {
+        let own = config
+            .entry("agent")
+            .or_insert_with(|| json!({}))
+            .as_object_mut()
+            .and_then(|a| a.entry(name).or_insert_with(|| json!({})).as_object_mut());
+        if let Some(own) = own {
+            let into = own.entry("permission").or_insert_with(|| json!({}));
+            if let (Some(into), Some(theirs)) =
+                (into.as_object_mut(), theirs["permission"].as_object())
+            {
+                for (k, v) in theirs {
+                    into.entry(k.clone()).or_insert_with(|| v.clone());
+                }
+            }
+        }
+    }
 }
 
-/// Just past the string that opens at `start`, or the end of `b`.
-fn string_end(b: &[u8], start: usize) -> usize {
-    let mut i = start + 1;
-    while i < b.len() {
-        match b[i] {
-            b'\\' => i += 2,
-            b'"' => return i + 1,
-            _ => i += 1,
-        }
-    }
-    b.len()
-}
-
-/// OpenCode's own wildcard match (`Wildcard.match`): `*` is any run, `?` any
-/// one character, the whole name must match, and a trailing ` *` may match
-/// nothing.
-pub fn opencode_matches(pattern: &str, name: &str) -> bool {
-    fn go(p: &[char], n: &[char]) -> bool {
-        match p.split_first() {
-            None => n.is_empty(),
-            Some(('*', rest)) => (0..=n.len()).any(|i| go(rest, &n[i..])),
-            Some(('?', rest)) => !n.is_empty() && go(rest, &n[1..]),
-            Some((c, rest)) => n.first() == Some(c) && go(rest, &n[1..]),
-        }
-    }
-    let p: Vec<char> = pattern.replace('\\', "/").chars().collect();
-    let n: Vec<char> = name.replace('\\', "/").chars().collect();
-    go(&p, &n) || (p.ends_with(&[' ', '*']) && go(&p[..p.len() - 2], &n))
-}
-
-/// The key a pinned ask is written under: the tool's name, or with as many
-/// `*` after it as it takes to be a key no config of the account's already
-/// has. OpenCode keeps a merged key where it first appeared, so only a new
-/// key is sure to be evaluated after everything the account says; a
-/// trailing `*` still names only this tool, since Storm has no other tool
-/// whose name begins with it.
-fn opencode_pinned_key(tool: &str, seen: &str) -> String {
+/// The key an allow is written under (146a): the tool's own name, or with as
+/// many `*` after it as it takes to be a key no config of the account's
+/// already has. OpenCode keeps a merged key where it first appeared, so only
+/// a new key is sure to follow the connection's `<slug>_*` ask; it sorts
+/// after that ask too, since `*` sorts before the letters these names have.
+/// A trailing `*` still names only this tool: no other Storm tool's name
+/// begins with another's.
+fn opencode_allow_key(tool: &str, seen: &str) -> String {
     let mut key = tool.to_string();
     while seen.contains(&key) {
         key.push('*');
     }
     key
-}
-
-/// A spawn session's OpenCode asks (134-8): each pinned tool's ask under a
-/// key that comes after the account's own, at the top level and in every
-/// agent the account or `runtime.toml` defines (an agent's own permission is
-/// evaluated after the top level's); and the exemptions where neither has
-/// named the tool itself.
-///
-/// Within this config the pinned key also follows every key that can match
-/// its tool: a match agrees with the tool's name up to its first wildcard,
-/// and `*` and `?` sort before the letters and `_` these names have, so only a
-/// longer run of `*` could sort after it, and the key has the longest.
-fn opencode_spawn_asks(
-    config: &mut serde_json::Map<String, Value>,
-    permission: &mut serde_json::Map<String, Value>,
-    server: &str,
-    asks: &SpawnAsks,
-    account: &OpencodeAccount,
-) {
-    let pinned: Vec<String> = PINNED_ASK_TOOLS
-        .iter()
-        .map(|t| format!("{server}_{t}"))
-        .collect();
-    let mut agents = config
-        .remove("agent")
-        .and_then(|a| a.as_object().cloned())
-        .unwrap_or_default();
-    let seen = format!(
-        "{}{}",
-        account.text,
-        serde_json::to_string(&(&*permission, &agents)).unwrap_or_default()
-    );
-    let keys: Vec<String> = pinned
-        .iter()
-        .map(|t| opencode_pinned_key(t, &seen))
-        .collect();
-    for key in &keys {
-        permission.insert(key.clone(), json!("ask"));
-    }
-    let named: std::collections::BTreeSet<String> = account
-        .agents
-        .iter()
-        .chain(agents.keys())
-        .cloned()
-        .collect();
-    for name in named {
-        let agent = agents.entry(name).or_insert_with(|| json!({}));
-        if !agent.is_object() {
-            *agent = json!({});
-        }
-        let p = agent
-            .as_object_mut()
-            .expect("an object")
-            .entry("permission")
-            .or_insert_with(|| json!({}));
-        if !p.is_object() {
-            *p = json!({});
-        }
-        for key in &keys {
-            p.as_object_mut()
-                .expect("an object")
-                .insert(key.clone(), json!("ask"));
-        }
-    }
-    if !agents.is_empty() {
-        config.insert("agent".into(), Value::Object(agents));
-    }
-    for tool in asks.exempt_tools() {
-        let key = format!("{server}_{tool}");
-        if !seen.contains(&key) {
-            permission.insert(key, json!("allow"));
-        }
-    }
 }
 
 pub const SESSIONS_DIR: &str = "sessions";
@@ -590,10 +603,14 @@ fn opencode_instruction_file(workspace: &Path) -> Option<String> {
 /// merged in, minus any `mcp` key — a setting can never add an MCP server.
 /// `plugin_servers` are a Claude Code session's plugins' local servers
 /// (decision 131c, `plugins.rs`), keyed `plugin_…`, which no slug can be.
-/// `spawn` is a session that may be offered decision 134's tools (134-8):
-/// OpenCode's pinned asks and exemptions join the built-in connection's
-/// (Claude Code's are in its `--settings` file, `harness.rs`; Codex asks for
-/// every tool already). `None` writes exactly what it always did.
+/// `layer` is Storm's own word on permissions (decision 146): OpenCode's
+/// allows for Storm's tools follow the built-in connection's ask, and a
+/// permission mode's keys join the config, which an OpenCode session then
+/// gets even without grants. Claude Code's allows are in its `--settings`
+/// file (`harness.rs`); Codex asks for every Storm tool (132c). An empty
+/// layer writes exactly what it always did. `account` is the text of the
+/// account's own OpenCode configs, read only when there is an allow to
+/// place.
 #[allow(clippy::too_many_arguments)]
 pub fn write_provider_config(
     provider: &str,
@@ -605,10 +622,12 @@ pub fn write_provider_config(
     opencode_settings: Option<&Value>,
     plugin_servers: &serde_json::Map<String, Value>,
     own: &AgentServers,
-    spawn: Option<(&SpawnAsks, &OpencodeAccount)>,
+    layer: &StormLayer,
+    account: &dyn Fn() -> Result<Vec<String>>,
 ) -> Result<LaunchExtras> {
     let grants: Vec<&McpGrant> = grants.iter().filter(|g| slug_ok(&g.slug)).collect();
-    if grants.is_empty() && !own.storm_only {
+    let opencode_mode = provider == "opencode" && !layer.opencode_permission.is_empty();
+    if grants.is_empty() && !own.storm_only && !opencode_mode {
         return Ok(LaunchExtras::default());
     }
     match provider {
@@ -664,13 +683,47 @@ pub fn write_provider_config(
                     key.clone(),
                     json!({ "type": "local", "command": command, "environment": env, "enabled": true }),
                 );
-                // Last, so no setting can relax it.
-                permission.insert(format!("{key}_*"), json!("ask"));
-                if g.id == STORM_CONNECTION
-                    && let Some((asks, account)) = spawn
-                {
-                    opencode_spawn_asks(&mut config, &mut permission, &key, asks, account);
+                // Last, so no setting can relax it; a child is never asked.
+                let action = if layer.deny_asks { "deny" } else { "ask" };
+                permission.insert(format!("{key}_*"), json!(action));
+            }
+            let files = if layer.deny_asks || !layer.allow.is_empty() {
+                account()?
+            } else {
+                Vec::new()
+            };
+            if layer.deny_asks {
+                let parsed = files
+                    .iter()
+                    .map(|f| parse_jsonc(f))
+                    .collect::<Result<Vec<_>>>()
+                    .context("an OpenCode config Storm cannot read could make a child ask")?;
+                deny_asks(&mut config, &mut permission, &parsed);
+            }
+            let seen = format!(
+                "{}{}",
+                files.concat(),
+                serde_json::to_string(&permission).unwrap_or_default()
+            );
+            let storm = grants.iter().find(|g| g.id == STORM_CONNECTION);
+            if let Some(g) = storm.filter(|_| !layer.allow.is_empty()) {
+                let key = own.key(g);
+                for tool in &layer.allow {
+                    permission.insert(
+                        opencode_allow_key(&format!("{key}_{tool}"), &seen),
+                        json!("allow"),
+                    );
                 }
+            }
+            // A child's allows follow the denies above under keys of their
+            // own, as Storm's tool allows do (148a).
+            for (k, v) in &layer.opencode_permission {
+                let k = if layer.deny_asks {
+                    opencode_allow_key(k, &seen)
+                } else {
+                    k.clone()
+                };
+                permission.insert(k, json!(v));
             }
             config.insert("$schema".into(), json!("https://opencode.ai/config.json"));
             // Replaces any `mcp` key the settings had: a host setting can
@@ -718,15 +771,23 @@ pub fn write_provider_config(
 pub const OPENING_PROMPT: &str =
     "Read your launch context with the storm session_context tool, then wait for my instructions.";
 
-/// The opening prompt of a session another agent started (decision 134f):
-/// as constant as [`OPENING_PROMPT`]. Its task, and any note, come only
+/// The opening prompt of a session another agent started (decisions 134f,
+/// 145): as constant as [`OPENING_PROMPT`]. Its task, and any note, come only
 /// through `session_context`; nothing ever reaches its terminal, so it is
-/// told where its parent's messages are (134-6) and how it reports.
-pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. Check the storm read_messages tool for messages from the agent that started you, and report your result with the storm report_result tool.";
+/// told to report each round and then wait in `read_messages`, where each
+/// message from its parent is its next round's task, and that a refusal is
+/// reported `blocked` (148b), since nobody answers a child. Word for word
+/// `docs/spawned-start-vectors.json`'s `opening_prompt`.
+pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round. Nobody can answer a prompt of yours: if something you need is refused, say so in report_result with outcome blocked and stop that path.";
 
 /// Which opening prompt a session gets: a spawned child's, else a note's.
-pub fn opening_prompt(context: bool, spawned: bool) -> Option<&'static str> {
-    if spawned {
+/// A child resumed from its parked conversation (145e) already knows its
+/// task and its loop: it is sent to `read_messages`, where its next round
+/// waits, in the waker's own fixed words.
+pub fn opening_prompt(context: bool, spawned: bool, resumed: bool) -> Option<&'static str> {
+    if spawned && resumed {
+        Some(crate::harness::WAKE_MESSAGE_TEXT)
+    } else if spawned {
         Some(SPAWNED_OPENING_PROMPT)
     } else if context {
         Some(OPENING_PROMPT)
@@ -855,7 +916,8 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         assert!(extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -890,7 +952,8 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         assert!(!extras.args.contains(&OsString::from("--strict-mcp-config")));
@@ -933,7 +996,8 @@ mod tests {
                 storm_only: false,
                 taken: &taken,
             },
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         assert!(
@@ -974,7 +1038,8 @@ mod tests {
                 None,
                 &Default::default(),
                 &AgentServers::storm_only(),
-                None,
+                &StormLayer::default(),
+                &|| Ok(Vec::new()),
             )
             .unwrap();
             assert_ne!(extras, LaunchExtras::default(), "{provider}");
@@ -1029,7 +1094,8 @@ mod tests {
             None,
             &plugins,
             &AgentServers::storm_only(),
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         let v: Value =
@@ -1058,7 +1124,8 @@ mod tests {
             None,
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         let path = session.join("mcp.json");
@@ -1102,7 +1169,8 @@ mod tests {
             Some(&settings),
             &serde_json::Map::new(),
             &AgentServers::storm_only(),
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         assert!(extras.args.is_empty());
@@ -1155,7 +1223,8 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
-                    None,
+                    &StormLayer::default(),
+                    &|| Ok(Vec::new()),
                 )
                 .unwrap();
                 launch.env.extend(mcp.env);
@@ -1244,7 +1313,8 @@ mod tests {
                 None,
                 &serde_json::Map::new(),
                 &AgentServers::storm_only(),
-                None,
+                &StormLayer::default(),
+                &|| Ok(Vec::new()),
             )
             .unwrap();
             assert_eq!(extras, LaunchExtras::default());
@@ -1264,7 +1334,8 @@ mod tests {
                 storm_only: false,
                 taken: &Default::default(),
             },
-            None,
+            &StormLayer::default(),
+            &|| Ok(Vec::new()),
         )
         .unwrap();
         assert_eq!(extras, LaunchExtras::default());
@@ -1286,7 +1357,8 @@ mod tests {
                     None,
                     &serde_json::Map::new(),
                     &AgentServers::storm_only(),
-                    None,
+                    &StormLayer::default(),
+                    &|| Ok(Vec::new()),
                 )
                 .unwrap()
             };
@@ -1317,13 +1389,34 @@ mod tests {
     /// started with; a note's session the note's; any other none.
     #[test]
     fn a_spawned_child_gets_the_spawned_opening_prompt() {
-        assert_eq!(opening_prompt(false, false), None);
-        assert_eq!(opening_prompt(true, false), Some(OPENING_PROMPT));
-        assert_eq!(opening_prompt(false, true), Some(SPAWNED_OPENING_PROMPT));
-        assert_eq!(opening_prompt(true, true), Some(SPAWNED_OPENING_PROMPT));
+        assert_eq!(opening_prompt(false, false, false), None);
+        assert_eq!(opening_prompt(true, false, false), Some(OPENING_PROMPT));
+        assert_eq!(
+            opening_prompt(false, true, false),
+            Some(SPAWNED_OPENING_PROMPT)
+        );
+        assert_eq!(
+            opening_prompt(true, true, false),
+            Some(SPAWNED_OPENING_PROMPT)
+        );
+        // 145e: a parked child resumed is sent to its next task.
+        assert_eq!(
+            opening_prompt(true, true, true),
+            Some(crate::harness::WAKE_MESSAGE_TEXT)
+        );
+        assert_eq!(opening_prompt(false, false, true), None);
         for tool in ["session_context", "read_messages", "report_result"] {
             assert!(SPAWNED_OPENING_PROMPT.contains(tool), "{tool}");
         }
+    }
+
+    /// 145: the child's prompt is the one the vectors name, so the server's
+    /// test of the tools it names reads the same words.
+    #[test]
+    fn the_spawned_opening_prompt_is_the_vectors() {
+        let v: Value =
+            serde_json::from_str(include_str!("../../../docs/spawned-start-vectors.json")).unwrap();
+        assert_eq!(v["opening_prompt"], SPAWNED_OPENING_PROMPT);
     }
 
     #[test]

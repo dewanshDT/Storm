@@ -16,25 +16,38 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
-pub mod approval;
+pub mod acts;
 pub mod attention;
 pub mod cache;
 pub mod cascade;
 pub mod credential;
+pub mod deletes;
+pub mod events;
 pub mod images;
 pub mod inbox;
 pub mod jobs;
+pub mod mode;
+pub mod model;
+pub mod park;
+pub mod permission;
+pub mod round;
+pub mod said;
 pub mod scope;
 pub mod store;
+pub mod wake;
 
 #[cfg(test)]
-mod approval_tests;
+mod acts_tests;
 #[cfg(test)]
 mod attention_tests;
 #[cfg(test)]
 mod cascade_tests;
 #[cfg(test)]
+mod events_tests;
+#[cfg(test)]
 mod inbox_tests;
+#[cfg(test)]
+mod lifecycle_tests;
 #[cfg(test)]
 mod scope_tests;
 #[cfg(test)]
@@ -59,23 +72,13 @@ pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
 /// The adapters that may be a spawning parent (decision 134, "candidate").
 pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
 
-/// What a `start` tells the host about a session decision 134 may offer
-/// its tools (134-8).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SpawnStart {
-    /// A child, whose `session_context` is exempt too.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub spawned: bool,
-}
-
-/// A spawn switch a person set: the session, what it was, what it is now,
-/// and how many pending requests turning it off refused.
+/// A spawn switch a person set: the session, what it was and what it is
+/// now.
 #[derive(Debug)]
 pub struct SpawnChange {
     pub session: SessionRecord,
     pub was: bool,
     pub enabled: bool,
-    pub refused: usize,
 }
 
 /// A session's spawn switch on its view (134-10).
@@ -125,12 +128,21 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
-        /// The session may be offered decision 134's tools while it runs,
-        /// so its CLI's config gets the pinned asks and, on a verified host,
-        /// the A6 exemptions (134-8). Sent only where C0 holds, so omitted
-        /// on every host today.
+        /// The model the agent starts on (decision 145b), checked for its
+        /// agent; the host's profile checks it again and passes it as the
+        /// agent's own flag. Omitted when none is chosen.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        spawn_asks: Option<SpawnStart>,
+        model: Option<String>,
+        /// The permission mode the person chose (decision 146b), checked for
+        /// the agent; the host maps it to the agent's own flag or config.
+        /// Omitted for `default`, so every other start's bytes are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
+        /// A session launched with the spawn switch on (146a): its host
+        /// pre-allows the spawn tools in the agent's own config. Omitted
+        /// otherwise.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spawn: bool,
         /// A resume's predecessor (decision 136e): an isolated host copies
         /// the conversation from that session's kept files, never from
         /// another's. Omitted on a fresh launch; an old host ignores it.
@@ -208,6 +220,22 @@ pub enum Command {
         name: String,
         git: bool,
     },
+    /// 145e: stop a child whose round is done, keeping its conversation
+    /// and its workspace for the message that resumes it. The host stops it
+    /// as an `end` does and reports it `parked`.
+    #[serde(rename = "park")]
+    Park { session: String },
+    /// 144c, 145d: the session has something unread, up to `mark`: events
+    /// (a parent, `kind: "events"`) or a message (a child, `"message"`). A
+    /// mark of 0 is nothing unread. Codes and a number only, never content;
+    /// the host's waker turns it into the agent's documented wake. Sent only
+    /// for an agent on `events::WAKE`.
+    #[serde(rename = "wake")]
+    Wake {
+        session: String,
+        kind: String,
+        mark: i64,
+    },
 }
 
 impl Command {
@@ -225,6 +253,8 @@ impl Command {
             Self::AgentInstall { .. } => "agent.install",
             Self::ChildWorkspace { .. } => "child.workspace",
             Self::WorkspaceCreate { .. } => "workspace.create",
+            Self::Park { .. } => "park",
+            Self::Wake { .. } => "wake",
         }
     }
 
@@ -233,6 +263,8 @@ impl Command {
         match self {
             Self::Start { session, .. }
             | Self::End { session }
+            | Self::Park { session }
+            | Self::Wake { session, .. }
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
@@ -525,6 +557,14 @@ pub struct StatusReport {
     /// from a host whose hooks report it for the adapter (134-9).
     #[serde(default)]
     pub attention: Option<String>,
+    /// Where `attention` came from (144b): `provider_hook` (the default, as
+    /// the hooks of 134-9 report it) or `output_pattern`.
+    #[serde(default)]
+    pub attention_source: Option<String>,
+    /// Where `activity` came from (144b): `output_pattern` (the default, as
+    /// AM42's terminal title reports it) or `provider_hook`.
+    #[serde(default)]
+    pub activity_source: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -635,10 +675,24 @@ pub struct Launch {
     /// and the session's first role label. A resume ignores it.
     #[serde(default)]
     pub role: Option<ContextRef>,
-    /// Launch with the spawn switch on (141e). Refused unless the `start`
-    /// carries `spawn_asks`.
+    /// Launch with the spawn switch on (141e). Refused unless the session
+    /// could be offered the spawn tools: it reads Storm, runs a spawning
+    /// adapter and C0 holds.
     #[serde(default)]
     pub spawn: bool,
+    /// The model the agent starts on (145b): checked for its agent, else
+    /// `model_unavailable`. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The permission mode (146b): `default`, `accept_edits` or `auto`,
+    /// checked for its agent, else `permission_mode_unavailable`. There is
+    /// no bypass. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Set only by Storm, never by a request: the mode an approved switch
+    /// (147c) resumes into, instead of the predecessor's.
+    #[serde(skip)]
+    pub switch_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -765,21 +819,41 @@ struct SessionLive {
     cache: OutputCache,
     /// `working` / `idle`, as the host last said (D15 AM42).
     activity: Option<String>,
-    /// A permission prompt waiting, as the host last said (134-9).
+    /// A permission prompt or usage limit waiting, as a gated signal last
+    /// said (134-9, 144b).
     attention: Option<String>,
+    /// `working` / `idle` from a gated idle signal only (144b), and its
+    /// source.
+    health: Option<String>,
+    health_source: Option<&'static str>,
+    /// When the current idle spell began, by [`AgentManager::clock`], and
+    /// whether its `idle_timeout` was written.
+    idle_since: Option<std::time::SystemTime>,
+    idle_fired: bool,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
     /// The credential kind its `start` named (decision 124): the only one the
     /// host may pull for it.
     credential: Option<&'static str>,
+    /// 145e: Storm asked its host to park it, so its host's `parked` is
+    /// taken; any other `parked` is a stop.
+    parking: bool,
+    /// 144c: the unread mark last sent to its host, so each is sent once.
+    wake_sent: Option<(&'static str, i64)>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
+            parking: false,
+            wake_sent: None,
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             attention: None,
+            health: None,
+            health_source: None,
+            idle_since: None,
+            idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
         }
@@ -802,7 +876,28 @@ struct Live {
     /// generation of the link it went down: one per link, so an `end` lost
     /// with its link is sent again on the next.
     stopping: HashMap<String, u64>,
+    /// Starts sent and not yet acknowledged by any report from their host:
+    /// the link generation each went down and when. A start is wanted only
+    /// on the link it was sent on and only for [`START_ACK_DEADLINE`]; past
+    /// either it has failed, and its host is told so if it runs it late.
+    starts: HashMap<String, PendingStart>,
 }
+
+#[derive(Debug, Clone)]
+struct PendingStart {
+    host: String,
+    generation: u64,
+    sent: std::time::Instant,
+}
+
+/// How long a `start` may wait for its host's first report of it before it
+/// has failed: a host that takes a start this late (a VM resumed, a link
+/// whose bytes sat in a send buffer) never runs it.
+pub const START_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a host is told when it asks to go on with a start Storm has given up
+/// on: it drops the start.
+pub const START_UNWANTED: &str = "start_unwanted";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AgentConfig {
@@ -821,11 +916,22 @@ pub struct AgentManager {
     new_workspaces: Mutex<HashMap<String, HostPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
-    /// Bumped whenever the approval engine decides a request.
-    requests: watch::Sender<u64>,
-    /// The adapters whose permission prompts are taken from their hosts
-    /// (134-9).
-    permission_prompt: Mutex<&'static [&'static str]>,
+    /// The signals taken from hosts (134-9, 144b).
+    signals: Mutex<&'static [attention::GatedSignal]>,
+    /// Added to the wall clock that times idle spells; only tests move it.
+    clock_skew: Mutex<std::time::Duration>,
+    /// The agents whose final message is a round's result (145c).
+    result_sources: Mutex<&'static [round::ResultSource]>,
+    /// The agents Storm may wake (144c, 145d).
+    wakes: Mutex<&'static [events::GatedWake]>,
+    /// The agents whose children's words are kept (145g), and those words.
+    said_gate: Mutex<&'static [&'static str]>,
+    said: Mutex<said::Said>,
+    /// Something a wake mark depends on changed outside the event queue:
+    /// a message, a read, a host's return.
+    pub(crate) wake_poke: tokio::sync::Notify,
+    /// Bumped whenever the delete requests a client lists change (149).
+    deletes_changed: watch::Sender<u64>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -922,8 +1028,14 @@ impl AgentManager {
             new_workspaces: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
-            requests: watch::channel(0).0,
-            permission_prompt: Mutex::new(attention::PERMISSION_PROMPT_ADAPTERS),
+            signals: Mutex::new(attention::GATED_SIGNALS),
+            clock_skew: Mutex::new(std::time::Duration::ZERO),
+            result_sources: Mutex::new(round::RESULT_SOURCES),
+            wakes: Mutex::new(events::WAKE),
+            said_gate: Mutex::new(said::SAID),
+            said: Mutex::new(said::Said::default()),
+            wake_poke: tokio::sync::Notify::new(),
+            deletes_changed: watch::channel(0).0,
         })
     }
 
@@ -985,9 +1097,37 @@ impl AgentManager {
             }
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
-        // Its sessions are unknown until it reconnects and reports them.
-        let _ = self.transition_host_sessions(host_id, |r| {
-            (!r.is_ended()).then(|| ("unknown".to_string(), None, None, None))
+        // A start that went down this link and was never reported has
+        // failed: the host may still read it from a stale connection, and
+        // must not run it then.
+        let unstarted: std::collections::HashSet<String> = {
+            let mut live = self.live.lock().unwrap();
+            let gone: Vec<String> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.host == host_id && p.generation == generation)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &gone {
+                live.starts.remove(id);
+            }
+            gone.into_iter().collect()
+        };
+        // Its other sessions are unknown until it reconnects and reports
+        // them. A parked child has no process there to be unsure of (145e).
+        let _ = self.transition_host_sessions(host_id, events::HOST_PROCESS, |r| {
+            if r.is_ended() || r.status == "parked" {
+                None
+            } else if unstarted.contains(&r.id) {
+                Some((
+                    "failed".to_string(),
+                    Some("start_failure".to_string()),
+                    None,
+                    None,
+                ))
+            } else {
+                Some(("unknown".to_string(), None, None, None))
+            }
         });
     }
 
@@ -1088,12 +1228,91 @@ impl AgentManager {
                 "command sent"
             ),
         }
+        let start = match &command {
+            Command::Start { session, .. } => Some(session.clone()),
+            _ => None,
+        };
         let envelope = Envelope {
             cmd_seq: link.next_seq,
             command,
         };
         link.next_seq += 1;
-        link.tx.send(envelope).map_err(|_| AgentError::HostOffline)
+        let generation = link.generation;
+        link.tx
+            .send(envelope)
+            .map_err(|_| AgentError::HostOffline)?;
+        if let Some(session) = start {
+            live.starts.insert(
+                session,
+                PendingStart {
+                    host: host_id.to_string(),
+                    generation,
+                    sent: std::time::Instant::now(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The host reported `session`: its start, if one was waiting, arrived.
+    fn start_acknowledged(&self, session_id: &str) {
+        self.live.lock().unwrap().starts.remove(session_id);
+    }
+
+    /// A session Storm has ended that its host says is running (a start it
+    /// took late): it is ended there too. Never a status change here.
+    fn end_unwanted(&self, host_id: &str, r: &SessionRecord) {
+        tracing::warn!(
+            host = host_id,
+            session = %r.id,
+            status = %r.status,
+            "the host runs a session that has ended: ending it"
+        );
+        let _ = self.send(
+            host_id,
+            Command::End {
+                session: r.id.clone(),
+            },
+        );
+    }
+
+    /// Every start whose host has not reported it within `deadline` has
+    /// failed (`start_failure`): its host is no longer waited for, and if
+    /// it takes the start later it drops it or is told to end it. Returns
+    /// the sessions it failed.
+    pub fn expire_starts(&self, deadline: std::time::Duration) -> Vec<String> {
+        let due: Vec<(String, String)> = {
+            let mut live = self.live.lock().unwrap();
+            let due: Vec<(String, String)> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.sent.elapsed() > deadline)
+                .map(|(id, p)| (id.clone(), p.host.clone()))
+                .collect();
+            for (id, _) in &due {
+                live.starts.remove(id);
+            }
+            due
+        };
+        let mut failed = Vec::new();
+        for (id, host) in due {
+            let Ok(Some(mut r)) = self.store.lock().unwrap().get(&id) else {
+                continue;
+            };
+            if r.is_ended() || !matches!(r.status.as_str(), "creating" | "starting" | "unknown") {
+                continue;
+            }
+            tracing::warn!(host = %host, session = %id, "its host never took the start: failed");
+            r.status = "failed".into();
+            r.end_reason = Some("start_failure".into());
+            r.ended_at.get_or_insert_with(now);
+            if self.update_record(&r, events::HOST_PROCESS).is_ok() {
+                self.forget_stop(&r);
+                self.bump(&r.id);
+                failed.push(id);
+            }
+        }
+        failed
     }
 
     /// Applies `change` to every session on `host_id`. `change` returns the
@@ -1101,6 +1320,7 @@ impl AgentManager {
     fn transition_host_sessions(
         &self,
         host_id: &str,
+        source: &'static str,
         change: impl Fn(&SessionRecord) -> Option<(String, Option<String>, Option<i32>, Option<i32>)>,
     ) -> Result<()> {
         let records = self.store.lock().unwrap().for_host(host_id)?;
@@ -1114,7 +1334,14 @@ impl AgentManager {
                     r.signal = signal;
                     r.ended_at.get_or_insert_with(now);
                 }
-                self.store.lock().unwrap().update(&r)?;
+                // Nothing a gated signal said holds once the link is gone
+                // (144b): the idle spell starts again from its next report.
+                if let Some(s) = self.live.lock().unwrap().sessions.get_mut(&r.id) {
+                    s.health = None;
+                    s.health_source = None;
+                    s.idle_since = None;
+                }
+                self.update_record(&r, source)?;
                 self.forget_stop(&r);
                 self.bump(&r.id);
             }
@@ -1169,6 +1396,11 @@ impl AgentManager {
         for mut r in records {
             match reported.get(&r.id) {
                 Some(rep) => {
+                    self.start_acknowledged(&r.id);
+                    if r.is_ended() && matches!(rep.status.status.as_str(), "starting" | "running")
+                    {
+                        self.end_unwanted(host_id, &r);
+                    }
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
                         // An end Storm sent before a restart (LT-6).
@@ -1176,9 +1408,8 @@ impl AgentManager {
                             r.status = "stopped".into();
                             r.end_reason = Some(reason);
                         }
-                        self.store.lock().unwrap().update(&r)?;
+                        self.record_report(&r, &rep.status)?;
                         self.forget_stop(&r);
-                        self.set_activity(&r, &rep.status);
                         self.bump(&r.id);
                     }
                     let empty = {
@@ -1191,11 +1422,13 @@ impl AgentManager {
                         replay.push(r.id.clone());
                     }
                 }
-                None if !r.is_ended() && r.status != "creating" => {
+                // A parked child (145e) runs nowhere: its host has nothing
+                // to report of it.
+                None if !r.is_ended() && r.status != "creating" && r.status != "parked" => {
                     r.status = "failed".into();
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
-                    self.store.lock().unwrap().update(&r)?;
+                    self.update_record(&r, events::HOST_PROCESS)?;
                     self.forget_stop(&r);
                     self.bump(&r.id);
                 }
@@ -1206,6 +1439,7 @@ impl AgentManager {
             self.send(host_id, Command::Replay { session, from: 0 })?;
         }
         self.reassess_spawn_gate(host_id);
+        self.forget_wakes_sent(host_id);
         Ok(())
     }
 
@@ -1376,6 +1610,22 @@ impl AgentManager {
         on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
     }
 
+    /// Whether an approved switch (147c) carries a session's switch: it was
+    /// launched with it on and the person has not turned it off since.
+    pub fn spawn_carried(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store.spawn_launched(session_id).unwrap_or(false)
+            && store.spawn_enabled(session_id).unwrap_or(false)
+    }
+
+    pub fn spawn_launched(&self, session_id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .spawn_launched(session_id)
+            .unwrap_or(false)
+    }
+
     /// Whether a session launched with the switch on has it off now, so a
     /// spawn tool call can say how to turn it back on (141e).
     pub fn spawn_turned_off(&self, session_id: &str) -> bool {
@@ -1387,25 +1637,6 @@ impl AgentManager {
     #[cfg(test)]
     pub fn spawn_enabled(&self, session_id: &str) -> AgentResult<bool> {
         Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
-    }
-
-    fn workspace_paths(&self, host_id: &str) -> HashMap<String, String> {
-        self.with_live(host_id, |caps| caps.workspace_paths.clone())
-            .unwrap_or_default()
-    }
-
-    /// How many live sessions share `session_id`'s workspace on its host,
-    /// leaving out the session's own tree (decision 141b), for the approval
-    /// card. Judged as WS-9 judged it (137-2).
-    pub fn shared_with(&self, session_id: &str) -> AgentResult<u32> {
-        let r = self.get(session_id)?;
-        let paths = self.workspace_paths(&r.host_id);
-        let store = self.store.lock().unwrap();
-        let root = store.lineage(&r.id)?.root_session;
-        let mut tree = store.descendants(&root, false)?;
-        tree.push(root);
-        tree.push(r.id.clone());
-        Ok(store.workspace_sharers(&r.host_id, &r.workspace, &tree, &paths)?)
     }
 
     /// Why turning a session's switch on would be refused now, in 134-2's
@@ -1420,9 +1651,6 @@ impl AgentManager {
         }
         if let Err(code) = self.spawn_gate(&r.host_id) {
             return Ok(Some(code));
-        }
-        if !store.spawn_asks(&r.id)? {
-            return Ok(Some("launched_without_asks"));
         }
         if !store.spawn_launched(&r.id)? {
             return Ok(Some("launched_without_spawn"));
@@ -1452,9 +1680,9 @@ impl AgentManager {
     }
 
     /// A person turns a session's spawn switch on or off (134c, B1, B2).
-    /// Off always succeeds and refuses the session's pending requests at
-    /// once. On needs a live session of a spawning adapter and C0;
-    /// otherwise the inner error is the refusal's code.
+    /// Off always succeeds and stops the session's next act at once. On
+    /// needs a live session of a spawning adapter launched with it on, and
+    /// C0; otherwise the inner error is the refusal's code.
     pub fn set_spawn(
         &self,
         session_id: &str,
@@ -1467,12 +1695,11 @@ impl AgentManager {
         if enabled && let Some(code) = self.enable_refusal(&r, &store)? {
             return Ok(Err(code));
         }
-        let refused = store.set_spawn(session_id, enabled, device, &now())?;
+        store.set_spawn(session_id, enabled, device, &now())?;
         Ok(Ok(SpawnChange {
             session: r,
             was,
             enabled,
-            refused,
         }))
     }
 
@@ -1668,7 +1895,7 @@ impl AgentManager {
         let stamp = now();
         if r.last_activity.as_deref().map(|l| &l[..19.min(l.len())]) != Some(&stamp[..19]) {
             r.last_activity = Some(stamp);
-            self.store.lock().unwrap().update(&r)?;
+            self.update_record(&r, events::HOST_PROCESS)?;
         }
         Ok(())
     }
@@ -1681,10 +1908,30 @@ impl AgentManager {
         report: &StatusReport,
     ) -> AgentResult<()> {
         let mut r = self.owned_by(host_id, session_id)?;
+        self.start_acknowledged(session_id);
         if r.is_ended() {
-            // An ending is final; a late duplicate changes nothing.
+            // An ending is final; a late duplicate changes nothing. A host
+            // that runs it anyway took a start Storm gave up on: a host
+            // about to start it drops it, one that started it ends it.
+            match report.status.as_str() {
+                "starting" => return Err(AgentError::Conflict(START_UNWANTED.into())),
+                "running" => self.end_unwanted(host_id, &r),
+                _ => {}
+            }
             return Ok(());
         }
+        // 145e: `parked` only answers Storm's own `park`; anything else that
+        // says it is a stop.
+        let unasked;
+        let report = if report.status == "parked" && !self.take_parking(session_id) {
+            unasked = StatusReport {
+                status: "stopped".into(),
+                ..report.clone()
+            };
+            &unasked
+        } else {
+            report
+        };
         let before = r.status.clone();
         apply_report(&mut r, report)?;
         if let Some(reason) = self.storm_stop(&r)? {
@@ -1701,7 +1948,7 @@ impl AgentManager {
                 "session status"
             );
         }
-        self.store.lock().unwrap().update(&r)?;
+        self.record_report(&r, report)?;
         self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
@@ -1709,7 +1956,6 @@ impl AgentManager {
         if let Some(made) = &report.child_workspace {
             self.record_child_workspace(session_id, made)?;
         }
-        self.set_activity(&r, report);
         self.bump(session_id);
         Ok(())
     }
@@ -1809,13 +2055,14 @@ impl AgentManager {
                 req.workspace
             )));
         }
+        // A parked child has no process (145e).
         let live_on_host = self
             .store
             .lock()
             .unwrap()
             .for_host(&req.host_id)?
             .iter()
-            .filter(|r| !r.is_ended())
+            .filter(|r| !r.is_ended() && r.status != "parked")
             .count();
         if caps.max_sessions > 0 && live_on_host >= caps.max_sessions as usize {
             return Err(AgentError::TooManySessions);
@@ -1907,14 +2154,61 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
-        // 134-8: written now, since a switch turned on later cannot add asks
-        // to a config the CLI has already read.
-        let spawn_asks = (reads_storm
+        // 141e: the CLI lists its tools once, at start, so only a session
+        // that could be offered them then is launched with the switch on.
+        let may_spawn = reads_storm
             && SPAWN_PROVIDERS.contains(&provider.id.as_str())
-            && self.spawn_gate(&req.host_id).is_ok())
-        .then_some(SpawnStart::default());
-        if req.spawn && spawn_asks.is_none() {
+            && self.spawn_gate(&req.host_id).is_ok();
+        // A resume never turns on more than its predecessor launched with,
+        // and an approved switch (147c) keeps the switch only if it can.
+        if let Some((old, _)) = resume.as_ref()
+            && req.spawn
+            && !self.store.lock().unwrap().spawn_launched(old)?
+        {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let spawn = req.spawn && (may_spawn || req.switch_mode.is_none());
+        if spawn && !may_spawn {
+            return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let model = match resume.as_ref() {
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.model)
+                .filter(|m| model::check(&provider.id, m).is_ok()),
+            None => req.model.clone().filter(|m| !m.is_empty()),
+        };
+        if let Some(m) = &model
+            && let Err(sentence) = model::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "model_unavailable: {sentence}"
+            )));
+        }
+        let permission_mode = match resume.as_ref() {
+            Some(_) if req.switch_mode.is_some() => req.switch_mode.clone(),
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.permission_mode)
+                .filter(|m| permission::check(&provider.id, m).is_ok()),
+            None => req
+                .permission_mode
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .and_then(permission::stored),
+        };
+        if let Some(m) = &permission_mode
+            && let Err(sentence) = permission::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "permission_mode_unavailable: {sentence}"
+            )));
         }
         let launch = {
             let mut store = self.store.lock().unwrap();
@@ -1937,6 +2231,8 @@ impl AgentManager {
                 // and cannot read a role note (138g).
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
                 role: meta.role.filter(|_| reads_storm),
+                model: model.clone(),
+                permission_mode: permission_mode.clone(),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -1946,10 +2242,7 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
-            if spawn_asks.is_some() {
-                store.record_spawn_asks(&record.id, &record.created_at)?;
-            }
-            if req.spawn {
+            if spawn {
                 store.record_spawn_launch(
                     &record.id,
                     meta.device.as_deref(),
@@ -1994,6 +2287,7 @@ impl AgentManager {
                 Some(CrewJoin::After(old)) => {
                     if let Some(m) = store.membership(&old)? {
                         let members = store.members(&m.id)?;
+                        let old = store::crew_root(&store.conn, &old)?;
                         let before = members
                             .iter()
                             .position(|s| *s == old)
@@ -2028,7 +2322,9 @@ impl AgentManager {
                 resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
-                spawn_asks,
+                model,
+                permission_mode,
+                spawn,
                 child_of: None,
             },
         );
@@ -2041,7 +2337,7 @@ impl AgentManager {
                 record.ended_at = Some(now());
             }
         }
-        self.store.lock().unwrap().update(&record)?;
+        self.update_record(&record, events::STORM)?;
         self.bump(&record.id);
         Ok((record, launch, outcome, credential))
     }
@@ -2146,7 +2442,6 @@ impl AgentManager {
         self.store.lock().unwrap().grant(session_id, connection_id)
     }
 
-    #[cfg(test)]
     pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
         self.store.lock().unwrap().grants_of(session_id)
     }
@@ -2193,20 +2488,17 @@ impl AgentManager {
         Ok(records.into_iter().map(|r| self.with_activity(r)).collect())
     }
 
-    fn set_activity(&self, r: &SessionRecord, report: &StatusReport) {
-        let activity = report
-            .activity
-            .as_deref()
-            .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
-            .map(str::to_owned);
-        let attention = self.reported_attention(r, report);
-        let mut live = self.live.lock().unwrap();
-        let session = live
-            .sessions
-            .entry(r.id.clone())
-            .or_insert_with(SessionLive::new);
-        session.activity = activity;
-        session.attention = attention;
+    /// A host's report written back, with what its gated signals say and
+    /// the events it makes, in one transaction (144a).
+    fn record_report(&self, r: &SessionRecord, report: &StatusReport) -> AgentResult<()> {
+        let taken = self.take_signals(r, report);
+        let ctx = events::EventCtx {
+            source: events::HOST_PROCESS,
+            live: taken.live,
+            extra: taken.extra,
+        };
+        self.store.lock().unwrap().update_with(r, &ctx)?;
+        Ok(())
     }
 
     /// Activity is shown only while the session runs: an `unknown` session's
@@ -2239,6 +2531,11 @@ impl AgentManager {
         let r = self.get(id)?;
         if r.is_ended() {
             return Err(AgentError::Conflict("the session has ended".into()));
+        }
+        if r.status == "parked" {
+            return Err(AgentError::Conflict(
+                "the session is parked: a message from the agent that started it resumes it".into(),
+            ));
         }
         Ok(r)
     }
@@ -2507,7 +2804,7 @@ impl AgentManager {
         )?;
         r.cols = size.cols;
         r.rows = size.rows;
-        self.store.lock().unwrap().update(&r)?;
+        self.update_record(&r, events::STORM)?;
         self.bump(id);
         Ok(())
     }
@@ -2527,6 +2824,21 @@ impl AgentManager {
 
     pub fn crews(&self) -> Result<Vec<Crew>> {
         self.store.lock().unwrap().crews()
+    }
+
+    /// Test-only: a crew's stored rows, which hold only roots (145i).
+    #[cfg(test)]
+    pub fn stored_members_for_tests(&self, crew_id: &str) -> Vec<String> {
+        self.store.lock().unwrap().members(crew_id).unwrap()
+    }
+
+    /// `agent.db`'s upgrades not yet audited (145i).
+    pub fn unaudited_migrations(&self) -> Result<Vec<store::Migration>> {
+        self.store.lock().unwrap().unaudited_migrations()
+    }
+
+    pub fn mark_migration_audited(&self, name: &str, now: &str) -> Result<()> {
+        self.store.lock().unwrap().mark_migration_audited(name, now)
     }
 
     pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
@@ -2669,7 +2981,7 @@ impl AgentManager {
                 r.status = "failed".into();
                 r.end_reason = Some("owner_removed".into());
                 r.ended_at.get_or_insert_with(now);
-                self.store.lock().unwrap().update(&r)?;
+                self.update_record(&r, events::STORM)?;
                 self.forget_stop(&r);
                 self.bump(&r.id);
                 failed += 1;
@@ -2683,7 +2995,7 @@ impl AgentManager {
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
-        self.transition_host_sessions(host_id, |r| {
+        self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (
                     "failed".to_string(),
@@ -2717,6 +3029,76 @@ impl AgentManager {
             None => Read::Ahead,
         }
     }
+
+    /// 145g: the last `lines` lines of a session's terminal, from the
+    /// output cache, as its screen and scrollback show them. Empty when
+    /// nothing is cached.
+    pub fn output_tail(&self, id: &str, lines: usize) -> Vec<String> {
+        let bytes = {
+            let live = self.live.lock().unwrap();
+            let Some(s) = live.sessions.get(id) else {
+                return Vec::new();
+            };
+            let from = s
+                .cache
+                .floor()
+                .max(s.cache.end().saturating_sub(TAIL_BYTES));
+            match s.cache.read(from, TAIL_BYTES as usize) {
+                Read::Data { bytes, .. } => bytes,
+                _ => return Vec::new(),
+            }
+        };
+        let size = match self.store.lock().unwrap().get(id) {
+            Ok(Some(r)) => (r.cols, r.rows),
+            _ => (80, 24),
+        };
+        screen_lines(&bytes, size, lines)
+    }
+}
+
+/// How much of the end of a session's output a peek reads (145g).
+const TAIL_BYTES: u64 = 256 * 1024;
+/// The longest line a peek returns, in characters.
+const TAIL_LINE_CHARS: usize = 1000;
+/// The scrollback a peek renders into, above the screen.
+const TAIL_SCROLLBACK: usize = 1000;
+
+/// Terminal output as the person would see it at `(cols, rows)`: run
+/// through a terminal emulator, then its scrollback and screen as plain
+/// lines, the last `n` non-empty ones kept, each bounded. A TUI that draws
+/// by cursor position (Claude Code) reads as its screen, not as every
+/// spinner frame it drew.
+pub fn screen_lines(bytes: &[u8], (cols, rows): (u16, u16), n: usize) -> Vec<String> {
+    let (cols, rows) = (cols.clamp(20, 500), rows.clamp(5, 300));
+    let size = |n: u16| std::num::NonZeroU16::new(n).expect("clamped above 0");
+    let mut parser = vt100::Parser::new(size(rows), size(cols), TAIL_SCROLLBACK);
+    parser.process(bytes);
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let back = parser.screen().scrollback();
+    let rows = usize::from(rows);
+    let mut all: Vec<String> = vec![String::new(); back + rows];
+    let mut offset = back;
+    loop {
+        parser.screen_mut().set_scrollback(offset);
+        for (r, row) in parser.screen().rows(0, cols).enumerate() {
+            all[back - offset + r] = row;
+        }
+        if offset == 0 {
+            break;
+        }
+        offset = offset.saturating_sub(rows);
+    }
+    let kept: Vec<String> = all
+        .into_iter()
+        .map(|l| {
+            l.trim_end()
+                .chars()
+                .take(TAIL_LINE_CHARS)
+                .collect::<String>()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(n)..].to_vec()
 }
 
 /// A session's name: the slug of its context note's title, else
@@ -2803,6 +3185,8 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
             }
             r.status = report.status.clone();
         }
+        // 145e: its process stopped at Storm's word; the session goes on.
+        "parked" => r.status = "parked".into(),
         "completed" | "failed" | "stopped" => {
             r.status = report.status.clone();
             r.exit_code = report.exit_code;
@@ -2970,6 +3354,9 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             meta,
             grants,
@@ -2993,6 +3380,9 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3012,6 +3402,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3145,6 +3537,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3661,6 +4055,9 @@ mod tests {
                     crew: None,
                     role: None,
                     spawn: false,
+                    model: None,
+                    permission_mode: None,
+                    switch_mode: None,
                 },
                 meta,
                 offered(),
@@ -3766,6 +4163,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3785,6 +4184,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3809,6 +4210,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3868,6 +4271,9 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -3900,6 +4306,8 @@ mod tests {
                 title: None,
                 activity: None,
                 attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3914,6 +4322,146 @@ mod tests {
         assert!(matches!(
             launch(&m, Some("shell")),
             Err(AgentError::HostOffline)
+        ));
+    }
+
+    fn sent_starts(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut starts = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::Start { session, .. } = e.command {
+                starts.push(session);
+            }
+        }
+        starts
+    }
+
+    fn sent_ends(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut ends = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::End { session } = e.command {
+                ends.push(session);
+            }
+        }
+        ends
+    }
+
+    fn hello_with(m: &AgentManager, sessions: Vec<ReportedSession>) {
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: caps(&[("shell", true)]),
+                sessions,
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Round 4's stray launch: a launch refused because its host is offline
+    /// leaves nothing behind. No session is written, and when the host
+    /// comes back nothing is started on it.
+    #[test]
+    fn a_launch_refused_offline_is_never_kept_or_replayed() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let (generation, _) = {
+            let live = m.live.lock().unwrap();
+            (live.hosts["hst_A"].generation, ())
+        };
+        m.disconnect_host("hst_A", generation);
+        drop(rx);
+        assert!(matches!(
+            launch(&m, Some("shell")),
+            Err(AgentError::HostOffline)
+        ));
+        assert!(m.list().unwrap().is_empty(), "nothing written");
+        assert!(m.live.lock().unwrap().starts.is_empty());
+
+        let (_, rx2) = m.connect_host("hst_A");
+        rx = rx2;
+        hello_with(&m, vec![]);
+        assert!(sent_starts(&mut rx).is_empty(), "nothing replayed");
+        assert!(m.list().unwrap().is_empty());
+    }
+
+    /// A start whose link went down before its host reported it has failed:
+    /// it is never left `unknown` to come back as running. When the host
+    /// asks to go on with it, it is told `start_unwanted`; a host that ran
+    /// it anyway is told to end it, and the session stays failed. A start
+    /// the host reported is `unknown` across a drop, as before.
+    #[test]
+    fn a_start_its_link_lost_before_the_host_took_it_never_runs_later() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let generation = m.live.lock().unwrap().hosts["hst_A"].generation;
+        let late = launch(&m, Some("shell")).unwrap();
+        let taken = launch(&m, Some("shell")).unwrap();
+        assert_eq!(sent_starts(&mut rx), [late.id.clone(), taken.id.clone()]);
+        m.host_status("hst_A", &taken.id, &report("running", None, None))
+            .unwrap();
+
+        m.disconnect_host("hst_A", generation);
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&taken.id).unwrap().status, "unknown");
+
+        let (_, mut rx) = m.connect_host("hst_A");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(code)) if code == START_UNWANTED
+        ));
+        assert!(sent_ends(&mut rx).is_empty());
+        m.host_status("hst_A", &late.id, &report("running", None, None))
+            .unwrap();
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        hello_with(
+            &m,
+            vec![
+                ReportedSession {
+                    id: late.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+                ReportedSession {
+                    id: taken.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+            ],
+        );
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        assert_eq!(m.get(&late.id).unwrap().status, "failed");
+        assert_eq!(m.get(&taken.id).unwrap().status, "running");
+    }
+
+    /// A start no report has answered within the deadline has failed, on a
+    /// link that is still up too; one its host answered is left alone.
+    #[test]
+    fn a_start_never_answered_in_time_fails() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let late = launch(&m, Some("shell")).unwrap();
+        let answered = launch(&m, Some("shell")).unwrap();
+        sent_starts(&mut rx);
+        m.host_status("hst_A", &answered.id, &report("starting", None, None))
+            .unwrap();
+        assert!(m.expire_starts(START_ACK_DEADLINE).is_empty());
+        assert_eq!(
+            m.expire_starts(std::time::Duration::ZERO),
+            std::slice::from_ref(&late.id)
+        );
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&answered.id).unwrap().status, "starting");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(_))
         ));
     }
 
@@ -3941,6 +4489,8 @@ mod tests {
             },
         );
         let r = launch(&m, Some("shell")).unwrap();
+        m.host_status("hst_A", &r.id, &report("running", None, None))
+            .unwrap();
         let _old = online(&m, "hst_OLD", caps(&[("shell", true)]));
 
         assert!(m.reap_silent(std::time::Duration::from_secs(60)).is_empty());
@@ -4024,6 +4574,8 @@ mod tests {
                         title: None,
                         activity: None,
                         attention: None,
+                        attention_source: None,
+                        activity_source: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -4059,6 +4611,8 @@ mod tests {
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
             attention: None,
+            attention_source: None,
+            activity_source: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -4387,6 +4941,8 @@ mod tests {
                     title: None,
                     activity: None,
                     attention: None,
+                    attention_source: None,
+                    activity_source: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
@@ -4437,7 +4993,7 @@ mod tests {
         assert_eq!(v["type"], "terminal.replay");
 
         // A native `start` is byte for byte what it was before token sync.
-        let start_with = |provider_credential: Option<String>, spawn_asks| Envelope {
+        let start_with = |provider_credential: Option<String>, model: Option<String>| Envelope {
             cmd_seq: 1,
             command: Command::Start {
                 session: "ags_X".into(),
@@ -4449,7 +5005,9 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
-                spawn_asks,
+                model,
+                permission_mode: None,
+                spawn: false,
                 resumed_from: None,
                 child_of: None,
             },
@@ -4464,15 +5022,25 @@ mod tests {
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
         );
-        // 134-8: a start decision 134 may offer its tools to says so.
+        // 145b: a model, when one is chosen, and no asks (145a).
         assert_eq!(
-            serde_json::to_string(&start_with(None, Some(SpawnStart::default()))).unwrap(),
-            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"spawn_asks":{}}"#
+            serde_json::to_string(&start_with(None, Some("haiku".into()))).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"model":"haiku"}"#
         );
-        assert!(
-            serde_json::to_string(&start_with(None, Some(SpawnStart { spawned: true })))
-                .unwrap()
-                .ends_with(r#""spawn_asks":{"spawned":true}}"#)
+        // 146: a mode other than default, and a spawning parent's flag.
+        let mut moded = start(None);
+        if let Command::Start {
+            permission_mode,
+            spawn,
+            ..
+        } = &mut moded.command
+        {
+            *permission_mode = Some("accept_edits".into());
+            *spawn = true;
+        }
+        assert_eq!(
+            serde_json::to_string(&moded).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"permission_mode":"accept_edits","spawn":true}"#
         );
     }
 

@@ -113,10 +113,13 @@ SessionSelection selectWith(
 
 /// Makes a crew named "New crew" of [ids], in that order, and opens its
 /// name for editing with the text selected (138n, Q3).
-Future<void> makeCrew(BuildContext context, List<String> ids) async {
+Future<void> makeCrew(BuildContext context, List<String> named) async {
   // The container, not the caller's ref: the multi-select bar that asked
   // is gone once its selection clears, before the server answers.
   final c = ProviderScope.containerOf(context, listen: false);
+  // A child goes with its root (145i).
+  final o = c.read(agentOverviewProvider).value;
+  final ids = o == null ? named : o.rootIdsOf(named);
   // Unfolded first, so the crew being made is seen being made.
   if (c.read(crewPrefsProvider).value?.section ?? false) {
     c.read(crewPrefsProvider.notifier).toggleSection();
@@ -143,6 +146,10 @@ Future<void> placeInCrew(
   String? before,
   bool reorder = false,
 }) async {
+  // A child moves only with its root (145i), which the server acts on too.
+  final o = ref.read(agentOverviewProvider).value;
+  if (o != null && s.spawn.isChild) s = o.byId(o.rootIdOf(s.id)) ?? s;
+  if (before != null && o != null) before = o.rootIdOf(before);
   if (before == s.id) return;
   // Joining a crew it is already in changes nothing; only a gap reorders.
   if (s.crew?.id == crewId && before == null && !reorder) return;
@@ -432,7 +439,8 @@ class _SelectionBarState extends ConsumerState<SelectionBar> {
     if (picked == null || !mounted) return;
     final to = picked.$1;
     final sessions = [
-      for (final id in _ids) ?widget.overview.byId(id),
+      for (final id in widget.overview.rootIdsOf(_ids))
+        ?widget.overview.byId(id),
     ].where((s) => s.crew?.id != to).toList();
     _clear();
     await sendCrewChange(

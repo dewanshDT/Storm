@@ -15,6 +15,7 @@ whatever the harness seeded. Exits non-zero if any check fails.
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -349,7 +350,8 @@ st, removed = call("DELETE", f"/v1/vaults/{second_id}")
 check("vault unregistered", st == 200, removed)
 check("but its directory is left on disk",
       os.path.isdir(os.path.join(VAULT_ROOT, second["dir"])), removed)
-os.rmdir(os.path.join(VAULT_ROOT, second["dir"]))
+# The deleted note is in its `.trash/` (decision 150), so it is not empty.
+shutil.rmtree(os.path.join(VAULT_ROOT, second["dir"]))
 
 print("\n=== the storage root cannot be moved somewhere that loses vaults ===")
 _, cfg = call("GET", "/v1/config")

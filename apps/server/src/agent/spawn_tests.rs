@@ -315,27 +315,18 @@ fn spawn_is_off_by_default_and_not_inherited() {
     );
 }
 
+/// 145a: turning the switch off stops the next act; it refuses nothing,
+/// since nothing waits.
 #[test]
-fn revoking_spawn_refuses_pending_requests_at_once() {
+fn turning_spawn_off_touches_no_act() {
     let (mut s, _d) = store();
     tree(&mut s);
     s.set_spawn("ags_P", true, Some("dev_A"), NOW).unwrap();
     s.insert_request(&request("agr_1", "start", "ags_P", None))
         .unwrap();
-    s.insert_request(&request("agr_2", "message", "ags_P", Some("ags_C")))
-        .unwrap();
-    s.insert_request(&request("agr_3", "start", "ags_C", None))
-        .unwrap();
-    assert_eq!(s.set_spawn("ags_P", false, Some("dev_A"), NOW).unwrap(), 2);
-    for id in ["agr_1", "agr_2"] {
-        let r = s.request(id).unwrap().unwrap();
-        assert_eq!(
-            (r.state.as_str(), r.outcome.as_deref(), r.reason.as_deref()),
-            ("decided", Some("refused"), Some("revoked"))
-        );
-    }
-    assert_eq!(s.request("agr_3").unwrap().unwrap().state, "pending");
-    assert_eq!(s.set_spawn("ags_P", false, None, NOW).unwrap(), 0);
+    s.set_spawn("ags_P", false, Some("dev_A"), NOW).unwrap();
+    assert!(!s.spawn_enabled("ags_P").unwrap());
+    assert_eq!(s.request("agr_1").unwrap().unwrap().state, "pending");
 }
 
 // ---- 134o: requests -----------------------------------------------------------
@@ -396,11 +387,6 @@ fn requests_keep_their_shape_and_are_decided_once() {
             []
         )
         .is_err()
-    );
-    assert_eq!(
-        s.refuse_requests_of("ags_P", "requester_ended", NOW)
-            .unwrap(),
-        0
     );
     assert_eq!(
         s.request("agr_1").unwrap().unwrap().outcome.as_deref(),
@@ -468,7 +454,7 @@ fn the_inbox_numbers_messages_and_names_its_sender() {
 // ---- L-3…L-7: cascades ------------------------------------------------------------
 
 #[test]
-fn a_cascade_snapshots_live_descendants_and_refuses_the_parents_requests() {
+fn a_cascade_snapshots_live_descendants() {
     let (mut s, _d) = store();
     tree(&mut s);
     s.insert_spawned(&record("ags_D", "completed"), "ags_P", "t", NOW)
@@ -481,9 +467,8 @@ fn a_cascade_snapshots_live_descendants_and_refuses_the_parents_requests() {
         .open_cascade("cas_1", "human_end", "ags_P", Some("stopped"), false, NOW)
         .unwrap();
     assert_eq!(targets, ["ags_C", "ags_G"], "ended children are untouched");
-    let r = s.request("agr_1").unwrap().unwrap();
-    assert_eq!(r.reason.as_deref(), Some("requester_ended"));
-    assert_eq!(s.request("agr_2").unwrap().unwrap().state, "pending");
+    // 145a: nothing waits, so nothing is refused; the parent's next act is.
+    assert_eq!(s.request("agr_1").unwrap().unwrap().state, "pending");
     let c = s.cascade("cas_1").unwrap().unwrap();
     assert_eq!(c.completed_at, None);
     assert_eq!(
@@ -657,6 +642,7 @@ fn dismissing_a_session_takes_its_spawn_state_and_keeps_history() {
     s.set_result(
         "ags_C",
         &SpawnResult {
+            round: 1,
             outcome: "succeeded".into(),
             summary: "s".into(),
             details: None,
@@ -678,14 +664,8 @@ fn dismissing_a_session_takes_its_spawn_state_and_keeps_history() {
     assert_eq!(s.task("ags_C").unwrap(), None);
     assert_eq!(s.result("ags_C").unwrap(), None);
     assert!(s.inbox("ags_C").unwrap().is_empty());
-    assert_eq!(
-        s.request("agr_from").unwrap().unwrap().reason.as_deref(),
-        Some("requester_ended")
-    );
-    assert_eq!(
-        s.request("agr_to").unwrap().unwrap().reason.as_deref(),
-        Some("target_gone")
-    );
+    assert!(s.request("agr_from").unwrap().is_some(), "acts are history");
+    assert!(s.request("agr_to").unwrap().is_some());
     assert_eq!(s.lineage("ags_C").unwrap(), lineage);
     assert!(s.cascade("cas_1").unwrap().is_some());
     assert_eq!(s.task("ags_G").unwrap().as_deref(), Some("grandchild task"));
@@ -702,6 +682,7 @@ fn a_later_result_replaces_an_earlier_one() {
         s.set_result(
             "ags_C",
             &SpawnResult {
+                round: 1,
                 outcome: outcome.into(),
                 summary: format!("{outcome} summary"),
                 details: Some("d".into()),
@@ -719,6 +700,7 @@ fn a_later_result_replaces_an_earlier_one() {
         s.set_result(
             "ags_C",
             &SpawnResult {
+                round: 1,
                 outcome: String::new(),
                 summary: "s".into(),
                 details: None,
@@ -815,7 +797,6 @@ fn the_oldest_database_reaches_134() {
 
 // ---- 134-2: the spawn switch ------------------------------------------------
 
-use super::store::spawn::{same_workspace, shares_workspace};
 use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
@@ -1001,8 +982,8 @@ fn a_verified_isolation_report_opens_c0() {
     .unwrap();
     m.hello("hst_A", hello).unwrap();
     assert_eq!(m.spawn_gate("hst_A"), Ok(()));
-    // Its CLI was configured before C0 held, so it never gets the tools.
-    assert_eq!(refusal(&m, &before.id, true), "launched_without_asks");
+    // Its CLI listed its tools before C0 held, so it never gets them.
+    assert_eq!(refusal(&m, &before.id, true), "launched_without_spawn");
     report(&m, &before.id, "completed", None);
     let s = start_on(&m, "storm", "claude-code").unwrap();
     assert!(m.spawn_offered(&s.id));
@@ -1100,17 +1081,16 @@ fn only_a_live_session_of_a_spawning_adapter_can_turn_it_on() {
     report(&m, &s.id, "completed", None);
     assert_eq!(refusal(&m, &s.id, true), "session_not_live");
     // Off is always allowed.
-    assert_eq!(m.set_spawn(&s.id, false, None).unwrap().unwrap().refused, 0);
+    assert!(!m.set_spawn(&s.id, false, None).unwrap().unwrap().enabled);
     assert!(matches!(
         m.set_spawn("ags_NOPE", true, None),
         Err(AgentError::NotFound(_))
     ));
 }
 
-/// LT-7: revoked with requests pending, they are refused at once; children
-/// keep running; nothing new is offered.
+/// LT-7: turned off, children keep running and nothing new is offered.
 #[test]
-fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
+fn revoking_leaves_children_running_and_offers_nothing() {
     let (m, _d, _rx) = verified_host();
     let parent = start_on(&m, "storm", "claude-code").unwrap();
     {
@@ -1118,29 +1098,14 @@ fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
         let mut child = record("ags_CHILD", "running");
         child.workspace = "other".into();
         s.insert_spawned(&child, &parent.id, "a task", NOW).unwrap();
-        s.insert_request(&request("agr_1", "start", &parent.id, None))
-            .unwrap();
-        s.insert_request(&request("agr_2", "end", &parent.id, Some("ags_CHILD")))
-            .unwrap();
     }
     let change = m
         .set_spawn(&parent.id, false, Some("dev_A"))
         .unwrap()
         .unwrap();
-    assert_eq!(
-        (change.was, change.enabled, change.refused),
-        (true, false, 2)
-    );
-    for id in ["agr_1", "agr_2"] {
-        let r = m.store.lock().unwrap().request(id).unwrap().unwrap();
-        assert_eq!(
-            (r.state.as_str(), r.outcome.as_deref(), r.reason.as_deref()),
-            ("decided", Some("refused"), Some("revoked")),
-            "{id}"
-        );
-    }
+    assert_eq!((change.was, change.enabled), (true, false));
     assert_eq!(m.get("ags_CHILD").unwrap().status, "running");
-    assert!(!m.spawn_offered(&parent.id), "new requests have no tool");
+    assert!(!m.spawn_offered(&parent.id), "no tool for a new act");
 }
 
 /// 141a: a spawning session does not hold its workspace. A launch beside
@@ -1150,7 +1115,6 @@ fn a_spawning_session_shares_its_workspace() {
     let (m, _d, _rx) = verified_host();
     let a = start_on(&m, "storm", "claude-code").unwrap();
     start_on(&m, "storm", "claude-code").unwrap();
-    let nested = start(&m, "storm/site", "claude-code", None).unwrap();
     for workspace in ["storm", "storm/site"] {
         assert!(
             !start(&m, workspace, "claude-code", None)
@@ -1158,102 +1122,8 @@ fn a_spawning_session_shares_its_workspace() {
                 .is_ended()
         );
     }
-    assert_eq!(m.shared_with(&a.id).unwrap(), 4, "b, nested and two more");
-    report(&m, &nested.id, "completed", None);
-    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
-    // `unknown` is live and still shares it.
-    m.store.lock().unwrap().mark_unknown_on_boot().unwrap();
-    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
-}
-
-/// WT-8, as decision 141 amends it: WS-9 no longer refuses either way, and
-/// the sharing it judges by the host's directories is what an approval card
-/// reports. Two names for one directory, or one inside the other, are one
-/// workspace; a name the host gives no directory for may be any of them.
-#[test]
-fn wt8_a_shared_workspace_allows_launch_and_spawn_both_ways() {
-    let (m, _d, _rx) = host(Some(VERIFIED));
-    let layout = |paths: serde_json::Value| {
-        let mut extra = isolated();
-        extra["workspaces"] = serde_json::json!(["storm", "alias", "site", "other", "bare"]);
-        extra["workspace_paths"] = paths;
-        hello_with(Some(VERIFIED), extra).capabilities
-    };
-    let paths = serde_json::json!({
-        "storm": "/w/storm", "alias": "/w/storm/", "site": "/w/storm/site", "other": "/w/other",
-    });
-    m.inventory("hst_A", layout(paths.clone())).unwrap();
-
-    for beside in ["storm", "alias", "site", "bare"] {
-        // Spawn on, then a launch beside it.
-        let a = start_on(&m, "storm", "claude-code").unwrap();
-        let b = start(&m, beside, "claude-code", None).unwrap();
-        let elsewhere = start(&m, "other", "shell", None).unwrap();
-        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
-        report(&m, &a.id, "completed", None);
-        // A live session beside it, then spawn on.
-        let a = start_on(&m, "storm", "claude-code").unwrap();
-        m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
-        m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
-        for r in [&a, &b, &elsewhere] {
-            report(&m, &r.id, "completed", None);
-        }
-    }
-
-    // A host that reports no directories: every pair may be one.
-    m.inventory("hst_A", layout(serde_json::json!({}))).unwrap();
-    let a = start_on(&m, "storm", "claude-code").unwrap();
     m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
-    start(&m, "other", "claude-code", None).unwrap();
-    m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-    assert_eq!(m.shared_with(&a.id).unwrap(), 1);
-    // Once it does, the two are apart.
-    m.inventory("hst_A", layout(paths)).unwrap();
-    assert_eq!(m.shared_with(&a.id).unwrap(), 0);
-}
-
-#[test]
-fn workspaces_are_shared_by_their_directories_or_when_unknown() {
-    let paths: std::collections::HashMap<String, String> = [
-        ("storm", "/w/storm"),
-        ("alias", "/w/storm"),
-        ("site", "/w/storm/site"),
-        ("other", "/w/other"),
-    ]
-    .into_iter()
-    .map(|(k, v)| (k.into(), v.into()))
-    .collect();
-    for (a, b) in [
-        ("storm", "storm"),
-        ("storm", "alias"),
-        ("site", "storm"),
-        ("storm", "site"),
-        ("storm", "gone"),
-        ("gone", "other"),
-    ] {
-        assert!(shares_workspace(a, b, &paths), "{a} {b}");
-    }
-    assert!(!shares_workspace("storm", "other", &paths));
-    assert!(!shares_workspace("site", "other", &paths));
-    assert!(shares_workspace("storm", "other", &Default::default()));
-}
-
-#[test]
-fn workspaces_are_shared_when_one_is_inside_the_other() {
-    for (a, b) in [
-        ("/w/storm", "/w/storm"),
-        ("/w/storm/", "/w/storm"),
-        ("/w/storm", "/w/storm/site"),
-        ("/w/storm/site", "/w/storm"),
-        ("C:\\w\\storm", "C:\\w\\storm\\site"),
-        ("/", "/w/storm"),
-    ] {
-        assert!(same_workspace(a, b), "{a} {b}");
-    }
-    for (a, b) in [("/w/storm", "/w/storm-site"), ("/w/storm", "/w/other")] {
-        assert!(!same_workspace(a, b), "{a} {b}");
-    }
+    assert!(m.set_spawn(&a.id, true, Some("dev_A")).unwrap().is_ok());
 }
 
 fn start_command(rx: &mut UnboundedReceiver<Envelope>, id: &str) -> serde_json::Value {
@@ -1266,76 +1136,40 @@ fn start_command(rx: &mut UnboundedReceiver<Envelope>, id: &str) -> serde_json::
     panic!("no start for {id}");
 }
 
-/// 134-8: a start says `spawn_asks` only where decision 134 could offer its
-/// tools — C0 holds, a spawning adapter, the storm connection — and only
-/// such a session's switch turns on, since a CLI reads its asks once.
+/// 145a with 141e: no start carries asks any more, and only a session
+/// launched with its switch on turns it on again: one that could be
+/// offered the tools (C0 holds, a spawning adapter, the storm connection)
+/// but was launched without it is refused `launched_without_spawn`.
 #[test]
-fn only_a_start_c0_held_for_carries_the_asks_and_only_it_can_spawn() {
-    // Every host today: no asks, and the bytes of every start unchanged.
+fn no_start_carries_asks_and_only_a_launch_with_spawn_turns_it_on() {
     let (m, _d, mut rx) = host(Some(VERIFIED));
     let before = start(&m, "storm", "claude-code", None).unwrap();
     let v = start_command(&mut rx, &before.id);
     assert!(v.get("spawn_asks").is_none(), "{v}");
-    assert!(!m.store.lock().unwrap().spawn_asks(&before.id).unwrap());
-
     m.verify_isolation_for_tests("hst_A");
-    assert_eq!(refusal(&m, &before.id, true), "launched_without_asks");
+    assert_eq!(refusal(&m, &before.id, true), "launched_without_spawn");
     assert!(!m.spawn_enabled(&before.id).unwrap());
     report(&m, &before.id, "completed", None);
 
     for provider in ["claude-code", "opencode", "codex"] {
         let s = start(&m, "storm", provider, None).unwrap();
-        let v = start_command(&mut rx, &s.id);
-        assert_eq!(v["spawn_asks"], serde_json::json!({}), "{provider}");
-        assert!(m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
-        // 141e: asks alone are not enough; the launch turns it on.
+        assert!(start_command(&mut rx, &s.id).get("spawn_asks").is_none());
         assert_eq!(refusal(&m, &s.id, true), "launched_without_spawn");
         report(&m, &s.id, "completed", None);
         let s = start_on(&m, "storm", provider).unwrap();
-        assert_eq!(
-            start_command(&mut rx, &s.id)["spawn_asks"],
-            serde_json::json!({})
-        );
+        assert!(start_command(&mut rx, &s.id).get("spawn_asks").is_none());
         m.set_spawn(&s.id, false, Some("dev_A")).unwrap().unwrap();
         m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
         report(&m, &s.id, "completed", None);
     }
-    let shell = start(&m, "storm", "shell", None).unwrap();
-    assert!(
-        start_command(&mut rx, &shell.id)
-            .get("spawn_asks")
-            .is_none()
-    );
-    report(&m, &shell.id, "completed", None);
-
-    // Without the storm connection there is no Storm tool to ask about.
-    let launch: Launch = serde_json::from_value(serde_json::json!({
-        "host_id": "hst_A", "workspace": "storm", "provider": "claude-code",
-        "terminal": {"cols": 80, "rows": 24},
-    }))
-    .unwrap();
-    let (bare, ..) = m
-        .launch("usr_A", launch, LaunchMeta::default(), Vec::new())
-        .unwrap();
-    assert!(start_command(&mut rx, &bare.id).get("spawn_asks").is_none());
-    assert_eq!(refusal(&m, &bare.id, true), "launched_without_asks");
 }
 
+/// 141e: a launch with the switch on is refused, writing nothing, unless the
+/// session could be offered the tools (C0, a spawning adapter, the storm
+/// connection); where it can, the switch is on before the host can see
+/// `start`.
 #[test]
-fn dismissing_a_session_takes_its_asks_record() {
-    let (m, _d, _rx) = verified_host();
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    assert!(m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
-    report(&m, &s.id, "completed", None);
-    m.dismiss(&s.id).unwrap();
-    assert!(!m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
-}
-
-/// 141e: a launch with the switch on is refused, writing nothing, unless its
-/// `start` carries `spawn_asks`; where it does, the switch is on before the
-/// host can see `start`.
-#[test]
-fn a_launch_with_spawn_on_needs_the_asks_and_is_on_before_start() {
+fn a_launch_with_spawn_on_needs_c0_and_is_on_before_start() {
     let (m, _d, mut rx) = host(Some(VERIFIED));
     let refused = |r: Result<SessionRecord, AgentError>| match r {
         Err(AgentError::Conflict(code)) => code,
@@ -1379,7 +1213,7 @@ fn a_launch_with_spawn_on_needs_the_asks_and_is_on_before_start() {
         let (on, start) = seen.join().unwrap();
         assert!(on, "the switch was on when start was sent");
         assert_eq!(start["session"], s.id.as_str());
-        assert_eq!(start["spawn_asks"], serde_json::json!({}));
+        assert!(start.get("spawn_asks").is_none());
     });
     let s = &m.list().unwrap()[0];
     let view = m.spawn_view(s).unwrap().unwrap();
@@ -1395,4 +1229,151 @@ fn a_launch_with_spawn_on_needs_the_asks_and_is_on_before_start() {
     report(&m, &s.id, "completed", None);
     m.dismiss(&s.id).unwrap();
     assert!(!m.store.lock().unwrap().spawn_launched(&s.id).unwrap());
+}
+
+/// 143a: a database from before `agent_unavailable` has its requests table
+/// rebuilt at open, every row kept, and its indexes and triggers made again.
+#[test]
+fn a_requests_table_from_before_143_is_rebuilt_with_its_rows() {
+    let d = tempdir::TempDir::new("storm-143-requests").unwrap();
+    let path = d.path().join("agent.db");
+    let old = Connection::open(&path).unwrap();
+    old.execute_batch(
+        "CREATE TABLE agent_requests (
+             id TEXT PRIMARY KEY,
+             kind TEXT NOT NULL CHECK (kind IN ('start', 'message', 'end')),
+             requester TEXT NOT NULL, target TEXT, payload TEXT NOT NULL,
+             created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
+             state TEXT NOT NULL CHECK (state IN ('pending', 'approving', 'decided')),
+             decided_by_device TEXT, decided_at TEXT,
+             outcome TEXT CHECK (outcome IN ('started', 'start_failed',
+                 'delivered', 'ended', 'denied', 'expired', 'refused')),
+             reason TEXT CHECK (reason IN ('limit', 'not_permitted', 'revoked',
+                 'requester_ended', 'target_gone', 'identity_unverified',
+                 'isolation_unverified')),
+             session TEXT);
+         CREATE INDEX requests_by_requester ON agent_requests(requester, state);
+         CREATE TRIGGER request_decided_once
+             BEFORE UPDATE ON agent_requests WHEN OLD.state = 'decided'
+             BEGIN SELECT RAISE(ABORT, 'a request is decided once'); END;
+         INSERT INTO agent_requests VALUES ('agr_OLD', 'start', 'ags_P', NULL,
+             '{\"task\":\"t\"}', '2026-10-25T10:00:00Z', '2026-10-25T10:10:00Z',
+             'decided', 'dev_A', '2026-10-25T10:01:00Z', 'refused', 'not_permitted', NULL);",
+    )
+    .unwrap();
+    drop(old);
+    let s = Store::open(&path).unwrap();
+    let kept = s.request("agr_OLD").unwrap().unwrap();
+    assert_eq!(
+        (kept.outcome.as_deref(), kept.reason.as_deref()),
+        (Some("refused"), Some("not_permitted"))
+    );
+    s.conn
+        .execute(
+            "INSERT INTO agent_requests (id, kind, requester, payload, created_at, expires_at,
+                 state, outcome, reason)
+             VALUES ('agr_NEW', 'start', 'ags_P', '{}', ?1, ?1, 'decided', 'refused',
+                 'agent_unavailable')",
+            [NOW],
+        )
+        .unwrap();
+    assert!(
+        s.conn
+            .execute(
+                "UPDATE agent_requests SET payload = 'x' WHERE id = 'agr_OLD'",
+                []
+            )
+            .is_err(),
+        "its triggers are back"
+    );
+    let objects: i64 = s
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE tbl_name = 'agent_requests'
+                 AND type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(objects, 5);
+    drop(s);
+    Store::open(&path).unwrap();
+}
+
+// ---- 145i: a crew holds whole trees ------------------------------------------
+
+/// A-145-12, the upgrade: every crew row a child holds is removed, its root
+/// joins that crew if it is in none, a crew left empty goes, and all of it
+/// once, recorded with what it moved for the server to audit.
+#[test]
+fn a_145_12_the_upgrade_moves_a_childs_crew_row_to_its_root_once() {
+    use super::store::{CREW_TREES_MIGRATION, Crew};
+    let d = tempdir::TempDir::new("storm-145i-upgrade").unwrap();
+    let path = d.path().join("agent.db");
+    {
+        let mut s = Store::open(&path).unwrap();
+        tree(&mut s);
+        s.insert(&record("ags_Q", "running")).unwrap();
+        s.insert_spawned(&record("ags_D", "running"), "ags_Q", "t", NOW)
+            .unwrap();
+        let crew = |id: &str| Crew {
+            id: id.into(),
+            name: id.into(),
+            color: "sage".into(),
+            order: 0,
+        };
+        // As an older server left them: the child alone in one crew, its
+        // root in none; another child in a crew of its own while its root
+        // is in another.
+        s.create_crew(&crew("crw_X"), "usr_A", &[], NOW).unwrap();
+        s.create_crew(&crew("crw_Y"), "usr_A", &[], NOW).unwrap();
+        s.create_crew(&crew("crw_Z"), "usr_A", &["ags_Q".into()], NOW)
+            .unwrap();
+        raw(&s)
+            .execute_batch(
+                "INSERT INTO crew_members VALUES ('ags_C', 'crw_X', 0);
+                 INSERT INTO crew_members VALUES ('ags_G', 'crw_X', 1);
+                 INSERT INTO crew_members VALUES ('ags_D', 'crw_Y', 0);
+                 DELETE FROM agent_migrations;",
+            )
+            .unwrap();
+    }
+    let s = Store::open(&path).unwrap();
+    assert_eq!(s.members("crw_X").unwrap(), ["ags_P"]);
+    assert_eq!(s.members("crw_Z").unwrap(), ["ags_Q"]);
+    assert!(s.crew("crw_Y").unwrap().is_none(), "emptied, so gone");
+    for (child, crew) in [("ags_C", "crw_X"), ("ags_G", "crw_X"), ("ags_D", "crw_Z")] {
+        assert_eq!(s.membership(child).unwrap().unwrap().id, crew, "{child}");
+    }
+    let pending = s.unaudited_migrations().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].name, CREW_TREES_MIGRATION);
+    let detail: serde_json::Value = serde_json::from_str(&pending[0].detail).unwrap();
+    assert_eq!(
+        detail["moved"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| (
+                m["session_id"].as_str().unwrap(),
+                m["root"].as_str().unwrap(),
+                m["root_joined"].as_bool().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("ags_C", "ags_P", true),
+            ("ags_G", "ags_P", false),
+            ("ags_D", "ags_Q", false)
+        ]
+    );
+    assert_eq!(detail["emptied_crews"], serde_json::json!(["crw_Y"]));
+    s.mark_migration_audited(CREW_TREES_MIGRATION, NOW).unwrap();
+    // Once: a row written after it, as no product path does, stays.
+    raw(&s)
+        .execute("INSERT INTO crew_members VALUES ('ags_D', 'crw_X', 5)", [])
+        .unwrap();
+    drop(s);
+    let s = Store::open(&path).unwrap();
+    assert!(s.unaudited_migrations().unwrap().is_empty());
+    assert_eq!(s.members("crw_X").unwrap(), ["ags_P", "ags_D"]);
 }

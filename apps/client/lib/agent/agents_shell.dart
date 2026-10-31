@@ -19,6 +19,7 @@ import 'crew_prefs.dart';
 import 'crew_widgets.dart';
 import 'spawn_state.dart' show lineageOrder;
 import 'spawn_widgets.dart' show lineageIndented, lineageLine;
+import 'spawn_models.dart' show kMovesWithParent;
 
 /// The session a location shows, or null on the overview.
 String? sessionIdOf(Uri location) {
@@ -118,9 +119,8 @@ class AgentsSidebar extends ConsumerWidget {
       openAgentSession(context, s.id);
     }
 
-    Widget row(AgentSession s) => CrewDraggable<SessionDrag>(
-      data: SessionDrag(s),
-      child: SnapBackOutline(
+    Widget row(AgentSession s) {
+      final drawn = SnapBackOutline(
         id: s.id,
         child: SessionRow(
           session: s,
@@ -129,8 +129,13 @@ class AgentsSidebar extends ConsumerWidget {
           lineage: lineageLine(s, o),
           onTap: () => click(s),
         ),
-      ),
-    );
+      );
+      // A child moves only with the agent that started it (145i).
+      if (s.spawn.isChild) {
+        return Tooltip(message: kMovesWithParent, child: drawn);
+      }
+      return CrewDraggable<SessionDrag>(data: SessionDrag(s), child: drawn);
+    }
 
     // A loose row: another session dropped on it makes a crew of the two.
     Widget looseRow(AgentSession s) => ZoneDropTarget<SessionDrag>(
@@ -259,7 +264,10 @@ class AgentsSidebar extends ConsumerWidget {
           if (membersShown(c) case final members when members.isNotEmpty) ...[
             SizedBox(height: t.sp * 0.25),
             CrewMembers(
-              children: [for (final m in members) memberRow(c, members, m)],
+              children: [
+                for (final m in members)
+                  lineageIndented(m, members, memberRow(c, members, m)),
+              ],
             ),
           ],
         ],
