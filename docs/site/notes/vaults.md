@@ -32,6 +32,11 @@ an id, not its name.
 Create, rename and delete folders in the app. An empty folder you created is
 kept; folders left empty by moving or deleting notes are tidied away.
 
+A `/` in a new note's name puts it in folders, making any that are missing:
+`Ideas/Plan` is the note *Plan* in *Ideas* inside the folder you're in, and
+`/Ideas/Plan` starts from the top of the vault. A name with `..`, or with
+nothing after its last `/`, is refused.
+
 Deleting a folder that holds notes asks first — "Delete folder X and its N
 notes? They go to Trash." — and moves the folder and everything in it to the
 Trash as one item. Storm's own settings folder, `_storm`, cannot be deleted.

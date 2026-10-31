@@ -12,12 +12,10 @@ class NewNote {
   final Accent accent;
 }
 
-/// Asks for a note's name — not its path.
-///
-/// The old dialog asked for `Folder/Note.md` and made the user supply both the
-/// folder and the extension. Neither is a decision worth asking about: the
-/// folder is wherever they already are, and every note is markdown. So this
-/// takes a name and [noteFileName] turns it into a path.
+/// Asks for a note's name, which may carry folders: `Ideas/Plan` makes
+/// `Plan` in `Ideas` under [folder], `/Ideas/Plan` the same from the top of
+/// the vault, and [noteFileName] turns either into a path. Missing folders
+/// are made by the create.
 Future<NewNote?> promptForNewNote(BuildContext context, {String folder = ''}) =>
     showDialog<NewNote>(
       context: context,
@@ -26,23 +24,41 @@ Future<NewNote?> promptForNewNote(BuildContext context, {String folder = ''}) =>
 
 /// Turns a note's name into a vault-relative path.
 ///
-/// Separators are stripped rather than rejected: typing `Q1/Plan` into a name
-/// field means the words, not a folder — and letting it through would create
-/// a directory the user did not ask for. Everything the server's path rules
-/// forbid is removed here, so a name can never fail validation downstream.
+/// A `/` separates folders, relative to [folder] unless the name starts with
+/// one. Everything the server's path rules forbid is removed rather than
+/// refused, so a name can never fail validation downstream: empty segments
+/// and `.`/`..` go, as do each segment's leading dots. [newNoteNameError] is
+/// what the dialog refuses first.
 String noteFileName(String name, {String folder = ''}) {
-  // Separators first: `Q1/Plan` is two words, not a folder.
-  var clean = name.replaceAll(RegExp(r'[/\\]'), ' ');
-  // Then every leading dot and space together, not just the first run — a
-  // `../../` becomes `.. .. ` above, and stopping after one run would leave
-  // a stray `..` in the filename.
-  clean = clean.replaceAll(RegExp(r'^[\s.]+'), '');
-  // Collapse what the substitutions left behind.
-  clean = clean.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final fromRoot = name.trimLeft().startsWith('/');
+  final parts = [
+    for (final s in name.split('/'))
+      if (_segment(s) case final c when c.isNotEmpty) c,
+  ];
+  var leaf = parts.isEmpty ? 'Untitled' : parts.removeLast();
+  if (!leaf.toLowerCase().endsWith('.md')) leaf = '$leaf.md';
+  return [if (!fromRoot && folder.isNotEmpty) folder, ...parts, leaf].join('/');
+}
 
-  if (clean.isEmpty) clean = 'Untitled';
-  if (!clean.toLowerCase().endsWith('.md')) clean = '$clean.md';
-  return folder.isEmpty ? clean : '$folder/$clean';
+String _segment(String s) => s
+    .replaceAll(r'\', ' ')
+    .replaceAll(RegExp(r'^[\s.]+'), '')
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .trim();
+
+/// Why the dialog won't create [name]: a `..`, which would otherwise be
+/// dropped and land the note somewhere unasked, or nothing after the last
+/// `/`.
+String? newNoteNameError(String name) {
+  final segments = name.trim().split('/');
+  if (segments.any((s) => s.trim() == '..')) {
+    return "A name can't use “..”: start it with / to begin at the top "
+        'of the vault.';
+  }
+  if (segments.length > 1 && segments.last.trim().isEmpty) {
+    return 'Name the note after the last /.';
+  }
+  return null;
 }
 
 /// A `StatefulWidget` so the controller outlives the closing animation —
@@ -67,8 +83,23 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
     super.dispose();
   }
 
-  void _submit() =>
-      Navigator.pop(context, NewNote(name: _controller.text, accent: _accent));
+  String? _error;
+
+  void _submit() {
+    final error = newNoteNameError(_controller.text);
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    Navigator.pop(context, NewNote(name: _controller.text, accent: _accent));
+  }
+
+  /// Said, not asked: where the note will land as the name stands.
+  String _where() {
+    final path = noteFileName(_controller.text, folder: widget.folder);
+    final cut = path.lastIndexOf('/');
+    return cut < 0 ? 'at the top of the vault' : 'in ${path.substring(0, cut)}';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -87,19 +118,29 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
             labelText: 'Name',
             hintText: 'Weekly review',
             onSubmitted: (_) => _submit(),
+            onChanged: (_) => setState(() => _error = null),
           ),
-          if (widget.folder.isNotEmpty) ...[
-            SizedBox(height: t.sp),
-            // Said, not asked: the folder follows where they are.
-            Text(
-              'in ${widget.folder}',
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.labelSize,
-                color: t.text3,
-              ),
+          SizedBox(height: t.sp),
+          Text(
+            _error ?? _where(),
+            key: const Key('new-note-where'),
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.labelSize,
+              color: _error == null ? t.text3 : t.danger,
             ),
-          ],
+          ),
+          SizedBox(height: t.sp * 0.5),
+          Text(
+            'A / makes folders, from here; start with / to begin at the top '
+            'of the vault.',
+            key: const Key('new-note-hint'),
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.labelSize,
+              color: t.text3,
+            ),
+          ),
           SizedBox(height: t.sp * 2.25),
           const SectionLabel('Colour'),
           SizedBox(height: t.sp),

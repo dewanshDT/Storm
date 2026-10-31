@@ -106,7 +106,7 @@ void main() {
     });
   });
 
-  group('a new note is named, not pathed', () {
+  group('a new note is named, with folders after a /', () {
     test('the extension is added, never typed', () {
       expect(noteFileName('Weekly review'), 'Weekly review.md');
       expect(noteFileName('Already.md'), 'Already.md');
@@ -120,11 +120,23 @@ void main() {
       );
     });
 
-    test('separators become spaces instead of folders', () {
-      // Typing `Q1/Plan` into a *name* field means the words. Creating a
-      // directory nobody asked for would be a surprise.
-      expect(noteFileName('Q1/Plan'), 'Q1 Plan.md');
+    test('a / makes folders, relative to where you are', () {
+      expect(noteFileName('Q1/Plan'), 'Q1/Plan.md');
+      expect(noteFileName('Q1/Plan', folder: 'Work'), 'Work/Q1/Plan.md');
       expect(noteFileName(r'Q1\Plan'), 'Q1 Plan.md');
+      expect(noteFileName('Q1/Plan.md'), 'Q1/Plan.md');
+      expect(noteFileName('Q1.md/Plan'), 'Q1.md/Plan.md');
+    });
+
+    test('a leading / starts at the top of the vault', () {
+      expect(noteFileName('/Q1/Plan', folder: 'Work'), 'Q1/Plan.md');
+      expect(noteFileName('  /Plan', folder: 'Work'), 'Plan.md');
+    });
+
+    test('empty segments and trailing slashes are dropped', () {
+      expect(noteFileName('Q1//Plan'), 'Q1/Plan.md');
+      expect(noteFileName('Q1/ /Plan/'), 'Q1/Plan.md');
+      expect(noteFileName('/'), 'Untitled.md');
     });
 
     test('a name cannot escape the vault or hide itself', () {
@@ -132,7 +144,18 @@ void main() {
       // impossible to produce here.
       expect(noteFileName('../escape'), 'escape.md');
       expect(noteFileName('.hidden'), 'hidden.md');
-      expect(noteFileName('../../etc/passwd'), 'etc passwd.md');
+      expect(noteFileName('../../etc/passwd'), 'etc/passwd.md');
+      expect(noteFileName('a/./.obsidian/x'), 'a/obsidian/x.md');
+    });
+
+    test('the dialog refuses .. and a missing name', () {
+      expect(newNoteNameError('Q1/Plan'), isNull);
+      expect(newNoteNameError('/Plan'), isNull);
+      expect(newNoteNameError(''), isNull);
+      expect(newNoteNameError('../Plan'), isNotNull);
+      expect(newNoteNameError('a/ .. /b'), isNotNull);
+      expect(newNoteNameError('Q1/'), isNotNull);
+      expect(newNoteNameError('/'), isNotNull);
     });
 
     test('an empty name still makes a note', () {
@@ -149,6 +172,8 @@ void main() {
         '.hidden',
         '',
         r'a\b/c',
+        'a//b/./c/',
+        '/x/../y',
       ]) {
         expect(
           validateVaultPath(noteFileName(name, folder: 'Notes')),
