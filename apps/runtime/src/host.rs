@@ -1711,6 +1711,10 @@ impl Host {
         child_of: Option<String>,
         (permission_mode, spawn): (Option<String>, bool),
     ) {
+        if !self.start_wanted(&id).await {
+            tracing::warn!(session = %id, "Storm no longer wants this start: dropped");
+            return;
+        }
         let (resume, resumed_from) = match resume {
             Some((r, from)) => (Some(r), from),
             None => (None, None),
@@ -2219,6 +2223,27 @@ impl Host {
         }
     }
 
+    /// Asks Storm, before anything runs, whether it still wants this start.
+    /// One read late from a stale link (a VM resumed, bytes held in a send
+    /// buffer while the link was down) has failed there by now and is
+    /// answered `start_unwanted`; it never runs. Any other answer, or none,
+    /// goes on as before.
+    async fn start_wanted(&self, id: &str) -> bool {
+        let asked = self
+            .post_for_response(
+                &format!("/v1/runtime/sessions/{id}/status"),
+                &json!({"status": "starting"}),
+                Some(START_CHECK_WAIT),
+            )
+            .await;
+        match asked {
+            Ok(r) if r.status() == reqwest::StatusCode::CONFLICT => {
+                !r.text().await.unwrap_or_default().contains(START_UNWANTED)
+            }
+            _ => true,
+        }
+    }
+
     async fn post_start_failure(&self, id: &str) {
         self.post_start_ended(id, EndReason::StartFailure).await
     }
@@ -2389,6 +2414,10 @@ impl Host {
 const MCP_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest line a bridge may send.
 const MCP_LINE_MAX: u64 = 4 * 1024 * 1024;
+/// How long a start waits for Storm to say it still wants it.
+const START_CHECK_WAIT: Duration = Duration::from_secs(10);
+/// Storm's answer for a start it has given up on.
+const START_UNWANTED: &str = "start_unwanted";
 /// How long a `harness-said` exchange may hold its session's transcript.
 const SAID_EXCHANGE: Duration = Duration::from_secs(10);
 
@@ -3511,6 +3540,10 @@ mod tests {
     use super::*;
 
     /// A stand-in server that answers every POST `200 {}` and records it.
+    /// Sessions (lowercased, as the recording server sees paths) whose
+    /// start the recording server answers as Storm does one it gave up on.
+    static UNWANTED_STARTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
     async fn recording_server() -> (String, Arc<Mutex<Vec<(String, serde_json::Value)>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3554,8 +3587,18 @@ mod tests {
                         let body = serde_json::from_slice(&buf[head_end..head_end + len])
                             .unwrap_or(serde_json::Value::Null);
                         buf.drain(..head_end + len);
+                        let unwanted = body["status"] == "starting"
+                            && UNWANTED_STARTS
+                                .lock()
+                                .unwrap()
+                                .iter()
+                                .any(|id| path.ends_with(&format!("/sessions/{id}/status")));
                         record.lock().unwrap().push((path, body));
-                        let reply = b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}";
+                        let reply: &[u8] = if unwanted {
+                            b"HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: 26\r\n\r\n{\"error\":\"start_unwanted\"}"
+                        } else {
+                            b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}"
+                        };
                         if conn.write_all(reply).await.is_err() {
                             return;
                         }
@@ -5365,7 +5408,9 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .lock()
             .unwrap()
             .iter()
-            .filter(|(_, b)| b["status"].is_string() && b["status"] != "running")
+            .filter(|(_, b)| {
+                b["status"].is_string() && b["status"] != "running" && b["status"] != "starting"
+            })
             .cloned()
             .collect();
         assert!(
@@ -5453,6 +5498,41 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             host.session("ags_OFF").is_some()
         })
         .await;
+    }
+
+    /// A start Storm has given up on (its link went down before the host
+    /// reported it, or it waited past the deadline) is dropped when the
+    /// host asks before running it: nothing runs and nothing more is
+    /// posted. One Storm still wants runs as before.
+    #[tokio::test]
+    async fn a_start_storm_no_longer_wants_never_runs() {
+        UNWANTED_STARTS.lock().unwrap().push("ags_late".into());
+        let (host, seen, _state, _roots) =
+            test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        host.dispatch(7, start("ags_LATE", "fake"));
+        host.dispatch(8, start("ags_WANTED", "fake"));
+        eventually("the wanted one runs", || {
+            host.session("ags_WANTED").is_some()
+        })
+        .await;
+        eventually("the late one asked", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_late/status") && b["status"] == "starting")
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(host.session("ags_LATE").is_none(), "never ran");
+        assert!(!host.starting.lock().unwrap().contains_key("ags_LATE"));
+        let late: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.contains("/ags_late/"))
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(late, [json!({"status": "starting"})], "only the question");
     }
 
     /// A host whose `shell` runs `args` through a fake isolation helper,
