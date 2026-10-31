@@ -831,10 +831,17 @@ Specification*; the slices are decisions 81 and 81a onward):
   `resume.from == session` only for a child `child_create` took back). A
   parked child survives neither a host nor a helper restart: its resume
   then fails and it ends. `read_output` (145g) gives a parent its own
-  child's last lines as its screen and scrollback show them (the cached
-  bytes run through `vt100` at the session's size: Claude Code draws by
-  cursor position, and read as lines its bytes were its spinner), audited
-  without text.
+  child's last reported result and what it said (`messages`, the newest
+  20, each at most 4 KB, kept in memory per child), and its screen only
+  with `screen: true` (the cached bytes run through `vt100` at the
+  session's size: Claude Code draws by cursor position and, after
+  reporting, waits inside `read_messages`, so its screen never shows its
+  answer), audited without text. A child's words come from its own hooks
+  (`harness-said`: Claude Code's `PostToolUse` on `mcp__storm__.*` and
+  `Stop`, reading its transcript on from the offset the host keeps per
+  session; OpenCode's completed assistant text parts), posted to
+  `…/said`, gated by `harness::SAID`/`said::SAID` (G-145-O), text blocks
+  only, data only, never an event and never typed anywhere (C9).
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets

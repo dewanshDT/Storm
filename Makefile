@@ -171,7 +171,7 @@ gate-attention:
 	@cd $(RUNTIME) && STORM_ATTENTION_GATE=1 \
 		cargo test --quiet --test attention_gate -- --nocapture --test-threads 1
 
-## gate-lifecycle: G-144-S/W, G-145-R/W, G-146-A/M/P, G-147 and G-148 — decisions 144–148's hooks, final message, wake, allows, permission modes, prompt flag, mode cycle and children that never ask against the real Claude Code and OpenCode on this host (REAL=1 for the account's logins; never CI)
+## gate-lifecycle: G-144-S/W, G-145-R/W/O, G-146-A/M/P, G-147, G-148 and G-149 — decisions 144–149's hooks, final message, a child's words, wake, allows, permission modes, prompt flag, mode cycle and children that never ask against the real Claude Code and OpenCode on this host (REAL=1 for the account's logins; never CI)
 gate-lifecycle:
 	@cd $(RUNTIME) && cargo build --quiet
 	@sh tools/lifecycle-gates.sh

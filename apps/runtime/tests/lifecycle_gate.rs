@@ -10,6 +10,10 @@
 //! - **G-145-R-<provider>**: the turn's final message arrives, word for
 //!   word, with the tokens the agent counted. Positive control: a turn that
 //!   fails on a 429 reports no final message.
+//! - **G-145-O-<provider>**: a child's own words reach the host while it
+//!   waits in `read_messages` (its turn never ends), once each, with
+//!   nothing of its thinking or its tools' inputs and results. Control:
+//!   Claude Code's transcript holds the thought and the tool's input.
 //! - **G-144-W-<provider>** and **G-145-W-<provider>**: an idle agent is
 //!   woken by its documented mechanism (Claude Code's `asyncRewake` hook,
 //!   OpenCode's plugin `client.session.promptAsync`), and the model then
@@ -184,20 +188,57 @@ class H(http.server.BaseHTTPRequestHandler):
             call = (newest.split("CALL:", 1)[1].split()[0], {})
         model = body.get("model", "m")
         tid = "toolu_gate%d" % int(time.time() * 1000)
+        blocks = [("tool_use", call)] if call else [("text", reply)]
+        # SAY:<word> CALLS:<tool>,<tool>: the word, a thought and the first
+        # tool in one message, then each next tool once the last answered.
+        def is_result(m):
+            c = m.get("content")
+            return isinstance(c, list) and any(b.get("type") == "tool_result" for b in c)
+        prompts = [text_of(m) for m in users if not is_result(m)]
+        prompt = prompts[-1] if prompts else ""
+        if "SAY:" in prompt:
+            at = max(i for i, m in enumerate(users) if not is_result(m))
+            step = len(users) - 1 - at
+            steps = [t for t in prompt.split("CALLS:", 1)[1].split()[0].split(",") if t in tools] if "CALLS:" in prompt else []
+            def input_of(name):
+                if name.endswith("report_result"):
+                    return {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"}
+                if name.endswith("read_messages"):
+                    return {"wait": 600}
+                return {}
+            if step == 0:
+                blocks = [("thinking", "CANARY-THINKING"), ("text", prompt.split("SAY:", 1)[1].split()[0])]
+                if steps:
+                    blocks.append(("tool_use", (steps[0], input_of(steps[0]))))
+            elif step < len(steps):
+                blocks = [("tool_use", (steps[step], input_of(steps[step])))]
+            else:
+                blocks = [("text", "Done.")]
+        uses = any(k == "tool_use" for k, _ in blocks)
         if not body.get("stream"):
-            content = [{"type": "tool_use", "id": tid, "name": call[0], "input": call[1]}] if call else [{"type": "text", "text": reply}]
-            return self.send_json(200, {"id": "msg_x", "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 5}})
+            content = []
+            for k, v in blocks:
+                if k == "tool_use":
+                    content.append({"type": "tool_use", "id": tid, "name": v[0], "input": v[1]})
+                elif k == "text":
+                    content.append({"type": "text", "text": v})
+            return self.send_json(200, {"id": "msg_x", "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": "tool_use" if uses else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 5}})
         ev = []
         def e(t, d): ev.append("event: %s\ndata: %s\n\n" % (t, json.dumps(d)))
         e("message_start", {"type": "message_start", "message": {"id": "msg_%d" % int(time.time() * 1000), "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 1}}})
-        if call:
-            e("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": tid, "name": call[0], "input": {}}})
-            e("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": json.dumps(call[1])}})
-        else:
-            e("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
-            e("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": reply}})
-        e("content_block_stop", {"type": "content_block_stop", "index": 0})
-        e("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use" if call else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 5}})
+        for i, (k, v) in enumerate(blocks):
+            if k == "tool_use":
+                e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "tool_use", "id": tid, "name": v[0], "input": {}}})
+                e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "input_json_delta", "partial_json": json.dumps(v[1])}})
+            elif k == "thinking":
+                e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "thinking", "thinking": "", "signature": ""}})
+                e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "thinking_delta", "thinking": v}})
+                e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "signature_delta", "signature": "c2lnbmF0dXJl"}})
+            else:
+                e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}})
+                e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": v}})
+            e("content_block_stop", {"type": "content_block_stop", "index": i})
+        e("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use" if uses else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 5}})
         e("message_stop", {"type": "message_stop"})
         data = "".join(ev).encode()
         self.send_response(200)
@@ -256,6 +297,24 @@ class H(http.server.BaseHTTPRequestHandler):
             out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
         else:
             out = [chunk({"role": "assistant", "content": reply}), chunk({}, "stop", usage)]
+        # SAY:<word> CALLS:<tool>,<tool>: a thought, the word and the first
+        # tool in one message, then each next tool once the last answered.
+        if "SAY:" in last:
+            at = max(i for i, m in enumerate(msgs) if m.get("role") == "user")
+            step = sum(1 for m in msgs[at:] if m.get("role") == "tool")
+            steps = [t.strip('"\\') for t in last.split("CALLS:", 1)[1].split()[0].split(",")] if "CALLS:" in last else []
+            steps = [t for t in steps if t in tools]
+            def call_of(name):
+                args = {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"} if name.endswith("report_result") else {"wait": 600} if name.endswith("read_messages") else {}
+                return {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+            if step == 0:
+                word = last.split("SAY:", 1)[1].split()[0].strip('"\\')
+                out = [chunk({"role": "assistant", "reasoning_content": "CANARY-THINKING"}), chunk({"content": word})]
+                out += [chunk({"tool_calls": [call_of(steps[0])]}), chunk({}, "tool_calls", usage)] if steps else [chunk({}, "stop", usage)]
+            elif step < len(steps):
+                out = [chunk({"role": "assistant", "tool_calls": [call_of(steps[step])]}), chunk({}, "tool_calls", usage)]
+            else:
+                out = [chunk({"role": "assistant", "content": "Done."}), chunk({}, "stop", usage)]
         self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
         for c in out + ["data: [DONE]\n\n"]:
             self.wfile.write(c.encode()); self.wfile.flush()
@@ -293,10 +352,12 @@ impl FakeHost {
         let lines: Lines = Arc::default();
         let waiters: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
         let (seen, held) = (lines.clone(), waiters.clone());
+        let transcripts: Arc<Mutex<std::collections::HashMap<String, u64>>> = Arc::default();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let mut line = String::new();
-                if BufReader::new(&stream).read_line(&mut line).is_err() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                if reader.read_line(&mut line).is_err() {
                     continue;
                 }
                 let Ok(v) = serde_json::from_str::<Value>(&line) else {
@@ -304,6 +365,28 @@ impl FakeHost {
                 };
                 eprintln!("  socket: {}", short(&v));
                 seen.lock().unwrap().push((Instant::now(), v.clone()));
+                // Claude Code's `harness-said`: where the last read of its
+                // transcript stopped, then what it read from there.
+                if let Some(path) = v["transcript"].as_str() {
+                    let (path, seen, at) = (path.to_string(), seen.clone(), transcripts.clone());
+                    std::thread::spawn(move || {
+                        let mut stream = stream;
+                        let offset = at.lock().unwrap().get(&path).copied().unwrap_or(0);
+                        let _ =
+                            stream.write_all(format!("{}\n", json!({"offset": offset})).as_bytes());
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).is_ok()
+                            && let Ok(read) = serde_json::from_str::<Value>(&line)
+                        {
+                            eprintln!("  socket: {}", short(&read));
+                            if let Some(n) = read["offset"].as_u64() {
+                                at.lock().unwrap().insert(path, n);
+                            }
+                            seen.lock().unwrap().push((Instant::now(), read));
+                        }
+                    });
+                    continue;
+                }
                 if v.get("wake").is_some() {
                     let mut held = held.lock().unwrap();
                     for mut old in held.drain(..) {
@@ -347,6 +430,16 @@ impl FakeHost {
         self.since(at)
             .into_iter()
             .filter_map(|v| v.get("denied").cloned())
+            .collect()
+    }
+
+    /// What the child said, as `harness-said` reported it (145g).
+    fn said(&self, at: Instant) -> Vec<String> {
+        self.since(at)
+            .iter()
+            .filter_map(|v| v["said"].as_array().cloned())
+            .flatten()
+            .filter_map(|t| t.as_str().map(str::to_string))
             .collect()
     }
 
@@ -681,7 +774,7 @@ impl Session {
 /// it lists a child's tools, some reads, a note write and the deletes, and logs every
 /// call.
 const FAKE_STORM_MCP: &str = r#"
-import json, sys
+import json, sys, time
 LOG = open(sys.argv[1], "a")
 TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder"]
 for line in sys.stdin:
@@ -698,6 +791,9 @@ for line in sys.stdin:
         res = {"tools": [{"name": t, "description": "Storm gate stand-in: " + t, "inputSchema": {"type": "object", "properties": {}}} for t in TOOLS]}
     elif method == "tools/call":
         LOG.write(json.dumps(m.get("params")) + "\n"); LOG.flush()
+        wait = ((m.get("params") or {}).get("arguments") or {}).get("wait")
+        if (m.get("params") or {}).get("name") == "read_messages" and isinstance(wait, int):
+            time.sleep(min(wait, 600))
         res = {"content": [{"type": "text", "text": "ok"}]}
     else:
         res = {}
@@ -1119,6 +1215,100 @@ fn final_message(provider: &str) {
         usage["output_tokens"].as_u64().is_some_and(|n| n > 0),
     );
     c.finish(&s.agent);
+}
+
+/// G-145-O-<provider>: a child's own words reach its host while it waits
+/// in `read_messages`, its turn never ending: the stand-in says a known
+/// word, with a thought, and calls `report_result` and then a
+/// `read_messages` that waits. The words arrive once, and nothing of the
+/// thought, a tool's input or a tool's result does.
+fn child_words(provider: &str) {
+    let gate = format!("G-145-O-{provider}");
+    if !enabled(&gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to say a word and call a tool)");
+        return;
+    }
+    let mut c = Checks::new(&gate);
+    let (mut s, tools) = if provider == "claude-code" {
+        let allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+            .iter()
+            .map(|t| format!("mcp__storm__{t}"))
+            .collect();
+        let s = claude_with(ClaudeOpts {
+            allow,
+            storm_mcp: true,
+            ..Default::default()
+        });
+        (s, "mcp__storm__report_result,mcp__storm__read_messages")
+    } else {
+        let s = opencode_with(OpencodeOpts {
+            storm_permission: Some(json!({"storm_*": "allow"})),
+            storm_mcp: true,
+            ..Default::default()
+        });
+        (s, "storm_report_result,storm_read_messages")
+    };
+    let word = format!("canary{}said", std::process::id());
+    let at = Instant::now();
+    s.agent.prompt(&format!("SAY:{word} CALLS:{tools}"));
+    let waiting = wait_until(120, || s.storm_calls().iter().any(|t| t == "read_messages"));
+    c.check(
+        &format!(
+            "it reported and waits in read_messages ({:?})",
+            s.storm_calls()
+        ),
+        waiting && s.storm_calls().iter().any(|t| t == "report_result"),
+    );
+    let heard = wait_until(60, || s.host.said(at).iter().any(|t| t.contains(&word)));
+    let said = s.host.said(at);
+    c.check(&format!("its words arrive ({said:?})"), heard);
+    c.check(
+        &format!("while its turn goes on ({:?})", s.host.signals(at)),
+        !s.host.signals(at).iter().any(|k| k == "idle"),
+    );
+    c.check(
+        "word for word, once",
+        said.iter().filter(|t| t.as_str() == word).count() == 1,
+    );
+    c.check(
+        "nothing of its thought, a tool's input or a tool's result",
+        !said.iter().any(|t| t.contains("CANARY") || t == "ok"),
+    );
+    if let Some(home) = &s.home {
+        c.check(
+            "control: its transcript holds the thought and the tool's input",
+            files_contain(home, "CANARY-THINKING") && files_contain(home, "CANARY-TOOL-INPUT"),
+        );
+    }
+    c.finish(&s.agent);
+}
+
+/// Whether any file under `dir` contains `text`.
+fn files_contain(dir: &Path, text: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        let p = e.path();
+        if p.is_dir() {
+            files_contain(&p, text)
+        } else {
+            std::fs::read(&p).is_ok_and(|b| String::from_utf8_lossy(&b).contains(text))
+        }
+    })
+}
+
+#[test]
+fn g_145_o_claude_code() {
+    child_words("claude-code");
+}
+
+#[test]
+fn g_145_o_opencode() {
+    child_words("opencode");
 }
 
 /// G-144-W-<provider> (`events`, a parent's) and G-145-W-<provider>

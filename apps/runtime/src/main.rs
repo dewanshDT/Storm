@@ -105,6 +105,11 @@ enum Command {
     /// plugin, never by hand.
     #[command(hide = true)]
     HarnessDenied { kind: String },
+    /// What a child said (decision 145g): the assistant text its
+    /// transcript gained, or its plugin's text, from stdin. Run by the
+    /// agent's own hook or plugin, never by hand.
+    #[command(hide = true)]
+    HarnessSaid,
     /// Waits until the host says something is unread, then wakes the agent
     /// the way it documents (decisions 144c, 145d). Run by the agent's own
     /// hook or plugin, never by hand.
@@ -210,6 +215,10 @@ async fn main() -> Result<()> {
         }
         Command::HarnessDenied { kind } => {
             storm_runtime::harness::report_denied(&kind);
+            Ok(())
+        }
+        Command::HarnessSaid => {
+            storm_runtime::harness::report_said();
             Ok(())
         }
         Command::HarnessWake { plugin } => std::process::exit(storm_runtime::harness::wake(plugin)),

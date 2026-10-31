@@ -311,6 +311,10 @@ struct Events {
     waiter: watch::Sender<u64>,
     /// Set when the session ends, so its waiter lets go.
     gone: watch::Sender<bool>,
+    /// 145g: the Claude Code transcript a child's `harness-said` last read,
+    /// and where that read stopped. Held across one hook's exchange, so two
+    /// hooks at once never read the same words.
+    transcript: tokio::sync::Mutex<Option<(String, u64)>>,
 }
 
 impl Events {
@@ -334,6 +338,7 @@ impl Events {
             woken: Mutex::new(0),
             waiter: watch::channel(0).0,
             gone: watch::channel(false).0,
+            transcript: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -2384,6 +2389,8 @@ impl Host {
 const MCP_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 /// The longest line a bridge may send.
 const MCP_LINE_MAX: u64 = 4 * 1024 * 1024;
+/// How long a `harness-said` exchange may hold its session's transcript.
+const SAID_EXCHANGE: Duration = Duration::from_secs(10);
 
 impl Host {
     /// Writes a session's provider config and registers its handle.
@@ -3002,6 +3009,81 @@ impl Host {
             .await;
     }
 
+    /// What a child said (145g), passed to the server as data, each message
+    /// bounded again here: `read_output` shows it to the parent. Only from
+    /// a spawned child whose agent's gate lets its words through; never
+    /// written to any terminal (C9).
+    async fn said_reported(&self, session: &str, events: &Events, said: Vec<String>) {
+        if !events.hooks.said || !events.spawned || !*self.link_up.borrow() {
+            return;
+        }
+        let mut said: Vec<String> = said
+            .iter()
+            .filter_map(|t| crate::harness::said_text(t))
+            .collect();
+        if said.len() > crate::harness::MAX_SAID_PER_REPORT {
+            said.drain(..said.len() - crate::harness::MAX_SAID_PER_REPORT);
+        }
+        if said.is_empty() {
+            return;
+        }
+        tracing::debug!(%session, messages = said.len(), "a child said something");
+        let messages: Vec<serde_json::Value> =
+            said.into_iter().map(|t| json!({"text": t})).collect();
+        let _ = self
+            .post(
+                &format!("/v1/runtime/sessions/{session}/said"),
+                &json!({"messages": messages, "source": crate::harness::PROVIDER_HOOK}),
+            )
+            .await;
+    }
+
+    /// Claude Code's `harness-said` (145g): told where the last read of its
+    /// transcript stopped (from the start for a transcript not read before),
+    /// then sent what it read from there and where it stopped.
+    async fn transcript_reported<R>(
+        &self,
+        report: crate::harness::TranscriptLine,
+        peer: Peer,
+        reader: &mut R,
+        mut write: tokio::io::WriteHalf<crate::platform::ipc::Stream>,
+    ) where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let Some((session, events)) = self.hook_session(&report.handle, peer).await else {
+            return;
+        };
+        if !events.hooks.said || !events.spawned {
+            return;
+        }
+        let Ok(mut at) = tokio::time::timeout(SAID_EXCHANGE, events.transcript.lock()).await else {
+            return;
+        };
+        let offset = match &*at {
+            Some((path, offset)) if *path == report.transcript => *offset,
+            _ => 0,
+        };
+        let mut answer =
+            serde_json::to_vec(&crate::harness::TranscriptAt { offset }).unwrap_or_default();
+        answer.push(b'\n');
+        if write.write_all(&answer).await.is_err() {
+            return;
+        }
+        let mut line = String::new();
+        let read = tokio::time::timeout(SAID_EXCHANGE, reader.read_line(&mut line)).await;
+        drop(write);
+        let Ok(Ok(_)) = read else {
+            return;
+        };
+        let Ok(read) = serde_json::from_str::<crate::harness::TranscriptRead>(&line) else {
+            return;
+        };
+        *at = Some((report.transcript, read.offset));
+        drop(at);
+        self.said_reported(&session, &events, read.said).await;
+    }
+
     /// A waker (144c, 145d): held until Storm says something new is unread
     /// for the session, then told its kind, once per mark. One waiter per
     /// session: a newer one releases this one. The session's end, or the
@@ -3129,6 +3211,17 @@ impl Host {
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::DeniedLine>(&line) {
             return self.denied_reported(report, peer).await;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::SaidLine>(&line) {
+            if let Some((session, events)) = self.hook_session(&report.handle, peer).await {
+                self.said_reported(&session, &events, report.said).await;
+            }
+            return;
+        }
+        if let Ok(report) = serde_json::from_str::<crate::harness::TranscriptLine>(&line) {
+            return self
+                .transcript_reported(report, peer, &mut reader, write)
+                .await;
         }
         if let Ok(report) = serde_json::from_str::<crate::harness::WakeLine>(&line) {
             return self.waiter(report, peer, write).await;
@@ -3790,6 +3883,23 @@ mod tests {
                         detail: arg.into(),
                     },
                 },
+            )
+            .unwrap(),
+            // 145g's words, as OpenCode's plugin sends them.
+            "say" => crate::harness::send_line(
+                socket(),
+                &crate::harness::SaidLine {
+                    handle: handle(),
+                    said: vec![arg.into()],
+                },
+            )
+            .unwrap(),
+            // 145g's words, as Claude Code's hook reads its transcript `arg`.
+            "transcript" => crate::harness::said_from_transcript(
+                socket(),
+                handle(),
+                std::path::Path::new(arg),
+                crate::harness::Settle::Now,
             )
             .unwrap(),
             // 144c's waker: the host's answer goes to the file `arg`.
@@ -7587,6 +7697,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             source: "provider_hook",
         }],
         denials: &["claude-code"],
+        said: &["claude-code"],
         wakes: &[crate::harness::GatedWake {
             provider: "claude-code",
             mechanism: "async_rewake",
@@ -7639,14 +7750,22 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
     async fn a_144_10_a_gated_childs_hooks_are_evidence_and_an_ungated_ones_nothing() {
         let marker = "99999999-9999-4999-8999-999999999999";
         let script = format!(
-            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; {}; {}; {}; exec sleep 1000",
+            "while [ ! -e go ]; do sleep 0.05; done; {}; {}; {}; {}; {}; {}; cat more.jsonl >> t.jsonl; {}; {}; {}; exec sleep 1000",
             probe("signal working", false),
             probe("signal idle", false),
             probe("signal usage_limit", false),
             probe("result the answer is 42", false),
             probe("deny curl example.com", false),
+            probe("transcript t.jsonl", false),
+            probe("transcript t.jsonl", false),
+            probe("say from the plugin", false),
             probe(&format!("send {marker}"), false),
         );
+        let entry = |text: &str| {
+            json!({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+                .to_string()
+                + "\n"
+        };
         for gated in [true, false] {
             let gates = if gated {
                 ALL_GATES
@@ -7657,10 +7776,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                     results: &[],
                     wakes: &[],
                     denials: &[],
+                    said: &[],
                 }
             };
             let (host, seen, _helper, state, _roots, children) =
                 spawned_child(&script, gates).await;
+            let ws = children.path().join("ags_CHILD/workspace");
+            std::fs::write(ws.join("t.jsonl"), entry("first words")).unwrap();
+            std::fs::write(ws.join("more.jsonl"), entry("second words")).unwrap();
             let settings = std::fs::read_to_string(
                 crate::mcp::session_dir(state.path(), "ags_CHILD").join("claude-settings.json"),
             )
@@ -7668,7 +7791,8 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             assert_eq!(settings.contains("asyncRewake"), gated, "{settings}");
             assert_eq!(settings.contains("harness-result"), gated, "{settings}");
             assert_eq!(settings.contains("harness-denied"), gated, "{settings}");
-            std::fs::write(children.path().join("ags_CHILD/workspace/go"), "").unwrap();
+            assert_eq!(settings.contains("harness-said"), gated, "{settings}");
+            std::fs::write(ws.join("go"), "").unwrap();
             wait_for("the marker", || {
                 child_posts(&seen, "status")
                     .iter()
@@ -7702,6 +7826,17 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                         json!({"tool": "Bash", "detail": "curl example.com", "source": "provider_hook"})
                     ]
                 );
+                wait_for("the words", || child_posts(&seen, "said").len() == 3).await;
+                let said = |t: &str| json!({"messages": [{"text": t}], "source": "provider_hook"});
+                assert_eq!(
+                    child_posts(&seen, "said"),
+                    [
+                        said("first words"),
+                        said("second words"),
+                        said("from the plugin")
+                    ],
+                    "each word once: the host kept where the last read stopped"
+                );
             } else {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 let posts = child_posts(&seen, "status");
@@ -7713,6 +7848,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 );
                 assert!(child_posts(&seen, "final-message").is_empty());
                 assert!(child_posts(&seen, "denied").is_empty());
+                assert!(child_posts(&seen, "said").is_empty());
             }
             host.shutdown(Duration::from_millis(200)).await;
         }

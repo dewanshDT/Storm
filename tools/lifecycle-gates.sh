@@ -1,6 +1,6 @@
 #!/bin/sh
 # The real-CLI gates of decisions 144 to 149 (G-144-S, G-144-W, G-145-R,
-# G-145-W; G-146-A, G-146-M, G-146-P; G-147; G-148; G-149), for Claude Code and
+# G-145-W, G-145-O; G-146-A, G-146-M, G-146-P; G-147; G-148; G-149), for Claude Code and
 # OpenCode, as the operator runs them on VM 113 before any list is switched
 # on. `make gate-lifecycle` runs this. The G-146, G-147 and G-148 gates need
 # the stand-in model (it calls the tools that ask) and show as SKIP with
@@ -8,6 +8,8 @@
 # the prompt, and in G-147 it presses Shift+Tab (`ESC [ Z`) as the person
 # would. G-148 runs a child as the host configures it and shows that no
 # prompt ever appears, and that a denial reaches the agent and the host.
+# G-145-O shows a child's own words reach the host while it waits in
+# read_messages, and nothing of its thinking or its tools does (stand-in only).
 # G-149 shows a top-level session's Storm reads and deletes reach Storm with
 # no Claude Code or OpenCode prompt first (Claude Code in manual and in auto).
 #
@@ -46,7 +48,9 @@
 #          and `harness::GATED_SIGNALS`, {provider, "permission_prompt",
 #          "provider_hook"};
 #        - a child's denials (G-148): `events::DENIALS` and
-#          `harness::DENIALS`, the provider.
+#          `harness::DENIALS`, the provider;
+#        - a child's words (G-145-O): `said::SAID` and `harness::SAID`, the
+#          provider.
 #      A test in each crate holds the two lists equal.
 #
 # Variables: CLAUDE_BIN, OPENCODE_BIN (default: on PATH), REAL=1,
