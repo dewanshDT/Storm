@@ -144,6 +144,7 @@ fn a_child_workspace_is_asked_for_and_answered_in_one_shape() {
                 submodules: true,
                 large_files: false,
                 applied: None,
+                resumed: false,
             };
             let workspace =
                 std::path::Path::new("/var/lib/storm-runtime-isolation/children/ags_C/workspace");
@@ -240,7 +241,7 @@ fn a_lease_without_a_usable_uid_is_refused() {
     }
 }
 
-/// 137-3: list, export, Apply and delete are each one the helper accepts,
+/// 137-3, 145e: list, export, Apply, delete and park are each one the helper accepts,
 /// with exactly their fields, and the host hands on the helper's answer
 /// without its `ok` and `op`.
 #[test]
@@ -257,6 +258,7 @@ fn the_child_operations_the_host_sends_are_ones_the_helper_accepts() {
     link.child_import("ags_C", "ags_P", "storm/ags_C").unwrap();
     link.child_import("ags_C", "ags_P", "app-ags_C").unwrap();
     link.child_dispose("ags_C").unwrap();
+    link.child_park("ags_C").unwrap();
     let ops: Vec<protocol::Op> = rec
         .0
         .lock()
@@ -277,7 +279,8 @@ fn the_child_operations_the_host_sends_are_ones_the_helper_accepts() {
             ChildExport,
             ChildImport,
             ChildImport,
-            ChildDispose
+            ChildDispose,
+            ChildPark
         ]
     );
 }

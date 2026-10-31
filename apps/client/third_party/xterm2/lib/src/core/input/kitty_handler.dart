@@ -28,6 +28,19 @@ class KittyKeyboardInputHandler implements TerminalInputHandler {
       return null;
     }
 
+    // Storm (5.2.0+storm.2): a release is reported only with "report event
+    // types", and a modifier on its own only with "report all keys as escape
+    // codes", as the protocol says. Encoded without its event type, a
+    // release reads as a second press: one Shift+Tab cycled Claude Code's
+    // mode twice, and one Escape was a double Escape.
+    if (event.type == TerminalKeyEventType.release &&
+        mode & _reportEventTypes == 0) {
+      return null;
+    }
+    if (_isModifierKey(event.key) && mode & _reportAllKeysAsEscapeCodes == 0) {
+      return null;
+    }
+
     final specialCode = _specialKeyCode(event.key);
     if (specialCode != null) {
       return _sequence(specialCode, event);
@@ -321,6 +334,22 @@ class KittyKeyboardInputHandler implements TerminalInputHandler {
       _ => null,
     };
   }
+
+  static bool _isModifierKey(TerminalKey key) => switch (key) {
+        TerminalKey.shiftLeft ||
+        TerminalKey.shiftRight ||
+        TerminalKey.controlLeft ||
+        TerminalKey.controlRight ||
+        TerminalKey.altLeft ||
+        TerminalKey.altRight ||
+        TerminalKey.metaLeft ||
+        TerminalKey.metaRight ||
+        TerminalKey.capsLock ||
+        TerminalKey.numLock ||
+        TerminalKey.scrollLock =>
+          true,
+        _ => false,
+      };
 
   int? _specialKeyCode(TerminalKey key) {
     if (key.index >= TerminalKey.f13.index &&

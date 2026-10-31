@@ -76,6 +76,12 @@ impl AgentManager {
         if r.is_ended() {
             return Err(AgentError::Conflict("the session has ended".into()));
         }
+        if r.status == "parked" {
+            // Nothing runs to be sent `end` (145e); a child has no children.
+            drop(store);
+            self.end_parked(&r, None)?;
+            return Ok(None);
+        }
         let live = store.descendants(id, true)?;
         check_confirmed(&live, confirmed)?;
         // Store, then live: the documented order.
@@ -102,7 +108,6 @@ impl AgentManager {
         for target in &opened.targets {
             self.bump(&target.0);
         }
-        self.requests.send_modify(|v| *v += 1);
         Ok(Some(opened))
     }
 
@@ -171,6 +176,19 @@ impl AgentManager {
                 cause: d.cause.clone(),
                 sent,
             };
+            // A parked target runs nowhere: Storm's stop is its end (145e).
+            let parked = self.get(&d.session_id)?;
+            if parked.status == "parked" {
+                let reason = self
+                    .store
+                    .lock()
+                    .unwrap()
+                    .end_cause(&d.session_id)?
+                    .map(|c| c.end_reason);
+                self.end_parked(&parked, reason)?;
+                stops.push(stop(true));
+                continue;
+            }
             match self.send(
                 &d.host_id,
                 Command::End {

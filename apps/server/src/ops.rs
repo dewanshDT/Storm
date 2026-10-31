@@ -657,12 +657,57 @@ pub async fn update_note(
     Ok(result)
 }
 
-pub async fn delete_note(state: &Shared, actor: &Actor, vault: &str, id: &str) -> ApiResult<i64> {
+/// Where a delete came from, beyond the actor: the person's device, and an
+/// agent's reason (decision 149 passes one; nothing does yet).
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOrigin {
+    pub device_id: Option<String>,
+    pub device_name: Option<String>,
+    pub reason: Option<String>,
+}
+
+fn deleted_by(actor: &Actor, origin: &DeleteOrigin) -> crate::db::DeletedBy {
+    use crate::db::DeletedBy;
+    match actor {
+        Actor::Session { .. } => {
+            DeletedBy::person(origin.device_id.clone(), origin.device_name.clone())
+        }
+        Actor::Key { key_id, .. } => DeletedBy::key(key_id),
+        Actor::Agent {
+            session_id,
+            host_id,
+            ..
+        } => DeletedBy::agent(host_id, session_id, origin.reason.clone()),
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeletedNote {
+    pub seq: i64,
+    /// Where it went (decision 150); `None` only for a note whose file was
+    /// already gone and whose history held nothing to keep.
+    pub trash_id: Option<String>,
+}
+
+/// Deletes a note: it moves to the vault's trash (decision 150a).
+pub async fn delete_note(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    id: &str,
+    origin: &DeleteOrigin,
+) -> ApiResult<DeletedNote> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
     let mut ix = handle.indexer.lock().await;
-    let seq = ix.delete_note(id)?;
-    broadcast_latest(state, &ix, seq);
-    Ok(seq)
+    let trashed = ix.delete_note(id, &deleted_by(actor, origin))?;
+    let seq = trashed.seqs.last().copied().unwrap_or(0);
+    for seq in &trashed.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(DeletedNote {
+        seq,
+        trash_id: trashed.trash_id,
+    })
 }
 
 /// Moves a note to a new path. Identity is the id, so this is a metadata
@@ -753,17 +798,146 @@ pub async fn create_folder(
     Ok(())
 }
 
-/// Refused rather than recursive: deleting someone's notes because they
-/// tapped "delete folder" is not something to do quietly.
+/// Deletes a folder. Without `to_trash` a folder holding anything is
+/// refused, as it always was: deleting someone's notes because they tapped
+/// "delete folder" is not something to do quietly. With it — the person
+/// confirmed "Delete folder X and its N notes?" — the folder and everything
+/// in it go to the trash as one entry (decision 150a).
 pub async fn delete_folder(
     state: &Shared,
     actor: &Actor,
     vault: &str,
     path: &str,
-) -> ApiResult<()> {
+    to_trash: bool,
+    origin: &DeleteOrigin,
+) -> ApiResult<crate::trash::Trashed> {
     let handle = vault_of(state, actor, Access::Write, vault).await?;
-    handle.indexer.lock().await.delete_folder(path)?;
+    let mut ix = handle.indexer.lock().await;
+    if !to_trash {
+        ix.delete_folder(path)?;
+        return Ok(crate::trash::Trashed {
+            trash_id: None,
+            notes: 0,
+            seqs: Vec::new(),
+        });
+    }
+    let trashed = ix.trash_folder(path, &deleted_by(actor, origin))?;
+    for seq in &trashed.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(trashed)
+}
+
+// ---- trash (decision 150) ----------------------------------------------
+//
+// The person's alone (150c): no MCP tool reaches these, and an agent or a
+// key that found its way here is refused before the vault is touched.
+
+fn person_only(actor: &Actor) -> ApiResult<()> {
+    match actor {
+        Actor::Session { .. } => Ok(()),
+        _ => Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "the trash is reachable only from the app".into(),
+        )),
+    }
+}
+
+/// A trash entry, with the agent session's name when an agent deleted it.
+#[derive(Debug, Serialize)]
+pub struct TrashListing {
+    #[serde(flatten)]
+    pub entry: crate::trash::TrashEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TrashPage {
+    pub items: Vec<TrashListing>,
+    /// Days an item is kept, `None` for never.
+    pub retention_days: Option<i64>,
+}
+
+pub async fn list_trash(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<TrashPage> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Read, vault).await?;
+    let ix = handle.indexer.lock().await;
+    let entries = ix.list_trash()?;
+    let retention_days = ix.trash_retention_days();
+    drop(ix);
+    let items = entries
+        .into_iter()
+        .map(|entry| {
+            let session_name = entry.deleted_by.session_id.as_deref().and_then(|id| {
+                let launch = state.agent.launch_of(id).ok().flatten();
+                launch
+                    .map(|l| l.name)
+                    .or_else(|| state.agent.get(id).ok().map(|s| s.workspace))
+            });
+            TrashListing {
+                entry,
+                session_name,
+            }
+        })
+        .collect();
+    Ok(TrashPage {
+        items,
+        retention_days,
+    })
+}
+
+/// Restore: the same ids at the original paths, with `created` changes so
+/// every client picks them up (150b).
+pub async fn restore_trash(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    trash_id: &str,
+) -> ApiResult<crate::trash::Restored> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    let mut ix = handle.indexer.lock().await;
+    let restored = ix.restore_trash(trash_id)?;
+    for seq in &restored.seqs {
+        broadcast_latest(state, &ix, *seq);
+    }
+    Ok(restored)
+}
+
+/// Delete forever. The client asks first; this is the act.
+pub async fn purge_trash(
+    state: &Shared,
+    actor: &Actor,
+    vault: &str,
+    trash_id: &str,
+) -> ApiResult<()> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    handle.indexer.lock().await.purge_trash(trash_id)?;
     Ok(())
+}
+
+/// Empty trash, returning how many entries went.
+pub async fn empty_trash(state: &Shared, actor: &Actor, vault: &str) -> ApiResult<usize> {
+    person_only(actor)?;
+    let handle = vault_of(state, actor, Access::Write, vault).await?;
+    Ok(handle.indexer.lock().await.empty_trash()?)
+}
+
+/// The hourly retention sweep (150b) over every open vault. One vault's
+/// failure is logged and does not stop the others.
+pub async fn purge_expired_trash(state: &Shared) {
+    let handles: Vec<_> = state.vaults.read().await.open.values().cloned().collect();
+    let now = time::OffsetDateTime::now_utc();
+    for handle in handles {
+        let mut ix = handle.indexer.lock().await;
+        match ix.purge_expired_trash(now) {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(purged = n, "trash: items past retention purged"),
+            Err(e) => tracing::warn!(error = format!("{e:#}"), "trash: retention sweep failed"),
+        }
+    }
 }
 
 /// Renames a folder, returning how many notes moved with it.
@@ -2054,8 +2228,6 @@ pub struct SetSpawn {
 #[derive(Debug, Serialize)]
 pub struct SpawnSwitch {
     pub enabled: bool,
-    /// Pending requests that turning it off refused, `revoked`.
-    pub refused_requests: usize,
 }
 
 /// `PUT /v1/agent/sessions/{id}/spawn`. Every accepted change and every
@@ -2084,7 +2256,6 @@ pub async fn set_session_spawn(
                 "session_id": id,
                 "host_id": record.host_id,
                 "was": change.was,
-                "refused_requests": change.refused,
             }),
         ),
         Err(code) => (
@@ -2117,29 +2288,25 @@ pub async fn set_session_spawn(
     }
     Ok(SpawnSwitch {
         enabled: change.enabled,
-        refused_requests: change.refused,
     })
 }
 
-// ---- Agent spawning: the approval engine (decision 134-3) -----------------
+// ---- Agent spawning: a parent's acts (decisions 134-3, 145a) ---------------
 //
-// A person's device decides on the session tier, owner only (A5): no key, no
-// agent, no host.
+// A start, a message and an end act at once: the launch toggle is the
+// person's standing approval (145a). Each act is checked as 134 checks it,
+// written to the session's act log and audited. The person reads the log
+// on the session tier, owner only.
 
-pub const EVENT_SPAWN_REQUEST: &str = "spawn_request";
-pub const EVENT_SPAWN_REQUEST_REFUSED: &str = "spawn_request_refused";
-pub const EVENT_SPAWN_REQUEST_DECIDED: &str = "spawn_request_decided";
-pub const EVENT_SPAWN_REQUEST_EXPIRED: &str = "spawn_request_expired";
+/// A parent started, messaged or ended a child. Metadata only: never the
+/// task's or the message's text.
+pub const EVENT_SPAWN_START: &str = "spawn_start";
+pub const EVENT_SPAWN_MESSAGE: &str = "spawn_message";
+pub const EVENT_SPAWN_END: &str = "spawn_end";
+pub const EVENT_SPAWN_ACT_REFUSED: &str = "spawn_act_refused";
 
-#[derive(Debug, Default, Deserialize)]
-pub struct ApproveRequest {
-    /// D2: the child may write the parent's own write vault. Off unless the
-    /// person ticks it.
-    #[serde(default)]
-    pub write_vault: bool,
-}
-
-/// A request as its decision left it.
+/// An act as its log row left it. Rows an older server left were decided by
+/// a person, or expired.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestView {
     pub id: String,
@@ -2154,9 +2321,6 @@ pub struct RequestView {
     pub outcome: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
-    /// For `refused: limit`, the cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cap: Option<String>,
     /// For `started`, the child.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
@@ -2165,7 +2329,7 @@ pub struct RequestView {
 }
 
 impl RequestView {
-    fn of(r: crate::agent::store::spawn::Request, cap: Option<&str>) -> Self {
+    fn of(r: crate::agent::store::spawn::Request) -> Self {
         Self {
             id: r.id,
             kind: r.kind,
@@ -2176,24 +2340,10 @@ impl RequestView {
             expires_at: r.expires_at,
             outcome: r.outcome,
             reason: r.reason,
-            cap: cap.map(Into::into),
             session: r.session,
             decided_at: r.decided_at,
         }
     }
-}
-
-fn request_detail(r: &RequestView) -> serde_json::Value {
-    serde_json::json!({
-        "request_id": r.id,
-        "kind": r.kind,
-        "requester": r.requester,
-        "target": r.target,
-        "outcome": r.outcome,
-        "reason": r.reason,
-        "cap": r.cap,
-        "session": r.session,
-    })
 }
 
 async fn record_spawn_event(
@@ -2210,123 +2360,11 @@ async fn record_spawn_event(
         &crate::index::now_rfc3339(),
         &detail.to_string(),
     ) {
-        tracing::warn!(error = %e, kind, "could not audit a spawn request");
+        tracing::warn!(error = %e, kind, "could not audit a spawn act");
     }
 }
 
-/// P-2, for the request tools: the requesting session's agent asks. A
-/// refusal names its reason and, for `limit`, the cap; both outcomes are
-/// audited.
-pub async fn create_spawn_request(
-    state: &Shared,
-    requester: &str,
-    new: crate::agent::store::spawn::NewRequest,
-) -> ApiResult<std::result::Result<RequestView, crate::agent::store::spawn::Refusal>> {
-    let record = state.agent.get(requester).map_err(agent_error)?;
-    let created = state
-        .agent
-        .create_request(requester, new)
-        .map_err(agent_error)?;
-    match &created {
-        Ok(r) => {
-            let view = RequestView::of(r.clone(), None);
-            record_spawn_event(
-                state,
-                EVENT_SPAWN_REQUEST,
-                Some(&record.owner_user_id),
-                None,
-                &request_detail(&view),
-            )
-            .await;
-        }
-        Err(refusal) => {
-            record_spawn_event(
-                state,
-                EVENT_SPAWN_REQUEST_REFUSED,
-                Some(&record.owner_user_id),
-                None,
-                &serde_json::json!({"requester": requester, "reason": refusal.reason,
-                    "cap": refusal.cap}),
-            )
-            .await;
-        }
-    }
-    Ok(created.map(|r| RequestView::of(r, None)))
-}
-
-/// The owner's request, or 404.
-fn owners_request(
-    state: &Shared,
-    owner: &str,
-    id: &str,
-) -> ApiResult<crate::agent::store::spawn::Request> {
-    let request = state.agent.request(id).map_err(agent_error)?;
-    match state.agent.get(&request.requester) {
-        Ok(r) if r.owner_user_id == owner => Ok(request),
-        _ => Err(not_found("no such request")),
-    }
-}
-
-fn decided(decision: crate::agent::store::spawn::Decision) -> ApiResult<RequestView> {
-    use crate::agent::store::spawn::Decision as D;
-    match decision {
-        D::Decided { request, cap, .. } => Ok(RequestView::of(request, cap)),
-        // Single use (P-3, P-6): what the app showed is stale.
-        D::Taken(_) => Err(conflict("already_decided")),
-    }
-}
-
-/// `POST /v1/agent/requests/{id}/approve`. Re-checked against current state
-/// at approval; the answer is the outcome, a refusal included.
-pub async fn approve_spawn_request(
-    state: &Shared,
-    actor: &Actor,
-    device: &str,
-    id: &str,
-    req: ApproveRequest,
-) -> ApiResult<RequestView> {
-    let owner = crews_owner(actor)?;
-    owners_request(state, owner, id)?;
-    let decision = state
-        .agent
-        .approve_request(id, device, req.write_vault)
-        .map_err(agent_error)?;
-    let view = decided(decision)?;
-    record_spawn_event(
-        state,
-        EVENT_SPAWN_REQUEST_DECIDED,
-        Some(owner),
-        Some(device),
-        &request_detail(&view),
-    )
-    .await;
-    Ok(view)
-}
-
-/// `POST /v1/agent/requests/{id}/deny`.
-pub async fn deny_spawn_request(
-    state: &Shared,
-    actor: &Actor,
-    device: &str,
-    id: &str,
-) -> ApiResult<RequestView> {
-    let owner = crews_owner(actor)?;
-    owners_request(state, owner, id)?;
-    let decision = state.agent.deny_request(id, device).map_err(agent_error)?;
-    let view = decided(decision)?;
-    record_spawn_event(
-        state,
-        EVENT_SPAWN_REQUEST_DECIDED,
-        Some(owner),
-        Some(device),
-        &request_detail(&view),
-    )
-    .await;
-    Ok(view)
-}
-
-/// A request as a person's card shows it (134-10): its decision so far and
-/// what it asks, word for word.
+/// An act as the person's log shows it (145a): what it did, word for word.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RequestCard {
     #[serde(flatten)]
@@ -2342,36 +2380,75 @@ pub struct RequestCard {
     pub context_note: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// A start's child's agent: the one it names, else its parent's (143c).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The requester's own agent, beside a start's `agent`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_agent: Option<String>,
+    /// A start's child runs another agent than its parent.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub agent_differs: bool,
+    /// A start's model (145b).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// A start's permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// A start's role, titled as it was then.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// A message's text, exactly as the agent sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
-    /// The live sessions sharing the requester's workspace now, other than
-    /// it and its own tree (decision 141b).
-    pub shared_with: u32,
+    /// A message's round (145).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i64>,
 }
 
-/// How many of a session's requests its list carries, newest first.
+/// How many of a session's acts its log carries, newest first.
 const REQUESTS_LISTED: usize = 50;
 
 impl RequestCard {
-    fn of(r: crate::agent::store::spawn::Request, shared_with: u32) -> Self {
+    fn of(
+        r: crate::agent::store::spawn::Request,
+        parent: &crate::agent::store::SessionRecord,
+    ) -> Self {
         let payload: serde_json::Value =
             serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
         let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
-        let (task, name, provider, message) =
-            (text("task"), text("name"), text("provider"), text("text"));
+        let (task, name, provider, message, model) = (
+            text("task"),
+            text("name"),
+            text("provider"),
+            text("text"),
+            text("model"),
+        );
         let context_note = payload
             .get("context_note")
             .filter(|v| v.is_object())
             .cloned();
+        let role = payload
+            .pointer("/role/title")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let round = payload.get("round").and_then(serde_json::Value::as_i64);
+        let agent = (r.kind == "start")
+            .then(|| provider.clone().unwrap_or_else(|| parent.provider.clone()));
         Self {
-            request: RequestView::of(r, None),
+            parent_agent: agent.as_ref().map(|_| parent.provider.clone()),
+            agent_differs: agent.as_ref().is_some_and(|a| *a != parent.provider),
+            agent,
+            request: RequestView::of(r),
             task,
             name,
             context_note,
             provider,
+            model,
+            permission_mode: text("permission_mode"),
+            role,
             text: message,
-            shared_with,
+            round,
         }
     }
 }
@@ -2381,8 +2458,8 @@ pub struct SessionRequests {
     pub requests: Vec<RequestCard>,
 }
 
-/// `GET /v1/agent/sessions/{id}/requests`: what a session asked a person
-/// for and what became of each, newest first (134-10). Owner only.
+/// `GET /v1/agent/sessions/{id}/requests`: the session's acts (its starts,
+/// messages and ends), newest first (134-10, 145a). Owner only.
 pub async fn session_requests(
     state: &Shared,
     actor: &Actor,
@@ -2392,47 +2469,42 @@ pub async fn session_requests(
     let mut requests = state.agent.requests_of(id).map_err(agent_error)?;
     requests.reverse();
     requests.truncate(REQUESTS_LISTED);
-    let shared_with = state.agent.shared_with(id).map_err(agent_error)?;
+    let parent = state.agent.get(id).map_err(agent_error)?;
     Ok(SessionRequests {
         requests: requests
             .into_iter()
-            .map(|r| RequestCard::of(r, shared_with))
+            .map(|r| RequestCard::of(r, &parent))
             .collect(),
     })
 }
 
-/// `GET /v1/agent/requests/{id}`: one request as its card shows it.
-pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestCard> {
-    let owner = crews_owner(actor)?;
-    let request = owners_request(state, owner, id)?;
-    let shared_with = state
-        .agent
-        .shared_with(&request.requester)
-        .map_err(agent_error)?;
-    Ok(RequestCard::of(request, shared_with))
-}
-
-/// The expiry sweeper's pass (P-5), audited per request.
-pub async fn sweep_spawn_requests(state: &Shared) {
-    let swept = match state.agent.expire_requests() {
-        Ok(swept) => swept,
-        Err(e) => {
-            tracing::warn!(error = ?e, "could not sweep spawn requests");
-            return;
-        }
+/// Audits an act or its refusal, never with its text.
+async fn audit_act(
+    state: &Shared,
+    caller: &str,
+    kind: &str,
+    target: Option<&str>,
+    refusal: Option<crate::agent::store::spawn::Refusal>,
+) {
+    let Ok(r) = state.agent.get(caller) else {
+        return;
     };
-    for r in swept {
-        let owner = state.agent.get(&r.requester).ok().map(|s| s.owner_user_id);
-        let view = RequestView::of(r, None);
-        record_spawn_event(
-            state,
-            EVENT_SPAWN_REQUEST_EXPIRED,
-            owner.as_deref(),
-            None,
-            &request_detail(&view),
-        )
-        .await;
-    }
+    let (event, detail) = match refusal {
+        None => (
+            match kind {
+                "start" => EVENT_SPAWN_START,
+                "message" => EVENT_SPAWN_MESSAGE,
+                _ => EVENT_SPAWN_END,
+            },
+            serde_json::json!({"requester": caller, "host_id": r.host_id, "target": target}),
+        ),
+        Some(refusal) => (
+            EVENT_SPAWN_ACT_REFUSED,
+            serde_json::json!({"requester": caller, "host_id": r.host_id, "kind": kind,
+                "target": target, "reason": refusal.reason, "cap": refusal.cap}),
+        ),
+    };
+    record_spawn_event(state, event, Some(&r.owner_user_id), None, &detail).await;
 }
 
 /// An approved child the server stopped before its `start` went out,
@@ -2461,6 +2533,31 @@ pub async fn fail_children_left_creating(state: &Shared) -> anyhow::Result<()> {
                 "parent_session": parent, "end_reason": r.end_reason}),
         )
         .await;
+    }
+    Ok(())
+}
+
+/// An `agent.db` upgrade ran (145i's crew trees): what it moved.
+pub const EVENT_AGENT_MIGRATION: &str = "agent_migration";
+
+/// At startup: each `agent.db` upgrade that ran is audited once, with what
+/// it did. The upgrade and its record are one transaction; the audit row
+/// is written after, and marked so a restart never writes it twice.
+pub async fn audit_agent_migrations(state: &Shared) -> anyhow::Result<()> {
+    let owner = state.auth_db.lock().await.account()?.map(|a| a.id);
+    for m in state.agent.unaudited_migrations()? {
+        let detail: serde_json::Value =
+            serde_json::from_str(&m.detail).unwrap_or(serde_json::Value::Null);
+        state.auth_db.lock().await.record_event(
+            EVENT_AGENT_MIGRATION,
+            owner.as_deref(),
+            None,
+            &m.applied_at,
+            &serde_json::json!({"migration": m.name, "detail": detail}).to_string(),
+        )?;
+        state
+            .agent
+            .mark_migration_audited(&m.name, &crate::index::now_rfc3339())?;
     }
     Ok(())
 }
@@ -2494,9 +2591,11 @@ impl From<crate::agent::store::spawn::Lineage> for LineageView {
     }
 }
 
-/// A result as its parent reads it: what the child said, untrusted (134h).
+/// A result as its parent reads it: what the child said, untrusted (134h),
+/// for its round (145).
 #[derive(Debug, Clone, Serialize)]
 pub struct ResultView {
+    pub round: i64,
     pub outcome: String,
     pub summary: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2507,6 +2606,7 @@ pub struct ResultView {
 impl From<crate::agent::store::spawn::SpawnResult> for ResultView {
     fn from(r: crate::agent::store::spawn::SpawnResult) -> Self {
         Self {
+            round: r.round,
             outcome: r.outcome,
             summary: r.summary,
             details: r.details,
@@ -2522,9 +2622,25 @@ pub struct AgentView {
     pub id: String,
     pub name: String,
     pub provider: String,
+    /// The model it started on (145b), when one was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
     pub status: String,
+    /// The round it is in (145): 1 for its task, then one per message
+    /// after a result.
+    pub round: i64,
+    /// 144b: `working` or `idle` only from a gated idle signal, `unknown`
+    /// otherwise while it is live; absent once ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
+    /// `approval`, `permission_prompt`, `usage_limit` or `blocked` (134p,
+    /// 144b).
+    pub needs_attention: Option<&'static str>,
+    /// Its events in the caller's queue not yet acknowledged (144a).
+    pub pending_events: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub end_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2534,20 +2650,24 @@ pub struct AgentView {
     pub ended_at: Option<String>,
     #[serde(flatten)]
     pub lineage: LineageView,
-    /// Ended, or reported a result: what a wait waits for.
+    /// Ended, or reported a result for its round: what a wait waits for.
     pub settled: bool,
     /// Only on `agent_status`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task: Option<String>,
+    /// Its latest result, of whatever round.
     pub result: Option<ResultView>,
+    /// Only on `agent_status`: every round's result, oldest first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub results: Option<Vec<ResultView>>,
     /// Only on `agent_status`: the caller's messages to it, by state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub messages: Option<Vec<SentMessage>>,
 }
 
-/// A message a parent asked to send, as it stands (134j): `pending_approval`,
-/// `queued`, `delivered`, `acknowledged`, `denied`, `expired` or
-/// `undeliverable`.
+/// A message a parent sent, as it stands (134j): `queued`, `delivered`,
+/// `acknowledged` or `undeliverable` (and, from before 145a,
+/// `pending_approval`, `denied` or `expired`).
 #[derive(Debug, Clone, Serialize)]
 pub struct SentMessage {
     pub request_id: Option<String>,
@@ -2573,7 +2693,16 @@ fn agent_view(
 ) -> ApiResult<AgentView> {
     let lineage = state.agent.lineage(&r.id).map_err(agent_error)?;
     let result = state.agent.result_of(&r.id).map_err(agent_error)?;
-    let (task, messages) = match detail_for {
+    let round = state.agent.round_of(&r.id).map_err(agent_error)?;
+    let (model, permission_mode) = state
+        .agent
+        .launch_of(&r.id)
+        .map_err(internal)?
+        .map_or((None, None), |l| (l.model, l.permission_mode));
+    let activity = state.agent.health_activity(&r);
+    let needs_attention = state.agent.needs_attention(&r).map_err(agent_error)?;
+    let pending_events = state.agent.pending_events(&r.id).map_err(agent_error)?;
+    let (task, messages, results) = match detail_for {
         Some(caller) => (
             state.agent.task_of(&r.id).map_err(agent_error)?,
             Some(
@@ -2589,17 +2718,31 @@ fn agent_view(
                     })
                     .collect(),
             ),
+            Some(
+                state
+                    .agent
+                    .results_of(&r.id)
+                    .map_err(agent_error)?
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+            ),
         ),
-        None => (None, None),
+        None => (None, None, None),
     };
     let name = session_name(state, &r)?;
     Ok(AgentView {
-        settled: crate::agent::scope::settled(&r, result.as_ref()),
+        settled: crate::agent::scope::settled(&r, result.as_ref(), round),
         id: r.id,
         name,
         provider: r.provider,
+        model,
+        permission_mode,
         status: r.status,
-        activity: r.activity,
+        round,
+        activity,
+        needs_attention,
+        pending_events,
         end_reason: r.end_reason,
         exit_code: r.exit_code,
         created_at: r.created_at,
@@ -2607,6 +2750,7 @@ fn agent_view(
         lineage: lineage.into(),
         task,
         result: result.map(Into::into),
+        results,
         messages,
     })
 }
@@ -2639,11 +2783,20 @@ fn spawned_caller(state: &Shared, actor: &Actor) -> ApiResult<String> {
     }
 }
 
-/// An agent a parent may ask for (agent discovery): in V1 only its own
-/// provider, since B4 refuses every other.
+/// An agent a parent may start (agent discovery, 143b), with the model
+/// forms it takes (145b).
 #[derive(Debug, Clone, Serialize)]
 pub struct StartableAgent {
+    /// The id start_agent's `agent` takes.
+    pub agent: String,
+    /// Its name, as people call it.
+    pub title: String,
+    /// The same id, for older callers.
     pub provider: String,
+    /// What `model` may be for it, as a sentence; absent where Storm passes
+    /// no model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<String>,
 }
 
 /// C4's caps, as numbers.
@@ -2652,45 +2805,103 @@ pub struct SpawnLimits {
     pub depth: i64,
     pub children: i64,
     pub tree: i64,
-    pub pending: i64,
+}
+
+/// A crew role a start may name (145b).
+#[derive(Debug, Clone, Serialize)]
+pub struct StartableRole {
+    pub title: String,
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ListAgents {
     pub agents: Vec<StartableAgent>,
+    /// The roles in Kit a start may name, by title or path.
+    pub roles: Vec<StartableRole>,
     pub limits: SpawnLimits,
-    /// The cap a start would hit now, if any. Advisory: a request is
-    /// counted again when it is made (P-6).
+    /// The cap a start would hit now, if any. Advisory: a start is counted
+    /// again when it is made.
     pub start_refused: Option<&'static str>,
     /// The longest one `wait_agent` holds, in seconds (134i).
     pub wait_cap_secs: u64,
+    /// Whether Storm can wake this session when events wait (144c). While
+    /// false, nothing is pushed: events wait until `wait_agent` reads them.
+    pub wake: bool,
 }
 
-/// `list_agents`: what the calling parent may ask to start, and how close it
-/// is to its caps.
+/// `list_agents`: what the calling parent may start, and how close it is to
+/// its caps.
 pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents> {
-    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_PENDING, MAX_TREE};
+    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_TREE};
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.get(&caller).map_err(agent_error)?;
+    let roles = role_catalog(state, &r.owner_user_id)
+        .await
+        .into_iter()
+        .map(|(note, _)| StartableRole {
+            title: note.title,
+            path: note.path,
+            summary: note.summary,
+        })
+        .collect();
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
-        agents: vec![StartableAgent {
-            provider: r.provider,
-        }],
+        wake: state.agent.wake_on(&r.provider),
+        agents: state
+            .agent
+            .startable_agents(&caller)
+            .map_err(agent_error)?
+            .into_iter()
+            .map(|provider| StartableAgent {
+                models: crate::agent::model::MODEL_AGENTS
+                    .contains(&provider.as_str())
+                    .then(|| crate::agent::model::accepted_forms(&provider)),
+                agent: provider.clone(),
+                title: crate::agent::permission::label(&provider).to_string(),
+                provider,
+            })
+            .collect(),
+        roles,
         limits: SpawnLimits {
             depth: MAX_DEPTH.min(BUILT_DEPTH),
             children: MAX_CHILDREN,
             tree: MAX_TREE,
-            pending: MAX_PENDING,
         },
     })
 }
 
-/// `agent_status {id}`: one of the caller's descendants, with its task.
+/// The descendant `to` names (145b): its id, or the name of one of the
+/// caller's own children, the live one first, else the latest. Anything
+/// else is not found.
+fn resolve_agent(state: &Shared, caller: &str, to: &str) -> ApiResult<String> {
+    let to = to.trim();
+    if state.agent.descendant(caller, to).is_ok() {
+        return Ok(to.to_string());
+    }
+    let mut named = Vec::new();
+    for child in state.agent.children_of(caller).map_err(agent_error)? {
+        if session_name(state, &child)? == to {
+            named.push(child);
+        }
+    }
+    named
+        .iter()
+        .find(|c| !c.is_ended())
+        .or(named.last())
+        .map(|c| c.id.clone())
+        .ok_or_else(|| not_found("no such agent among your descendants"))
+}
+
+/// `agent_status {id}`: one of the caller's descendants, by id or name,
+/// with its task and every round's result.
 pub async fn agent_status(state: &Shared, actor: &Actor, id: &str) -> ApiResult<AgentView> {
     let caller = spawning_caller(state, actor)?;
-    let r = state.agent.descendant(&caller, id).map_err(agent_error)?;
+    let id = resolve_agent(state, &caller, id)?;
+    let r = state.agent.descendant(&caller, &id).map_err(agent_error)?;
     agent_view(state, r, Some(&caller))
 }
 
@@ -2710,14 +2921,7 @@ pub struct Children {
     pub agents: Vec<AgentView>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub predecessor_results: Vec<PredecessorResult>,
-    /// The caller's own start requests, newest first: how a parent learns
-    /// what a person decided after `start_agent` answered.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub starts: Vec<RequestView>,
 }
-
-/// How many of its start requests `list_children` shows a parent.
-const STARTS_SHOWN: usize = 10;
 
 /// `list_children`: the caller's own children, oldest first, and the
 /// results its resumed predecessors' children reported (C3).
@@ -2744,78 +2948,223 @@ pub async fn list_children(state: &Shared, actor: &Actor) -> ApiResult<Children>
             result: result.into(),
         });
     }
-    let starts = state
-        .agent
-        .requests_of(&caller)
-        .map_err(agent_error)?
-        .into_iter()
-        .rev()
-        .filter(|r| r.kind == "start")
-        .take(STARTS_SHOWN)
-        .map(|r| RequestView::of(r, None))
-        .collect();
     Ok(Children {
         agents,
         predecessor_results,
-        starts,
     })
 }
 
 /// The longest name a parent may give a child, in characters.
-pub const MAX_AGENT_NAME_CHARS: usize = 80;
+pub const MAX_AGENT_NAME_CHARS: usize = crate::agent::store::spawn::MAX_NAME_CHARS;
 
-/// What `start_agent` asks a person to approve (134o).
-#[derive(Debug, Clone)]
+/// What `start_agent` starts (145b).
+#[derive(Debug, Clone, Default)]
 pub struct StartAgent {
     pub task: String,
     pub name: Option<String>,
     pub context_note: Option<crate::agent::ContextRef>,
-    pub provider: Option<String>,
-    /// Seconds to wait for the person's decision, capped as `wait_agent`
-    /// is; none answers at once.
-    pub wait: Option<u64>,
+    /// The child's agent; the caller's own when absent.
+    pub agent: Option<String>,
+    pub model: Option<String>,
+    /// Never looser than the caller's own (146b); the caller's, or the
+    /// nearest stricter one the child's agent offers, when absent.
+    pub permission_mode: Option<String>,
+    /// A role note in Kit, by title or path.
+    pub role: Option<String>,
+    /// `false` waits for the child's first result, within the caller's
+    /// wait bound. Default `true`.
+    pub background: Option<bool>,
+    /// For a foreground start, seconds to wait at most, capped as
+    /// `wait_agent` is.
+    pub timeout: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct StartRequested {
-    /// What a person decides on; none when Storm refused it at once.
-    pub request_id: Option<String>,
-    /// `pending`, `decided`, or `refused` when Storm refused it at once.
+pub struct StartedAgent {
+    /// `started`, or `refused`.
     pub state: &'static str,
-    /// Once decided: `started`, `denied`, `expired` or `refused`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub outcome: Option<String>,
+    pub id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// For `refused: limit` at once, the cap.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cap: Option<&'static str>,
-    /// For `started`, the new agent's id.
+    pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// For a foreground start: its status when the wait ended.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    /// For a foreground start: its first result, the child's own words.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<ResultView>,
+    /// A foreground start whose wait ended before the child reported.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub still_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    /// For `refused: limit`, the cap.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cap: Option<&'static str>,
+    /// What to do instead, for a refusal that has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
 }
 
-/// `start_agent {task, name?, context_note?, provider?, wait?}` (134-5):
-/// asks a person to approve a new agent on the caller's host, in its own
-/// workspace, running the caller's agent with no more than the caller's
-/// grants (134e). Answered at once, or after at most `wait` seconds below
-/// the caller's tool-call timeout (134i); `list_children` shows a decision
-/// that comes later.
+impl StartedAgent {
+    fn refused(reason: &'static str, cap: Option<&'static str>, message: Option<String>) -> Self {
+        Self {
+            state: "refused",
+            id: None,
+            name: None,
+            agent: None,
+            model: None,
+            permission_mode: None,
+            status: None,
+            result: None,
+            still_running: false,
+            reason: Some(reason),
+            cap,
+            message,
+        }
+    }
+}
+
+/// A permission mode was given to a session (146b): audited once, at its
+/// launch or its start.
+pub const EVENT_PERMISSION_MODE: &str = "permission_mode";
+
+async fn audit_permission_mode(
+    state: &Shared,
+    session: &crate::agent::store::SessionRecord,
+    mode: &str,
+    requester: Option<&str>,
+) {
+    let detail = serde_json::json!({
+        "session_id": session.id,
+        "host_id": session.host_id,
+        "provider": session.provider,
+        "permission_mode": mode,
+        "requester": requester,
+    });
+    let _ = state.auth_db.lock().await.record_event(
+        EVENT_PERMISSION_MODE,
+        Some(&session.owner_user_id),
+        None,
+        &crate::index::now_rfc3339(),
+        &detail.to_string(),
+    );
+}
+
+/// A child's permission mode (146b): the one asked for, never looser than
+/// its parent's and offered by its agent; else its parent's, or the nearest
+/// stricter one its agent offers. `None` is `default`.
+fn child_permission_mode(
+    state: &Shared,
+    parent: &str,
+    agent: &str,
+    asked: Option<&str>,
+) -> Result<Option<String>, (&'static str, String)> {
+    use crate::agent::permission;
+    let parents = state
+        .agent
+        .launch_of(parent)
+        .ok()
+        .flatten()
+        .and_then(|l| l.permission_mode)
+        .unwrap_or_else(|| permission::DEFAULT.to_string());
+    let mode = match asked.map(str::trim) {
+        None | Some("") => permission::inherit(agent, &parents),
+        Some(m) => {
+            let Some(rank) = permission::rank(m) else {
+                return Err((
+                    "permission_mode_unavailable",
+                    format!(
+                        "{:?} is not a permission mode: there are {}.",
+                        m.chars().take(40).collect::<String>(),
+                        permission::ORDER.join(", ")
+                    ),
+                ));
+            };
+            if rank > permission::rank(&parents).unwrap_or(0) {
+                return Err((
+                    "permission_mode_wider",
+                    format!(
+                        "A child's permission mode is never looser than yours ({parents}): \
+                         leave permission_mode out, or choose a stricter one."
+                    ),
+                ));
+            }
+            permission::check(agent, m).map_err(|s| ("permission_mode_unavailable", s))?;
+            permission::ORDER[rank]
+        }
+    };
+    Ok(permission::stored(mode))
+}
+
+/// Every role note in Kit with its frontmatter `model:`, read as the
+/// account. No Kit vault is no roles.
+async fn role_catalog(state: &Shared, owner: &str) -> Vec<(RoleNote, Option<String>)> {
+    let actor = Actor::Session {
+        user_id: owner.to_string(),
+    };
+    role_notes(state, &actor).await.unwrap_or_default()
+}
+
+/// `agent_unavailable`'s sentence: the ids list_agents gives, which
+/// start_agent's `agent` takes.
+fn agent_unavailable(state: &Shared, caller: &str, agent: &str) -> ApiResult<String> {
+    let startable = state
+        .agent
+        .startable_agents(caller)
+        .map_err(agent_error)?
+        .join(", ");
+    let startable = if startable.is_empty() {
+        "none".to_string()
+    } else {
+        startable
+    };
+    let shown: String = agent.chars().take(64).collect();
+    Ok(if agent == "codex" {
+        format!(
+            "{} The agents it can start here (pass one as agent): {startable}.",
+            crate::agent::permission::not_unattended(agent)
+        )
+    } else {
+        format!(
+            "Storm cannot start {shown:?} on this host for a child. The agents it can start here (pass one as agent): {startable}."
+        )
+    })
+}
+
+/// `start_agent {task, name?, agent?, model?, role?, background?,
+/// context_note?}` (134-5, 145b): starts a child at once on the caller's
+/// host, in its own workspace, running the caller's agent or another its
+/// host can start (143a), on `model` (checked for that agent), with no more
+/// than the caller's grants (134e). In the background (the default) it
+/// answers at once; `background: false` waits for its first result within
+/// the caller's wait bound, else answers `still_running`.
 pub async fn start_agent(
     state: &Shared,
     actor: &Actor,
     req: StartAgent,
-) -> ApiResult<StartRequested> {
-    use crate::agent::store::spawn::NewRequest;
+) -> ApiResult<StartedAgent> {
+    use crate::agent::store::spawn::StartPayload;
     let caller = spawning_caller(state, actor)?;
     if req.task.trim().is_empty() {
         return Err(bad_request("a start needs a task"));
     }
     let name = match req.name.as_deref().map(str::trim) {
         None | Some("") => None,
-        Some(n) if n.chars().count() > MAX_AGENT_NAME_CHARS || n.chars().any(char::is_control) => {
+        Some(n)
+            if n.chars().count() > MAX_AGENT_NAME_CHARS
+                || n.chars().any(char::is_control)
+                || n.starts_with("ags_") =>
+        {
             return Err(bad_request(format!(
-                "a name is one line of at most {MAX_AGENT_NAME_CHARS} characters"
+                "a name is one line of at most {MAX_AGENT_NAME_CHARS} characters, not an id"
             )));
         }
         Some(n) => Some(n.to_string()),
@@ -2833,90 +3182,287 @@ pub async fn start_agent(
             })
         }
     };
-    let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
-    let new = NewRequest::Start {
-        task: req.task,
-        provider: req.provider,
-        name,
-        context_note,
-    };
-    let created = match create_spawn_request(state, &caller, new).await? {
-        Ok(r) => r,
-        Err(refusal) => {
-            return Ok(StartRequested {
-                request_id: None,
-                state: "refused",
-                outcome: None,
-                reason: Some(refusal.reason.into()),
-                cap: refusal.cap,
-                agent: None,
-            });
+    let parent = state.agent.get(&caller).map_err(agent_error)?;
+    let asked = req
+        .agent
+        .as_deref()
+        .map(str::trim)
+        .filter(|a| !a.is_empty())
+        .map(crate::agent::permission::agent_id);
+    let agent = asked.clone().unwrap_or_else(|| parent.provider.clone());
+    // Before the model, so a wrong agent is never blamed on its model.
+    if !state
+        .agent
+        .startable_agents(&caller)
+        .map_err(agent_error)?
+        .contains(&agent)
+    {
+        let refusal = crate::agent::store::spawn::Refusal {
+            reason: "agent_unavailable",
+            cap: None,
+        };
+        audit_act(state, &caller, "start", None, Some(refusal)).await;
+        return Ok(StartedAgent::refused(
+            refusal.reason,
+            None,
+            Some(agent_unavailable(state, &caller, &agent)?),
+        ));
+    }
+    let (role, role_model) = match req.role.as_deref().map(str::trim) {
+        None | Some("") => (None, None),
+        Some(asked) => {
+            let wanted = asked.trim_end_matches(".md");
+            let found = role_catalog(state, &parent.owner_user_id)
+                .await
+                .into_iter()
+                .find(|(r, _)| {
+                    r.path.trim_end_matches(".md") == wanted || r.title.eq_ignore_ascii_case(asked)
+                });
+            match found {
+                Some((r, model)) => (
+                    Some(crate::agent::store::Context {
+                        vault_id: r.vault_id,
+                        note_id: r.note_id,
+                        title: r.title,
+                    }),
+                    model,
+                ),
+                None => {
+                    audit_act(
+                        state,
+                        &caller,
+                        "start",
+                        None,
+                        Some(crate::agent::store::spawn::Refusal {
+                            reason: "role_unknown",
+                            cap: None,
+                        }),
+                    )
+                    .await;
+                    return Ok(StartedAgent::refused(
+                        "role_unknown",
+                        None,
+                        Some(
+                            "No role in Kit has that title or path: list_agents names them.".into(),
+                        ),
+                    ));
+                }
+            }
         }
     };
-    let bound = crate::agent::scope::wait_bound(
-        &provider,
-        Some(std::time::Duration::from_secs(req.wait.unwrap_or(0))),
-    );
-    let r = if bound.is_zero() {
-        state.agent.request(&created.id).map_err(agent_error)?
-    } else {
-        state
-            .agent
-            .wait_request(&created.id, bound)
-            .await
-            .map_err(agent_error)?
+    // A role's own model counts only where its agent takes it.
+    let model = match req.model.as_deref().map(str::trim) {
+        Some(m) => Some(m.to_string()),
+        None => role_model.filter(|m| crate::agent::model::check(&agent, m).is_ok()),
     };
-    let decided = r.state == "decided";
-    Ok(StartRequested {
-        request_id: Some(r.id),
-        state: if decided { "decided" } else { "pending" },
-        outcome: r.outcome,
-        reason: r.reason,
+    if let Some(m) = &model
+        && let Err(sentence) = crate::agent::model::check(&agent, m)
+    {
+        audit_act(
+            state,
+            &caller,
+            "start",
+            None,
+            Some(crate::agent::store::spawn::Refusal {
+                reason: "model_unavailable",
+                cap: None,
+            }),
+        )
+        .await;
+        return Ok(StartedAgent::refused(
+            "model_unavailable",
+            None,
+            Some(sentence),
+        ));
+    }
+    let permission_mode =
+        match child_permission_mode(state, &caller, &agent, req.permission_mode.as_deref()) {
+            Ok(mode) => mode,
+            Err((reason, sentence)) => {
+                audit_act(
+                    state,
+                    &caller,
+                    "start",
+                    None,
+                    Some(crate::agent::store::spawn::Refusal { reason, cap: None }),
+                )
+                .await;
+                return Ok(StartedAgent::refused(reason, None, Some(sentence)));
+            }
+        };
+    let deliverable = deliverable_credential(state, &parent.host_id);
+    let payload = StartPayload {
+        task: req.task,
+        provider: asked,
+        name,
+        context_note,
+        model: model.clone(),
+        permission_mode: permission_mode.clone(),
+        role,
+    };
+    let child = match state
+        .agent
+        .start_child(&caller, payload, deliverable)
+        .map_err(agent_error)?
+    {
+        Ok(child) => {
+            audit_act(state, &caller, "start", Some(&child.id), None).await;
+            if let Some(mode) = &permission_mode {
+                audit_permission_mode(state, &child, mode, Some(&caller)).await;
+            }
+            child
+        }
+        Err(refusal) => {
+            audit_act(state, &caller, "start", None, Some(refusal)).await;
+            let message = match refusal.reason {
+                "agent_unavailable" => Some(agent_unavailable(state, &caller, &agent)?),
+                "name_taken" => Some(
+                    "One of your live children already has that name: continue it with send_message, or choose another name."
+                        .into(),
+                ),
+                "limit" => Some(
+                    "End children you are done with (end_agent) before starting another.".into(),
+                ),
+                _ => None,
+            };
+            return Ok(StartedAgent::refused(refusal.reason, refusal.cap, message));
+        }
+    };
+    let name = session_name(state, &child)?;
+    let mut started = StartedAgent {
+        state: "started",
+        id: Some(child.id.clone()),
+        name: Some(name),
+        agent: Some(child.provider.clone()),
+        model,
+        permission_mode,
+        status: None,
+        result: None,
+        still_running: false,
+        reason: None,
         cap: None,
-        agent: r.session,
-    })
+        message: None,
+    };
+    if req.background.unwrap_or(true) {
+        return Ok(started);
+    }
+    let bound = crate::agent::scope::wait_bound(
+        &parent.provider,
+        req.timeout.map(std::time::Duration::from_secs),
+    );
+    let agent = state.agent.clone();
+    let offered = caller.clone();
+    let (now, result) = state
+        .agent
+        .wait_first_result(&child.id, bound, &move || agent.spawn_offered(&offered))
+        .await
+        .map_err(agent_error)?;
+    started.still_running = result.is_none() && !now.is_ended();
+    started.status = Some(now.status);
+    started.result = result.map(Into::into);
+    Ok(started)
+}
+
+/// What `wait_agent` is asked (134i, 144a).
+#[derive(Debug, Clone, Default)]
+pub struct WaitAgent {
+    /// Descendants to hear of, by id or name; all the caller's children
+    /// when empty.
+    pub ids: Vec<String>,
+    /// The cursor last returned: acknowledges up to it, and reads after it.
+    /// Without it the read starts from the caller's acknowledged cursor.
+    pub after: Option<i64>,
+    pub timeout: Option<u64>,
+    /// `settled` waits as 134i did: until every listed agent has settled.
+    pub until: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WaitAgents {
+    /// The caller's child events after its cursor, oldest first (144a).
+    pub events: Vec<crate::agent::events::ChildEvent>,
+    /// The highest `seq` returned, or where the read started: the `after`
+    /// of the next call.
+    pub cursor: i64,
     pub agents: Vec<AgentView>,
-    /// The bound ended the wait before every agent settled.
+    /// The bound ended the wait: no event came, or (settled) not every
+    /// agent settled.
     pub timed_out: bool,
 }
 
-/// `wait_agent {ids, timeout?}`: a bounded long-poll (134i). It returns once
-/// every listed descendant has ended or reported, or at the caller's
-/// adapter's cap, which stays below its tool-call timeout.
-pub async fn wait_agent(
-    state: &Shared,
-    actor: &Actor,
-    ids: &[String],
-    timeout_secs: Option<u64>,
-) -> ApiResult<WaitAgents> {
-    let caller = spawning_caller(state, actor)?;
+/// `wait_agent {ids?, after?, timeout?, until?}`: a bounded long-poll over
+/// the caller's child events (144a), returning on the first, or with
+/// `until: "settled"` once every listed descendant has ended or reported
+/// for its round (134i, 145). Either way at most the caller's adapter's
+/// cap, which stays below its tool-call timeout. Anything outside the
+/// caller's descendants is `not_permitted` (144d).
+pub async fn wait_agent(state: &Shared, actor: &Actor, req: WaitAgent) -> ApiResult<WaitAgents> {
+    let caller = spawning_caller(state, actor)
+        .map_err(|e| ApiError(e.0, format!("not_permitted: {}", e.1)))?;
+    let settled = match req.until.as_deref() {
+        None | Some("event") => false,
+        Some("settled") => true,
+        Some(_) => return Err(bad_request("until is `event` or `settled`")),
+    };
+    // A name resolves to its id; anything else is left for the scope check
+    // below to refuse as it always has.
+    let ids: Vec<String> = req
+        .ids
+        .iter()
+        .map(|id| resolve_agent(state, &caller, id).unwrap_or_else(|_| id.clone()))
+        .collect();
     let provider = state.agent.get(&caller).map_err(agent_error)?.provider;
-    let bound = crate::agent::scope::wait_bound(
-        &provider,
-        timeout_secs.map(std::time::Duration::from_secs),
-    );
+    let bound =
+        crate::agent::scope::wait_bound(&provider, req.timeout.map(std::time::Duration::from_secs));
     let agent = state.agent.clone();
     let offered = caller.clone();
-    let (records, timed_out) = state
+    let still_offered = move || agent.spawn_offered(&offered);
+    if settled {
+        let (records, timed_out) = state
+            .agent
+            .wait_agents(&caller, &ids, bound, &still_offered)
+            .await
+            .map_err(agent_error)?;
+        let read = state
+            .agent
+            .events_now(&caller, &ids, req.after)
+            .map_err(agent_error)?;
+        return Ok(WaitAgents {
+            events: read.events,
+            cursor: read.cursor,
+            agents: records
+                .into_iter()
+                .map(|r| agent_view(state, r, None))
+                .collect::<ApiResult<_>>()?,
+            timed_out,
+        });
+    }
+    let read = state
         .agent
-        .wait_agents(&caller, ids, bound, &move || agent.spawn_offered(&offered))
+        .wait_events(&caller, &ids, req.after, bound, &still_offered)
         .await
         .map_err(agent_error)?;
+    let records = if ids.is_empty() {
+        state.agent.children_of(&caller).map_err(agent_error)?
+    } else {
+        ids.iter()
+            .map(|id| state.agent.descendant(&caller, id))
+            .collect::<Result<_, _>>()
+            .map_err(agent_error)?
+    };
     Ok(WaitAgents {
+        events: read.events,
+        cursor: read.cursor,
         agents: records
             .into_iter()
             .map(|r| agent_view(state, r, None))
             .collect::<ApiResult<_>>()?,
-        timed_out,
+        timed_out: read.timed_out,
     })
 }
 
 /// `report_result {outcome, summary, details?}` (134h): the calling spawned
-/// session's own result. Audited without its text.
+/// session's own result for its round (145). Audited without its text.
 pub async fn report_result(
     state: &Shared,
     actor: &Actor,
@@ -2936,7 +3482,7 @@ pub async fn report_result(
         Some(&r.owner_user_id),
         None,
         &serde_json::json!({"session_id": caller, "host_id": r.host_id,
-            "outcome": result.outcome}),
+            "outcome": result.outcome, "round": result.round}),
     )
     .await;
     Ok(result.into())
@@ -2944,9 +3490,9 @@ pub async fn report_result(
 
 // ---- The inbox (decision 134-6) ----------------------------------------
 //
-// A parent's message is a request a person decides (134o); approved, it
-// enters only the child's inbox (A2), and the child reads it with
-// `read_messages`. Nothing is written to any terminal (C9, G-134-3).
+// A parent's message enters only its child's inbox, at once (145a), and the
+// child reads it with `read_messages`. Nothing is written to any terminal
+// (C9, G-134-3).
 
 /// A child stopped after its parent ended by itself (C9), with the notice
 /// it was given 30 s before. Metadata only.
@@ -2954,73 +3500,107 @@ pub const EVENT_SPAWN_PARENT_ENDED: &str = "spawn_parent_ended";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MessageSent {
-    /// What a person decides on; none when Storm refused it at once.
-    pub request_id: Option<String>,
-    /// `pending`, or `refused`.
-    pub state: &'static str,
+    pub delivered: bool,
+    /// The agent was parked (145e) and is being resumed for this round.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub resumed: bool,
+    /// The child's round the message belongs to: the next one when it came
+    /// after the child's result (145).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub round: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<&'static str>,
-    /// For `refused: limit`, the cap: `pending` or `inbox`.
+    /// For `refused: limit`, the cap: `inbox`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cap: Option<&'static str>,
 }
 
-/// `send_message {id, text}`: asks a person to approve a message to one of
-/// the caller's descendants. Answered at once; `agent_status` shows the
-/// message's state after.
+/// `send_message {to, text}` (134-6, 145d): a message into one of the
+/// caller's live descendants' inbox, at once, by id or name. Answers
+/// `{delivered, round}`.
 pub async fn send_message(
     state: &Shared,
     actor: &Actor,
-    id: &str,
+    to: &str,
     text: &str,
 ) -> ApiResult<MessageSent> {
-    use crate::agent::store::spawn::NewRequest;
     let caller = spawning_caller(state, actor)?;
     if text.trim().is_empty() {
         return Err(bad_request("a message needs text"));
     }
-    let new = NewRequest::Message {
-        target: id.to_string(),
-        text: text.to_string(),
-    };
-    request_for_descendant(state, &caller, new).await
-}
-
-/// `end_agent {id}` (134-7): asks a person to approve ending one of the
-/// caller's descendants. Answered at once like `send_message`; approved, the
-/// target is sent `end`, and its own descendants follow it (C1).
-pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<MessageSent> {
-    use crate::agent::store::spawn::NewRequest;
-    let caller = spawning_caller(state, actor)?;
-    let new = NewRequest::End {
-        target: id.to_string(),
-    };
-    request_for_descendant(state, &caller, new).await
-}
-
-/// Asks a person to approve `new`, answered as `send_message` and
-/// `end_agent` answer.
-async fn request_for_descendant(
-    state: &Shared,
-    caller: &str,
-    new: crate::agent::store::spawn::NewRequest,
-) -> ApiResult<MessageSent> {
-    match create_spawn_request(state, caller, new).await? {
-        Ok(r) => Ok(MessageSent {
-            request_id: Some(r.id),
-            state: "pending",
-            reason: None,
-            cap: None,
-        }),
-        Err(refusal) if refusal.reason == "not_found" => {
-            Err(not_found("no such agent among your descendants"))
+    let target = resolve_agent(state, &caller, to)?;
+    match state
+        .agent
+        .message_child(&caller, &target, text)
+        .map_err(agent_error)?
+    {
+        Ok(round) => {
+            audit_act(state, &caller, "message", Some(&target), None).await;
+            // 145d: a parked child is resumed with the message as its task;
+            // one whose host is away is resumed once its host is back.
+            let host = state.agent.get(&target).map_err(agent_error)?.host_id;
+            let resumed = state
+                .agent
+                .resume_parked(&target, deliverable_credential(state, &host))
+                .map_err(agent_error)?;
+            Ok(MessageSent {
+                delivered: true,
+                resumed,
+                round: Some(round),
+                reason: None,
+                cap: None,
+            })
         }
-        Err(refusal) => Ok(MessageSent {
-            request_id: None,
-            state: "refused",
-            reason: Some(refusal.reason),
-            cap: refusal.cap,
-        }),
+        Err(refusal) => {
+            audit_act(state, &caller, "message", Some(&target), Some(refusal)).await;
+            if refusal.reason == "not_found" {
+                return Err(not_found("no such live agent among your descendants"));
+            }
+            Ok(MessageSent {
+                delivered: false,
+                resumed: false,
+                round: None,
+                reason: Some(refusal.reason),
+                cap: refusal.cap,
+            })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentEnded {
+    pub ended: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+/// `end_agent {id}` (134-7): ends one of the caller's live descendants at
+/// once, by id or name; its own descendants follow it (C1).
+pub async fn end_agent(state: &Shared, actor: &Actor, id: &str) -> ApiResult<AgentEnded> {
+    let caller = spawning_caller(state, actor)?;
+    let target = resolve_agent(state, &caller, id)?;
+    match state
+        .agent
+        .end_child(&caller, &target)
+        .map_err(agent_error)?
+    {
+        Ok(()) => {
+            audit_act(state, &caller, "end", Some(&target), None).await;
+            Ok(AgentEnded {
+                ended: true,
+                reason: None,
+            })
+        }
+        Err(refusal) => {
+            audit_act(state, &caller, "end", Some(&target), Some(refusal)).await;
+            if refusal.reason == "not_found" {
+                return Err(not_found("no such live agent among your descendants"));
+            }
+            Ok(AgentEnded {
+                ended: false,
+                reason: Some(refusal.reason),
+            })
+        }
     }
 }
 
@@ -3077,6 +3657,97 @@ pub async fn read_messages(
             })
             .collect(),
         timed_out,
+    })
+}
+
+/// A parent read its child (145g): audited with how many messages and
+/// lines it was given, never the text.
+pub const EVENT_SPAWN_PEEK: &str = "spawn_peek";
+
+/// At most this many screen lines per `read_output`.
+pub const MAX_OUTPUT_LINES: usize = 200;
+const DEFAULT_OUTPUT_LINES: usize = 50;
+
+/// What `read_output` says when a child has said nothing Storm heard.
+pub const NO_MESSAGES_NOTE: &str =
+    "It has said nothing Storm has heard yet. Pass screen: true to see its terminal.";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct OutputTail {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    /// The last result it reported, or none yet.
+    pub reported: Option<ResultView>,
+    /// The newest things it said, oldest first, each as Storm heard it.
+    pub messages: Vec<crate::agent::said::ChildMessage>,
+    /// The last lines of its terminal, without escape sequences, oldest
+    /// first; only when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
+}
+
+/// `read_output {id, screen?, tail?}` (145g, amended 2026-10-31): what one
+/// of the caller's own children said, the last result it reported and, with
+/// `screen`, the last `tail` lines (up to 200) of its terminal, from the
+/// server's output cache, as its screen shows them. All of it the child's
+/// own: data, not instructions. Anyone else, and any other session, is
+/// `not_permitted`. Audited without its text.
+pub async fn read_output(
+    state: &Shared,
+    actor: &Actor,
+    id: &str,
+    screen: bool,
+    tail: Option<u64>,
+) -> ApiResult<OutputTail> {
+    let refused = || {
+        ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "not_permitted: only the agent that started a session reads its output".into(),
+        )
+    };
+    let caller = spawning_caller(state, actor).map_err(|_| refused())?;
+    let target = resolve_agent(state, &caller, id).map_err(|_| refused())?;
+    let parent = state
+        .agent
+        .lineage(&target)
+        .map_err(agent_error)?
+        .parent_session;
+    if parent.as_deref() != Some(caller.as_str()) {
+        return Err(refused());
+    }
+    let r = state.agent.get(&target).map_err(agent_error)?;
+    let reported = state
+        .agent
+        .result_of(&target)
+        .map_err(agent_error)?
+        .map(ResultView::from);
+    let messages = state.agent.child_messages(&target);
+    let screen = screen.then(|| {
+        let n = tail
+            .map_or(DEFAULT_OUTPUT_LINES, |t| t as usize)
+            .clamp(1, MAX_OUTPUT_LINES);
+        state.agent.output_tail(&target, n)
+    });
+    record_spawn_event(
+        state,
+        EVENT_SPAWN_PEEK,
+        Some(&r.owner_user_id),
+        None,
+        &serde_json::json!({"session_id": caller, "target": target,
+            "messages": messages.len(), "lines": screen.as_ref().map_or(0, Vec::len)}),
+    )
+    .await;
+    Ok(OutputTail {
+        name: session_name(state, &r)?,
+        id: target,
+        status: r.status,
+        note: (messages.is_empty() && screen.is_none()).then_some(NO_MESSAGES_NOTE),
+        reported,
+        messages,
+        screen,
     })
 }
 
@@ -3668,9 +4339,21 @@ pub struct SessionView {
     /// made it: the mode and the commit a clone starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_workspace: Option<crate::agent::ChildWorkspace>,
-    /// Whether it waits for a person (134p): `approval`, `permission_prompt`
-    /// or `blocked`. Beside `activity`, never a status, never from idle.
+    /// Whether it waits for a person (134p): `approval`, `permission_prompt`,
+    /// `usage_limit` (144b) or `blocked`. Beside `activity`, never a status,
+    /// never from idle.
     pub needs_attention: Option<&'static str>,
+    /// A child's evidence-based activity (144b): `working` or `idle` only
+    /// from a gated signal, else `unknown` while live. Only on a child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_activity: Option<String>,
+    /// A child's events its parent has not acknowledged (144a). Only on a
+    /// child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_events: Option<i64>,
+    /// A child's latest events, oldest first. Only on a child.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recent_events: Option<Vec<crate::agent::events::ChildEvent>>,
     /// Its spawn switch (134-10), only where its host could offer spawning
     /// now or the switch is on; absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -3678,6 +4361,20 @@ pub struct SessionView {
     /// The role it was launched with (138f), titled as it was then. Fixed:
     /// changing the label never changes it.
     pub launch_role: Option<crate::agent::store::Context>,
+    /// The model it was started on (145b), when one was chosen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Its permission mode (146b), absent for `default`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// Its agent's request for auto (147c) while it waits, or once approved
+    /// (with where the switch went); absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode_request: Option<crate::agent::mode::ModeRequest>,
+    /// Its agent's deletion waiting for the person (149c), shown under its
+    /// Needs you; absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delete_request: Option<crate::agent::deletes::DeleteRequest>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -3717,6 +4414,27 @@ fn session_view(
         .child_workspace_of(&session.id)
         .map_err(internal)?;
     let needs_attention = state.agent.needs_attention(&session).map_err(agent_error)?;
+    let (child_activity, pending_events, recent_events) = match &lineage {
+        LineageView {
+            parent_session: Some(_),
+            ..
+        } => (
+            state.agent.health_activity(&session),
+            Some(
+                state
+                    .agent
+                    .pending_events(&session.id)
+                    .map_err(agent_error)?,
+            ),
+            Some(
+                state
+                    .agent
+                    .recent_events(&session.id)
+                    .map_err(agent_error)?,
+            ),
+        ),
+        _ => (None, None, None),
+    };
     let spawn = state.agent.spawn_view(&session).map_err(internal)?;
     let role = state
         .agent
@@ -3728,9 +4446,26 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id, launch_role) = match launch {
-        Some(l) => (l.name, l.context, l.write_vault_id, l.role),
-        None => (session.workspace.clone(), None, None, None),
+    let (name, context, write_vault_id, launch_role, model, permission_mode) = match launch {
+        Some(l) => (
+            l.name,
+            l.context,
+            l.write_vault_id,
+            l.role,
+            l.model,
+            l.permission_mode,
+        ),
+        None => (session.workspace.clone(), None, None, None, None, None),
+    };
+    let mode_request = shown_mode_request(state, &session.id)?;
+    let delete_request = state
+        .agent
+        .pending_delete_of(&session.id)
+        .map_err(agent_error)?;
+    let needs_attention = if delete_request.is_some() {
+        Some(crate::agent::attention::DELETE_APPROVAL)
+    } else {
+        needs_attention
     };
     Ok(SessionView {
         session,
@@ -3748,9 +4483,28 @@ fn session_view(
         isolation,
         child_workspace,
         needs_attention,
+        child_activity,
+        pending_events,
+        recent_events,
         spawn,
         launch_role,
+        model,
+        permission_mode,
+        mode_request,
+        delete_request,
     })
+}
+
+/// The request a session's view carries: one waiting, or one approved.
+fn shown_mode_request(
+    state: &Shared,
+    session_id: &str,
+) -> ApiResult<Option<crate::agent::mode::ModeRequest>> {
+    Ok(state
+        .agent
+        .mode_request_of(session_id)
+        .map_err(agent_error)?
+        .filter(|r| r.pending() || r.state == crate::agent::mode::APPROVED))
 }
 
 /// Names each view's role by its note's title now, so a rename follows and a
@@ -3807,6 +4561,14 @@ pub async fn launch_session(
 ) -> ApiResult<LaunchedSession> {
     // Only a person turns the switch on, at launch as later (B1, 141e).
     if req.spawn {
+        crews_owner(actor)?;
+    }
+    // A permission mode is the person's choice (146b), never an agent's.
+    if req
+        .permission_mode
+        .as_deref()
+        .is_some_and(|m| !m.is_empty() && m != crate::agent::permission::DEFAULT)
+    {
         crews_owner(actor)?;
     }
     // A resume is the old session's launch again (decision 89): its note and
@@ -3894,12 +4656,27 @@ pub async fn launch_session(
     // Every non-disabled connection of the owner scoped to this host, plus
     // `storm` (spec §6, G-D9, decision 121). Snapshotted here; the manager
     // drops them for `shell` and for a host that cannot bridge.
+    // An approved switch (147c) is the same session in another mode: it
+    // keeps the connections it had, never one added since.
+    let kept = match (&req.switch_mode, &req.resume_of) {
+        (Some(_), Some(old)) => Some(
+            state
+                .agent
+                .grants_of(old)
+                .map_err(internal)?
+                .into_iter()
+                .map(|g| g.id)
+                .collect::<std::collections::HashSet<_>>(),
+        ),
+        _ => None,
+    };
     let (connections, mut origins) = {
         let store = gateway_store(state);
         let mut out = Vec::new();
         let mut origins = std::collections::HashMap::new();
         for c in store.connections_of(actor.user_id()).map_err(internal)? {
             if c.status != status::DISABLED
+                && kept.as_ref().is_none_or(|k| k.contains(&c.id))
                 && store.in_host_scope(&c.id, &req.host_id).map_err(internal)?
             {
                 if let Some((plugin, server)) = store.plugin_origin(&c.id).map_err(internal)? {
@@ -3945,12 +4722,11 @@ pub async fn launch_session(
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
-    if spawn {
+    if spawn && state.agent.spawn_launched(&session.id) {
         let detail = serde_json::json!({
             "session_id": session.id,
             "host_id": session.host_id,
             "was": false,
-            "refused_requests": 0,
         });
         state
             .auth_db
@@ -3964,6 +4740,9 @@ pub async fn launch_session(
                 &detail.to_string(),
             )
             .map_err(internal)?;
+    }
+    if let Some(mode) = &launch.permission_mode {
+        audit_permission_mode(state, &session, mode, None).await;
     }
     let (credential, credential_notice) =
         provider_wire::launch_credential(state, &session, &host_name, credential).await;
@@ -4050,8 +4829,15 @@ pub async fn launch_session(
         isolation,
         child_workspace: None,
         needs_attention: None,
+        child_activity: None,
+        pending_events: None,
+        recent_events: None,
         spawn,
         launch_role: launch.role,
+        model: launch.model,
+        permission_mode: launch.permission_mode.clone(),
+        mode_request: None,
+        delete_request: None,
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;
@@ -4601,6 +5387,16 @@ const ROLE_SUMMARY_MAX: usize = 160;
 /// error: the launcher then offers only None.
 pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote>> {
     crews_owner(actor)?;
+    Ok(role_notes(state, actor)
+        .await?
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect())
+}
+
+/// Every role note in Kit with its frontmatter `model:`, the default model
+/// a start with that role gets (145b).
+async fn role_notes(state: &Shared, actor: &Actor) -> ApiResult<Vec<(RoleNote, Option<String>)>> {
     let Ok(vault_id) = kit_vault_id(state).await else {
         return Ok(Vec::new());
     };
@@ -4612,8 +5408,13 @@ pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote
             continue;
         }
         let content = ix.vault.read(&note.path)?;
-        let summary = crate::frontmatter::parse(&content)
-            .frontmatter
+        let frontmatter = crate::frontmatter::parse(&content).frontmatter;
+        let model = frontmatter
+            .as_ref()
+            .and_then(|fm| crate::frontmatter::get_scalar(&fm.raw, "model"))
+            .map(|m| m.trim().to_string())
+            .filter(|m| !m.is_empty());
+        let summary = frontmatter
             .and_then(|fm| crate::frontmatter::get_scalar(&fm.raw, "summary"))
             .and_then(|s| s.lines().next().map(str::trim).map(str::to_string))
             .filter(|s| !s.is_empty())
@@ -4626,16 +5427,19 @@ pub async fn list_roles(state: &Shared, actor: &Actor) -> ApiResult<Vec<RoleNote
             .rsplit_once('/')
             .map(|(dir, _)| dir.to_string())
             .unwrap_or_default();
-        roles.push(RoleNote {
-            vault_id: vault_id.clone(),
-            note_id: note.id,
-            title: note.title,
-            path: note.path,
-            folder,
-            summary,
-        });
+        roles.push((
+            RoleNote {
+                vault_id: vault_id.clone(),
+                note_id: note.id,
+                title: note.title,
+                path: note.path,
+                folder,
+                summary,
+            },
+            model,
+        ));
     }
-    roles.sort_by(|a, b| {
+    roles.sort_by(|(a, _), (b, _)| {
         (a.folder != "agents", &a.folder, a.title.to_lowercase()).cmp(&(
             b.folder != "agents",
             &b.folder,
@@ -4700,6 +5504,378 @@ pub async fn set_session_role(
         .agent
         .set_role(session_id, label.as_ref())
         .map_err(agent_error)
+}
+
+// ---- decision 147c: an agent asks for auto, the person decides -------------
+
+/// A request for auto made, with the reason's length, never its text.
+pub const EVENT_PERMISSION_MODE_REQUEST: &str = "permission_mode_request";
+/// The person's answer, or its expiry.
+pub const EVENT_PERMISSION_MODE_DECISION: &str = "permission_mode_decision";
+/// The approved switch: the session it left and the one it resumed into.
+pub const EVENT_PERMISSION_MODE_SWITCH: &str = "permission_mode_switch";
+
+/// How long the approved tool call has to reach the agent before its
+/// session is stopped for the switch.
+pub const SWITCH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long the switch waits for the session to stop, or a child to park.
+const SWITCH_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
+const APPROVED_SENTENCE: &str = "The person approved auto mode. Storm now restarts this \
+    session in auto with its conversation kept: end your turn here and do nothing else. The \
+    person continues the conversation in the restarted session, where auto lets you run routine \
+    commands without asking, each checked by Claude Code's own safety classifier.";
+const DENIED_SENTENCE: &str = "The person denied auto mode. Carry on in your current mode: \
+    ask for each action as before, and do not ask for auto again unless the person says so.";
+const EXPIRED_SENTENCE: &str = "Nobody answered within 10 minutes, so the request expired. \
+    Carry on in your current mode.";
+const PENDING_SENTENCE: &str = "The person has not answered yet. Call request_permission_mode \
+    again with the same mode to keep waiting; it shows the same card, never a second one.";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ModeRequestAnswer {
+    /// `pending`, `approved`, `denied`, `expired`, `already` or `refused`.
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+    /// A refusal's code: `permission_mode_unavailable`,
+    /// `permission_mode_wider`, `live_children` or `session_not_live`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+    pub message: String,
+}
+
+impl ModeRequestAnswer {
+    fn refused(reason: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: "refused",
+            request: None,
+            expires_at: None,
+            reason: Some(reason),
+            message: message.into(),
+        }
+    }
+
+    fn of(r: &crate::agent::mode::ModeRequest) -> Self {
+        use crate::agent::mode;
+        let (status, message) = match r.state.as_str() {
+            mode::APPROVED => ("approved", APPROVED_SENTENCE),
+            mode::DENIED => ("denied", DENIED_SENTENCE),
+            mode::EXPIRED => ("expired", EXPIRED_SENTENCE),
+            _ => ("pending", PENDING_SENTENCE),
+        };
+        Self {
+            status,
+            request: Some(r.id.clone()),
+            expires_at: Some(r.expires_at.clone()),
+            reason: None,
+            message: message.into(),
+        }
+    }
+}
+
+async fn audit_mode(
+    state: &Shared,
+    kind: &str,
+    owner: &str,
+    device: Option<&str>,
+    detail: serde_json::Value,
+) {
+    let _ = state.auth_db.lock().await.record_event(
+        kind,
+        Some(owner),
+        device,
+        &crate::index::now_rfc3339(),
+        &detail.to_string(),
+    );
+}
+
+/// `request_permission_mode {mode, reason}` (147c): only a Claude Code
+/// session, only for `auto`, and a child only while its parent is in auto.
+/// Makes one card (a repeat while it waits shows the same one), then waits
+/// up to the agent's wait cap for the person.
+pub async fn request_permission_mode(
+    state: &Shared,
+    actor: &Actor,
+    mode: &str,
+    reason: &str,
+) -> ApiResult<ModeRequestAnswer> {
+    use crate::agent::mode::Refusal;
+    let Actor::Agent { session_id, .. } = actor else {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "only an agent session asks for a permission mode".into(),
+        ));
+    };
+    let session = state.agent.get(session_id).map_err(agent_error)?;
+    let made = match state
+        .agent
+        .request_mode(session_id, mode, reason)
+        .map_err(agent_error)?
+    {
+        Ok(made) => made,
+        Err(refusal) => {
+            let answer = match refusal {
+                Refusal::Unavailable(why) => {
+                    ModeRequestAnswer::refused("permission_mode_unavailable", why)
+                }
+                Refusal::LiveChildren => ModeRequestAnswer::refused(
+                    "live_children",
+                    "Switching restarts this session, which the agents you started would not \
+                     survive: end them first, then ask again.",
+                ),
+                Refusal::NotLive => {
+                    ModeRequestAnswer::refused("session_not_live", "This session is not running.")
+                }
+                Refusal::AlreadyAuto => ModeRequestAnswer {
+                    status: "already",
+                    request: None,
+                    expires_at: None,
+                    reason: None,
+                    message: "This session is already in auto mode.".into(),
+                },
+            };
+            if answer.status == "refused" {
+                audit_mode(
+                    state,
+                    EVENT_PERMISSION_MODE_REQUEST,
+                    &session.owner_user_id,
+                    None,
+                    serde_json::json!({
+                        "session_id": session.id,
+                        "refused": answer.reason,
+                    }),
+                )
+                .await;
+            }
+            return Ok(answer);
+        }
+    };
+    let (request, new) = made;
+    if new {
+        audit_mode(
+            state,
+            EVENT_PERMISSION_MODE_REQUEST,
+            &session.owner_user_id,
+            None,
+            serde_json::json!({
+                "session_id": session.id,
+                "request_id": request.id,
+                "permission_mode": request.mode,
+                "reason_bytes": request.reason.len(),
+            }),
+        )
+        .await;
+    }
+    let bound = crate::agent::scope::wait_cap(&session.provider);
+    let waited = state
+        .agent
+        .wait_mode(&request.id, bound)
+        .await
+        .map_err(agent_error)?;
+    if waited.state == crate::agent::mode::EXPIRED {
+        audit_expired(state, &session.owner_user_id, &waited).await;
+    }
+    Ok(ModeRequestAnswer::of(&waited))
+}
+
+async fn audit_expired(state: &Shared, owner: &str, r: &crate::agent::mode::ModeRequest) {
+    audit_mode(
+        state,
+        EVENT_PERMISSION_MODE_DECISION,
+        owner,
+        None,
+        serde_json::json!({
+            "session_id": r.session_id,
+            "request_id": r.id,
+            "outcome": r.state,
+        }),
+    )
+    .await;
+}
+
+/// `POST /v1/agent/sessions/{id}/mode-requests/{request}`'s body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DecideMode {
+    /// `approve` or `deny`.
+    pub decision: String,
+}
+
+/// The person's answer to a request for auto (147c), on the session tier
+/// only. Approval switches the session in the background
+/// ([`switch_to_auto`]); the request's `switched_to` names where it went.
+pub async fn decide_mode_request(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    session_id: &str,
+    request_id: &str,
+    req: DecideMode,
+) -> ApiResult<crate::agent::mode::ModeRequest> {
+    let (owner, _) = owners_session(state, actor, session_id)?;
+    let approve = match req.decision.as_str() {
+        "approve" => true,
+        "deny" => false,
+        _ => return Err(bad_request("decision is approve or deny")),
+    };
+    let decided = match state
+        .agent
+        .decide_mode(session_id, request_id, approve, device)
+    {
+        Ok(d) => d,
+        Err(crate::agent::AgentError::Conflict(code)) if code == "request_expired" => {
+            if let Ok(Some(r)) = state.agent.mode_request(request_id) {
+                audit_expired(state, &owner, &r).await;
+            }
+            return Err(conflict(code));
+        }
+        Err(e) => return Err(agent_error(e)),
+    };
+    audit_mode(
+        state,
+        EVENT_PERMISSION_MODE_DECISION,
+        &owner,
+        device,
+        serde_json::json!({
+            "session_id": session_id,
+            "request_id": request_id,
+            "outcome": decided.state,
+        }),
+    )
+    .await;
+    if approve {
+        let (state, actor) = (state.clone(), actor.clone());
+        let (device, id) = (device.map(str::to_string), request_id.to_string());
+        let session = session_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(SWITCH_GRACE).await;
+            let to = switch_to_auto(&state, &actor, device.as_deref(), &session).await;
+            if let Err(e) = &to {
+                tracing::warn!(session = %session, error = %e.1, "the switch to auto failed");
+            }
+            let to = to.ok();
+            let _ = state.agent.record_switch(&id, to.as_deref());
+            audit_mode(
+                &state,
+                EVENT_PERMISSION_MODE_SWITCH,
+                &owner,
+                device.as_deref(),
+                serde_json::json!({
+                    "session_id": session,
+                    "request_id": id,
+                    "permission_mode": crate::agent::permission::AUTO,
+                    "mechanism": "resume",
+                    "switched_to": to,
+                }),
+            )
+            .await;
+        });
+    }
+    Ok(decided)
+}
+
+/// Waits until `session_id` is ended, or parked when `parked` is accepted.
+async fn stopped(state: &Shared, session_id: &str, parked: bool) -> bool {
+    let deadline = std::time::Instant::now() + SWITCH_STOP_WAIT;
+    let mut changed = state.agent.watch(session_id);
+    loop {
+        changed.borrow_and_update();
+        match state.agent.get(session_id) {
+            Ok(r) if r.is_ended() || (parked && r.status == "parked") => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return false;
+        }
+        let _ = tokio::time::timeout(
+            left.min(std::time::Duration::from_millis(500)),
+            changed.changed(),
+        )
+        .await;
+    }
+}
+
+/// The approved switch (147c). G-147 found Claude Code does not re-read its
+/// `--settings` while running, so auto is reached by a restart that keeps
+/// the conversation: a top-level session is stopped and resumed in auto as
+/// a new session (decision 89's Resume, the mode replaced); a child is
+/// parked and resumed as itself with its stored mode now auto (145e).
+/// Returns the session that runs in auto.
+async fn switch_to_auto(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    session_id: &str,
+) -> ApiResult<String> {
+    let r = state.agent.get(session_id).map_err(agent_error)?;
+    let child = state
+        .agent
+        .lineage(session_id)
+        .map_err(agent_error)?
+        .parent_session
+        .is_some();
+    if child {
+        state
+            .agent
+            .set_mode_for_switch(session_id)
+            .map_err(agent_error)?;
+        state
+            .agent
+            .park_for_switch(session_id)
+            .map_err(agent_error)?;
+        if !stopped(state, session_id, true).await {
+            return Err(conflict("the session did not stop for the switch"));
+        }
+        let deliverable = deliverable_credential(state, &r.host_id);
+        if !state
+            .agent
+            .resume_parked(session_id, deliverable)
+            .map_err(agent_error)?
+        {
+            return Err(conflict("the session could not be resumed"));
+        }
+        if let Ok(r) = state.agent.get(session_id) {
+            audit_permission_mode(state, &r, crate::agent::permission::AUTO, None).await;
+        }
+        return Ok(session_id.to_string());
+    }
+    let spawn = state.agent.spawn_carried(session_id);
+    if !r.is_ended() {
+        state
+            .agent
+            .end_by_person(session_id, None, false)
+            .map_err(agent_error)?;
+    }
+    if !stopped(state, session_id, false).await {
+        return Err(conflict("the session did not stop for the switch"));
+    }
+    let launch = crate::agent::Launch {
+        host_id: r.host_id.clone(),
+        workspace: r.workspace.clone(),
+        provider: Some(r.provider.clone()),
+        interaction: r.interaction.clone(),
+        terminal: crate::agent::TerminalSize {
+            cols: r.cols,
+            rows: r.rows,
+        },
+        context: None,
+        write_vault_id: None,
+        allow_vault_writes: false,
+        resume_of: Some(session_id.to_string()),
+        crew: None,
+        role: None,
+        spawn,
+        model: None,
+        permission_mode: None,
+        switch_mode: Some(crate::agent::permission::AUTO.into()),
+    };
+    let launched = launch_session(state, actor, device, launch).await?;
+    Ok(launched.session.session.id)
 }
 
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
@@ -4838,18 +6014,125 @@ pub fn runtime_output(
         .map_err(agent_error)
 }
 
-pub fn runtime_status(
+/// A child stopped on its CLI's own prompt (148b): its no-prompt mode
+/// failed. Audited with codes only; the person is shown nothing.
+pub const EVENT_SPAWN_UNEXPECTED_PROMPT: &str = "spawn_unexpected_prompt";
+
+/// A child's session record while a permission prompt shows on it.
+fn child_at_prompt(state: &Shared, session: &str) -> Option<crate::agent::store::SessionRecord> {
+    let r = state.agent.get(session).ok()?;
+    state.agent.lineage(session).ok()?.parent_session.as_ref()?;
+    let attention = state.agent.needs_attention(&r).ok()??;
+    (attention == crate::agent::attention::PERMISSION_PROMPT).then_some(r)
+}
+
+pub async fn runtime_status(
     state: &Shared,
     host_id: &str,
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
+    let prompt_before = child_at_prompt(state, session).is_some();
     state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
     sweep_gateway_sessions(state);
+    if !prompt_before && let Some(r) = child_at_prompt(state, session) {
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_UNEXPECTED_PROMPT,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": session, "host_id": host_id,
+                "reason": crate::agent::attention::UNEXPECTED_PROMPT}),
+        )
+        .await;
+    }
     Ok(())
+}
+
+/// A child's round ended with a final message (145c): audited with its
+/// outcome and round, never its text.
+pub const EVENT_SPAWN_FINAL_MESSAGE: &str = "spawn_final_message";
+
+/// `POST /v1/runtime/sessions/{id}/final-message`: a host's report of a
+/// child's final message and its round's usage (145c, 145f), from the
+/// agent's own hook or plugin. Taken only through a gated source; never an
+/// error to the host otherwise, since it is evidence, not a request.
+pub async fn runtime_final_message(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    message: &crate::agent::round::FinalMessage,
+) -> ApiResult<()> {
+    let made = state
+        .agent
+        .final_message(host_id, session, message)
+        .map_err(agent_error)?;
+    if let Some(result) = made {
+        let r = state.agent.get(session).map_err(agent_error)?;
+        record_spawn_event(
+            state,
+            EVENT_SPAWN_FINAL_MESSAGE,
+            Some(&r.owner_user_id),
+            None,
+            &serde_json::json!({"session_id": session, "host_id": host_id,
+                "outcome": result.outcome, "round": result.round}),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// `POST /v1/runtime/sessions/{id}/denied`: a host's report of a child's
+/// denied tool call (148b), from the agent's own hook or plugin. The parent
+/// hears it as a `denied` event; never an error to the host otherwise,
+/// since it is evidence, not a request.
+pub fn runtime_denied(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    report: &crate::agent::events::DeniedReport,
+) -> ApiResult<()> {
+    state
+        .agent
+        .denied(host_id, session, report)
+        .map_err(agent_error)?;
+    Ok(())
+}
+
+/// A host's report of what a child said (145g): kept for its parent's
+/// `read_output` when its agent's gate lets it through; never an event.
+pub fn runtime_said(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    report: &crate::agent::said::SaidReport,
+) -> ApiResult<()> {
+    state
+        .agent
+        .said(host_id, session, report)
+        .map_err(agent_error)?;
+    Ok(())
+}
+
+/// The resume pass (145d): every parked child with a message waiting is
+/// resumed, as once its host is back.
+pub fn resume_parked_children(state: &Shared) {
+    let waiting = match state.agent.parked_with_unread() {
+        Ok(waiting) => waiting,
+        Err(e) => {
+            tracing::warn!(error = ?e, "could not list parked children");
+            return;
+        }
+    };
+    for r in waiting {
+        let deliverable = deliverable_credential(state, &r.host_id);
+        if let Err(e) = state.agent.resume_parked(&r.id, deliverable) {
+            tracing::warn!(session = %r.id, error = ?e, "could not resume a parked child");
+        }
+    }
 }
 
 /// The security event of a connection a host refused (decision 135a).
@@ -5844,6 +7127,12 @@ struct Authorized {
     spawned: bool,
     /// The session was launched with spawning on and a person turned it off.
     spawn_off: bool,
+    /// The session's agent is Claude Code, so it may ask for auto (147c),
+    /// and it is not a child, which never asks (148).
+    mode_request: bool,
+    /// The delete tools are offered (149a): vault writes, and not a child,
+    /// which never asks the person (149d).
+    deletes: bool,
 }
 
 impl Authorized {
@@ -5854,10 +7143,11 @@ impl Authorized {
         match &self.connection {
             Some(c) => c.tool_allowlist.iter().any(|a| a == name),
             None => {
-                !crate::mcp::NEVER_FOR_AGENTS.contains(&name)
-                    && (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                (self.vault_writes || !crate::mcp::WRITE_TOOLS.contains(&name))
+                    && (self.deletes || !crate::mcp::DELETE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
+                    && (self.mode_request || !crate::mcp::MODE_TOOLS.contains(&name))
             }
         }
     }
@@ -5988,6 +7278,10 @@ async fn authorize_call(
         && state
             .agent_writes
             .load(std::sync::atomic::Ordering::Relaxed);
+    let top_level = state
+        .agent
+        .lineage(session_id)
+        .is_ok_and(|l| l.parent_session.is_none());
     Ok(Authorized {
         owner: session.owner_user_id,
         connection,
@@ -5998,6 +7292,8 @@ async fn authorize_call(
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
+        mode_request: session.provider == "claude-code" && top_level,
+        deletes: vault_writes && top_level,
     })
 }
 
@@ -6397,6 +7693,7 @@ async fn connect_builtin(
     let handler = crate::mcp::Storm::for_agent(
         state.clone(),
         authorized.vault_writes,
+        authorized.deletes,
         authorized.has_context,
         authorized.has_role,
         actor,
@@ -6472,6 +7769,12 @@ pub fn sweep_gateway_sessions(state: &Shared) {
 }
 
 pub(crate) mod provider_wire;
+
+pub mod agent_deletes;
+pub use agent_deletes::{
+    AgentDelete, DecideDelete, DeleteRequestsPage, agent_delete, decide_delete_request,
+    delete_requests,
+};
 pub use provider_wire::runtime_provider_credential;
 
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------
@@ -7345,9 +8648,16 @@ mod tests {
             ),
             (
                 "delete_folder",
-                delete_folder(&state, &agent, &home, "Keep")
-                    .await
-                    .map(|_| ()),
+                delete_folder(
+                    &state,
+                    &agent,
+                    &home,
+                    "Keep",
+                    true,
+                    &DeleteOrigin::default(),
+                )
+                .await
+                .map(|_| ()),
             ),
             (
                 "rename_folder",
@@ -7378,6 +8688,84 @@ mod tests {
             assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "{what}");
             assert_eq!(message, crate::auth::authz::AGENT_WRITE_REFUSED, "{what}");
         }
+    }
+
+    /// A-150-1 and A-150-5 (decision 150): an agent's delete lands in the
+    /// trash with its session and reason, and the trash itself is the
+    /// person's: an agent or a key is refused every trash operation.
+    #[tokio::test]
+    async fn an_agents_delete_is_in_the_trash_and_only_the_person_reaches_it() {
+        let dir = tempdir::TempDir::new("storm-ops-trash").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        let agent = agent_writing_to(&work);
+        let note = must(create_note(&state, &owner(), &work, "A.md", "a\n").await).note;
+        let origin = DeleteOrigin {
+            reason: Some("a duplicate of B".into()),
+            ..DeleteOrigin::default()
+        };
+        let deleted = must(delete_note(&state, &agent, &work, &note.id, &origin).await);
+        let trash_id = deleted.trash_id.unwrap();
+
+        let key = Actor::Key {
+            key_id: "key_test".into(),
+            user_id: "usr_test".into(),
+        };
+        for actor in [&agent, &key] {
+            for (what, result) in [
+                ("list", list_trash(&state, actor, &work).await.map(|_| ())),
+                (
+                    "restore",
+                    restore_trash(&state, actor, &work, &trash_id)
+                        .await
+                        .map(|_| ()),
+                ),
+                ("purge", purge_trash(&state, actor, &work, &trash_id).await),
+                ("empty", empty_trash(&state, actor, &work).await.map(|_| ())),
+            ] {
+                assert_eq!(
+                    refused(result).0,
+                    axum::http::StatusCode::FORBIDDEN,
+                    "{what}"
+                );
+            }
+        }
+
+        let page = must(list_trash(&state, &owner(), &work).await);
+        assert_eq!(page.retention_days, Some(30));
+        let by = &page.items[0].entry.deleted_by;
+        assert_eq!(
+            (
+                by.kind.as_str(),
+                by.session_id.as_deref(),
+                by.reason.as_deref()
+            ),
+            ("agent", Some("ags_test"), Some("a duplicate of B"))
+        );
+        let restored = must(restore_trash(&state, &owner(), &work, &trash_id).await);
+        assert_eq!(restored.notes[0].id, note.id);
+        assert_eq!(
+            must(get_note(&state, &owner(), &work, &note.id).await)
+                .note
+                .path,
+            "A.md"
+        );
+    }
+
+    /// A-150-2: a folder holding notes goes only once the person confirmed.
+    #[tokio::test]
+    async fn a_folder_with_notes_needs_the_confirm() {
+        let dir = tempdir::TempDir::new("storm-ops-folder-trash").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "P/A.md", "a\n").await);
+        let none = DeleteOrigin::default();
+        let (status, message) =
+            refused(delete_folder(&state, &owner(), &work, "P", false, &none).await);
+        assert_eq!(status, axum::http::StatusCode::CONFLICT);
+        assert!(message.contains("1 note"), "{message}");
+
+        let trashed = must(delete_folder(&state, &owner(), &work, "P", true, &none).await);
+        assert_eq!(trashed.notes, 1);
+        assert!(trashed.trash_id.is_some());
     }
 
     #[tokio::test]

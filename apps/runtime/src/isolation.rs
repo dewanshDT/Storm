@@ -287,6 +287,10 @@ mod imp {
         pub fn child_dispose(&self, _: &str) -> std::io::Result<serde_json::Value> {
             match self._never {}
         }
+
+        pub fn child_park(&self, _: &str) -> std::io::Result<()> {
+            match self._never {}
+        }
     }
 
     /// No helper off Linux, so never its refusal.
@@ -742,6 +746,13 @@ mod imp {
             self.answer(json!({"op": "child_dispose", "child": child}))
         }
 
+        /// 145e: a child whose lease ended at Storm's park is started
+        /// again in its own workspace on its resume.
+        pub fn child_park(&self, child: &str) -> io::Result<()> {
+            self.ask(json!({"op": "child_park", "child": child}), None)
+                .map(drop)
+        }
+
         pub fn release(&self, session: &str, user: &str) -> io::Result<()> {
             self.ask(
                 json!({"op": "release", "session": session, "user": user}),
@@ -792,6 +803,8 @@ mod imp {
             /// The helper's record of each child made under
             /// `children_root`, for its listing, export and Apply (137-3).
             pub records: HashMap<String, Record>,
+            /// The children `child_park` was asked for (145e).
+            pub parked: Vec<String>,
         }
 
         pub struct Record {
@@ -1205,6 +1218,11 @@ mod imp {
                     json!({"ok": true, "op": "child_dispose", "removed": true}),
                     None,
                 ),
+                "child_park" => {
+                    let mut seen = seen.lock().unwrap();
+                    seen.parked.push(session.clone());
+                    (json!({"ok": true, "op": "child_park"}), None)
+                }
                 "child_export" | "child_import" => refuse("no_child"),
                 _ => (json!({"ok": false, "error": "not_built"}), None),
             };

@@ -355,6 +355,7 @@ fn a_result_is_one_of_the_outcomes_and_replaces_the_last() {
     assert_eq!(f.m.result_of(&c.id).unwrap().unwrap().outcome, "blocked");
     // The store refuses on its own too: it is the only writer.
     let raw = SpawnResult {
+        round: 1,
         outcome: "done".into(),
         summary: "s".into(),
         details: None,

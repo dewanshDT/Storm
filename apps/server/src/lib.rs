@@ -50,6 +50,7 @@ mod ops;
 mod parse;
 mod registry;
 mod relay;
+mod trash;
 mod vault;
 mod watcher;
 
@@ -1143,6 +1144,33 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             loop {
                 tick.tick().await;
                 agent.reap_silent(std::time::Duration::from_secs(45));
+                agent.expire_starts(crate::agent::START_ACK_DEADLINE);
+                // 144a: a child idle past IDLE_EVENT_AFTER, by a gated signal.
+                if let Err(e) = agent.fire_idle_timeouts() {
+                    tracing::warn!(error = ?e, "could not write idle events");
+                }
+                // 145e: a reported child idle past PARK_AFTER, the same way.
+                if let Err(e) = agent.park_idle_children() {
+                    tracing::warn!(error = ?e, "could not park idle children");
+                }
+            }
+        });
+    }
+    // 144c, 145d: each wakeable session's host hears when it has something
+    // unread. Nothing is sent while no agent's wake has passed its gate.
+    {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            let mut written = agent.event_writes();
+            loop {
+                tokio::select! {
+                    _ = written.changed() => {}
+                    _ = agent.wake_poke.notified() => {}
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+                }
+                if let Err(e) = agent.sync_wakes() {
+                    tracing::warn!(error = ?e, "could not tell hosts what is unread");
+                }
             }
         });
     }
@@ -1195,19 +1223,9 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
     ops::fail_children_left_creating(&state)
         .await
         .context("failing spawned sessions a restart left creating")?;
-
-    // P-5: expired spawn requests are marked, at boot and then every few
-    // seconds. An approval checks expiry itself, so this is for the record.
-    {
-        let state = state.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                tick.tick().await;
-                ops::sweep_spawn_requests(&state).await;
-            }
-        });
-    }
+    ops::audit_agent_migrations(&state)
+        .await
+        .context("auditing agent.db's upgrades")?;
 
     // Cascades (134-6, 134-7): each target is stopped once its stop is due,
     // at once for a person's end and after C9's grace otherwise, and an
@@ -1219,6 +1237,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             loop {
                 tick.tick().await;
                 ops::stop_cascade_targets(&state, &crate::index::now_rfc3339()).await;
+                ops::resume_parked_children(&state);
+            }
+        });
+    }
+
+    // Trash retention (decision 150b): hourly, and once at boot.
+    {
+        let state = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            loop {
+                tick.tick().await;
+                ops::purge_expired_trash(&state).await;
             }
         });
     }

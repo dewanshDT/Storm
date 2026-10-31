@@ -69,6 +69,13 @@ impl io::Write for BlockingClient {
 }
 
 impl BlockingClient {
+    /// One line from the host, however long it takes, at most `max` bytes:
+    /// the waker's long-poll (144c). An end of the connection before the
+    /// line is an error.
+    pub fn read_line(&mut self, max: usize) -> io::Result<String> {
+        imp::read_line(&mut self.0, max)
+    }
+
     /// Waits, up to `limit`, for the host to close the connection. A host
     /// that checks who connected (decision 135) does so after reading the
     /// line, and refuses a connector that has already exited.
@@ -114,6 +121,22 @@ mod imp {
 
     pub fn connect_blocking(address: &OsStr) -> io::Result<BlockingClient> {
         std::os::unix::net::UnixStream::connect(address)
+    }
+
+    pub fn read_line(stream: &mut BlockingClient, max: usize) -> io::Result<String> {
+        use std::io::Read;
+        stream.set_read_timeout(None)?;
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match stream.read(&mut byte)? {
+                0 => return Err(io::ErrorKind::UnexpectedEof.into()),
+                _ if byte[0] == b'\n' => break,
+                _ if line.len() >= max => return Err(io::ErrorKind::InvalidData.into()),
+                _ => line.push(byte[0]),
+            }
+        }
+        String::from_utf8(line).map_err(|_| io::ErrorKind::InvalidData.into())
     }
 
     pub fn wait_closed(stream: &mut BlockingClient, limit: std::time::Duration) {
@@ -196,6 +219,11 @@ mod imp {
     }
 
     pub type BlockingClient = std::fs::File;
+
+    /// No waker on Windows: no agent there has a gated wake.
+    pub fn read_line(_stream: &mut BlockingClient, _max: usize) -> io::Result<String> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 
     /// Nothing to wait for: Windows hosts do not check who connected (AM80).
     pub fn wait_closed(_stream: &mut BlockingClient, _limit: std::time::Duration) {}

@@ -51,11 +51,12 @@ def mcp_tools():
     tools = [t for t in tools if t["name"] not in dark]
     write = set(const_list(src, "WRITE_TOOLS"))
     only_agents = set(const_list(src, "ONLY_FOR_AGENTS"))
-    never_agents = set(const_list(src, "NEVER_FOR_AGENTS"))
+    approval = set(const_list(src, "DELETE_TOOLS"))
     for t in tools:
         n = t["name"]
         t["access"] = "agents" if n in only_agents else "write" if n in write else "read"
-        t["agents"] = n not in never_agents
+        t["agents"] = True
+        t["approval"] = n in approval
     return tools
 
 

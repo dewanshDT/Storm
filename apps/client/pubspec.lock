@@ -1411,7 +1411,7 @@ packages:
       path: "third_party/xterm2"
       relative: true
     source: path
-    version: "5.2.0+storm.1"
+    version: "5.2.0+storm.3"
   yaml:
     dependency: transitive
     description:

@@ -538,6 +538,7 @@ args = ["-i"]
         wait(lambda: session(owner, survivor)["status"] == "unknown", "the session to go unknown", timeout=60)
         check("a dropped link makes the session unknown", True)
         check("input is refused while the host is offline", write(owner, survivor, "x") == 503)
+        before = {s["id"] for s in call("GET", "/v1/agent/sessions", auth=owner)[1]}
         status, _ = launch(owner, host_id, provider="fake")
         check("a launch is refused while the host is offline", status == 503, status)
         runtime = start_runtime()
@@ -546,6 +547,34 @@ args = ["-i"]
         check("its sessions became failed (host_restart), none restarted",
               rec["end_reason"] == "host_restart", rec)
         wait(host_online, "the host back online", timeout=60)
+        time.sleep(3)
+        after = {s["id"] for s in call("GET", "/v1/agent/sessions", auth=owner)[1]}
+        check("the refused launch never starts once the host is back (round 4's stray launch)",
+              after == before, after - before)
+
+        print("\n=== a start the host takes too late never runs ===")
+        # A paused VM: the host's link outlives it, so a launch is sent;
+        # Storm drops the silent host and fails the start, and the host,
+        # resumed, reads the start from its stale link and asks first.
+        runtime.send_signal(signal.SIGSTOP)
+        try:
+            status, rec = launch(owner, host_id, provider="fake")
+            check("a launch to a host whose link has not yet gone is sent", status == 200, status)
+            late = rec["id"]
+            wait(lambda: session(owner, late)["status"] == "failed", "the start to fail", timeout=90)
+            rec = session(owner, late)
+            check("its start failed when the link went (start_failure), never unknown",
+                  rec["end_reason"] == "start_failure", rec)
+        finally:
+            runtime.send_signal(signal.SIGCONT)
+        wait(host_online, "the host back online", timeout=90)
+        time.sleep(5)
+        rec = session(owner, late)
+        check("the host, resumed, never ran it", rec["status"] == "failed" and not rec.get("started_at"), rec)
+        # Whether the resumed host read the start before its link timed out
+        # is the kernel's to say; either way it must not run.
+        dropped = "Storm no longer wants this start" in open(RUNTIME_LOG).read()
+        print(f"  info  the resumed host {'read and dropped' if dropped else 'never read'} the start")
 
         print("\n=== AM37: SIGTERM ends the host's sessions and everything they spawned ===")
         status, rec = launch(owner, host_id, provider="shell")

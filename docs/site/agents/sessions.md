@@ -19,6 +19,8 @@ launcher asks for:
 | **Host** | Which Runtime Host runs it. |
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
+| **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's row shows it. |
+| **Permission mode** | How much the agent may do without asking you: **Manual** (the agent asks; the default), **Accept edits** (file edits go ahead without a prompt; shell commands still ask) or **Auto** (the agent's own safety check decides routine calls, shell commands included). Claude Code offers all three, OpenCode Manual and Accept edits; other agents always ask. There is never an option that turns the agent's prompts off. Agents the session starts get the same mode or a stricter one, and never ask you: what their mode doesn't cover is refused, and the session that started them hears about it. The session's row and About show it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
@@ -49,12 +51,50 @@ Sessions working toward one goal can be grouped into a
   Android (including Gboard's image keyboard). It is staged on the host and
   handed to the agent as a file path.
 - **Links** in the terminal open in your browser.
-- **On a phone**, extra keys (Esc, Tab, arrows, Ctrl) sit above the keyboard.
+- **Tab and Shift+Tab go to the agent** while the terminal has focus: in
+  Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
+  move focus out of the terminal with the keyboard, press **Escape, then
+  Tab**, or click outside it.
+- **On a phone**, extra keys (Esc, Tab, ⇧Tab, arrows, Ctrl) sit above the
+  keyboard.
 - **Settings › Terminal** sets the text size, line spacing and padding.
 
 Beside the terminal, **Context**, **Wrote** and **About** show the note it
 started from, the notes it has written, and how it was launched. A note an
 agent wrote says so on its version line, linking back to the session.
+
+## Switching to Auto
+
+Unless you launched a Claude Code session in **Auto**, Auto is not among the
+modes Shift+Tab cycles through. The agent can ask for it: a card on the
+session shows its reason, word for word, with **Approve Auto** and **Deny**,
+and expires after 10 minutes. Approving restarts the session in Auto with
+its conversation kept, and takes you to it. An agent another agent started
+can ask only while that agent is in Auto, and a session with agents of its
+own running can't ask until they end.
+
+### Deletes wait for you
+
+An agent that may write to a vault can ask to delete a note or a folder
+there, saying why. Nothing is deleted until you answer: a dialog opens on
+every device you're signed in on, with the agent, its session (and the note
+it started from), what would go (a note's path, size and last change, or a
+folder's note count and first paths) and the agent's reason, shown as plain
+text.
+
+- **Approve** moves it to the vault's [Trash](/docs/notes/vaults/#trash);
+  **Decline** keeps it and tells the agent no. There is no "always allow",
+  and Auto mode does not skip the dialog.
+- **Later**, Esc or clicking outside only closes the dialog on that device:
+  the request keeps waiting and isn't declined. It doesn't pop up again
+  there on its own (a new request does); your other devices still show it.
+- The first answer wins; the dialog on your other devices closes and says
+  where it was answered. While it waits, the session shows **Needs you**,
+  and **Review** reopens the dialog.
+- If the note is edited or moved, or the folder's notes change, before you
+  approve, nothing is deleted and the agent is told to look again.
+- Unanswered, it times out after 10 minutes. An agent asks for one deletion
+  at a time, and an agent another agent started can't delete at all.
 
 ## When it ends
 
@@ -65,7 +105,8 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
 ## What an agent can touch
 
 - It reads your notes through Storm's tools, and writes only to the vault
-  chosen at launch. It is never offered `delete_note`.
+  chosen at launch. It deletes there only when you
+  [approve it](#deletes-wait-for-you).
 - It can use the [integrations](/docs/agents/integrations/) allowed on its
   host, and only their allowed tools. A shell session gets none.
 - **Claude Code keeps its own MCP servers:** the ones in your

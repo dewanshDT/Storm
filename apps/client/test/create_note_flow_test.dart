@@ -92,30 +92,93 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('a name with separators becomes one note, not a folder', (
-    tester,
-  ) async {
-    // The dialog asks for a name, so `Q1/Plan` means those words — not a
-    // folder called Q1. Creating a directory the user did not ask for would
-    // be a surprise, and `..` has to be impossible to type into a path.
+  Future<List<String>> create(
+    WidgetTester tester,
+    String name, {
+    String folder = '',
+  }) async {
     final c = shellContainer();
     await pumpShell(tester, c);
     await openVault(tester, c);
-
+    if (folder.isNotEmpty) {
+      c.read(routerProvider).go(Routes.folder(FakeServer.primaryVault, folder));
+      await tester.pumpAndSettle();
+    }
     await openDialog(tester);
-    await tester.enterText(find.byType(TextField).last, '../Q1/Plan');
+    await tester.enterText(find.byType(TextField).last, name);
+    await tester.pump();
     await tester.tap(find.text('Create'));
     await tester.pumpAndSettle();
-
     expect(tester.takeException(), isNull);
     final paths = serverOf(c).notes.values.map((n) => n.path).toList();
-    // Separators become spaces and the leading `..` is dropped entirely, so
-    // the name cannot escape the vault or invent a folder.
-    expect(paths, contains('Q1 Plan.md'));
-    expect(paths.every((p) => !p.contains('..')), isTrue);
+    await disposeShell(tester, c);
+    return paths;
+  }
 
+  testWidgets('a / in the name makes the note in that folder', (tester) async {
+    expect(
+      await create(tester, 'Test Sandbox 2026-10-30/Folder A/One'),
+      contains('Test Sandbox 2026-10-30/Folder A/One.md'),
+    );
+  });
+
+  testWidgets('from inside a folder, a / is relative to it and a leading / '
+      'starts at the top', (tester) async {
+    expect(
+      await create(tester, 'Ideas/Plan', folder: 'Projects'),
+      contains('Projects/Ideas/Plan.md'),
+    );
+    expect(
+      await create(tester, '/Ideas/Plan', folder: 'Projects'),
+      contains('Ideas/Plan.md'),
+    );
+  });
+
+  testWidgets('the dialog says where the note will land', (tester) async {
+    final c = shellContainer();
+    await pumpShell(tester, c);
+    await openVault(tester, c);
+    c.read(routerProvider).go(Routes.folder(FakeServer.primaryVault, 'Work'));
+    await tester.pumpAndSettle();
+    await openDialog(tester);
+    String where() =>
+        tester.widget<Text>(find.byKey(const Key('new-note-where'))).data!;
+    expect(where(), 'in Work');
+    expect(find.byKey(const Key('new-note-hint')), findsOneWidget);
+    await tester.enterText(find.byType(TextField).last, 'Q1/Plan');
+    await tester.pump();
+    expect(where(), 'in Work/Q1');
+    await tester.enterText(find.byType(TextField).last, '/Plan');
+    await tester.pump();
+    expect(where(), 'at the top of the vault');
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
     await disposeShell(tester, c);
   });
+
+  for (final (name, why) in [
+    ('../Q1/Plan', 'can\'t use'),
+    ('Q1/', 'after the last /'),
+  ]) {
+    testWidgets('"$name" is refused, says why, and makes nothing', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      await openVault(tester, c);
+      final before = serverOf(c).notes.length;
+      await openDialog(tester);
+      await tester.enterText(find.byType(TextField).last, name);
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+      expect(find.text('New note'), findsOneWidget, reason: 'still open');
+      expect(find.textContaining(why), findsOneWidget);
+      expect(serverOf(c).notes.length, before);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await disposeShell(tester, c);
+    });
+  }
 
   group('path validation mirrors the server rules', () {
     test('accepts ordinary paths', () {

@@ -1,15 +1,13 @@
-//! Decision 134-6: 134j's inbox states, A2's scope, the cap, C9's notice and
-//! LT-13, at the manager. The tools and the approval routes over the
-//! gateway are tested in `api.rs`.
+//! Decision 134-6: 134j's inbox states, A2's scope, the cap, C9's notice,
+//! LT-13 and 145's rounds, at the manager. The tools over the gateway are
+//! tested in `api.rs`.
 
 use std::time::{Duration, Instant};
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::store::SessionRecord;
-use super::store::spawn::{
-    Decision, MAX_INBOX, NOTICE_GRACE_SECS, NewRequest, PARENT_ENDED_NOTICE, Refusal, Request,
-};
+use super::store::spawn::{MAX_INBOX, NOTICE_GRACE_SECS, PARENT_ENDED_NOTICE, Refusal};
 use super::{AgentError, AgentManager, Command, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
@@ -78,23 +76,9 @@ impl Fixture {
         self.m.spawn_child_for_tests(parent, "a task")
     }
 
-    fn message(&self, from: &str, to: &str, text: &str) -> Result<Request, Refusal> {
-        self.m
-            .create_request(
-                from,
-                NewRequest::Message {
-                    target: to.into(),
-                    text: text.into(),
-                },
-            )
-            .unwrap()
-    }
-
-    fn approve(&self, id: &str) -> Request {
-        match self.m.approve_request(id, "dev_A", false).unwrap() {
-            Decision::Decided { request, .. } => request,
-            other => panic!("not decided: {other:?}"),
-        }
+    /// A message, at once (145a): the round it belongs to.
+    fn message(&self, from: &str, to: &str, text: &str) -> Result<i64, Refusal> {
+        self.m.message_child(from, to, text).unwrap()
     }
 
     fn states(&self, session: &str) -> Vec<(i64, String)> {
@@ -178,22 +162,12 @@ fn no_terminal_input(sent: &[Command]) {
 // ---- 134j: states ------------------------------------------------------------
 
 #[tokio::test]
-async fn a_message_waits_for_a_person_then_is_read_and_acknowledged() {
+async fn a_message_is_queued_at_once_then_read_and_acknowledged() {
     let mut f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
-    let r = f.message(&p.id, &c.id, "look at store.rs").unwrap();
-    assert_eq!(r.state, "pending");
-    assert_eq!(f.states(&c.id), [(1, "pending_approval".to_string())]);
-    assert!(
-        f.read(&c.id, None).await.is_empty(),
-        "nothing before approval"
-    );
-
-    let decided = f.approve(&r.id);
-    assert_eq!(decided.outcome.as_deref(), Some("delivered"));
+    assert_eq!(f.message(&p.id, &c.id, "look at store.rs"), Ok(1));
     assert_eq!(f.states(&c.id), [(1, "queued".to_string())]);
-
     assert_eq!(
         f.read(&c.id, None).await,
         [(1, "look at store.rs".to_string())]
@@ -205,53 +179,43 @@ async fn a_message_waits_for_a_person_then_is_read_and_acknowledged() {
     assert_eq!(f.states(&c.id), [(1, "acknowledged".to_string())]);
     assert!(f.read(&c.id, None).await.is_empty());
 
-    // The parent sees its message's state.
+    // The parent sees its message's state, under its act.
+    let act = f.m.requests_of(&p.id).unwrap().pop().unwrap();
     let mine = f.m.messages_from(&p.id, &c.id).unwrap();
     assert_eq!(
         mine.iter()
             .map(|m| (m.request_id.as_deref(), m.state.as_str()))
             .collect::<Vec<_>>(),
-        [(Some(r.id.as_str()), "acknowledged")]
+        [(Some(act.id.as_str()), "acknowledged")]
     );
     no_terminal_input(&f.sent());
 }
 
-#[tokio::test]
-async fn denied_expired_and_refused_messages_never_reach_the_child() {
+/// 145: a message after the child's result for its round starts the next
+/// round; one before it joins the round it is in.
+#[test]
+fn a_message_after_a_result_starts_the_next_round() {
     let f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
-
-    let denied = f.message(&p.id, &c.id, "denied").unwrap();
-    f.m.deny_request(&denied.id, "dev_A").unwrap();
-    let expired = f.message(&p.id, &c.id, "expired").unwrap();
-    let swept =
-        f.m.store
-            .lock()
-            .unwrap()
-            .expire_requests(&after_secs(601))
-            .unwrap();
-    assert_eq!(swept.len(), 1);
-    assert_eq!(swept[0].id, expired.id);
-    let revoked = f.message(&p.id, &c.id, "revoked").unwrap();
-    f.m.set_spawn(&p.id, false, Some("dev_A")).unwrap().unwrap();
+    assert_eq!(f.message(&p.id, &c.id, "also this"), Ok(1));
+    f.m.report_result(&c.id, "succeeded", "round one", None)
+        .unwrap();
+    assert_eq!(f.message(&p.id, &c.id, "next"), Ok(2));
+    assert_eq!(f.message(&p.id, &c.id, "and"), Ok(2), "no result yet");
+    f.m.report_result(&c.id, "partial", "round two", None)
+        .unwrap();
+    assert_eq!(f.message(&p.id, &c.id, "last"), Ok(3));
+    let results = f.m.results_of(&c.id).unwrap();
     assert_eq!(
-        f.m.request(&revoked.id).unwrap().reason.as_deref(),
-        Some("revoked")
-    );
-    assert_eq!(
-        f.m.inbox_of(&c.id)
-            .unwrap()
-            .into_iter()
-            .map(|m| (m.text, m.state))
+        results
+            .iter()
+            .map(|r| (r.round, r.summary.as_str()))
             .collect::<Vec<_>>(),
-        [
-            ("denied".to_string(), "denied".to_string()),
-            ("expired".to_string(), "expired".to_string()),
-            ("revoked".to_string(), "undeliverable".to_string()),
-        ]
+        [(1, "round one"), (2, "round two")]
     );
-    assert!(f.read(&c.id, None).await.is_empty());
+    assert_eq!(f.m.result_of(&c.id).unwrap().unwrap().round, 2);
+    assert_eq!(f.m.round_of(&c.id).unwrap(), 3);
 }
 
 #[tokio::test]
@@ -259,45 +223,21 @@ async fn a_message_to_a_child_that_ends_first_is_undeliverable() {
     let f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
-    let queued = f.message(&p.id, &c.id, "queued, never read").unwrap();
-    f.approve(&queued.id);
-    let pending = f.message(&p.id, &c.id, "pending").unwrap();
+    f.message(&p.id, &c.id, "queued, never read").unwrap();
     f.report(&c.id, "completed");
-    // L-7: unread when its child ended; still pending, then refused at
-    // approval's re-check.
-    let refused = f.approve(&pending.id);
-    assert_eq!(refused.reason.as_deref(), Some("target_gone"));
+    // L-7: unread when its child ended.
     assert_eq!(
         f.m.inbox_of(&c.id)
             .unwrap()
             .into_iter()
             .map(|m| m.state)
             .collect::<Vec<_>>(),
-        ["undeliverable", "undeliverable"]
+        ["undeliverable"]
     );
-}
-
-#[tokio::test]
-async fn the_cursor_only_moves_forward_whatever_order_approvals_come_in() {
-    let f = fixture();
-    let p = f.parent("storm");
-    let c = f.child(&p.id);
-    let first = f.message(&p.id, &c.id, "first asked").unwrap();
-    let second = f.message(&p.id, &c.id, "second asked").unwrap();
-    f.approve(&second.id);
-    let read = f.read(&c.id, None).await;
-    assert_eq!(read.len(), 1);
-    let (seen, _) = &read[0];
-    f.approve(&first.id);
-    // Numbered when it was queued: after everything the child has seen.
-    let next = f.read(&c.id, Some(*seen)).await;
-    assert_eq!(next.len(), 1);
-    assert!(next[0].0 > *seen, "{next:?} after {seen}");
-    assert_eq!(next[0].1, "first asked");
-    // A cursor past anything given out acknowledges only what was given.
-    let third = f.message(&p.id, &c.id, "third").unwrap();
-    f.approve(&third.id);
-    assert_eq!(f.read(&c.id, Some(1000)).await.len(), 1, "queued is unseen");
+    assert_eq!(
+        f.message(&p.id, &c.id, "too late").unwrap_err().reason,
+        "not_found"
+    );
 }
 
 #[tokio::test]
@@ -317,11 +257,13 @@ async fn a_negative_cursor_is_refused() {
 fn a_message_goes_only_to_the_requesters_own_descendants() {
     let f = fixture();
     let t = f.trees();
-    for (from, to) in [(&t.root, &t.child), (&t.root, &t.grandchild)] {
+    for (from, to) in [
+        (&t.root, &t.child),
+        (&t.root, &t.grandchild),
+        (&t.child, &t.grandchild),
+    ] {
         assert!(f.message(from, to, "ok").is_ok(), "{from} to {to}");
     }
-    let to_grandchild = f.message(&t.child, &t.grandchild, "ok").unwrap();
-    f.approve(&to_grandchild.id);
     for (from, to) in [
         (&t.child, &t.root),     // its parent
         (&t.child, &t.sibling),  // a sibling
@@ -345,7 +287,7 @@ fn a_message_goes_only_to_the_requesters_own_descendants() {
     // message anyone.
     assert_eq!(
         f.message(&t.grandchild, &t.child, "no").unwrap_err().reason,
-        "not_permitted"
+        "spawn_off"
     );
     // An ended descendant is out of scope too.
     f.report(&t.sibling, "completed");
@@ -364,19 +306,15 @@ async fn the_inbox_holds_32_and_keeps_the_last_for_storms_notice() {
     let f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
-    for i in 0..MAX_INBOX - 2 {
-        let r = f.message(&p.id, &c.id, &format!("m{i}")).unwrap();
-        f.approve(&r.id);
+    for i in 0..MAX_INBOX - 1 {
+        f.message(&p.id, &c.id, &format!("m{i}")).unwrap();
     }
-    // One waiting for approval counts: it takes the last of the parent's.
-    let held = f.message(&p.id, &c.id, "pending").unwrap();
     let refused = f.message(&p.id, &c.id, "one too many").unwrap_err();
     assert_eq!((refused.reason, refused.cap), ("limit", Some("inbox")));
     assert_eq!(f.m.inbox_of(&c.id).unwrap().len() as i64, MAX_INBOX - 1);
 
-    // Approved, it fills the parent's 31; its parent then ends by itself,
-    // and the notice still fits, as the 32nd.
-    f.approve(&held.id);
+    // Its parent then ends by itself, and the notice still fits, as the
+    // 32nd.
     f.report(&p.id, "completed");
     let inbox = f.m.inbox_of(&c.id).unwrap();
     assert_eq!(inbox.len() as i64, MAX_INBOX);
@@ -392,39 +330,6 @@ async fn the_inbox_holds_32_and_keeps_the_last_for_storms_notice() {
             .unwrap()
             .iter()
             .all(|m| m.state != "queued" && m.state != "delivered")
-    );
-}
-
-#[test]
-fn approval_recounts_the_cap() {
-    let f = fixture();
-    let p = f.parent("storm");
-    let c = f.child(&p.id);
-    for i in 0..MAX_INBOX - 3 {
-        let r = f.message(&p.id, &c.id, &format!("m{i}")).unwrap();
-        f.approve(&r.id);
-    }
-    let late = f.message(&p.id, &c.id, "late").unwrap();
-    // Filled behind its back, as no product path does.
-    let mut store = f.m.store.lock().unwrap();
-    for _ in 0..2 {
-        store
-            .queue_message(&c.id, "storm", "x", None, "queued", "2026-10-25T10:00:00Z")
-            .unwrap();
-    }
-    drop(store);
-    let refused = match f.m.approve_request(&late.id, "dev_A", false).unwrap() {
-        Decision::Decided { request, cap, .. } => (request.reason, cap),
-        other => panic!("{other:?}"),
-    };
-    assert_eq!(refused, (Some("limit".into()), Some("inbox")));
-    assert_eq!(
-        f.m.inbox_of(&c.id)
-            .unwrap()
-            .iter()
-            .filter(|m| m.state == "undeliverable")
-            .count(),
-        1
     );
 }
 
@@ -602,7 +507,7 @@ fn a_child_whose_host_is_away_at_the_stop_is_unreachable() {
 // ---- waiting -----------------------------------------------------------------------
 
 #[tokio::test]
-async fn a_waiting_read_wakes_on_delivery_and_ends_at_its_bound() {
+async fn a_waiting_read_wakes_on_a_message_and_ends_at_its_bound() {
     let f = fixture();
     let p = f.parent("storm");
     let c = f.child(&p.id);
@@ -628,13 +533,11 @@ async fn a_waiting_read_wakes_on_delivery_and_ends_at_its_bound() {
         })
     };
     tokio::time::sleep(Duration::from_millis(100)).await;
-    let r = m.message(&p.id, &c.id, "wake up").unwrap();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    assert!(!reader.is_finished(), "pending is not readable");
+    assert!(!reader.is_finished(), "nothing to read yet");
     let mut woken = m.m.watch(&c.id);
     woken.borrow_and_update();
-    m.approve(&r.id);
-    assert!(woken.has_changed().unwrap(), "the approval wakes its child");
+    m.message(&p.id, &c.id, "wake up").unwrap();
+    assert!(woken.has_changed().unwrap(), "the message wakes its child");
     let ((read, timed_out), took) = reader.await.unwrap();
     assert!(!timed_out);
     assert_eq!(read[0].text, "wake up");

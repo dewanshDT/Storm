@@ -1,49 +1,42 @@
 import 'agent_api.dart';
+import 'agent_models.dart';
 import 'spawn_models.dart';
 
-/// The spawning routes (decisions 134 and 137), owner only on the session
-/// tier: a person's device decides every request (A5), turns the switch,
+/// The spawning routes (decisions 134, 137 and 145), owner only on the
+/// session tier: a person's device reads what agents did, turns the switch,
 /// ends and dismisses, and reads and applies a child's work.
 extension SpawnApi on AgentApi {
   String _s(String id) => '/v1/agent/sessions/${Uri.encodeComponent(id)}';
-  String _r(String id) => '/v1/agent/requests/${Uri.encodeComponent(id)}';
 
-  /// What a session asked for, newest first.
-  Future<List<SpawnRequest>> requests(String sessionId) async {
+  /// What a session's agent started, messaged and ended, newest first
+  /// (decision 145a: acts, never requests a person decides).
+  Future<List<AgentAct>> acts(String sessionId) async {
     final json = await send('GET', '${_s(sessionId)}/requests') as Map;
     return [
       for (final r in json['requests'] as List? ?? const [])
-        SpawnRequest.fromJson(r as Map<String, dynamic>),
+        if (r is Map<String, dynamic>) AgentAct.fromJson(r),
     ];
   }
 
-  Future<SpawnRequest> request(String id) async =>
-      SpawnRequest.fromJson(await send('GET', _r(id)) as Map<String, dynamic>);
-
-  /// Approves on this device. [writeVault] is D2's toggle, off unless the
-  /// person ticked it. The answer is the outcome, a refusal included.
-  Future<SpawnRequest> approve(String id, {bool writeVault = false}) async =>
-      SpawnRequest.fromJson(
-        await send(
-              'POST',
-              '${_r(id)}/approve',
-              body: {'write_vault': writeVault},
-            )
-            as Map<String, dynamic>,
-      );
-
-  Future<SpawnRequest> deny(String id) async => SpawnRequest.fromJson(
-    await send('POST', '${_r(id)}/deny', body: const {})
+  /// The person's answer to the agent's request for auto (decision 147c):
+  /// approving switches the session; its request then names where to.
+  Future<ModeRequest> decideModeRequest(
+    String sessionId,
+    String requestId, {
+    required bool approve,
+  }) async => ModeRequest.fromJson(
+    await send(
+          'POST',
+          '${_s(sessionId)}/mode-requests/${Uri.encodeComponent(requestId)}',
+          body: {'decision': approve ? 'approve' : 'deny'},
+        )
         as Map<String, dynamic>,
   );
 
-  /// Turns a session's spawn switch; the answer counts the waiting requests
-  /// turning it off refused.
-  Future<int> setSpawn(String sessionId, bool enabled) async {
-    final json =
-        await send('PUT', '${_s(sessionId)}/spawn', body: {'enabled': enabled})
-            as Map?;
-    return (json?['refused_requests'] as num?)?.toInt() ?? 0;
+  /// Turns a session's spawn switch (141e: off in About, on only for a
+  /// session launched with it).
+  Future<void> setSpawn(String sessionId, bool enabled) async {
+    await send('PUT', '${_s(sessionId)}/spawn', body: {'enabled': enabled});
   }
 
   Future<Descendants> descendants(String sessionId) async =>

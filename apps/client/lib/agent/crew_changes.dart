@@ -126,10 +126,28 @@ class _SnapBackOutlineState extends ConsumerState<SnapBackOutline>
 
 // ---- what each change looks like before the server answers --------------
 
+/// A crew's stored members: the roots of its trees (145i), in order.
 List<AgentSession> _membersById(AgentOverview o, String crewId) => [
   for (final s in o.sessions)
-    if (s.crew?.id == crewId) s,
+    if (s.crew?.id == crewId && !s.spawn.isChild) s,
 ]..sort((a, b) => a.crew!.order.compareTo(b.crew!.order));
+
+/// Every child drawn in its root's crew, as the server derives it (145i).
+AgentOverview _withTrees(AgentOverview o) {
+  final crewOf = {
+    for (final s in o.sessions)
+      if (!s.spawn.isChild) s.id: s.crew,
+  };
+  return o.copyWith(
+    sessions: [
+      for (final s in o.sessions)
+        if (s.spawn.isChild && crewOf.containsKey(s.spawn.rootSession))
+          s.withCrew(crewOf[s.spawn.rootSession])
+        else
+          s,
+    ],
+  );
+}
 
 /// Drops those of [touched] no session is in any more, as the server does in
 /// the same change (138c). A crew already empty and untouched stays.
@@ -146,7 +164,9 @@ AgentOverview _dropEmptied(AgentOverview o, Set<String> touched) {
   );
 }
 
-AgentOverview _move(AgentOverview o, String id, String? to, String? before) {
+AgentOverview _move(AgentOverview o, String named, String? to, String? b) {
+  final id = o.rootIdOf(named);
+  final before = b == null ? null : o.rootIdOf(b);
   final s = o.byId(id);
   if (s == null) return o;
   final from = s.crew?.id;
@@ -173,7 +193,8 @@ AgentOverview _move(AgentOverview o, String id, String? to, String? before) {
           m,
     ],
   );
-  return from == null || from == to ? moved : _dropEmptied(moved, {from});
+  final trees = _withTrees(moved);
+  return from == null || from == to ? trees : _dropEmptied(trees, {from});
 }
 
 /// [sessionId] into [crewId] in front of [before] (last when null), or out

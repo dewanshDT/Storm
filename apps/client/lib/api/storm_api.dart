@@ -301,12 +301,55 @@ class StormApi {
     );
   }
 
-  Future<void> deleteFolder(String vaultId, String path) async {
+  /// Deletes a folder. A folder holding notes needs [toTrash], which the
+  /// app sends only once the person confirmed (decision 150a).
+  Future<void> deleteFolder(
+    String vaultId,
+    String path, {
+    bool toTrash = false,
+  }) async {
     _decode(
       await _client.delete(
-        _uri(_v(vaultId, '/folders/${_path(path)}')),
+        _uri(
+          _v(vaultId, '/folders/${_path(path)}'),
+          toTrash ? const {'trash': 'true'} : null,
+        ),
         headers: _headers,
       ),
+    );
+  }
+
+  /// The vault's trash (decision 150b).
+  Future<TrashPage> trash(String vaultId) async {
+    final json = _decode(
+      await _client.get(_uri(_v(vaultId, '/trash')), headers: _headers),
+    );
+    return TrashPage.fromJson(json as Map<String, dynamic>);
+  }
+
+  Future<void> restoreTrash(String vaultId, String id) async {
+    _decode(
+      await _client.post(
+        _uri(_v(vaultId, '/trash/${Uri.encodeComponent(id)}/restore')),
+        headers: _headers,
+        body: '{}',
+      ),
+    );
+  }
+
+  /// Delete forever.
+  Future<void> purgeTrash(String vaultId, String id) async {
+    _decode(
+      await _client.delete(
+        _uri(_v(vaultId, '/trash/${Uri.encodeComponent(id)}')),
+        headers: _headers,
+      ),
+    );
+  }
+
+  Future<void> emptyTrash(String vaultId) async {
+    _decode(
+      await _client.delete(_uri(_v(vaultId, '/trash')), headers: _headers),
     );
   }
 
