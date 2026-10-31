@@ -1144,6 +1144,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             loop {
                 tick.tick().await;
                 agent.reap_silent(std::time::Duration::from_secs(45));
+                agent.expire_starts(crate::agent::START_ACK_DEADLINE);
                 // 144a: a child idle past IDLE_EVENT_AFTER, by a gated signal.
                 if let Err(e) = agent.fire_idle_timeouts() {
                     tracing::warn!(error = ?e, "could not write idle events");

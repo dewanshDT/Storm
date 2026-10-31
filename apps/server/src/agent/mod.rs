@@ -876,7 +876,28 @@ struct Live {
     /// generation of the link it went down: one per link, so an `end` lost
     /// with its link is sent again on the next.
     stopping: HashMap<String, u64>,
+    /// Starts sent and not yet acknowledged by any report from their host:
+    /// the link generation each went down and when. A start is wanted only
+    /// on the link it was sent on and only for [`START_ACK_DEADLINE`]; past
+    /// either it has failed, and its host is told so if it runs it late.
+    starts: HashMap<String, PendingStart>,
 }
+
+#[derive(Debug, Clone)]
+struct PendingStart {
+    host: String,
+    generation: u64,
+    sent: std::time::Instant,
+}
+
+/// How long a `start` may wait for its host's first report of it before it
+/// has failed: a host that takes a start this late (a VM resumed, a link
+/// whose bytes sat in a send buffer) never runs it.
+pub const START_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a host is told when it asks to go on with a start Storm has given up
+/// on: it drops the start.
+pub const START_UNWANTED: &str = "start_unwanted";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AgentConfig {
@@ -1076,11 +1097,37 @@ impl AgentManager {
             }
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
-        // Its sessions are unknown until it reconnects and reports them.
-        // A parked child has no process there to be unsure of (145e).
+        // A start that went down this link and was never reported has
+        // failed: the host may still read it from a stale connection, and
+        // must not run it then.
+        let unstarted: std::collections::HashSet<String> = {
+            let mut live = self.live.lock().unwrap();
+            let gone: Vec<String> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.host == host_id && p.generation == generation)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &gone {
+                live.starts.remove(id);
+            }
+            gone.into_iter().collect()
+        };
+        // Its other sessions are unknown until it reconnects and reports
+        // them. A parked child has no process there to be unsure of (145e).
         let _ = self.transition_host_sessions(host_id, events::HOST_PROCESS, |r| {
-            (!r.is_ended() && r.status != "parked")
-                .then(|| ("unknown".to_string(), None, None, None))
+            if r.is_ended() || r.status == "parked" {
+                None
+            } else if unstarted.contains(&r.id) {
+                Some((
+                    "failed".to_string(),
+                    Some("start_failure".to_string()),
+                    None,
+                    None,
+                ))
+            } else {
+                Some(("unknown".to_string(), None, None, None))
+            }
         });
     }
 
@@ -1181,12 +1228,91 @@ impl AgentManager {
                 "command sent"
             ),
         }
+        let start = match &command {
+            Command::Start { session, .. } => Some(session.clone()),
+            _ => None,
+        };
         let envelope = Envelope {
             cmd_seq: link.next_seq,
             command,
         };
         link.next_seq += 1;
-        link.tx.send(envelope).map_err(|_| AgentError::HostOffline)
+        let generation = link.generation;
+        link.tx
+            .send(envelope)
+            .map_err(|_| AgentError::HostOffline)?;
+        if let Some(session) = start {
+            live.starts.insert(
+                session,
+                PendingStart {
+                    host: host_id.to_string(),
+                    generation,
+                    sent: std::time::Instant::now(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The host reported `session`: its start, if one was waiting, arrived.
+    fn start_acknowledged(&self, session_id: &str) {
+        self.live.lock().unwrap().starts.remove(session_id);
+    }
+
+    /// A session Storm has ended that its host says is running (a start it
+    /// took late): it is ended there too. Never a status change here.
+    fn end_unwanted(&self, host_id: &str, r: &SessionRecord) {
+        tracing::warn!(
+            host = host_id,
+            session = %r.id,
+            status = %r.status,
+            "the host runs a session that has ended: ending it"
+        );
+        let _ = self.send(
+            host_id,
+            Command::End {
+                session: r.id.clone(),
+            },
+        );
+    }
+
+    /// Every start whose host has not reported it within `deadline` has
+    /// failed (`start_failure`): its host is no longer waited for, and if
+    /// it takes the start later it drops it or is told to end it. Returns
+    /// the sessions it failed.
+    pub fn expire_starts(&self, deadline: std::time::Duration) -> Vec<String> {
+        let due: Vec<(String, String)> = {
+            let mut live = self.live.lock().unwrap();
+            let due: Vec<(String, String)> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.sent.elapsed() > deadline)
+                .map(|(id, p)| (id.clone(), p.host.clone()))
+                .collect();
+            for (id, _) in &due {
+                live.starts.remove(id);
+            }
+            due
+        };
+        let mut failed = Vec::new();
+        for (id, host) in due {
+            let Ok(Some(mut r)) = self.store.lock().unwrap().get(&id) else {
+                continue;
+            };
+            if r.is_ended() || !matches!(r.status.as_str(), "creating" | "starting" | "unknown") {
+                continue;
+            }
+            tracing::warn!(host = %host, session = %id, "its host never took the start: failed");
+            r.status = "failed".into();
+            r.end_reason = Some("start_failure".into());
+            r.ended_at.get_or_insert_with(now);
+            if self.update_record(&r, events::HOST_PROCESS).is_ok() {
+                self.forget_stop(&r);
+                self.bump(&r.id);
+                failed.push(id);
+            }
+        }
+        failed
     }
 
     /// Applies `change` to every session on `host_id`. `change` returns the
@@ -1270,6 +1396,11 @@ impl AgentManager {
         for mut r in records {
             match reported.get(&r.id) {
                 Some(rep) => {
+                    self.start_acknowledged(&r.id);
+                    if r.is_ended() && matches!(rep.status.status.as_str(), "starting" | "running")
+                    {
+                        self.end_unwanted(host_id, &r);
+                    }
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
                         // An end Storm sent before a restart (LT-6).
@@ -1777,8 +1908,16 @@ impl AgentManager {
         report: &StatusReport,
     ) -> AgentResult<()> {
         let mut r = self.owned_by(host_id, session_id)?;
+        self.start_acknowledged(session_id);
         if r.is_ended() {
-            // An ending is final; a late duplicate changes nothing.
+            // An ending is final; a late duplicate changes nothing. A host
+            // that runs it anyway took a start Storm gave up on: a host
+            // about to start it drops it, one that started it ends it.
+            match report.status.as_str() {
+                "starting" => return Err(AgentError::Conflict(START_UNWANTED.into())),
+                "running" => self.end_unwanted(host_id, &r),
+                _ => {}
+            }
             return Ok(());
         }
         // 145e: `parked` only answers Storm's own `park`; anything else that
@@ -4186,6 +4325,146 @@ mod tests {
         ));
     }
 
+    fn sent_starts(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut starts = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::Start { session, .. } = e.command {
+                starts.push(session);
+            }
+        }
+        starts
+    }
+
+    fn sent_ends(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut ends = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::End { session } = e.command {
+                ends.push(session);
+            }
+        }
+        ends
+    }
+
+    fn hello_with(m: &AgentManager, sessions: Vec<ReportedSession>) {
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: caps(&[("shell", true)]),
+                sessions,
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Round 4's stray launch: a launch refused because its host is offline
+    /// leaves nothing behind. No session is written, and when the host
+    /// comes back nothing is started on it.
+    #[test]
+    fn a_launch_refused_offline_is_never_kept_or_replayed() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let (generation, _) = {
+            let live = m.live.lock().unwrap();
+            (live.hosts["hst_A"].generation, ())
+        };
+        m.disconnect_host("hst_A", generation);
+        drop(rx);
+        assert!(matches!(
+            launch(&m, Some("shell")),
+            Err(AgentError::HostOffline)
+        ));
+        assert!(m.list().unwrap().is_empty(), "nothing written");
+        assert!(m.live.lock().unwrap().starts.is_empty());
+
+        let (_, rx2) = m.connect_host("hst_A");
+        rx = rx2;
+        hello_with(&m, vec![]);
+        assert!(sent_starts(&mut rx).is_empty(), "nothing replayed");
+        assert!(m.list().unwrap().is_empty());
+    }
+
+    /// A start whose link went down before its host reported it has failed:
+    /// it is never left `unknown` to come back as running. When the host
+    /// asks to go on with it, it is told `start_unwanted`; a host that ran
+    /// it anyway is told to end it, and the session stays failed. A start
+    /// the host reported is `unknown` across a drop, as before.
+    #[test]
+    fn a_start_its_link_lost_before_the_host_took_it_never_runs_later() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let generation = m.live.lock().unwrap().hosts["hst_A"].generation;
+        let late = launch(&m, Some("shell")).unwrap();
+        let taken = launch(&m, Some("shell")).unwrap();
+        assert_eq!(sent_starts(&mut rx), [late.id.clone(), taken.id.clone()]);
+        m.host_status("hst_A", &taken.id, &report("running", None, None))
+            .unwrap();
+
+        m.disconnect_host("hst_A", generation);
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&taken.id).unwrap().status, "unknown");
+
+        let (_, mut rx) = m.connect_host("hst_A");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(code)) if code == START_UNWANTED
+        ));
+        assert!(sent_ends(&mut rx).is_empty());
+        m.host_status("hst_A", &late.id, &report("running", None, None))
+            .unwrap();
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        hello_with(
+            &m,
+            vec![
+                ReportedSession {
+                    id: late.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+                ReportedSession {
+                    id: taken.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+            ],
+        );
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        assert_eq!(m.get(&late.id).unwrap().status, "failed");
+        assert_eq!(m.get(&taken.id).unwrap().status, "running");
+    }
+
+    /// A start no report has answered within the deadline has failed, on a
+    /// link that is still up too; one its host answered is left alone.
+    #[test]
+    fn a_start_never_answered_in_time_fails() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let late = launch(&m, Some("shell")).unwrap();
+        let answered = launch(&m, Some("shell")).unwrap();
+        sent_starts(&mut rx);
+        m.host_status("hst_A", &answered.id, &report("starting", None, None))
+            .unwrap();
+        assert!(m.expire_starts(START_ACK_DEADLINE).is_empty());
+        assert_eq!(
+            m.expire_starts(std::time::Duration::ZERO),
+            std::slice::from_ref(&late.id)
+        );
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&answered.id).unwrap().status, "starting");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(_))
+        ));
+    }
+
     #[test]
     fn a_stale_link_closing_does_not_take_a_newer_one_down() {
         let (m, _d) = manager();
@@ -4210,6 +4489,8 @@ mod tests {
             },
         );
         let r = launch(&m, Some("shell")).unwrap();
+        m.host_status("hst_A", &r.id, &report("running", None, None))
+            .unwrap();
         let _old = online(&m, "hst_OLD", caps(&[("shell", true)]));
 
         assert!(m.reap_silent(std::time::Duration::from_secs(60)).is_empty());
