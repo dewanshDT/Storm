@@ -287,6 +287,10 @@ mod imp {
         pub fn child_dispose(&self, _: &str) -> std::io::Result<serde_json::Value> {
             match self._never {}
         }
+
+        pub fn child_park(&self, _: &str) -> std::io::Result<()> {
+            match self._never {}
+        }
     }
 
     /// No helper off Linux, so never its refusal.

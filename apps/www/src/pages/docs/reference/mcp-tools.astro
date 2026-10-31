@@ -24,7 +24,7 @@ const groups = [
     tools: facts.mcp_tools.filter((t) => t.access === "agents"),
   },
 ];
-const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.name);
+const askFirst = facts.mcp_tools.filter((t) => t.approval).map((t) => t.name);
 ---
 
 <StarlightPage
@@ -39,9 +39,9 @@ const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.nam
     <strong>Settings › AI access</strong>; each AI app authenticates with its
     own key from <strong>Settings › Devices &amp; access</strong>. This list is
     generated from the server's source, so it is the set the current release
-    offers. Agents in a session never get {neverForAgents.map((n, i) => (
-      <>{i > 0 && ", "}<code>{n}</code></>
-    ))}.
+    offers. When an agent in a session calls {askFirst.map((n, i) => (
+      <>{i > 0 && " or "}<code>{n}</code></>
+    ))}, Storm asks you first, and an approved delete goes to Trash.
   </p>
   {
     groups.map((g) => (
