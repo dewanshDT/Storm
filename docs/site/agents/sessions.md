@@ -82,9 +82,12 @@ it started from), what would go (a note's path, size and last change, or a
 folder's note count and first paths) and the agent's reason, shown as plain
 text.
 
-- **Approve** moves it to the vault's [Trash](/docs/notes/vaults/#trash).
-  **Decline**, Esc or closing the dialog keeps it. There is no "always
-  allow", and Auto mode does not skip the dialog.
+- **Approve** moves it to the vault's [Trash](/docs/notes/vaults/#trash);
+  **Decline** keeps it and tells the agent no. There is no "always allow",
+  and Auto mode does not skip the dialog.
+- **Later**, Esc or clicking outside only closes the dialog on that device:
+  the request keeps waiting and isn't declined. It doesn't pop up again
+  there on its own (a new request does); your other devices still show it.
 - The first answer wins; the dialog on your other devices closes and says
   where it was answered. While it waits, the session shows **Needs you**,
   and **Review** reopens the dialog.

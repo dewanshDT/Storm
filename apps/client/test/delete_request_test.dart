@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:storm/agent/delete_request.dart' show kDeleteLaterNote;
 import 'package:storm/router.dart';
 import 'package:storm/ui/controls.dart';
 
@@ -210,22 +211,10 @@ void main() {
     for (final (how, answer) in [
       ('Approve', 'approve'),
       ('Decline', 'decline'),
-      ('Esc', 'decline'),
-      ('dismissing it', 'decline'),
     ]) {
       testWidgets('$how answers $answer', (t) async {
         final (c, deletes) = await _open(t);
-        switch (how) {
-          case 'Approve':
-            await t.tap(find.byKey(const Key('delete-request-approve')));
-          case 'Decline':
-            await t.tap(find.byKey(const Key('delete-request-decline')));
-          case 'Esc':
-            // ignore: avoid_print
-            await t.sendKeyEvent(LogicalKeyboardKey.escape);
-          default:
-            await t.tapAt(const Offset(10, 10));
-        }
+        await t.tap(find.byKey(Key('delete-request-$answer')));
         await t.pumpAndSettle();
         expect(_dialog(), findsNothing);
         expect(deletes.answers, [
@@ -237,6 +226,57 @@ void main() {
         await disposeShell(t, c);
       });
     }
+
+    for (final how in ['Later', 'Esc', 'dismissing it']) {
+      testWidgets('$how closes it and leaves the request pending', (t) async {
+        final (c, deletes) = await _open(t);
+        expect(find.text(kDeleteLaterNote), findsOneWidget);
+        switch (how) {
+          case 'Later':
+            await t.tap(find.byKey(const Key('delete-request-later')));
+          case 'Esc':
+            await t.sendKeyEvent(LogicalKeyboardKey.escape);
+          default:
+            await t.tapAt(const Offset(10, 10));
+        }
+        await t.pumpAndSettle();
+        expect(_dialog(), findsNothing);
+        expect(deletes.answers, isEmpty, reason: 'closing is not declining');
+        expect(deletes.requests.first['state'], 'pending');
+        deletes.version++;
+        await t.pump(const Duration(seconds: 2));
+        await t.pumpAndSettle();
+        expect(_dialog(), findsNothing, reason: 'not reopened by the watcher');
+        await disposeShell(t, c);
+      });
+    }
+
+    testWidgets('a new request after one put off opens its own dialog', (
+      t,
+    ) async {
+      final (c, deletes) = await _open(t);
+      await t.tap(find.byKey(const Key('delete-request-later')));
+      await t.pumpAndSettle();
+      deletes.requests.add(_request(id: 'adr_2', kind: 'note'));
+      deletes.version++;
+      await t.pump(const Duration(seconds: 2));
+      await t.pumpAndSettle();
+      expect(_dialog(), findsOneWidget);
+      expect(
+        t
+            .widget<Text>(find.byKey(const Key('delete-request-title')))
+            .textSpan!
+            .toPlainText(),
+        'Delete Ideas.md?',
+      );
+      await t.tap(find.byKey(const Key('delete-request-decline')));
+      await t.pumpAndSettle();
+      expect(deletes.answers, [
+        {'decision': 'decline'},
+      ]);
+      expect(deletes.requests.first['state'], 'pending');
+      await disposeShell(t, c);
+    });
 
     testWidgets('answered on another device first: this one closes and '
         'says where, sending nothing', (t) async {
@@ -263,8 +303,8 @@ void main() {
   });
 
   group('149c: Needs you', () {
-    testWidgets('the session shows the request under Needs you, and Review '
-        'opens the dialog', (t) async {
+    testWidgets('a request closed with Esc stays under Needs you, and Review '
+        'opens the dialog again until Decline answers it', (t) async {
       final pending = _request(kind: 'note');
       final session = {
         ...agentSession('ags_d', name: 'tidier'),
@@ -276,10 +316,9 @@ void main() {
         sessions: [session],
         size: const Size(411, 900),
       );
-      await t.tap(find.byKey(const Key('delete-request-decline')));
+      await t.sendKeyEvent(LogicalKeyboardKey.escape);
       await t.pumpAndSettle();
-      deletes.answers.clear();
-      deletes.requests.first['state'] = 'pending';
+      expect(deletes.answers, isEmpty);
 
       c.read(routerProvider).go(Routes.agents);
       await t.pumpAndSettle();
@@ -291,10 +330,17 @@ void main() {
       await t.tap(find.byKey(const Key('delete-request-review')));
       await t.pumpAndSettle();
       expect(_dialog(), findsOneWidget);
-      await t.tap(find.byKey(const Key('delete-request-approve')));
+      await t.tap(find.byKey(const Key('delete-request-later')));
+      await t.pumpAndSettle();
+      expect(_dialog(), findsNothing);
+      expect(find.byKey(const Key('delete-request-card')), findsOneWidget);
+      await t.tap(find.byKey(const Key('delete-request-review')));
+      await t.pumpAndSettle();
+      expect(_dialog(), findsOneWidget, reason: 'Review reopens it');
+      await t.tap(find.byKey(const Key('delete-request-decline')));
       await t.pumpAndSettle();
       expect(deletes.answers, [
-        {'decision': 'approve'},
+        {'decision': 'decline'},
       ]);
       await disposeShell(t, c);
     });

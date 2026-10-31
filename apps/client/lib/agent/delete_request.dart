@@ -113,6 +113,10 @@ extension DeleteApi on AgentApi {
 
 const kDeleteFootnote = 'It goes to Trash, which keeps it for 30 days.';
 
+const kDeleteLaterNote =
+    'Later closes this and keeps the request waiting: Review it from the '
+    'session until it times out.';
+
 String _bytes(int n) {
   if (n < 1024) return '$n B';
   if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
@@ -134,8 +138,10 @@ enum _Ended { approve, decline, elsewhere }
 /// when another device answers first.
 final _open = <String, void Function()>{};
 
-/// Asks the person (149c). Approve is the main, destructive button; Esc
-/// and dismissing it decline. Nothing when its dialog is already open here.
+/// Asks the person (149c, amended 2026-10-31). Approve is the main,
+/// destructive button and only Decline declines; Later, Esc and dismissing
+/// it close it on this device and leave the request pending. Nothing when
+/// its dialog is already open here.
 Future<void> showDeleteRequestDialog(
   BuildContext context,
   ProviderContainer container,
@@ -168,7 +174,7 @@ Future<void> showDeleteRequestDialog(
     },
   );
   _open.remove(r.id);
-  if (ended == _Ended.elsewhere) return;
+  if (ended == null || ended == _Ended.elsewhere) return;
   final api = container.read(agentApiFactoryProvider)?.call();
   if (api == null) return;
   final approve = ended == _Ended.approve;
@@ -244,15 +250,15 @@ class _DeleteRequestDialogState extends State<DeleteRequestDialog> {
     super.dispose();
   }
 
-  /// Esc declines, as dismissing it does, wherever focus is: a page the
-  /// shell's own navigator finishes while this is open takes focus.
+  /// Esc closes it, as Later does, wherever focus is: a page the shell's
+  /// own navigator finishes while this is open takes focus.
   bool _key(KeyEvent e) {
     if (e is! KeyDownEvent || e.logicalKey != LogicalKeyboardKey.escape) {
       return false;
     }
     final route = ModalRoute.of(context);
     if (!mounted || route == null || !route.isCurrent) return false;
-    Navigator.of(context).pop(_Ended.decline);
+    Navigator.of(context).pop();
     return true;
   }
 
@@ -377,11 +383,22 @@ class _DeleteRequestDialogState extends State<DeleteRequestDialog> {
                 key: const Key('delete-request-footnote'),
                 style: agentSans(t, color: t.text2),
               ),
+              SizedBox(height: t.sp * 0.5),
+              Text(
+                kDeleteLaterNote,
+                key: const Key('delete-request-later-note'),
+                style: agentSans(t, color: t.text2),
+              ),
             ],
           ),
         ),
       ),
       actions: [
+        StormButton.text(
+          key: const Key('delete-request-later'),
+          label: 'Later',
+          onPressed: () => Navigator.of(context).pop(),
+        ),
         StormButton.outline(
           key: const Key('delete-request-decline'),
           label: 'Decline',
@@ -421,8 +438,8 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
   Timer? _retry;
   AppLifecycleListener? _lifecycle;
 
-  /// Requests this device already showed, so a declined or dismissed one
-  /// is not asked again while it is still listed.
+  /// Requests this device already showed, so one put off with Later is
+  /// not opened again while it is still listed: Review reopens it.
   final _seen = <String>{};
 
   @override
@@ -507,7 +524,7 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
 }
 
 /// A session's Needs you entry for its agent's deletion (149c), so it is
-/// not lost when the dialog was closed elsewhere: Review opens the dialog.
+/// not lost when the dialog was closed, here or elsewhere: Review opens it.
 class DeleteRequestCard extends ConsumerWidget {
   const DeleteRequestCard({super.key, required this.session});
 
