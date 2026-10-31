@@ -56,9 +56,16 @@ class SpawnFacts {
 
 /// The spawn switch on a session's view (134-10).
 class SpawnSwitch {
-  const SpawnSwitch({required this.enabled, this.refused});
+  const SpawnSwitch({
+    required this.enabled,
+    this.refused,
+    this.launchedOn = false,
+  });
 
   final bool enabled;
+
+  /// Launched with the switch on (141e): only such a session turns it on.
+  final bool launchedOn;
 
   /// What turning it on would be refused with now (134-2's codes), or null.
   final String? refused;
@@ -66,6 +73,7 @@ class SpawnSwitch {
   factory SpawnSwitch.fromJson(Map<String, dynamic> j) => SpawnSwitch(
     enabled: j['enabled'] == true,
     refused: j['refused'] as String?,
+    launchedOn: j['launched_on'] == true,
   );
 }
 
@@ -126,6 +134,7 @@ class SpawnRequest {
     this.contextTitle,
     this.provider,
     this.text,
+    this.sharedWith = 0,
   });
 
   final String id;
@@ -157,6 +166,10 @@ class SpawnRequest {
   final String? provider;
   final String? text;
 
+  /// Other live sessions in the requester's workspace, its own tree left
+  /// out (decision 141b). 0 from a server that does not say.
+  final int sharedWith;
+
   /// Waiting for a person, and not yet past its expiry.
   bool waiting(DateTime now) => state != 'decided' && left(now) > Duration.zero;
 
@@ -187,6 +200,7 @@ class SpawnRequest {
       contextTitle: note is Map ? note['title'] as String? : null,
       provider: j['provider'] as String?,
       text: j['text'] as String?,
+      sharedWith: (j['shared_with'] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -329,9 +343,18 @@ String spawnRefusalText(String code, String agent) => switch (code) {
   'launched_without_asks' =>
     'It started before this host could offer it. Start a new session to '
         'allow it',
+  'launched_without_spawn' => kSpawnAtLaunch,
   'session_not_live' => 'The session has ended',
   _ => code.replaceAll('_', ' '),
 };
+
+/// The agents that can start agents (134-2).
+const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
+
+/// Why a session launched without the switch can't turn it on (141e).
+const kSpawnAtLaunch =
+    'To let an agent start agents, start a new session with "Allow this '
+    'session to start agents" on.';
 
 /// The cap a request hit, in the decision's words (C4).
 String capText(String? cap) => switch (cap) {

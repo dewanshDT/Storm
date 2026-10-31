@@ -154,6 +154,10 @@ class AgentHost {
 
   bool get online => status == 'online';
 
+  /// C0 as its view says (134r, 141e): identity and isolation verified.
+  bool get offersSpawning =>
+      identityState == 'verified' && isolationState == 'verified';
+
   bool get receivesClaudeLogin =>
       providerCredentials.contains('claude_subscription_token');
 

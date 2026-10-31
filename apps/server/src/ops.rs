@@ -1890,6 +1890,7 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
             format!("the host could not take the image: {m}"),
         ),
         E::ChildRefused(code) => ApiError(child_status(&code), code),
+        E::WorkspaceRefused(code) => ApiError(new_workspace_status(&code), code),
         E::Internal(e) => internal(e),
     }
 }
@@ -1921,6 +1922,119 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
             name,
         })
         .collect())
+}
+
+// ---- New workspaces (decision 141c) ----------------------------------------
+//
+// Owner only and session tier, like installs: no `stk_` key, agent or MCP
+// tool makes one. The host checks the name again and makes the folder.
+
+/// The audit row of a new workspace: the host, the name and the result
+/// code, never a path.
+pub const EVENT_WORKSPACE_CREATE: &str = "workspace_create";
+
+#[derive(Debug, Deserialize)]
+pub struct NewWorkspace {
+    pub name: String,
+    #[serde(default)]
+    pub git: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreatedWorkspace {
+    pub name: String,
+}
+
+/// The host's own rule for a workspace name (one path segment), checked
+/// here too so a bad one never reaches it.
+fn workspace_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.chars().count())
+        && !name.starts_with('.')
+        && name.trim() == name
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+}
+
+fn new_workspace_status(code: &str) -> axum::http::StatusCode {
+    use axum::http::StatusCode as S;
+    match code {
+        "bad_name" => S::BAD_REQUEST,
+        "timeout" => S::GATEWAY_TIMEOUT,
+        "failed" | "git_failed" => S::BAD_GATEWAY,
+        _ => S::CONFLICT,
+    }
+}
+
+/// `POST /v1/agent/hosts/{id}/workspaces`: makes a workspace on the host,
+/// audited whether it was made or not.
+pub async fn create_workspace(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    req: NewWorkspace,
+) -> ApiResult<CreatedWorkspace> {
+    let owner = crews_owner(actor)?;
+    {
+        let auth_db = state.auth_db.lock().await;
+        match auth_db.host_by_id(host_id).map_err(internal)? {
+            Some(h) if !h.is_revoked() => {}
+            _ => return Err(not_found("no such host")),
+        }
+    }
+    let made = if workspace_name_ok(&req.name) {
+        state
+            .agent
+            .create_workspace(host_id, &req.name, req.git)
+            .await
+    } else {
+        Err(crate::agent::AgentError::WorkspaceRefused(
+            "bad_name".into(),
+        ))
+    };
+    let result = match &made {
+        Ok(_) => "created".to_string(),
+        Err(crate::agent::AgentError::WorkspaceRefused(code)) => code.clone(),
+        Err(crate::agent::AgentError::HostOffline) => "host_offline".into(),
+        Err(_) => "failed".into(),
+    };
+    // A refused name is not echoed: it may not be one.
+    let name = (result != "bad_name").then_some(req.name.as_str());
+    let detail = serde_json::json!({
+        "host_id": host_id,
+        "name": name,
+        "git": req.git,
+        "result": result,
+    });
+    {
+        let auth_db = state.auth_db.lock().await;
+        if let Err(e) = auth_db.record_event(
+            EVENT_WORKSPACE_CREATE,
+            Some(owner),
+            None,
+            &crate::index::now_rfc3339(),
+            &detail.to_string(),
+        ) {
+            tracing::warn!(error = %e, host = host_id, "could not record a new workspace");
+        }
+    }
+    let name = made.map_err(agent_error)?;
+    tracing::info!(host = host_id, git = req.git, "workspace created");
+    Ok(CreatedWorkspace { name })
+}
+
+/// A host's answer to `workspace.create`: `{answer}` or `{refused}`.
+pub fn runtime_workspace_created(
+    state: &Shared,
+    host_id: &str,
+    request: &str,
+    body: serde_json::Value,
+) -> ApiResult<()> {
+    let outcome = host_answer(&body)?;
+    state
+        .agent
+        .workspace_created(host_id, request, outcome)
+        .map_err(agent_error)
 }
 
 // ---- Agent spawning: the spawn switch (decision 134-2) ---------------------
@@ -2231,13 +2345,16 @@ pub struct RequestCard {
     /// A message's text, exactly as the agent sent it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// The live sessions sharing the requester's workspace now, other than
+    /// it and its own tree (decision 141b).
+    pub shared_with: u32,
 }
 
 /// How many of a session's requests its list carries, newest first.
 const REQUESTS_LISTED: usize = 50;
 
 impl RequestCard {
-    fn of(r: crate::agent::store::spawn::Request) -> Self {
+    fn of(r: crate::agent::store::spawn::Request, shared_with: u32) -> Self {
         let payload: serde_json::Value =
             serde_json::from_str(&r.payload).unwrap_or(serde_json::Value::Null);
         let text = |k: &str| payload.get(k).and_then(|v| v.as_str()).map(String::from);
@@ -2254,6 +2371,7 @@ impl RequestCard {
             context_note,
             provider,
             text: message,
+            shared_with,
         }
     }
 }
@@ -2274,15 +2392,24 @@ pub async fn session_requests(
     let mut requests = state.agent.requests_of(id).map_err(agent_error)?;
     requests.reverse();
     requests.truncate(REQUESTS_LISTED);
+    let shared_with = state.agent.shared_with(id).map_err(agent_error)?;
     Ok(SessionRequests {
-        requests: requests.into_iter().map(RequestCard::of).collect(),
+        requests: requests
+            .into_iter()
+            .map(|r| RequestCard::of(r, shared_with))
+            .collect(),
     })
 }
 
 /// `GET /v1/agent/requests/{id}`: one request as its card shows it.
 pub async fn spawn_request(state: &Shared, actor: &Actor, id: &str) -> ApiResult<RequestCard> {
     let owner = crews_owner(actor)?;
-    Ok(RequestCard::of(owners_request(state, owner, id)?))
+    let request = owners_request(state, owner, id)?;
+    let shared_with = state
+        .agent
+        .shared_with(&request.requester)
+        .map_err(agent_error)?;
+    Ok(RequestCard::of(request, shared_with))
 }
 
 /// The expiry sweeper's pass (P-5), audited per request.
@@ -3356,7 +3483,18 @@ pub fn runtime_child_answered(
     request: &str,
     body: serde_json::Value,
 ) -> ApiResult<()> {
-    let outcome = match (body.get("answer"), body.get("refused")) {
+    let outcome = host_answer(&body)?;
+    state
+        .agent
+        .child_answered(host_id, request, outcome)
+        .map_err(agent_error)
+}
+
+/// A host's `{answer}` (an object) or `{refused}` (a code).
+fn host_answer(
+    body: &serde_json::Value,
+) -> ApiResult<std::result::Result<serde_json::Value, String>> {
+    Ok(match (body.get("answer"), body.get("refused")) {
         (Some(answer), None) if answer.is_object() => Ok(answer.clone()),
         (None, Some(code)) => {
             let code = code
@@ -3369,11 +3507,7 @@ pub fn runtime_child_answered(
             Err(code.to_string())
         }
         _ => return Err(bad_request("an answer or a refusal")),
-    };
-    state
-        .agent
-        .child_answered(host_id, request, outcome)
-        .map_err(agent_error)
+    })
 }
 
 // ---- Agent installs (decision 133) ------------------------------------
@@ -3668,8 +3802,13 @@ pub struct LaunchMcp {
 pub async fn launch_session(
     state: &Shared,
     actor: &Actor,
+    device: Option<&str>,
     mut req: crate::agent::Launch,
 ) -> ApiResult<LaunchedSession> {
+    // Only a person turns the switch on, at launch as later (B1, 141e).
+    if req.spawn {
+        crews_owner(actor)?;
+    }
     // A resume is the old session's launch again (decision 89): its note and
     // launch role as they were then, its write vault, still checked below,
     // its role label, and a place right after it in its crew (138f).
@@ -3785,7 +3924,9 @@ pub async fn launch_session(
         role,
         label,
         crew,
+        device: device.map(str::to_string),
     };
+    let spawn = req.spawn;
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
         slug: BUILTIN_SLUG.into(),
@@ -3804,6 +3945,26 @@ pub async fn launch_session(
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    if spawn {
+        let detail = serde_json::json!({
+            "session_id": session.id,
+            "host_id": session.host_id,
+            "was": false,
+            "refused_requests": 0,
+        });
+        state
+            .auth_db
+            .lock()
+            .await
+            .record_event(
+                EVENT_SPAWN_ENABLED,
+                Some(actor.user_id()),
+                device,
+                &crate::index::now_rfc3339(),
+                &detail.to_string(),
+            )
+            .map_err(internal)?;
+    }
     let (credential, credential_notice) =
         provider_wire::launch_credential(state, &session, &host_name, credential).await;
     let (connections, notice) = match outcome {
@@ -5644,6 +5805,12 @@ pub async fn integration_tools(
 
 // ---- MCP Gateway: an agent's call (decision 81e, spec §7) ------------------
 
+/// A spawn tool called after a person turned the switch off (141e): the
+/// agent's list may still hold it, so the refusal says how to get it back.
+pub const SPAWN_OFF: &str = "spawn_off";
+pub const SPAWN_OFF_SENTENCE: &str = "Spawning is turned off for this session; the person can \
+     turn it back on in the session's About.";
+
 /// Methods an agent may send (spec §9). Anything else is refused.
 fn method_permitted(method: &str, c: Option<&Connection>) -> bool {
     let resources = c.is_none_or(|c| c.expose_resources);
@@ -5675,6 +5842,8 @@ struct Authorized {
     spawn: bool,
     /// The spawned tools are offered: another agent started it and C0 holds.
     spawned: bool,
+    /// The session was launched with spawning on and a person turned it off.
+    spawn_off: bool,
 }
 
 impl Authorized {
@@ -5828,6 +5997,7 @@ async fn authorize_call(
         has_role: launch.is_some_and(|l| l.role.is_some()),
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
+        spawn_off: state.agent.spawn_turned_off(session_id),
     })
 }
 
@@ -5846,7 +6016,7 @@ pub async fn integration_call(
     connection_id: &str,
     message: serde_json::Value,
 ) -> tokio::sync::mpsc::Receiver<serde_json::Value> {
-    use crate::gateway::session::{error_line, message_line};
+    use crate::gateway::session::{error_line, message_line, refusal_line};
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     let id = crate::gateway::session::agent_id(&message);
     let method = message
@@ -5914,12 +6084,20 @@ pub async fn integration_call(
     if let Some(name) = &tool
         && !authorized.may_call(name)
     {
-        let _ = tx.send(error_line(&id, "tool_not_allowed")).await;
+        let off = authorized.spawn_off
+            && authorized.connection.is_none()
+            && crate::mcp::SPAWN_TOOLS.contains(&name.as_str());
+        let (code, line) = if off {
+            (SPAWN_OFF, refusal_line(&id, SPAWN_OFF, SPAWN_OFF_SENTENCE))
+        } else {
+            ("tool_not_allowed", error_line(&id, "tool_not_allowed"))
+        };
+        let _ = tx.send(line).await;
         scope.audit(
             &state.gateway,
             Some(&method),
             tool.as_deref(),
-            Err("tool_not_allowed"),
+            Err(code),
             0,
             None,
         );

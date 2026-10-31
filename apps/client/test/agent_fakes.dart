@@ -17,11 +17,16 @@ Map<String, dynamic> agentHost({
   List<String>? workspaceRoots,
   List<String>? resumes = const ['claude-code', 'opencode'],
   Map<String, bool> mcp = const {},
+  String? isolation,
+  String? identity,
 }) => {
   'id': id,
   'name': name,
   'status': status,
   'egress': 'host',
+  if (identity != null) 'identity': {'state': identity},
+  if (isolation != null)
+    'isolation': {'state': isolation, 'mechanism': 'systemd_units'},
   'capabilities': {
     'providers': [
       for (final p in providers)
@@ -170,6 +175,21 @@ class FakeAgentServer {
 
   /// A refused start, by agent: its status and stable code.
   final agentRefusals = <String, (int, String)>{};
+
+  /// Refuses the next launch with this status and code.
+  (int, String)? refuseLaunch;
+
+  /// Refuses the next new workspace with this status and code (141c).
+  (int, String)? refuseNewWorkspace;
+
+  /// The new workspaces asked for, as their request bodies.
+  List<Map<String, dynamic>> get newWorkspaces => [
+    for (final r in requests)
+      if (r.method == 'POST' &&
+          r.url.pathSegments.length == 5 &&
+          r.url.pathSegments[4] == 'workspaces')
+        jsonDecode(r.body) as Map<String, dynamic>,
+  ];
 
   /// Called when a poll first sees a job done, to change the host the way
   /// the job would have.
@@ -402,6 +422,20 @@ class FakeAgentServer {
       }
       return _json(job);
     }
+    if (seg.length == 5 &&
+        seg[2] == 'hosts' &&
+        seg[4] == 'workspaces' &&
+        req.method == 'POST') {
+      if (refuseNewWorkspace case (final status, final code)) {
+        refuseNewWorkspace = null;
+        return _json({'error': code}, status);
+      }
+      final host = hosts.firstWhere((h) => h['id'] == seg[3]);
+      final caps = host['capabilities'] as Map;
+      final name = (jsonDecode(req.body) as Map)['name'] as String;
+      caps['workspaces'] = [...caps['workspaces'] as List, name];
+      return _json({'name': name}, 201);
+    }
     if (seg.length == 5 && seg[2] == 'hosts' && seg[4] == 'workspaces') {
       final host = hosts.firstWhere((h) => h['id'] == seg[3]);
       final names = (host['capabilities'] as Map)['workspaces'] as List;
@@ -425,6 +459,10 @@ class FakeAgentServer {
       return _json(sessions);
     }
     if (path == '/v1/agent/sessions' && req.method == 'POST') {
+      if (refuseLaunch case (final status, final code)) {
+        refuseLaunch = null;
+        return _json({'error': code}, status);
+      }
       final body = jsonDecode(req.body) as Map<String, dynamic>;
       final ctx = body['context'] as Map<String, dynamic>?;
       final resumed = session(body['resume_of'] as String? ?? '');

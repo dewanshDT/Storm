@@ -815,7 +815,7 @@ fn the_oldest_database_reaches_134() {
 
 // ---- 134-2: the spawn switch ------------------------------------------------
 
-use super::store::spawn::{Claim, same_workspace, shares_workspace};
+use super::store::spawn::{same_workspace, shares_workspace};
 use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
@@ -871,9 +871,28 @@ fn start(
     provider: &str,
     resume_of: Option<&str>,
 ) -> Result<SessionRecord, AgentError> {
+    launch_as(m, workspace, provider, resume_of, false)
+}
+
+/// A launch with "Allow this session to start agents" on (141e).
+fn start_on(
+    m: &AgentManager,
+    workspace: &str,
+    provider: &str,
+) -> Result<SessionRecord, AgentError> {
+    launch_as(m, workspace, provider, None, true)
+}
+
+fn launch_as(
+    m: &AgentManager,
+    workspace: &str,
+    provider: &str,
+    resume_of: Option<&str>,
+    spawn: bool,
+) -> Result<SessionRecord, AgentError> {
     let launch: Launch = serde_json::from_value(serde_json::json!({
         "host_id": "hst_A", "workspace": workspace, "provider": provider,
-        "terminal": {"cols": 80, "rows": 24}, "resume_of": resume_of,
+        "terminal": {"cols": 80, "rows": 24}, "resume_of": resume_of, "spawn": spawn,
     }))
     .unwrap();
     let storm = McpGrant {
@@ -985,8 +1004,7 @@ fn a_verified_isolation_report_opens_c0() {
     // Its CLI was configured before C0 held, so it never gets the tools.
     assert_eq!(refusal(&m, &before.id, true), "launched_without_asks");
     report(&m, &before.id, "completed", None);
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
+    let s = start_on(&m, "storm", "claude-code").unwrap();
     assert!(m.spawn_offered(&s.id));
 
     // A downgrade in the inventory shuts it at once; a new report reopens it.
@@ -1014,9 +1032,7 @@ fn a_verified_isolation_report_opens_c0() {
 #[test]
 fn c0_holds_only_while_the_live_link_says_so() {
     let (m, _d, _rx) = verified_host();
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    let change = m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
-    assert!(change.enabled && !change.was);
+    let s = start_on(&m, "storm", "claude-code").unwrap();
     assert!(m.spawn_offered(&s.id));
 
     // An identity downgrade hides the tools at once; the switch stays on.
@@ -1046,12 +1062,10 @@ fn c0_holds_only_while_the_live_link_says_so() {
 #[test]
 fn spawn_starts_off_for_fresh_children_and_resumed_sessions() {
     let (m, _d, _rx) = verified_host();
-    let parent = start(&m, "storm", "claude-code", None).unwrap();
-    assert!(!m.spawn_enabled(&parent.id).unwrap());
-    assert!(!m.spawn_offered(&parent.id));
-    m.set_spawn(&parent.id, true, Some("dev_A"))
-        .unwrap()
-        .unwrap();
+    let plain = start(&m, "storm", "claude-code", None).unwrap();
+    assert!(!m.spawn_enabled(&plain.id).unwrap());
+    assert!(!m.spawn_offered(&plain.id));
+    let parent = start_on(&m, "storm", "claude-code").unwrap();
 
     let mut child = record("ags_CHILD", "running");
     child.workspace = "other".into();
@@ -1098,10 +1112,7 @@ fn only_a_live_session_of_a_spawning_adapter_can_turn_it_on() {
 #[test]
 fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
     let (m, _d, _rx) = verified_host();
-    let parent = start(&m, "storm", "claude-code", None).unwrap();
-    m.set_spawn(&parent.id, true, Some("dev_A"))
-        .unwrap()
-        .unwrap();
+    let parent = start_on(&m, "storm", "claude-code").unwrap();
     {
         let mut s = m.store.lock().unwrap();
         let mut child = record("ags_CHILD", "running");
@@ -1132,57 +1143,35 @@ fn revoking_refuses_pending_requests_at_once_and_children_keep_running() {
     assert!(!m.spawn_offered(&parent.id), "new requests have no tool");
 }
 
+/// 141a: a spawning session does not hold its workspace. A launch beside
+/// it and its switch beside another live session are both allowed.
 #[test]
-fn ws9_a_spawning_session_holds_its_workspace_alone() {
+fn a_spawning_session_shares_its_workspace() {
     let (m, _d, _rx) = verified_host();
-    let a = start(&m, "storm", "claude-code", None).unwrap();
-    let b = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    // A workspace inside it shares its files.
-    report(&m, &b.id, "completed", None);
+    let a = start_on(&m, "storm", "claude-code").unwrap();
+    start_on(&m, "storm", "claude-code").unwrap();
     let nested = start(&m, "storm/site", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    report(&m, &nested.id, "completed", None);
-    m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-
     for workspace in ["storm", "storm/site"] {
         assert!(
-            matches!(start(&m, workspace, "claude-code", None),
-                Err(AgentError::Conflict(ref c)) if c == "workspace_held"),
-            "{workspace}"
+            !start(&m, workspace, "claude-code", None)
+                .unwrap()
+                .is_ended()
         );
     }
-    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
-    assert!(!elsewhere.is_ended());
-
-    // `unknown` is live and still holds it.
+    assert_eq!(m.shared_with(&a.id).unwrap(), 4, "b, nested and two more");
+    report(&m, &nested.id, "completed", None);
+    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
+    // `unknown` is live and still shares it.
     m.store.lock().unwrap().mark_unknown_on_boot().unwrap();
-    assert!(
-        m.store
-            .lock()
-            .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
-            .unwrap()
-    );
-    m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
-    assert!(
-        !m.store
-            .lock()
-            .unwrap()
-            .workspace_held("hst_A", "storm", Claim::Launch, &paths(&m))
-            .unwrap()
-    );
+    assert_eq!(m.shared_with(&a.id).unwrap(), 3);
 }
 
-fn paths(m: &AgentManager) -> std::collections::HashMap<String, String> {
-    m.host_live("hst_A").capabilities.unwrap().workspace_paths
-}
-
-/// WT-8 (137-2): WS-9 both ways, judged by the directories the host
+/// WT-8, as decision 141 amends it: WS-9 no longer refuses either way, and
+/// the sharing it judges by the host's directories is what an approval card
 /// reports. Two names for one directory, or one inside the other, are one
 /// workspace; a name the host gives no directory for may be any of them.
 #[test]
-fn wt8_a_shared_workspace_refuses_launch_and_spawn_both_ways() {
+fn wt8_a_shared_workspace_allows_launch_and_spawn_both_ways() {
     let (m, _d, _rx) = host(Some(VERIFIED));
     let layout = |paths: serde_json::Value| {
         let mut extra = isolated();
@@ -1194,39 +1183,34 @@ fn wt8_a_shared_workspace_refuses_launch_and_spawn_both_ways() {
         "storm": "/w/storm", "alias": "/w/storm/", "site": "/w/storm/site", "other": "/w/other",
     });
     m.inventory("hst_A", layout(paths.clone())).unwrap();
-    let held = |r: Result<SessionRecord, AgentError>| matches!(r, Err(AgentError::Conflict(ref c)) if c == "workspace_held");
 
     for beside in ["storm", "alias", "site", "bare"] {
         // Spawn on, then a launch beside it.
-        let a = start(&m, "storm", "claude-code", None).unwrap();
-        m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-        assert!(held(start(&m, beside, "claude-code", None)), "{beside}");
-        assert!(!held(start(&m, "other", "shell", None)), "{beside}");
+        let a = start_on(&m, "storm", "claude-code").unwrap();
+        let b = start(&m, beside, "claude-code", None).unwrap();
+        let elsewhere = start(&m, "other", "shell", None).unwrap();
+        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
         report(&m, &a.id, "completed", None);
         // A live session beside it, then spawn on.
-        let b = start(&m, beside, "claude-code", None).unwrap();
-        let a = start(&m, "storm", "claude-code", None).unwrap();
-        assert_eq!(refusal(&m, &a.id, true), "workspace_held", "{beside}");
-        report(&m, &b.id, "completed", None);
+        let a = start_on(&m, "storm", "claude-code").unwrap();
+        m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
         m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-        report(&m, &a.id, "completed", None);
-    }
-    let live: Vec<_> = m.store.lock().unwrap().for_host("hst_A").unwrap();
-    for r in live.into_iter().filter(|r| !r.is_ended()) {
-        report(&m, &r.id, "completed", None);
+        assert_eq!(m.shared_with(&a.id).unwrap(), 1, "{beside}");
+        for r in [&a, &b, &elsewhere] {
+            report(&m, &r.id, "completed", None);
+        }
     }
 
     // A host that reports no directories: every pair may be one.
     m.inventory("hst_A", layout(serde_json::json!({}))).unwrap();
-    let a = start(&m, "storm", "claude-code", None).unwrap();
-    let elsewhere = start(&m, "other", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &a.id, true), "workspace_held");
-    report(&m, &elsewhere.id, "completed", None);
+    let a = start_on(&m, "storm", "claude-code").unwrap();
+    m.set_spawn(&a.id, false, Some("dev_A")).unwrap().unwrap();
+    start(&m, "other", "claude-code", None).unwrap();
     m.set_spawn(&a.id, true, Some("dev_A")).unwrap().unwrap();
-    assert!(held(start(&m, "other", "claude-code", None)));
+    assert_eq!(m.shared_with(&a.id).unwrap(), 1);
     // Once it does, the two are apart.
     m.inventory("hst_A", layout(paths)).unwrap();
-    assert!(!held(start(&m, "other", "claude-code", None)));
+    assert_eq!(m.shared_with(&a.id).unwrap(), 0);
 }
 
 #[test]
@@ -1304,8 +1288,16 @@ fn only_a_start_c0_held_for_carries_the_asks_and_only_it_can_spawn() {
         let v = start_command(&mut rx, &s.id);
         assert_eq!(v["spawn_asks"], serde_json::json!({}), "{provider}");
         assert!(m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
-        m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
+        // 141e: asks alone are not enough; the launch turns it on.
+        assert_eq!(refusal(&m, &s.id, true), "launched_without_spawn");
+        report(&m, &s.id, "completed", None);
+        let s = start_on(&m, "storm", provider).unwrap();
+        assert_eq!(
+            start_command(&mut rx, &s.id)["spawn_asks"],
+            serde_json::json!({})
+        );
         m.set_spawn(&s.id, false, Some("dev_A")).unwrap().unwrap();
+        m.set_spawn(&s.id, true, Some("dev_A")).unwrap().unwrap();
         report(&m, &s.id, "completed", None);
     }
     let shell = start(&m, "storm", "shell", None).unwrap();
@@ -1337,4 +1329,70 @@ fn dismissing_a_session_takes_its_asks_record() {
     report(&m, &s.id, "completed", None);
     m.dismiss(&s.id).unwrap();
     assert!(!m.store.lock().unwrap().spawn_asks(&s.id).unwrap());
+}
+
+/// 141e: a launch with the switch on is refused, writing nothing, unless its
+/// `start` carries `spawn_asks`; where it does, the switch is on before the
+/// host can see `start`.
+#[test]
+fn a_launch_with_spawn_on_needs_the_asks_and_is_on_before_start() {
+    let (m, _d, mut rx) = host(Some(VERIFIED));
+    let refused = |r: Result<SessionRecord, AgentError>| match r {
+        Err(AgentError::Conflict(code)) => code,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(
+        refused(start_on(&m, "storm", "claude-code")),
+        "spawn_unavailable"
+    );
+    m.verify_isolation_for_tests("hst_A");
+    assert_eq!(refused(start_on(&m, "storm", "shell")), "spawn_unavailable");
+    let bare: Launch = serde_json::from_value(serde_json::json!({
+        "host_id": "hst_A", "workspace": "storm", "provider": "claude-code",
+        "terminal": {"cols": 80, "rows": 24}, "spawn": true,
+    }))
+    .unwrap();
+    assert!(matches!(
+        m.launch("usr_A", bare, LaunchMeta::default(), Vec::new()),
+        Err(AgentError::Conflict(code)) if code == "spawn_unavailable"
+    ));
+    assert!(m.list().unwrap().is_empty(), "no session was created");
+    assert!(rx.try_recv().is_err(), "no start was sent");
+
+    std::thread::scope(|scope| {
+        let m = &m;
+        let seen = scope.spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            let env = loop {
+                if let Ok(env) = rx.try_recv() {
+                    break env;
+                }
+                assert!(std::time::Instant::now() < deadline, "no start");
+                std::thread::yield_now();
+            };
+            let v = serde_json::to_value(&env).unwrap();
+            assert_eq!(v["type"], "start");
+            let id = v["session"].as_str().unwrap().to_string();
+            (m.spawn_enabled(&id).unwrap(), v)
+        });
+        let s = launch_as(m, "storm", "claude-code", None, true).unwrap();
+        let (on, start) = seen.join().unwrap();
+        assert!(on, "the switch was on when start was sent");
+        assert_eq!(start["session"], s.id.as_str());
+        assert_eq!(start["spawn_asks"], serde_json::json!({}));
+    });
+    let s = &m.list().unwrap()[0];
+    let view = m.spawn_view(s).unwrap().unwrap();
+    assert_eq!(
+        (view.enabled, view.launched_on, view.refused),
+        (true, true, None)
+    );
+    // Off, then on again: it was launched with it.
+    m.set_spawn(&s.id, false, None).unwrap().unwrap();
+    assert!(m.spawn_turned_off(&s.id));
+    m.set_spawn(&s.id, true, None).unwrap().unwrap();
+    assert!(!m.spawn_turned_off(&s.id));
+    report(&m, &s.id, "completed", None);
+    m.dismiss(&s.id).unwrap();
+    assert!(!m.store.lock().unwrap().spawn_launched(&s.id).unwrap());
 }

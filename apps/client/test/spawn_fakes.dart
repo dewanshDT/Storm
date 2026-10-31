@@ -87,6 +87,7 @@ class FakeSpawning {
     String? task,
     String? text,
     String? name,
+    int? sharedWith,
     Duration left = const Duration(minutes: 8, seconds: 42),
   }) {
     final now = DateTime.now().toUtc();
@@ -101,6 +102,7 @@ class FakeSpawning {
       'task': ?task,
       'text': ?text,
       'name': ?name,
+      'shared_with': ?sharedWith,
     };
     requests.add(r);
     _attention();

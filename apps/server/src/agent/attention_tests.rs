@@ -56,9 +56,13 @@ impl Fixture {
     }
 
     fn launch_in(&self, provider: &str, workspace: &str) -> SessionRecord {
+        self.launch_as(provider, workspace, false)
+    }
+
+    fn launch_as(&self, provider: &str, workspace: &str, spawn: bool) -> SessionRecord {
         let launch: Launch = serde_json::from_value(serde_json::json!({
             "host_id": "hst_A", "workspace": workspace, "provider": provider,
-            "terminal": {"cols": 80, "rows": 24},
+            "terminal": {"cols": 80, "rows": 24}, "spawn": spawn,
         }))
         .unwrap();
         let grant = McpGrant {
@@ -87,11 +91,7 @@ impl Fixture {
 
     /// A running parent with spawn on and a running child of it.
     fn tree(&self) -> (String, String) {
-        let parent = self.launch("claude-code").id;
-        self.m
-            .set_spawn(&parent, true, Some("dev_A"))
-            .unwrap()
-            .unwrap();
+        let parent = self.launch_as("claude-code", "storm", true).id;
         let mut r = self.m.get(&parent).unwrap();
         r.id = "ags_C1".into();
         r.workspace = "children/ags_C1".into();

@@ -48,10 +48,13 @@ void main() {
     String name, {
     bool online = true,
     bool receives = true,
+    bool isolated = false,
   }) => {
     'id': id,
     'name': name,
     'status': online ? 'online' : 'offline',
+    if (isolated)
+      'isolation': {'state': 'verified', 'mechanism': 'systemd_units'},
     if (online)
       'capabilities': {
         'providers': [
@@ -433,6 +436,7 @@ void main() {
       WidgetTester tester,
       Map<String, dynamic> view, {
       bool receives = true,
+      bool isolated = false,
     }) async {
       final (client, _) = launchServer(view);
       await tester.pumpWidget(
@@ -455,7 +459,12 @@ void main() {
               body: NewSessionLauncher(
                 hosts: [
                   AgentHost.fromJson(
-                    hostJson('hst_1', 'build-vm', receives: receives),
+                    hostJson(
+                      'hst_1',
+                      'build-vm',
+                      receives: receives,
+                      isolated: isolated,
+                    ),
                   ),
                 ],
               ),
@@ -501,6 +510,27 @@ void main() {
       await pumpLauncher(tester, synced(hosts: ['hst_1'], warn: '7d', days: 3));
       expect(find.byKey(const Key('launcher-claude-login-synced')), findsOne);
       expect(find.textContaining('expires in 3 days'), findsOneWidget);
+    });
+
+    testWidgets('an isolated host needs the synced login or an API key '
+        '(141d)', (tester) async {
+      await pumpLauncher(tester, synced(), isolated: true);
+      expect(find.byKey(const Key('launcher-claude-login-own')), findsOne);
+      expect(
+        find.text(
+          'Claude: needs your synced Claude login or an API key, since this '
+          'host isolates sessions',
+        ),
+        findsOneWidget,
+      );
+      expect(find.textContaining("this host's own login"), findsNothing);
+    });
+
+    testWidgets('an isolated host with the synced login uses it', (
+      tester,
+    ) async {
+      await pumpLauncher(tester, synced(hosts: ['hst_1']), isolated: true);
+      expect(find.text('Claude: your synced login'), findsOneWidget);
     });
 
     testWidgets('a shell has no Claude line', (tester) async {

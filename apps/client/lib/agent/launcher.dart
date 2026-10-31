@@ -10,12 +10,14 @@ import '../ui/states.dart';
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem;
+import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'claude_login_api.dart';
 import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
+import 'spawn_models.dart' show kSpawnProviders;
 
 typedef NoteRef = ({String vaultId, String noteId});
 
@@ -94,6 +96,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
+
+  /// "Allow this session to start agents" (141e): off by default.
+  bool _spawn = false;
   String? _error;
   bool _busy = false;
 
@@ -178,10 +183,21 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ws.firstOrNull?.name;
       });
     } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
+      if (mounted) setState(() => _error = launchErrorText(e));
     } finally {
       api.dispose();
     }
+  }
+
+  /// "New workspace…" (decision 141c): made on the host, then picked.
+  Future<void> _newWorkspace(AgentHost host) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => NewWorkspaceDialog(host: host),
+    );
+    if (name == null || !mounted || _host?.id != host.id) return;
+    setState(() => _error = null);
+    await _pickHost(host, keepWorkspace: name);
   }
 
   Future<void> _launch(
@@ -213,6 +229,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         role: _role == null || !_reachesStorm
             ? null
             : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+        spawn: _spawn && _spawnable,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -224,7 +241,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       }
       Navigator.of(context).pop(session);
     } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
+      if (mounted) setState(() => _error = launchErrorText(e));
     } finally {
       api.dispose();
       if (mounted) setState(() => _busy = false);
@@ -240,6 +257,13 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           .firstOrNull
           ?.reachesStorm ??
       _provider != 'shell';
+
+  /// The launch can carry the switch: the host passes C0 and the agent can
+  /// start agents with Storm's tools (141e). The server decides.
+  bool get _spawnable =>
+      (_host?.offersSpawning ?? false) &&
+      kSpawnProviders.contains(_provider) &&
+      _reachesStorm;
 
   @override
   Widget build(BuildContext context) {
@@ -355,8 +379,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                       ? '${w.name}  (another session is working here)'
                       : w.name,
                 ),
+              if (host != null && _workspaces != null)
+                const _Opt(_newWorkspaceKey, 'New workspace…'),
             ],
-            onChanged: (w) => setState(() => _workspace = w),
+            onChanged: (w) => w == _newWorkspaceKey
+                ? _newWorkspace(host!)
+                : setState(() => _workspace = w),
           ),
         ),
         if (host != null && _workspaces != null && _workspaces!.isEmpty)
@@ -471,6 +499,37 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ),
           ),
         ),
+        if (_spawnable)
+          _Field(
+            label: 'Agents',
+            under: const _Under(
+              key: Key('launcher-spawn-note'),
+              text: 'You approve each start, message and end.',
+            ),
+            child: Row(
+              children: [
+                Semantics(
+                  label: 'Allow this session to start agents',
+                  child: StormToggle(
+                    key: const Key('launcher-spawn'),
+                    value: _spawn,
+                    onChanged: (v) => setState(() => _spawn = v),
+                  ),
+                ),
+                SizedBox(width: t.sp * 1.25),
+                Expanded(
+                  child: Text(
+                    'Allow this session to start agents',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
       ],
       Container(
         key: const Key('launcher-risk'),
@@ -686,6 +745,11 @@ class _ClaudeLoginLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final route = claudeLoginRoute(login, host);
+    // Decision 136f: an isolated session never uses the host's own login.
+    final own = host.isolationState == 'verified'
+        ? 'Claude: needs your synced Claude login or an API key, since this '
+              'host isolates sessions'
+        : "Claude: this host's own login";
     final soon =
         route == ClaudeLoginRoute.synced &&
         login.warn == '7d' &&
@@ -696,16 +760,14 @@ class _ClaudeLoginLine extends StatelessWidget {
             ? 'Claude: your synced login · expires in ${login.daysLeft} '
                   '${login.daysLeft == 1 ? 'day' : 'days'}, replace it in Settings'
             : 'Claude: your synced login',
-      ClaudeLoginRoute.own => "Claude: this host's own login",
+      ClaudeLoginRoute.own => own,
       ClaudeLoginRoute.oldHost =>
-        "Claude: this host's own login · ${host.name} can't receive your "
-            'synced login, update storm-runtime',
+        "$own · ${host.name} can't receive your synced login, update "
+            'storm-runtime',
       ClaudeLoginRoute.expired =>
-        "Claude: this host's own login · your synced login has expired, "
-            're-sync it in Settings',
+        '$own · your synced login has expired, re-sync it in Settings',
       ClaudeLoginRoute.needsResync =>
-        "Claude: this host's own login · your synced login can't be read, "
-            'sync it again in Settings',
+        "$own · your synced login can't be read, sync it again in Settings",
     };
     final warn =
         soon ||
@@ -816,6 +878,8 @@ class _Field extends StatelessWidget {
   }
 }
 
+/// No workspace name starts with a dot, so this is never one.
+const _newWorkspaceKey = '.new';
 const _noCrew = '';
 const _newCrew = 'new';
 const _noRole = '';
@@ -1047,4 +1111,164 @@ Future<AgentSession?> showNewSessionLauncher(
       ),
     ),
   );
+}
+
+/// A launch's or a workspace list's failure as a sentence (decision 141d):
+/// a refusal code is never shown bare.
+String launchErrorText(Object e) {
+  final code = e is AgentRefusal ? e.code : null;
+  if (code == null || !_isCode(code)) return describeFailure(e);
+  return switch (code) {
+    'workspace_held' => 'Another session is working in this workspace.',
+    'credential_unavailable' =>
+      'This host isolates sessions, so Claude Code needs your synced Claude '
+          'login or an API key.',
+    'isolation_unavailable' || 'isolation_unverified' =>
+      "This host's session isolation isn't working, so it isn't starting "
+          'new sessions.',
+    'owner_only' => 'Only the server’s owner can do that.',
+    'spawn_unavailable' =>
+      "This host or agent can't offer starting agents now. Turn off "
+          '"Allow this session to start agents" to launch.',
+    _ => "Couldn't launch: $code",
+  };
+}
+
+/// What a refused "New workspace…" says (decision 141c).
+String newWorkspaceErrorText(Object e, String name) {
+  final code = e is AgentRefusal ? e.code : null;
+  if (e is AgentRefusal && e.statusCode == 503) return 'The host is offline.';
+  return switch (code) {
+    'bad_name' =>
+      'A workspace name is one folder name: no “/”, “\\” or “:”, and not '
+          'starting with a dot.',
+    'exists' => 'There is already a folder named “$name” on this host.',
+    'no_root' =>
+      "This host's workspace folder is missing. Check workspace_roots in its "
+          'runtime.toml.',
+    'not_writable' =>
+      "storm-runtime can't write to this host's workspace "
+          'folder.',
+    'git_failed' =>
+      "It couldn't be started as a git repository (is git installed on the "
+          'host?), so it wasn’t kept.',
+    'old_host' =>
+      "This host's storm-runtime can't make workspaces. Update it, or make "
+          'the folder on the host.',
+    'timeout' => "The host didn't answer in time. Check the list again.",
+    'owner_only' => 'Only the server’s owner can make workspaces.',
+    'failed' => "The host couldn't make the folder.",
+    null => describeFailure(e),
+    _ => "Couldn't make the workspace: $code",
+  };
+}
+
+bool _isCode(String s) => RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(s);
+
+/// "New workspace…": a name and whether to start it as a git repository
+/// (on by default). It stays open on a refusal, saying why; it pops the
+/// workspace's name once the host has made it.
+class NewWorkspaceDialog extends ConsumerStatefulWidget {
+  const NewWorkspaceDialog({super.key, required this.host});
+
+  final AgentHost host;
+
+  @override
+  ConsumerState<NewWorkspaceDialog> createState() => _NewWorkspaceState();
+}
+
+class _NewWorkspaceState extends ConsumerState<NewWorkspaceDialog> {
+  late final _name = TextEditingController();
+  bool _git = true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create() async {
+    final name = _name.text.trim();
+    if (name.isEmpty || _busy) return;
+    final api = agentApi(ref);
+    if (api == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final made = await api.createWorkspace(widget.host.id, name, git: _git);
+      if (mounted) Navigator.of(context).pop(made);
+    } catch (e) {
+      if (mounted) setState(() => _error = newWorkspaceErrorText(e, name));
+    } finally {
+      api.dispose();
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final style = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: t.text2,
+    );
+    return AlertDialog(
+      title: Text('New workspace on ${widget.host.name}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            key: const Key('new-workspace-name'),
+            controller: _name,
+            autofocus: true,
+            autocorrect: false,
+            maxLength: 128,
+            decoration: const InputDecoration(labelText: 'Name'),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _create(),
+          ),
+          SizedBox(height: t.sp),
+          Row(
+            children: [
+              Semantics(
+                label: 'Start as a git repository',
+                child: StormToggle(
+                  key: const Key('new-workspace-git'),
+                  value: _git,
+                  onChanged: _busy ? null : (v) => setState(() => _git = v),
+                ),
+              ),
+              SizedBox(width: t.sp),
+              Flexible(child: Text('Start as a git repository', style: style)),
+            ],
+          ),
+          if (_error != null) ...[
+            SizedBox(height: t.sp * 1.5),
+            Text(
+              _error!,
+              key: const Key('new-workspace-error'),
+              style: style.copyWith(color: t.danger),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('new-workspace-create'),
+          onPressed: _busy || _name.text.trim().isEmpty ? null : _create,
+          child: Text(_busy ? 'Creating' : 'Create'),
+        ),
+      ],
+    );
+  }
 }

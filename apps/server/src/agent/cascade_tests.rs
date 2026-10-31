@@ -61,9 +61,13 @@ fn after_secs(secs: i64) -> String {
 
 impl Fixture {
     fn launch(&self, workspace: &str) -> SessionRecord {
+        self.launch_as(workspace, false)
+    }
+
+    fn launch_as(&self, workspace: &str, spawn: bool) -> SessionRecord {
         let launch: Launch = serde_json::from_value(serde_json::json!({
             "host_id": "hst_A", "workspace": workspace, "provider": "claude-code",
-            "terminal": {"cols": 80, "rows": 24},
+            "terminal": {"cols": 80, "rows": 24}, "spawn": spawn,
         }))
         .unwrap();
         self.launch_with(launch)
@@ -93,12 +97,7 @@ impl Fixture {
     }
 
     fn parent(&self, workspace: &str) -> SessionRecord {
-        let p = self.launch(workspace);
-        self.m
-            .set_spawn(&p.id, true, Some("dev_A"))
-            .unwrap()
-            .unwrap();
-        p
+        self.launch_as(workspace, true)
     }
 
     fn child(&self, parent: &str) -> SessionRecord {
