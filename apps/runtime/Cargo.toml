@@ -43,6 +43,9 @@ assets = [
     ["../../deploy/storm-runtime-isolation.socket", "lib/systemd/system/", "644"],
     ["../../deploy/storm-runtime-isolation.service", "lib/systemd/system/", "644"],
     ["../../deploy/storm-runtime-isolation.sysusers", "usr/share/storm-runtime-isolation/sysusers.conf", "644"],
+    # Every session's network unit names it (decision 140); a conffile, as
+    # cargo-deb makes everything under /etc.
+    ["../../deploy/storm-runtime-pasta.apparmor", "etc/apparmor.d/storm-runtime-pasta", "644"],
 ]
 
 # The provider contract has no dependencies at all (decision 77): PTY I/O is

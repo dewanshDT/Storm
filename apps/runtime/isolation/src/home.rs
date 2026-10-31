@@ -61,6 +61,14 @@ pub const DENIED: &[&str] = &[
     ".pypirc",
 ];
 
+/// OpenCode's config dir in an isolated session's home (140f): OpenCode
+/// writes there at start, and the host's per-session one is read-only to
+/// the session.
+pub const OPENCODE_CONFIG: &str = ".config/storm-opencode";
+/// The host's Storm plugin for OpenCode, under `<host state>/sessions/<id>`.
+const OPENCODE_PLUGIN: &str = "opencode/plugin/storm.js";
+const MAX_PLUGIN: u64 = 64 * 1024;
+
 /// Variables a launch may not carry on an isolated host: a refreshable
 /// login (136f), even from the operator's env file.
 pub const REFRESHABLE_ENV: &[&str] = &["CLAUDE_CODE_OAUTH_REFRESH_TOKEN"];
@@ -282,13 +290,7 @@ fn filtered(filter: Filter, rel: &[u8], bytes: Vec<u8>, cx: &Paths) -> Option<Ve
     match filter {
         Filter::None => Some(bytes),
         Filter::Store(store) => static_keys(store, &bytes),
-        Filter::ClaudeJson => {
-            let Ok(Value::Object(mut all)) = serde_json::from_slice::<Value>(&bytes) else {
-                return None;
-            };
-            all.remove("primaryApiKey");
-            serde_json::to_vec_pretty(&Value::Object(all)).ok()
-        }
+        Filter::ClaudeJson => claude_json(&bytes, &cx.workspace),
         Filter::PluginPaths => {
             if rel != b"installed_plugins.json" && rel != b"known_marketplaces.json" {
                 return Some(bytes);
@@ -321,6 +323,35 @@ fn filtered(filter: Filter, rel: &[u8], bytes: Vec<u8>, cx: &Paths) -> Option<Ve
     }
 }
 
+/// A session's `.claude.json` from the account's: no key Claude Code
+/// stored itself, and past Claude Code's first run (142) in `workspace`
+/// alone.
+pub fn claude_json(bytes: &[u8], workspace: &Path) -> Option<Vec<u8>> {
+    let Ok(Value::Object(mut all)) = serde_json::from_slice::<Value>(bytes) else {
+        return None;
+    };
+    all.remove("primaryApiKey");
+    all.insert("hasCompletedOnboarding".into(), Value::Bool(true));
+    all.entry("theme").or_insert_with(|| "dark".into());
+    let projects = all
+        .entry("projects")
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !projects.is_object() {
+        *projects = Value::Object(Default::default());
+    }
+    let entry = projects
+        .as_object_mut()?
+        .entry(workspace.to_string_lossy())
+        .or_insert_with(|| Value::Object(Default::default()));
+    if !entry.is_object() {
+        *entry = Value::Object(Default::default());
+    }
+    entry
+        .as_object_mut()?
+        .insert("hasTrustDialogAccepted".into(), Value::Bool(true));
+    serde_json::to_vec_pretty(&Value::Object(all)).ok()
+}
+
 fn rewrite_prefix(v: &mut Value, from: &Path, to: &Path) {
     match v {
         Value::String(s) => {
@@ -345,15 +376,18 @@ pub struct Paths {
     pub codex_home: PathBuf,
     /// The session's home.
     pub home: PathBuf,
+    /// The directory the session's unit starts in.
+    pub workspace: PathBuf,
 }
 
 impl Paths {
-    pub fn new(host_state: &Path, home: &Path) -> Self {
+    pub fn new(host_state: &Path, home: &Path, workspace: &Path) -> Self {
         Self {
             host_state: host_state.to_path_buf(),
             host_home: host_state.join("home"),
             codex_home: host_state.join("agents").join("codex"),
             home: home.to_path_buf(),
+            workspace: workspace.to_path_buf(),
         }
     }
 }
@@ -762,6 +796,19 @@ pub fn populate(
             skip_denied,
         )?;
     }
+    if provider == "claude-code" {
+        claude_json_default(&mut c, home.as_fd(), &mut made, paths)?;
+    }
+    if provider == "opencode" {
+        opencode_config(
+            &mut c,
+            state.as_fd(),
+            home.as_fd(),
+            &mut made,
+            session,
+            host_uid,
+        )?;
+    }
     if let Some((resume, kept)) = resume {
         copy_conversation(
             &mut c,
@@ -774,6 +821,67 @@ pub fn populate(
         )?;
     }
     c.finish(home.as_fd(), &made)
+}
+
+/// A session whose account has no usable `.claude.json` still gets one,
+/// or it would stop at Claude Code's first-run screens (142).
+fn claude_json_default(
+    c: &mut Copier,
+    home: BorrowedFd<'_>,
+    made: &mut Vec<String>,
+    paths: &Paths,
+) -> Result<()> {
+    match rustix::fs::statat(home, c".claude.json", AtFlags::SYMLINK_NOFOLLOW) {
+        Err(rustix::io::Errno::NOENT) => {}
+        other => {
+            return other
+                .map(drop)
+                .context("checking the session's .claude.json");
+        }
+    }
+    let bytes = claude_json(b"{}", &paths.workspace).context("a fresh .claude.json")?;
+    let (dir, name) = c.parents(home, ".claude.json", made)?;
+    let meta = c.target(Access::Private, Kind::File, 0o600);
+    c.write_file(dir.as_fd(), &name, &bytes, meta)
+}
+
+/// The session's own OpenCode config dir, with the host's plugin for the
+/// session copied in when there is one: a regular file of the host's,
+/// never followed through a link.
+fn opencode_config(
+    c: &mut Copier,
+    state: BorrowedFd<'_>,
+    home: BorrowedFd<'_>,
+    made: &mut Vec<String>,
+    session: &str,
+    host_uid: u32,
+) -> Result<()> {
+    let (to_dir, to_name) = c.parents(home, &format!("{OPENCODE_CONFIG}/plugin/storm.js"), made)?;
+    let rel = format!("sessions/{session}/{OPENCODE_PLUGIN}");
+    let (dir_rel, name) = rel.rsplit_once('/').expect("nested");
+    let Some(dir) = open_dir_under(state, dir_rel, Some(host_uid), c.own)? else {
+        return Ok(());
+    };
+    let fd = match rustix::fs::openat(
+        &dir,
+        cname(name.as_bytes())?.as_c_str(),
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(e) => return Err(e).context("opening the session's OpenCode plugin"),
+    };
+    let st = rustix::fs::fstat(&fd)?;
+    if kind_of(&st) != Kind::File || owner_of(c.own, &st) != host_uid {
+        bail!("the session's OpenCode plugin is not a file of the host's");
+    }
+    if st.st_size as u64 > MAX_PLUGIN {
+        bail!("the session's OpenCode plugin is too large");
+    }
+    let bytes = Copier::read_file(fd, MAX_PLUGIN)?;
+    let meta = c.target(Access::Private, Kind::File, 0o600);
+    c.write_file(to_dir.as_fd(), &to_name, &bytes, meta)
 }
 
 /// Copies the one conversation from the predecessor's kept files.
@@ -1064,6 +1172,7 @@ mod tests {
     const GID: u32 = 2007;
     const A: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000001";
     const B: &str = "0f6c1e2a-1111-4c3b-9a9a-000000000002";
+    const WS: &str = "/var/lib/storm-runtime/workspaces/app";
 
     struct Fx {
         _t: tempfile::TempDir,
@@ -1091,9 +1200,12 @@ mod tests {
             h
         }
         fn populate(&self, provider: &str, session: &str) -> Result<PathBuf> {
+            self.populate_in(provider, session, Path::new(WS))
+        }
+        fn populate_in(&self, provider: &str, session: &str, ws: &Path) -> Result<PathBuf> {
             let home = self.home(session);
             populate(
-                &Paths::new(&self.host_state, &home),
+                &Paths::new(&self.host_state, &home, ws),
                 provider,
                 session,
                 me(),
@@ -1103,6 +1215,15 @@ mod tests {
                 &self.own,
             )?;
             Ok(home)
+        }
+        fn plugin(&self, session: &str) -> PathBuf {
+            let p = self
+                .host_state
+                .join("sessions")
+                .join(session)
+                .join("opencode/plugin/storm.js");
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            p
         }
         fn meta(&self, p: &Path) -> Meta {
             let md = std::fs::symlink_metadata(p).unwrap();
@@ -1486,7 +1607,7 @@ mod tests {
             conversation: A.into(),
         };
         populate(
-            &Paths::new(&f.host_state, &home),
+            &Paths::new(&f.host_state, &home, Path::new(WS)),
             "claude-code",
             "ags_C",
             me(),
@@ -1517,7 +1638,7 @@ mod tests {
         let home = f.home("ags_D");
         assert!(
             populate(
-                &Paths::new(&f.host_state, &home),
+                &Paths::new(&f.host_state, &home, Path::new(WS)),
                 "claude-code",
                 "ags_D",
                 me(),
@@ -1531,7 +1652,7 @@ mod tests {
         let home = f.home("ags_E");
         assert!(
             populate(
-                &Paths::new(&f.host_state, &home),
+                &Paths::new(&f.host_state, &home, Path::new(WS)),
                 "codex",
                 "ags_E",
                 me(),
@@ -1548,7 +1669,7 @@ mod tests {
         let home = f.home("ags_F");
         assert!(
             populate(
-                &Paths::new(&f.host_state, &home),
+                &Paths::new(&f.host_state, &home, Path::new(WS)),
                 "claude-code",
                 "ags_F",
                 me(),
@@ -1586,7 +1707,7 @@ mod tests {
             conversation: A.into(),
         };
         populate(
-            &Paths::new(&f.host_state, &home),
+            &Paths::new(&f.host_state, &home, Path::new(WS)),
             "codex",
             "ags_Y",
             me(),
@@ -1621,7 +1742,7 @@ mod tests {
             conversation: "ses_abc123".into(),
         };
         populate(
-            &Paths::new(&f.host_state, &home),
+            &Paths::new(&f.host_state, &home, Path::new(WS)),
             "opencode",
             "ags_P",
             me(),
@@ -1639,7 +1760,7 @@ mod tests {
         };
         assert!(
             populate(
-                &Paths::new(&f.host_state, &home),
+                &Paths::new(&f.host_state, &home, Path::new(WS)),
                 "opencode",
                 "ags_Q",
                 me(),
@@ -1676,7 +1797,7 @@ mod tests {
             conversation: "ses_abc123".into(),
         };
         populate(
-            &Paths::new(&f.host_state, &home),
+            &Paths::new(&f.host_state, &home, Path::new(WS)),
             "opencode",
             "ags_P",
             me(),
@@ -1759,6 +1880,145 @@ mod tests {
             ("shell", A),
         ] {
             assert!(!conversation_ok(p, bad), "{p} {bad}");
+        }
+    }
+
+    /// 140f: OpenCode writes into its config dir at start, so the session's
+    /// is its own, with the host's plugin copied in.
+    #[test]
+    fn an_opencode_home_has_a_config_dir_of_its_own() {
+        let f = fx();
+        std::fs::write(f.plugin("ags_O"), b"export const Storm = 1;\n").unwrap();
+        let home = f.populate("opencode", "ags_O").unwrap();
+        let dir = home.join(".config/storm-opencode");
+        assert_eq!(
+            read(&dir.join("plugin/storm.js")),
+            "export const Storm = 1;\n"
+        );
+        for (rel, mode) in [
+            (".config", 0o700),
+            (".config/storm-opencode", 0o700),
+            (".config/storm-opencode/plugin", 0o700),
+            (".config/storm-opencode/plugin/storm.js", 0o600),
+        ] {
+            let m = f.meta(&home.join(rel));
+            assert_eq!((m.uid, m.gid, m.mode), (UID, GID, mode), "{rel}");
+        }
+        // No plugin from the host: OpenCode still has somewhere to write.
+        let home = f.populate("opencode", "ags_P").unwrap();
+        let m = f.meta(&home.join(".config/storm-opencode"));
+        assert_eq!((m.uid, m.mode), (UID, 0o700));
+        assert!(!home.join(".config/storm-opencode/plugin/storm.js").exists());
+        let home = f.populate("claude-code", "ags_C").unwrap();
+        assert!(!home.join(".config/storm-opencode").exists());
+    }
+
+    #[test]
+    fn a_linked_or_oversized_plugin_is_refused() {
+        let f = fx();
+        let secret = f.account("secret", b"TOKEN");
+        symlink(&secret, f.plugin("ags_L")).unwrap();
+        assert!(f.populate("opencode", "ags_L").is_err());
+        let copied = f.homes.join("ags_L/.config/storm-opencode/plugin/storm.js");
+        assert!(copied.symlink_metadata().is_err(), "not followed");
+        std::fs::write(f.plugin("ags_B"), vec![b'x'; 64 * 1024 + 1]).unwrap();
+        assert!(f.populate("opencode", "ags_B").is_err());
+        std::fs::create_dir(f.plugin("ags_D")).unwrap();
+        assert!(f.populate("opencode", "ags_D").is_err());
+    }
+
+    fn claude_json_of(home: &Path) -> Value {
+        serde_json::from_str(&read(&home.join(".claude.json"))).unwrap()
+    }
+
+    /// 142: a session starts past Claude Code's first run, trusting its own
+    /// working directory and nothing else of the account's.
+    #[test]
+    fn a_claude_session_starts_past_its_first_run_in_its_own_workspace() {
+        let f = fx();
+        f.account(
+            ".claude.json",
+            br#"{"primaryApiKey":"sk-x","numStartups":3,"projects":{
+                "/srv/other":{"hasTrustDialogAccepted":false,"allowedTools":["x"]},
+                "/var/lib/storm-runtime/workspaces/app":{"allowedTools":["Bash"]}}}"#,
+        );
+        let json = claude_json_of(&f.populate("claude-code", "ags_A").unwrap());
+        assert_eq!(json["hasCompletedOnboarding"], true);
+        assert_eq!(json["theme"], "dark");
+        assert_eq!(json["numStartups"], 3);
+        assert!(json.get("primaryApiKey").is_none());
+        let projects = json["projects"].as_object().unwrap();
+        assert_eq!(projects.len(), 2);
+        assert_eq!(
+            projects[WS],
+            serde_json::json!({"allowedTools": ["Bash"], "hasTrustDialogAccepted": true})
+        );
+        assert_eq!(
+            projects["/srv/other"],
+            serde_json::json!({"hasTrustDialogAccepted": false, "allowedTools": ["x"]})
+        );
+    }
+
+    #[test]
+    fn the_accounts_own_theme_is_kept() {
+        let f = fx();
+        f.account(".claude.json", br#"{"theme":"light-daltonized"}"#);
+        let json = claude_json_of(&f.populate("claude-code", "ags_A").unwrap());
+        assert_eq!(json["theme"], "light-daltonized");
+        assert_eq!(json["hasCompletedOnboarding"], true);
+    }
+
+    /// A child's unit starts in its own clone or scratch, so that is what
+    /// its home trusts, never its parent's workspace.
+    #[test]
+    fn only_the_directory_the_unit_starts_in_is_trusted() {
+        let f = fx();
+        f.account(".claude.json", b"{}");
+        let child = Path::new("/var/lib/storm-runtime-isolation/children/ags_C/workspace");
+        let json = claude_json_of(&f.populate_in("claude-code", "ags_C", child).unwrap());
+        let projects = json["projects"].as_object().unwrap();
+        assert_eq!(
+            projects.keys().collect::<Vec<_>>(),
+            [&child.display().to_string()]
+        );
+        assert_eq!(
+            projects[&child.display().to_string()]["hasTrustDialogAccepted"],
+            true
+        );
+    }
+
+    /// An account that never ran Claude Code, or whose file is unusable,
+    /// still gives the session a private copy past the first run.
+    #[test]
+    fn a_missing_or_unusable_account_file_still_gives_a_session_one() {
+        let f = fx();
+        for (session, account) in [("ags_M", None), ("ags_U", Some(&b"not json"[..]))] {
+            if let Some(bytes) = account {
+                f.account(".claude.json", bytes);
+            }
+            let home = f.populate("claude-code", session).unwrap();
+            let json = claude_json_of(&home);
+            assert_eq!(json["hasCompletedOnboarding"], true, "{session}");
+            assert_eq!(json["theme"], "dark");
+            assert_eq!(json["projects"][WS]["hasTrustDialogAccepted"], true);
+            let m = f.meta(&home.join(".claude.json"));
+            assert_eq!((m.uid, m.gid, m.mode), (UID, GID, 0o600), "{session}");
+        }
+    }
+
+    #[test]
+    fn no_other_provider_gets_a_claude_json() {
+        let f = fx();
+        f.account(".claude.json", b"{}");
+        for (provider, session) in [
+            ("opencode", "ags_O"),
+            ("codex", "ags_X"),
+            ("cursor", "ags_R"),
+            ("shell", "ags_S"),
+            (crate::session::PROBE, "ags_P"),
+        ] {
+            let home = f.populate(provider, session).unwrap();
+            assert!(!home.join(".claude.json").exists(), "{provider}");
         }
     }
 }

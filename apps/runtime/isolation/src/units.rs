@@ -3,7 +3,7 @@
 //! and its workspace group, sees the system read-only, its workspace
 //! read-write at its real path, its own home and Storm session directory,
 //! and nothing of the host account's state or another session's
-//! directories; it has its own `/tmp`, `/dev` (and with it `/dev/shm`) and
+//! directories; it has its own `/tmp`, `/dev`, `/dev/shm` (a tmpfs of its own) and
 //! IPC namespace, its own network namespace (`net.rs`), and its own
 //! control group, which stopping the unit ends whole. The terminal is the
 //! one the host handed over.
@@ -190,9 +190,12 @@ impl UnitSpec {
             p("KillSignal=SIGHUP"),
             format!("TimeoutStopSec={STOP_GRACE_SECS}"),
             p("SendSIGKILL=yes"),
-            // Private /tmp and /var/tmp, /dev (with /dev/shm), IPC.
+            // Private /tmp and /var/tmp, /dev, /dev/shm and IPC.
             p("PrivateTmp=yes"),
             p("PrivateDevices=yes"),
+            // PrivateDevices binds the host's /dev/shm into the private /dev,
+            // so without this every session shares one (AT-11, decision 140).
+            p("TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev"),
             p("PrivateIPC=yes"),
             p("RemoveIPC=yes"),
             p("ProtectSystem=strict"),
@@ -300,9 +303,10 @@ pub const SHOW_PROPERTIES: &str = "LoadState,SubState,MainPID,ExecMainCode,ExecM
 
 /// systemd, as the helper uses it.
 pub trait Units: Send + Sync {
-    /// Whether pasta and `ip` are installed and pasta runs (136j).
+    /// Whether pasta and `ip` are installed (136j).
     fn network_ready(&self) -> bool;
-    /// Starts the session's network and returns once it is configured.
+    /// Starts the session's namespace, then its network, and returns once
+    /// it is configured; a network that fails leaves no namespace.
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()>;
     fn start(&self, spec: &UnitSpec) -> Result<()>;
     fn show(&self, unit: &str) -> Result<UnitState>;
@@ -343,9 +347,21 @@ fn run(program: &str, args: &[OsString]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Whether pasta and `ip` are installed as executables. Never by running
+/// pasta here: it sandboxes itself as it starts, which this helper's own
+/// seccomp filter refuses, and it only ever runs in a session's network unit.
+/// The self-test's probe sessions go through that unit, so a pasta that
+/// cannot run there still fails the self-test.
+pub(crate) fn network_tools_installed(pasta: &Path, ip: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    [pasta, ip].iter().all(|tool| {
+        std::fs::metadata(tool).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    })
+}
+
 impl Units for Systemd {
     fn network_ready(&self) -> bool {
-        Path::new(crate::net::IP).is_file() && run(crate::net::PASTA, &["--version".into()]).is_ok()
+        network_tools_installed(Path::new(crate::net::PASTA), Path::new(crate::net::IP))
     }
 
     fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
@@ -354,7 +370,14 @@ impl Units for Systemd {
                 bail!("{tool} is not installed; a session needs it for its network");
             }
         }
-        run(SYSTEMD_RUN, &spec.systemd_run_args()).map(drop)
+        run(SYSTEMD_RUN, &spec.namespace_run_args())?;
+        if let Err(e) = run(SYSTEMD_RUN, &spec.systemd_run_args()) {
+            let namespace = crate::net::namespace_unit_name(&spec.session);
+            let _ = self.stop(&namespace);
+            self.reset_failed(&namespace);
+            return Err(e);
+        }
+        Ok(())
     }
 
     fn start(&self, spec: &UnitSpec) -> Result<()> {
@@ -424,6 +447,29 @@ impl Units for Systemd {
 pub mod tests {
     use super::*;
 
+    /// Found on a Debian 13 host (2026-10-26): pasta starts by sandboxing
+    /// itself, which the helper's own seccomp filter refuses, so running it
+    /// from the helper failed every self-test with `no_passt` while pasta
+    /// worked in the network unit it actually runs in.
+    #[test]
+    fn a_pasta_that_cannot_run_inside_the_helper_still_counts_as_installed() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let exec = |name: &str, mode: u32| {
+            let p = t.path().join(name);
+            std::fs::write(&p, "#!/bin/sh\nexit 255\n").unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
+            p
+        };
+        let pasta = exec("pasta", 0o755);
+        let ip = exec("ip", 0o755);
+        assert!(network_tools_installed(&pasta, &ip));
+        let missing = t.path().join("absent");
+        assert!(!network_tools_installed(&missing, &ip));
+        assert!(!network_tools_installed(&pasta, &missing));
+        assert!(!network_tools_installed(&exec("noexec", 0o644), &ip));
+    }
+
     pub fn spec() -> UnitSpec {
         UnitSpec {
             session: "ags_A1".into(),
@@ -464,6 +510,7 @@ pub mod tests {
             "WorkingDirectory=/var/lib/storm-runtime/workspaces/app",
             "PrivateTmp=yes",
             "PrivateDevices=yes",
+            "TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev",
             "PrivateIPC=yes",
             "RemoveIPC=yes",
             "ProtectSystem=strict",
@@ -524,6 +571,7 @@ pub mod tests {
         assert_eq!(
             mounts,
             [
+                "TemporaryFileSystem=/dev/shm:mode=1777,nosuid,nodev",
                 "TemporaryFileSystem=/var/lib/storm-runtime:ro",
                 "TemporaryFileSystem=/var/lib/storm-runtime-isolation:ro",
                 "TemporaryFileSystem=/var/lib/storm-runtime/workspaces:ro",

@@ -1,6 +1,8 @@
 //! A session's own network (136d): a network namespace of its own, named
-//! `storm-<session>`, which its unit joins, with user-mode egress through
-//! `pasta` (passt's namespace mode) running beside it in a unit of its own.
+//! `storm-<session>` and owned by a unit of its own, which the session's unit
+//! joins, with user-mode egress through `pasta` (passt's namespace mode)
+//! running beside it in another unit, confined by Storm's AppArmor profile
+//! (decision 140).
 //!
 //! Inside, the session has its own loopback and its own abstract-socket
 //! space, so nothing another session or the host listens on there is
@@ -42,6 +44,17 @@ pub fn unit_name(session: &str) -> String {
     format!("storm-session-{session}-net.service")
 }
 
+/// The unit that owns the session's namespace, apart from pasta's: a
+/// namespace cannot be deleted while a unit's mounts still hold it.
+pub fn namespace_unit_name(session: &str) -> String {
+    format!("storm-session-{session}-netns.service")
+}
+
+/// Storm's AppArmor profile for pasta (decision 140), which the network
+/// unit names. Debian's own profile for pasta allows none of its paths.
+pub const APPARMOR_PROFILE: &str = "storm-runtime-pasta";
+pub const APPARMOR_PROFILE_FILE: &str = "/etc/apparmor.d/storm-runtime-pasta";
+
 pub fn resolv_conf() -> String {
     format!("nameserver {DNS_FORWARD}\n")
 }
@@ -73,6 +86,12 @@ impl NetSpec {
         format!("storm-session-{}-net", self.session)
     }
 
+    /// The namespace as pasta opens it: bound into its own runtime
+    /// directory, since /run/netns is root's alone (`0700`).
+    fn netns_view(&self) -> String {
+        format!("/run/{}/netns", self.pid_dir())
+    }
+
     /// `pasta`'s arguments. Every forwarding default is `auto`, which
     /// would publish the session's listeners on the host and the host's
     /// listeners in the session, so each direction is set explicitly.
@@ -87,7 +106,7 @@ impl NetSpec {
             "--quiet",
             "--config-net",
             "--netns",
-            &netns_path(&self.session).display().to_string(),
+            &self.netns_view(),
             "--pid",
             &format!("/run/{}/pasta.pid", self.pid_dir()),
             // The gateway would otherwise be the host's loopback.
@@ -119,24 +138,32 @@ impl NetSpec {
     /// The network unit's properties, in order. Read by the tests as the
     /// spec.
     pub fn properties(&self) -> Vec<String> {
-        let netns = netns_name(&self.session);
         let host = crate::HOST_UNIT;
+        let namespace = namespace_unit_name(&self.session);
         let caps = self.capabilities();
         let p = |s: &str| s.to_string();
         vec![
             format!("Description=Storm session {} network", self.session),
             format!("BindsTo={host}"),
             format!("After={host}"),
+            // Stopping the namespace's unit stops this one first, so the
+            // namespace is deleted only once nothing holds a mount of it.
+            format!("BindsTo={namespace}"),
+            format!("After={namespace}"),
             // pasta returns once the namespace is configured, so the
             // session never starts before its network.
             p("Type=forking"),
             format!("PIDFile=/run/{}/pasta.pid", self.pid_dir()),
             format!("RuntimeDirectory={}", self.pid_dir()),
             p("RuntimeDirectoryMode=0700"),
-            // Only these two run as root, unsandboxed: a named namespace is
-            // a mount on the host's /run/netns.
-            format!("ExecStartPre=+{IP} netns add {netns}"),
-            format!("ExecStopPost=-+{IP} netns delete {netns}"),
+            format!(
+                "BindReadOnlyPaths={}:{}",
+                netns_path(&self.session).display(),
+                self.netns_view()
+            ),
+            // No `-`: on an AppArmor host a missing profile fails the unit
+            // (systemd ignores it where AppArmor is off).
+            format!("AppArmorProfile={APPARMOR_PROFILE}"),
             // pasta itself runs as a user of its own, with only what it
             // needs to enter and configure the namespace.
             p("DynamicUser=yes"),
@@ -179,6 +206,48 @@ impl NetSpec {
         units::unit_file(self.properties(), &units::command_line(&self.exec()))
     }
 
+    /// The namespace unit's properties. It runs only `ip`, as root, since
+    /// a named namespace is a mount on the host's /run/netns.
+    pub fn namespace_properties(&self) -> Vec<String> {
+        let host = crate::HOST_UNIT;
+        vec![
+            format!(
+                "Description=Storm session {} network namespace",
+                self.session
+            ),
+            format!("BindsTo={host}"),
+            format!("After={host}"),
+            "Type=oneshot".to_string(),
+            "RemainAfterExit=yes".to_string(),
+            format!("ExecStop={IP} netns delete {}", netns_name(&self.session)),
+        ]
+    }
+
+    /// Without `--wait`: systemd-run returns once the namespace exists,
+    /// where `--wait` would block until the unit stops.
+    pub fn namespace_run_args(&self) -> Vec<OsString> {
+        let unit = namespace_unit_name(&self.session);
+        units::run_args(
+            &unit,
+            false,
+            self.namespace_properties(),
+            self.namespace_exec(),
+        )
+    }
+
+    pub fn namespace_unit_file(&self) -> String {
+        units::unit_file(
+            self.namespace_properties(),
+            &units::command_line(&self.namespace_exec()),
+        )
+    }
+
+    fn namespace_exec(&self) -> Vec<OsString> {
+        [IP, "netns", "add", &netns_name(&self.session)]
+            .map(OsString::from)
+            .to_vec()
+    }
+
     fn exec(&self) -> Vec<OsString> {
         let mut out = vec![OsString::from(PASTA)];
         out.extend(self.pasta_args().into_iter().map(OsString::from));
@@ -214,7 +283,10 @@ mod tests {
         assert_eq!(pair(&args, "--tcp-ports"), "none");
         assert_eq!(pair(&args, "--udp-ports"), "none");
         assert_eq!(pair(&args, "--dns-forward"), DNS_FORWARD);
-        assert_eq!(pair(&args, "--netns"), "/run/netns/storm-ags_A1");
+        assert_eq!(
+            pair(&args, "--netns"),
+            "/run/storm-session-ags_A1-net/netns"
+        );
         assert!(args.contains(&"--config-net".to_string()));
         assert_eq!(pair(&spec(&[]).pasta_args(), "--tcp-ns"), "none");
         assert_eq!(resolv_conf(), format!("nameserver {DNS_FORWARD}\n"));
@@ -243,25 +315,121 @@ mod tests {
             "AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN",
             "NoNewPrivileges=yes",
             "BindsTo=storm-runtime.service",
-            "ExecStartPre=+/usr/bin/ip netns add storm-ags_A1",
-            "ExecStopPost=-+/usr/bin/ip netns delete storm-ags_A1",
+            "After=storm-runtime.service",
+            "BindsTo=storm-session-ags_A1-netns.service",
+            "After=storm-session-ags_A1-netns.service",
             "PIDFile=/run/storm-session-ags_A1-net/pasta.pid",
+            "RuntimeDirectory=storm-session-ags_A1-net",
+            "RuntimeDirectoryMode=0700",
             "DeviceAllow=/dev/net/tun rw",
             "RestrictNamespaces=ipc mnt net pid uts",
+            "AppArmorProfile=storm-runtime-pasta",
         ] {
             assert!(props.iter().any(|p| p == want), "{want} missing");
         }
         assert!(!props.iter().any(|p| p.starts_with("User=")));
-        // Only the namespace's own two commands run as root.
-        let privileged: Vec<_> = props
-            .iter()
-            .filter(|p| p.contains("=+") || p.contains("=-+"))
-            .collect();
-        assert_eq!(privileged.len(), 2);
+        // Nothing of it runs as root: the namespace is its own unit's.
+        assert!(!props.iter().any(|p| p.contains("=+") || p.contains("=-+")));
+        assert!(!props.iter().any(|p| p.contains("netns add")
+            || p.contains("netns delete")
+            || p.starts_with("ExecStartPre=")
+            || p.starts_with("ExecStopPost=")));
         let low = spec(&[80]).properties();
         assert!(low.contains(
             &"AmbientCapabilities=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_NET_BIND_SERVICE".to_string()
         ));
+    }
+
+    /// Found on a Debian 13 host (2026-10-26): pasta, a dynamic user, could
+    /// not open `/run/netns` (`0700 root`), and Debian's AppArmor profile for
+    /// pasta allows none of the unit's paths. The unit sees exactly its own
+    /// namespace file, in its own runtime directory, under Storm's profile.
+    #[test]
+    fn pasta_reaches_its_namespace_through_its_own_runtime_directory() {
+        let props = spec(&[]).properties();
+        let binds: Vec<&String> = props
+            .iter()
+            .filter(|p| {
+                p.starts_with("BindPaths=")
+                    || p.starts_with("BindReadOnlyPaths=")
+                    || p.starts_with("TemporaryFileSystem=")
+            })
+            .collect();
+        assert_eq!(
+            binds,
+            ["BindReadOnlyPaths=/run/netns/storm-ags_A1:/run/storm-session-ags_A1-net/netns"]
+        );
+        let profiles: Vec<&String> = props
+            .iter()
+            .filter(|p| p.starts_with("AppArmorProfile="))
+            .collect();
+        assert_eq!(profiles, ["AppArmorProfile=storm-runtime-pasta"], "no `-`");
+        assert_eq!(
+            pair(&spec(&[]).pasta_args(), "--netns"),
+            "/run/storm-session-ags_A1-net/netns"
+        );
+    }
+
+    /// The namespace outlives pasta's mounts of it: its own unit adds it
+    /// and deletes it only once the network unit (bound to it) has stopped.
+    #[test]
+    fn the_namespace_is_its_own_units() {
+        let s = spec(&[5432]);
+        let props = s.namespace_properties();
+        for want in [
+            "Type=oneshot",
+            "RemainAfterExit=yes",
+            "BindsTo=storm-runtime.service",
+            "After=storm-runtime.service",
+            "ExecStop=/usr/bin/ip netns delete storm-ags_A1",
+        ] {
+            assert!(props.iter().any(|p| p == want), "{want} missing");
+        }
+        let args: Vec<String> = s
+            .namespace_run_args()
+            .into_iter()
+            .map(|a| a.into_string().unwrap())
+            .collect();
+        assert_eq!(args[0], "--unit=storm-session-ags_A1-netns.service");
+        // With --wait, systemd-run would block until the namespace is gone.
+        assert!(!args.iter().any(|a| a == "--wait"));
+        let dash = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(
+            &args[dash + 1..],
+            ["/usr/bin/ip", "netns", "add", "storm-ags_A1"]
+        );
+        assert_eq!(
+            namespace_unit_name("ags_A1"),
+            "storm-session-ags_A1-netns.service"
+        );
+    }
+
+    /// The profile `AppArmorProfile=` names, as shipped: pasta's own
+    /// abstraction where passt provides one, and only the unit's own paths.
+    #[test]
+    fn the_apparmor_profile_allows_only_the_units_paths() {
+        let text = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../../deploy/storm-runtime-pasta.apparmor"),
+        )
+        .unwrap();
+        assert!(text.contains(&format!(
+            "profile {APPARMOR_PROFILE} flags=(attach_disconnected)"
+        )));
+        assert!(text.contains("include if exists <abstractions/pasta>"));
+        let rules: Vec<&str> = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.starts_with("/run/"))
+            .collect();
+        assert_eq!(
+            rules,
+            [
+                "/run/storm-session-*-net/ r,",
+                "/run/storm-session-*-net/netns r,",
+                "/run/storm-session-*-net/pasta.pid rw,",
+            ]
+        );
     }
 
     #[test]
@@ -299,6 +467,31 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let path = t.path().join("storm-session-ags_A1-net.service");
         std::fs::write(&path, spec(&[5432]).unit_file()).unwrap();
+        let out = std::process::Command::new(analyze)
+            .args(["verify", "--man=no", "--recursive-errors=no"])
+            .arg(&path)
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        for line in stderr.lines() {
+            assert!(
+                !line.contains("Unknown key")
+                    && !line.contains("Failed to parse")
+                    && !line.contains("Invalid")
+                    && !line.contains("Unknown section"),
+                "{stderr}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_namespace_unit_verifies_offline() {
+        let Some(analyze) = crate::units::tests::which("systemd-analyze") else {
+            return;
+        };
+        let t = tempfile::tempdir().unwrap();
+        let path = t.path().join("storm-session-ags_A1-netns.service");
+        std::fs::write(&path, spec(&[]).namespace_unit_file()).unwrap();
         let out = std::process::Command::new(analyze)
             .args(["verify", "--man=no", "--recursive-errors=no"])
             .arg(&path)

@@ -931,9 +931,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   a devpts slave, resolves the program from `runtime.toml` itself and asks
   systemd for `storm-session-<id>.service` (`units.rs` is the property set,
   tested as data), and hands back the leader's pidfd. **Each session has its
-  own network namespace** (136-3, `net.rs`): `storm-session-<id>-net.service`
-  creates `/run/netns/storm-<id>` and runs `pasta` in it as a dynamic user
-  with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only; pasta's every forwarding
+  own network namespace** (136-3, `net.rs`): `storm-session-<id>-netns.service`
+  (a oneshot that stays active) owns `/run/netns/storm-<id>`, and
+  `storm-session-<id>-net.service`, bound to it, runs `pasta` as a dynamic
+  user with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only, seeing that one
+  namespace file bound into its own runtime directory (`/run/netns` is
+  root's), under Storm's AppArmor profile `storm-runtime-pasta` (decision
+  140; the distribution's is for rootless containers). Stopping the
+  namespace's unit stops pasta first; pasta's every forwarding
   direction is set explicitly (each defaults to `auto`, which would publish
   listeners both ways), `--no-map-gw` keeps the host's loopback out, and only
   `runtime.toml` `isolation_host_ports` reach it; DNS goes through pasta's
@@ -946,7 +951,11 @@ Specification*; the slices are decisions 81 and 81a onward):
   per-profile allowlist copied at `start` through `O_NOFOLLOW` descriptors
   (links copied, never followed), root's and read-only except the files an
   agent rewrites; no credential file (`DENIED`), and of a provider's store
-  only its static API keys (`static_keys`). At lease end its conversations
+  only its static API keys (`static_keys`). A `claude-code` session's
+  private `.claude.json` (written even when the account has none) is past
+  Claude Code's first run and trusts exactly the directory its unit starts
+  in, a child's own clone or scratch (decision 142, `claude_json`;
+  `tests/claude_first_run_gate.rs` with `STORM_CLAUDE_BIN`). At lease end its conversations
   move to the helper's `kept/<session>/`, and a resume copies only the named
   conversation from the predecessor the server names, once that one has
   ended. **An isolated session starts only on a credential 136f permits**
