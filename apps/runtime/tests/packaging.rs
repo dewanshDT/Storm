@@ -332,6 +332,7 @@ fn the_package_ships_the_helper_disabled() {
 /// effort: `storm-runtime-isolation on` loads it again and refuses if it
 /// cannot.
 #[test]
+#[cfg(target_os = "linux")]
 fn the_package_ships_and_loads_the_pasta_profile() {
     let cargo = repo_file("apps/runtime/Cargo.toml");
     assert!(cargo.contains(
