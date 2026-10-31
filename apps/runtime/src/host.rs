@@ -7375,6 +7375,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         wait_for("OpenCode's env", || {
             recorded(roots.path(), "env", "ags_OCEDIT")
                 .is_some_and(|e| e.contains("OPENCODE_CONFIG_CONTENT="))
+                && recorded(roots.path(), "args", "ags_OCEDIT").is_some()
         })
         .await;
         let env = recorded(roots.path(), "env", "ags_OCEDIT").unwrap();
