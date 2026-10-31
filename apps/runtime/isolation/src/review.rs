@@ -1291,8 +1291,18 @@ pub mod tests {
         let base = repo(&child, &[("README", "x")]);
         let dir = t.path().join("review");
         std::fs::create_dir(&dir).unwrap();
-        let run =
-            || export_clone(Path::new(GIT), &child, &dir, &base, BIG, Path::new(HOME)).unwrap();
+        let run = || {
+            export_clone(
+                Path::new(GIT),
+                &child,
+                &dir,
+                &base,
+                BIG,
+                Path::new(HOME),
+                Path::new(TMP),
+            )
+            .unwrap()
+        };
         let v = run();
         assert_eq!(v["tip"], base);
         assert_eq!(v["commits"].as_array().unwrap().len(), 0);
