@@ -14,7 +14,7 @@
 //! or uncommitted file. The remote is removed once the clone is made, so
 //! nothing in the child's repository points back at the parent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use serde_json::{Map, Value, json};
@@ -24,6 +24,9 @@ use serde_json::{Map, Value, json};
 pub const GIT: &str = "/usr/bin/git";
 /// What a pool user's `HOME` is (`/nonexistent` in the sysusers file).
 pub const HOME: &str = "/nonexistent";
+/// Where a unit's trust file is written: its own `/tmp` (`PrivateTmp=yes`
+/// in `children::sandbox`).
+pub const TMP: &str = "/tmp";
 /// The parent while the clone is made; removed after.
 const REMOTE: &str = "storm-parent";
 /// Through git's transport, never a copy of the parent's `.git`; one
@@ -80,18 +83,19 @@ impl Failure {
     pub const CODES: [&'static str; 3] = ["workspace_cap", "unreadable_repository", "no_commit"];
 }
 
-/// The whole environment of every git call.
-pub fn environment(home: &Path) -> Vec<(&'static str, String)> {
+/// The whole environment of every git call. `global` is a `Trust` file.
+pub fn environment(home: &Path, global: &Path) -> Vec<(&'static str, String)> {
     let s = |v: &str| v.to_string();
     vec![
         ("PATH", s("/usr/bin:/bin")),
         ("HOME", home.display().to_string()),
         ("LC_ALL", s("C")),
-        // No system or global configuration: an account's filters, hooks,
-        // template directory, fsmonitor and pack-objects hook stay out.
+        // No system configuration and no account's: its filters, hooks,
+        // template directory, fsmonitor and pack-objects hook stay out. The
+        // global file is Storm's own, and holds only `safe.directory`.
         ("GIT_CONFIG_NOSYSTEM", s("1")),
         ("GIT_CONFIG_SYSTEM", s("/dev/null")),
-        ("GIT_CONFIG_GLOBAL", s("/dev/null")),
+        ("GIT_CONFIG_GLOBAL", global.display().to_string()),
         ("GIT_ATTR_NOSYSTEM", s("1")),
         // A partial clone's promisor remote is the parent's config: the
         // upload-pack reading it must never fetch through it (CVE-2024-32004).
@@ -140,11 +144,10 @@ pub const HOOK_EVENTS: &[&str] = &[
     "post-index-change",
 ];
 
-/// Given on every git call's command line. git treats it as protected
-/// configuration and hands it to the git processes it starts, the
-/// upload-pack in the parent's repository included.
+/// Given on every git call's command line, as protected configuration.
+/// git hands it to the git processes it starts, but not to a `file://`
+/// transport's upload-pack, which is why `Trust` exists.
 pub fn protections(parent: &Path) -> Vec<String> {
-    let parent = parent.display();
     let mut out: Vec<String> = vec![
         "core.hooksPath=/dev/null".into(),
         "core.fsmonitor=false".into(),
@@ -164,17 +167,74 @@ pub fn protections(parent: &Path) -> Vec<String> {
         "transfer.bundleURI=false".into(),
         "fetch.bundleURI=".into(),
         "log.showSignature=false".into(),
-        // The parent's repository is another user's; it is read, never
-        // trusted, and this is the only one git is told to read.
-        format!("safe.directory={parent}"),
-        format!("safe.directory={parent}/.git"),
     ];
+    // The parent's repository is another user's; it is read, never
+    // trusted, and this is the only one git is told to read.
+    out.extend(safe_directories(parent).map(|d| format!("safe.directory={d}")));
     out.extend(
         HOOK_EVENTS
             .iter()
             .map(|e| format!("hook.{e}.enabled=false")),
     );
     out
+}
+
+fn safe_directories(repo: &Path) -> [String; 2] {
+    let repo = repo.display();
+    [format!("{repo}"), format!("{repo}/.git")]
+}
+
+/// The repository a unit's git must read, as `safe.directory` in a file
+/// `GIT_CONFIG_GLOBAL` names, and nothing else (decision 140h). git hands a
+/// `file://` transport's upload-pack none of its `-c` configuration, so
+/// there the command line's `safe.directory` is lost and upload-pack
+/// refuses a repository another user owns. Removed when dropped.
+pub struct Trust {
+    path: PathBuf,
+}
+
+impl Trust {
+    pub fn write(dir: &Path, repo: &Path) -> std::io::Result<Trust> {
+        use rustix::fs::{Mode, OFlags};
+        use std::io::Write;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let mut text = String::from("[safe]\n");
+        for d in safe_directories(repo) {
+            if d.chars().any(char::is_control) {
+                return Err(std::io::ErrorKind::InvalidInput.into());
+            }
+            let quoted = d.replace('\\', "\\\\").replace('"', "\\\"");
+            text.push_str(&format!("\tdirectory = \"{quoted}\"\n"));
+        }
+        let pid = std::process::id();
+        loop {
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let path = dir.join(format!("storm-git-trust-{pid}-{n}"));
+            let fd = match rustix::fs::open(
+                &path,
+                OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            ) {
+                Ok(fd) => fd,
+                Err(rustix::io::Errno::EXIST) if n < 1 << 16 => continue,
+                Err(e) => return Err(e.into()),
+            };
+            let trust = Trust { path };
+            std::fs::File::from(fd).write_all(text.as_bytes())?;
+            return Ok(trust);
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Trust {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 pub(crate) struct Git<'a> {
@@ -320,17 +380,23 @@ fn read_tree(listing: &[u8]) -> Tree {
 }
 
 /// Clones `parent`'s `HEAD` into the empty directory `dest`, in at most
-/// `budget` bytes. `home` is the user's `HOME`, which git is never let read.
+/// `budget` bytes. `home` is the user's `HOME`, which git is never let read;
+/// `tmp` is where its `Trust` is written.
 pub fn clone(
     git: &Path,
     parent: &Path,
     dest: &Path,
     budget: u64,
     home: &Path,
+    tmp: &Path,
 ) -> Result<Report, Failure> {
+    let trust = Trust::write(tmp, parent).map_err(|e| {
+        eprintln!("writing git's trust file: {e}");
+        Failure::Unreadable
+    })?;
     let git = Git {
         git,
-        env: environment(home),
+        env: environment(home, trust.path()),
         config: protections(parent),
     };
     let url = format!("file://{}", parent.display());
@@ -462,6 +528,7 @@ pub fn main(args: &[String]) -> std::process::ExitCode {
         Path::new(dest),
         budget,
         Path::new(HOME),
+        Path::new(TMP),
     );
     println!("{}", line(&result));
     std::process::ExitCode::SUCCESS
@@ -834,7 +901,7 @@ pub mod tests {
         let t = tempfile::tempdir().unwrap();
         let h = hostile(t.path());
         let dest = empty_dir(t.path(), "child");
-        let report = clone(Path::new(GIT), &h.parent, &dest, BIG, &h.home).unwrap();
+        let report = clone(Path::new(GIT), &h.parent, &dest, BIG, &h.home, t.path()).unwrap();
         assert_eq!(h.plants.ran(), Vec::<String>::new());
         assert_eq!(report.commit, h.commit);
         assert_eq!(report.branch.as_deref(), Some("main"));
@@ -872,7 +939,15 @@ pub mod tests {
         std::fs::write(parent.join("staged.txt"), "x").unwrap();
         git(&parent, &["add", "staged.txt"]);
         let dest = empty_dir(t.path(), "child");
-        clone(Path::new(GIT), &parent, &dest, BIG, Path::new(HOME)).unwrap();
+        clone(
+            Path::new(GIT),
+            &parent,
+            &dest,
+            BIG,
+            Path::new(HOME),
+            t.path(),
+        )
+        .unwrap();
         let mut names: Vec<String> = std::fs::read_dir(&dest)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -894,7 +969,7 @@ pub mod tests {
         let t = tempfile::tempdir().unwrap();
         let h = hostile(t.path());
         let dest = empty_dir(t.path(), "child");
-        clone(Path::new(GIT), &h.parent, &dest, BIG, &h.home).unwrap();
+        clone(Path::new(GIT), &h.parent, &dest, BIG, &h.home, t.path()).unwrap();
         let dot = dest.join(".git");
         assert!(!dot.join("hooks").exists(), "no template was copied");
         assert!(!dot.join("objects/info/alternates").exists());
@@ -944,7 +1019,15 @@ pub mod tests {
         git(&parent, &["commit", "-q", "-am", "second"]);
         git(&parent, &["checkout", "-q", "--detach", &first]);
         let dest = empty_dir(t.path(), "detached");
-        let r = clone(Path::new(GIT), &parent, &dest, BIG, Path::new(HOME)).unwrap();
+        let r = clone(
+            Path::new(GIT),
+            &parent,
+            &dest,
+            BIG,
+            Path::new(HOME),
+            t.path(),
+        )
+        .unwrap();
         assert_eq!((r.commit.as_str(), r.branch), (first.as_str(), None));
         assert_eq!(std::fs::read_to_string(dest.join("a")).unwrap(), "1");
         let empty = t.path().join("empty");
@@ -952,7 +1035,14 @@ pub mod tests {
         git(&empty, &["init", "-q", "--template="]);
         let dest = empty_dir(t.path(), "of-empty");
         assert_eq!(
-            clone(Path::new(GIT), &empty, &dest, BIG, Path::new(HOME)),
+            clone(
+                Path::new(GIT),
+                &empty,
+                &dest,
+                BIG,
+                Path::new(HOME),
+                t.path()
+            ),
             Err(Failure::NoCommit)
         );
         let dest = empty_dir(t.path(), "of-nothing");
@@ -962,7 +1052,8 @@ pub mod tests {
                 &t.path().join("nothing"),
                 &dest,
                 BIG,
-                Path::new(HOME)
+                Path::new(HOME),
+                t.path()
             ),
             Err(Failure::Unreadable)
         );
@@ -980,12 +1071,27 @@ pub mod tests {
         assert!(objects < 1 << 20, "{objects}");
         let dest = empty_dir(t.path(), "child");
         assert_eq!(
-            clone(Path::new(GIT), &parent, &dest, 2 << 20, Path::new(HOME)),
+            clone(
+                Path::new(GIT),
+                &parent,
+                &dest,
+                2 << 20,
+                Path::new(HOME),
+                t.path()
+            ),
             Err(Failure::WorkspaceCap)
         );
         assert!(!dest.join("zeros.txt").exists());
         let dest = empty_dir(t.path(), "roomy");
-        clone(Path::new(GIT), &parent, &dest, 8 << 20, Path::new(HOME)).unwrap();
+        clone(
+            Path::new(GIT),
+            &parent,
+            &dest,
+            8 << 20,
+            Path::new(HOME),
+            t.path(),
+        )
+        .unwrap();
         assert!(dest.join("zeros.txt").exists());
     }
 
@@ -1018,7 +1124,7 @@ pub mod tests {
         );
         let dest = empty_dir(t.path(), "child");
         assert_eq!(
-            clone(Path::new(GIT), &lazy, &dest, BIG, Path::new(HOME)),
+            clone(Path::new(GIT), &lazy, &dest, BIG, Path::new(HOME), t.path()),
             Err(Failure::Unreadable)
         );
         assert_eq!(plants.ran(), Vec::<String>::new());
@@ -1029,11 +1135,11 @@ pub mod tests {
     /// protocol.
     #[test]
     fn every_git_call_has_the_whole_protection() {
-        let env = environment(Path::new("/h"));
+        let env = environment(Path::new("/h"), Path::new("/tmp/trust"));
         for (k, v) in [
             ("GIT_CONFIG_NOSYSTEM", "1"),
             ("GIT_CONFIG_SYSTEM", "/dev/null"),
-            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_GLOBAL", "/tmp/trust"),
             ("GIT_ATTR_NOSYSTEM", "1"),
             ("GIT_NO_LAZY_FETCH", "1"),
             ("GIT_ALLOW_PROTOCOL", "file"),
@@ -1065,6 +1171,168 @@ pub mod tests {
         for flag in ["--no-local", "--template=", "--single-branch", "--no-tags"] {
             assert!(CLONE.contains(&flag), "{flag}");
         }
+    }
+
+    /// What `git config` reads back from a file.
+    fn config_list(file: &Path) -> Vec<String> {
+        git(
+            Path::new("/"),
+            &["config", "--file", file.to_str().unwrap(), "--list"],
+        )
+        .lines()
+        .map(String::from)
+        .collect()
+    }
+
+    /// 140h: the trust file holds the one repository and its `.git`,
+    /// nothing else, private and new; and it is gone once dropped.
+    #[test]
+    fn the_trust_file_names_only_the_one_repository_and_goes_away() {
+        use std::os::unix::fs::MetadataExt;
+        let t = tempfile::tempdir().unwrap();
+        let trust = Trust::write(t.path(), Path::new("/w/app")).unwrap();
+        let path = trust.path().to_path_buf();
+        assert_eq!(path.parent(), Some(t.path()));
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[safe]\n\tdirectory = \"/w/app\"\n\tdirectory = \"/w/app/.git\"\n"
+        );
+        assert_eq!(
+            config_list(&path),
+            ["safe.directory=/w/app", "safe.directory=/w/app/.git"]
+        );
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o7777, 0o600);
+        let other = Trust::write(t.path(), Path::new("/w/app")).unwrap();
+        assert_ne!(other.path(), path, "each its own");
+        drop(other);
+        drop(trust);
+        assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
+        // A name git would read differently is quoted; one it cannot hold
+        // is refused.
+        let odd = Trust::write(t.path(), Path::new(r#"/w/a "b" \c; #d "#)).unwrap();
+        assert_eq!(
+            config_list(odd.path()),
+            [
+                r#"safe.directory=/w/a "b" \c; #d "#,
+                r#"safe.directory=/w/a "b" \c; #d /.git"#
+            ]
+        );
+        drop(odd);
+        assert!(Trust::write(t.path(), Path::new("/w/a\n[core]\n")).is_err());
+        assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
+    }
+
+    /// 140h's premise, on this machine's git: a `file://` transport's
+    /// upload-pack runs with no `-c` configuration (git clears
+    /// `GIT_CONFIG_PARAMETERS` for it), but with the global file.
+    #[test]
+    fn the_transport_drops_the_command_line_but_keeps_the_global_file() {
+        let t = tempfile::tempdir().unwrap();
+        let plants = Plants::new(t.path());
+        let parent = t.path().join("parent");
+        repo(&parent, &[("a", "1")]);
+        let hook = format!(
+            "uploadpack.packObjectsHook={}",
+            plants.evil("pack-objects-hook").display()
+        );
+        let clone_with = |env: Vec<(&'static str, String)>, config: Vec<String>, name: &str| {
+            let dest = t.path().join(name);
+            let url = format!("file://{}", parent.display());
+            let mut args = CLONE.to_vec();
+            args.extend(["--", &url, dest.to_str().unwrap()]);
+            let g = Git {
+                git: Path::new(GIT),
+                env,
+                config,
+            };
+            g.run(t.path(), &args).unwrap();
+        };
+        let null = Path::new("/dev/null");
+        clone_with(
+            environment(Path::new(HOME), null),
+            vec![hook.clone()],
+            "cli",
+        );
+        assert_eq!(plants.ran(), Vec::<String>::new(), "-c never reached it");
+        let global = t.path().join("global");
+        std::fs::write(
+            &global,
+            format!(
+                "[uploadpack]\n\tpackObjectsHook = {}\n",
+                plants.evil("pack-objects-hook").display()
+            ),
+        )
+        .unwrap();
+        clone_with(environment(Path::new(HOME), &global), vec![], "from-global");
+        assert_eq!(plants.ran(), ["pack-objects-hook"], "the global file did");
+    }
+
+    /// Whether this git's upload-pack refuses a repository it takes to be
+    /// another user's (it does on Debian 13's 2.47; 2.56 no longer checks).
+    pub fn upload_pack_checks_ownership(repo: &Path) -> bool {
+        !Command::new(GIT)
+            .env_clear()
+            .envs(environment(Path::new(HOME), Path::new("/dev/null")))
+            .env("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+            .args(["upload-pack", "--advertise-refs"])
+            .arg(repo)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    }
+
+    /// 140h, the defect: the parent is the host account's, not the clone's
+    /// user's. git is made to take every repository for another user's
+    /// (`GIT_TEST_ASSUME_DIFFERENT_OWNER`), and the clone's own transport
+    /// call runs as `clone` runs it: with only `-c safe.directory` the
+    /// parent is refused where upload-pack checks; with the trust file it
+    /// is read.
+    #[test]
+    fn a_clone_reads_a_parent_another_user_owns() {
+        let t = tempfile::tempdir().unwrap();
+        let parent = t.path().join("parent");
+        let commit = repo(&parent, &[("a", "1")]);
+        let tmp = empty_dir(t.path(), "tmp");
+        let foreign = |global: &Path, name: &str| {
+            let mut env = environment(Path::new(HOME), global);
+            env.push(("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1".into()));
+            let g = Git {
+                git: Path::new(GIT),
+                env,
+                config: protections(&parent),
+            };
+            let dest = t.path().join(name);
+            let url = format!("file://{}", parent.display());
+            let mut args = CLONE.to_vec();
+            args.extend(["--", &url, dest.to_str().unwrap()]);
+            (g.run(t.path(), &args), dest)
+        };
+        let (before, _) = foreign(Path::new("/dev/null"), "before");
+        if upload_pack_checks_ownership(&parent) {
+            assert!(before.is_err(), "-c safe.directory alone is lost");
+        } else {
+            eprintln!("this git's upload-pack does not check ownership");
+        }
+        let trust = Trust::write(&tmp, &parent).unwrap();
+        let (after, dest) = foreign(trust.path(), "after");
+        assert!(after.is_ok());
+        assert_eq!(
+            git(&dest, &["rev-parse", "refs/remotes/storm-parent/main"]),
+            commit
+        );
+        drop(trust);
+        // The whole clone leaves no trust file behind, made or failed.
+        let dest = empty_dir(t.path(), "whole");
+        let r = clone(Path::new(GIT), &parent, &dest, BIG, Path::new(HOME), &tmp).unwrap();
+        assert_eq!(r.commit, commit);
+        let dest = empty_dir(t.path(), "capped");
+        assert_eq!(
+            clone(Path::new(GIT), &parent, &dest, 1, Path::new(HOME), &tmp),
+            Err(Failure::WorkspaceCap)
+        );
+        assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0);
     }
 
     #[test]

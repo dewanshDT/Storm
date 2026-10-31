@@ -942,12 +942,13 @@ mod imp {
                 return refuse("child_live");
             }
             let (git, home) = (Path::new(clone::GIT), Path::new(clone::HOME));
+            let tmp = std::env::temp_dir();
             let dir = root.join(&child).join("review");
             if r.export.is_none() {
                 std::fs::create_dir_all(&dir).unwrap();
                 let workspace = PathBuf::from(r.made["workspace"].as_str().unwrap());
                 let base = r.made["commit"].as_str().unwrap_or("-");
-                match review::export_clone(git, &workspace, &dir, base, 1 << 30, home) {
+                match review::export_clone(git, &workspace, &dir, base, 1 << 30, home, &tmp) {
                     Ok(Value::Object(v)) => r.export = Some(v),
                     _ => return refuse("failed"),
                 }
@@ -975,7 +976,8 @@ mod imp {
             }
             let tip = answer["tip"].as_str().unwrap().to_string();
             let bundle = dir.join(review::BUNDLE);
-            match review::import_clone(git, &r.parent_workspace, &bundle, &branch, &tip, home) {
+            match review::import_clone(git, &r.parent_workspace, &bundle, &branch, &tip, home, &tmp)
+            {
                 Ok(v) if v["already"] == false => {
                     r.applied = Some(branch.clone());
                     (

@@ -91,10 +91,13 @@ impl Layout {
 }
 
 /// The environment a session's unit gets from the host's launch: Codex's
-/// home is the session's own (136e), never the host's shared one.
+/// home is the session's own (136e), never the host's shared one, and so is
+/// OpenCode's config dir, which it writes at start (140f). Git trusts the
+/// workspace the unit runs in, which the host account owns (140g).
 pub fn session_env(
     provider: &str,
     home: &Path,
+    workspace: &Path,
     mut env: Vec<(String, String)>,
 ) -> Vec<(String, String)> {
     env.retain(|(k, _)| k != "CODEX_HOME");
@@ -104,7 +107,38 @@ pub fn session_env(
             home.join(".codex").to_string_lossy().into_owned(),
         ));
     }
+    if provider == "opencode" {
+        env.retain(|(k, _)| k != "OPENCODE_CONFIG_DIR");
+        env.push((
+            "OPENCODE_CONFIG_DIR".into(),
+            home.join(crate::home::OPENCODE_CONFIG)
+                .to_string_lossy()
+                .into_owned(),
+        ));
+    }
+    trust_workspace(&mut env, workspace);
     env
+}
+
+/// Appends `safe.directory=<workspace>` to git's environment config; a
+/// count git would not read leaves it alone rather than guess.
+fn trust_workspace(env: &mut Vec<(String, String)>, workspace: &Path) {
+    let count = match env.iter().rev().find(|(k, _)| k == "GIT_CONFIG_COUNT") {
+        None => 0,
+        Some((_, v)) if v.bytes().all(|b| b.is_ascii_digit()) => match v.parse::<usize>() {
+            Ok(n) if n < usize::MAX => n,
+            _ => return,
+        },
+        Some(_) => return,
+    };
+    let (key, value) = (
+        format!("GIT_CONFIG_KEY_{count}"),
+        format!("GIT_CONFIG_VALUE_{count}"),
+    );
+    env.retain(|(k, _)| k != "GIT_CONFIG_COUNT" && *k != key && *k != value);
+    env.push((key, "safe.directory".into()));
+    env.push((value, workspace.to_string_lossy().into_owned()));
+    env.push(("GIT_CONFIG_COUNT".into(), (count + 1).to_string()));
 }
 
 pub struct State {
@@ -384,7 +418,11 @@ impl Helper {
             .tty
             .give(tty.as_fd(), uid)
             .map_err(|e| failed("giving the terminal", e.into()))?;
-        let env = session_env(provider, &home, launch.env);
+        let unit_workspace = match &child {
+            Some(_) => self.layout.child_workspace(session),
+            None => workspace.to_path_buf(),
+        };
+        let env = session_env(provider, &home, &unit_workspace, launch.env);
         files::write_root_private(
             &self.layout.env_file(session),
             files::env_file(&env).as_bytes(),
@@ -400,10 +438,7 @@ impl Helper {
             session: session.to_string(),
             user: user.to_string(),
             workspace_group: group,
-            workspace: match &child {
-                Some(_) => self.layout.child_workspace(session),
-                None => workspace.to_path_buf(),
-            },
+            workspace: unit_workspace,
             parent_view: child
                 .as_ref()
                 .filter(|c| c.mode == ChildMode::Scratch)
@@ -443,7 +478,11 @@ impl Helper {
             });
         if let Err((what, e)) = started {
             // A unit that failed to start may still be loaded.
-            for unit in [unit.clone(), crate::net::unit_name(session)] {
+            for unit in [
+                unit.clone(),
+                crate::net::unit_name(session),
+                crate::net::namespace_unit_name(session),
+            ] {
                 let _ = self.deps.units.stop(&unit);
                 self.deps.units.reset_failed(&unit);
             }
@@ -583,10 +622,12 @@ impl Helper {
         Ok((out, None))
     }
 
-    /// The session's unit, then its network.
+    /// The session's unit, then its network, then its namespace: the
+    /// namespace cannot be deleted while pasta's unit holds a mount of it.
     fn stop_session(&self, session: &str) -> Result<()> {
         self.stop_unit(&units::unit_name(session))?;
-        self.stop_unit(&crate::net::unit_name(session))
+        self.stop_unit(&crate::net::unit_name(session))?;
+        self.stop_unit(&crate::net::namespace_unit_name(session))
     }
 
     fn stop_unit(&self, unit: &str) -> Result<()> {
@@ -809,17 +850,23 @@ pub mod tests {
             !self.no_passt.load(std::sync::atomic::Ordering::SeqCst)
         }
         fn start_network(&self, spec: &crate::net::NetSpec) -> Result<()> {
+            let state = UnitState {
+                loaded: true,
+                running: true,
+                ..UnitState::default()
+            };
+            let namespace = crate::net::namespace_unit_name(&spec.session);
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("start {namespace}"));
+            self.units.lock().unwrap().insert(namespace, (state, None));
             let unit = crate::net::unit_name(&spec.session);
             self.calls.lock().unwrap().push(format!("start {unit}"));
             self.nets.lock().unwrap().push(spec.clone());
             if self.fail_network.load(std::sync::atomic::Ordering::SeqCst) {
                 anyhow::bail!("injected: no pasta");
             }
-            let state = UnitState {
-                loaded: true,
-                running: true,
-                ..UnitState::default()
-            };
             self.units.lock().unwrap().insert(unit, (state, None));
             Ok(())
         }
@@ -906,6 +953,7 @@ pub mod tests {
                 &spec.dest,
                 spec.budget,
                 &home,
+                &std::env::temp_dir(),
             )))
         }
         fn run_review(&self, spec: &crate::children::ReviewSpec) -> Result<String> {
@@ -971,6 +1019,7 @@ pub mod tests {
                     base,
                     budget.parse().unwrap(),
                     &home,
+                    &std::env::temp_dir(),
                 ),
                 ["export", "scratch", child] => crate::review::export_scratch(Path::new(child)),
                 ["import", "clone", parent, bundle, branch, tip] => crate::review::import_clone(
@@ -980,6 +1029,7 @@ pub mod tests {
                     branch,
                     tip,
                     &home,
+                    &std::env::temp_dir(),
                 ),
                 ["import", "scratch", scratch, parent, child, name] => {
                     crate::review::import_scratch(
@@ -1050,8 +1100,14 @@ pub mod tests {
             ("shell".into(), String::new()),
             ("claude-code".into(), "/bin/sh".into()),
             ("codex".into(), "/bin/sh".into()),
+            ("opencode".into(), "/bin/sh".into()),
         ];
-        settings.providers = vec!["shell".into(), "claude-code".into(), "codex".into()];
+        settings.providers = vec![
+            "shell".into(),
+            "claude-code".into(),
+            "codex".into(),
+            "opencode".into(),
+        ];
         let helper = Helper::new(pool, settings, deps);
         std::fs::create_dir_all(helper.layout.host_state.join("home")).unwrap();
         std::fs::create_dir_all(helper.layout.launch_dir()).unwrap();
@@ -1197,7 +1253,13 @@ pub mod tests {
         // The environment is the helper's own file, never the unit's
         // properties; the host's HOME never gets in.
         let env = std::fs::read_to_string(f.helper.layout.env_file("ags_A")).unwrap();
-        assert_eq!(env, "TERM=xterm-256color\nTOKEN=\"it's \\$secret\"\n");
+        assert_eq!(
+            env,
+            format!(
+                "TERM=xterm-256color\nTOKEN=\"it's \\$secret\"\nGIT_CONFIG_KEY_0=safe.directory\nGIT_CONFIG_VALUE_0={}\nGIT_CONFIG_COUNT=1\n",
+                f.workspace()
+            )
+        );
         assert!(
             spec.properties()
                 .unwrap()
@@ -1275,10 +1337,12 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
@@ -1334,12 +1398,14 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service",
                 "kill storm-session-ags_A.service SIGHUP",
                 "kill storm-session-ags_A.service SIGKILL",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let spec = f.units.specs.lock().unwrap()[0].clone();
@@ -1385,10 +1451,11 @@ pub mod tests {
         );
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[calls.len() - 2..],
+            calls[calls.len() - 3..],
             [
                 "stop storm-session-ags_A.service",
-                "stop storm-session-ags_A-net.service"
+                "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service"
             ]
         );
         let meta = f.own.meta(
@@ -1443,10 +1510,11 @@ pub mod tests {
         f.helper.recover().unwrap();
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[calls.len() - 2..],
+            calls[calls.len() - 3..],
             [
                 "stop storm-session-ags_A.service",
-                "stop storm-session-ags_A-net.service"
+                "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service"
             ]
         );
         assert!(
@@ -1638,8 +1706,9 @@ pub mod tests {
         );
         let calls = f.units.calls.lock().unwrap().clone();
         assert_eq!(
-            calls[..2],
+            calls[..3],
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "start storm-session-ags_A.service"
             ],
@@ -1680,9 +1749,11 @@ pub mod tests {
         assert_eq!(
             calls,
             [
+                "start storm-session-ags_A-netns.service",
                 "start storm-session-ags_A-net.service",
                 "stop storm-session-ags_A.service",
                 "stop storm-session-ags_A-net.service",
+                "stop storm-session-ags_A-netns.service",
             ]
         );
         let (v, _) = f.call(json!({"op": "end", "session": "ags_A"}), vec![]);
@@ -1813,10 +1884,15 @@ pub mod tests {
             env.contains(&format!("CODEX_HOME={}/.codex\n", home.display())),
             "{env}"
         );
+        let codex_home = |provider: &str, env: Vec<(String, String)>| {
+            session_env(provider, &home, Path::new("/w/app"), env)
+                .into_iter()
+                .filter(|(k, _)| !k.starts_with("GIT_CONFIG_"))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(
-            session_env(
+            codex_home(
                 "codex",
-                &home,
                 vec![(
                     "CODEX_HOME".into(),
                     "/var/lib/storm-runtime/agents/codex".into()
@@ -1828,8 +1904,144 @@ pub mod tests {
             )]
         );
         assert_eq!(
-            session_env("shell", &home, vec![("CODEX_HOME".into(), "/x".into())]),
+            codex_home("shell", vec![("CODEX_HOME".into(), "/x".into())]),
             []
+        );
+    }
+
+    fn pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+        v.iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// 140g: git trusts exactly the session's workspace, through the
+    /// environment, after whatever git config the launch already carries.
+    #[test]
+    fn git_trusts_the_sessions_workspace_and_nothing_else() {
+        let home = Path::new("/h");
+        let ws = Path::new("/w/app");
+        assert_eq!(
+            session_env("shell", home, ws, pairs(&[("TERM", "xterm")])),
+            pairs(&[
+                ("TERM", "xterm"),
+                ("GIT_CONFIG_KEY_0", "safe.directory"),
+                ("GIT_CONFIG_VALUE_0", "/w/app"),
+                ("GIT_CONFIG_COUNT", "1"),
+            ])
+        );
+        let before = pairs(&[
+            ("GIT_CONFIG_COUNT", "2"),
+            ("GIT_CONFIG_KEY_0", "user.name"),
+            ("GIT_CONFIG_VALUE_0", "a"),
+            ("GIT_CONFIG_KEY_1", "core.pager"),
+            ("GIT_CONFIG_VALUE_1", "cat"),
+        ]);
+        let mut want = before[1..].to_vec();
+        want.extend(pairs(&[
+            ("GIT_CONFIG_KEY_2", "safe.directory"),
+            ("GIT_CONFIG_VALUE_2", "/w/app"),
+            ("GIT_CONFIG_COUNT", "3"),
+        ]));
+        assert_eq!(
+            session_env("codex", home, ws, before.clone())[..4],
+            want[..4]
+        );
+        assert_eq!(
+            session_env("claude-code", home, ws, before),
+            want,
+            "every provider"
+        );
+        for bad in ["", "x", "-1", "1x", " 1", "99999999999999999999999"] {
+            let env = pairs(&[("GIT_CONFIG_COUNT", bad), ("GIT_CONFIG_KEY_0", "a.b")]);
+            assert_eq!(session_env("shell", home, ws, env.clone()), env, "{bad:?}");
+        }
+    }
+
+    /// 140f: OpenCode writes into its config dir at start; an isolated
+    /// session's is in its own home, never the host's read-only one.
+    #[test]
+    fn opencode_gets_a_config_dir_it_can_write() {
+        use std::os::unix::fs::MetadataExt;
+        let f = fixture();
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_O"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_O", "user": user}),
+            vec![],
+        );
+        f.launch("ags_O");
+        let host_config = f.helper.layout.session_dir("ags_O").join("opencode");
+        std::fs::create_dir_all(host_config.join("plugin")).unwrap();
+        std::fs::write(host_config.join("plugin/storm.js"), b"// storm\n").unwrap();
+        std::fs::write(
+            f.helper.layout.launch_dir().join("ags_O.json"),
+            json!({"args": [], "env": [["OPENCODE_CONFIG_DIR", host_config]]}).to_string(),
+        )
+        .unwrap();
+        let (_master, slave) = crate::tty::tests::pty();
+        let (v, _) = f.call(
+            json!({"op": "start", "session": "ags_O", "user": user, "provider": "opencode", "workspace": f.workspace()}),
+            vec![slave],
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        let home = f.helper.layout.home("ags_O");
+        let config = home.join(".config/storm-opencode");
+        let env = std::fs::read_to_string(f.helper.layout.env_file("ags_O")).unwrap();
+        assert!(
+            env.contains(&format!("OPENCODE_CONFIG_DIR={}\n", config.display())),
+            "{env}"
+        );
+        assert!(!env.contains(&host_config.display().to_string()), "{env}");
+        assert_eq!(
+            std::fs::read(config.join("plugin/storm.js")).unwrap(),
+            b"// storm\n"
+        );
+        let uid = f.helper.pool.users[&user];
+        let owner = |p: &Path| {
+            let md = std::fs::symlink_metadata(p).unwrap();
+            f.own.meta(
+                Key {
+                    dev: md.dev(),
+                    ino: md.ino(),
+                },
+                Meta {
+                    uid: md.uid(),
+                    gid: md.gid(),
+                    mode: md.mode() & 0o7777,
+                },
+            )
+        };
+        assert_eq!((owner(&config).uid, owner(&config).mode), (uid, 0o700));
+        let plugin = owner(&config.join("plugin/storm.js"));
+        assert_eq!((plugin.uid, plugin.mode), (uid, 0o600));
+        // Any other provider: no such directory, its environment as it was.
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_S"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_S", "user": user}),
+            vec![],
+        );
+        f.launch("ags_S");
+        std::fs::write(
+            f.helper.layout.launch_dir().join("ags_S.json"),
+            json!({"args": [], "env": [["OPENCODE_CONFIG_DIR", "/x"]]}).to_string(),
+        )
+        .unwrap();
+        let (_master, slave) = crate::tty::tests::pty();
+        let (v, _) = f.call(
+            json!({"op": "start", "session": "ags_S", "user": user, "provider": "claude-code", "workspace": f.workspace()}),
+            vec![slave],
+        );
+        assert_eq!(v["ok"], true, "{v}");
+        let env = std::fs::read_to_string(f.helper.layout.env_file("ags_S")).unwrap();
+        assert!(env.starts_with("OPENCODE_CONFIG_DIR=/x\n"), "{env}");
+        assert!(
+            !f.helper
+                .layout
+                .home("ags_S")
+                .join(".config/storm-opencode")
+                .exists()
         );
     }
 

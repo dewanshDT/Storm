@@ -5,6 +5,11 @@ set -e
 # host's identity and its workspaces — the operator's code. An operator who
 # wants them gone can say so with rm. Nor /var/lib/storm-runtime-isolation:
 # its records are what `storm-runtime-isolation off` restores workspaces from.
+# The profile file stays until purge (a conffile); the kernel's copy goes now.
+if [ "$1" = "remove" ] && [ -f /etc/apparmor.d/storm-runtime-pasta ] && command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -R /etc/apparmor.d/storm-runtime-pasta 2>/dev/null || true
+fi
+
 if [ "$1" = "purge" ]; then
     rm -f /etc/storm-runtime/runtime.toml
     if [ -d /run/systemd/system ]; then

@@ -2095,8 +2095,11 @@ mod tests {
                     "{p} is not the child's own"
                 );
             }
+            // Only the session's own /dev/shm is a writable tmpfs (decision 140).
             assert!(
-                !p.starts_with("TemporaryFileSystem=") || p.ends_with(":ro"),
+                !p.starts_with("TemporaryFileSystem=")
+                    || p.ends_with(":ro")
+                    || p.starts_with("TemporaryFileSystem=/dev/shm:"),
                 "{p}"
             );
         }

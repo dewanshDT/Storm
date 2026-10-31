@@ -723,9 +723,14 @@ Specification*; the slices are decisions 81 and 81a onward):
   a devpts slave, resolves the program from `runtime.toml` itself and asks
   systemd for `storm-session-<id>.service` (`units.rs` is the property set,
   tested as data), and hands back the leader's pidfd. **Each session has its
-  own network namespace** (136-3, `net.rs`): `storm-session-<id>-net.service`
-  creates `/run/netns/storm-<id>` and runs `pasta` in it as a dynamic user
-  with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only; pasta's every forwarding
+  own network namespace** (136-3, `net.rs`): `storm-session-<id>-netns.service`
+  (a oneshot that stays active) owns `/run/netns/storm-<id>`, and
+  `storm-session-<id>-net.service`, bound to it, runs `pasta` as a dynamic
+  user with `CAP_SYS_ADMIN` and `CAP_NET_ADMIN` only, seeing that one
+  namespace file bound into its own runtime directory (`/run/netns` is
+  root's), under Storm's AppArmor profile `storm-runtime-pasta` (decision
+  140; the distribution's is for rootless containers). Stopping the
+  namespace's unit stops pasta first; pasta's every forwarding
   direction is set explicitly (each defaults to `auto`, which would publish
   listeners both ways), `--no-map-gw` keeps the host's loopback out, and only
   `runtime.toml` `isolation_host_ports` reach it; DNS goes through pasta's

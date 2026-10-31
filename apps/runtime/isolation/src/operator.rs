@@ -1,7 +1,7 @@
 //! The operator's command (136a): `on`, `off` and `status`, run as root.
 //!
-//! `on` checks the host can isolate (systemd ≥ 255, `passt`), creates the
-//! pools from the package's declaration, converts every workspace, enables
+//! `on` checks the host can isolate (systemd ≥ 255, `passt`, and where
+//! AppArmor is on, Storm's profile for pasta loads), creates the pools from the package's declaration, converts every workspace, enables
 //! the helper's socket and only then sets `isolation = "per-session"`.
 //! `off` disables the helper, restores every workspace and sets
 //! `isolation = "off"` last. Both refuse while the host is running, so no
@@ -31,6 +31,9 @@ pub trait Machine {
     fn is_root(&self) -> bool;
     fn systemd_version(&self) -> Option<u32>;
     fn has_passt(&self) -> bool;
+    /// Whether the kernel enforces AppArmor, so a unit's `AppArmorProfile=`
+    /// is applied.
+    fn apparmor_enabled(&self) -> bool;
     fn unit_active(&self, unit: &str) -> bool;
     fn run(&self, argv: &[&str]) -> Result<()>;
     /// Live processes whose real, effective or saved uid is one of `uids`.
@@ -43,6 +46,8 @@ pub struct Paths {
     pub sysusers: PathBuf,
     /// The host account's state, where the agents prefix is.
     pub host_state: PathBuf,
+    /// Storm's AppArmor profile for pasta (decision 140).
+    pub apparmor_profile: PathBuf,
 }
 
 impl Paths {
@@ -52,6 +57,7 @@ impl Paths {
             state: crate::STATE_DIR.into(),
             sysusers: crate::SYSUSERS_FILE.into(),
             host_state: crate::session::HOST_STATE.into(),
+            apparmor_profile: crate::net::APPARMOR_PROFILE_FILE.into(),
         }
     }
 
@@ -97,6 +103,9 @@ pub fn on(
              sudo apt install passt iproute2"
         );
     }
+    if m.apparmor_enabled() {
+        load_apparmor_profile(m, &paths.apparmor_profile)?;
+    }
     let config = HelperConfig::load(&paths.config)?;
     if !paths.sysusers.is_file() {
         bail!(
@@ -124,6 +133,21 @@ pub fn on(
         crate::pool::INSTALL_ACCOUNT,
     )?;
     Ok(())
+}
+
+/// Loaded here as well as at install: passt may have been installed after
+/// storm-runtime, and the profile includes pasta's own abstraction only if
+/// it existed when the profile was loaded. Every network unit names the
+/// profile, so without it no session could start.
+fn load_apparmor_profile(m: &dyn Machine, profile: &Path) -> Result<()> {
+    if !profile.is_file() {
+        bail!(
+            "{} is missing; reinstall the storm-runtime package",
+            profile.display()
+        );
+    }
+    m.run(&["apparmor_parser", "-r", &profile.to_string_lossy()])
+        .context("AppArmor is on and Storm's profile for pasta did not load")
 }
 
 pub fn off(
@@ -269,6 +293,11 @@ impl Machine for Real {
                 .is_ok_and(|s| s.success())
     }
 
+    fn apparmor_enabled(&self) -> bool {
+        std::fs::read_to_string("/sys/module/apparmor/parameters/enabled")
+            .is_ok_and(|v| v.trim() == "Y")
+    }
+
     fn unit_active(&self, unit: &str) -> bool {
         Command::new("systemctl")
             .args(["is-active", "--quiet", unit])
@@ -335,6 +364,9 @@ mod tests {
         not_root: bool,
         systemd: Option<u32>,
         no_passt: bool,
+        apparmor: bool,
+        /// A command that fails, by its program.
+        fails: Option<&'static str>,
         active: Vec<&'static str>,
         processes: Vec<u32>,
         ran: RefCell<Vec<String>>,
@@ -350,11 +382,17 @@ mod tests {
         fn has_passt(&self) -> bool {
             !self.no_passt
         }
+        fn apparmor_enabled(&self) -> bool {
+            self.apparmor
+        }
         fn unit_active(&self, unit: &str) -> bool {
             self.active.contains(&unit)
         }
         fn run(&self, argv: &[&str]) -> Result<()> {
             self.ran.borrow_mut().push(argv.join(" "));
+            if self.fails == Some(argv[0]) {
+                bail!("{} failed (exit status: 1)", argv.join(" "));
+            }
             Ok(())
         }
         fn processes_of(&self, _: &[u32]) -> Vec<u32> {
@@ -393,6 +431,8 @@ mod tests {
         .unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o640)).unwrap();
         std::fs::create_dir_all(base.join("host")).unwrap();
+        let apparmor_profile = base.join("storm-runtime-pasta");
+        std::fs::write(&apparmor_profile, b"profile storm-runtime-pasta {}\n").unwrap();
         let sysusers = base.join("sysusers.conf");
         std::fs::write(&sysusers, crate::pool::sysusers_conf()).unwrap();
         Setup {
@@ -401,6 +441,7 @@ mod tests {
                 state: base.join("state"),
                 sysusers,
                 host_state: base.join("host"),
+                apparmor_profile,
             },
             root,
             _t: t,
@@ -496,6 +537,72 @@ mod tests {
                 "{what}"
             );
         }
+    }
+
+    /// Found on a Debian 13 host (2026-10-26): every network unit names
+    /// Storm's profile, so on an AppArmor host `on` loads it, and refuses if
+    /// it cannot, before anything changes.
+    #[test]
+    fn on_loads_the_pasta_profile_where_apparmor_is_on() {
+        let s = setup();
+        let accounts = crate::pool::tests::fixed();
+        let load = |s: &Setup| format!("apparmor_parser -r {}", s.paths.apparmor_profile.display());
+        let m = Fake {
+            apparmor: true,
+            ..ready()
+        };
+        on(
+            &m,
+            &accounts,
+            &Recorded::default(),
+            &s.paths,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(m.ran.borrow()[0], load(&s));
+
+        let s = setup();
+        let before = std::fs::read_to_string(&s.paths.config).unwrap();
+        let m = Fake {
+            apparmor: true,
+            fails: Some("apparmor_parser"),
+            ..ready()
+        };
+        let own = Recorded::default();
+        let err = on(&m, &accounts, &own, &s.paths, &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("Storm's profile for pasta did not load"),
+            "{err:#}"
+        );
+        assert_eq!(*m.ran.borrow(), [load(&s)]);
+        assert!(own.overlay.borrow().is_empty());
+        assert_eq!(std::fs::read_to_string(&s.paths.config).unwrap(), before);
+
+        let s = setup();
+        std::fs::remove_file(&s.paths.apparmor_profile).unwrap();
+        let m = Fake {
+            apparmor: true,
+            ..ready()
+        };
+        let err = on(&m, &accounts, &own, &s.paths, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("is missing"), "{err}");
+        assert!(m.ran.borrow().is_empty());
+    }
+
+    #[test]
+    fn on_leaves_apparmor_alone_where_it_is_off() {
+        let s = setup();
+        std::fs::remove_file(&s.paths.apparmor_profile).unwrap();
+        let m = ready();
+        on(
+            &m,
+            &crate::pool::tests::fixed(),
+            &Recorded::default(),
+            &s.paths,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!m.ran.borrow().iter().any(|r| r.contains("apparmor")));
     }
 
     #[test]
