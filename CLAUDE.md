@@ -753,7 +753,11 @@ Specification*; the slices are decisions 81 and 81a onward):
   per-profile allowlist copied at `start` through `O_NOFOLLOW` descriptors
   (links copied, never followed), root's and read-only except the files an
   agent rewrites; no credential file (`DENIED`), and of a provider's store
-  only its static API keys (`static_keys`). At lease end its conversations
+  only its static API keys (`static_keys`). A `claude-code` session's
+  private `.claude.json` (written even when the account has none) is past
+  Claude Code's first run and trusts exactly the directory its unit starts
+  in, a child's own clone or scratch (decision 142, `claude_json`;
+  `tests/claude_first_run_gate.rs` with `STORM_CLAUDE_BIN`). At lease end its conversations
   move to the helper's `kept/<session>/`, and a resume copies only the named
   conversation from the predecessor the server names, once that one has
   ended. **An isolated session starts only on a credential 136f permits**
