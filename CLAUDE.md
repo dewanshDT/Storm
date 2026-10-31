@@ -522,6 +522,14 @@ decision 77):
   while the host is offline and never queued on the server. On the host, each
   session has its own ordered writer, and every PTY write is bounded, so a hung
   agent can never hold the session against the owner's `end`.
+- **A start runs only while Storm still wants it** (round 4's stray launch).
+  A launch refused because its host is offline writes nothing and is never
+  queued. A `start` its host has not reported when the link it went down
+  closes, or within `START_ACK_DEADLINE` (120 s), has failed
+  (`start_failure`), never `unknown`; the host's first act on a start is to
+  report `starting`, which such a session answers `409 start_unwanted`, and
+  the host drops it. A host that runs one anyway (an older host) is sent
+  `end` when it reports it. The client sends a launch only on a click.
 - **`storm-runtime` is its own account and never joins the server's group**
   (decision 77e). The group mode of P3 is all that keeps a co-located runtime
   out of the vaults. Its unit never sets `MemoryDenyWriteExecute`, because
