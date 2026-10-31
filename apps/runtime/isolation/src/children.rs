@@ -667,10 +667,14 @@ impl Helper {
 
     /// 145e: a parked child's workspace, given to the user of its new
     /// lease as `child_create` made it for the first (its own, `0700`), with
-    /// any review stopped first. Its kept conversation is the start's.
+    /// any review stopped first and any export made while it was parked
+    /// gone, since its work is about to change. Its kept conversation is
+    /// the start's.
     fn readopt(&self, mut r: ChildRecord, user: &str) -> Result<Answer, Refusal> {
         self.stop_review(&r.child)
             .map_err(|e| failed("stopping the child's review", e))?;
+        self.forget_export(&r.child)
+            .map_err(|e| failed("clearing the child's export", e))?;
         let (uid, gid) = (self.pool.users[user], self.pool.primary[user]);
         let workspace = self.layout.child_workspace(&r.child);
         files::give_tree(&workspace, uid, gid, self.deps.own.as_ref())
@@ -739,6 +743,18 @@ impl Helper {
                 Ok(())
             }
         }
+    }
+
+    fn forget_export(&self, child: &str) -> Result<()> {
+        match std::fs::remove_file(self.layout.child_export(child)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
+        }
+        let dir = self.layout.child_review(child);
+        if dir.symlink_metadata().is_ok() {
+            files::remove_tree(&dir, self.deps.own.as_ref())?;
+        }
+        Ok(())
     }
 
     fn stop_review(&self, child: &str) -> Result<()> {
@@ -1857,6 +1873,52 @@ mod tests {
         let listed = f.ok(json!({"op": "child_list"}), vec![]).0;
         assert_eq!(listed["children"][0]["applied"], "storm/ags_C");
         assert_eq!(listed["children"][0]["stage"], "ended");
+    }
+
+    /// A child exported while parked, then started again, is exported
+    /// afresh once it ends: Apply never takes the work it had before.
+    #[test]
+    fn a_resumed_child_forgets_the_export_it_had_while_parked() {
+        let f = fixture();
+        let (_, first_tip) = ended_clone_child(&f);
+        f.ok(json!({"op": "child_park", "child": "ags_C"}), vec![]);
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        let stale = v["tip"].as_str().unwrap().to_string();
+        assert!(f.helper.layout.child_export("ags_C").exists());
+
+        let (v, _) = f.ok(json!({"op": "lease", "session": "ags_C"}), vec![]);
+        let user = v["user"].as_str().unwrap().to_string();
+        f.ok(
+            json!({"op": "prepare", "session": "ags_C", "user": user}),
+            vec![],
+        );
+        assert_eq!(create(&f)["ok"], true);
+        assert!(!f.helper.layout.child_export("ags_C").exists());
+        assert!(!f.helper.layout.child_review("ags_C").exists());
+        assert_eq!(start_child(&f, &user)["ok"], true);
+        let dest = f.helper.layout.child_workspace("ags_C");
+        std::fs::write(dest.join("README"), "round two\n").unwrap();
+        git(&dest, &["commit", "-q", "-am", "round two"]);
+        let second_tip = git(&dest, &["rev-parse", "HEAD"]);
+        assert_ne!(second_tip, first_tip);
+        f.ok(
+            json!({"op": "release", "session": "ags_C", "user": user}),
+            vec![],
+        );
+
+        let v = export_child(&f);
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(
+            v["tip"],
+            json!(second_tip),
+            "no snapshot: nothing uncommitted"
+        );
+        assert_ne!(v["tip"], json!(stale));
+        assert_eq!(f.units.reviews.lock().unwrap().len(), 2);
+        let v = apply(&f, "storm/ags_C");
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["commit"], json!(second_tip));
     }
 
     /// What an Apply wrote in the parent's workspace is the workspace
