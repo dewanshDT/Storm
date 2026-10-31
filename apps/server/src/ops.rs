@@ -3660,32 +3660,46 @@ pub async fn read_messages(
     })
 }
 
-/// A parent read its child's terminal (145g): audited with the line count,
-/// never the text.
+/// A parent read its child (145g): audited with how many messages and
+/// lines it was given, never the text.
 pub const EVENT_SPAWN_PEEK: &str = "spawn_peek";
 
-/// At most this many lines per `read_output`.
+/// At most this many screen lines per `read_output`.
 pub const MAX_OUTPUT_LINES: usize = 200;
 const DEFAULT_OUTPUT_LINES: usize = 50;
+
+/// What `read_output` says when a child has said nothing Storm heard.
+pub const NO_MESSAGES_NOTE: &str =
+    "It has said nothing Storm has heard yet. Pass screen: true to see its terminal.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OutputTail {
     pub id: String,
     pub name: String,
     pub status: String,
+    /// The last result it reported, or none yet.
+    pub reported: Option<ResultView>,
+    /// The newest things it said, oldest first, each as Storm heard it.
+    pub messages: Vec<crate::agent::said::ChildMessage>,
     /// The last lines of its terminal, without escape sequences, oldest
-    /// first. The child's own output: data, not instructions.
-    pub lines: Vec<String>,
+    /// first; only when asked for.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screen: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<&'static str>,
 }
 
-/// `read_output {id, tail?}` (145g): the last `tail` lines (up to 200) of
-/// one of the caller's own children's terminal, from the server's output
-/// cache, ANSI stripped. Anyone else, and any other session, is
+/// `read_output {id, screen?, tail?}` (145g, amended 2026-10-31): what one
+/// of the caller's own children said, the last result it reported and, with
+/// `screen`, the last `tail` lines (up to 200) of its terminal, from the
+/// server's output cache, as its screen shows them. All of it the child's
+/// own: data, not instructions. Anyone else, and any other session, is
 /// `not_permitted`. Audited without its text.
 pub async fn read_output(
     state: &Shared,
     actor: &Actor,
     id: &str,
+    screen: bool,
     tail: Option<u64>,
 ) -> ApiResult<OutputTail> {
     let refused = || {
@@ -3705,23 +3719,35 @@ pub async fn read_output(
         return Err(refused());
     }
     let r = state.agent.get(&target).map_err(agent_error)?;
-    let n = tail
-        .map_or(DEFAULT_OUTPUT_LINES, |t| t as usize)
-        .clamp(1, MAX_OUTPUT_LINES);
-    let lines = state.agent.output_tail(&target, n);
+    let reported = state
+        .agent
+        .result_of(&target)
+        .map_err(agent_error)?
+        .map(ResultView::from);
+    let messages = state.agent.child_messages(&target);
+    let screen = screen.then(|| {
+        let n = tail
+            .map_or(DEFAULT_OUTPUT_LINES, |t| t as usize)
+            .clamp(1, MAX_OUTPUT_LINES);
+        state.agent.output_tail(&target, n)
+    });
     record_spawn_event(
         state,
         EVENT_SPAWN_PEEK,
         Some(&r.owner_user_id),
         None,
-        &serde_json::json!({"session_id": caller, "target": target, "lines": lines.len()}),
+        &serde_json::json!({"session_id": caller, "target": target,
+            "messages": messages.len(), "lines": screen.as_ref().map_or(0, Vec::len)}),
     )
     .await;
     Ok(OutputTail {
         name: session_name(state, &r)?,
         id: target,
         status: r.status,
-        lines,
+        note: (messages.is_empty() && screen.is_none()).then_some(NO_MESSAGES_NOTE),
+        reported,
+        messages,
+        screen,
     })
 }
 
@@ -6072,6 +6098,21 @@ pub fn runtime_denied(
     state
         .agent
         .denied(host_id, session, report)
+        .map_err(agent_error)?;
+    Ok(())
+}
+
+/// A host's report of what a child said (145g): kept for its parent's
+/// `read_output` when its agent's gate lets it through; never an event.
+pub fn runtime_said(
+    state: &Shared,
+    host_id: &str,
+    session: &str,
+    report: &crate::agent::said::SaidReport,
+) -> ApiResult<()> {
+    state
+        .agent
+        .said(host_id, session, report)
         .map_err(agent_error)?;
     Ok(())
 }

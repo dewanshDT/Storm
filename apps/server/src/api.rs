@@ -375,6 +375,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(runtime_final_message),
         )
         .route("/v1/runtime/sessions/{id}/denied", post(runtime_denied))
+        .route("/v1/runtime/sessions/{id}/said", post(runtime_said))
         .route(
             "/v1/runtime/sessions/{id}/terminal/images/{image}",
             get(runtime_image).post(runtime_image_staged),
@@ -1908,6 +1909,16 @@ async fn runtime_denied(
     Json(report): Json<crate::agent::events::DeniedReport>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_denied(&state, &auth.host.id, &id, &report)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn runtime_said(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Path(id): Path<String>,
+    Json(report): Json<crate::agent::said::SaidReport>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_said(&state, &auth.host.id, &id, &report)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -15065,26 +15076,47 @@ pub(crate) mod tests {
             &f.tool(
                 &parent,
                 "read_output",
-                serde_json::json!({"id": child, "tail": 3}),
+                serde_json::json!({"id": child, "screen": true, "tail": 3}),
             )
             .await,
         );
         assert_eq!(read["id"], child);
         assert_eq!(
-            read["lines"],
+            read["screen"],
             serde_json::json!(["line 247", "line 248", "line 249"])
         );
+        assert_eq!(read["reported"], serde_json::Value::Null);
+        assert_eq!(read["messages"], serde_json::json!([]));
         let Ok(all) =
-            crate::ops::read_output(&f.state, &f.agent(&parent), &child, Some(10_000)).await
+            crate::ops::read_output(&f.state, &f.agent(&parent), &child, true, Some(10_000)).await
         else {
             panic!("the parent reads its child");
         };
-        assert_eq!(all.lines.len(), crate::ops::MAX_OUTPUT_LINES, "bounded");
-        let Ok(stripped) = crate::ops::read_output(&f.state, &f.agent(&parent), &child, None).await
+        assert_eq!(
+            all.screen.unwrap().len(),
+            crate::ops::MAX_OUTPUT_LINES,
+            "bounded"
+        );
+        let Ok(stripped) =
+            crate::ops::read_output(&f.state, &f.agent(&parent), &child, true, None).await
         else {
             panic!("the parent reads its child");
         };
-        assert!(stripped.lines.iter().all(|l| !l.contains('\x1b')));
+        assert!(stripped.screen.unwrap().iter().all(|l| !l.contains('\x1b')));
+        let plain = structured(
+            &f.tool(
+                &parent,
+                "read_output",
+                serde_json::json!({"id": child, "tail": 3}),
+            )
+            .await,
+        );
+        assert!(
+            plain.get("screen").is_none(),
+            "the screen only when asked: {plain}"
+        );
+        assert_eq!(plain["note"], crate::ops::NO_MESSAGES_NOTE);
+        assert!(!plain.to_string().contains(CANARY));
 
         let other = f.launch_on("claude-code").await["id"]
             .as_str()
@@ -15099,7 +15131,9 @@ pub(crate) mod tests {
             (&parent, &other),
         ] {
             assert!(
-                refused(crate::ops::read_output(&f.state, &f.agent(caller), target, None).await),
+                refused(
+                    crate::ops::read_output(&f.state, &f.agent(caller), target, true, None).await
+                ),
                 "{caller} read {target}"
             );
         }
@@ -15111,10 +15145,10 @@ pub(crate) mod tests {
             .filter(|(kind, _)| kind == crate::ops::EVENT_SPAWN_PEEK)
             .map(|(_, d)| d)
             .collect();
-        assert_eq!(peeks.len(), 3);
+        assert_eq!(peeks.len(), 4);
         assert_eq!(
             peeks[0],
-            serde_json::json!({"session_id": parent, "target": child, "lines": 3})
+            serde_json::json!({"session_id": parent, "target": child, "messages": 0, "lines": 3})
         );
         assert!(
             peeks.iter().all(|p| !p.to_string().contains(CANARY)),
@@ -17959,6 +17993,157 @@ pub(crate) mod tests {
         assert!(code.is_success());
         let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
         assert!(view["needs_attention"].is_null(), "gone: {view}");
+    }
+
+    /// 145g, amended 2026-10-31: what a child's host reports it said is
+    /// `read_output`'s, newest last and bounded, beside the last result it
+    /// reported, and never an event. Only the child's own host is heard,
+    /// only for a running child whose agent's gate lets its words through,
+    /// and only from its agent's hook; another host is refused.
+    #[tokio::test]
+    async fn a_145_o_read_output_returns_what_the_child_said() {
+        const CANARY: &str = "CANARY-145-O";
+        let dir = tempdir::TempDir::new("storm-145-o").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.state.agent.gate_said_for_tests(&["claude-code"]);
+        let parent = f.spawning_parent().await;
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "t", "name": "poet"}))
+            .await;
+        let first = structured(
+            &f.tool(&parent, "wait_agent", serde_json::json!({"timeout": 1}))
+                .await,
+        );
+        let said = |session: &str, body: serde_json::Value| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{session}/said"),
+                body,
+                &f.host_bearer,
+            )
+        };
+        let (code, _) = send(
+            &f.app,
+            said(
+                &child,
+                serde_json::json!({"messages": [{"text": format!("{CANARY} Hello, world, ready.")}],
+                    "source": "provider_hook"}),
+            ),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        structured(
+            &f.tool(
+                &child,
+                "report_result",
+                serde_json::json!({"outcome": "succeeded", "summary": "three words"}),
+            )
+            .await,
+        );
+        let many: Vec<serde_json::Value> = (0..25)
+            .map(|n| serde_json::json!({"text": format!("m{n}")}))
+            .chain([serde_json::json!({"text": "x".repeat(9000)})])
+            .collect();
+        let (code, _) = send(&f.app, said(&child, serde_json::json!({"messages": many}))).await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+
+        let read = structured(
+            &f.tool(&parent, "read_output", serde_json::json!({"id": "poet"}))
+                .await,
+        );
+        assert_eq!(read["reported"]["summary"], "three words", "{read}");
+        assert_eq!(read["reported"]["outcome"], "succeeded");
+        let messages = read["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), crate::agent::said::MAX_SAID_PER_CHILD);
+        assert_eq!(messages[0]["text"], "m6", "oldest first, the newest kept");
+        assert_eq!(
+            messages.last().unwrap()["text"].as_str().unwrap().len(),
+            crate::agent::said::MAX_SAID_BYTES
+        );
+        assert!(messages.iter().all(|m| m["at"].is_string()));
+        assert!(
+            read.get("screen").is_none() && read.get("note").is_none(),
+            "{read}"
+        );
+
+        let (code, _) = send(
+            &f.app,
+            said(&child, serde_json::json!({"messages": [{"text": "again"}]})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        let newest = f.state.agent.child_messages(&child);
+        assert_eq!(newest.last().unwrap().text, "again");
+        assert_eq!(newest.len(), crate::agent::said::MAX_SAID_PER_CHILD);
+
+        let woke = structured(
+            &f.tool(
+                &parent,
+                "wait_agent",
+                serde_json::json!({"after": first["cursor"], "timeout": 1}),
+            )
+            .await,
+        );
+        assert!(!woke.to_string().contains(CANARY), "never an event: {woke}");
+
+        // Not a child, not the agent's hook, another host: nothing kept.
+        let before = f.state.agent.child_messages(&child).len();
+        for (session, body) in [
+            (
+                parent.as_str(),
+                serde_json::json!({"messages": [{"text": "p"}]}),
+            ),
+            (
+                child.as_str(),
+                serde_json::json!({"messages": [{"text": "y"}], "source": "output_pattern"}),
+            ),
+        ] {
+            let (code, _) = send(&f.app, said(session, body)).await;
+            assert_eq!(code, StatusCode::NO_CONTENT);
+        }
+        assert!(f.state.agent.child_messages(&parent).is_empty());
+        assert_eq!(f.state.agent.child_messages(&child).len(), before);
+        assert_eq!(
+            f.state.agent.child_messages(&child).last().unwrap().text,
+            "again"
+        );
+        let (_, other_token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/said"),
+                serde_json::json!({"messages": [{"text": "z"}]}),
+                &other_token,
+            ),
+        )
+        .await;
+        assert!(code.is_client_error(), "another host: {code}");
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/said"),
+                serde_json::json!({"messages": [{"text": "z"}]}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_client_error(), "a session token: {code}");
+        assert_eq!(
+            f.state.agent.child_messages(&child).last().unwrap().text,
+            "again"
+        );
+
+        // With its agent's gate off, nothing is kept.
+        f.state.agent.gate_said_for_tests(&[]);
+        let (code, _) = send(
+            &f.app,
+            said(&child, serde_json::json!({"messages": [{"text": "off"}]})),
+        )
+        .await;
+        assert_eq!(code, StatusCode::NO_CONTENT);
+        assert_eq!(
+            f.state.agent.child_messages(&child).last().unwrap().text,
+            "again"
+        );
     }
 
     /// A-148-2: each denial a child's host reports gives its parent one

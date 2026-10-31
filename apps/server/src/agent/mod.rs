@@ -31,6 +31,7 @@ pub mod model;
 pub mod park;
 pub mod permission;
 pub mod round;
+pub mod said;
 pub mod scope;
 pub mod store;
 pub mod wake;
@@ -902,6 +903,9 @@ pub struct AgentManager {
     result_sources: Mutex<&'static [round::ResultSource]>,
     /// The agents Storm may wake (144c, 145d).
     wakes: Mutex<&'static [events::GatedWake]>,
+    /// The agents whose children's words are kept (145g), and those words.
+    said_gate: Mutex<&'static [&'static str]>,
+    said: Mutex<said::Said>,
     /// Something a wake mark depends on changed outside the event queue:
     /// a message, a read, a host's return.
     pub(crate) wake_poke: tokio::sync::Notify,
@@ -1007,6 +1011,8 @@ impl AgentManager {
             clock_skew: Mutex::new(std::time::Duration::ZERO),
             result_sources: Mutex::new(round::RESULT_SOURCES),
             wakes: Mutex::new(events::WAKE),
+            said_gate: Mutex::new(said::SAID),
+            said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
         })
