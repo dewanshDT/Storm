@@ -42,6 +42,25 @@ void main() {
 
   Uri where(ProviderContainer c) => c.read(routerProvider).state.uri;
 
+  /// A session's About on a wide window, where the switch lives (141e).
+  Future<ProviderContainer> about(
+    WidgetTester tester,
+    FakeAgentServer agents,
+    String id,
+  ) async {
+    final c = await open(
+      tester,
+      agents,
+      at: Routes.agentSession(id, tab: SessionTab.about.name),
+    );
+    if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+      await tester.tap(find.byKey(const Key('inspector-toggle')));
+      await tester.pumpAndSettle();
+    }
+    expect(find.byKey(const Key('session-about')), findsOneWidget);
+    return c;
+  }
+
   List<Map<String, dynamic>> sent(FakeAgentServer a, String method, String p) =>
       [
         for (final r in a.requests)
@@ -133,7 +152,7 @@ void main() {
         ],
       );
       final spawning = FakeSpawning(agents);
-      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      final c = await about(tester, agents, 'ags_p');
       expect(find.text('Allow this session to start agents'), findsOneWidget);
       expect(find.byKey(const Key('spawn-switch-note')), findsOneWidget);
       expect(find.text('Off'), findsOneWidget);
@@ -150,6 +169,8 @@ void main() {
         findsOneWidget,
       );
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
+      await tester.ensureVisible(find.byKey(const Key('banner-action')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('banner-action')));
       await tester.pumpAndSettle();
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
@@ -199,7 +220,7 @@ void main() {
           ],
         );
         FakeSpawning(agents);
-        final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+        final c = await about(tester, agents, 'ags_p');
         expect(find.text('Unavailable · $text'), findsOneWidget);
         await tester.tap(find.byKey(const Key('spawn-switch')));
         await tester.pumpAndSettle();
@@ -207,6 +228,97 @@ void main() {
         expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
         await disposeShell(tester, c);
       }
+    });
+
+    testWidgets('141e: launched without it, About says how to get it', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession(
+            'ags_p',
+            spawn: {
+              'enabled': false,
+              'launched_on': false,
+              'refused': 'launched_without_spawn',
+            },
+          ),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await about(tester, agents, 'ags_p');
+      expect(
+        find.text(
+          'To let an agent start agents, start a new session with "Allow '
+          'this session to start agents" on.',
+        ),
+        findsOneWidget,
+      );
+      final toggle = tester.widget<StormToggle>(
+        find.byKey(const Key('spawn-switch')),
+      );
+      expect(toggle.enabled, isFalse);
+      await tester.tap(find.byKey(const Key('spawn-switch')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('spawn-on-confirm')), findsNothing);
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('141e: launched with it, off and on again from About', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': false, 'launched_on': true}),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await about(tester, agents, 'ags_p');
+      expect(find.text('Off'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('spawn-switch')));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.byKey(const Key('banner-action')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('banner-action')));
+      await tester.pumpAndSettle();
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
+        {'enabled': true},
+      ]);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('141e: not in the session header', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': true, 'launched_on': true}),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await open(
+        tester,
+        agents,
+        at: Routes.agentSession('ags_p', tab: SessionTab.context.name),
+      );
+      expect(find.byKey(const Key('session-bar')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-bar')),
+          matching: find.byKey(const Key('spawn-switch')),
+        ),
+        findsNothing,
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('session-bar')),
+          matching: find.text('Allow this session to start agents'),
+        ),
+        findsNothing,
+      );
+      await disposeShell(tester, c);
     });
 
     testWidgets('phone: in the details sheet, below 900', (tester) async {
@@ -286,6 +398,36 @@ void main() {
       ]);
       expect(find.text('Approved: test-gateway is starting.'), findsOneWidget);
       expect(spawning.terminalWrites, 0);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a shared workspace is said on the card (141b)', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      final spawning = FakeSpawning(agents);
+      spawning.addRequest('ags_p', task: 't', sharedWith: 2);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.text('WORKSPACE'), findsOneWidget);
+      expect(
+        find.text('storm is shared with 2 other sessions'),
+        findsOneWidget,
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an unshared workspace says nothing of it', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [parent(needs: 'approval')],
+      );
+      FakeSpawning(agents).addRequest('ags_p', task: 't', sharedWith: 0);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.byType(ApprovalCard), findsOneWidget);
+      expect(find.textContaining('is shared with'), findsNothing);
       await disposeShell(tester, c);
     });
 

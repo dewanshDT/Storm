@@ -101,6 +101,16 @@ pub fn error_line(id: &Value, code: &str) -> Line {
     }))
 }
 
+/// A refusal whose `message` is a sentence for the agent; the stable code
+/// stays in `data.storm_error`.
+pub fn refusal_line(id: &Value, code: &str, sentence: &str) -> Line {
+    message_line(json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": { "code": -32001, "message": sentence, "data": { "storm_error": code } },
+    }))
+}
+
 /// Strips what the gateway never forwards upstream (§9): `sampling`, `roots`
 /// and `elicitation.url`. Never adds anything the agent did not declare.
 pub fn upstream_capabilities(agent: &Value) -> Value {

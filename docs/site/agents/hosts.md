@@ -114,6 +114,7 @@ agent_updates = "manual"  # installs from the app, but no automatic updates
 ```sh
 sudo apt install storm-runtime
 # Workspaces are the directories under /var/lib/storm-runtime/workspaces.
+# Make one here, or later from the launcher's "New workspace…".
 sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
 # In the app: Settings › Hosts & default agent › Enroll a host. Paste the string here:
 sudo -u storm-runtime storm-runtime enroll

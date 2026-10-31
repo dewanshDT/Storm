@@ -1254,6 +1254,12 @@ pub mod spawn {
                  created_at TEXT NOT NULL
              );
 
+             -- 141e: launched with the switch on, so only it turns on again.
+             CREATE TABLE IF NOT EXISTS session_spawn_launch (
+                 session_id TEXT PRIMARY KEY,
+                 created_at TEXT NOT NULL
+             );
+
              -- 134-5: a child's own workspace as its host made it (137-1):
              -- the mode, and for a clone the commit it starts from.
              CREATE TABLE IF NOT EXISTS session_child_workspace (
@@ -1441,15 +1447,6 @@ pub mod spawn {
     }
 
     const ENDED: &str = "('completed', 'failed', 'stopped')";
-
-    /// What asks for a workspace under WS-9.
-    #[derive(Debug, Clone, Copy)]
-    pub enum Claim<'a> {
-        /// A new session launching into it.
-        Launch,
-        /// This session turning its spawn switch on.
-        Spawn(&'a str),
-    }
 
     /// Whether two of a host's workspaces may share files (WS-9, 137-2): by
     /// the canonical directories the host reports for both, and otherwise
@@ -1861,6 +1858,34 @@ pub mod spawn {
                 .is_some())
         }
 
+        /// Records a launch with the switch on (141e) and turns it on, before
+        /// the host is sent `start`.
+        pub fn record_spawn_launch(
+            &mut self,
+            session_id: &str,
+            device: Option<&str>,
+            now: &str,
+        ) -> Result<()> {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at) VALUES (?1, ?2)",
+                params![session_id, now],
+            )?;
+            self.set_spawn(session_id, true, device, now)?;
+            Ok(())
+        }
+
+        pub fn spawn_launched(&self, session_id: &str) -> Result<bool> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM session_spawn_launch WHERE session_id = ?1",
+                    params![session_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        }
+
         pub fn spawn_enabled(&self, session_id: &str) -> Result<bool> {
             Ok(self
                 .conn
@@ -1901,31 +1926,26 @@ pub mod spawn {
             Ok(refused)
         }
 
-        /// WS-9 (decision 137): whether `workspace` on `host_id` is held
-        /// against `claim`. A launch is refused beside a live session whose
-        /// spawn is on; spawn is refused beside any other live session.
-        /// `unknown` is live. Nested workspaces share files, so they count as
-        /// one.
-        pub fn workspace_held(
+        /// How many live sessions on `host_id` share `workspace` (WS-9, 137-2,
+        /// now only reported: decision 141a), leaving out `except`. `unknown`
+        /// is live. Nested workspaces share files, so they count as one.
+        pub fn workspace_sharers(
             &self,
             host_id: &str,
             workspace: &str,
-            claim: Claim<'_>,
+            except: &[String],
             paths: &std::collections::HashMap<String, String>,
-        ) -> Result<bool> {
+        ) -> Result<u32> {
+            let mut n = 0;
             for r in self.for_host(host_id)? {
-                if r.is_ended() || !shares_workspace(&r.workspace, workspace, paths) {
-                    continue;
-                }
-                let held = match claim {
-                    Claim::Launch => self.spawn_enabled(&r.id)?,
-                    Claim::Spawn(session) => r.id != session,
-                };
-                if held {
-                    return Ok(true);
+                if !r.is_ended()
+                    && !except.contains(&r.id)
+                    && shares_workspace(&r.workspace, workspace, paths)
+                {
+                    n += 1;
                 }
             }
-            Ok(false)
+            Ok(n)
         }
 
         pub fn task(&self, session_id: &str) -> Result<Option<String>> {
@@ -2991,6 +3011,7 @@ pub mod spawn {
         for table in [
             "session_spawn",
             "session_spawn_asks",
+            "session_spawn_launch",
             "session_child_workspace",
             "session_task",
             "session_result",

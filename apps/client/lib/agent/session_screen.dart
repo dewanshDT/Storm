@@ -441,6 +441,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }) {
     final t = context.tokens;
     return Container(
+      key: const Key('session-bar'),
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 2.5,
         vertical: t.sp * 1.75,
@@ -557,10 +558,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             session: s,
             onParent: (id) => openAgentSession(context, id),
           ),
-          if (s.spawn.switchState != null && !s.ended) ...[
-            SizedBox(height: t.sp),
-            SpawnSwitchRow(session: s, host: host),
-          ],
         ],
       ),
     );
@@ -1494,6 +1491,10 @@ class _About extends ConsumerWidget {
         SizedBox(height: t.sp * 1.75),
         KeyValueList(rows: rows.skip(2).toList()),
         AddSkippedToIntegrations(session: session),
+        if (session.spawn.switchState != null && !session.ended) ...[
+          SizedBox(height: t.sp * 1.75),
+          SpawnSwitchRow(session: session, host: host),
+        ],
         SpawnChildrenSection(session: session),
       ],
     );

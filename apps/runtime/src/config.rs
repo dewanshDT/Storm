@@ -476,6 +476,74 @@ pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
     resolve_in(&canonical_roots(roots), name)
 }
 
+/// Whether `name` may name a new workspace (decision 141c): what
+/// [`resolve_workspace`] accepts, and no control character, no `\` or `:`
+/// on any platform, and nothing a reader could mistake for another name.
+pub fn new_workspace_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.chars().count())
+        && !name.starts_with('.')
+        && name.trim() == name
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+}
+
+/// Makes the workspace `name` in the first root (decision 141c), with
+/// `create_dir`, never through a link, and `git init` it if asked. Never
+/// replaces anything: a name in any root is `exists`. The error is the
+/// stable code the server is told.
+pub fn create_workspace(roots: &[PathBuf], name: &str, git: bool) -> Result<String, &'static str> {
+    if !new_workspace_name_ok(name) {
+        return Err("bad_name");
+    }
+    let root = roots
+        .first()
+        .and_then(|r| r.canonicalize().ok())
+        .filter(|r| r.is_dir())
+        .ok_or("no_root")?;
+    // A later root's workspace of that name would be hidden by this one.
+    if roots
+        .iter()
+        .any(|r| std::fs::symlink_metadata(r.join(name)).is_ok())
+    {
+        return Err("exists");
+    }
+    let dir = root.join(name);
+    if let Err(e) = std::fs::create_dir(&dir) {
+        return Err(match e.kind() {
+            std::io::ErrorKind::AlreadyExists => "exists",
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+                "not_writable"
+            }
+            _ => "failed",
+        });
+    }
+    if git && let Err(e) = git_init(&dir) {
+        tracing::warn!(error = %e, "new workspace: git init failed; removed it");
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err("git_failed");
+    }
+    Ok(name.to_string())
+}
+
+fn git_init(dir: &Path) -> Result<()> {
+    let mut git = std::process::Command::new("git");
+    git.args(["init", "-q", "-b", "main", "--"])
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // The account's own template directory or hooks are not the folder's.
+    #[cfg(unix)]
+    git.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    let out = git.output().context("running git")?;
+    if !out.status.success() {
+        bail!("git init: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
 fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
 }
@@ -492,6 +560,88 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// 141c: a new workspace is one plain name, made in the first root
+    /// only, never over anything that exists in any root.
+    #[test]
+    fn a_new_workspace_is_made_in_the_first_root_and_never_over_one() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(second.path().join("taken")).unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+
+        assert_eq!(
+            create_workspace(&roots, "demo 2", false),
+            Ok("demo 2".into())
+        );
+        assert!(first.path().join("demo 2").is_dir());
+        assert!(!first.path().join("demo 2/.git").exists());
+        assert!(list_workspaces(&roots).contains(&"demo 2".to_string()));
+        for taken in ["demo 2", "taken"] {
+            assert_eq!(
+                create_workspace(&roots, taken, false),
+                Err("exists"),
+                "{taken}"
+            );
+        }
+        let long = "x".repeat(129);
+        for bad in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "a/b",
+            "../x",
+            "/etc",
+            "a\\b",
+            "c:",
+            "bell\u{7}",
+            "new\nline",
+            " pad",
+            "pad ",
+            &long,
+        ] {
+            assert_eq!(
+                create_workspace(&roots, bad, false),
+                Err("bad_name"),
+                "{bad:?}"
+            );
+        }
+        assert!(!second.path().join("demo 2").exists());
+
+        let gone = vec![first.path().join("missing"), second.path().to_path_buf()];
+        assert_eq!(create_workspace(&gone, "x", false), Err("no_root"));
+        assert!(!second.path().join("x").exists(), "never a later root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_workspace_never_goes_through_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nowhere"), root.path().join("dangling"))
+            .unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        assert_eq!(create_workspace(&roots, "dangling", false), Err("exists"));
+        assert!(!outside.path().join("nowhere").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_workspace_can_start_as_a_git_repository_on_main() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        assert_eq!(create_workspace(&roots, "repo", true), Ok("repo".into()));
+        let head = std::fs::read_to_string(root.path().join("repo/.git/HEAD")).unwrap();
+        assert_eq!(head.trim(), "ref: refs/heads/main");
+    }
 
     #[cfg(unix)]
     #[test]
