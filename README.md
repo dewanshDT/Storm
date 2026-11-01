@@ -5,7 +5,8 @@ canonical vaults on infrastructure you control; Flutter clients on macOS,
 Windows, Linux, Android and the web keep pace, offline included. The same knowledge is available
 to AI agents through MCP, and an optional runtime host runs coding agents —
 Claude Code, Codex, OpenCode, Cursor, Command Code, a shell — in a workspace
-with a terminal you drive from the app. An optional relay reaches the server from outside your network
+with a terminal you drive from the app, and installs and updates those agents
+for you. An optional relay reaches the server from outside your network
 without opening a port.
 
 > **Your knowledge. On your infrastructure.**
@@ -174,8 +175,25 @@ loads by itself: yours, its
 [plugins'](https://storm.dewansh.space/docs/agents/plugins/), a project's
 under the agent's own prompts; `agent_mcp = "storm-only"` in `runtime.toml`
 gives a host Storm's servers alone.
+
+**Settings › Agents** (beta) installs, updates and removes the agent CLIs on
+a Linux or macOS host, into the host's own folder, checked against each
+vendor's published checksum; `agent_install = "off"` in `runtime.toml` turns
+that off. The launcher picks a model and a permission mode (Manual by
+default; never one that turns the agent's prompts off), and **New
+workspace…** makes a folder on the host. On Linux the host checks that every
+call to a session's Storm tools comes from inside that session.
+
+The package also ships `storm-runtime-isolation`, a root helper that runs
+each session as its own system user in its own sandbox and network. It is
+**experimental and disabled**: nothing changes until `sudo
+storm-runtime-isolation on`, and the docs say to leave it off for now. Agent
+spawning — a session starting, messaging and ending agents of its own, which
+never prompt you and send their refusals to it — is offered only on a host
+where that isolation is on and verified, so it is off everywhere by default.
 Setup and the package's guarantees:
-[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime). A Runtime
+[`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime) and
+[the hosts docs](https://storm.dewansh.space/docs/agents/hosts/). A Runtime
 Host connects to its server directly; the app reaches agent sessions through
 the relay like everything else.
 
@@ -235,7 +253,7 @@ token, use **Replace token**, and revoke the old one.
 | Path | What |
 |---|---|
 | [`apps/server`](apps/server/README.md) | Rust sync server — REST, WebSocket, MCP, auth, agent manager |
-| [`apps/runtime`](apps/runtime) | `storm-runtime`, the Agent Runtime Host — PTY, providers, workspaces (standalone crate, no workspace) |
+| [`apps/runtime`](apps/runtime) | `storm-runtime`, the Agent Runtime Host — PTY, providers, workspaces, agent installs (standalone crate, no workspace); `isolation/` is the per-session isolation root helper |
 | [`apps/relay`](apps/relay) | `storm-relay`, the SRP v1 relay (standalone crate, no workspace) |
 | [`apps/client`](apps/client/README.md) | Flutter app — macOS, Windows, Linux, Android, web |
 | [`apps/www`](apps/www/README.md) | Website and docs (Astro + Starlight) → [storm.dewansh.space](https://storm.dewansh.space); the docs' pages are [`docs/site/`](docs/site) |
@@ -277,8 +295,20 @@ versions, and scripts from the kit vault) always, plus five write tools
 (create / update / delete note, create / update script) in read-write mode.
 Off by default and switched at runtime from **Server ▸ AI access**; agents
 authenticate with MCP keys minted in the app. Updates carry a `base_version`
-into the same three-way merge the clients use. See
+into the same three-way merge the clients use, and a deleted note goes to the
+vault's Trash for 30 days. See
 [`apps/server/README.md`](apps/server/README.md#mcp).
+
+An agent in a Storm session gets the same tools through the MCP Gateway, plus
+`session_context`, with differences. With a write vault, `delete_note` and
+`delete_folder` each wait for the person to Approve in the app, every time.
+A Claude Code session no agent started has `request_permission_mode` to ask
+for Auto. Where
+spawning is on (above), the session gets `start_agent`, `list_agents`,
+`agent_status`, `list_children`, `wait_agent`, `send_message`, `end_agent`
+and `read_output`, and the agents it starts get `report_result` and
+`read_messages` and never the delete tools. No tool lists, restores or
+empties the Trash.
 
 **Connecting an AI app: `storm-runtime mcp-connect`** (since v0.10.0). A
 stdio adapter the AI app starts itself. It dials the server's LAN address first and falls back
@@ -313,14 +343,17 @@ covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
 Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions
 (Claude Code, Codex, OpenCode) in a terminal you can resume, each keeping
-its own MCP servers beside your integrations; the MCP Gateway's integrations, each scoped to the
+its own MCP servers beside your integrations, grouped into crews, with the
+agent CLIs installed and updated from the app; agent deletes that wait for
+your Approve, and a Trash in every vault; the MCP Gateway's integrations, each scoped to the
 hosts you choose and signed in with your own app where a service needs one;
 a Claude login you set once in the app and share with the
 hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity rail; the interactive installer; and the
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
 testing). The website and its docs are at
 [storm.dewansh.space](https://storm.dewansh.space) (M27). M17 (Markdown read
-mode) is in progress.
+mode) is in progress. Per-session isolation and agent spawning are built and
+ship turned off while they are tested on real hosts.
 
 Milestone status and the decision log are kept in the maintainer's notes, not
 in this repo. License: [MIT](LICENSE).
