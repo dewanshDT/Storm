@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -309,6 +309,8 @@ struct Events {
     unread: watch::Sender<(Option<&'static str>, i64)>,
     woken: Mutex<i64>,
     waiter: watch::Sender<u64>,
+    /// The number of the waiter holding its connection now, 0 for none.
+    armed: AtomicU64,
     /// Set when the session ends, so its waiter lets go.
     gone: watch::Sender<bool>,
     /// 145g: the Claude Code transcript a child's `harness-said` last read,
@@ -340,6 +342,7 @@ impl Events {
             unread: watch::channel((None, 0)).0,
             woken: Mutex::new(0),
             waiter: watch::channel(0).0,
+            armed: AtomicU64::new(0),
             gone: watch::channel(false).0,
             transcript: tokio::sync::Mutex::new(None),
             said_logged: Mutex::new(Default::default()),
@@ -1666,7 +1669,28 @@ impl Host {
                         "message" => Some("message"),
                         _ => None,
                     };
-                    s.events.unread.send_replace((kind, mark.max(0)));
+                    let mark = mark.max(0);
+                    let events = &s.events;
+                    if let Some(kind) = kind.filter(|_| mark > *events.woken.lock().unwrap()) {
+                        if !events.hooks.wake {
+                            tracing::warn!(
+                                %session,
+                                kind,
+                                mark,
+                                "something is unread, but this session's agent has no waker"
+                            );
+                        } else if events.armed.load(Ordering::SeqCst) == 0 {
+                            tracing::info!(
+                                %session,
+                                kind,
+                                mark,
+                                "something is unread; no waker is armed now, the agent's next one wakes it"
+                            );
+                        } else {
+                            tracing::info!(%session, kind, mark, "something is unread: waking the agent");
+                        }
+                    }
+                    events.unread.send_replace((kind, mark));
                 }
             }
             Command::Input { session, data } => {
@@ -3181,7 +3205,9 @@ impl Host {
             });
             n
         };
-        tracing::debug!(%session, armed_by = %report.wake, waiter = me, "waker armed");
+        tracing::info!(%session, armed_by = %report.wake, waiter = me, "waker armed");
+        events.armed.store(me, Ordering::SeqCst);
+        let _disarm = Disarm(&events.armed, me);
         let mut waiters = events.waiter.subscribe();
         let mut unread = events.unread.subscribe();
         let mut gone = events.gone.subscribe();
@@ -3208,7 +3234,9 @@ impl Host {
                 if told.is_ok() {
                     let mut woken = events.woken.lock().unwrap();
                     *woken = (*woken).max(mark);
-                    tracing::info!(%session, kind, "woke the agent: something is unread");
+                    tracing::info!(%session, kind, mark, waiter = me, "woke the agent: something is unread");
+                } else {
+                    tracing::warn!(%session, kind, mark, "the waker went before it could wake the agent");
                 }
                 return;
             }
@@ -3549,6 +3577,18 @@ fn read_table(state_dir: &Path) -> SessionTable {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+/// Clears a session's armed waiter when that waiter lets go, unless a
+/// newer one took over.
+struct Disarm<'a>(&'a AtomicU64, u64);
+
+impl Drop for Disarm<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .compare_exchange(self.1, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 }
 
 /// Splits the first complete SSE event off `buf` (an event ends at a blank
@@ -7821,6 +7861,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         wakes: &[crate::harness::GatedWake {
             provider: "claude-code",
             mechanism: "async_rewake",
+            kind: "message",
         }],
     };
 

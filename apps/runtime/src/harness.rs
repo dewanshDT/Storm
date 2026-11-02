@@ -124,18 +124,26 @@ pub const RESULT_SOURCES: &[ResultSource] = &[ResultSource {
     source: "provider_hook",
 }];
 
-/// One agent's documented wake (144c, 145d), once its gates
-/// (G-144-W-<provider>, G-145-W-<provider>) pass. The server's
-/// `events::WAKE` is the same list.
+/// One agent's documented wake (144c, 145d) for one kind, once that
+/// kind's gate passes: `events`, a parent's (G-144-W-<provider>), or
+/// `message`, a child's (G-145-W-<provider>). The server's `events::WAKE`
+/// is the same list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatedWake {
     pub provider: &'static str,
     /// `async_rewake` (Claude Code) or `prompt_async` (OpenCode).
     pub mechanism: &'static str,
+    pub kind: &'static str,
 }
 
-/// None has passed its gate.
-pub const WAKE: &[GatedWake] = &[];
+/// A Claude Code child's wake: G-145-W-claude-code and
+/// G-145-W-child-claude-code passed locally on 2026-11-02 with Claude Code
+/// 2.1.314 and 2.1.316 (`tests/lifecycle_gate.rs`). No parent's wake is on.
+pub const WAKE: &[GatedWake] = &[GatedWake {
+    provider: "claude-code",
+    mechanism: "async_rewake",
+    kind: "message",
+}];
 
 /// The agents whose denials a child's hooks or plugin report (148b), once
 /// G-148 passes for them: Claude Code's `PostToolBatch` (a `dontAsk`
@@ -223,7 +231,9 @@ impl Gates {
                     .results
                     .iter()
                     .any(|r| r.provider == provider && r.source == PROVIDER_HOOK),
-            wake: self.wakes.iter().any(|w| w.provider == provider),
+            wake: self.wakes.iter().any(|w| {
+                w.provider == provider && w.kind == if child { "message" } else { "events" }
+            }),
             denied: child && self.denials.contains(&provider),
             said: child && self.said.contains(&provider),
         }
@@ -2130,7 +2140,14 @@ export const StormHarness = async () => {
                 source: PROVIDER_HOOK
             }]
         );
-        assert!(WAKE.is_empty());
+        assert_eq!(
+            WAKE,
+            [GatedWake {
+                provider: "claude-code",
+                mechanism: "async_rewake",
+                kind: "message",
+            }]
+        );
         let on: Vec<(&str, &str, &str)> = GATED_SIGNALS
             .iter()
             .map(|g| (g.provider, g.signal, g.source))
@@ -2155,6 +2172,7 @@ export const StormHarness = async () => {
                     denied: gated,
                     said: gated,
                     result: provider == "claude-code",
+                    wake: provider == "claude-code",
                     ..Hooks::attention(gated)
                 },
                 "{provider}'s child"
@@ -2198,6 +2216,7 @@ export const StormHarness = async () => {
                 denied: true,
                 result: true,
                 said: true,
+                wake: true,
                 ..Hooks::attention(true)
             })
         );

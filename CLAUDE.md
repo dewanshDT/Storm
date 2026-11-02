@@ -800,9 +800,12 @@ Specification*; the slices are decisions 81 and 81a onward):
   holds codes, never a child's text (A-144-8). A host's attention or idle
   word counts only through `attention::GATED_SIGNALS` (provider, signal,
   source; each on only once its gate passes), so without a gated idle signal a
-  child's activity is `unknown`, never `working`. No provider has a `wake`
-  (`events::WAKE`), and no event path writes to a terminal (A-144-12 scans
-  for one). Round events (`reported`, `failed`, `ended`, `parked`) carry
+  child's activity is `unknown`, never `working`. A wake is on per agent
+  and kind (`events::WAKE`, `{provider, mechanism, kind}`): only a Claude
+  Code child's (`message`, G-145-W-child-claude-code), never a parent's
+  (`events`); a child whose agent has none is woken by nothing once its
+  turn ends, and the server logs its unread message. No event path writes
+  to a terminal (A-144-12 scans for one). Round events (`reported`, `failed`, `ended`, `parked`) carry
   `round`, `duration_ms` by Storm's own timestamps, and `usage` only where
   the agent itself counted it (145f).
 - **A hook is evidence, switched on per agent in two mirrored lists**

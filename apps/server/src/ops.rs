@@ -2850,7 +2850,7 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
     Ok(ListAgents {
         start_refused: state.agent.start_cap(&caller).map_err(agent_error)?,
         wait_cap_secs: crate::agent::scope::wait_cap(&r.provider).as_secs(),
-        wake: state.agent.wake_on(&r.provider),
+        wake: state.agent.wake_on(&r.provider, crate::agent::wake::EVENTS),
         agents: state
             .agent
             .startable_agents(&caller)

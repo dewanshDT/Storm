@@ -26,6 +26,10 @@
 //!   OpenCode's plugin `client.session.promptAsync`), and the model then
 //!   receives exactly Storm's fixed sentence (a parent's for 144, a
 //!   child's for 145). Positive control: without the wake it stays idle.
+//!   **G-145-W-child-claude-code** runs a child as Storm launches one
+//!   (`dontAsk`, the child baseline, the host's own lists): a message that
+//!   arrives mid-turn and one that arrives once it is idle each wake it, and
+//!   it reads the message and reports the next round.
 //! - **G-146-A-claude-code**: a child's Storm tools allowed in Storm's
 //!   `--settings` run with no prompt, and a note write still asks.
 //!   Positive control: without the allow, `report_result` asks.
@@ -133,6 +137,7 @@ except ProcessLookupError:
 /// logged, one JSON line each, with the last user message's text.
 const FAKE_ANTHROPIC: &str = r#"
 import http.server, json, sys, time
+WAKE_MESSAGE = json.loads(sys.argv[2])
 LOG = open(sys.argv[1], "a")
 def text_of(msg):
     c = msg.get("content")
@@ -203,6 +208,21 @@ class H(http.server.BaseHTTPRequestHandler):
             return isinstance(c, list) and any(b.get("type") == "tool_result" for b in c)
         prompts = [text_of(m) for m in users if not is_result(m)]
         prompt = prompts[-1] if prompts else ""
+        # Storm's wake, a turn of its own or, mid-turn, a system message
+        # after a tool's result: read the message, report, end the turn. Its
+        # place counts as the last user message before it.
+        turns_at, seen, asked = None, -1, -1
+        for m in msgs:
+            if m.get("role") == "user":
+                seen += 1
+                if not is_result(m):
+                    asked = seen
+            if WAKE_MESSAGE in json.dumps(m.get("content")):
+                turns_at = seen if m.get("role") == "user" else seen + 0.5
+        if turns_at is not None and turns_at >= asked:
+            prompt = "TURNS:call=mcp__storm__read_messages;say=WOKEREAD+call=mcp__storm__report_result;say=WOKEDONE"
+        else:
+            turns_at = None
         def input_of(name):
             if name.endswith("report_result"):
                 return {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"}
@@ -213,8 +233,8 @@ class H(http.server.BaseHTTPRequestHandler):
         # `think=<word>` and `call=<tool>` joined by `+`, the next step once
         # the last one's tools answered; SLOW streams it as a model does.
         if "TURNS:" in prompt:
-            at = max(i for i, m in enumerate(users) if not is_result(m))
-            step = len(users) - 1 - at
+            at = turns_at if turns_at is not None else max(i for i, m in enumerate(users) if not is_result(m))
+            step = int(len(users) - 1 - at + 0.5)
             turns = prompt.split("TURNS:", 1)[1].split()[0].split(";")
             blocks = [("text", "Done.")]
             if step >= len(turns) and turns[-1].endswith("read_messages"):
@@ -561,6 +581,7 @@ impl Model {
         let mut child = Command::new("python3")
             .args(["-c", script])
             .arg(&log)
+            .arg(json!(WAKE_MESSAGE_TEXT).to_string())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
@@ -839,6 +860,24 @@ impl Session {
         self.model.as_ref().map(Model::requests).unwrap_or_default()
     }
 
+    /// The messages the stand-in Storm server's `read_messages` returned.
+    fn storm_reads(&self) -> Vec<String> {
+        self.mcp_log
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v["read"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Queues a message for the stand-in's next `read_messages`.
+    fn queue_message(&self, text: &str) {
+        let log = self.mcp_log.as_ref().expect("a stand-in Storm server");
+        std::fs::write(format!("{}.inbox", log.display()), text).unwrap();
+    }
+
     /// The tools the stand-in Storm server ran.
     fn storm_calls(&self) -> Vec<String> {
         self.mcp_log
@@ -854,11 +893,14 @@ impl Session {
 
 /// A stand-in for Storm's MCP server, named `storm` as the host names it:
 /// it lists a child's tools, some reads, a note write and the deletes, and logs every
-/// call. A `read_messages` waits at most 30 s, as Storm's does.
+/// call. A `read_messages` waits at most 30 s, as Storm's does, and returns
+/// the message the gate queued (`<log>.inbox`) once there is one;
+/// `gate_pause` takes 10 s.
 const FAKE_STORM_MCP: &str = r#"
-import json, sys, time
+import json, os, sys, time
 LOG = open(sys.argv[1], "a")
-TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder"]
+INBOX = sys.argv[1] + ".inbox"
+TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder", "gate_pause"]
 for line in sys.stdin:
     try:
         m = json.loads(line)
@@ -874,9 +916,21 @@ for line in sys.stdin:
     elif method == "tools/call":
         LOG.write(json.dumps(m.get("params")) + "\n"); LOG.flush()
         wait = ((m.get("params") or {}).get("arguments") or {}).get("wait")
-        if (m.get("params") or {}).get("name") == "read_messages" and isinstance(wait, int):
-            time.sleep(min(wait, 30))
-        res = {"content": [{"type": "text", "text": "ok"}]}
+        name = (m.get("params") or {}).get("name")
+        text = "ok"
+        if name == "read_messages":
+            until = time.time() + (min(wait, 30) if isinstance(wait, int) else 0)
+            while True:
+                if os.path.exists(INBOX):
+                    text = open(INBOX).read(); os.remove(INBOX)
+                    LOG.write(json.dumps({"read": text}) + "\n"); LOG.flush()
+                    break
+                if time.time() >= until:
+                    break
+                time.sleep(0.2)
+        elif name == "gate_pause":
+            time.sleep(10)
+        res = {"content": [{"type": "text", "text": text}]}
     else:
         res = {}
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": res}) + "\n")
@@ -896,6 +950,8 @@ struct ClaudeOpts {
     /// The account's own `permissions.defaultMode` (its user settings).
     /// Claude Code 2.1.312's own default is `auto`; `manual` is what asks.
     account_mode: Option<&'static str>,
+    /// Storm's hooks, when not every list's.
+    hooks: Option<Hooks>,
 }
 
 fn workspace() -> tempfile::TempDir {
@@ -943,13 +999,14 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
         None,
         None,
-        &Hooks::all(),
+        &opts.hooks.unwrap_or_else(Hooks::all),
         storm_runtime::harness::Permissions {
             allow: &opts.allow,
             auto_off: opts.auto_off,
         },
     )
     .unwrap();
+    let wakes = opts.hooks.is_none_or(|h| h.wake);
     let mut argv = vec![bin];
     argv.extend(extras.args.iter().map(|a| a.to_string_lossy().to_string()));
     argv.extend(opts.args);
@@ -1025,7 +1082,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
             .since(started)
             .iter()
             .any(|v| v.get("harness_session").is_some())
-            && host.waiting())
+            && (host.waiting() || !wakes))
     {
         if real() && agent.screen_has("trust") && started.elapsed() > Duration::from_secs(8) {
             agent.keys("\r");
@@ -1614,6 +1671,119 @@ fn g_145_r_opencode() {
 #[test]
 fn g_144_w_claude_code() {
     wake("claude-code", "events");
+}
+
+/// G-145-W-child-claude-code: a child as Storm launches one (`dontAsk`
+/// with the child baseline, and only the hooks the host's own lists give a
+/// child) is woken by a message. A message that arrives while its first
+/// turn still runs, after its `read_messages` came back empty, reaches the
+/// model in that turn (Claude Code adds the waker armed by
+/// `UserPromptSubmit` to the turn's next request); once idle, the next
+/// message wakes it (the waker armed by `Stop`). Each time it reads the
+/// message and reports the next round. Control: idle with nothing pushed,
+/// it calls nothing.
+#[test]
+fn g_145_w_child_claude_code() {
+    let gate = "G-145-W-child-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call tools)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let child = storm_runtime::profile::child_permission_mode("claude-code", "default").unwrap();
+    let mut allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+        .iter()
+        .map(|t| format!("mcp__storm__{t}"))
+        .collect();
+    allow.extend(child.allow.iter().cloned());
+    allow.push("mcp__storm__gate_pause".into());
+    let mut s = claude_with(ClaudeOpts {
+        args: child.args.clone(),
+        allow,
+        auto_off: child.auto_off,
+        storm_mcp: true,
+        hooks: Some(storm_runtime::harness::Gates::COMPILED.hooks("claude-code", true)),
+        ..Default::default()
+    });
+    let reports = |s: &Session| {
+        s.storm_calls()
+            .iter()
+            .filter(|t| *t == "report_result")
+            .count()
+    };
+    let ended = |s: &Session, at: Instant, word: &str| {
+        s.host
+            .results(at)
+            .iter()
+            .any(|r| r["final_message"].as_str() == Some(word))
+    };
+
+    let at = Instant::now();
+    s.agent.prompt(
+        "TURNS:say=ROUNDONE+call=mcp__storm__report_result;call=mcp__storm__read_messages;call=mcp__storm__gate_pause;say=IDLEONE",
+    );
+    let paused = wait_until(90, || s.storm_calls().iter().any(|t| t == "gate_pause"));
+    c.check(
+        &format!(
+            "round 1 reported, its read came back empty, its turn runs on ({:?})",
+            s.storm_calls()
+        ),
+        paused && reports(&s) == 1 && s.storm_reads().is_empty(),
+    );
+    s.queue_message("TASK-TWO");
+    c.check("a waker waits on the child's socket", s.host.waiting());
+    c.check(
+        "the host's wake reached it mid-turn",
+        s.host.wake("message"),
+    );
+    let read = wait_until(90, || {
+        s.storm_reads().iter().any(|r| r == "TASK-TWO") && reports(&s) == 2
+    });
+    c.check(
+        &format!(
+            "it heard the wake, read the message and reported round 2 ({:?}, {:?})",
+            s.storm_calls(),
+            s.storm_reads()
+        ),
+        read,
+    );
+    c.check(
+        "and its turn ended",
+        wait_until(60, || ended(&s, at, "WOKEDONE")),
+    );
+    c.check("it re-armed its waker", wait_until(30, || s.host.waiting()));
+
+    let calls = s.storm_calls().len();
+    std::thread::sleep(Duration::from_secs(10));
+    c.check(
+        "control: idle with nothing pushed, it calls nothing",
+        s.storm_calls().len() == calls,
+    );
+    let at = Instant::now();
+    let before = reports(&s);
+    s.queue_message("TASK-THREE");
+    c.check(
+        "the host's wake reached the idle child",
+        s.host.wake("message"),
+    );
+    let read = wait_until(90, || {
+        s.storm_reads().iter().any(|r| r == "TASK-THREE") && reports(&s) == before + 1
+    });
+    c.check(
+        &format!(
+            "the idle child woke, read the message and reported the next round ({:?})",
+            s.storm_reads()
+        ),
+        read,
+    );
+    c.check(
+        "and ended that turn",
+        wait_until(60, || ended(&s, at, "WOKEDONE")),
+    );
+    c.finish(&s.agent);
 }
 
 #[test]
@@ -2516,6 +2686,7 @@ fn g_149_claude_code() {
             auto_off,
             storm_mcp: true,
             account_mode: Some("manual"),
+            ..Default::default()
         });
         for tool in GATE_READS
             .iter()
