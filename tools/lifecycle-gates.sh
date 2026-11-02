@@ -9,7 +9,9 @@
 # would. G-148 runs a child as the host configures it and shows that no
 # prompt ever appears, and that a denial reaches the agent and the host.
 # G-145-O shows a child's own words reach the host while it waits in
-# read_messages, and nothing of its thinking or its tools does (stand-in only).
+# read_messages, and nothing of its thinking or its tools does (stand-in only);
+# G-145-O-shapes streams the replies a real model writes (text in the message
+# that calls a tool, several replies, OpenCode's parts) and wants each once.
 # G-149 shows a top-level session's Storm reads and deletes reach Storm with
 # no Claude Code or OpenCode prompt first (Claude Code in manual and in auto).
 #

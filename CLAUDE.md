@@ -845,11 +845,19 @@ Specification*; the slices are decisions 81 and 81a onward):
   session's size: Claude Code draws by cursor position and, after
   reporting, waits inside `read_messages`, so its screen never shows its
   answer), audited without text. A child's words come from its own hooks
-  (`harness-said`: Claude Code's `PostToolUse` on `mcp__storm__.*` and
-  `Stop`, reading its transcript on from the offset the host keeps per
-  session; OpenCode's completed assistant text parts), posted to
-  `…/said`, gated by `harness::SAID`/`said::SAID` (G-145-O), text blocks
-  only, data only, never an event and never typed anywhere (C9).
+  (`harness-said`: Claude Code's `PreToolUse`/`PostToolUse` on
+  `mcp__storm__.*` and `Stop`, all `async`, and `SessionEnd`, reading its
+  transcript on from the offset the host keeps per session, again as it
+  grows, until it holds the call's entry or the final message, at most
+  `SAID_WAIT`: Claude Code writes entries after the hooks that follow
+  them start, and a streamed message only once its tools return, so a
+  word in the message that calls `read_messages` arrives when that call
+  does, within the 30 s wait cap; OpenCode's assistant text parts once
+  complete, by their own end or their message's), posted to
+  `…/said`, gated by `harness::SAID`/`said::SAID` (G-145-O and
+  G-145-O-shapes), text blocks only, data only, never an event and never
+  typed anywhere (C9). The host logs a session's first read and first
+  post, and once why a read or a post failed.
 - **A built-in agent is a profile** (decision 130, `apps/runtime/src/profile.rs`):
   its safe launch args, prompt form, MCP writer, resume id shape and title
   policy. **An agent whose writer has not passed its real-account gate gets
