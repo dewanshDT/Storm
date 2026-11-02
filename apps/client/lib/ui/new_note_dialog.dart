@@ -16,11 +16,17 @@ class NewNote {
 /// `Plan` in `Ideas` under [folder], `/Ideas/Plan` the same from the top of
 /// the vault, and [noteFileName] turns either into a path. Missing folders
 /// are made by the create.
-Future<NewNote?> promptForNewNote(BuildContext context, {String folder = ''}) =>
-    showDialog<NewNote>(
-      context: context,
-      builder: (_) => _NewNoteDialog(folder: folder),
-    );
+///
+/// With [create], the dialog runs it before closing: a create that made
+/// nothing returns why, and the dialog says so and stays open.
+Future<NewNote?> promptForNewNote(
+  BuildContext context, {
+  String folder = '',
+  Future<String?> Function(NewNote note)? create,
+}) => showDialog<NewNote>(
+  context: context,
+  builder: (_) => _NewNoteDialog(folder: folder, create: create),
+);
 
 /// Turns a note's name into a vault-relative path.
 ///
@@ -46,6 +52,13 @@ String _segment(String s) => s
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
 
+/// Where a note at [path] lands, folder by folder: `in Work / Q1`.
+String newNoteDestination(String path) {
+  final cut = path.lastIndexOf('/');
+  if (cut < 0) return 'at the top of the vault';
+  return 'in ${path.substring(0, cut).split('/').join(' / ')}';
+}
+
 /// Why the dialog won't create [name]: a `..`, which would otherwise be
 /// dropped and land the note somewhere unasked, or nothing after the last
 /// `/`.
@@ -65,9 +78,10 @@ String? newNoteNameError(String name) {
 /// disposing it as `showDialog` returns kills it mid-animation, which is the
 /// red screen that once appeared right after naming a note.
 class _NewNoteDialog extends StatefulWidget {
-  const _NewNoteDialog({required this.folder});
+  const _NewNoteDialog({required this.folder, this.create});
 
   final String folder;
+  final Future<String?> Function(NewNote note)? create;
 
   @override
   State<_NewNoteDialog> createState() => _NewNoteDialogState();
@@ -84,22 +98,33 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
   }
 
   String? _error;
+  bool _creating = false;
 
-  void _submit() {
+  Future<void> _submit() async {
+    if (_creating) return;
     final error = newNoteNameError(_controller.text);
     if (error != null) {
       setState(() => _error = error);
       return;
     }
-    Navigator.pop(context, NewNote(name: _controller.text, accent: _accent));
+    final note = NewNote(name: _controller.text, accent: _accent);
+    final create = widget.create;
+    if (create != null) {
+      setState(() => _creating = true);
+      final failed = await create(note);
+      if (!mounted) return;
+      setState(() => _creating = false);
+      if (failed != null) {
+        setState(() => _error = failed);
+        return;
+      }
+    }
+    if (mounted) Navigator.pop(context, note);
   }
 
   /// Said, not asked: where the note will land as the name stands.
-  String _where() {
-    final path = noteFileName(_controller.text, folder: widget.folder);
-    final cut = path.lastIndexOf('/');
-    return cut < 0 ? 'at the top of the vault' : 'in ${path.substring(0, cut)}';
-  }
+  String _where() =>
+      newNoteDestination(noteFileName(_controller.text, folder: widget.folder));
 
   @override
   Widget build(BuildContext context) {
@@ -132,8 +157,10 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
           ),
           SizedBox(height: t.sp * 0.5),
           Text(
-            'A / makes folders, from here; start with / to begin at the top '
-            'of the vault.',
+            '“Here” is what you picked last: a folder in the sidebar, a '
+            'folder you opened, or the folder of the note you opened. A / '
+            'makes folders from here; start with / to begin at the top of '
+            'the vault.',
             key: const Key('new-note-hint'),
             style: TextStyle(
               fontFamily: StormTokens.sansFamily,
@@ -156,7 +183,10 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
-        FilledButton(onPressed: _submit, child: const Text('Create')),
+        FilledButton(
+          onPressed: _creating ? null : _submit,
+          child: const Text('Create'),
+        ),
       ],
     );
   }

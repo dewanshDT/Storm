@@ -32,10 +32,13 @@ an id, not its name.
 Create, rename and delete folders in the app. An empty folder you created is
 kept; folders left empty by moving or deleting notes are tidied away.
 
-A `/` in a new note's name puts it in folders, making any that are missing:
-`Ideas/Plan` is the note *Plan* in *Ideas* inside the folder you're in, and
-`/Ideas/Plan` starts from the top of the vault. A name with `..`, or with
-nothing after its last `/`, is refused.
+A new note goes in the folder you picked last: a folder you clicked in the
+sidebar, a folder you opened, or the folder of the note you opened. A `/` in
+its name puts it in folders, making any that are missing: `Ideas/Plan` is the
+note *Plan* in *Ideas* inside that folder, and `/Ideas/Plan` starts from the
+top of the vault. The dialog shows the whole path the note will land in. A
+name with `..`, with nothing after its last `/`, or that a note in that folder
+already has, is refused with the reason, and the dialog stays open.
 
 Deleting a folder that holds notes asks first — "Delete folder X and its N
 notes? They go to Trash." — and moves the folder and everything in it to the
