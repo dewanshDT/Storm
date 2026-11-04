@@ -124,18 +124,26 @@ pub const RESULT_SOURCES: &[ResultSource] = &[ResultSource {
     source: "provider_hook",
 }];
 
-/// One agent's documented wake (144c, 145d), once its gates
-/// (G-144-W-<provider>, G-145-W-<provider>) pass. The server's
-/// `events::WAKE` is the same list.
+/// One agent's documented wake (144c, 145d) for one kind, once that
+/// kind's gate passes: `events`, a parent's (G-144-W-<provider>), or
+/// `message`, a child's (G-145-W-<provider>). The server's `events::WAKE`
+/// is the same list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatedWake {
     pub provider: &'static str,
     /// `async_rewake` (Claude Code) or `prompt_async` (OpenCode).
     pub mechanism: &'static str,
+    pub kind: &'static str,
 }
 
-/// None has passed its gate.
-pub const WAKE: &[GatedWake] = &[];
+/// A Claude Code child's wake: G-145-W-claude-code and
+/// G-145-W-child-claude-code passed locally on 2026-11-02 with Claude Code
+/// 2.1.314 and 2.1.316 (`tests/lifecycle_gate.rs`). No parent's wake is on.
+pub const WAKE: &[GatedWake] = &[GatedWake {
+    provider: "claude-code",
+    mechanism: "async_rewake",
+    kind: "message",
+}];
 
 /// The agents whose denials a child's hooks or plugin report (148b), once
 /// G-148 passes for them: Claude Code's `PostToolBatch` (a `dontAsk`
@@ -147,11 +155,13 @@ pub const DENIALS: &[&str] = &["claude-code", "opencode"];
 
 /// The agents whose child's own assistant text is reported (145g, round 5:
 /// `read_output` returns what a child said), once G-145-O passes for them:
-/// Claude Code's `PostToolUse` on Storm's tools and `Stop`, which read the
-/// transcript from where the last read stopped, and OpenCode's completed
-/// assistant text parts. G-145-O passed locally on 2026-10-31 with Claude
-/// Code 2.1.314 and OpenCode 1.19.4 (`tests/lifecycle_gate.rs`). The
-/// server's `said::SAID` is the same list.
+/// Claude Code's `PreToolUse` and `PostToolUse` on Storm's tools, `Stop`
+/// and `SessionEnd`, which read the transcript from where the last read
+/// stopped, and OpenCode's completed assistant text parts. G-145-O passed
+/// locally on 2026-10-31 with Claude Code 2.1.314 and OpenCode 1.19.4, and
+/// with its streamed shapes (G-145-O-shapes) on 2026-11-02 with Claude Code
+/// 2.1.314 and 2.1.316 and OpenCode 1.19.4 (`tests/lifecycle_gate.rs`).
+/// The server's `said::SAID` is the same list.
 pub const SAID: &[&str] = &["claude-code", "opencode"];
 
 /// The longest message `harness-said` sends, in bytes; the server keeps no
@@ -221,7 +231,9 @@ impl Gates {
                     .results
                     .iter()
                     .any(|r| r.provider == provider && r.source == PROVIDER_HOOK),
-            wake: self.wakes.iter().any(|w| w.provider == provider),
+            wake: self.wakes.iter().any(|w| {
+                w.provider == provider && w.kind == if child { "message" } else { "events" }
+            }),
             denied: child && self.denials.contains(&provider),
             said: child && self.said.contains(&provider),
         }
@@ -358,6 +370,9 @@ pub struct TranscriptAt {
 pub struct TranscriptRead {
     pub said: Vec<String>,
     pub offset: u64,
+    /// Why the transcript could not be read, for the host's log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -672,8 +687,10 @@ fn add_hook(
 ///   next turn;
 /// - final message: `Stop`'s `last_assistant_message`, with the turn's
 ///   tokens from its transcript;
-/// - a child's words (145g): `PostToolUse` on Storm's tools and `Stop`,
-///   each reading the transcript on from where the last read stopped;
+/// - a child's words (145g): `PreToolUse` and `PostToolUse` on Storm's
+///   tools and `Stop`, each `async` and reading the transcript on from
+///   where the last read stopped until it holds the call's entry or the
+///   final message, and `SessionEnd`, one last read;
 /// - wake: an `asyncRewake` waker armed on `SessionStart`,
 ///   `UserPromptSubmit`, `Stop` and `StopFailure` (an interrupt fires no
 ///   `Stop`), with a day's timeout since Claude Code enforces it;
@@ -727,13 +744,17 @@ fn claude_lifecycle_hooks(settings: &mut serde_json::Value, exe: &Path, hooks: &
         );
     }
     if hooks.said {
-        add_hook(
-            settings,
-            "PostToolUse",
-            Some(STORM_TOOLS_MATCHER),
-            command("harness-said"),
-        );
-        add_hook(settings, "Stop", None, command("harness-said"));
+        let reader = || {
+            let mut reader = command("harness-said");
+            reader["async"] = json!(true);
+            reader["timeout"] = json!(SAID_WAIT.as_secs() * 2);
+            reader
+        };
+        for event in ["PreToolUse", "PostToolUse"] {
+            add_hook(settings, event, Some(STORM_TOOLS_MATCHER), reader());
+        }
+        add_hook(settings, "Stop", None, reader());
+        add_hook(settings, "SessionEnd", None, command("harness-said"));
     }
     if hooks.wake {
         for event in ["SessionStart", "UserPromptSubmit", "Stop", "StopFailure"] {
@@ -782,8 +803,9 @@ const CLAUDE_DENIED: (&str, &str) = ("Permission to use ", " has been denied");
 /// - a child's denials (148b): a tool part that failed on a deny rule, once
 ///   per part;
 /// - a child's words (145g): each assistant text part of the top-level
-///   session once it is complete, once per part; reasoning and tool parts
-///   are never sent.
+///   session once it is complete (its own `time.end`, or its message's
+///   `time.completed`), once per part, also when the message's role is
+///   learned after the part; reasoning and tool parts are never sent.
 fn plugin(exe: &Path, hooks: &Hooks) -> String {
     let exe = serde_json::to_string(&exe.display().to_string()).expect("a string serializes");
     let lifecycle = hooks.any_signal() || hooks.result || hooks.wake;
@@ -952,27 +974,44 @@ fn plugin(exe: &Path, hooks: &Hooks) -> String {
         ));
     }
     if hooks.said {
-        state.push_str(
+        state.push_str(&format!(
             r#"
   const assistant = new Set();
-  const said = new Set();"#,
-        );
+  const said = new Set();
+  const people = new Set();
+  const texts = new Map();
+  const say = (part) => {{
+    if (!assistant.has(part.messageID) || said.has(part.id)) return;
+    said.add(part.id);
+    texts.delete(part.id);
+    const text = part.text.trim();
+    if (text) run(["harness-said"], JSON.stringify({{ text: text.slice(0, {MAX_SAID_TEXT}) }}));
+  }};"#
+        ));
         handlers.push_str(
             r#"
-      if (event.type === "message.updated" && event.properties?.info?.role === "assistant") {
-        assistant.add(event.properties.info.id);
+      if (event.type === "message.updated") {
+        const info = event.properties?.info;
+        if (info?.role === "user") {
+          people.add(info.id);
+          for (const [id, part] of texts) if (part.messageID === info.id) texts.delete(id);
+        }
+        if (info?.role === "assistant") {
+          assistant.add(info.id);
+          for (const part of [...texts.values()]) {
+            if (part.messageID === info.id && (part.time?.end || info.time?.completed)) say(part);
+          }
+        }
       }"#,
         );
-        on_part.push_str(&format!(
+        on_part.push_str(
             r#"
         if (part?.type === "text" && !part.synthetic && typeof part.text === "string"
-            && part.time?.end && assistant.has(part.messageID) && !children.has(part.sessionID)
-            && !said.has(part.id)) {{
-          said.add(part.id);
-          const text = part.text.trim();
-          if (text) run(["harness-said"], JSON.stringify({{ text: text.slice(0, {MAX_SAID_TEXT}) }}));
-        }}"#
-        ));
+            && !children.has(part.sessionID) && !people.has(part.messageID) && !said.has(part.id)) {
+          texts.set(part.id, part);
+          if (part.time?.end) say(part);
+        }"#,
+        );
     }
     if !on_part.is_empty() {
         handlers.push_str(&format!(
@@ -1349,11 +1388,12 @@ pub fn report_said() {
     };
     if let Some(path) = input["transcript_path"].as_str() {
         let settle = match (
+            input["hook_event_name"].as_str(),
             input["last_assistant_message"].as_str(),
             input["tool_use_id"].as_str(),
         ) {
-            (Some(text), _) if input["hook_event_name"] == "Stop" => Settle::Said(text),
-            (_, Some(id)) if !id.is_empty() => Settle::Written(id),
+            (Some("Stop"), Some(text), _) => Settle::Said(text),
+            (_, _, Some(id)) if !id.is_empty() => Settle::Written(id),
             _ => Settle::Now,
         };
         let _ = said_from_transcript(&socket, handle, Path::new(path), settle);
@@ -1368,50 +1408,70 @@ pub fn report_said() {
     }
 }
 
-/// What a read of the transcript waits for, at most [`TRANSCRIPT_WAIT`]:
-/// Claude Code writes its entries a moment after the hooks that follow them
-/// start (2.1.314: a `PostToolUse` found none of the message that called
-/// the tool).
+/// What a read of the transcript waits for, at most [`SAID_WAIT`]: Claude
+/// Code writes its entries after the hooks that follow them start, and on a
+/// session's first turn not for seconds (2.1.314 and 2.1.316: a hook found
+/// nothing of the message that called its tool after 3 s).
 #[derive(Debug, Clone, Copy)]
 pub enum Settle<'a> {
     Now,
     /// `Stop`'s `last_assistant_message`.
     Said(&'a str),
-    /// `PostToolUse`'s `tool_use_id`: the entry that called the tool, and
-    /// everything the message said before it.
+    /// `PreToolUse`'s or `PostToolUse`'s `tool_use_id`: the entry that
+    /// called the tool, and everything the message said before it.
     Written(&'a str),
 }
 
+/// How long a `harness-said` waits for what it settles on. Its hooks are
+/// `async`, so the agent never waits for it.
+pub const SAID_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reads on from where the host's last read stopped, again each time the
+/// transcript grows, until it holds what `settle` names, or [`SAID_WAIT`].
 pub(crate) fn said_from_transcript(
     socket: impl AsRef<Path>,
     handle: String,
     path: &Path,
     settle: Settle,
 ) -> Result<()> {
-    let mut stream = crate::platform::ipc::connect_blocking(socket.as_ref().as_os_str())?;
+    let needle = match settle {
+        Settle::Now => None,
+        Settle::Said(text) => said_needle(text),
+        Settle::Written(id) => Some(id.to_string()),
+    };
+    let mut scan = Scan::new(path);
+    let deadline = std::time::Instant::now() + SAID_WAIT;
+    let mut read_at = None;
+    loop {
+        let found = needle.as_deref().is_none_or(|n| scan.found(path, n));
+        let len = std::fs::metadata(path).map(|m| m.len()).ok();
+        if found || len != read_at {
+            transcript_exchange(socket.as_ref(), &handle, path)?;
+            read_at = len;
+        }
+        if found || std::time::Instant::now() >= deadline {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// One read: the host says where its last read stopped, and is sent what
+/// the transcript holds from there. A transcript that can't be read says
+/// why, so the host can log it.
+fn transcript_exchange(socket: &Path, handle: &str, path: &Path) -> Result<()> {
+    let mut stream = crate::platform::ipc::connect_blocking(socket.as_os_str())?;
     let mut line = serde_json::to_vec(&TranscriptLine {
-        handle,
+        handle: handle.to_string(),
         transcript: path.display().to_string(),
     })?;
     line.push(b'\n');
     stream.write_all(&line)?;
     let at: TranscriptAt = serde_json::from_str(&stream.read_line(4096)?)?;
-    let deadline = std::time::Instant::now() + TRANSCRIPT_WAIT;
-    let read = loop {
-        let read = transcript_said(path, at.offset);
-        let settled = match settle {
-            Settle::Now => true,
-            Settle::Said(last) => {
-                let last = last.trim();
-                last.is_empty() || read.said.iter().any(|s| last.starts_with(s.as_str()))
-            }
-            Settle::Written(id) => transcript_mentions(path, at.offset, id),
-        };
-        if settled || std::time::Instant::now() >= deadline {
-            break read;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    };
+    let mut read = transcript_said(path, at.offset);
+    if let Err(e) = std::fs::File::open(path) {
+        read.error = Some(e.kind().to_string());
+    }
     let mut line = serde_json::to_vec(&read)?;
     line.push(b'\n');
     stream.write_all(&line)?;
@@ -1419,25 +1479,57 @@ pub(crate) fn said_from_transcript(
     Ok(())
 }
 
-/// Whether the transcript's whole lines after `offset` mention `needle`.
-fn transcript_mentions(path: &Path, offset: u64, needle: &str) -> bool {
-    use std::io::Seek;
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let len = file.metadata().map_or(0, |m| m.len());
-    let start = if len < offset { 0 } else { offset };
-    let start = start.max(len.saturating_sub(MAX_SAID_READ));
-    let mut bytes = Vec::new();
-    if file.seek(std::io::SeekFrom::Start(start)).is_err()
-        || file.take(len - start).read_to_end(&mut bytes).is_err()
-    {
-        return false;
+/// What of `Stop`'s last message its transcript entry holds verbatim: the
+/// start of its first line, as JSON writes it.
+fn said_needle(text: &str) -> Option<String> {
+    let first = text.trim().lines().next()?.trim();
+    let mut end = first.len().min(48);
+    while !first.is_char_boundary(end) {
+        end -= 1;
     }
-    let whole = bytes.iter().rposition(|&b| b == b'\n').map_or(0, |i| i + 1);
-    bytes[..whole]
-        .windows(needle.len().max(1))
-        .any(|w| w == needle.as_bytes())
+    let quoted = serde_json::to_string(&first[..end]).ok()?;
+    let inner = &quoted[1..quoted.len() - 1];
+    (!inner.is_empty()).then(|| inner.to_string())
+}
+
+/// Looks for a needle in a transcript's whole lines, reading each byte
+/// once: from [`MAX_SAID_READ`] before its end when the hook started, then
+/// whatever it gains.
+struct Scan {
+    at: u64,
+}
+
+impl Scan {
+    fn new(path: &Path) -> Self {
+        let len = std::fs::metadata(path).map_or(0, |m| m.len());
+        Self {
+            at: len.saturating_sub(MAX_SAID_READ),
+        }
+    }
+
+    fn found(&mut self, path: &Path, needle: &str) -> bool {
+        use std::io::Seek;
+        let Ok(mut file) = std::fs::File::open(path) else {
+            return false;
+        };
+        let len = file.metadata().map_or(0, |m| m.len());
+        if len < self.at {
+            self.at = 0;
+        }
+        let mut bytes = Vec::new();
+        if file.seek(std::io::SeekFrom::Start(self.at)).is_err()
+            || file.take(len - self.at).read_to_end(&mut bytes).is_err()
+        {
+            return false;
+        }
+        let Some(whole) = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1) else {
+            return false;
+        };
+        self.at += whole as u64;
+        bytes[..whole]
+            .windows(needle.len().max(1))
+            .any(|w| w == needle.as_bytes())
+    }
 }
 
 /// A child's message as it is sent: trimmed, at most [`MAX_SAID_TEXT`]
@@ -1467,6 +1559,7 @@ pub fn transcript_said(path: &Path, offset: u64) -> TranscriptRead {
         return TranscriptRead {
             said: Vec::new(),
             offset,
+            error: None,
         };
     };
     let len = file.metadata().map_or(0, |m| m.len());
@@ -1482,6 +1575,7 @@ pub fn transcript_said(path: &Path, offset: u64) -> TranscriptRead {
         return TranscriptRead {
             said: Vec::new(),
             offset,
+            error: None,
         };
     }
     let from = if skipping {
@@ -1491,6 +1585,7 @@ pub fn transcript_said(path: &Path, offset: u64) -> TranscriptRead {
                 return TranscriptRead {
                     said: Vec::new(),
                     offset: start,
+                    error: None,
                 };
             }
         }
@@ -1529,6 +1624,7 @@ pub fn transcript_said(path: &Path, offset: u64) -> TranscriptRead {
     TranscriptRead {
         said,
         offset: start + whole as u64,
+        error: None,
     }
 }
 
@@ -2044,7 +2140,14 @@ export const StormHarness = async () => {
                 source: PROVIDER_HOOK
             }]
         );
-        assert!(WAKE.is_empty());
+        assert_eq!(
+            WAKE,
+            [GatedWake {
+                provider: "claude-code",
+                mechanism: "async_rewake",
+                kind: "message",
+            }]
+        );
         let on: Vec<(&str, &str, &str)> = GATED_SIGNALS
             .iter()
             .map(|g| (g.provider, g.signal, g.source))
@@ -2069,6 +2172,7 @@ export const StormHarness = async () => {
                     denied: gated,
                     said: gated,
                     result: provider == "claude-code",
+                    wake: provider == "claude-code",
                     ..Hooks::attention(gated)
                 },
                 "{provider}'s child"
@@ -2112,6 +2216,7 @@ export const StormHarness = async () => {
                 denied: true,
                 result: true,
                 said: true,
+                wake: true,
                 ..Hooks::attention(true)
             })
         );
@@ -2598,9 +2703,113 @@ export const StormHarness = async () => {
         assert_eq!(gone.offset, 7);
     }
 
-    /// 145g's hooks: Claude Code's `PostToolUse` on Storm's tools and its
-    /// `Stop`, and OpenCode's plugin sending only a completed assistant text
-    /// part of the top-level session; nothing of it without the gate.
+    /// 145g: a hook reads on as Claude Code writes, and stops once its
+    /// transcript holds the entry it waits for. Claude Code writes a
+    /// message after the hooks that follow it start, so the first read
+    /// finds nothing; each word is still sent once.
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_reads_until_its_entry_is_written() {
+        use std::io::{BufRead, BufReader};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        let socket = dir.path().join("s.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let socket_reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::<TranscriptRead>::new()));
+        let seen = socket_reads.clone();
+        let reads_of = |r: &std::sync::Arc<std::sync::Mutex<Vec<TranscriptRead>>>| {
+            r.lock()
+                .unwrap()
+                .iter()
+                .map(|t| TranscriptRead {
+                    said: t.said.clone(),
+                    offset: t.offset,
+                    error: t.error.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        std::thread::spawn(move || {
+            let mut offset = 0;
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let mut stream = stream;
+                writeln!(stream, "{}", json!({ "offset": offset })).unwrap();
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                let read: TranscriptRead = serde_json::from_str(&line).unwrap();
+                offset = read.offset;
+                seen.lock().unwrap().push(read);
+            }
+        });
+        let entry = |content: serde_json::Value| {
+            json!({"type": "assistant", "message": {"content": content}}).to_string() + "\n"
+        };
+        std::fs::write(&path, "{\"type\":\"mode\"}\n").unwrap();
+        let writer = {
+            let path = path.clone();
+            let text = entry(json!([{"type": "text", "text": "Said before the call."}]))
+                + &entry(json!([{"type": "tool_use", "id": "toolu_w", "name": "x", "input": {}}]));
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(700));
+                let mut f = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&path)
+                    .unwrap();
+                f.write_all(text.as_bytes()).unwrap();
+            })
+        };
+        let started = std::time::Instant::now();
+        said_from_transcript(&socket, "h".into(), &path, Settle::Written("toolu_w")).unwrap();
+        writer.join().unwrap();
+        assert!(
+            started.elapsed() < SAID_WAIT,
+            "it stopped once the entry was there"
+        );
+        let reads = reads_of(&socket_reads);
+        assert!(reads[0].said.is_empty(), "the first read finds nothing yet");
+        let said: Vec<&String> = reads.iter().flat_map(|r| &r.said).collect();
+        assert_eq!(said, ["Said before the call."]);
+
+        drop(reads);
+        let missing = dir.path().join("gone.jsonl");
+        said_from_transcript(&socket, "h".into(), &missing, Settle::Now).unwrap();
+        let reads = reads_of(&socket_reads);
+        assert!(
+            reads.last().is_some_and(|r| r.error.is_some()),
+            "an unreadable transcript says why"
+        );
+    }
+
+    /// 145g: what `Stop`'s hook waits for is the start of the final
+    /// message as its transcript entry spells it, and a scan reads only
+    /// whole lines, each once.
+    #[test]
+    fn a_stop_hook_waits_for_its_message_as_json_spells_it() {
+        assert_eq!(said_needle("  \n"), None);
+        assert_eq!(
+            said_needle("He said \"go\"\tnow.\nMore.").as_deref(),
+            Some("He said \\\"go\\\"\\tnow.")
+        );
+        let long = said_needle(&"é".repeat(40)).unwrap();
+        assert!(long.len() <= 48 && long.chars().all(|c| c == 'é'));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.jsonl");
+        std::fs::write(&path, "").unwrap();
+        let mut scan = Scan::new(&path);
+        std::fs::write(&path, "{\"a\":\"toolu_").unwrap();
+        assert!(!scan.found(&path, "toolu_1"), "a line still being written");
+        std::fs::write(&path, "{\"a\":\"toolu_1\"}\n").unwrap();
+        assert!(scan.found(&path, "toolu_1"));
+        assert!(!scan.found(&path, "toolu_1"), "each byte is read once");
+    }
+
+    /// 145g's hooks: Claude Code's `PreToolUse` and `PostToolUse` on
+    /// Storm's tools and its `Stop`, in the background, and `SessionEnd`;
+    /// OpenCode's plugin sending only a completed assistant text part of the
+    /// top-level session; nothing of it without the gate.
     #[test]
     fn a_childs_words_are_reported_by_its_hooks_only_when_gated() {
         let on = Hooks {
@@ -2608,21 +2817,24 @@ export const StormHarness = async () => {
             ..Hooks::default()
         };
         let settings: serde_json::Value = serde_json::from_str(&settings_of(&on)).unwrap();
-        assert_eq!(
-            settings["hooks"]["PostToolUse"][0]["matcher"],
-            STORM_TOOLS_MATCHER
-        );
-        assert_eq!(
-            settings["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
-            "'/x' harness-said"
-        );
-        assert_eq!(
-            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
-            "'/x' harness-said"
-        );
+        for event in ["PreToolUse", "PostToolUse", "Stop"] {
+            let group = &settings["hooks"][event][0];
+            let matcher = (event != "Stop").then_some(STORM_TOOLS_MATCHER);
+            assert_eq!(group["matcher"].as_str(), matcher, "{event}");
+            assert_eq!(group["hooks"][0]["command"], "'/x' harness-said", "{event}");
+            assert_eq!(group["hooks"][0]["async"], true, "{event}");
+            assert!(
+                group["hooks"][0]["timeout"].as_u64() > Some(SAID_WAIT.as_secs()),
+                "{event}"
+            );
+        }
+        let end = &settings["hooks"]["SessionEnd"][0]["hooks"][0];
+        assert_eq!(end["command"], "'/x' harness-said");
+        assert!(end.get("async").is_none(), "it reads before the CLI exits");
         let js = plugin(Path::new("/x"), &on);
         assert!(js.contains(r#"run(["harness-said"]"#), "{js}");
         assert!(js.contains(r#"part?.type === "text""#) && js.contains("part.time?.end"));
+        assert!(js.contains("info.time?.completed"));
         assert!(js.contains(r#"role === "assistant""#) && js.contains("!part.synthetic"));
         for off in [
             settings_of(&Hooks::default()),
@@ -2661,8 +2873,10 @@ export const StormHarness = async () => {
 
     /// 145g's OpenCode plugin, run under Node where there is one: of a
     /// session's parts, only each completed assistant text of the top-level
-    /// session is sent, once; never a person's text, reasoning, a tool, a
-    /// part still streaming, a synthetic one or a subagent's.
+    /// session is sent, once, also one seen before its message and one whose
+    /// message completed without its own end; never a person's text,
+    /// reasoning, a tool, a part still streaming, a synthetic one or a
+    /// subagent's.
     #[cfg(unix)]
     #[test]
     fn the_plugin_sends_only_a_childs_finished_assistant_text() {
@@ -2711,6 +2925,13 @@ for (const event of [
   msg("a2", "assistant", "sub"),
   part({ id: "p5", type: "text", text: "CANARY-SUBAGENT", messageID: "a2", sessionID: "sub", time: done }),
   part({ id: "p6", type: "text", text: "  Second.  ", messageID: "a1", sessionID: "s1", time: done }),
+  part({ id: "p7", type: "text", text: "Before its message.", messageID: "a3", sessionID: "s1", time: done }),
+  msg("a3", "assistant", "s1"),
+  part({ id: "p8", type: "text", text: "Never ended", messageID: "a3", sessionID: "s1", time: { start: 1 } }),
+  part({ id: "p9", type: "text", text: "CANARY-USER-LATE", messageID: "u2", sessionID: "s1", time: { start: 1 } }),
+  msg("u2", "user", "s1"),
+  { type: "message.updated", properties: { info: { id: "a3", role: "assistant", sessionID: "s1", time: { created: 1, completed: 2 } } } },
+  { type: "message.updated", properties: { info: { id: "a3", role: "assistant", sessionID: "s1", time: { created: 1, completed: 2 } } } },
 ]) await h.event({ event });
 await new Promise((r) => setTimeout(r, 1500));
 "#;
@@ -2728,7 +2949,9 @@ await new Promise((r) => setTimeout(r, 1500));
                 .collect::<Vec<_>>(),
             [
                 r#"harness-said {"text":"Hello, world, ready."}"#,
-                r#"harness-said {"text":"Second."}"#
+                r#"harness-said {"text":"Second."}"#,
+                r#"harness-said {"text":"Before its message."}"#,
+                r#"harness-said {"text":"Never ended"}"#
             ],
             "{sent}"
         );

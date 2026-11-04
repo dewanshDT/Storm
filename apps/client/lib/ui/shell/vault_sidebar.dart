@@ -419,9 +419,16 @@ class _FolderTreeState extends ConsumerState<FolderTree> {
             guides: guides,
             leading: Twisty(open: isOpen),
             unseen: !isOpen && _unseenUnder(entry.path),
-            onTap: () => setState(() {
-              if (!_expanded.remove(entry.path)) _expanded.add(entry.path);
-            }),
+            onTap: () {
+              ref.read(pickedFolderProvider.notifier).state = (
+                vault: vaultId,
+                folder: entry.path,
+                at: DateTime.now(),
+              );
+              setState(() {
+                if (!_expanded.remove(entry.path)) _expanded.add(entry.path);
+              });
+            },
             onLongPress: () => showFolderActions(context, ref, vaultId, entry),
           ),
         );

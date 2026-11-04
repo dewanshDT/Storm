@@ -14,11 +14,22 @@
 //!   waits in `read_messages` (its turn never ends), once each, with
 //!   nothing of its thinking or its tools' inputs and results. Control:
 //!   Claude Code's transcript holds the thought and the tool's input.
+//!   **G-145-O-shapes-<provider>** streams as a model does: a word in the
+//!   message that calls a Storm tool, a reply after a tool's result, two
+//!   words around a thought, and a word in the message whose
+//!   `read_messages` then waits (Claude Code writes that message only once
+//!   the call returns, within Storm's 30 s wait cap); every word arrives,
+//!   once. OpenCode runs it through both its OpenAI-compatible and its
+//!   Anthropic provider, and Claude Code ends with `SessionEnd`'s read.
 //! - **G-144-W-<provider>** and **G-145-W-<provider>**: an idle agent is
 //!   woken by its documented mechanism (Claude Code's `asyncRewake` hook,
 //!   OpenCode's plugin `client.session.promptAsync`), and the model then
 //!   receives exactly Storm's fixed sentence (a parent's for 144, a
 //!   child's for 145). Positive control: without the wake it stays idle.
+//!   **G-145-W-child-claude-code** runs a child as Storm launches one
+//!   (`dontAsk`, the child baseline, the host's own lists): a message that
+//!   arrives mid-turn and one that arrives once it is idle each wake it, and
+//!   it reads the message and reports the next round.
 //! - **G-146-A-claude-code**: a child's Storm tools allowed in Storm's
 //!   `--settings` run with no prompt, and a note write still asks.
 //!   Positive control: without the allow, `report_result` asks.
@@ -126,6 +137,7 @@ except ProcessLookupError:
 /// logged, one JSON line each, with the last user message's text.
 const FAKE_ANTHROPIC: &str = r#"
 import http.server, json, sys, time
+WAKE_MESSAGE = json.loads(sys.argv[2])
 LOG = open(sys.argv[1], "a")
 def text_of(msg):
     c = msg.get("content")
@@ -196,30 +208,69 @@ class H(http.server.BaseHTTPRequestHandler):
             return isinstance(c, list) and any(b.get("type") == "tool_result" for b in c)
         prompts = [text_of(m) for m in users if not is_result(m)]
         prompt = prompts[-1] if prompts else ""
-        if "SAY:" in prompt:
+        # Storm's wake, a turn of its own or, mid-turn, a system message
+        # after a tool's result: read the message, report, end the turn. Its
+        # place counts as the last user message before it.
+        turns_at, seen, asked = None, -1, -1
+        for m in msgs:
+            if m.get("role") == "user":
+                seen += 1
+                if not is_result(m):
+                    asked = seen
+            if WAKE_MESSAGE in json.dumps(m.get("content")):
+                turns_at = seen if m.get("role") == "user" else seen + 0.5
+        if turns_at is not None and turns_at >= asked:
+            prompt = "TURNS:call=mcp__storm__read_messages;say=WOKEREAD+call=mcp__storm__report_result;say=WOKEDONE"
+        else:
+            turns_at = None
+        def input_of(name):
+            if name.endswith("report_result"):
+                return {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"}
+            if name.endswith("read_messages"):
+                return {"wait": 600}
+            return {}
+        # TURNS:<step>;<step>…, each step one message of `say=<word>`,
+        # `think=<word>` and `call=<tool>` joined by `+`, the next step once
+        # the last one's tools answered; SLOW streams it as a model does.
+        if "TURNS:" in prompt:
+            at = turns_at if turns_at is not None else max(i for i, m in enumerate(users) if not is_result(m))
+            step = int(len(users) - 1 - at + 0.5)
+            turns = prompt.split("TURNS:", 1)[1].split()[0].split(";")
+            blocks = [("text", "Done.")]
+            if step >= len(turns) and turns[-1].endswith("read_messages"):
+                waiter = turns[-1].rsplit("=", 1)[1]
+                blocks = [("tool_use", (waiter, input_of(waiter)))]
+            elif step < len(turns):
+                blocks = []
+                for item in turns[step].split("+"):
+                    k, _, v = item.partition("=")
+                    if k == "say":
+                        blocks.append(("text", v))
+                    elif k == "think":
+                        blocks.append(("thinking", v))
+                    elif k == "call" and v in tools:
+                        blocks.append(("tool_use", (v, input_of(v))))
+        elif "SAY:" in prompt:
             at = max(i for i, m in enumerate(users) if not is_result(m))
             step = len(users) - 1 - at
             steps = [t for t in prompt.split("CALLS:", 1)[1].split()[0].split(",") if t in tools] if "CALLS:" in prompt else []
-            def input_of(name):
-                if name.endswith("report_result"):
-                    return {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"}
-                if name.endswith("read_messages"):
-                    return {"wait": 600}
-                return {}
             if step == 0:
                 blocks = [("thinking", "CANARY-THINKING"), ("text", prompt.split("SAY:", 1)[1].split()[0])]
                 if steps:
                     blocks.append(("tool_use", (steps[0], input_of(steps[0]))))
             elif step < len(steps):
                 blocks = [("tool_use", (steps[step], input_of(steps[step])))]
+            elif steps and steps[-1].endswith("read_messages"):
+                blocks = [("tool_use", (steps[-1], input_of(steps[-1])))]
             else:
                 blocks = [("text", "Done.")]
         uses = any(k == "tool_use" for k, _ in blocks)
+        slow = "SLOW" in prompt
         if not body.get("stream"):
             content = []
-            for k, v in blocks:
+            for i, (k, v) in enumerate(blocks):
                 if k == "tool_use":
-                    content.append({"type": "tool_use", "id": tid, "name": v[0], "input": v[1]})
+                    content.append({"type": "tool_use", "id": "%s%d" % (tid, i), "name": v[0], "input": v[1]})
                 elif k == "text":
                     content.append({"type": "text", "text": v})
             return self.send_json(200, {"id": "msg_x", "type": "message", "role": "assistant", "model": model, "content": content, "stop_reason": "tool_use" if uses else "end_turn", "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 5}})
@@ -228,7 +279,7 @@ class H(http.server.BaseHTTPRequestHandler):
         e("message_start", {"type": "message_start", "message": {"id": "msg_%d" % int(time.time() * 1000), "type": "message", "role": "assistant", "model": model, "content": [], "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 10, "output_tokens": 1}}})
         for i, (k, v) in enumerate(blocks):
             if k == "tool_use":
-                e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "tool_use", "id": tid, "name": v[0], "input": {}}})
+                e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "tool_use", "id": "%s%d" % (tid, i), "name": v[0], "input": {}}})
                 e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "input_json_delta", "partial_json": json.dumps(v[1])}})
             elif k == "thinking":
                 e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "thinking", "thinking": "", "signature": ""}})
@@ -236,15 +287,24 @@ class H(http.server.BaseHTTPRequestHandler):
                 e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "signature_delta", "signature": "c2lnbmF0dXJl"}})
             else:
                 e("content_block_start", {"type": "content_block_start", "index": i, "content_block": {"type": "text", "text": ""}})
-                e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": v}})
+                for piece in ([v[j:j + 4] for j in range(0, len(v), 4)] if slow else [v]):
+                    e("content_block_delta", {"type": "content_block_delta", "index": i, "delta": {"type": "text_delta", "text": piece}})
             e("content_block_stop", {"type": "content_block_stop", "index": i})
         e("message_delta", {"type": "message_delta", "delta": {"stop_reason": "tool_use" if uses else "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 5}})
         e("message_stop", {"type": "message_stop"})
-        data = "".join(ev).encode()
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers(); self.wfile.write(data); self.wfile.flush()
+        if not slow:
+            data = "".join(ev).encode()
+            self.send_header("content-length", str(len(data)))
+            self.end_headers(); self.wfile.write(data); self.wfile.flush()
+            return
+        self.send_header("connection", "close")
+        self.close_connection = True
+        self.end_headers()
+        for x in ev:
+            self.wfile.write(x.encode()); self.wfile.flush()
+            time.sleep(0.15)
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 print(s.server_address[1], flush=True)
 s.serve_forever()
@@ -313,11 +373,44 @@ class H(http.server.BaseHTTPRequestHandler):
                 out += [chunk({"tool_calls": [call_of(steps[0])]}), chunk({}, "tool_calls", usage)] if steps else [chunk({}, "stop", usage)]
             elif step < len(steps):
                 out = [chunk({"role": "assistant", "tool_calls": [call_of(steps[step])]}), chunk({}, "tool_calls", usage)]
+            elif steps and steps[-1].endswith("read_messages"):
+                out = [chunk({"role": "assistant", "tool_calls": [call_of(steps[-1])]}), chunk({}, "tool_calls", usage)]
             else:
                 out = [chunk({"role": "assistant", "content": "Done."}), chunk({}, "stop", usage)]
+        # TURNS:<step>;<step>…, each step one message of `say=<word>`,
+        # `think=<word>` and `call=<tool>` joined by `+`, the next step once
+        # the last one's tools answered; SLOW streams it as a model does.
+        prompt = [m for m in msgs if m.get("role") == "user"]
+        prompt = prompt[-1].get("content") if prompt else ""
+        prompt = prompt if isinstance(prompt, str) else json.dumps(prompt)
+        slow = "SLOW" in prompt
+        if "TURNS:" in prompt:
+            at = max(i for i, m in enumerate(msgs) if m.get("role") == "user")
+            step = sum(1 for m in msgs[at:] if m.get("role") == "assistant")
+            turns = prompt.split("TURNS:", 1)[1].split()[0].strip('"\\').split(";")
+            out = [chunk({"role": "assistant", "content": "Done."}), chunk({}, "stop", usage)]
+            if step >= len(turns) and turns[-1].endswith("read_messages"):
+                waiter = turns[-1].rsplit("=", 1)[1]
+                call = {"index": 0, "id": "call_gate%d" % int(time.time() * 1000), "type": "function", "function": {"name": waiter, "arguments": json.dumps({"wait": 600})}}
+                out = [chunk({"role": "assistant", "tool_calls": [call]}), chunk({}, "tool_calls", usage)]
+            elif step < len(turns):
+                out, calls = [chunk({"role": "assistant", "content": ""})], 0
+                for item in turns[step].split("+"):
+                    k, _, v = item.partition("=")
+                    if k == "say":
+                        out += [chunk({"content": v[j:j + 4]}) for j in range(0, len(v), 4)] if slow else [chunk({"content": v})]
+                    elif k == "think":
+                        out.append(chunk({"reasoning_content": v}))
+                    elif k == "call" and v in tools:
+                        args = {"outcome": "succeeded", "summary": "CANARY-TOOL-INPUT"} if v.endswith("report_result") else {"wait": 600} if v.endswith("read_messages") else {}
+                        out.append(chunk({"tool_calls": [{"index": calls, "id": "call_gate%d_%d" % (int(time.time() * 1000), calls), "type": "function", "function": {"name": v, "arguments": json.dumps(args)}}]}))
+                        calls += 1
+                out.append(chunk({}, "tool_calls" if calls else "stop", usage))
         self.send_response(200); self.send_header("content-type", "text/event-stream"); self.end_headers()
         for c in out + ["data: [DONE]\n\n"]:
             self.wfile.write(c.encode()); self.wfile.flush()
+            if slow:
+                time.sleep(0.15)
 s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
 print(s.server_address[1], flush=True)
 s.serve_forever()
@@ -352,6 +445,7 @@ impl FakeHost {
         let lines: Lines = Arc::default();
         let waiters: Arc<Mutex<Vec<UnixStream>>> = Arc::default();
         let (seen, held) = (lines.clone(), waiters.clone());
+        // Held across a whole exchange, as the host holds its session's.
         let transcripts: Arc<Mutex<std::collections::HashMap<String, u64>>> = Arc::default();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
@@ -371,7 +465,8 @@ impl FakeHost {
                     let (path, seen, at) = (path.to_string(), seen.clone(), transcripts.clone());
                     std::thread::spawn(move || {
                         let mut stream = stream;
-                        let offset = at.lock().unwrap().get(&path).copied().unwrap_or(0);
+                        let mut at = at.lock().unwrap();
+                        let offset = at.get(&path).copied().unwrap_or(0);
                         let _ =
                             stream.write_all(format!("{}\n", json!({"offset": offset})).as_bytes());
                         let mut line = String::new();
@@ -380,7 +475,7 @@ impl FakeHost {
                         {
                             eprintln!("  socket: {}", short(&read));
                             if let Some(n) = read["offset"].as_u64() {
-                                at.lock().unwrap().insert(path, n);
+                                at.insert(path, n);
                             }
                             seen.lock().unwrap().push((Instant::now(), read));
                         }
@@ -486,6 +581,7 @@ impl Model {
         let mut child = Command::new("python3")
             .args(["-c", script])
             .arg(&log)
+            .arg(json!(WAKE_MESSAGE_TEXT).to_string())
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
@@ -543,6 +639,13 @@ struct Agent {
 }
 
 impl Agent {
+    /// SIGTERM to the agent itself, as its host ends it.
+    fn terminate(&self) {
+        let _ = Command::new("pkill")
+            .args(["-TERM", "-P", &self.child.id().to_string()])
+            .status();
+    }
+
     fn start(argv: Vec<String>, env: Vec<(String, String)>, cwd: &Path, screen: PathBuf) -> Self {
         let mut c = Command::new("python3");
         c.args(["-c", DRIVER]);
@@ -757,6 +860,24 @@ impl Session {
         self.model.as_ref().map(Model::requests).unwrap_or_default()
     }
 
+    /// The messages the stand-in Storm server's `read_messages` returned.
+    fn storm_reads(&self) -> Vec<String> {
+        self.mcp_log
+            .as_ref()
+            .map(|p| std::fs::read_to_string(p).unwrap_or_default())
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .filter_map(|v| v["read"].as_str().map(str::to_string))
+            .collect()
+    }
+
+    /// Queues a message for the stand-in's next `read_messages`.
+    fn queue_message(&self, text: &str) {
+        let log = self.mcp_log.as_ref().expect("a stand-in Storm server");
+        std::fs::write(format!("{}.inbox", log.display()), text).unwrap();
+    }
+
     /// The tools the stand-in Storm server ran.
     fn storm_calls(&self) -> Vec<String> {
         self.mcp_log
@@ -772,11 +893,14 @@ impl Session {
 
 /// A stand-in for Storm's MCP server, named `storm` as the host names it:
 /// it lists a child's tools, some reads, a note write and the deletes, and logs every
-/// call.
+/// call. A `read_messages` waits at most 30 s, as Storm's does, and returns
+/// the message the gate queued (`<log>.inbox`) once there is one;
+/// `gate_pause` takes 10 s.
 const FAKE_STORM_MCP: &str = r#"
-import json, sys, time
+import json, os, sys, time
 LOG = open(sys.argv[1], "a")
-TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder"]
+INBOX = sys.argv[1] + ".inbox"
+TOOLS = ["session_context", "report_result", "read_messages", "list_vaults", "search", "get_note", "create_note", "delete_note", "delete_folder", "gate_pause"]
 for line in sys.stdin:
     try:
         m = json.loads(line)
@@ -792,9 +916,21 @@ for line in sys.stdin:
     elif method == "tools/call":
         LOG.write(json.dumps(m.get("params")) + "\n"); LOG.flush()
         wait = ((m.get("params") or {}).get("arguments") or {}).get("wait")
-        if (m.get("params") or {}).get("name") == "read_messages" and isinstance(wait, int):
-            time.sleep(min(wait, 600))
-        res = {"content": [{"type": "text", "text": "ok"}]}
+        name = (m.get("params") or {}).get("name")
+        text = "ok"
+        if name == "read_messages":
+            until = time.time() + (min(wait, 30) if isinstance(wait, int) else 0)
+            while True:
+                if os.path.exists(INBOX):
+                    text = open(INBOX).read(); os.remove(INBOX)
+                    LOG.write(json.dumps({"read": text}) + "\n"); LOG.flush()
+                    break
+                if time.time() >= until:
+                    break
+                time.sleep(0.2)
+        elif name == "gate_pause":
+            time.sleep(10)
+        res = {"content": [{"type": "text", "text": text}]}
     else:
         res = {}
     sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": m["id"], "result": res}) + "\n")
@@ -814,6 +950,8 @@ struct ClaudeOpts {
     /// The account's own `permissions.defaultMode` (its user settings).
     /// Claude Code 2.1.312's own default is `auto`; `manual` is what asks.
     account_mode: Option<&'static str>,
+    /// Storm's hooks, when not every list's.
+    hooks: Option<Hooks>,
 }
 
 fn workspace() -> tempfile::TempDir {
@@ -861,13 +999,14 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         Path::new(env!("CARGO_BIN_EXE_storm-runtime")),
         None,
         None,
-        &Hooks::all(),
+        &opts.hooks.unwrap_or_else(Hooks::all),
         storm_runtime::harness::Permissions {
             allow: &opts.allow,
             auto_off: opts.auto_off,
         },
     )
     .unwrap();
+    let wakes = opts.hooks.is_none_or(|h| h.wake);
     let mut argv = vec![bin];
     argv.extend(extras.args.iter().map(|a| a.to_string_lossy().to_string()));
     argv.extend(opts.args);
@@ -943,7 +1082,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
             .since(started)
             .iter()
             .any(|v| v.get("harness_session").is_some())
-            && host.waiting())
+            && (host.waiting() || !wakes))
     {
         if real() && agent.screen_has("trust") && started.elapsed() > Duration::from_secs(8) {
             agent.keys("\r");
@@ -970,6 +1109,9 @@ struct OpencodeOpts {
     account_permission: Option<Value>,
     storm_permission: Option<Value>,
     storm_mcp: bool,
+    /// The stand-in Messages API through OpenCode's Anthropic provider,
+    /// which ends each content block on its own, as Claude models stream.
+    anthropic: bool,
 }
 
 fn opencode() -> Session {
@@ -1012,7 +1154,12 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
         }
         None
     } else {
-        let model = Model::start(FAKE_OPENAI, state.path());
+        let (script, npm) = if opts.anthropic {
+            (FAKE_ANTHROPIC, "@ai-sdk/anthropic")
+        } else {
+            (FAKE_OPENAI, "@ai-sdk/openai-compatible")
+        };
+        let model = Model::start(script, state.path());
         let config = json!({
             "$schema": "https://opencode.ai/config.json",
             "model": "gate/m",
@@ -1020,10 +1167,10 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
             "autoupdate": false,
             "share": "disabled",
             "provider": {"gate": {
-                "npm": "@ai-sdk/openai-compatible",
+                "npm": npm,
                 "name": "Gate",
-                "options": {"baseURL": format!("http://127.0.0.1:{}/v1", model.port), "apiKey": "x"},
-                "models": {"m": {"name": "m", "tool_call": true}},
+                "options": {"baseURL": format!("http://127.0.0.1:{}/v1", model.port), "apiKey": FAKE_KEY},
+                "models": {"m": {"name": "m", "tool_call": true, "reasoning": opts.anthropic}},
             }},
         });
         let mut config = config;
@@ -1286,6 +1433,105 @@ fn child_words(provider: &str) {
     c.finish(&s.agent);
 }
 
+/// G-145-O-shapes-<provider>: what a child says reaches its host as a model
+/// writes it, streamed slowly: a word in the message that calls a Storm
+/// tool, a reply after a tool's result, two words in one message around a
+/// thought, and a word in the message that calls the `read_messages` it
+/// then waits in. Every word arrives, once, and nothing of the thought.
+fn child_words_shapes(provider: &str, anthropic: bool) {
+    let gate = format!(
+        "G-145-O-shapes-{provider}{}",
+        if anthropic { "-anthropic" } else { "" }
+    );
+    if !enabled(&gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to say words and call tools)");
+        return;
+    }
+    let mut c = Checks::new(&gate);
+    let (mut s, prefix) = if provider == "claude-code" {
+        let allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+            .iter()
+            .map(|t| format!("mcp__storm__{t}"))
+            .collect();
+        let mut allow = allow;
+        allow.extend(storm_runtime::profile::CHILD_BASELINE.map(String::from));
+        let s = claude_with(ClaudeOpts {
+            args: vec!["--permission-mode".into(), "dontAsk".into()],
+            allow,
+            storm_mcp: true,
+            ..Default::default()
+        });
+        (s, "mcp__storm__")
+    } else {
+        let s = opencode_with(OpencodeOpts {
+            storm_permission: Some(json!({"storm_*": "allow"})),
+            storm_mcp: true,
+            anthropic,
+            ..Default::default()
+        });
+        (s, "storm_")
+    };
+    let pid = std::process::id();
+    let words: Vec<String> = ["first", "second", "third", "fourth"]
+        .iter()
+        .map(|w| format!("{w}{pid}said"))
+        .collect();
+    let turns = format!(
+        "say={}+call={prefix}session_context;say={}+call={prefix}report_result;say={}+think=CANARY-THINKING+say={}+call={prefix}read_messages",
+        words[0], words[1], words[2], words[3]
+    );
+    let at = Instant::now();
+    s.agent.prompt(&format!("TURNS:{turns} SLOW"));
+    let waiting = wait_until(120, || s.storm_calls().iter().any(|t| t == "read_messages"));
+    c.check(
+        &format!(
+            "it reported and waits in read_messages ({:?})",
+            s.storm_calls()
+        ),
+        waiting && s.storm_calls().iter().any(|t| t == "report_result"),
+    );
+    let heard = wait_until(60, || {
+        let said = s.host.said(at);
+        words
+            .iter()
+            .all(|w| said.iter().any(|t| t.contains(w.as_str())))
+    });
+    std::thread::sleep(Duration::from_secs(5));
+    let said = s.host.said(at);
+    c.check(&format!("every word arrives ({said:?})"), heard);
+    for w in &words {
+        c.check(
+            &format!("{w} once"),
+            said.iter().filter(|t| t.contains(w.as_str())).count() == 1,
+        );
+    }
+    c.check(
+        &format!("while its turn goes on ({:?})", s.host.signals(at)),
+        !s.host.signals(at).iter().any(|k| k == "idle"),
+    );
+    c.check(
+        "nothing of its thought, a tool's input or a tool's result",
+        !said.iter().any(|t| t.contains("CANARY") || t == "ok"),
+    );
+    if provider == "claude-code" {
+        // The host ends a child with SIGTERM: its `SessionEnd` hook reads
+        // the transcript once more.
+        let ended = Instant::now();
+        s.agent.terminate();
+        let read = wait_until(15, || {
+            s.host
+                .since(ended)
+                .iter()
+                .any(|v| v.get("transcript").is_some())
+        });
+        c.check("as it ends, its SessionEnd hook reads once more", read);
+    }
+    c.finish(&s.agent);
+}
+
 /// Whether any file under `dir` contains `text`.
 fn files_contain(dir: &Path, text: &str) -> bool {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1309,6 +1555,21 @@ fn g_145_o_claude_code() {
 #[test]
 fn g_145_o_opencode() {
     child_words("opencode");
+}
+
+#[test]
+fn g_145_o_shapes_claude_code() {
+    child_words_shapes("claude-code", false);
+}
+
+#[test]
+fn g_145_o_shapes_opencode() {
+    child_words_shapes("opencode", false);
+}
+
+#[test]
+fn g_145_o_shapes_opencode_anthropic() {
+    child_words_shapes("opencode", true);
 }
 
 /// G-144-W-<provider> (`events`, a parent's) and G-145-W-<provider>
@@ -1410,6 +1671,119 @@ fn g_145_r_opencode() {
 #[test]
 fn g_144_w_claude_code() {
     wake("claude-code", "events");
+}
+
+/// G-145-W-child-claude-code: a child as Storm launches one (`dontAsk`
+/// with the child baseline, and only the hooks the host's own lists give a
+/// child) is woken by a message. A message that arrives while its first
+/// turn still runs, after its `read_messages` came back empty, reaches the
+/// model in that turn (Claude Code adds the waker armed by
+/// `UserPromptSubmit` to the turn's next request); once idle, the next
+/// message wakes it (the waker armed by `Stop`). Each time it reads the
+/// message and reports the next round. Control: idle with nothing pushed,
+/// it calls nothing.
+#[test]
+fn g_145_w_child_claude_code() {
+    let gate = "G-145-W-child-claude-code";
+    if !enabled(gate) {
+        return;
+    }
+    if real() {
+        eprintln!("{gate} SKIP (it needs the stand-in model to call tools)");
+        return;
+    }
+    let mut c = Checks::new(gate);
+    let child = storm_runtime::profile::child_permission_mode("claude-code", "default").unwrap();
+    let mut allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
+        .iter()
+        .map(|t| format!("mcp__storm__{t}"))
+        .collect();
+    allow.extend(child.allow.iter().cloned());
+    allow.push("mcp__storm__gate_pause".into());
+    let mut s = claude_with(ClaudeOpts {
+        args: child.args.clone(),
+        allow,
+        auto_off: child.auto_off,
+        storm_mcp: true,
+        hooks: Some(storm_runtime::harness::Gates::COMPILED.hooks("claude-code", true)),
+        ..Default::default()
+    });
+    let reports = |s: &Session| {
+        s.storm_calls()
+            .iter()
+            .filter(|t| *t == "report_result")
+            .count()
+    };
+    let ended = |s: &Session, at: Instant, word: &str| {
+        s.host
+            .results(at)
+            .iter()
+            .any(|r| r["final_message"].as_str() == Some(word))
+    };
+
+    let at = Instant::now();
+    s.agent.prompt(
+        "TURNS:say=ROUNDONE+call=mcp__storm__report_result;call=mcp__storm__read_messages;call=mcp__storm__gate_pause;say=IDLEONE",
+    );
+    let paused = wait_until(90, || s.storm_calls().iter().any(|t| t == "gate_pause"));
+    c.check(
+        &format!(
+            "round 1 reported, its read came back empty, its turn runs on ({:?})",
+            s.storm_calls()
+        ),
+        paused && reports(&s) == 1 && s.storm_reads().is_empty(),
+    );
+    s.queue_message("TASK-TWO");
+    c.check("a waker waits on the child's socket", s.host.waiting());
+    c.check(
+        "the host's wake reached it mid-turn",
+        s.host.wake("message"),
+    );
+    let read = wait_until(90, || {
+        s.storm_reads().iter().any(|r| r == "TASK-TWO") && reports(&s) == 2
+    });
+    c.check(
+        &format!(
+            "it heard the wake, read the message and reported round 2 ({:?}, {:?})",
+            s.storm_calls(),
+            s.storm_reads()
+        ),
+        read,
+    );
+    c.check(
+        "and its turn ended",
+        wait_until(60, || ended(&s, at, "WOKEDONE")),
+    );
+    c.check("it re-armed its waker", wait_until(30, || s.host.waiting()));
+
+    let calls = s.storm_calls().len();
+    std::thread::sleep(Duration::from_secs(10));
+    c.check(
+        "control: idle with nothing pushed, it calls nothing",
+        s.storm_calls().len() == calls,
+    );
+    let at = Instant::now();
+    let before = reports(&s);
+    s.queue_message("TASK-THREE");
+    c.check(
+        "the host's wake reached the idle child",
+        s.host.wake("message"),
+    );
+    let read = wait_until(90, || {
+        s.storm_reads().iter().any(|r| r == "TASK-THREE") && reports(&s) == before + 1
+    });
+    c.check(
+        &format!(
+            "the idle child woke, read the message and reported the next round ({:?})",
+            s.storm_reads()
+        ),
+        read,
+    );
+    c.check(
+        "and ended that turn",
+        wait_until(60, || ended(&s, at, "WOKEDONE")),
+    );
+    c.finish(&s.agent);
 }
 
 #[test]
@@ -2312,6 +2686,7 @@ fn g_149_claude_code() {
             auto_off,
             storm_mcp: true,
             account_mode: Some("manual"),
+            ..Default::default()
         });
         for tool in GATE_READS
             .iter()

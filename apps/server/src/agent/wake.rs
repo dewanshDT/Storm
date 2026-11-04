@@ -9,7 +9,9 @@
 //! what is waiting through `wait_agent` or `read_messages`. Only agents on
 //! [`events::WAKE`] are told, and that list is empty until a gate
 //! (G-144-W-<provider>, G-145-W-<provider>) passes. Nothing here writes to a
-//! terminal (C9); the only command this file sends is the wake.
+//! terminal (C9); the only command this file sends is the wake. A child
+//! with an unread message whose agent has no gated wake is logged, once
+//! per mark: nothing will wake it if it is idle.
 
 use super::{AgentManager, AgentResult, Command};
 
@@ -19,13 +21,14 @@ pub const EVENTS: &str = "events";
 pub const MESSAGE: &str = "message";
 
 impl AgentManager {
-    /// Whether Storm may wake `provider`'s sessions.
-    pub fn wake_on(&self, provider: &str) -> bool {
+    /// Whether Storm may wake `provider`'s sessions for `kind`: a parent's
+    /// [`EVENTS`] or a child's [`MESSAGE`].
+    pub fn wake_on(&self, provider: &str, kind: &str) -> bool {
         self.wakes
             .lock()
             .unwrap()
             .iter()
-            .any(|w| w.provider == provider)
+            .any(|w| w.provider == provider && w.kind == kind)
     }
 
     /// Test-only: wakes as once their gates have passed.
@@ -70,7 +73,7 @@ impl AgentManager {
         let records = self.store.lock().unwrap().list()?;
         let mut sent = 0;
         for r in records {
-            if r.status != "running" || !self.wake_on(&r.provider) {
+            if r.status != "running" {
                 continue;
             }
             let (kind, mark) = self.unread_mark(&r.id)?;
@@ -84,12 +87,32 @@ impl AgentManager {
             if unchanged {
                 continue;
             }
+            if !self.wake_on(&r.provider, kind) {
+                if kind == MESSAGE && mark > 0 {
+                    tracing::warn!(
+                        session = %r.id,
+                        provider = %r.provider,
+                        mark,
+                        "a child has an unread message but its agent has no gated wake: \
+                         it reads it only if it is still waiting in read_messages"
+                    );
+                    self.live
+                        .lock()
+                        .unwrap()
+                        .sessions
+                        .entry(r.id.clone())
+                        .or_insert_with(super::SessionLive::new)
+                        .wake_sent = Some((kind, mark));
+                }
+                continue;
+            }
             let wake = Command::Wake {
                 session: r.id.clone(),
                 kind: kind.into(),
                 mark,
             };
             if self.send(&r.host_id, wake).is_ok() {
+                tracing::info!(session = %r.id, kind, mark, "told the host what is unread");
                 self.live
                     .lock()
                     .unwrap()

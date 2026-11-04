@@ -74,18 +74,27 @@ pub fn confidence(source: &str) -> &'static str {
     }
 }
 
-/// A provider-native way to tell an idle parent that events wait (144c):
+/// A provider-native way to tell an idle session that something waits:
 /// the mechanism its vendor documents, never terminal input. A provider
-/// joins only once its gate G-144-W-<provider> passes on the real CLI.
+/// joins for one kind only once that kind's gate passes on the real CLI:
+/// `events`, a parent's (G-144-W-<provider>), or `message`, a child's
+/// (G-145-W-<provider>).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GatedWake {
     pub provider: &'static str,
     pub mechanism: &'static str,
+    pub kind: &'static str,
 }
 
-/// No provider's wake has passed its gate. The host keeps the same list
-/// (`harness::WAKE`), spelled the same: a test holds the two equal.
-pub const WAKE: &[GatedWake] = &[];
+/// A Claude Code child's wake: G-145-W-claude-code and
+/// G-145-W-child-claude-code passed locally on 2026-11-02 with Claude Code
+/// 2.1.314 and 2.1.316. No parent's wake is on. The host keeps the same
+/// list (`harness::WAKE`), spelled the same: a test holds the two equal.
+pub const WAKE: &[GatedWake] = &[GatedWake {
+    provider: "claude-code",
+    mechanism: "async_rewake",
+    kind: "message",
+}];
 
 /// The agents whose children's denials are taken (148b), once G-148 passes
 /// for them; it passed locally on 2026-10-30 (Claude Code 2.1.312, OpenCode
@@ -93,8 +102,9 @@ pub const WAKE: &[GatedWake] = &[];
 pub const DENIALS: &[&str] = &["claude-code", "opencode"];
 
 #[cfg(test)]
-pub fn wake_on(provider: &str) -> bool {
-    WAKE.iter().any(|w| w.provider == provider)
+pub fn wake_on(provider: &str, kind: &str) -> bool {
+    WAKE.iter()
+        .any(|w| w.provider == provider && w.kind == kind)
 }
 
 /// What an agent said a round cost (145f), as its own hook or plugin

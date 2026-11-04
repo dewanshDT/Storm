@@ -839,9 +839,16 @@ fn a_144_12_no_event_or_wake_code_writes_to_a_terminal() {
         "an event or wake path reaches a terminal:\n{}",
         offences.join("\n")
     );
-    assert!(events::WAKE.is_empty(), "no wake has passed its gate");
     for provider in ["claude-code", "opencode", "codex", "shell"] {
-        assert!(!events::wake_on(provider), "{provider}");
+        assert!(
+            !events::wake_on(provider, "events"),
+            "no parent's wake: {provider}"
+        );
+        assert_eq!(
+            events::wake_on(provider, "message"),
+            provider == "claude-code",
+            "{provider}"
+        );
     }
 }
 
