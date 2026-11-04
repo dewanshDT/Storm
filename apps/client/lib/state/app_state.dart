@@ -1105,6 +1105,12 @@ final propertiesOpenProvider = StateProvider<bool?>((ref) => null);
 /// Phone layout has no sidebar, so the toggle is a no-op below the breakpoint.
 final sidebarCollapsedProvider = StateProvider<bool>((ref) => false);
 
+/// The folder row last clicked in the sidebar, and when: New note's "here"
+/// while that click is newer than the page it is on (decision 150's New
+/// note, round 5's F4).
+final pickedFolderProvider =
+    StateProvider<({String vault, String folder, DateTime at})?>((ref) => null);
+
 final noteSessionProvider = ChangeNotifierProvider<NoteSession>((ref) {
   // Deliberately `watch(apiProvider)` + `read(syncEngineProvider)`: the
   // session must be rebuilt when the server connection changes, but must

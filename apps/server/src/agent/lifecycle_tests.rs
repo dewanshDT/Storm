@@ -60,10 +60,18 @@ const RESULTS: &[ResultSource] = &[ResultSource {
     source: PROVIDER_HOOK,
 }];
 
-const WAKES: &[GatedWake] = &[GatedWake {
-    provider: "claude-code",
-    mechanism: "async_rewake",
-}];
+const WAKES: &[GatedWake] = &[
+    GatedWake {
+        provider: "claude-code",
+        mechanism: "async_rewake",
+        kind: "events",
+    },
+    GatedWake {
+        provider: "claude-code",
+        mechanism: "async_rewake",
+        kind: "message",
+    },
+];
 
 struct Fixture {
     m: AgentManager,
@@ -577,15 +585,7 @@ fn a_wake_mark_goes_only_to_a_gated_agents_host_and_once_per_mark() {
     let p = f.launch(None);
     let c = f.child(&p, "count the tests");
     f.sent();
-    assert!(events::WAKE.is_empty());
     f.m.report_result(&c, "succeeded", "done", None).unwrap();
-    assert_eq!(f.m.sync_wakes().unwrap(), 0, "no wake has passed its gate");
-    assert!(f.sent().is_empty());
-
-    f.m.gate_wake_for_tests(WAKES);
-    assert_eq!(f.m.unread_mark(&p).unwrap().0, wake::EVENTS);
-    assert_eq!(f.m.unread_mark(&c).unwrap().0, wake::MESSAGE);
-    f.m.sync_wakes().unwrap();
     let marks = |sent: Vec<Command>| -> Vec<(String, String, i64)> {
         sent.into_iter()
             .filter_map(|c| match c {
@@ -598,13 +598,18 @@ fn a_wake_mark_goes_only_to_a_gated_agents_host_and_once_per_mark() {
             })
             .collect()
     };
+    // Compiled: only a Claude Code child's wake has passed its gate.
+    assert_eq!(f.m.sync_wakes().unwrap(), 1);
+    assert_eq!(marks(f.sent()), [(c.clone(), "message".to_string(), 0)]);
+
+    f.m.gate_wake_for_tests(WAKES);
+    assert_eq!(f.m.unread_mark(&p).unwrap().0, wake::EVENTS);
+    assert_eq!(f.m.unread_mark(&c).unwrap().0, wake::MESSAGE);
+    f.m.sync_wakes().unwrap();
     let last_seq = f.last(&p).seq;
     assert_eq!(
         marks(f.sent()),
-        [
-            (p.clone(), "events".to_string(), last_seq),
-            (c.clone(), "message".to_string(), 0)
-        ]
+        [(p.clone(), "events".to_string(), last_seq)]
     );
     assert_eq!(f.m.sync_wakes().unwrap(), 0, "each mark once");
 

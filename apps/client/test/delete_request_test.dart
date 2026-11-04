@@ -7,7 +7,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:storm/agent/delete_request.dart' show kDeleteLaterNote;
+import 'package:storm/agent/delete_request.dart'
+    show DeleteAsker, kDeleteLaterNote;
 import 'package:storm/router.dart';
 import 'package:storm/ui/controls.dart';
 
@@ -163,7 +164,11 @@ void main() {
         find.byKey(const Key('delete-request-open-session')),
         findsOneWidget,
       );
-      expect(find.text('TIDIER SAYS:'), findsOneWidget);
+      expect(
+        find.text('CLAUDE CODE SAYS:'),
+        findsOneWidget,
+        reason: 'its agent, not the title its terminal gave the session',
+      );
       expect(
         t.widget<Text>(find.byKey(const Key('delete-request-reason'))).data,
         _reason,
@@ -298,6 +303,56 @@ void main() {
       await t.pump(const Duration(seconds: 10));
       await t.pumpAndSettle();
       expect(agents.count('GET', '/v1/agent/delete-requests'), 1);
+      await disposeShell(t, c);
+    });
+  });
+
+  group('round 5 rough edges', () {
+    test('the reason is said by the agent, or a child by its given name', () {
+      const titled = DeleteAsker(
+        sessionId: 'ags_a',
+        name: 'Words-child agent test',
+        provider: 'opencode',
+      );
+      expect(titled.speaker, 'OpenCode');
+      const child = DeleteAsker(
+        sessionId: 'ags_b',
+        name: 'Words-child agent test',
+        provider: 'claude-code',
+        given: 'words-child',
+      );
+      expect(child.speaker, 'words-child');
+      expect(
+        DeleteAsker.fromJson(const {
+          'title': 'A title',
+          'provider': '',
+        }).speaker,
+        'The agent',
+      );
+    });
+
+    testWidgets('Esc on the dialog over a session closes only the dialog', (
+      t,
+    ) async {
+      final pending = _request(kind: 'note');
+      final session = {
+        ...agentSession('ags_d', name: 'tidier'),
+        'needs_attention': 'delete_approval',
+        'delete_request': pending,
+      };
+      final (c, deletes) = await _open(t, sessions: [session]);
+      await t.sendKeyEvent(LogicalKeyboardKey.escape);
+      await t.pumpAndSettle();
+      c.read(routerProvider).go('/agents/s/ags_d');
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('delete-request-review')));
+      await t.pumpAndSettle();
+      expect(_dialog(), findsOneWidget);
+      await t.sendKeyEvent(LogicalKeyboardKey.escape);
+      await t.pumpAndSettle();
+      expect(_dialog(), findsNothing);
+      expect(c.read(routerProvider).state.uri.path, '/agents/s/ags_d');
+      expect(deletes.answers, isEmpty);
       await disposeShell(t, c);
     });
   });

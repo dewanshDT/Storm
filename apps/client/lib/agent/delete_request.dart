@@ -18,6 +18,7 @@ class DeleteAsker {
     required this.sessionId,
     required this.name,
     required this.provider,
+    this.given,
     this.model,
     this.context,
   });
@@ -25,6 +26,9 @@ class DeleteAsker {
   final String sessionId;
   final String name;
   final String provider;
+
+  /// The name its parent gave a child (145b).
+  final String? given;
   final String? model;
   final SessionContext? context;
 
@@ -38,10 +42,16 @@ class DeleteAsker {
         : null,
   );
 
+  /// Who the reason is from: a child by its given name, otherwise its
+  /// agent, never the session's title, which its terminal sets.
+  String get speaker =>
+      given ?? (provider.isEmpty ? 'The agent' : providerLabel(provider));
+
   factory DeleteAsker.of(AgentSession s) => DeleteAsker(
     sessionId: s.id,
     name: s.displayName,
     provider: s.provider,
+    given: s.spawn.isChild ? s.name : null,
     model: s.model,
     context: s.context,
   );
@@ -251,14 +261,18 @@ class _DeleteRequestDialogState extends State<DeleteRequestDialog> {
   }
 
   /// Esc closes it, as Later does, wherever focus is: a page the shell's
-  /// own navigator finishes while this is open takes focus.
+  /// own navigator finishes while this is open takes focus. Closed after
+  /// the key has gone through the focus tree, never before: the dialog's
+  /// own Esc would otherwise pop the page beneath it.
   bool _key(KeyEvent e) {
     if (e is! KeyDownEvent || e.logicalKey != LogicalKeyboardKey.escape) {
       return false;
     }
     final route = ModalRoute.of(context);
     if (!mounted || route == null || !route.isCurrent) return false;
-    Navigator.of(context).pop();
+    scheduleMicrotask(() {
+      if (mounted && route.isCurrent) Navigator.of(context).pop();
+    });
     return true;
   }
 
@@ -322,7 +336,11 @@ class _DeleteRequestDialogState extends State<DeleteRequestDialog> {
                 ),
               ),
               SizedBox(height: t.sp),
-              Text('${a.name.toUpperCase()} SAYS:', style: agentKey(t)),
+              Text(
+                '${a.speaker.toUpperCase()} SAYS:',
+                key: const Key('delete-request-says'),
+                style: agentKey(t),
+              ),
               SizedBox(height: t.sp * 0.5),
               Container(
                 padding: EdgeInsets.all(t.sp),

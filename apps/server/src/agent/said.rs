@@ -18,7 +18,8 @@ use super::{AgentManager, AgentResult, now};
 
 /// The agents whose children's words are taken, once G-145-O passes for
 /// them; it passed locally on 2026-10-31 (Claude Code 2.1.314, OpenCode
-/// 1.19.4). The host keeps the same list (`harness::SAID`), spelled the
+/// 1.19.4), and with streamed shapes on 2026-11-02 (Claude Code 2.1.314
+/// and 2.1.316, OpenCode 1.19.4). The host keeps the same list (`harness::SAID`), spelled the
 /// same: a test holds the two equal.
 pub const SAID: &[&str] = &["claude-code", "opencode"];
 
@@ -122,11 +123,18 @@ impl AgentManager {
     /// kept. Returns how many messages it kept.
     pub fn said(&self, host_id: &str, session_id: &str, report: &SaidReport) -> AgentResult<usize> {
         let r = self.owned_by(host_id, session_id)?;
-        if r.status != "running" || !self.said_on(&r.provider) {
-            return Ok(0);
+        let dropped = |why: &str| {
+            tracing::debug!(session = session_id, why, "a child's words were not kept");
+            Ok(0)
+        };
+        if r.status != "running" {
+            return dropped("not running");
+        }
+        if !self.said_on(&r.provider) {
+            return dropped("its agent's gate is off");
         }
         if !matches!(report.source.as_deref(), None | Some(PROVIDER_HOOK)) {
-            return Ok(0);
+            return dropped("not from its hook");
         }
         if self
             .store
@@ -136,7 +144,7 @@ impl AgentManager {
             .parent_session
             .is_none()
         {
-            return Ok(0);
+            return dropped("not a child");
         }
         let at = now();
         let skip = report.messages.len().saturating_sub(MAX_SAID_PER_CHILD);

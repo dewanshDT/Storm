@@ -147,7 +147,7 @@ void main() {
     expect(find.byKey(const Key('new-note-hint')), findsOneWidget);
     await tester.enterText(find.byType(TextField).last, 'Q1/Plan');
     await tester.pump();
-    expect(where(), 'in Work/Q1');
+    expect(where(), 'in Work / Q1');
     await tester.enterText(find.byType(TextField).last, '/Plan');
     await tester.pump();
     expect(where(), 'at the top of the vault');
@@ -179,6 +179,152 @@ void main() {
       await disposeShell(tester, c);
     });
   }
+
+  group('round 5 F4: here, the whole destination, and a create that '
+      'makes nothing', () {
+    const wide = Size(1400, 900);
+    String where(WidgetTester tester) =>
+        tester.widget<Text>(find.byKey(const Key('new-note-where'))).data!;
+
+    Future<void> name(WidgetTester tester, String text) async {
+      await tester.enterText(find.byType(TextField).last, text);
+      await tester.pump();
+    }
+
+    testWidgets('a folder clicked in the sidebar is here, from a page with '
+        'no folder of its own', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: wide);
+      c.read(routerProvider).go(Routes.trash(FakeServer.primaryVault));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('folder:Projects')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('folder:Projects/Storm')));
+      await tester.pumpAndSettle();
+      await openDialog(tester);
+      expect(where(tester), 'in Projects / Storm');
+      await name(tester, 'F4 Folder/F4 Note');
+      expect(where(tester), 'in Projects / Storm / F4 Folder');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+      expect(
+        serverOf(c).notes.values.map((n) => n.path),
+        contains('Projects/Storm/F4 Folder/F4 Note.md'),
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an open note\'s folder is here, until a folder is clicked', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: wide);
+      final design = serverOf(
+        c,
+      ).notes.values.firstWhere((n) => n.path == 'Projects/Storm/Design.md');
+      c
+          .read(routerProvider)
+          .go(Routes.note(FakeServer.primaryVault, design.id));
+      await tester.pumpAndSettle();
+      await openDialog(tester);
+      expect(where(tester), 'in Projects / Storm');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('folder:Daily')));
+      await tester.pumpAndSettle();
+      await openDialog(tester);
+      expect(where(tester), 'in Daily', reason: 'the click is newer');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      final welcome = serverOf(
+        c,
+      ).notes.values.firstWhere((n) => n.path == 'Welcome.md');
+      c
+          .read(routerProvider)
+          .go(Routes.note(FakeServer.primaryVault, welcome.id));
+      await tester.pumpAndSettle();
+      await openDialog(tester);
+      expect(
+        where(tester),
+        'at the top of the vault',
+        reason: 'opening a note after the click makes its folder here',
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the hint says how here is chosen', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      await openVault(tester, c);
+      await openDialog(tester);
+      final hint = tester
+          .widget<Text>(find.byKey(const Key('new-note-hint')))
+          .data!;
+      expect(hint, contains('a folder in the sidebar'));
+      expect(hint, contains('the note you opened'));
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a name that is taken says so and keeps the dialog open', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      c
+          .read(routerProvider)
+          .go(Routes.folder(FakeServer.primaryVault, 'Daily'));
+      await tester.pumpAndSettle();
+      final before = serverOf(c).notes.length;
+      await openDialog(tester);
+      await name(tester, '2026-08-05');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+      expect(find.text('New note'), findsOneWidget, reason: 'still open');
+      expect(where(tester), 'A note with that name is already in Daily.');
+      expect(serverOf(c).notes.length, before);
+      await name(tester, '2026-08-06');
+      expect(where(tester), 'in Daily', reason: 'typing clears it');
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a create the server refuses says why and keeps the dialog '
+        'open', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c);
+      await openVault(tester, c);
+      serverOf(c).notes['late'] = ServerNote(
+        id: 'late',
+        path: 'Late.md',
+        content: '',
+        version: 1,
+      );
+      final before = serverOf(c).notes.length;
+      await openDialog(tester);
+      await name(tester, 'Late');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+      expect(find.text('New note'), findsOneWidget, reason: 'still open');
+      expect(where(tester), startsWith('Nothing was created: '));
+      expect(where(tester), contains('already exists'));
+      expect(serverOf(c).notes.length, before);
+      expect(
+        c.read(routerProvider).state.uri.path,
+        Routes.browse(FakeServer.primaryVault),
+        reason: 'nothing was opened',
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      await disposeShell(tester, c);
+    });
+  });
 
   group('path validation mirrors the server rules', () {
     test('accepts ordinary paths', () {

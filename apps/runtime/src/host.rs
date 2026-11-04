@@ -28,7 +28,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -309,12 +309,17 @@ struct Events {
     unread: watch::Sender<(Option<&'static str>, i64)>,
     woken: Mutex<i64>,
     waiter: watch::Sender<u64>,
+    /// The number of the waiter holding its connection now, 0 for none.
+    armed: AtomicU64,
     /// Set when the session ends, so its waiter lets go.
     gone: watch::Sender<bool>,
     /// 145g: the Claude Code transcript a child's `harness-said` last read,
     /// and where that read stopped. Held across one hook's exchange, so two
     /// hooks at once never read the same words.
     transcript: tokio::sync::Mutex<Option<(String, u64)>>,
+    /// 145g's log lines, each once per session: its words reached the
+    /// host, and why they did not.
+    said_logged: Mutex<std::collections::HashSet<&'static str>>,
 }
 
 impl Events {
@@ -337,9 +342,16 @@ impl Events {
             unread: watch::channel((None, 0)).0,
             woken: Mutex::new(0),
             waiter: watch::channel(0).0,
+            armed: AtomicU64::new(0),
             gone: watch::channel(false).0,
             transcript: tokio::sync::Mutex::new(None),
+            said_logged: Mutex::new(Default::default()),
         }
+    }
+
+    /// Whether 145g's `what` is logged for the first time this session.
+    fn said_first(&self, what: &'static str) -> bool {
+        self.said_logged.lock().unwrap().insert(what)
     }
 
     /// The attention its hooks report now: a permission prompt first, then
@@ -1657,7 +1669,28 @@ impl Host {
                         "message" => Some("message"),
                         _ => None,
                     };
-                    s.events.unread.send_replace((kind, mark.max(0)));
+                    let mark = mark.max(0);
+                    let events = &s.events;
+                    if let Some(kind) = kind.filter(|_| mark > *events.woken.lock().unwrap()) {
+                        if !events.hooks.wake {
+                            tracing::warn!(
+                                %session,
+                                kind,
+                                mark,
+                                "something is unread, but this session's agent has no waker"
+                            );
+                        } else if events.armed.load(Ordering::SeqCst) == 0 {
+                            tracing::info!(
+                                %session,
+                                kind,
+                                mark,
+                                "something is unread; no waker is armed now, the agent's next one wakes it"
+                            );
+                        } else {
+                            tracing::info!(%session, kind, mark, "something is unread: waking the agent");
+                        }
+                    }
+                    events.unread.send_replace((kind, mark));
                 }
             }
             Command::Input { session, data } => {
@@ -3059,12 +3092,29 @@ impl Host {
         tracing::debug!(%session, messages = said.len(), "a child said something");
         let messages: Vec<serde_json::Value> =
             said.into_iter().map(|t| json!({"text": t})).collect();
-        let _ = self
+        let posted = self
             .post(
                 &format!("/v1/runtime/sessions/{session}/said"),
                 &json!({"messages": messages, "source": crate::harness::PROVIDER_HOOK}),
             )
             .await;
+        match posted {
+            Ok(status) if status.is_success() => {
+                if events.said_first("posted") {
+                    tracing::info!(%session, "Storm has a child's first words");
+                }
+            }
+            Ok(status) => {
+                if events.said_first("refused") {
+                    tracing::warn!(%session, %status, "Storm did not take a child's words");
+                }
+            }
+            Err(e) => {
+                if events.said_first("unsent") {
+                    tracing::warn!(%session, error = %e, "a child's words did not reach Storm");
+                }
+            }
+        }
     }
 
     /// Claude Code's `harness-said` (145g): told where the last read of its
@@ -3087,6 +3137,7 @@ impl Host {
             return;
         }
         let Ok(mut at) = tokio::time::timeout(SAID_EXCHANGE, events.transcript.lock()).await else {
+            tracing::debug!(%session, "a child's transcript read waited too long for another");
             return;
         };
         let offset = match &*at {
@@ -3103,11 +3154,22 @@ impl Host {
         let read = tokio::time::timeout(SAID_EXCHANGE, reader.read_line(&mut line)).await;
         drop(write);
         let Ok(Ok(_)) = read else {
+            tracing::debug!(%session, "a child's transcript read sent nothing back");
             return;
         };
         let Ok(read) = serde_json::from_str::<crate::harness::TranscriptRead>(&line) else {
+            tracing::debug!(%session, "a child's transcript read was not understood");
             return;
         };
+        if events.said_first("read") {
+            tracing::info!(%session, "a child's hook read its transcript");
+        }
+        if let Some(error) = &read.error
+            && events.said_first("unreadable")
+        {
+            tracing::warn!(%session, %error, "a child's hook could not read its transcript");
+        }
+        tracing::debug!(%session, from = offset, to = read.offset, messages = read.said.len(), "a child's transcript read");
         *at = Some((report.transcript, read.offset));
         drop(at);
         self.said_reported(&session, &events, read.said).await;
@@ -3143,7 +3205,9 @@ impl Host {
             });
             n
         };
-        tracing::debug!(%session, armed_by = %report.wake, waiter = me, "waker armed");
+        tracing::info!(%session, armed_by = %report.wake, waiter = me, "waker armed");
+        events.armed.store(me, Ordering::SeqCst);
+        let _disarm = Disarm(&events.armed, me);
         let mut waiters = events.waiter.subscribe();
         let mut unread = events.unread.subscribe();
         let mut gone = events.gone.subscribe();
@@ -3170,7 +3234,9 @@ impl Host {
                 if told.is_ok() {
                     let mut woken = events.woken.lock().unwrap();
                     *woken = (*woken).max(mark);
-                    tracing::info!(%session, kind, "woke the agent: something is unread");
+                    tracing::info!(%session, kind, mark, waiter = me, "woke the agent: something is unread");
+                } else {
+                    tracing::warn!(%session, kind, mark, "the waker went before it could wake the agent");
                 }
                 return;
             }
@@ -3511,6 +3577,18 @@ fn read_table(state_dir: &Path) -> SessionTable {
         .ok()
         .and_then(|b| serde_json::from_slice(&b).ok())
         .unwrap_or_default()
+}
+
+/// Clears a session's armed waiter when that waiter lets go, unless a
+/// newer one took over.
+struct Disarm<'a>(&'a AtomicU64, u64);
+
+impl Drop for Disarm<'_> {
+    fn drop(&mut self) {
+        let _ = self
+            .0
+            .compare_exchange(self.1, 0, Ordering::SeqCst, Ordering::SeqCst);
+    }
 }
 
 /// Splits the first complete SSE event off `buf` (an event ends at a blank
@@ -7783,6 +7861,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         wakes: &[crate::harness::GatedWake {
             provider: "claude-code",
             mechanism: "async_rewake",
+            kind: "message",
         }],
     };
 

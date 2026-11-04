@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../api/models.dart' show NoteMeta;
 import '../../keyboard/storm_global_shortcuts.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
@@ -45,38 +46,68 @@ class VaultShell extends ConsumerStatefulWidget {
 }
 
 class _VaultShellState extends ConsumerState<VaultShell> {
-  Future<void> _createNote() async {
-    // The folder follows where they are rather than being typed — a note made
-    // from inside `Projects/Storm` almost always belongs there.
-    final here = Routes.folderOf(GoRouterState.of(context).uri);
-    final wanted = await promptForNewNote(context, folder: here);
-    if (wanted == null || !mounted) return;
+  Uri? _page;
+  DateTime _arrived = DateTime.now();
 
-    final created = await ref
-        .read(syncEngineProvider)
-        .create(
-          path: noteFileName(wanted.name, folder: here),
-          // A colour chosen up front is just the note's first property.
-          content: wanted.accent.isNone
-              ? ''
-              : '---\n$kColorKey: ${wanted.accent.name}\n---\n\n',
-        );
-    if (!mounted) return;
-
-    if (created.meta == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(created.error ?? 'Could not create the note')),
-      );
-      return;
+  /// Where a new note or folder goes: whichever was picked last, a folder
+  /// row clicked in the sidebar or the page itself (an opened folder, or an
+  /// open note's folder); otherwise the top of the vault.
+  String _here() {
+    final uri = GoRouterState.of(context).uri;
+    final picked = ref.read(pickedFolderProvider);
+    if (picked != null &&
+        picked.vault == Routes.vaultOf(uri) &&
+        picked.at.isAfter(_arrived)) {
+      return picked.folder;
     }
+    final noteId = openNoteIdOf(uri);
+    if (noteId != null) {
+      final notes = ref.read(treeProvider).value ?? const <NoteMeta>[];
+      final note = notes.where((n) => n.id == noteId).firstOrNull;
+      if (note != null) return note.folder;
+    }
+    return Routes.folderOf(uri);
+  }
+
+  Future<void> _createNote() async {
+    final here = _here();
+    NoteMeta? made;
+    final wanted = await promptForNewNote(
+      context,
+      folder: here,
+      create: (note) async {
+        final path = noteFileName(note.name, folder: here);
+        final notes = ref.read(treeProvider).value ?? const <NoteMeta>[];
+        if (notes.any((n) => n.path.toLowerCase() == path.toLowerCase())) {
+          return 'A note with that name is already '
+              '${newNoteDestination(path)}.';
+        }
+        final created = await ref
+            .read(syncEngineProvider)
+            .create(
+              path: path,
+              // A colour chosen up front is just the note's first property.
+              content: note.accent.isNone
+                  ? ''
+                  : '---\n$kColorKey: ${note.accent.name}\n---\n\n',
+            );
+        made = created.meta;
+        if (made != null) return null;
+        final why = (created.error ?? 'the server did not make the note')
+            .replaceAll(RegExp(r'\.+$'), '');
+        return 'Nothing was created: $why.';
+      },
+    );
+    final note = made;
+    if (wanted == null || note == null || !mounted) return;
     ref.invalidate(treeProvider);
     final vaultId = Routes.vaultOf(GoRouterState.of(context).uri);
-    context.push(Routes.note(vaultId, created.meta!.id));
+    context.push(Routes.note(vaultId, note.id));
   }
 
   /// Creating a folder, offered alongside it.
   Future<void> _createFolder() async {
-    final here = Routes.folderOf(GoRouterState.of(context).uri);
+    final here = _here();
     await createFolder(
       context,
       ref,
@@ -87,7 +118,12 @@ class _VaultShellState extends ConsumerState<VaultShell> {
 
   @override
   Widget build(BuildContext context) {
-    final vaultId = Routes.vaultOf(GoRouterState.of(context).uri);
+    final uri = GoRouterState.of(context).uri;
+    if (uri != _page) {
+      _page = uri;
+      _arrived = DateTime.now();
+    }
+    final vaultId = Routes.vaultOf(uri);
     final collapsed = ref.watch(sidebarCollapsedProvider);
 
     return VaultGate(
