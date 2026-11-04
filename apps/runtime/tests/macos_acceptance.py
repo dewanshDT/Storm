@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""macOS Runtime Host acceptance, on a real Mac: AC-M1–AC-M9 (decision 83).
+"""macOS Runtime Host acceptance, on a real Mac: AC-M1–AC-M9 (decision 83),
+and G-133-6 (decision 133: Claude Code and OpenCode installed, run, updated
+and removed by the host itself, from the vendors' real channels).
 
 The vault's *Agent Runtime/macOS Runtime Host* (D14) defines the criteria.
 This drives them against the **installed** host: the real `storm-runtime
@@ -32,7 +34,9 @@ Exits non-zero on any FAIL.
 """
 
 import base64
+import hashlib
 import http.client
+import io
 import json
 import os
 import pwd
@@ -45,6 +49,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "server", "tests"))
@@ -382,6 +387,28 @@ class Owner:
     def end(self, sid):
         return call("POST", f"/v1/agent/sessions/{sid}/end", auth=self.auth)[0]
 
+    def refresh(self, host_id):
+        """Asking for a host's workspaces makes it re-report its inventory."""
+        call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=self.auth, timeout=20)
+
+    def agent(self, host_id, agent):
+        h = self.host(host_id) or {}
+        return next((p for p in (h.get("capabilities") or {}).get("providers", []) if p["id"] == agent), {})
+
+    def agent_job(self, host_id, agent, op, timeout=660):
+        """`(status, job)`: the POST's answer when it was refused, else the
+        finished job, polled to its end."""
+        status, job = call("POST", f"/v1/agent/hosts/{host_id}/agents/{agent}", {"op": op}, auth=self.auth)
+        if status != 202:
+            return status, job
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            _, job = call("GET", f"/v1/agent/hosts/{host_id}/agents/jobs/{job['id']}", auth=self.auth)
+            if job.get("state") in ("done", "failed"):
+                return status, job
+            time.sleep(1)
+        return status, job
+
     def enrollment(self):
         status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=self.auth)
         if status != 200:
@@ -438,6 +465,172 @@ def stub_providers():
         if rc == 0:
             made.append(path)
     return prefix, made, real
+
+
+MANAGED = f"{STATE}/agents/managed"
+G1336 = (("claude-code", "claude"), ("opencode", "opencode"))
+installed = {}  # agent -> version, for the report
+releases = {}  # agent -> the binary bin/<command> points at
+
+
+def move(src, dst):
+    if sh(["mv", src, dst])[0] != 0:
+        sh(["mv", src, dst], sudo=True)
+
+
+def sha256_of(path):
+    rc, out = sh(["shasum", "-a", "256", path], sudo=True)
+    return out.split()[0] if rc == 0 and out else None
+
+
+def fetch(url, timeout=60):
+    req = urllib.request.Request(url, headers={"user-agent": "storm-macos-acceptance"})
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == 2:
+                raise
+            print(f"  RETRY  fetching {url}: {e}", flush=True)
+
+
+def published_digest(agent, version, binary):
+    """The vendor's own word for the bytes `binary` should hold, fetched here
+    independently of the host: Claude Code's manifest SHA-256 for this
+    platform; for OpenCode, the GitHub asset's digest, checked against the
+    asset, and the hash of the binary inside it."""
+    arch = "arm64" if os.uname().machine == "arm64" else "x64"
+    if agent == "claude-code":
+        base = f"https://downloads.claude.ai/claude-code-releases/{version}"
+        manifest = json.loads(fetch(f"{base}/manifest.json"))
+        return manifest["platforms"][f"darwin-{arch}"]["checksum"], None
+    name = f"opencode-darwin-{arch}.zip"
+    release = json.loads(fetch(f"https://api.github.com/repos/anomalyco/opencode/releases/tags/v{version}"))
+    digest = next(a["digest"] for a in release["assets"] if a["name"] == name).removeprefix("sha256:")
+    data = fetch(f"https://github.com/anomalyco/opencode/releases/download/v{version}/{name}", timeout=300)
+    asset_ok = hashlib.sha256(data).hexdigest() == digest
+    inner = hashlib.sha256(zipfile.ZipFile(io.BytesIO(data)).read(binary)).hexdigest()
+    return inner, asset_ok
+
+
+def g_133_6(owner, host_id, stubs):
+    """Decision 133's install, through the server's routes, as the app
+    drives it: on this Mac, as _stormruntime under launchd, against the
+    vendors' real channels. The app offers Install only for an agent that
+    resolves nowhere, so AC-M3's stubs are moved aside first; they come back
+    before the sessions, where the managed binary must still win."""
+    aside = [(s, s + ".g1336") for s in stubs]
+    try:
+        for s, off in aside:
+            move(s, off)
+        owner.refresh(host_id)
+        for agent, _ in G1336:
+            cap = try_wait(lambda: (lambda c: c if c.get("available") is False else None)(owner.agent(host_id, agent)),
+                           timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"{agent} resolves nowhere, and Install is offered",
+                  cap.get("available") is False and cap.get("installable") is True and "source" not in cap, cap)
+
+        for agent, command in G1336:
+            status, job = owner.agent_job(host_id, agent, "install")
+            if job.get("error") in ("download_failed", "timeout"):
+                print(f"  RETRY  [G-133-6] {agent} install failed {job.get('error')}; once more", flush=True)
+                status, job = owner.agent_job(host_id, agent, "install")
+            version = job.get("version")
+            ok = check("G-133-6", f"{agent} installs ({version or job.get('error')})",
+                       status == 202 and job.get("state") == "done" and version, (status, job))
+            if not ok:
+                continue
+            installed[agent] = version
+            link = f"{MANAGED}/bin/{command}"
+            rc, target = sh(["readlink", link], sudo=True)
+            target = target.strip()
+            release = os.path.basename(os.path.dirname(target))
+            releases[agent] = target
+            check("G-133-6", f"bin/{command} is Storm's, in its release folder",
+                  rc == 0 and target.startswith(f"{MANAGED}/{agent}/") and release == version, (rc, target))
+            rc, out = sh([link, "--version"], user=ACCOUNT, timeout=30)
+            check("G-133-6", f"the managed {command} answers --version as _stormruntime", rc == 0 and version in out, out)
+            try:
+                want, asset_ok = published_digest(agent, release, command)
+            except Exception as e:
+                want, asset_ok = None, e
+            got = sha256_of(target)
+            if agent == "claude-code":
+                check("G-133-6", "its bytes are the manifest's SHA-256", want and got == want, (got, want))
+            else:
+                check("G-133-6", "the GitHub asset matches its published digest", asset_ok is True, asset_ok)
+                check("G-133-6", "and the installed binary is that asset's", want and got == want, (got, want))
+            owner.refresh(host_id)
+            cap = try_wait(lambda: (lambda c: c if c.get("source") == "storm" and c.get("version") else None)(
+                owner.agent(host_id, agent)), timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"the host reports {agent} {version}, source storm",
+                  cap.get("available") is True and cap.get("source") == "storm" and cap.get("version") == version, cap)
+
+        for s, off in aside:
+            move(off, s)
+        aside = []
+        owner.refresh(host_id)
+        for agent, command in G1336:
+            if agent not in installed:
+                continue
+            cap = owner.agent(host_id, agent)
+            check("G-133-6", f"with the stub back on PATH, {agent} still resolves to Storm's (bin/ first)",
+                  cap.get("source") == "storm", cap)
+            sid = owner.launch(host_id, agent)
+            exe = releases[agent]
+            running = try_wait(lambda: exe in sh(["lsof", "-a", "-u", ACCOUNT, "-d", "txt", "-Fn"], sudo=True)[1],
+                               timeout=20)
+            check("G-133-6", f"a {agent} session starts and execs the managed binary", running,
+                  sh(["ps", "-axo", "user=,pid=,comm=", "-U", ACCOUNT])[1][-400:])
+            s = owner.stream(sid)
+            try:
+                text, _ = s.until(lambda e, d, t: len(t.strip()) > 0)
+            except Exception as e:
+                text = repr(e)
+            finally:
+                s.close()
+            check("G-133-6", f"the {agent} session draws its own screen, not the stub's",
+                  text.strip() and "STUB=" not in text, text[-300:])
+            check("G-133-6", "and is still running", owner.session(sid).get("status") == "running", owner.session(sid))
+            owner.end(sid)
+            wait(lambda: owner.session(sid).get("status") == "stopped", "stopped", timeout=20)
+
+        for agent, command in G1336:
+            if agent not in installed:
+                continue
+            listing = lambda: sh(["sh", "-c", f"ls -i '{MANAGED}/{agent}'; readlink '{MANAGED}/bin/{command}'"], sudo=True)[1]
+            before = listing()
+            status, job = owner.agent_job(host_id, agent, "update")
+            if job.get("error") in ("download_failed", "timeout"):
+                print(f"  RETRY  [G-133-6] {agent} update failed {job.get('error')}; once more", flush=True)
+                status, job = owner.agent_job(host_id, agent, "update")
+            check("G-133-6", f"{agent} update on the latest is done with the same version",
+                  status == 202 and job.get("state") == "done" and job.get("version") == installed[agent], (status, job))
+            check("G-133-6", "and changed nothing", listing() == before, (before, listing()))
+
+            status, job = owner.agent_job(host_id, agent, "remove")
+            check("G-133-6", f"{agent} remove is done", status == 202 and job.get("state") == "done", (status, job))
+            gone = sh(["sh", "-c", f"test -e '{MANAGED}/bin/{command}' || test -L '{MANAGED}/bin/{command}' "
+                       f"|| test -e '{MANAGED}/{agent}'"], sudo=True)[0] != 0
+            check("G-133-6", "and leaves nothing of it under agents/managed", gone,
+                  sh(["ls", "-la", MANAGED, f"{MANAGED}/bin"], sudo=True)[1])
+            owner.refresh(host_id)
+            cap = try_wait(lambda: (lambda c: c if c.get("source") != "storm" else None)(owner.agent(host_id, agent)),
+                           timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"the host no longer reports {agent} as Storm's", cap.get("source") != "storm", cap)
+            status, job = owner.agent_job(host_id, agent, "remove")
+            refused = (status == 409 and (job or {}).get("error") == "not_managed") or \
+                      (status == 202 and job.get("state") == "failed" and job.get("error") == "not_managed")
+            check("G-133-6", f"a second {agent} remove is not_managed", refused, (status, job))
+        # The host's own `claude plugin list` (131) may still be running.
+        stray = lambda: [p for p in account_processes() if p[0] != daemon_pid()]
+        check("G-133-6", "nothing the agents started is left running", try_wait(lambda: not stray(), timeout=20), stray())
+        rc, out = sh(["sh", "-c", f"ls -A '{HOME}/.local/bin' 2>/dev/null"], sudo=True)
+        check("G-133-6", "no agent installed itself into the account's ~/.local/bin", not out.strip(), out)
+    finally:
+        for s, off in aside:
+            move(off, s)
 
 
 def main():
@@ -741,6 +934,10 @@ def main():
         check("M7", "the host comes back with the original config",
               try_wait(lambda: owner.online(host_id), timeout=60) is not None, launchd())
 
+        # -------------------------------------------------------------- G-133-6
+        print("\n=== G-133-6: agent install on a macOS host ===")
+        g_133_6(owner, host_id, stubs)
+
         # ---------------------------------------------------------------- AC-M8
         print("\n=== AC-M8: secrets ===")
         _, host_log = sh(["cat", LOG], sudo=True)
@@ -828,15 +1025,17 @@ def main():
 
 def report():
     print("\n" + "=" * 78)
-    print(f"{'AC':<5}{'result':<8}criterion")
+    print(f"{'AC':<9}{'result':<8}criterion")
     print("-" * 78)
     for ac, name, status, detail in results:
-        print(f"{ac:<5}{status:<8}{name}")
+        print(f"{ac:<9}{status:<8}{name}")
         if status == "FAIL" and detail:
-            print(f"{'':<13}{detail}")
+            print(f"{'':<17}{detail}")
     counts = {s: sum(1 for r in results if r[2] == s) for s in ("PASS", "FAIL", "MANUAL")}
     print("-" * 78)
     print(f"{counts['PASS']} passed, {counts['FAIL']} failed, {counts['MANUAL']} manual")
+    for agent, version in installed.items():
+        print(f"G-133-6 installed {agent} {version}")
     print(f"logs: {SERVER_LOG}" + (f" (copied to {ARTIFACTS})" if ARTIFACTS != WORK else ""))
     sys.exit(1 if counts["FAIL"] else 0)
 
