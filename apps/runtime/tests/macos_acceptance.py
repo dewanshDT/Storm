@@ -549,7 +549,8 @@ def g_133_6(owner, host_id, stubs):
             releases[agent] = target
             check("G-133-6", f"bin/{command} is Storm's, in its release folder",
                   rc == 0 and target.startswith(f"{MANAGED}/{agent}/") and release == version, (rc, target))
-            rc, out = sh([link, "--version"], user=ACCOUNT, timeout=30)
+            # sudo keeps the operator's HOME on macOS; OpenCode writes under it.
+            rc, out = sh(["env", f"HOME={HOME}", link, "--version"], user=ACCOUNT, timeout=30)
             check("G-133-6", f"the managed {command} answers --version as _stormruntime", rc == 0 and version in out, out)
             try:
                 want, asset_ok = published_digest(agent, release, command)
