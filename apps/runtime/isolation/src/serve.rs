@@ -94,7 +94,7 @@ impl Settings {
             crate::agents::STORM_RUNTIME.into(),
         ));
         Ok(Self {
-            roots: config.canonical_roots(),
+            roots: config.roots(&layout.state, &layout.host_state)?,
             providers,
             commands,
             search,

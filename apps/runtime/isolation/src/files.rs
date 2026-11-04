@@ -158,10 +158,14 @@ pub fn dir_names(dir: impl AsFd) -> rustix::io::Result<Vec<CString>> {
     Ok(out)
 }
 
-/// Opens `path` one component at a time from `/`, never following a link,
-/// and refuses unless every component from `trusted_depth` on is a
-/// directory owned by `owner`. Returns the last one's descriptor.
-pub fn open_owned_dir(path: &Path, trusted_depth: usize, owner: u32) -> Result<OwnedFd> {
+/// Opens the directory `path` one component at a time from `/`, never
+/// following a link; `check` sees each component's descriptor and depth.
+/// A component that is a link fails with `ELOOP`, one that is not a
+/// directory with `ENOTDIR` and a missing one with `ENOENT`, each named.
+pub fn open_dir_with(
+    path: &Path,
+    mut check: impl FnMut(usize, &OwnedFd) -> Result<()>,
+) -> Result<OwnedFd> {
     if !path.is_absolute() {
         bail!("{} is not absolute", path.display());
     }
@@ -171,6 +175,7 @@ pub fn open_owned_dir(path: &Path, trusted_depth: usize, owner: u32) -> Result<O
         Mode::empty(),
     )?;
     let mut depth = 0;
+    let mut seen = PathBuf::from("/");
     for c in path.components() {
         let Component::Normal(name) = c else {
             if matches!(c, Component::RootDir) {
@@ -179,17 +184,54 @@ pub fn open_owned_dir(path: &Path, trusted_depth: usize, owner: u32) -> Result<O
             bail!("{} is not in its normal form", path.display());
         };
         depth += 1;
-        let next = rustix::fs::openat(&fd, name, DIR_FLAGS, Mode::empty())
-            .with_context(|| format!("opening {}", path.display()))?;
-        if depth >= trusted_depth {
-            let st = rustix::fs::fstat(&next)?;
-            if st.st_uid != owner {
-                bail!("{} is not the expected account's", path.display());
+        seen.push(name);
+        let next = match rustix::fs::openat(&fd, name, DIR_FLAGS, Mode::empty()) {
+            Ok(next) => next,
+            Err(e) => {
+                let why = match rustix::fs::statat(&fd, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)
+                {
+                    Ok(st) if FileType::from_raw_mode(st.st_mode as _) == FileType::Symlink => {
+                        (rustix::io::Errno::LOOP, "is a symbolic link")
+                    }
+                    Ok(_) if e == rustix::io::Errno::NOTDIR || e == rustix::io::Errno::LOOP => {
+                        (rustix::io::Errno::NOTDIR, "is not a directory")
+                    }
+                    _ => (e, "could not be opened"),
+                };
+                return Err(anyhow::Error::new(why.0).context(format!(
+                    "opening {}: {} {}",
+                    path.display(),
+                    seen.display(),
+                    why.1
+                )));
             }
-        }
+        };
+        check(depth, &next)?;
         fd = next;
     }
     Ok(fd)
+}
+
+/// [`open_dir_with`] with nothing more to check.
+pub fn open_dir(path: &Path) -> Result<OwnedFd> {
+    open_dir_with(path, |_, _| Ok(()))
+}
+
+/// The errno under an error from [`open_dir_with`], if it has one.
+pub fn errno_of(e: &anyhow::Error) -> Option<rustix::io::Errno> {
+    e.downcast_ref::<rustix::io::Errno>().copied()
+}
+
+/// Opens `path` one component at a time from `/`, never following a link,
+/// and refuses unless every component from `trusted_depth` on is a
+/// directory owned by `owner`. Returns the last one's descriptor.
+pub fn open_owned_dir(path: &Path, trusted_depth: usize, owner: u32) -> Result<OwnedFd> {
+    open_dir_with(path, |depth, fd| {
+        if depth >= trusted_depth && rustix::fs::fstat(fd)?.st_uid != owner {
+            bail!("{} is not the expected account's", path.display());
+        }
+        Ok(())
+    })
 }
 
 /// The host's launch file for a session: a regular file the host owns, in
@@ -861,7 +903,8 @@ mod tests {
         std::fs::create_dir(&ws).unwrap();
         let manifests = t.path().join("manifests");
         let own = Recorded::default();
-        let pool = pool();
+        let mut pool = pool();
+        pool.host_uid = me();
         assert_eq!(
             workspace_group(&ws, &pool, &manifests, &own).unwrap(),
             "storm-w001"
@@ -879,7 +922,8 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let manifests = t.path().join("manifests");
         let own = crate::session::tests::Own::default();
-        let pool = pool();
+        let mut pool = pool();
+        pool.host_uid = me();
         let start = std::sync::Barrier::new(8);
         let groups: Vec<String> = std::thread::scope(|s| {
             let threads: Vec<_> = (0..8)

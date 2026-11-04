@@ -206,6 +206,8 @@ pub struct Entry<'a> {
     pub kind: Kind,
     pub key: Key,
     pub seen: Meta,
+    /// Hard links to it, as `stat` reported.
+    pub links: u64,
     pub node: Node<'a>,
 }
 
@@ -225,8 +227,7 @@ pub fn walk_capped(workspace: &Path, visit: Visit, at_cap: Visit) -> Result<Vec<
 }
 
 fn walk_from(workspace: &Path, visit: Visit, at_cap: Option<Visit>) -> Result<Vec<PathBuf>> {
-    let fd = rustix::fs::open(workspace, crate::files::DIR_FLAGS, Mode::empty())
-        .with_context(|| format!("opening {}", workspace.display()))?;
+    let fd = crate::files::open_dir(workspace)?;
     let st = rustix::fs::fstat(&fd)?;
     let dev = st.st_dev as u64;
     visit(Entry {
@@ -234,6 +235,7 @@ fn walk_from(workspace: &Path, visit: Visit, at_cap: Option<Visit>) -> Result<Ve
         kind: Kind::Dir,
         key: key_of(&st),
         seen: meta_of(&st),
+        links: st.st_nlink as u64,
         node: Node::Fd(fd.as_fd()),
     })?;
     let mut cap = Cap {
@@ -271,6 +273,7 @@ fn walk_dir(
             kind: Kind::Dir,
             key: key_of(&st),
             seen: meta_of(&st),
+            links: st.st_nlink as u64,
             node: Node::Fd(dir.as_fd()),
         })?;
         cap.found.push(workspace.join(OsStr::from_bytes(rel)));
@@ -319,6 +322,7 @@ fn walk_dir(
                     kind,
                     key: key_of(&now),
                     seen: meta_of(&now),
+                    links: now.st_nlink as u64,
                     node: Node::Fd(fd.as_fd()),
                 })?;
                 if kind == Kind::Dir {
@@ -330,6 +334,7 @@ fn walk_dir(
                 kind,
                 key: key_of(&st),
                 seen: meta_of(&st),
+                links: st.st_nlink as u64,
                 node: Node::At(dir.as_fd(), name.as_c_str()),
             })?,
         }
@@ -556,6 +561,20 @@ pub struct Report {
     pub missing: Vec<PathBuf>,
     /// Directories past the walk's cap, sealed to the host account.
     pub sealed: Vec<PathBuf>,
+    /// Entries `on` left as they were (G-136-2 L2).
+    pub skipped: Vec<PathBuf>,
+}
+
+/// Why `on` leaves an entry as it is: a file with another name elsewhere
+/// (possibly outside the workspace), or one no account of the host's owns.
+fn not_convertible(e: &Entry, now: Meta, pool: &Pool) -> Option<&'static str> {
+    if e.kind == Kind::File && e.links > 1 {
+        return Some("has more than one hard link");
+    }
+    if now.uid != pool.host_uid && !pool.is_pool_uid(now.uid) {
+        return Some("is owned by neither the host account nor a session user");
+    }
+    None
 }
 
 /// Held across load, choice, save and apply in `on` and `off`: a session's
@@ -638,7 +657,18 @@ pub fn on(
     for m in &plan {
         let gid = pool.groups[&m.group];
         walk(&m.workspace, &mut |e| {
-            let target = converted(e.kind, own.meta(e.key, e.seen), gid);
+            let now = own.meta(e.key, e.seen);
+            if let Some(why) = not_convertible(&e, now, pool) {
+                let path = match e.rel {
+                    b"" => m.workspace.clone(),
+                    rel => m.workspace.join(OsStr::from_bytes(rel)),
+                };
+                // Debug-quoted: a name a session chose cannot forge another line.
+                eprintln!("isolation on: skipped {path:?}: it {why}");
+                report.skipped.push(path);
+                return Ok(());
+            }
+            let target = converted(e.kind, now, gid);
             if apply(own, &e, target)? {
                 report.changed += 1;
             }
@@ -651,25 +681,61 @@ pub fn on(
 /// Turns isolation off: every recorded entry gets back exactly its
 /// recorded owner, group and mode; anything created since is handed back
 /// to the host account. A manifest is removed only once its workspace is
-/// restored, so an interrupted run can be repeated.
-pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report> {
+/// restored, so an interrupted run can be repeated. Every manifest's
+/// workspace must sit directly under one of `roots` (already validated)
+/// before anything is changed, and no setuid or setgid bit is restored.
+pub fn off(
+    roots: &[PathBuf],
+    pool: &Pool,
+    manifests: &Path,
+    own: &dyn Ownership,
+) -> Result<Report> {
     let _lock = lock(manifests)?;
     let mut report = Report::default();
-    for m in workspace_manifests(manifests)? {
-        match std::fs::symlink_metadata(&m.workspace) {
-            Ok(md) if md.is_dir() => {}
-            _ => {
-                report.missing.push(m.workspace.clone());
-                m.remove(manifests)?;
-                continue;
+    let all = workspace_manifests(manifests)?;
+    for m in &all {
+        let under = m.workspace.is_absolute()
+            && m.workspace.components().collect::<PathBuf>() == m.workspace
+            && m.workspace
+                .file_name()
+                .is_some_and(|n| n.as_bytes()[0] != b'.')
+            && m.workspace
+                .parent()
+                .is_some_and(|p| roots.iter().any(|r| r == p));
+        if !under {
+            bail!(
+                "the record for {} is not for a workspace under a configured workspace root; \
+                 put its root back in runtime.toml's workspace_roots and run off again. \
+                 Nothing was changed",
+                m.workspace.display()
+            );
+        }
+    }
+    for m in all {
+        if let Err(e) = crate::files::open_dir(&m.workspace) {
+            use rustix::io::Errno;
+            if !matches!(
+                crate::files::errno_of(&e),
+                Some(Errno::NOENT | Errno::NOTDIR | Errno::LOOP)
+            ) {
+                return Err(e);
             }
+            report.missing.push(m.workspace.clone());
+            m.remove(manifests)?;
+            continue;
         }
         report.workspaces += 1;
         let mut changed = 0;
         let sealed = walk_sealing(&m.workspace, pool.host_uid, pool.host_gid, own, &mut |e| {
             let now = own.meta(e.key, e.seen);
             let target = match m.entries.get(e.rel) {
-                Some((kind, recorded)) if *kind == e.kind => *recorded,
+                Some((kind, recorded)) if *kind == e.kind => Meta {
+                    mode: match kind {
+                        Kind::Dir | Kind::File => recorded.mode & !(S_ISUID | S_ISGID),
+                        Kind::Link | Kind::Other => recorded.mode,
+                    },
+                    ..*recorded
+                },
                 _ => restored_new(e.kind, now, pool),
             };
             if apply(own, &e, target)? {
@@ -687,8 +753,15 @@ pub fn off(pool: &Pool, manifests: &Path, own: &dyn Ownership) -> Result<Report>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pool::tests::pool;
     use std::os::unix::fs::{MetadataExt, PermissionsExt, symlink};
+
+    /// The fixture's files are the test's own, so the test is the host
+    /// account here.
+    fn pool() -> Pool {
+        let mut p = crate::pool::tests::pool();
+        p.host_uid = rustix::process::getuid().as_raw();
+        p
+    }
 
     struct Fixture {
         _t: tempfile::TempDir,
@@ -734,6 +807,10 @@ mod tests {
     }
 
     impl Fixture {
+        fn roots(&self) -> Vec<PathBuf> {
+            vec![self.root.clone()]
+        }
+
         fn workspaces(&self) -> Vec<PathBuf> {
             crate::config::workspaces(std::slice::from_ref(&self.root)).unwrap()
         }
@@ -803,12 +880,21 @@ mod tests {
         assert!(report.changed > 0);
         assert_eq!(contents(&f.root), before, "content untouched by on");
 
-        let report = off(&pool, &f.manifests, &own).unwrap();
+        let report = off(&f.roots(), &pool, &f.manifests, &own).unwrap();
         assert_eq!(report.workspaces, 2);
         assert_eq!(contents(&f.root), before, "content untouched by off");
         let metas_after: Vec<_> = ws.iter().map(|w| metas(w, &own)).collect();
-        assert_eq!(metas_after, metas_before);
+        assert_eq!(metas_after, without_setid(metas_before));
         assert!(Manifest::load_all(&f.manifests).unwrap().is_empty());
+    }
+
+    /// What `off` restores: everything as recorded, but setuid and setgid
+    /// (G-136-2 L1).
+    fn without_setid(mut all: Vec<BTreeMap<Vec<u8>, Meta>>) -> Vec<BTreeMap<Vec<u8>, Meta>> {
+        for m in all.iter_mut().flat_map(|w| w.values_mut()) {
+            m.mode &= !(S_ISUID | S_ISGID);
+        }
+        all
     }
 
     #[test]
@@ -816,9 +902,21 @@ mod tests {
         let f = fixture();
         let pool = pool();
         let own = Recorded::default();
-        on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
-        let app = metas(&f.root.join("app"), &own);
+        let report = on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
+        let mut app = metas(&f.root.join("app"), &own);
         let lib = metas(&f.root.join("lib"), &own);
+        let gid = std::fs::metadata(&f.root).unwrap().gid();
+        for hard in ["README", "README.hard"] {
+            assert_eq!(
+                app.remove(hard.as_bytes()).unwrap().gid,
+                gid,
+                "{hard} is skipped"
+            );
+        }
+        assert_eq!(
+            report.skipped,
+            [f.root.join("app/README"), f.root.join("app/README.hard")]
+        );
         assert!(app.values().all(|m| m.gid == 3001), "{app:?}");
         assert!(lib.values().all(|m| m.gid == 3002), "{lib:?}");
         let uid = std::fs::metadata(&f.root).unwrap().uid();
@@ -897,9 +995,9 @@ mod tests {
         assert!(on(&ws, &pool, &f.manifests, &own).is_err());
         own.fail_after = None;
         on(&ws, &pool, &f.manifests, &own).unwrap();
-        off(&pool, &f.manifests, &own).unwrap();
+        off(&f.roots(), &pool, &f.manifests, &own).unwrap();
         let after: Vec<_> = ws.iter().map(|w| metas(w, &own)).collect();
-        assert_eq!(after, original);
+        assert_eq!(after, without_setid(original));
     }
 
     #[test]
@@ -941,12 +1039,12 @@ mod tests {
                 mode: 0o660,
             },
         );
-        off(&pool, &f.manifests, &own).unwrap();
+        off(&f.roots(), &pool, &f.manifests, &own).unwrap();
         let o = own.overlay.borrow();
         assert_eq!(
             o[&key(&made)],
             Meta {
-                uid: 900,
+                uid: pool.host_uid,
                 gid: 900,
                 mode: 0o755
             }
@@ -954,7 +1052,7 @@ mod tests {
         assert_eq!(
             o[&key(&made.join("out"))],
             Meta {
-                uid: 900,
+                uid: pool.host_uid,
                 gid: 900,
                 mode: 0o644
             }
@@ -989,7 +1087,7 @@ mod tests {
         let own = Recorded::default();
         on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
         std::fs::remove_dir_all(f.root.join("lib")).unwrap();
-        let report = off(&pool, &f.manifests, &own).unwrap();
+        let report = off(&f.roots(), &pool, &f.manifests, &own).unwrap();
         assert_eq!(report.missing, [f.root.join("lib")]);
         assert!(Manifest::load_all(&f.manifests).unwrap().is_empty());
     }
@@ -1068,12 +1166,12 @@ mod tests {
         let app = f.root.join("app");
         let deep = app.join(std::iter::repeat_n("d", 300).collect::<PathBuf>());
         std::fs::create_dir_all(&deep).unwrap();
-        let report = off(&pool, &f.manifests, &own).unwrap();
+        let report = off(&f.roots(), &pool, &f.manifests, &own).unwrap();
         let capped = app.join(std::iter::repeat_n("d", 256).collect::<PathBuf>());
         assert_eq!(
             own.overlay.borrow()[&key(&capped)],
             Meta {
-                uid: 900,
+                uid: pool.host_uid,
                 gid: 900,
                 mode: 0o700
             }
@@ -1149,5 +1247,86 @@ mod tests {
                 mode: 0o700
             }
         );
+    }
+
+    /// G-136-2 L1: `off` restores only workspaces under a configured root,
+    /// and checks every record before it changes anything.
+    #[test]
+    fn off_refuses_a_record_outside_the_configured_roots() {
+        let f = fixture();
+        let pool = pool();
+        let own = Recorded::default();
+        on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
+        let converted = own.overlay.borrow().clone();
+        let elsewhere = vec![f.outside.clone()];
+        let err = off(&elsewhere, &pool, &f.manifests, &own).unwrap_err();
+        assert!(
+            err.to_string().contains("not for a workspace under"),
+            "{err}"
+        );
+        assert_eq!(*own.overlay.borrow(), converted, "nothing was changed");
+        assert_eq!(Manifest::load_all(&f.manifests).unwrap().len(), 2);
+        off(&f.roots(), &pool, &f.manifests, &own).unwrap();
+    }
+
+    /// G-136-2 L1: a setuid or setgid bit in a record is never put back.
+    #[test]
+    fn off_never_restores_setuid_or_setgid() {
+        let f = fixture();
+        let pool = pool();
+        let own = Recorded::default();
+        assert_eq!(
+            metas(&f.root.join("app"), &own)[&b"setuid"[..]].mode,
+            0o4750
+        );
+        on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
+        off(&f.roots(), &pool, &f.manifests, &own).unwrap();
+        let app = metas(&f.root.join("app"), &own);
+        assert_eq!(app[&b"setuid"[..]].mode, 0o750);
+        assert!(
+            app.values().all(|m| m.mode & (S_ISUID | S_ISGID) == 0),
+            "{app:?}"
+        );
+    }
+
+    /// G-136-2 L2: what no account of the host's owns is recorded and left
+    /// as it is, never given a pool group.
+    #[test]
+    fn on_skips_what_neither_the_host_nor_a_session_user_owns() {
+        let f = fixture();
+        let mut pool = pool();
+        let file = f.root.join("lib/x/y");
+        pool.host_uid += 1;
+        let own = Recorded::default();
+        let report = on(&f.workspaces(), &pool, &f.manifests, &own).unwrap();
+        assert!(report.skipped.contains(&file), "{:?}", report.skipped);
+        assert!(report.skipped.contains(&f.root.join("lib")));
+        assert_eq!(report.changed, 0);
+        assert!(own.overlay.borrow().is_empty());
+        let lib = Manifest::load_all(&f.manifests)
+            .unwrap()
+            .into_iter()
+            .find(|m| m.workspace == f.root.join("lib"))
+            .unwrap();
+        assert!(lib.entries.contains_key(&b"x/y"[..]), "still recorded");
+    }
+
+    /// G-136-2 H1: the walk never goes through a link anywhere in the
+    /// workspace's path, not only at its last component.
+    #[test]
+    fn a_link_above_the_workspace_is_never_followed() {
+        let f = fixture();
+        let linked = f.root.parent().unwrap().join("linked");
+        symlink(&f.root, &linked).unwrap();
+        let err = walk(&linked.join("app"), &mut |_| Ok(())).unwrap_err();
+        assert!(format!("{err:#}").contains("is a symbolic link"), "{err:#}");
+        let err = on(
+            &[linked.join("app")],
+            &pool(),
+            &f.manifests,
+            &Recorded::default(),
+        )
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("is a symbolic link"), "{err:#}");
     }
 }

@@ -107,6 +107,7 @@ pub fn on(
         load_apparmor_profile(m, &paths.apparmor_profile)?;
     }
     let config = HelperConfig::load(&paths.config)?;
+    let roots = config.roots(&paths.state, &paths.host_state)?;
     if !paths.sysusers.is_file() {
         bail!(
             "{} is missing; reinstall the storm-runtime package",
@@ -115,7 +116,7 @@ pub fn on(
     }
     m.run(&["systemd-sysusers", &paths.sysusers.to_string_lossy()])?;
     let pool = Pool::resolve(accounts, crate::HOST_ACCOUNT)?;
-    let workspaces = config::workspaces(&config.canonical_roots())?;
+    let workspaces = config::workspaces(&roots)?;
     let report = convert::on(&workspaces, &pool, &paths.manifests(), own)?;
     let agents = crate::agents::on(&paths.host_state, &pool, &paths.agents_manifests(), own)?;
     m.run(&["systemctl", "daemon-reload"])?;
@@ -132,6 +133,13 @@ pub fn on(
         report.changed,
         crate::pool::INSTALL_ACCOUNT,
     )?;
+    for skipped in &report.skipped {
+        writeln!(
+            out,
+            "  {} was left as it is: it has another hard link, or no account of the host's owns it.",
+            skipped.display()
+        )?;
+    }
     Ok(())
 }
 
@@ -158,6 +166,8 @@ pub fn off(
     out: &mut dyn Write,
 ) -> Result<()> {
     preflight(m)?;
+    let config = HelperConfig::load(&paths.config)?;
+    config.roots(&paths.state, &paths.host_state)?;
     let pool = Pool::resolve(accounts, crate::HOST_ACCOUNT).context(
         "the isolation pools are not intact, so their files cannot be handed back safely",
     )?;
@@ -184,7 +194,7 @@ pub fn off(
         crate::SOCKET_UNIT,
         crate::SERVICE_UNIT,
     ])?;
-    let report = convert::off(&pool, &paths.manifests(), own)?;
+    let report = convert::off(&config.workspace_roots, &pool, &paths.manifests(), own)?;
     let agents = crate::agents::off(&paths.host_state, &pool, &paths.agents_manifests(), own)?;
     write_isolation(&paths.config, Isolation::Off)?;
     writeln!(
@@ -536,6 +546,64 @@ mod tests {
                 before,
                 "{what}"
             );
+        }
+    }
+
+    /// G-136-2 H1 and L3: a root that is a link, or overlaps the helper's
+    /// state, stops `on` and `off` before anything changes.
+    #[test]
+    fn on_and_off_refuse_a_linked_or_overlapping_root_and_change_nothing() {
+        let accounts = crate::pool::tests::fixed();
+        let set_root = |s: &Setup, root: &Path| {
+            std::fs::write(
+                &s.paths.config,
+                format!("workspace_roots = [\"{}\"]\n", root.display()),
+            )
+            .unwrap();
+        };
+        type Root = fn(&Setup) -> PathBuf;
+        let cases: &[(&str, Root)] = &[
+            ("linked", |s| {
+                let link = s.root.with_file_name("linked");
+                std::os::unix::fs::symlink(&s.root, &link).unwrap();
+                link
+            }),
+            ("inside the helper's state", |s| {
+                let inside = s.paths.state.join("children");
+                std::fs::create_dir_all(&inside).unwrap();
+                inside
+            }),
+        ];
+        for (what, make) in cases {
+            let s = setup();
+            let root = make(&s);
+            set_root(&s, &root);
+            let before = std::fs::read_to_string(&s.paths.config).unwrap();
+            let (m, own) = (ready(), Recorded::default());
+            let err = on(&m, &accounts, &own, &s.paths, &mut Vec::new()).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(&root.display().to_string()),
+                "{what}: {err:#}"
+            );
+            assert!(m.ran.borrow().is_empty(), "{what}");
+            assert!(own.overlay.borrow().is_empty(), "{what}");
+            assert!(Manifest::load_all(&s.paths.manifests()).unwrap().is_empty());
+            assert_eq!(std::fs::read_to_string(&s.paths.config).unwrap(), before);
+
+            let s2 = setup();
+            on(&ready(), &accounts, &own, &s2.paths, &mut Vec::new()).unwrap();
+            let root = make(&s2);
+            set_root(&s2, &root);
+            let m = ready();
+            assert!(
+                off(&m, &accounts, &own, &s2.paths, &mut Vec::new()).is_err(),
+                "{what}"
+            );
+            assert!(
+                m.ran.borrow().is_empty(),
+                "{what}: the helper stays enabled"
+            );
+            assert_eq!(Manifest::load_all(&s2.paths.manifests()).unwrap().len(), 2);
         }
     }
 
