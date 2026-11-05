@@ -235,12 +235,13 @@ void main() {
       expect(connection.isRelayed, isTrue);
 
       // The carrier drops the trunk: the connection re-races, and the next
-      // request waits for it.
+      // request waits for it. The re-race may prove itself before the loop
+      // sees the drop, so the log is cleared first.
+      seen.clear();
       await relay.dropTrunk();
       while (connection.isConnected && connection.hasLiveTrunk) {
         await Future<void>.delayed(const Duration(milliseconds: 10));
       }
-      seen.clear();
       final hosts = await api.hosts();
       expect(hosts.single.id, 'hst_1');
       provenFirst(seen, '/v1/agent/hosts');
