@@ -505,6 +505,7 @@ impl<'a> Copier<'a> {
             kind,
             key,
             seen,
+            links: st.st_nlink as u64,
             node,
         };
         self.own.chown(&e, meta.uid, meta.gid)?;

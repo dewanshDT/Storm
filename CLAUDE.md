@@ -988,8 +988,10 @@ Specification*; the slices are decisions 81 and 81a onward):
   each probe's own controls must work); anything else is `isolation:
   unavailable` and `isolation_unavailable`, and a helper that stops
   answering or `no_passt` drops it at once. The operator's
-  `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`,
-  record every entry before changing any, and write `isolation` in
+  `on`/`off` convert workspaces through descriptors opened `O_NOFOLLOW`
+  from `/` (a root that is or passes a link, or overlaps the system's or
+  Storm's own state, is refused: G-136-2), record every entry before
+  changing any, and write `isolation` in
   `runtime.toml` last. Nothing at install creates the pools or enables the
   helper. `tests/packaging.rs` pins `storm-runtime.service` line for line
   (G-136-6).
