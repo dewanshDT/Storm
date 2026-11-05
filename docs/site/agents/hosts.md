@@ -201,8 +201,14 @@ own system user in its own sandbox, so sessions on one host cannot reach each
 other. Turning it on needs systemd 255 or newer and `passt`, stops nothing by
 itself (stop the host first), creates the user pools and gives each workspace
 a group; `sudo storm-runtime-isolation off` puts every workspace back as it
-was. With it on, the host starts each session through the helper, in its own
-systemd unit (`storm-session-<id>.service`) under a leased pool user, with
+was, except setuid and setgid bits, which it never restores. Both refuse a
+workspace root that is a symbolic link or has one anywhere in its path, and
+one that overlaps a system directory (`/etc`, `/usr`, `/home` and the like),
+`/var/lib/storm-runtime-isolation`, or `/var/lib/storm-runtime` itself or its
+`agents`, `sessions`, `launch` or `home`. `on` leaves a file with more than
+one hard link, or one that neither `storm-runtime` nor a session user owns,
+as it is, and lists it. With it on, the host starts each session through the
+helper, in its own systemd unit (`storm-session-<id>.service`) under a leased pool user, with
 its own `/tmp`, `/dev/shm` and IPC, its own home, and only its own workspace
 and session files visible; it never runs one the old way. Each session also
 has its own network: it reaches the internet and resolves names through

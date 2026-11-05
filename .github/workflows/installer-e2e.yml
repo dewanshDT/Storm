@@ -47,6 +47,10 @@ jobs:
           set -eux
           mkdir -p dist apps/server/packaging/web
           echo '<!doctype html><title>Storm</title>ci web' > apps/server/packaging/web/index.html
+          # storm-runtime's .deb ships the isolation helper (decision 136).
+          (cd apps/runtime/isolation &&
+            sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml &&
+            cargo build --release)
           for app in server runtime; do
             (cd apps/$app &&
               sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml &&
