@@ -317,6 +317,17 @@ class NoteSession extends ChangeNotifier {
     return error;
   }
 
+  /// Puts typing not yet saved in this session's vault's outbox, for when the
+  /// session is replaced (a vault switch) before its debounced save runs.
+  void keepUnsaved() {
+    final id = _noteId;
+    if (id == null || _saveState != SaveState.dirty) return;
+    _debounce?.cancel();
+    unawaited(
+      _engine.keepUnsent(id: id, baseVersion: _baseVersion, content: _buffer),
+    );
+  }
+
   /// Moves the session to the note its edit was kept as, after the note it
   /// had open was deleted elsewhere (decision 128c).
   Future<void> followRecovered(RecoveredNote recovered) async {

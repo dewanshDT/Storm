@@ -22,9 +22,11 @@ Three things are backed up, for different reasons:
   actually uses** (`storm-server storage-root` prints it), which is not
   necessarily `STORM_VAULT_ROOT`: that only seeds a first run, and a root
   changed in the app is never written back to it. The log's `root:` line names
-  the directory copied.
+  the directory copied. Each vault's `.trash/` is copied with
+  it, so a restore brings the Trash back too.
 - **`state/<vault-id>/index.db`** — one index per vault, holding version
-  history that the 3-way merge uses as its base, plus `vaults.json`. The rest
+  history that the 3-way merge uses as its base and who deleted each item in
+  the Trash, plus `vaults.json`. The rest
   of an index can be rebuilt by rescanning; the history cannot.
 - **`state/auth.db` and `state/identity/`** — the server's own identity: its
   `server_id`, the public half of its Ed25519 credential, **its account**, and

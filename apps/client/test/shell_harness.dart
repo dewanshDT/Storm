@@ -171,6 +171,7 @@ Future<void> pumpShell(
       child: MaterialApp.router(
         theme: StormTheme.dark(),
         routerConfig: c.read(routerProvider),
+        scaffoldMessengerKey: rootMessengerKey,
       ),
     ),
   );
@@ -193,6 +194,7 @@ Future<void> pumpShellFrames(
       child: MaterialApp.router(
         theme: StormTheme.dark(),
         routerConfig: c.read(routerProvider),
+        scaffoldMessengerKey: rootMessengerKey,
       ),
     ),
   );

@@ -6,6 +6,9 @@ import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
+import 'crew_widgets.dart' show RoleTagRow;
+import 'mode_request.dart' show ModeAskTag;
+import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -51,19 +54,57 @@ String _ran(Duration d) {
   return m == 0 ? '${d.inHours} h' : '${d.inHours} h $m min';
 }
 
-String _clock(DateTime t) {
+/// "14:02": a moment as the agent surfaces say it, in local time.
+String clockAt(DateTime t) {
   final l = t.toLocal();
   String two(int n) => n.toString().padLeft(2, '0');
   return '${two(l.hour)}:${two(l.minute)}';
 }
 
+/// The agent surfaces' text styles: a mono sub-line, sans body text, a
+/// spaced mono key, and code or exact text as an agent sent it.
+TextStyle agentMono(StormTokens t, {Color? color, double? size}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: size ?? t.labelSize,
+  color: color ?? t.text3,
+);
+
+TextStyle agentSans(StormTokens t, {Color? color, FontWeight? weight}) =>
+    TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      height: 1.4,
+      fontWeight: weight,
+      color: color ?? t.text,
+    );
+
+TextStyle agentKey(StormTokens t, {Color? color}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: t.labelSize,
+  letterSpacing: t.labelSize * 0.08,
+  color: color ?? t.text3,
+);
+
+TextStyle agentCode(StormTokens t, {Color? color}) => TextStyle(
+  fontFamily: StormTokens.monoFamily,
+  fontSize: t.labelSize * 1.09,
+  height: 1.45,
+  color: color ?? t.text2,
+);
+
 /// A live session's age, or an ended one's status in lower case.
 String sessionWhen(AgentSession s) =>
     s.ended ? s.statusLabel.toLowerCase() : shortAge(s.createdAt);
 
-/// "build-vm · storm · 40m": the rows' sub-line; the mark says the agent.
-String sessionSub(AgentSession s, String host) =>
-    '$host · ${s.workspace} · ${sessionWhen(s)}';
+/// "build-vm · storm · haiku · 40m": the rows' sub-line; the mark says the
+/// agent, and the model shows when it was chosen (145b).
+String sessionSub(AgentSession s, String host) => [
+  host,
+  s.workspace,
+  ?s.model,
+  ?permissionModeWord(s.permissionMode),
+  sessionWhen(s),
+].join(' · ');
 
 /// "Fix the login, Claude Code on build-vm, working": a row read aloud.
 String sessionSpoken(AgentSession s, String host) => [
@@ -79,7 +120,7 @@ String endedLine(AgentSession s) {
   return [
     ended == null || s.status == 'failed'
         ? s.statusLabel
-        : '${s.statusLabel} ${_clock(ended)}',
+        : '${s.statusLabel} ${clockAt(ended)}',
     ?s.endDetail,
     if (ended != null && started != null && s.status != 'failed')
       'ran ${_ran(ended.difference(started))}',
@@ -94,7 +135,12 @@ String sessionMeta(AgentSession s, String hostName) {
       : age == 'now'
       ? 'started now'
       : 'started $age ago';
-  return '${providerLabel(s.provider)} · ${s.workspace} on $hostName · $when';
+  final agent = [
+    providerLabel(s.provider),
+    ?s.model,
+    ?permissionModeWord(s.permissionMode),
+  ].join(' · ');
+  return '$agent · ${s.workspace} on $hostName · $when';
 }
 
 /// One session in a list: its agent's mark, its name, and a mono line under
@@ -108,6 +154,8 @@ class SessionRow extends StatelessWidget {
     required this.onTap,
     this.selected = false,
     this.phone = false,
+    this.lineage,
+    this.onLongPress,
   });
 
   final AgentSession session;
@@ -116,11 +164,18 @@ class SessionRow extends StatelessWidget {
   final bool selected;
   final bool phone;
 
+  /// A spawned child's "↳ from …" in place of the sub-line (134l).
+  final String? lineage;
+
+  /// The phone's crew and role sheet (decision 138n).
+  final VoidCallback? onLongPress;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final s = session;
     final radius = BorderRadius.circular(phone ? 0 : t.rControl);
+    final subStyle = agentMono(t);
     final content = Row(
       children: [
         AgentMark(
@@ -134,27 +189,39 @@ class SessionRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text(
-                s.displayName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: phone ? t.uiSize : t.codeSize,
-                  color: s.ended ? t.text2 : t.text,
-                ),
+              Row(
+                children: [
+                  Flexible(
+                    child: RoleTagRow(
+                      name: s.displayName,
+                      role: s.role,
+                      launchRole: s.launchRole,
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: phone ? t.uiSize : t.codeSize,
+                        color: s.ended ? t.text2 : t.text,
+                      ),
+                    ),
+                  ),
+                  if (!s.ended && s.spawn.needsAttention != null) ...[
+                    SizedBox(width: t.sp * 0.75),
+                    Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
+                  ] else if (!s.ended && (s.modeRequest?.pending ?? false)) ...[
+                    SizedBox(width: t.sp * 0.75),
+                    const Flexible(child: ModeAskTag()),
+                  ],
+                ],
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
-              Text(
-                sessionSub(s, host),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
-                ),
-              ),
+              if (lineage case final line?)
+                Text(
+                  line,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: subStyle,
+                )
+              else
+                SessionSubLine(session: s, host: host, style: subStyle),
             ],
           ),
         ),
@@ -166,6 +233,7 @@ class SessionRow extends StatelessWidget {
       label: sessionSpoken(s, host),
       excludeSemantics: true,
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Material(
         color: selected ? t.surface2 : Colors.transparent,
         borderRadius: radius,
@@ -173,6 +241,7 @@ class SessionRow extends StatelessWidget {
           key: Key('session-${s.id}'),
           borderRadius: radius,
           onTap: onTap,
+          onLongPress: onLongPress,
           child: Container(
             padding: phone
                 ? EdgeInsets.symmetric(vertical: t.sp * 1.5)
@@ -195,11 +264,80 @@ class SessionRow extends StatelessWidget {
   }
 }
 
+/// "build-vm · storm · 40m", where only the workspace gives way: the host
+/// and the age are never cut (decision 138l).
+class SessionSubLine extends StatelessWidget {
+  const SessionSubLine({
+    super.key,
+    required this.session,
+    required this.host,
+    required this.style,
+  });
+
+  final AgentSession session;
+  final String host;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final dir = Directionality.of(context);
+    // What the Text below draws with, letter spacing included.
+    final drawn = DefaultTextStyle.of(context).style.merge(style);
+    // A child's workspace is `children/<id>` on its host: named by what it
+    // is instead, as its meta line does (134l).
+    final ws = session.spawn.isChild
+        ? childWorkspaceLabel(session.spawn.childWorkspace)
+        : session.workspace;
+    // The model, when one was chosen (145b), stays whole with the age.
+    final when = [
+      ?session.model,
+      ?permissionModeWord(session.permissionMode),
+      sessionWhen(session),
+    ].join(' · ');
+    return LayoutBuilder(
+      builder: (context, box) {
+        String line(String w) => '$host · $w · $when';
+        bool fits(String text) =>
+            (TextPainter(
+              text: TextSpan(text: text, style: drawn),
+              textDirection: dir,
+              textScaler: scaler,
+              maxLines: 1,
+            )..layout()).width <=
+            box.maxWidth;
+        var text = line(ws);
+        if (box.hasBoundedWidth && !fits(text)) {
+          var lo = 0, hi = ws.length;
+          while (lo < hi) {
+            final mid = (lo + hi + 1) ~/ 2;
+            fits(line('${ws.substring(0, mid)}…')) ? lo = mid : hi = mid - 1;
+          }
+          text = line('${ws.substring(0, lo)}…');
+          // No room for even a cut workspace: it goes, so the host and age
+          // stay whole (the overview card at 900).
+          if (lo == 0 && !fits(text)) text = '$host · $when';
+        }
+        return Text(
+          text,
+          maxLines: 1,
+          softWrap: false,
+          overflow: TextOverflow.ellipsis,
+          style: style,
+        );
+      },
+    );
+  }
+}
+
 /// The note a session started from: a file icon and its title, outlined.
 class NoteContextChip extends StatelessWidget {
-  const NoteContextChip({super.key, required this.title});
+  const NoteContextChip({super.key, required this.title, this.maxWidth});
 
   final String title;
+
+  /// The title's room; 160 by default.
+  final double? maxWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -216,7 +354,7 @@ class NoteContextChip extends StatelessWidget {
           Icon(LucideIcons.file, size: t.labelSize, color: t.text2),
           SizedBox(width: t.sp * 0.625),
           ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: t.sp * 20),
+            constraints: BoxConstraints(maxWidth: maxWidth ?? t.sp * 20),
             child: Text(
               title,
               maxLines: 1,
@@ -236,9 +374,16 @@ class NoteContextChip extends StatelessWidget {
 
 /// *＋ New session*, the phone list's one labelled primary in the pill.
 class NewSessionPill extends StatelessWidget {
-  const NewSessionPill({super.key, required this.onTap});
+  const NewSessionPill({
+    super.key,
+    required this.onTap,
+    this.label = 'New session',
+  });
 
   final VoidCallback onTap;
+
+  /// "New session in crew" on a phone's crew page.
+  final String label;
 
   @override
   Widget build(BuildContext context) {
@@ -250,7 +395,7 @@ class NewSessionPill extends StatelessWidget {
         child: StormPill(
           child: Semantics(
             button: true,
-            label: 'New session',
+            label: label,
             excludeSemantics: true,
             onTap: onTap,
             child: Material(
@@ -273,7 +418,7 @@ class NewSessionPill extends StatelessWidget {
                       ),
                       SizedBox(width: t.sp),
                       Text(
-                        'New session',
+                        label,
                         style: TextStyle(
                           fontFamily: StormTokens.sansFamily,
                           fontSize: t.bodySize,
@@ -302,15 +447,7 @@ class AgentsLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Text(
-      text.toUpperCase(),
-      style: TextStyle(
-        fontFamily: StormTokens.monoFamily,
-        fontSize: t.labelSize,
-        letterSpacing: t.labelSize * 0.08,
-        color: t.text3,
-      ),
-    );
+    return Text(text.toUpperCase(), style: agentKey(t));
   }
 }
 
@@ -339,22 +476,7 @@ class AgentMark extends StatelessWidget {
     final s = session;
     final side = size ?? t.sp * 4;
     final glyph = side * 0.6;
-    final mark = switch (s.provider) {
-      'claude-code' => SvgPicture.asset(
-        'assets/agents/claude-code.svg',
-        width: glyph,
-        height: glyph,
-        colorFilter: const ColorFilter.mode(claudeOrange, BlendMode.srcIn),
-      ),
-      'opencode' => SvgPicture.asset(
-        'assets/agents/opencode.svg',
-        width: glyph * 0.8,
-        height: glyph * 0.8,
-        colorFilter: ColorFilter.mode(t.text, BlendMode.srcIn),
-      ),
-      'shell' => Icon(LucideIcons.square_terminal, size: glyph, color: t.text2),
-      _ => Icon(LucideIcons.bot, size: glyph, color: t.text2),
-    };
+    final mark = ProviderGlyph(s.provider, size: glyph);
     final badge = switch (s.status) {
       'running' when s.working => t.accent,
       'creating' || 'starting' => t.text3,
@@ -398,6 +520,34 @@ class AgentMark extends StatelessWidget {
         ],
       ),
     );
+  }
+}
+
+/// An agent's own mark, or a generic one for an agent without one.
+class ProviderGlyph extends StatelessWidget {
+  const ProviderGlyph(this.provider, {super.key, required this.size});
+
+  final String provider;
+  final double size;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    Widget svg(String name, double side, Color color) => SvgPicture.asset(
+      'assets/agents/$name.svg',
+      width: side,
+      height: side,
+      colorFilter: ColorFilter.mode(color, BlendMode.srcIn),
+    );
+    return switch (provider) {
+      'claude-code' => svg('claude-code', size, AgentMark.claudeOrange),
+      'opencode' => svg('opencode', size * 0.8, t.text),
+      'codex' => svg('codex', size * 0.9, t.text),
+      'cursor' => svg('cursor', size * 0.9, t.text),
+      'command-code' => svg('command-code', size * 0.8, t.text),
+      'shell' => Icon(LucideIcons.square_terminal, size: size, color: t.text2),
+      _ => Icon(LucideIcons.bot, size: size, color: t.text2),
+    };
   }
 }
 

@@ -25,14 +25,14 @@ select option{background:#2a2826;color:#eee}
   <div style="position:absolute;inset:0;display:flex">
     <div style="width:56px;flex:none;background:var(--bg,oklch(0.22 0.008 55));border-right:1px solid var(--border,oklch(0.36 0.008 55));display:flex;flex-direction:column;align-items:center;padding:16px 0 14px;gap:8px">
       <div onClick="{{ goNotes }}" title="Notes" style="{{ notesRailStyle }}">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path><path d="M9 13h6M9 17h4"></path></svg>
-        <span style="font-size:10px;letter-spacing:.02em">Notes</span>
+        <svg width="20" height="22" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v1h-1zM7 1h1v1h-1zM0 2h1v1h-1zM8 2h1v1h-1zM0 3h1v1h-1zM2 3h4v1h-4zM9 3h1v1h-1zM0 4h1v1h-1zM9 4h1v1h-1zM0 5h1v1h-1zM2 5h6v1h-6zM9 5h1v1h-1zM0 6h1v1h-1zM9 6h1v1h-1zM0 7h1v1h-1zM2 7h6v1h-6zM9 7h1v1h-1zM0 8h1v1h-1zM9 8h1v1h-1zM0 9h1v1h-1zM9 9h1v1h-1zM1 10h8v1h-8z"></path></svg>
       </div>
       <div onClick="{{ goAgents }}" title="Agents" style="{{ agentsRailStyle }}">
-        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="m7 10 3 2-3 2"></path><path d="M13 15h4"></path></svg>
-        <span style="font-size:10px;letter-spacing:.02em">Agents</span>
-        <sc-if value="{{ hasRunning }}" hint-placeholder-val="{{ false }}">
-          <span style="position:absolute;top:3px;right:6px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;background:var(--accent,oklch(0.68 0.15 293));color:var(--on-accent,oklch(0.16 0.03 293));font-family:'IBM Plex Mono',monospace;font-size:10px;font-weight:500;display:flex;align-items:center;justify-content:center">{{ runningCount }}</span>
+        <sc-if value="{{ agentsFrameA }}" hint-placeholder-val="{{ true }}">
+          <svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg>
+        </sc-if>
+        <sc-if value="{{ agentsFrameB }}" hint-placeholder-val="{{ false }}">
+          <svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM0 1h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM10 1h1v1h-1zM0 2h1v1h-1zM2 2h7v1h-7zM10 2h1v1h-1zM0 3h3v1h-3zM4 3h3v1h-3zM8 3h3v1h-3zM0 4h11v1h-11zM1 5h9v1h-9zM2 6h1v1h-1zM8 6h1v1h-1zM1 7h1v1h-1zM9 7h1v1h-1z"></path></svg>
         </sc-if>
       </div>
       <div style="flex:1"></div>
@@ -100,7 +100,7 @@ select option{background:#2a2826;color:#eee}
             <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:12px 8px 6px">Running</div>
             <sc-for list="{{ runningRows }}" as="s" hint-placeholder-count="2">
               <div onClick="{{ s.open }}" style="{{ s.rowStyle }}">
-                <div style="{{ s.dotStyle }}"></div>
+                {{ s.markEl }}
                 <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
                   <span style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.name }}</span>
                   <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.sub }}</span>
@@ -112,7 +112,7 @@ select option{background:#2a2826;color:#eee}
             <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:16px 8px 6px">Ended</div>
             <sc-for list="{{ endedRows }}" as="s" hint-placeholder-count="2">
               <div onClick="{{ s.open }}" style="{{ s.rowStyle }}">
-                <div style="{{ s.dotStyle }}"></div>
+                {{ s.markEl }}
                 <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
                   <span style="font-size:13px;color:var(--text2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.name }}</span>
                   <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ s.sub }}</span>
@@ -163,7 +163,7 @@ select option{background:#2a2826;color:#eee}
                   </div>
                   <sc-for list="{{ g.rows }}" as="s" hint-placeholder-count="2">
                     <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:10px;padding:8px 8px;margin:0 -8px;border-radius:var(--r-control,10px);cursor:pointer" style-hover="background:var(--surface2)">
-                      <div style="{{ s.dotStyle }}"></div>
+                      {{ s.markEl }}
                       <span style="font-size:14px;color:var(--text)">{{ s.name }}</span>
                       <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ s.meta }}</span>
                       <span style="flex:1"></span>
@@ -235,51 +235,60 @@ select option{background:#2a2826;color:#eee}
       </sc-if>
 
       <sc-if value="{{ dShowSession }}" hint-placeholder-val="{{ false }}">
-        <div style="position:absolute;inset:0;display:grid;grid-template-columns:minmax(0,1.1fr) minmax(0,1fr)">
-          <div style="display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--border)">
-            <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px">
-              <div style="display:flex;align-items:center;gap:10px">
-                <span style="font-size:16px;font-weight:600;color:var(--text)">{{ sess.name }}</span>
-                <span style="{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
-                <span style="flex:1"></span>
-                <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
-                  <span onClick="{{ askEnd }}" style="font-size:13px;color:var(--text2);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">End</span>
-                </sc-if>
-                <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
-                  <span onClick="{{ runAgain }}" style="font-size:13px;color:var(--accent);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">Run again</span>
-                  <span onClick="{{ dismissSession }}" style="font-size:13px;color:var(--text2);padding:5px 10px;cursor:pointer">Dismiss</span>
-                </sc-if>
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;min-height:0">
+          <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:4px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div style="flex:1;min-width:0;display:flex;align-items:center;gap:10px">
+                <span style="min-width:0;font-size:16px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ sess.name }}</span>
+                <span style="flex:none;{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
               </div>
-              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ sess.meta }}</span>
-            </div>
-            <sc-if value="{{ endConfirm }}" hint-placeholder-val="{{ false }}">
-              <div style="margin:12px 16px 0;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;gap:10px">
-                <span style="flex:1;font-size:13px;color:var(--text);line-height:1.45">End {{ sess.name }}? The agent and everything it started are stopped on the host.</span>
-                <span onClick="{{ cancelEnd }}" style="font-size:13px;color:var(--text2);cursor:pointer;padding:5px 8px">Cancel</span>
-                <span onClick="{{ confirmEnd }}" style="font-size:13px;color:var(--on-accent);background:var(--danger);padding:6px 10px;border-radius:var(--r-control,10px);cursor:pointer">End session</span>
-              </div>
-            </sc-if>
-            <div style="flex:1;overflow:auto;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
-              <sc-for list="{{ sess.lines }}" as="l" hint-placeholder-count="4">
-                <div style="{{ l.style }}">{{ l.text }}</div>
-              </sc-for>
+              <span onClick="{{ toggleInspector }}" title="Details" style="{{ inspectorToggleStyle }}"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M15 3v18"></path></svg></span>
               <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
-                <div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div>
+                <span onClick="{{ askEnd }}" style="font-size:12.8px;color:var(--text2);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">End</span>
+              </sc-if>
+              <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
+                <div style="display:flex;gap:4px">
+                  <sc-if value="{{ sess.canResume }}" hint-placeholder-val="{{ false }}"><span onClick="{{ resumeSession }}" style="font-size:12.8px;color:var(--accent);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer">Resume</span></sc-if>
+                  <span onClick="{{ runAgain }}" style="{{ runAgainStyle }}">Run again</span>
+                  <span onClick="{{ dismissSession }}" style="font-size:12.8px;color:var(--text2);padding:5px 10px;border-radius:var(--r-control,10px);cursor:pointer">Dismiss</span>
+                </div>
               </sc-if>
             </div>
-            <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
-              <div style="padding:10px 20px;border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ sess.endedLine }} · scrollback kept until you dismiss it</div>
-            </sc-if>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ sess.meta }}</span>
           </div>
-          <div style="display:flex;flex-direction:column;min-height:0;background:var(--bg)">
-            <div style="display:flex;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border)">
-              <sc-for list="{{ tabs }}" as="tb" hint-placeholder-count="3">
-                <div onClick="{{ tb.pick }}" style="{{ tb.style }}">{{ tb.label }}</div>
-              </sc-for>
+          <sc-if value="{{ endConfirm }}" hint-placeholder-val="{{ false }}">
+            <div style="margin:12px 16px 0;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--surface2);border:1px solid var(--border);display:flex;align-items:center;gap:10px">
+              <span style="flex:1;font-size:13px;color:var(--text);line-height:1.45">End {{ sess.name }}? The agent and everything it started are stopped on the host.</span>
+              <span onClick="{{ cancelEnd }}" style="font-size:13px;color:var(--text2);cursor:pointer;padding:5px 8px">Cancel</span>
+              <span onClick="{{ confirmEnd }}" style="font-size:13px;color:var(--on-accent);background:var(--danger);padding:6px 10px;border-radius:var(--r-control,10px);cursor:pointer">End session</span>
             </div>
-            <div style="flex:1;overflow:auto">
+          </sc-if>
+          <div style="flex:1;min-height:0;display:flex">
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column">
+              <div style="flex:1;overflow:auto;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
+                <sc-for list="{{ sess.lines }}" as="l" hint-placeholder-count="4">
+                  <div style="{{ l.style }}">{{ l.text }}</div>
+                </sc-for>
+                <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
+                  <div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div>
+                </sc-if>
+              </div>
+              <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
+                <div style="padding:10px 20px;border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ sess.endedLine }} · scrollback kept until you dismiss it</div>
+              </sc-if>
+            </div>
+            <sc-if value="{{ inspectorOpen }}" hint-placeholder-val="{{ true }}">
+              <div style="width:320px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)">
+                <div style="display:flex;align-items:center;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border)">
+                  <sc-for list="{{ tabs }}" as="tb" hint-placeholder-count="3">
+                    <div onClick="{{ tb.pick }}" style="{{ tb.style }}">{{ tb.label }}</div>
+                  </sc-for>
+                  <span style="flex:1"></span>
+                  <span onClick="{{ toggleInspector }}" title="Close details" style="color:var(--text3);cursor:pointer;font-size:15px;padding:2px 6px">×</span>
+                </div>
+                <div style="flex:1;overflow:auto">
               <sc-if value="{{ tabNote }}" hint-placeholder-val="{{ true }}">
-                <div style="padding:22px 28px 40px;display:flex;flex-direction:column;gap:10px">
+                <div style="padding:22px 16px 40px;display:flex;flex-direction:column;gap:10px">
                   <div style="display:flex;align-items:center;gap:8px">
                     <sc-if value="{{ panelBack }}" hint-placeholder-val="{{ false }}"><span onClick="{{ panelBackClick }}" style="font-size:13px;color:var(--accent);cursor:pointer">‹ Wrote</span></sc-if>
                     <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ pn.crumb }}</span>
@@ -294,7 +303,7 @@ select option{background:#2a2826;color:#eee}
                 </div>
               </sc-if>
               <sc-if value="{{ tabNoCtx }}" hint-placeholder-val="{{ false }}">
-                <div style="padding:28px;font-size:14px;color:var(--text3);line-height:1.5">Started without a note. Notes this session writes appear under Wrote.</div>
+                <div style="padding:16px;font-size:14px;color:var(--text3);line-height:1.5">Started without a note. Notes this session writes appear under Wrote.</div>
               </sc-if>
               <sc-if value="{{ tabWrote }}" hint-placeholder-val="{{ false }}">
                 <div style="padding:18px 16px;display:flex;flex-direction:column;gap:2px">
@@ -313,7 +322,7 @@ select option{background:#2a2826;color:#eee}
                 </div>
               </sc-if>
               <sc-if value="{{ tabAbout }}" hint-placeholder-val="{{ false }}">
-                <div style="padding:22px 28px;display:flex;flex-direction:column;gap:14px">
+                <div style="padding:22px 16px;display:flex;flex-direction:column;gap:14px">
                   <sc-for list="{{ aboutRows }}" as="a" hint-placeholder-count="5">
                     <div style="display:flex;flex-direction:column;gap:3px">
                       <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ a.k }}</span>
@@ -323,6 +332,8 @@ select option{background:#2a2826;color:#eee}
                 </div>
               </sc-if>
             </div>
+              </div>
+            </sc-if>
           </div>
         </div>
       </sc-if>
@@ -430,7 +441,7 @@ select option{background:#2a2826;color:#eee}
           <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 0 4px">Running</div>
           <sc-for list="{{ runningRows }}" as="s" hint-placeholder-count="2">
             <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer">
-              <div style="{{ s.dotStyle }}"></div>
+              {{ s.markEl }}
               <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text)">{{ s.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ s.sub }}</span></div>
             </div>
           </sc-for>
@@ -439,7 +450,7 @@ select option{background:#2a2826;color:#eee}
           <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:22px 0 4px">Ended</div>
           <sc-for list="{{ endedRows }}" as="s" hint-placeholder-count="2">
             <div onClick="{{ s.open }}" style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border);cursor:pointer">
-              <div style="{{ s.dotStyle }}"></div>
+              {{ s.markEl }}
               <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text2)">{{ s.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ s.sub }}</span></div>
             </div>
           </sc-for>
@@ -451,20 +462,15 @@ select option{background:#2a2826;color:#eee}
     </sc-if>
 
     <sc-if value="{{ pShowSession }}" hint-placeholder-val="{{ false }}">
-      <div style="position:absolute;inset:0;display:flex;flex-direction:column;padding-top:76px">
-        <div style="padding:0 20px 10px;display:flex;flex-direction:column;gap:8px">
-          <div style="display:flex;align-items:center;gap:8px">
-            <span onClick="{{ backToList }}" style="font-size:14px;color:var(--accent);cursor:pointer">‹ Agents</span>
-            <span style="flex:1"></span>
-            <span style="{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
-          </div>
-          <div style="font-size:20px;font-weight:600;color:var(--text)">{{ sess.name }}</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <sc-if value="{{ sess.hasCtx }}" hint-placeholder-val="{{ false }}">
-              <span onClick="{{ pOpenCtx }}" style="font-size:13px;color:var(--text);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">▤ {{ sess.ctxTitle }}</span>
-            </sc-if>
-            <span onClick="{{ openInfo }}" style="font-size:13px;color:var(--accent);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">{{ sess.wroteLabel }}</span>
-            <span onClick="{{ openInfo }}" style="font-size:13px;color:var(--text2);border:1px solid var(--border);background:var(--surface);border-radius:var(--r-control,10px);padding:6px 10px;cursor:pointer">Details</span>
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+        <div style="height:84px;flex:none;padding:20px 76px 0;display:flex;flex-direction:column;justify-content:flex-start">
+          <div onClick="{{ openInfo }}" style="height:44px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;cursor:pointer;min-width:0">
+            <div style="display:flex;align-items:center;gap:6px;max-width:100%">
+              <span style="{{ sess.dotStyle }}"></span>
+              <span style="min-width:0;font-size:15px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ sess.name }}</span>
+              <span style="flex:none;color:var(--text3);font-size:11px">▾</span>
+            </div>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%">{{ sess.phoneSub }}</span>
           </div>
         </div>
         <div style="flex:1;overflow:auto;padding:12px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;background:var(--surface);border-top:1px solid var(--border)">
@@ -472,13 +478,17 @@ select option{background:#2a2826;color:#eee}
           <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}"><div style="color:var(--text)">› <span style="display:inline-block;width:7px;height:13px;background:var(--text2);vertical-align:-2px"></span></div></sc-if>
         </div>
         <sc-if value="{{ sess.isLive }}" hint-placeholder-val="{{ true }}">
-          <div style="display:flex;gap:6px;padding:8px 10px 26px;background:var(--surface2);border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)">
-            <span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Esc</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Tab</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Ctrl</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">←</span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">→</span><span style="flex:1"></span><span style="padding:8px 10px;border-radius:var(--r-control,10px);background:var(--surface)">Paste</span>
-          </div>
+          <div style="height:24px;flex:none;background:var(--surface)"></div>
         </sc-if>
         <sc-if value="{{ sess.isEnded }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;gap:8px;padding:12px 16px 28px;border-top:1px solid var(--border)">
+            <sc-if value="{{ sess.canResume }}" hint-placeholder-val="{{ false }}">
+              <span onClick="{{ resumeSession }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500;cursor:pointer">Resume</span>
+              <span onClick="{{ runAgain }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);border:1px solid var(--border);color:var(--text2);font-size:14px;cursor:pointer">Run again</span>
+            </sc-if>
+            <sc-if value="{{ sess.noResume }}" hint-placeholder-val="{{ true }}">
             <span onClick="{{ runAgain }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500;cursor:pointer">Run again</span>
+            </sc-if>
             <span onClick="{{ dismissSession }}" style="flex:1;text-align:center;padding:12px;border-radius:var(--r-control,10px);border:1px solid var(--border);color:var(--text2);font-size:14px;cursor:pointer">Dismiss</span>
           </div>
         </sc-if>
@@ -489,6 +499,10 @@ select option{background:#2a2826;color:#eee}
       <div onClick="{{ closeInfo }}" style="position:absolute;inset:0;background:rgba(0,0,0,.35);z-index:44"></div>
       <div style="position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--r-card,16px) var(--r-card,16px) 0 0;padding:10px 20px 30px;z-index:45;display:flex;flex-direction:column;gap:12px;max-height:75%;overflow:auto">
         <div style="align-self:center;width:36px;height:4px;border-radius:2px;background:var(--border)"></div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <span style="font-size:17px;font-weight:600;color:var(--text);line-height:1.3;overflow-wrap:anywhere">{{ sess.name }}</span>
+          <span style="align-self:flex-start;{{ sess.chipStyle }}"><span style="{{ sess.dotStyle }}"></span>{{ sess.statusLabel }}</span>
+        </div>
         <sc-if value="{{ sess.hasCtx }}" hint-placeholder-val="{{ false }}">
           <div style="display:flex;flex-direction:column;gap:6px">
             <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Started from</span>
@@ -541,7 +555,12 @@ select option{background:#2a2826;color:#eee}
         <sc-if value="{{ bubbleIsVault }}" hint-placeholder-val="{{ true }}">
           <div style="{{ vaultTileStyle }}">{{ vaultInitial }}</div>
         </sc-if>
-        <div style="{{ bubbleDotStyle }}"></div>
+        <sc-if value="{{ bubbleIsBack }}" hint-placeholder-val="{{ false }}">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg>
+        </sc-if>
+        <sc-if value="{{ notBubbleIsBack }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ bubbleDotStyle }}"></div>
+        </sc-if>
       </div>
     </div>
     <div style="position:absolute;top:20px;right:20px;z-index:20">
@@ -663,6 +682,55 @@ select option{background:#2a2826;color:#eee}
         </div>
       </sc-if>
 
+      <sc-if value="{{ pgClaude }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="font-size:13px;color:var(--text2);line-height:1.55;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--surface);border:1px solid var(--border)">This is for one person, on their own machines, for their own work. Do not use it to share a Claude account, to give other people access to your plan, or on machines you do not control.<br><br>You are responsible for following Anthropic's terms. Storm stores your token at your request, on your server. If you are not comfortable with that risk to your account, don't turn this on: log in on each host instead.<br><br>Only claude.ai can revoke the token. Removing it here stops new sessions from getting it.</div>
+          <span style="font-size:13px;color:var(--accent);cursor:pointer">How Claude login sync works ›</span>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:14px">Token</div>
+          <div style="font-size:13px;color:var(--text);line-height:1.55;padding:12px 14px;border-radius:var(--r-control,10px);background:var(--amber-soft);border:1px solid var(--amber)">Your synced Claude login expires in 24 days, on 17 Nov 2026. Mint a new token, use Replace token, then revoke the old one on claude.ai.</div>
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">Claude subscription token</span><span style="font-size:12px;color:var(--text3);line-height:1.45">Synced · fingerprint 7f3a·c21e · minted 17 Nov 2025 · expires 17 Nov 2026</span></div>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--amber);border:1px solid var(--border);border-radius:999px;padding:2px 8px;white-space:nowrap">Expires in 24 days</span>
+          </div>
+          <div style="display:flex;align-items:center;gap:12px;padding-top:4px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">Replace token</span><span style="font-size:13px;color:var(--danger);cursor:pointer">Remove</span></div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.5">Storm never tests the token with Anthropic: the first Claude Code session on a ticked host is the test. If sessions on synced hosts say the login is revoked or expired, sync a new token.</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:14px">Hosts</div>
+          <div style="font-size:13px;color:var(--text2);line-height:1.5">Claude Code sessions on a ticked host use this login; every other host uses its own. No host gets it until you tick it, including hosts you enroll later.</div>
+          <sc-for list="{{ claudeHosts }}" as="h" hint-placeholder-count="2">
+            <div onClick="{{ h.flip }}" style="display:flex;align-items:center;gap:12px;padding:8px 0;cursor:pointer">
+              <div style="{{ h.boxStyle }}">{{ h.check }}</div>
+              <div style="display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ h.name }}</span><span style="font-size:12px;color:var(--text3)">{{ h.sub }}</span></div>
+            </div>
+          </sc-for>
+          <div style="font-size:13px;color:var(--text2);font-weight:600">Every agent on a ticked host can read this token. Tick only your own machines.</div>
+          <div style="display:flex"><span style="padding:8px 14px;border-radius:var(--r-control,10px);border:1px solid var(--border);font-size:13px;color:var(--text3)">Save hosts</span></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pgTerminal }}" hint-placeholder-val="{{ false }}">
+        <div style="display:flex;flex-direction:column;gap:10px">
+          <div style="display:flex;align-items:center;gap:6px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <span style="flex:1;font-size:14px;color:var(--text)">Text size</span>
+            <span onClick="{{ termSmaller }}" title="Smaller terminal text" style="padding:4px 8px;border-radius:6px;color:var(--text2);cursor:pointer;font-size:14px">−</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text2);min-width:56px;text-align:center">{{ termSizeLabel }}</span>
+            <span onClick="{{ termLarger }}" title="Larger terminal text" style="padding:4px 8px;border-radius:6px;color:var(--text2);cursor:pointer;font-size:14px">＋</span>
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:10px">Line spacing</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ termSpacing }}" as="o" hint-placeholder-count="3"><span onClick="{{ o.pick }}" style="{{ o.style }}">{{ o.label }}</span></sc-for>
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:10px">Padding</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap">
+            <sc-for list="{{ termPadding }}" as="o" hint-placeholder-count="3"><span onClick="{{ o.pick }}" style="{{ o.style }}">{{ o.label }}</span></sc-for>
+          </div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:10px">Preview</div>
+          <div style="{{ termPreviewStyle }}"><div><span style="color:var(--text3)">~/storm</span> <span style="color:oklch(0.75 0.11 210)">❯</span> claude</div><div> </div><div><span style="color:#D97757">✻</span> Welcome back</div><div>╭────────────────────────────╮</div><div>│ &gt; fix the login redirect   │</div><div>╰────────────────────────────╯</div><div><b>●</b> Read <span style="color:var(--amber)">src/auth.rs</span></div><div>  The redirect drops the query string.</div><div><span style="color:var(--green)">+</span>   let next = url.query().unwrap_or("");</div><div style="color:var(--text3)">  2 lines changed · 3s</div></div>
+          <sc-if value="{{ termIsCustom }}" hint-placeholder-val="{{ false }}">
+            <div style="display:flex;padding-top:4px"><span onClick="{{ termReset }}" style="font-size:13px;color:var(--accent);cursor:pointer">Reset to defaults</span></div>
+          </sc-if>
+        </div>
+      </sc-if>
+
       <sc-if value="{{ pgAccess }}" hint-placeholder-val="{{ false }}">
         <div style="display:flex;flex-direction:column;gap:4px">
           <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-bottom:4px">Signed-in devices</div>
@@ -736,6 +804,19 @@ select option{background:#2a2826;color:#eee}
             </div>
           </sc-for>
           <div style="display:flex;padding-top:6px"><span style="padding:8px 14px;border-radius:var(--r-control,10px);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500;cursor:pointer">＋ Add integration</span></div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:14px">From your plugins</div>
+          <div style="font-size:12px;color:var(--text3);line-height:1.5;margin-top:-4px">Your agents' plugins use these servers. A session reaches one only once it is an integration.</div>
+          <sc-for list="{{ pluginSuggestions }}" as="p" hint-placeholder-count="2">
+            <div style="display:flex;align-items:flex-start;gap:12px;padding:6px 0">
+              <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                <span style="font-size:14px;font-weight:500;color:var(--text)">{{ p.name }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ p.url }}</span>
+                <span style="font-size:12px;color:var(--text3)">{{ p.from }}</span>
+              </div>
+              <span style="font-size:13px;color:var(--accent);cursor:pointer">Add</span>
+              <span style="font-size:13px;color:var(--text2);cursor:pointer">Dismiss</span>
+            </div>
+          </sc-for>
         </div>
       </sc-if>
 
@@ -827,7 +908,7 @@ select option{background:#2a2826;color:#eee}
     <sc-for list="{{ L.fields }}" as="f" hint-placeholder-count="3">
       <div style="display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px">
         <span style="font-size:13px;color:var(--text2)">{{ f.label }}</span>
-        <select value="{{ f.value }}" onChange="{{ f.change }}" style="appearance:none;-webkit-appearance:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:9px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;width:100%">
+        <select value="{{ f.value }}" onChange="{{ f.change }}" style="appearance:none;-webkit-appearance:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:9px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;width:100%;background-image:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E&quot;);background-repeat:no-repeat;background-position:right 10px center;padding-right:32px;">
           <sc-for list="{{ f.options }}" as="o" hint-placeholder-count="2"><option value="{{ o.v }}">{{ o.label }}</option></sc-for>
         </select>
       </div>
@@ -838,7 +919,7 @@ select option{background:#2a2826;color:#eee}
         <div style="display:flex;align-items:center;gap:10px">
           <div onClick="{{ L.flipWrites }}" style="{{ L.track }}"><div style="{{ L.knob }}"></div></div>
           <sc-if value="{{ L.writes }}" hint-placeholder-val="{{ false }}">
-            <select value="{{ L.writeVault }}" onChange="{{ L.setWriteVault }}" style="appearance:none;-webkit-appearance:none;flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:7px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px">
+            <select value="{{ L.writeVault }}" onChange="{{ L.setWriteVault }}" style="appearance:none;-webkit-appearance:none;flex:1;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:var(--r-control,10px);padding:7px 12px;font-family:'IBM Plex Sans',sans-serif;font-size:14px;background-image:url(&quot;data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E&quot;);background-repeat:no-repeat;background-position:right 10px center;padding-right:32px;">
               <sc-for list="{{ L.vaultOpts }}" as="o" hint-placeholder-count="3"><option value="{{ o.v }}">{{ o.label }}</option></sc-for>
             </select>
           </sc-if>
@@ -916,6 +997,7 @@ const STATUS = {
   unknown: { label: 'Unknown', c: 'var(--text3)', live: true }
 };
 const clone = (o) => JSON.parse(JSON.stringify(o));
+const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z';
 const mono = "font-family:'IBM Plex Mono',monospace";
 
 class Component extends DCLogic {
@@ -924,14 +1006,34 @@ class Component extends DCLogic {
     expanded: { 'personal/projects': true, 'personal/projects/storm': true },
     recents: ['gw', 'sprint', 'lead', 'daily'], notes: clone(NOTES0), sessions: clone(SESSIONS0),
     sessionId: null, tab: 'context', panelNote: null, endConfirm: false, settingsPage: 'device',
+    tick: 0, inspector: true, term: { size: null, spacing: 'Default', padding: 'Default' },
     launcher: null, vaultMenu: false, statusMenu: false, placeMenu: false, infoSheet: false,
     phonePath: [], overlayNote: null, phoneSettingsOpen: false,
     prefs: { read: true, showId: false, appsRead: true, appsWrite: false, agentWrite: true }, defaultAgent: 'Claude Code'
   };
   seq = 0; timers = [];
 
-  componentDidMount() { if (this.props.device === 'phone') this.setState({ noteId: null }); }
-  componentWillUnmount() { this.timers.forEach(clearTimeout); }
+  componentDidMount() {
+    if (this.props.device === 'phone') this.setState({ noteId: null });
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (!reduce) this.tickTimer = setInterval(() => this.setState(s => ({ tick: s.tick + 1 })), 550);
+  }
+  componentWillUnmount() { this.timers.forEach(clearTimeout); clearInterval(this.tickTimer); }
+  mark(s, size, ringBg) {
+    const h = React.createElement, st = STATUS[s.status], ended = !st.live;
+    const g = size * 0.6;
+    const glyph = s.agent === 'Claude Code'
+      ? h('svg', { width: g, height: g, viewBox: '0 0 24 24' }, h('path', { fill: '#D97757', d: CLAUDE_PATH }))
+      : s.agent === 'OpenCode'
+        ? h('svg', { width: g * 0.8, height: g * 0.8, viewBox: '0 0 24 24' }, h('path', { fill: 'var(--text)', fillRule: 'evenodd', d: 'M22 24H2V0h20zM17 4.8H7v14.4h10z' }))
+        : h('svg', { width: g, height: g, viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--text2)', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'm7 11 2-2-2-2' }), h('path', { d: 'M11 13h4' }), h('rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }));
+    const working = s.status === 'running' && s.working !== false;
+    const badge = working ? 'var(--accent)' : (s.status === 'starting' ? 'var(--text3)' : s.status === 'unknown' ? 'var(--amber)' : s.status === 'failed' ? 'var(--danger)' : null);
+    const dot = Math.round(size * 0.34);
+    return h('div', { style: { position: 'relative', width: size, height: size, flex: 'none' } },
+      h('div', { style: { width: size, height: size, borderRadius: 'var(--r-control,10px)', background: 'var(--surface2)', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: ended ? 0.5 : 1 } }, glyph),
+      badge && h('div', { style: { position: 'absolute', right: -dot * 0.25, bottom: -dot * 0.25, width: dot, height: dot, borderRadius: 999, boxSizing: 'border-box', border: `2px solid ${ringBg}`, background: badge, opacity: working && this.state.tick % 2 ? 0.45 : 1, transition: 'opacity 550ms ease-in-out' } }));
+  }
 
   get phone() { return this.props.device === 'phone'; }
   hosts() { return (this.props.agentsState ?? 'running') === 'empty' ? [] : HOSTS; }
@@ -1014,12 +1116,13 @@ class Component extends DCLogic {
     const hosts = this.hosts(), online = hosts.filter(h => h.online);
     const sessions = this.visSessions();
     const live = sessions.filter(s => STATUS[s.status].live), ended = sessions.filter(s => !STATUS[s.status].live);
+    const working = live.some(s => s.status === 'running' && s.working !== false);
     const notes = S.notes;
     const vaultOf = (id) => VAULTS.find(v => v.id === id);
     const V = vaultOf(S.vault);
     const close = { vaultMenu: false, statusMenu: false, placeMenu: false };
 
-    const railStyle = (on) => `width:46px;padding:7px 0 5px;display:flex;flex-direction:column;align-items:center;gap:3px;border-radius:var(--r-control,10px);cursor:pointer;position:relative;color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent-soft)' : 'transparent'}`;
+    const railStyle = (on) => `width:40px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control,10px);cursor:pointer;position:relative;color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent-soft)' : 'transparent'}`;
     const tag = (vid) => `${mono};font-size:10.5px;color:var(--text3);border:1px solid var(--border);border-radius:calc(var(--r-control,10px) * .5);padding:0 5px;flex:none`;
 
     const worst = (() => {
@@ -1088,7 +1191,8 @@ class Component extends DCLogic {
     // agents
     const sRow = (s, sel) => {
       const st = STATUS[s.status];
-      return { name: s.name, sub: `${s.workspace} · ${s.agent} · ${st.live ? s.age : st.label.toLowerCase()}`, dotStyle: this.dot(st.c, st.ring), open: () => this.openSession(s.id),
+      return { name: s.name, sub: `${s.host} · ${s.workspace} · ${st.live ? s.age : st.label.toLowerCase()}`, dotStyle: this.dot(st.c, st.ring), open: () => this.openSession(s.id),
+        markEl: this.mark(s, phone ? 36 : 32, phone ? 'var(--bg)' : (sel ? 'var(--surface2)' : 'var(--surface)')),
         rowStyle: `display:flex;align-items:center;gap:10px;padding:7px 8px;border-radius:var(--r-control,10px);cursor:pointer;background:${sel ? 'var(--surface2)' : 'transparent'}` };
     };
     const curS = S.activity === 'agents' && S.sessionId ? sessions.find(s => s.id === S.sessionId) : null;
@@ -1096,6 +1200,7 @@ class Component extends DCLogic {
     sessions.forEach(s => { const k = s.workspace + '@' + s.host; (groups[k] = groups[k] || { workspace: s.workspace, host: s.host, rows: [] }).rows.push(s); });
     const workGroups = Object.values(groups).map(g => ({ ...g, rows: g.rows.map(s => { const st = STATUS[s.status]; return {
       name: s.name, meta: `${s.agent} · ${st.live ? s.age : st.label.toLowerCase()}`, dotStyle: this.dot(st.c, st.ring), open: () => this.openSession(s.id),
+      markEl: this.mark(s, 28, 'var(--surface)'),
       hasCtx: !!(s.context && notes[s.context]), ctxTitle: s.context && notes[s.context] ? notes[s.context].title : '',
       hasWrote: s.wrote.length > 0, wroteLabel: `wrote ${s.wrote.length}` }; }) }));
     const agentNames = ['Claude Code', 'OpenCode', 'Shell'];
@@ -1115,7 +1220,10 @@ class Component extends DCLogic {
         dotStyle: this.dot(st.c, st.ring, 7), chipStyle: `display:inline-flex;align-items:center;gap:6px;${mono};font-size:11px;color:${st.c};border:1px solid var(--border);border-radius:999px;padding:2px 9px`,
         meta: `${curS.agent} · ${curS.workspace} on ${curS.host} · ${st.live ? 'started ' + curS.age + (curS.age === 'now' ? '' : ' ago') : (curS.ended || '')}`,
         hasCtx: !!(curS.context && notes[curS.context]), ctxTitle: curS.context && notes[curS.context] ? notes[curS.context].title : '',
+        canResume: !st.live && curS.status === 'completed' && curS.agent !== 'Shell',
+        noResume: !(!st.live && curS.status === 'completed' && curS.agent !== 'Shell'),
         wroteLabel: curS.wrote.length ? `Wrote ${curS.wrote.length}` : 'Wrote 0',
+        phoneSub: [st.label, curS.agent, curS.context && notes[curS.context] ? notes[curS.context].title : null, curS.wrote.length ? `wrote ${curS.wrote.length}` : null].filter(Boolean).join(' · '),
         lines: curS.lines.map(t => ({ text: t, style: `white-space:pre-wrap;color:${t.startsWith('$') ? 'var(--text)' : t.startsWith('✕') ? 'var(--danger)' : t.startsWith('✓') ? 'var(--text)' : /updated|created/.test(t) ? 'var(--accent)' : 'var(--text2)'}` }))
       };
     })() : { lines: [], name: '' };
@@ -1134,7 +1242,7 @@ class Component extends DCLogic {
     ] : [];
 
     // settings
-    const pages = [['device', 'This device', 'Only affects this device.'], ['access', 'Devices & access', 'Where you’re signed in, and keys for AI apps outside Storm.'], ['h', 'Storm'], ['vaults', 'Vaults', 'Each vault is a folder of Markdown under the storage root.'], ['ai', 'AI access', 'What AI apps outside Storm, and agents inside it, can do with your notes.'], ['integrations', 'Integrations', 'Services your agents can use, such as Linear or GitHub.'], ['hosts', 'Hosts & default agent', 'The machines agents run on.'], ['storage', 'Storage', 'Where your vaults live on the server.'], ['connection', 'Connection', 'How this device reaches your Storm.'], ['advanced', 'Advanced', 'Details for troubleshooting and for connecting other tools.'], ['h', ''], ['health', 'About & health', 'Whether everything is working.']];
+    const pages = [['device', 'This device', 'Only affects this device.'], ['terminal', 'Terminal', 'Every agent session in this app. Kept on this device.'], ['access', 'Devices & access', 'Where you’re signed in, and keys for AI apps outside Storm.'], ['h', 'Storm'], ['vaults', 'Vaults', 'Each vault is a folder of Markdown under the storage root.'], ['ai', 'AI access', 'What AI apps outside Storm, and agents inside it, can do with your notes.'], ['integrations', 'Integrations', 'Services your agents can use, such as Linear or GitHub.'], ['claude-login', 'Claude login', 'Sign in to Claude once, here, and Claude Code sessions on the hosts you tick use that login.'], ['hosts', 'Hosts & default agent', 'The machines agents run on.'], ['storage', 'Storage', 'Where your vaults live on the server.'], ['connection', 'Connection', 'How this device reaches your Storm.'], ['advanced', 'Advanced', 'Details for troubleshooting and for connecting other tools.'], ['h', ''], ['health', 'About & health', 'Whether everything is working.']];
     const settingsNav = pages.map(([id, label]) => id === 'h' ? { isHeader: !!label, isItem: false, label } : {
       isHeader: false, isItem: true, label, dot: id === 'integrations',
       pick: () => this.setState({ settingsPage: id, phoneSettingsOpen: true, activity: 'settings' }),
@@ -1178,7 +1286,8 @@ class Component extends DCLogic {
       frameStyle: desk ? 'position:relative;width:1280px;height:800px;overflow:hidden;background:var(--bg,oklch(0.22 0.008 55));border-radius:12px;border:1px solid var(--border,oklch(0.36 0.008 55))' : 'position:relative;width:390px;height:844px;overflow:hidden;background:var(--bg,oklch(0.22 0.008 55));border-radius:36px;border:1px solid var(--border,oklch(0.36 0.008 55))',
       isDesktop: desk, isPhone: phone,
       isNotes: S.activity === 'notes', isAgents: S.activity === 'agents', isSettings: S.activity === 'settings',
-      notesRailStyle: railStyle(S.activity === 'notes'), agentsRailStyle: railStyle(S.activity === 'agents'), settingsRailStyle: railStyle(S.activity === 'settings').replace('padding:7px 0 5px', 'padding:8px 0'),
+      notesRailStyle: railStyle(S.activity === 'notes'), agentsRailStyle: railStyle(S.activity === 'agents'), settingsRailStyle: railStyle(S.activity === 'settings'),
+      agentsFrameA: !(working && S.tick % 2), agentsFrameB: !!(working && S.tick % 2),
       goNotes: () => this.setState({ activity: 'notes', ...close, overlayNote: null }),
       goAgents: () => this.setState({ activity: 'agents', sessionId: phone ? null : S.sessionId, ...close, overlayNote: null, infoSheet: false }),
       goSettings: () => this.setState({ activity: 'settings', phoneSettingsOpen: false, ...close, overlayNote: null, infoSheet: false }),
@@ -1216,6 +1325,10 @@ class Component extends DCLogic {
       confirmEnd: () => { this.updS(curS.id, x => ({ ...x, status: 'stopped', ended: 'Stopped by you just now', lines: [...x.lines, '■ stopped'] })); this.setState({ endConfirm: false, infoSheet: false }); },
       dismissSession: () => this.setState(s => ({ sessions: s.sessions.filter(x => x.id !== curS.id), sessionId: null })),
       runAgain: () => curS && this.openLauncher(curS.context, curS.launch || { context: curS.context, host: online[0] ? online[0].id : 'build-vm', workspace: curS.workspace, agent: curS.agent, writes: !!curS.writeVault, writeVault: curS.writeVault || 'personal' }),
+      inspectorOpen: S.inspector, toggleInspector: () => this.setState({ inspector: !S.inspector }),
+      inspectorToggleStyle: `display:flex;padding:6px;border-radius:var(--r-control,10px);cursor:pointer;color:${S.inspector ? 'var(--text2)' : 'var(--text3)'}`,
+      runAgainStyle: (() => { const r = curS && !STATUS[curS.status].live && curS.status === 'completed' && curS.agent !== 'Shell'; return `font-size:12.8px;color:${r ? 'var(--text2)' : 'var(--accent)'};padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control,10px);cursor:pointer`; })(),
+      resumeSession: () => curS && this.updS(curS.id, x => ({ ...x, status: 'running', age: 'now', ended: null, lines: [...x.lines, '', '$ claude --resume', '› resumed the conversation', '› waiting for input'] })),
       tabs, tabNote: !!curS && ((S.tab === 'context' && !!ctxN) || (S.tab === 'wrote' && !!S.panelNote)), tabNoCtx: !!curS && S.tab === 'context' && !ctxN,
       tabWrote: !!curS && S.tab === 'wrote' && !S.panelNote, tabAbout: !!curS && S.tab === 'about',
       panelBack: !!S.panelNote, panelBackClick: () => this.setState({ panelNote: null }),
@@ -1226,6 +1339,17 @@ class Component extends DCLogic {
       settingsNav, showSettingsPage, pageTitle: pg[1], pageIntro: pg[2],
       settingsPageStyle: desk ? 'position:absolute;top:0;bottom:0;left:316px;right:0;overflow:auto;background:var(--bg)' : 'position:absolute;inset:0;overflow:auto;background:var(--bg);z-index:5',
       settingsInnerStyle: desk ? 'max-width:680px;padding:28px 40px 60px;display:flex;flex-direction:column;gap:18px' : 'padding:80px 20px 60px;display:flex;flex-direction:column;gap:16px',
+      pgTerminal: S.settingsPage === 'terminal', pgClaude: S.settingsPage === 'claude-login',
+      claudeHosts: HOSTS.map(h => { const on = (S.claudeHosts || ['build-vm']).includes(h.id); return { name: h.id, sub: h.online ? 'Online' : 'Offline', check: on ? '✓' : '', flip: () => this.setState(s => { const cur = s.claudeHosts || ['build-vm']; return { claudeHosts: on ? cur.filter(x => x !== h.id) : [...cur, h.id] }; }), boxStyle: `width:18px;height:18px;flex:none;border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:12px;border:1.5px solid ${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent)' : 'transparent'};color:var(--on-accent)` }; }),
+      pluginSuggestions: [{ name: 'Sentry', url: 'https://mcp.sentry.dev/mcp', from: 'Plugin sentry on build-vm' }, { name: 'Figma', url: 'Needs its address: https://{host}/mcp', from: 'Plugin figma on build-vm, mac-mini' }],
+      termSizeLabel: S.term.size == null ? 'Default' : S.term.size + ' px',
+      termSmaller: () => this.setState(s => ({ term: { ...s.term, size: Math.max(10, (s.term.size ?? (phone ? 12 : 13)) - 1) } })),
+      termLarger: () => this.setState(s => ({ term: { ...s.term, size: Math.min(20, (s.term.size ?? (phone ? 12 : 13)) + 1) } })),
+      termIsCustom: S.term.size != null || S.term.spacing !== 'Default' || S.term.padding !== 'Default',
+      termReset: () => this.setState({ term: { size: null, spacing: 'Default', padding: 'Default' } }),
+      termSpacing: ['Compact', 'Default', 'Relaxed'].map(l => ({ label: l, pick: () => this.setState(s => ({ term: { ...s.term, spacing: l } })), style: `padding:7px 12px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;border:1px solid ${S.term.spacing === l ? 'var(--accent)' : 'var(--border)'};color:${S.term.spacing === l ? 'var(--accent)' : 'var(--text2)'};background:${S.term.spacing === l ? 'var(--accent-soft)' : 'transparent'}` })),
+      termPadding: ['Tight', 'Default', 'Roomy'].map(l => ({ label: l, pick: () => this.setState(s => ({ term: { ...s.term, padding: l } })), style: `padding:7px 12px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;border:1px solid ${S.term.padding === l ? 'var(--accent)' : 'var(--border)'};color:${S.term.padding === l ? 'var(--accent)' : 'var(--text2)'};background:${S.term.padding === l ? 'var(--accent-soft)' : 'transparent'}` })),
+      termPreviewStyle: (() => { const fs = S.term.size ?? (phone ? 12 : 13); const lh = { Compact: 1.15, Default: 1.25, Relaxed: 1.5 }[S.term.spacing]; const pad = Math.round(12 * { Tight: 0.5, Default: 1, Roomy: 1.5 }[S.term.padding]); return `height:240px;overflow:hidden;border:1px solid var(--border);border-radius:var(--r-control,10px);background:var(--bg);padding:${pad}px;font-family:'IBM Plex Mono',monospace;font-size:${fs}px;line-height:${lh};white-space:pre;color:var(--text)`; })(),
       pgDevice: S.settingsPage === 'device', pgAccess: S.settingsPage === 'access', pgVaults: S.settingsPage === 'vaults', pgAi: S.settingsPage === 'ai', pgInt: S.settingsPage === 'integrations', pgHosts: S.settingsPage === 'hosts', pgStorage: S.settingsPage === 'storage', pgConn: S.settingsPage === 'connection', pgAdv: S.settingsPage === 'advanced', pgHealth: S.settingsPage === 'health',
       presetButtons: Object.entries(PRESETS).map(([k, p]) => { const d = derive(p); return { label: p.label, pick: () => this.setState({ preset: k }), swatch: `width:18px;height:18px;border-radius:999px;background:${d.vars['--bg']};border:3px solid ${d.vars['--accent']}`, style: `display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--r-control,10px);cursor:pointer;font-size:13px;color:var(--text);border:1px solid ${k === preset ? 'var(--accent)' : 'var(--border)'};background:${k === preset ? 'var(--accent-soft)' : 'var(--surface)'}` }; }),
       deviceToggles: [{ label: 'Open notes in Read mode', sub: 'Switch to Edit with ⌘E.', ...this.toggle(pr.read, flip('read')) }, { label: 'Show note id', sub: 'Shown on the version line.', ...this.toggle(pr.showId, flip('showId')) }],
@@ -1252,9 +1376,9 @@ class Component extends DCLogic {
       pOpenCtx: () => this.setState({ overlayNote: curS.context, infoSheet: false }),
       openInfo: () => this.setState({ infoSheet: true }), closeInfo: () => this.setState({ infoSheet: false, endConfirm: false }), infoSheet: phone && S.infoSheet && !!curS,
       pShowSettingsList: phone && S.activity === 'settings' && !S.phoneSettingsOpen, pSettingsBack: () => this.setState({ phoneSettingsOpen: false }),
-      placeMenu: S.placeMenu, togglePlace: () => this.setState({ placeMenu: !S.placeMenu }),
+      placeMenu: S.placeMenu, togglePlace: () => (phone && S.activity === 'agents' && curS) ? this.setState({ sessionId: null, endConfirm: false, infoSheet: false }) : this.setState({ placeMenu: !S.placeMenu }),
       placeBubbleStyle: bubble, setBubbleStyle: bubble + (S.activity === 'settings' ? ';color:var(--accent);border-color:var(--accent)' : ''),
-      bubbleIsAgents: S.activity === 'agents', bubbleIsVault: S.activity !== 'agents',
+      bubbleIsAgents: S.activity === 'agents' && !curS, bubbleIsVault: S.activity !== 'agents', bubbleIsBack: phone && S.activity === 'agents' && !!curS, notBubbleIsBack: !(phone && S.activity === 'agents' && !!curS),
       bubbleDotStyle: `position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:999px;border:2px solid var(--bg);background:${S.activity === 'agents' ? (live.length ? 'var(--accent)' : 'var(--text3)') : 'var(--green)'}`,
       pShowPill: phone && ((S.activity === 'notes' && !S.noteId) || (S.activity === 'agents' && !curS && online.length > 0)) && !S.overlayNote,
       pillNotes: S.activity === 'notes', pillAgents: S.activity === 'agents'

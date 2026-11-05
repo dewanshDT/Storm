@@ -476,12 +476,16 @@ class FakeServer {
       final held = vaultNotes.values.where(
         (n) => n.path.startsWith('$folder/'),
       );
-      if (held.isNotEmpty) {
+      // Decision 150: refused unless the person confirmed, then trashed.
+      if (held.isNotEmpty && request.url.queryParameters['trash'] != 'true') {
         return http.Response(
           '{"error":"${held.length} note(s) inside"}',
           409,
           headers: j(''),
         );
+      }
+      for (final id in held.map((n) => n.id).toList()) {
+        vaultNotes.remove(id);
       }
       folders[vaultId]?.remove(folder);
       return http.Response('{"deleted":"ok"}', 200, headers: j(''));

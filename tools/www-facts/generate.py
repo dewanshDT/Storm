@@ -45,13 +45,18 @@ def mcp_tools():
         tools.append({"name": name, "description": " ".join(desc.split())})
     if not tools:
         sys.exit(f"www-facts: no #[tool] functions in {MCP_RS}")
+    # Decision 134's tools are offered to no one until 134-11 enables a host,
+    # so the site does not describe them yet.
+    dark = set(const_list(src, "SPAWN_TOOLS")) | set(const_list(src, "SPAWNED_TOOLS"))
+    tools = [t for t in tools if t["name"] not in dark]
     write = set(const_list(src, "WRITE_TOOLS"))
     only_agents = set(const_list(src, "ONLY_FOR_AGENTS"))
-    never_agents = set(const_list(src, "NEVER_FOR_AGENTS"))
+    approval = set(const_list(src, "DELETE_TOOLS"))
     for t in tools:
         n = t["name"]
         t["access"] = "agents" if n in only_agents else "write" if n in write else "read"
-        t["agents"] = n not in never_agents
+        t["agents"] = True
+        t["approval"] = n in approval
     return tools
 
 

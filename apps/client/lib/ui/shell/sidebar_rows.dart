@@ -115,6 +115,7 @@ class SidebarRow extends StatelessWidget {
     this.selected = false,
     this.unseen = false,
     this.indent = 0,
+    this.guides = const [],
     this.vertical,
     this.onTap,
     this.onLongPress,
@@ -127,6 +128,10 @@ class SidebarRow extends StatelessWidget {
   final bool unseen;
   final double indent;
 
+  /// Where, from the row's left edge, a tree's indent guides run: one per
+  /// open folder the row is inside, so its depth reads at a glance.
+  final List<double> guides;
+
   /// Defaults to the tree's 5; recent rows pass 6.
   final double? vertical;
   final VoidCallback? onTap;
@@ -136,7 +141,7 @@ class SidebarRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final radius = BorderRadius.circular(t.rControl);
-    return Material(
+    final row = Material(
       color: selected ? t.surface2 : Colors.transparent,
       borderRadius: radius,
       child: InkWell(
@@ -173,5 +178,37 @@ class SidebarRow extends StatelessWidget {
         ),
       ),
     );
+    if (guides.isEmpty) return row;
+    return CustomPaint(
+      key: const Key('tree-guides'),
+      painter: _GuidePainter(guides, t.border, t.bw),
+      child: row,
+    );
   }
+}
+
+class _GuidePainter extends CustomPainter {
+  _GuidePainter(this.xs, this.color, this.width);
+
+  final List<double> xs;
+  final Color color;
+  final double width;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = width;
+    for (final x in xs) {
+      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GuidePainter old) =>
+      old.color != color || old.width != width || !_same(old.xs, xs);
+
+  static bool _same(List<double> a, List<double> b) =>
+      a.length == b.length &&
+      [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((v) => v);
 }

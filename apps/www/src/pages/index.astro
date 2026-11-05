@@ -10,7 +10,7 @@ import facts from "../data/facts.json";
 const mcpReadTools = facts.mcp_tools.filter((t) => t.access === "read").map((t) => t.name);
 const mcpWriteTools = facts.mcp_tools.filter((t) => t.access === "write").map((t) => t.name);
 const mcpAgentTools = facts.mcp_tools.filter((t) => t.access === "agents").map((t) => t.name);
-const neverForAgents = facts.mcp_tools.filter((t) => !t.agents).map((t) => t.name);
+const askFirst = facts.mcp_tools.filter((t) => t.approval).map((t) => t.name);
 const mcpTools = [...mcpReadTools, ...mcpWriteTools];
 
 const platforms = [
@@ -23,7 +23,7 @@ const docs = [
   { href: "/docs/start/quickstart/", title: "Quickstart", body: "Server to phone in a few minutes." },
   { href: "/docs/install/server/", title: "Install", body: "Linux, macOS, Windows; pairing; firewalls." },
   { href: "/docs/notes/writing/", title: "Notes", body: "Writing, vaults, sync and conflicts." },
-  { href: "/docs/agents/sessions/", title: "Agents", body: "Sessions, Runtime Hosts, integrations." },
+  { href: "/docs/agents/sessions/", title: "Agents", body: "Sessions, crews, Runtime Hosts, integrations." },
   { href: "/docs/mcp/connect/", title: "MCP", body: "Connect Claude Code, Claude Desktop, Cursor." },
   { href: "/docs/reference/mcp-tools/", title: "Reference", body: "Tools, CLIs and config, generated." },
 ];
@@ -203,8 +203,9 @@ state/   ← indexes · account · agents (never inside vaults)</code></pre>
       </ul>
       <p class="support small">
         Agents in a Storm session also get <code>{mcpAgentTools[0]}</code>,
-        which reads the note the session started from. They never get
-        {neverForAgents.map((n, i) => <>{i > 0 && ", "}<code>{n}</code></>)}.
+        which reads the note the session started from. An agent's
+        {askFirst.map((n, i) => <>{i > 0 && " and "}<code>{n}</code></>)} wait
+        for you to approve each delete, and deletes go to Trash.
         <a href="/docs/reference/mcp-tools/">Every tool →</a>
       </p>
     </div>

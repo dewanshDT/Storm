@@ -35,6 +35,7 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -186,6 +187,19 @@ class Agent:
                                   ("result" in m or "error" in m)), None),
                     f"the answer to {rid} on {slug}", timeout)
 
+    def run(self, command, stdin=""):
+        """Runs `command` as the agent's own child, as a hook would run."""
+        self.n += 1
+        out = f"run-{self.n:05d}.json"
+        inbox = os.path.join(self.dir, "inbox")
+        tmp = os.path.join(inbox, f"{self.n:05d}.tmp")
+        with open(tmp, "w") as f:
+            json.dump({"run": command, "input": stdin, "out": out}, f)
+        os.rename(tmp, os.path.join(inbox, f"{self.n:05d}.json"))
+        path = os.path.join(self.dir, out)
+        return wait(lambda: json.load(open(path)) if os.path.exists(path) else None,
+                    f"the agent to run {command[:40]}")
+
     def env(self):
         path = os.path.join(self.dir, "agent-env.json")
         return json.load(open(path)) if os.path.exists(path) else None
@@ -285,9 +299,12 @@ args = ["-i"]
                                   input=(issued["enrollment"] + "\n").encode(), capture_output=True)
         check("storm-runtime enrolls", enrolled.returncode == 0, enrolled.stderr.decode())
         host_id = json.load(open(os.path.join(HOST_STATE, "host.json")))["host_id"]
+        # The host's `claude --version` probe runs the fixture in the host's
+        # cwd, where it writes agent-env.json: keep that out of the checkout.
         runtime = subprocess.Popen(
             [RUNTIME_BIN, "serve", "--state", HOST_STATE, "--config", os.path.join(WORK, "runtime.toml")],
-            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"})
+            stdout=open(RUNTIME_LOG, "a"), stderr=subprocess.STDOUT, env={**os.environ, "RUST_LOG": "info"},
+            cwd=WORK)
 
         def host_online():
             _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
@@ -295,6 +312,39 @@ args = ["-i"]
             return h if h and h["status"] == "online" and h.get("capabilities") else None
         host = wait(host_online, "the host")
         check("the host reports mcp_bridge", host["capabilities"].get("mcp_bridge") is True, host)
+        # Decision 135d: Linux checks who connects; macOS is not gated yet and
+        # Windows cannot (AM80).
+        expected_identity = ("verified" if sys.platform.startswith("linux")
+                             else "unsupported" if sys.platform == "win32" else "unavailable")
+        check(f"the host row says its identity is {expected_identity} (135d)",
+              host.get("identity", {}).get("state") == expected_identity
+              and host["identity"] == host["capabilities"].get("identity"), host)
+        # Decision 136j: isolation is off on this host, and it says so.
+        expected_isolation = ({"state": "unavailable", "mechanism": None, "reason": "off"}
+                              if sys.platform.startswith("linux")
+                              else {"state": "unsupported", "mechanism": None,
+                                    "reason": "windows" if sys.platform == "win32" else "macos"})
+        check("the host row says isolation is off (136j)",
+              host.get("isolation") == expected_isolation
+              and host["capabilities"].get("isolation") == expected_isolation, host)
+
+        def call_identities(session):
+            db = sqlite3.connect(f"file:{os.path.join(STATE, 'gateway', 'gateway.db')}?mode=ro", uri=True)
+            try:
+                return [r[0] for r in db.execute(
+                    "SELECT call_identity.identity FROM calls"
+                    " LEFT JOIN call_identity ON call_identity.call_id = calls.id"
+                    " WHERE calls.session_id = ?", (session,))]
+            finally:
+                db.close()
+
+        def security_events(kind):
+            db = sqlite3.connect(f"file:{os.path.join(STATE, 'auth.db')}?mode=ro", uri=True)
+            try:
+                return [json.loads(r[0]) for r in db.execute(
+                    "SELECT detail FROM security_events WHERE kind = ?", (kind,))]
+            finally:
+                db.close()
 
         print("\n=== plugins' remote servers, suggested (decision 131g) ===")
 
@@ -345,6 +395,10 @@ args = ["-i"]
         _, view = call("GET", f"/v1/agent/sessions/{sid}", auth=owner)
         check("nothing is skipped: Claude Code loads its plugins itself (132a)",
               not view.get("mcp_skipped"), view)
+        check("the session view carries its host's identity (135d)",
+              view.get("identity") == host["identity"], view)
+        check("and its host's isolation (136j)",
+              view.get("isolation") == host["isolation"], view)
         status, _ = call("POST", "/v1/integrations/suggestions/dismiss",
                          {"plugin": "e2eplug", "server": "remote", "url": "https://e2e-remote.example.com/mcp"},
                          auth=owner)
@@ -383,10 +437,14 @@ args = ["-i"]
         a.initialize("storm", 101)
         a.send("storm", {"jsonrpc": "2.0", "id": 102, "method": "tools/list"})
         stools = [t["name"] for t in a.answer("storm", 102)["result"]["tools"]]
-        check("the built-in storm connection is read-only without the flags, and never deletes",
+        check("the built-in storm connection is read-only without the flags, and offers no delete",
               "list_vaults" in stools and "create_note" not in stools and "delete_note" not in stools, stools)
         a.tool("storm", 103, "list_vaults")
         check("an agent reads the vault through the gateway", "result" in a.answer("storm", 103))
+        audited = call_identities(sid)
+        want = "verified" if expected_identity == "verified" else "unverified"
+        check(f"every audited call of the session says {want} (135d)",
+              len(audited) >= 8 and all(i == want for i in audited), audited)
 
         print("\n=== an integration scoped to another host (decision 121) ===")
         _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)
@@ -533,7 +591,7 @@ args = ["-i"]
         vault = next(v["id"] for v in vaults["vaults"] if v["dir"] == "primary")
 
         print("\n=== a session started from a note (§5.3 C; the argv rule) ===")
-        prompt = "Read your context note with the storm session_context tool, then wait for my instructions."
+        prompt = "Read your launch context with the storm session_context tool, then wait for my instructions."
         mark = "ctx-marker-" + os.urandom(6).hex()
         other_mark = "ctx-other-" + os.urandom(6).hex()
         _, made = call("POST", f"/v1/vaults/{vault}/notes", {
@@ -583,13 +641,18 @@ args = ["-i"]
         c.initialize("storm", 1)
         c.tool("storm", 2, "session_context")
         got = c.answer("storm", 2).get("result", {}).get("structuredContent", {})
+        note = got.get("context") or {}
         check("the agent reads its note through session_context",
-              f"{mark}-body" in got.get("content", "") and got.get("note_id") == brief["id"], got)
+              f"{mark}-body" in note.get("content", "") and note.get("note_id") == brief["id"]
+              and got.get("role") is None, got)
+        check("a top-level session's context carries no task (134-4's additive field)",
+              "task" not in got and "missing" not in got, got)
         c2.initialize("storm", 1)
         c2.tool("storm", 2, "session_context")
         got2 = c2.answer("storm", 2).get("result", {}).get("structuredContent", {})
         check("a second session reads its own note, never the first one's",
-              f"{other_mark}-body" in got2.get("content", "") and mark not in json.dumps(got2), got2)
+              f"{other_mark}-body" in (got2.get("context") or {}).get("content", "")
+              and mark not in json.dumps(got2), got2)
         print("\n=== resuming a conversation (decision 89) ===")
         check("the host says which agents it can resume",
               sorted(host_online()["capabilities"].get("resume", [])) == ["claude-code", "opencode"],
@@ -598,13 +661,29 @@ args = ["-i"]
         # A file in the session's directory, never inline: claude.cmd on Windows (99).
         hook = json.load(open(argv[argv.index("--settings") + 1]))["hooks"]["SessionStart"][0]["hooks"][0]["command"]
         cleared = "0c2bf366-2db2-42da-9c3c-9498392b1f63"
-        env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
-        ran = subprocess.run(hook, shell=True, env=env, capture_output=True,
-                             input=json.dumps({"session_id": cleared, "source": "clear"}).encode())
-        check("the hook Claude Code runs is silent and succeeds", ran.returncode == 0 and ran.stdout == b"",
-              (ran.returncode, ran.stdout, ran.stderr))
+        # Run by the agent, as Claude Code runs it: on Linux the host takes a
+        # report only from inside the session (decision 135).
+        ran = c.run(hook, json.dumps({"session_id": cleared, "source": "clear"}))
+        check("the hook Claude Code runs is silent and succeeds", ran["returncode"] == 0 and ran["stdout"] == "",
+              ran)
         wait(lambda: call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared,
              "the hook's id on the record")
+        if sys.platform.startswith("linux"):
+            # The same hook and handle from outside the session.
+            stolen = "1f0e8a52-5d4e-4c4b-9a8f-0e6a3b2c1d00"
+            env = {**os.environ, **{k: v for k, v in c.env()["env"].items() if v}}
+            subprocess.run(hook, shell=True, env=env, capture_output=True,
+                           input=json.dumps({"session_id": stolen, "source": "clear"}).encode())
+            time.sleep(1.5)
+            check("the same hook from outside the session is refused (135a)",
+                  call("GET", f"/v1/agent/sessions/{rec['id']}", auth=owner)[1].get("harness_session") == cleared)
+            refusals = wait(lambda: [e for e in security_events("identity_mismatch")
+                                     if e.get("session_id") == rec["id"]] or None,
+                            "the refusal's audit row")
+            check("the refusal is audited on its session by the server, never with the handle (135a)",
+                  refusals == [{"session_id": rec["id"], "host_id": host_id,
+                                "connection": "harness", "reason": refusals[0]["reason"]}]
+                  and refusals[0]["reason"] not in ("", None), refusals)
         check("the first id was the launch's own", first != cleared and len(first) == 36, first)
         for sid_ in (rec["id"], rec2["id"]):
             call("POST", f"/v1/agent/sessions/{sid_}/end", auth=owner)
@@ -640,8 +719,9 @@ args = ["-i"]
         w.initialize("storm", 1)
         w.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         wtools = [t["name"] for t in w.answer("storm", 2)["result"]["tools"]]
-        check("with a write vault and agent writes on, the agent may write, and still never delete",
-              "create_note" in wtools and "update_note" in wtools and "delete_note" not in wtools, wtools)
+        check("with a write vault and agent writes on, the agent may write, and ask to delete (decision 149)",
+              "create_note" in wtools and "update_note" in wtools and "delete_note" in wtools
+              and "delete_folder" in wtools, wtools)
         w.tool("storm", 3, "create_note", {"vault": vault, "path": "Agents/Plan.md",
                                            "content": "# Plan\n\nfirst: draft\n\nsecond: draft\n"})
         made = w.answer("storm", 3)["result"].get("structuredContent", {})
@@ -659,8 +739,23 @@ args = ["-i"]
         check("both edits are in the note", "from the phone" in body and "from the agent" in body, body)
         w.tool("storm", 5, "delete_note", {"vault": vault, "note_id": note_id})
         refused = w.answer("storm", 5)
-        check("and the agent cannot delete it (G-D5)",
-              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+        check("a delete without a reason is refused",
+              refused.get("result", {}).get("isError") is True
+              and "reason is required" in json.dumps(refused), refused)
+        w.tool("storm", 51, "delete_note", {"vault": vault, "note_id": note_id,
+                                            "reason": "The e2e suite tidies up."})
+        waiting = wait(lambda: [r for r in call("GET", "/v1/agent/delete-requests", auth=owner)[1]
+                                .get("requests", []) if r["state"] == "pending"],
+                       "the agent's deletion to wait for the person")
+        _, still = call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)
+        check("nothing is deleted while it waits (decision 149)", still.get("id") == note_id, still)
+        status, decided = call("POST", f"/v1/agent/sessions/{wid}/delete-requests/{waiting[0]['id']}",
+                               {"decision": "decline"}, auth=owner)
+        check("the person declines", status == 200 and decided["state"] == "declined", decided)
+        declined = w.answer("storm", 51)["result"].get("structuredContent", {})
+        check("and the agent is told declined, with the note kept",
+              declined.get("status") == "declined"
+              and call("GET", f"/v1/vaults/{vault}/notes/{note_id}", auth=owner)[0] == 200, declined)
         w.tool("storm", 6, "create_note", {"vault": elsewhere["id"], "path": "Stray.md", "content": "x"})
         refused = w.answer("storm", 6)
         check("a write outside its write vault is refused with a stable code",

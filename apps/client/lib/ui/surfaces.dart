@@ -2,6 +2,8 @@
 /// corner menus stop each hand-rolling the same container.
 library;
 
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
@@ -203,13 +205,18 @@ Future<T?> showStormPopover<T>({
   if (box == null) return Future<T?>.value();
 
   final origin = box.localToGlobal(Offset.zero, ancestor: overlay);
-  final (:top, :bottom, :left, :right) = placePopover(
+  final (:top, :bottom, left: placed, :right) = placePopover(
     anchor: origin & box.size,
     overlay: overlay.size,
     gap: t.sp,
     side: side,
     alignRight: alignRight,
   );
+  // An anchor near the right edge (a page header's ··· at 900) would push
+  // the popover off the window, where it can't be seen or tapped.
+  final left = placed == null
+      ? null
+      : math.max(t.sp, math.min(placed, overlay.size.width - width - t.sp));
 
   return Navigator.of(context).push<T>(
     PageRouteBuilder<T>(

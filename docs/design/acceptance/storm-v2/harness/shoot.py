@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(ROOT, "apps/server/tests"))
 
 import agents  # noqa: E402
 import cdp  # noqa: E402
+import crews  # noqa: E402
 import shots  # noqa: E402
 import storm_auth  # noqa: E402
 
@@ -52,6 +53,8 @@ PASSWORD = storm_auth.PASSWORD
 VIEWPORTS = {
     "desktop": dict(width=1280, height=800, deviceScaleFactor=2, mobile=False),
     "phone": dict(width=390, height=844, deviceScaleFactor=2, mobile=True),
+    # The crews handoff's 900 frame (4h): the breakpoint itself.
+    "desktop900": dict(width=900, height=800, deviceScaleFactor=2, mobile=False),
     "gallery": dict(width=1180, height=4600, deviceScaleFactor=1, mobile=False),
 }
 
@@ -70,7 +73,10 @@ window.__storm = {
   },
   label(el) {
     return (el.getAttribute('aria-label') || el.getAttribute('placeholder') ||
-            (el.childElementCount === 0 ? el.textContent : '') || '').trim();
+            (el.childElementCount === 0 ? el.textContent : '') ||
+            // A leaf whose text sits in its own element (a toast's message).
+            (el.tagName === 'FLT-SEMANTICS' && !el.querySelector('flt-semantics')
+              ? el.textContent : '') || '').trim();
   },
   find(pattern) {
     const re = new RegExp(pattern);
@@ -89,6 +95,15 @@ window.__storm = {
         best = {x: r.left + r.width / 2, y: r.top + r.height / 2, rank, label: l, tappable};
     }
     return best;
+  },
+  // Every match, for a choice find() can't make (the sidebar's copy of a
+  // row rather than the overview's).
+  findAll(pattern) {
+    const re = new RegExp(pattern);
+    return this.nodes().filter(el => re.test(this.label(el))).map(el => {
+      const r = el.getBoundingClientRect();
+      return {x: r.left + r.width / 2, y: r.top + r.height / 2, w: r.width, h: r.height};
+    }).filter(h => h.w > 0 && h.h > 0);
   },
   inputs() {
     return [...document.querySelectorAll('input, textarea')].map(el => {
@@ -127,16 +142,23 @@ class Harness:
         self.ids = {}
         self.base = BASE
         self.world = None
+        self.crew_world = None
+        self.crew_checks = None
+        self.last_wait = None
 
     def api(self, method, path, body=None):
         return storm_auth._call(BASE, method, path, body, auth=self.session)
 
     def step(self, name):
-        """Moves the server's agent state on (see agents.py)."""
+        """Moves the server's agent state on (see agents.py, crews.py)."""
         self.world = self.world or agents.AgentWorld(self)
-        {"hosts": self.world.enroll_hosts,
-         "sessions": self.world.run_sessions,
-         "loop": self.world.run_loop}[name]()
+        if name.startswith("crews"):
+            self.crew_world = self.crew_world or crews.CrewWorld(self, self.world)
+            getattr(self.crew_world, name.partition(":")[2] or "seed")()
+        else:
+            {"hosts": self.world.enroll_hosts,
+             "sessions": self.world.run_sessions,
+             "loop": self.world.run_loop}[name]()
         log(f"step {name} done")
 
     # ---- server -------------------------------------------------------
@@ -175,6 +197,16 @@ class Harness:
             for n in tree["notes"]:
                 self.ids[f"note:{vault['name']}/{n['path']}"] = n["id"]
         log(f"claimed; resolved {len(self.ids)} ids")
+
+    def route_values(self, v):
+        """[route] over every string in a request body."""
+        if isinstance(v, str):
+            return self.route(v)
+        if isinstance(v, list):
+            return [self.route_values(x) for x in v]
+        if isinstance(v, dict):
+            return {k: self.route_values(x) for k, x in v.items()}
+        return v
 
     def route(self, template):
         """`/v/{vault:personal}/note/{note:personal/projects/storm/BOARD.md}`"""
@@ -230,13 +262,77 @@ class Harness:
                            button="left", clickCount=1)
         time.sleep(0.3)
 
-    def tap_text(self, pattern, timeout=10):
+    def find_text(self, pattern, timeout=10):
+        pattern = self.route(pattern)
         self.page.eval("window.__storm || (" + JS_HELPERS.strip().rstrip(";") + ")")
         self.page.eval("window.__storm.enableSemantics()")
-        hit = wait_for(lambda: self.page.eval(f"window.__storm.find({pattern!r})"),
-                       timeout, f"something labelled /{pattern}/")
+        return wait_for(lambda: self.page.eval(f"window.__storm.find({pattern!r})"),
+                        timeout, f"something labelled /{pattern}/")
+
+    def tap_text(self, pattern, timeout=10):
+        hit = self.find_text(pattern, timeout)
         self.click(hit["x"], hit["y"])
         return hit
+
+    def mouse(self, kind, x, y, button="none", buttons=0):
+        self.page.call("Input.dispatchMouseEvent", type=kind, x=x, y=y, button=button,
+                       buttons=buttons, clickCount=1 if kind != "mouseMoved" else 0)
+
+    def right_click(self, pattern):
+        hit = self.find_text(pattern)
+        self.mouse("mouseMoved", hit["x"], hit["y"])
+        self.mouse("mousePressed", hit["x"], hit["y"], "right", 2)
+        self.mouse("mouseReleased", hit["x"], hit["y"], "right", 0)
+        time.sleep(0.5)
+
+    def long_press(self, pattern):
+        """A held touch, as a phone's long-press is (touch emulation is on)."""
+        hit = self.find_text(pattern)
+        point = [dict(x=hit["x"], y=hit["y"])]
+        self.page.call("Input.dispatchTouchEvent", type="touchStart", touchPoints=point)
+        time.sleep(0.9)
+        self.page.call("Input.dispatchTouchEvent", type="touchEnd", touchPoints=[])
+        time.sleep(0.6)
+
+    def drag(self, src, dst, midway=()):
+        """A mouse drag, in steps, so Flutter's drag recogniser and the drop
+        target both see it move. [midway] are API calls made while the row is
+        held: what another device does meanwhile."""
+        def leftmost(pattern):
+            self.find_text(pattern)
+            hits = self.page.eval(f"window.__storm.findAll({self.route(pattern)!r})")
+            return min(hits, key=lambda h: h["x"])
+        # Drag lives in the sidebar, the leftmost copy of a row or header.
+        a, b = leftmost(src), leftmost(dst)
+        self.mouse("mouseMoved", a["x"], a["y"])
+        self.mouse("mousePressed", a["x"], a["y"], "left", 1)
+        steps = 12
+        for i in range(1, steps + 1):
+            x = a["x"] + (b["x"] - a["x"]) * i / steps
+            y = a["y"] + (b["y"] - a["y"]) * i / steps
+            self.mouse("mouseMoved", x, y, "left", 1)
+            time.sleep(0.05)
+            if i == steps // 2:
+                for method, path, body in midway:
+                    # Retried until it lands: a dismiss waits for the end.
+                    wait_for(lambda: storm_auth._call(
+                        BASE, method, self.route(path), body=body,
+                        auth=self.session)[0] < 300, 15, f"{method} {path}")
+        time.sleep(0.3)
+        self.mouse("mouseReleased", b["x"], b["y"], "left", 0)
+        time.sleep(0.5)
+
+    def wait_text(self, pattern, timeout):
+        """How long until something labelled [pattern] appears, without any
+        reload: the poll's own catch-up."""
+        pattern = self.route(pattern)
+        self.last_wait = None
+        start = time.time()
+        self.page.eval("window.__storm.enableSemantics()")
+        wait_for(lambda: self.page.eval(f"window.__storm.find({pattern!r})"), timeout,
+                 f"/{pattern}/ to appear")
+        self.last_wait = time.time() - start
+        log(f"/{pattern}/ appeared after {self.last_wait:.1f} s")
 
     def type_into(self, x, y, text):
         """Tap a field, wait for Flutter to hand it focus, type, and check the
@@ -330,16 +426,35 @@ class Harness:
                 self.go(self.route(arg))
             elif kind == "wait":
                 time.sleep(arg)
+            elif kind == "step":
+                self.step(arg)
+            elif kind == "rightclick":
+                self.right_click(arg)
+            elif kind == "longpress":
+                self.long_press(arg)
+            elif kind == "drag":
+                self.drag(*arg)
+            elif kind == "wait_text":
+                self.wait_text(*arg)
+            elif kind == "preset":
+                self.use_preset(arg)
+            elif kind == "hover":
+                hit = self.find_text(arg)
+                self.mouse("mouseMoved", hit["x"], hit["y"])
             elif kind == "js":
                 self.page.eval(arg)
             elif kind == "api":
                 # Seeds real server state (a key, a relay) through its API.
                 method, path, body = arg
+                body = self.route_values(body)
                 status, _ = storm_auth._call(BASE, method, self.route(path), body=body,
                                              auth=self.session)
                 if status >= 300:
                     raise RuntimeError(f"seeding {method} {path} answered {status}")
-        if not any(kind == "tap" for kind, _ in shot.get("actions", [])):
+        if shot.get("noshot"):
+            return
+        if not any(kind in ("tap", "hover", "rightclick", "drag", "longpress")
+                   for kind, _ in shot.get("actions", [])):
             # Park the pointer in a corner so no row is captured mid-hover.
             self.page.call("Input.dispatchMouseEvent", type="mouseMoved", x=1, y=1)
         self.settle(shot.get("settle", 1.5))
@@ -410,6 +525,12 @@ def main():
                 h.step(shot["step"])
             elif shot["name"].startswith(only):
                 h.shoot(shot)
+        if h.crew_checks is not None:
+            failed = h.crew_checks.failed()
+            log(f"crew checks: {len(h.crew_checks.results) - len(failed)} passed, "
+                f"{len(failed)} failed")
+            if failed:
+                raise SystemExit(f"crew checks failed: {failed}")
     except Exception:
         h.debug_dump()
         raise

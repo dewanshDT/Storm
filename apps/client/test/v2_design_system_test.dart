@@ -205,6 +205,7 @@ void main() {
         'starting': ('Starting', t.accent, true, true),
         'running': ('Running', t.accent, true, false),
         'unknown': ('Unknown', t.text3, true, false),
+        'parked': ('Parked', t.text3, true, false),
         'completed': ('Completed', t.text3, false, false),
         'stopped': ('Stopped', t.text3, false, false),
         'failed': ('Failed', t.danger, false, false),

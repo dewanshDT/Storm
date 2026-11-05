@@ -66,6 +66,7 @@ jobs:
               - apps/runtime/**
               - tools/www-facts/**
               - deploy/storm-runtime.service
+              - deploy/storm-runtime-isolation.*
               - deploy/runtime.toml.example
             installer:
               - deploy/install.sh
@@ -229,12 +230,25 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: apps/runtime
+          workspaces: |
+            apps/runtime
+            apps/runtime/isolation
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
       - run: cargo build
       - run: python3 ../../tools/www-facts/generate.py --check --runtime target/debug/storm-runtime
+      # Per-session isolation's root helper (decision 136): its own crate,
+      # Linux only, and its units checked by systemd itself.
+      - name: isolation helper
+        working-directory: apps/runtime/isolation
+        run: |
+          cargo fmt --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test
+      - name: isolation units (systemd-analyze)
+        working-directory: .
+        run: make verify-isolation-units
 
   # The same Runtime Host on a real Mac (decision 83). The PTY and the
   # syscalls under it differ there (macOS's poll(2) does not support devices),

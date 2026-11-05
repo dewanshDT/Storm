@@ -54,6 +54,7 @@ pub use windows_service::{enable_and_start, service_main};
 
 pub mod ipc;
 pub mod launchd;
+pub mod peer;
 pub mod wincmd;
 pub mod winsvc;
 
@@ -143,6 +144,26 @@ pub fn open_private(
     path: &std::path::Path,
     options: &mut std::fs::OpenOptions,
 ) -> io::Result<std::fs::File> {
+    shared::open_private(path, options)
+}
+
+/// Opens `path` to be read by whoever can reach its directory: `0644` on
+/// Unix, for a file in an isolated session's own directory, which only the
+/// host and that session can enter (decision 136i). Private on Windows,
+/// which has no isolation.
+pub fn open_readable(
+    path: &std::path::Path,
+    options: &mut std::fs::OpenOptions,
+) -> io::Result<std::fs::File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let f = options.mode(0o644).open(path)?;
+        // Past the host's UMask=0027.
+        f.set_permissions(std::fs::Permissions::from_mode(0o644))?;
+        Ok(f)
+    }
+    #[cfg(windows)]
     shared::open_private(path, options)
 }
 

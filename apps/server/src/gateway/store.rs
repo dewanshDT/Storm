@@ -130,6 +130,14 @@ const SCHEMA: &str = "
     );
     CREATE INDEX IF NOT EXISTS calls_by_time ON calls(at_ms);
 
+    -- Whether an agent call's host checked who connected (decision 135d):
+    -- `verified` or `unverified`. A table beside `calls` so the audit stays
+    -- additive; pruned with it. An owner's own test has no row.
+    CREATE TABLE IF NOT EXISTS call_identity (
+        call_id  INTEGER PRIMARY KEY,
+        identity TEXT NOT NULL
+    );
+
     -- Upstream tools that appeared after the owner's first test and that the
     -- owner has not reviewed yet (spec §9, decision 81k). Off by
     -- construction — the allowlist names tools explicitly — and shown as
@@ -226,6 +234,9 @@ pub struct CallRecord {
     pub error_code: Option<String>,
     pub duration_ms: Option<i64>,
     pub response_bytes: Option<i64>,
+    /// `verified` or `unverified` for an agent's call (decision 135d); `None`
+    /// for one the owner made.
+    pub identity: Option<&'static str>,
 }
 
 /// An OAuth client of one authorization server, for one owner and redirect.
@@ -876,6 +887,12 @@ impl GatewayDb {
                 c.response_bytes
             ],
         )?;
+        if let Some(identity) = c.identity {
+            self.conn.execute(
+                "INSERT INTO call_identity (call_id, identity) VALUES (last_insert_rowid(), ?1)",
+                params![identity],
+            )?;
+        }
         Ok(())
     }
 
@@ -893,6 +910,11 @@ impl GatewayDb {
                  (SELECT id FROM calls ORDER BY id DESC LIMIT 1 OFFSET ?1)",
             params![keep_rows],
         )?;
+        self.conn.execute(
+            "DELETE FROM call_identity
+             WHERE NOT EXISTS (SELECT 1 FROM calls WHERE calls.id = call_identity.call_id)",
+            [],
+        )?;
         Ok(old + excess)
     }
 
@@ -900,8 +922,9 @@ impl GatewayDb {
     pub fn recent_calls(&self, limit: i64) -> Result<Vec<CallRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT at_ms, owner_user_id, connection_id, session_id, host_id, method, tool,
-                    outcome, error_code, duration_ms, response_bytes
-             FROM calls ORDER BY id DESC LIMIT ?1",
+                    outcome, error_code, duration_ms, response_bytes, call_identity.identity
+             FROM calls LEFT JOIN call_identity ON call_identity.call_id = calls.id
+             ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |r| {
             Ok(CallRecord {
@@ -916,6 +939,11 @@ impl GatewayDb {
                 error_code: r.get(8)?,
                 duration_ms: r.get(9)?,
                 response_bytes: r.get(10)?,
+                identity: match r.get::<_, Option<String>>(11)?.as_deref() {
+                    Some("verified") => Some("verified"),
+                    Some(_) => Some("unverified"),
+                    None => None,
+                },
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -1147,6 +1175,7 @@ mod tests {
             error_code: None,
             duration_ms: Some(12),
             response_bytes: Some(345),
+            identity: Some("verified"),
         }
     }
 
@@ -1172,6 +1201,7 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .unwrap();
         for t in [
+            "call_identity",
             "calls",
             "connection_hosts",
             "connection_plugin_origin",
@@ -1285,6 +1315,47 @@ mod tests {
         assert!(left.iter().all(|c| c.at_ms > now - CALLS_KEEP_MS));
         // Newest first, and the newest survived.
         assert_eq!(left[0].at_ms, now - 4);
+    }
+
+    /// Decision 135d: an agent's call says whether its host was verified; an
+    /// owner's own test says nothing; the label goes with its row.
+    #[test]
+    fn a_calls_identity_is_kept_with_it_and_pruned_with_it() {
+        let dir = tempdir::TempDir::new("storm-gw-call-identity").unwrap();
+        let d = db(dir.path());
+        let now = 100 * CALLS_KEEP_MS;
+        let with = |at_ms, identity| CallRecord {
+            identity,
+            ..call(at_ms)
+        };
+        d.record_call(&with(now - CALLS_KEEP_MS - 1, Some("unverified")))
+            .unwrap();
+        d.record_call(&with(now - 2, Some("verified"))).unwrap();
+        d.record_call(&with(now - 1, None)).unwrap();
+        d.record_call(&with(now, Some("unverified"))).unwrap();
+        let identities = |d: &GatewayDb| -> Vec<Option<&'static str>> {
+            d.recent_calls(10)
+                .unwrap()
+                .into_iter()
+                .map(|c| c.identity)
+                .collect()
+        };
+        assert_eq!(
+            identities(&d),
+            [
+                Some("unverified"),
+                None,
+                Some("verified"),
+                Some("unverified")
+            ]
+        );
+        assert_eq!(d.prune_calls(now, 2).unwrap(), 2);
+        assert_eq!(identities(&d), [Some("unverified"), None]);
+        let orphans: i64 = d
+            .conn()
+            .query_row("SELECT COUNT(*) FROM call_identity", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(orphans, 1);
     }
 
     #[test]

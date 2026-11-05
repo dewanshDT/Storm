@@ -163,6 +163,45 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('a root note after an open folder reads as the root’s, '
+        'not the folder’s', (tester) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      c.read(routerProvider).go(Routes.note(primary, 'n3'));
+      await tester.pumpAndSettle();
+
+      Finder row(String label) => find.ancestor(
+        of: find.text(label),
+        matching: find.byType(SidebarRow),
+      );
+      double textX(String label) => tester.getTopLeft(find.text(label)).dx;
+      double leftOf(Finder f) => tester.getTopLeft(f).dx;
+      // Projects is open, then its children, then the root's Welcome.
+      expect(
+        tester.getTopLeft(find.text('Welcome')).dy,
+        greaterThan(tester.getTopLeft(find.text('Ideas')).dy),
+      );
+      expect(textX('Welcome'), textX('Projects'), reason: 'siblings');
+      expect(textX('Ideas'), greaterThan(textX('Welcome')));
+      // A child's twisty column starts where its folder's name does.
+      final ideasTwisty = find.descendant(
+        of: row('Ideas'),
+        matching: find.byType(SizedBox),
+      );
+      expect(leftOf(ideasTwisty.first), closeTo(textX('Projects'), 0.5));
+      // Guides only inside a folder.
+      final guided = find.byKey(const Key('tree-guides'));
+      bool hasGuides(String label) => find
+          .ancestor(of: find.text(label), matching: guided)
+          .evaluate()
+          .isNotEmpty;
+      expect(hasGuides('Ideas'), isTrue);
+      expect(hasGuides('Design'), isTrue);
+      expect(hasGuides('Welcome'), isFalse);
+      expect(hasGuides('Projects'), isFalse);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('an empty pane says how to find a note', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);

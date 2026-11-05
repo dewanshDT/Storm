@@ -102,6 +102,10 @@ void main() {
       expect(s('failed', r: 'host_restart').statusLabel, 'Failed');
       expect(s('failed', r: 'host_restart').endDetail, 'host restarted');
       expect(s('failed', r: 'host_revoked').endDetail, 'host revoked');
+      expect(
+        s('failed', r: 'credential_unavailable').endDetail,
+        'no credential this host may use',
+      );
       expect(s('failed', r: 'lost').endDetail, 'lost');
       expect(providerLabel('claude-code'), 'Claude Code');
     });
@@ -156,6 +160,17 @@ void main() {
         );
         // A record without a title keeps the one already known.
         expect(named.withLive(plain).displayName, 'Fix the login');
+        // A child is called what its parent named it.
+        final child = AgentSession.fromJson({
+          ...session(),
+          'name': 'outside-test',
+          'title': 'Storm session task loop',
+          'parent_session': 'ags_parent',
+          'root_session': 'ags_parent',
+          'depth': 1,
+        });
+        expect(child.displayName, 'outside-test');
+        expect(child.withLive(live).displayName, 'outside-test');
       },
     );
 

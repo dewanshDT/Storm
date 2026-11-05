@@ -1,0 +1,24 @@
+[package]
+name = "storm-runtime-isolation"
+version = "0.1.0"
+edition = "2024"
+description = "Storm Runtime Host isolation helper — the root side of per-session isolation"
+license = "MIT"
+repository = "https://github.com/dewanshDT/Storm"
+
+# Decision 136c: the root helper is its own binary, with its own small
+# dependency set, so what runs as root is only this crate. It is shipped in
+# storm-runtime's .deb (apps/runtime/Cargo.toml's assets) and never depends on
+# storm-runtime: the two share a wire format, pinned by both test suites.
+
+[dependencies]
+anyhow = "1.0.104"
+libc = "0.2"
+rustix = { version = "1.1.5", features = ["fs", "net", "process", "termios"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+toml = "1.1.6"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+rustix = { version = "1.1.5", features = ["pty"] }

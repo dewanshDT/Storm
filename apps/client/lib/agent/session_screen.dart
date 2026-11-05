@@ -20,14 +20,24 @@ import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
+import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
+import 'crew_changes.dart';
+import 'crew_sheets.dart' show CrewRoleSections;
+import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'delete_request.dart';
+import 'mode_request.dart';
 import 'session_controller.dart';
+import 'session_crew.dart';
 import 'session_inspector.dart';
+import 'spawn_state.dart';
+import 'spawn_widgets.dart';
+import 'spawn_work.dart';
 import 'image_target.dart';
 import 'terminal_surface.dart';
 
@@ -57,6 +67,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   final _focus = FocusNode();
   bool _confirmEnd = false;
   bool _ending = false;
+
+  /// Ending a parent lists its children first (C1); dismissing one of a
+  /// tree dismisses the tree (C8).
+  bool _endTree = false;
+  bool _dismissTree = false;
   bool _reloadedAtEnd = false;
 
   /// A written note shown in the Wrote tab, with "‹ Wrote" back.
@@ -77,6 +92,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.didUpdateWidget(old);
     if (old.sessionId != widget.sessionId) {
       _confirmEnd = false;
+      _endTree = false;
+      _dismissTree = false;
       _reloadedAtEnd = false;
       _wroteNote = null;
     }
@@ -100,25 +117,100 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       if (mounted) setState(() => _confirmEnd = false);
       ref.invalidate(agentOverviewProvider);
     } catch (e) {
-      _say(describeFailure(e));
+      // It has live descendants the list here didn't know of yet: show
+      // them, and end only once the person has seen which (C1).
+      if (e is AgentRefusal && e.code == 'confirm_descendants') {
+        _showEndTree();
+      } else {
+        _say(describeFailure(e));
+      }
     } finally {
       if (mounted) setState(() => _ending = false);
     }
   }
 
-  Future<void> _dismiss() async {
+  void _showEndTree() {
+    ref.invalidate(sessionDescendantsProvider(_id));
+    if (mounted) {
+      setState(() {
+        _confirmEnd = false;
+        _endTree = true;
+      });
+    }
+  }
+
+  /// End, or End with its children listed when it has any running.
+  void _askEnd(AgentSession s) {
+    final o = ref.read(agentOverviewProvider).value;
+    final live = o != null && childrenOf(o, s.id).any((k) => !k.ended);
+    if (live) {
+      _showEndTree();
+    } else {
+      setState(() => _confirmEnd = true);
+    }
+  }
+
+  void _gone() {
+    ref.invalidate(agentOverviewProvider);
+    if (mounted) context.go(Routes.agents);
+  }
+
+  Future<void> _dismiss([AgentSession? s]) async {
+    if (s != null && inTree(ref.read(agentOverviewProvider).value, s)) {
+      setState(() => _dismissTree = true);
+      return;
+    }
     final api = agentApi(ref);
     if (api == null) return;
+    final c = ProviderScope.containerOf(context, listen: false);
+    final before = ref.read(agentOverviewProvider).value;
+    final messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      await api.dismiss(_id);
-      ref.invalidate(agentOverviewProvider);
-      if (mounted) context.go(Routes.agents);
+      final removed = await api.dismiss(_id);
+      announceDismissedCrews(c, before, removed, fallback: messenger);
+      _gone();
     } catch (e) {
-      _say(describeFailure(e));
+      if (e is AgentRefusal &&
+          (e.code == 'confirm_tree' || e.code == 'tree_live')) {
+        setState(() => _dismissTree = true);
+      } else {
+        _say(describeFailure(e));
+      }
     } finally {
       api.dispose();
     }
   }
+
+  /// The confirmations spawning adds below the header.
+  List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
+    if (s.deleteRequest case final r? when r.pending && !s.ended)
+      Padding(
+        padding: padding,
+        child: DeleteRequestCard(session: s),
+      ),
+    if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
+      Padding(
+        padding: padding,
+        child: ModeRequestCard(session: s),
+      ),
+    if (_endTree && !s.ended)
+      Padding(
+        padding: padding,
+        child: EndTreeBanner(
+          session: s,
+          onDone: () => setState(() => _endTree = false),
+        ),
+      ),
+    if (_dismissTree)
+      Padding(
+        padding: padding,
+        child: DismissTreeBanner(
+          session: s,
+          onDone: () => setState(() => _dismissTree = false),
+          onDismissed: _gone,
+        ),
+      ),
+  ];
 
   void _runAgain(AgentSession s) =>
       launchAgentSession(context, ref, runAgain: s);
@@ -178,7 +270,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         final record = detail.value ?? overview?.byId(_id);
         final live = controller?.session;
         _catchUpAtEnd(record, live);
-        final s = record?.withLive(live) ?? live;
+        final seen = record?.withLive(live) ?? live;
+        // A crew or label change still pending is ahead of the record.
+        final s = seen == null ? null : overview?.labelsOf(seen) ?? seen;
         final wide = context.isExpanded;
         if (s == null) {
           final settled =
@@ -271,7 +365,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             ),
             child: Text(
               '${endedLine(s)} · scrollback kept until you dismiss it',
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
           ),
       ],
@@ -298,6 +392,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   onCancel: () => setState(() => _confirmEnd = false),
                 ),
               ),
+            ..._spawnBanners(
+              s,
+              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
+            ),
             _Trouble(controller: c),
             Expanded(
               child: open
@@ -329,6 +427,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   }) {
     final t = context.tokens;
     return Container(
+      key: const Key('session-bar'),
       padding: EdgeInsets.symmetric(
         horizontal: t.sp * 2.5,
         vertical: t.sp * 1.75,
@@ -382,7 +481,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   label: 'End',
                   color: t.text2,
                   outlined: true,
-                  onTap: () => setState(() => _confirmEnd = true),
+                  onTap: () => _askEnd(s),
                 )
               else ...[
                 if (_canResume(s)) ...[
@@ -407,18 +506,29 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   key: const Key('dismiss-session'),
                   label: 'Dismiss',
                   color: t.text2,
-                  onTap: _dismiss,
+                  onTap: () => _dismiss(s),
                 ),
               ],
             ],
           ),
           SizedBox(height: t.sp * 0.5),
-          Text(
-            sessionMeta(s, host),
-            key: const Key('session-meta'),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: _mono(t, t.labelSize * 1.09),
+          Row(
+            children: [
+              Flexible(
+                child: Text(
+                  spawnMeta(
+                    sessionMeta(s, host),
+                    s,
+                    ref.watch(agentOverviewProvider).value,
+                  ),
+                  key: const Key('session-meta'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: agentMono(t, size: t.labelSize * 1.09),
+                ),
+              ),
+              SessionMetaTags(session: s),
+            ],
           ),
           if (_resumeBlocker(s) case final why?) ...[
             SizedBox(height: t.sp * 0.25),
@@ -427,9 +537,13 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
               key: const Key('resume-blocker'),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
           ],
+          SpawnHeaderLine(
+            session: s,
+            onParent: (id) => openAgentSession(context, id),
+          ),
         ],
       ),
     );
@@ -471,6 +585,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ),
         child: _About(session: s, host: host),
       ),
+      SessionTab.requests => ActsPanel(session: s),
+      SessionTab.work => ChildWorkPanel(session: s),
     };
     return ColoredBox(
       color: t.bg,
@@ -490,25 +606,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             child: Row(
               children: [
                 Expanded(
-                  // Scrolls rather than overflowing at the inspector's
-                  // narrowest.
-                  child: SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: PanelTabs<SessionTab>(
-                      tabs: [
-                        (SessionTab.context, 'Context'),
-                        (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
-                        (SessionTab.about, 'About'),
-                      ],
-                      selected: tab,
-                      onSelected: (next) {
-                        if (next == tab) {
-                          setState(() => _wroteNote = null);
-                        } else {
-                          _pickTab(next);
-                        }
-                      },
-                    ),
+                  // Wraps rather than hiding a tab past the edge: a
+                  // child's Work tab was out of sight at 320px.
+                  child: PanelTabs<SessionTab>(
+                    wrap: true,
+                    tabs: [
+                      (SessionTab.context, 'Context'),
+                      (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
+                      (SessionTab.about, 'About'),
+                      if (showsActs(s)) (SessionTab.requests, 'Activity'),
+                      if (s.spawn.isChild) (SessionTab.work, 'Work'),
+                    ],
+                    selected: tab,
+                    onSelected: (next) {
+                      if (next == tab) {
+                        setState(() => _wroteNote = null);
+                      } else {
+                        _pickTab(next);
+                      }
+                    },
                   ),
                 ),
                 IconButton(
@@ -550,6 +666,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            ..._spawnBanners(
+              s,
+              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp),
+            ),
             _Trouble(controller: c),
             Expanded(
               child: DecoratedBox(
@@ -633,7 +753,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                         child: _BarButton(
                           key: const Key('dismiss-session'),
                           label: 'Dismiss',
-                          onTap: _dismiss,
+                          onTap: () => _dismiss(s),
                         ),
                       ),
                     ],
@@ -682,12 +802,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 }
-
-TextStyle _mono(StormTokens t, double size, [Color? color]) => TextStyle(
-  fontFamily: StormTokens.monoFamily,
-  fontSize: size,
-  color: color ?? t.text3,
-);
 
 /// Why input or the stream is not reaching the session, if it is not.
 class _Trouble extends StatelessWidget {
@@ -808,6 +922,8 @@ class _HeaderButton extends StatelessWidget {
 String phoneHeaderMeta(AgentSession s) => [
   s.statusLabel,
   providerLabel(s.provider),
+  ?s.model,
+  ?permissionModeWord(s.permissionMode),
   ?s.context?.title,
   if (s.wroteCount > 0) 'wrote ${s.wroteCount}',
 ].join(' · ');
@@ -815,17 +931,18 @@ String phoneHeaderMeta(AgentSession s) => [
 /// The phone session's header, between the corner bubbles: status dot, name
 /// and caret over a mono line. A tap opens the details sheet, where the full
 /// name wraps.
-class _PhoneHeader extends StatelessWidget {
+class _PhoneHeader extends ConsumerWidget {
   const _PhoneHeader({required this.session, required this.onTap});
 
   final AgentSession session;
   final VoidCallback onTap;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final s = session;
     final meta = phoneHeaderMeta(s);
+    final crew = ref.watch(agentOverviewProvider).value?.crewOf(s);
     return Semantics(
       button: true,
       label: '${s.displayName}, $meta, details',
@@ -866,13 +983,41 @@ class _PhoneHeader extends StatelessWidget {
               ],
             ),
             SizedBox(height: t.sp * 0.25),
-            Text(
-              meta,
-              key: const Key('session-meta'),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              textAlign: TextAlign.center,
-              style: _mono(t, 11).copyWith(height: 1.3),
+            // The crew chip and role tag ride the meta line (138-5); each
+            // gives way in proportion when the three don't fit.
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Flexible(
+                  flex: 4,
+                  child: Text(
+                    meta,
+                    key: const Key('session-meta'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: agentMono(t, size: 11).copyWith(height: 1.3),
+                  ),
+                ),
+                if (crew != null) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 3,
+                    child: LayoutBuilder(
+                      key: const Key('phone-crew-chip'),
+                      builder: (context, box) =>
+                          CrewChip(crew: crew, maxWidth: box.maxWidth),
+                    ),
+                  ),
+                ],
+                if (s.role case final role?) ...[
+                  SizedBox(width: t.sp * 0.75),
+                  Flexible(
+                    flex: 2,
+                    child: RoleTag(role: role, launchRole: s.launchRole),
+                  ),
+                ],
+              ],
             ),
           ],
         ),
@@ -1009,7 +1154,7 @@ class _NotePanel extends ConsumerWidget {
                   n == null ? vault : noteCrumb(vault, n.meta.path),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: _mono(t, t.labelSize * 1.09),
+                  style: agentMono(t, size: t.labelSize * 1.09),
                 ),
               ),
               Flexible(
@@ -1049,7 +1194,7 @@ class _NotePanel extends ConsumerWidget {
             Text(
               panelVersionLine(n, sessionId),
               key: const Key('panel-version-line'),
-              style: _mono(t, t.labelSize * 1.09),
+              style: agentMono(t, size: t.labelSize * 1.09),
             ),
             SizedBox(height: t.sp * 1.25),
             StormMarkdownView(markdown: fm.split(n.content).body),
@@ -1197,13 +1342,13 @@ class _WroteRow extends StatelessWidget {
                         noteCrumb(vault, w.path),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: _mono(t, t.labelSize),
+                        style: agentMono(t),
                       ),
                     ],
                   ),
                 ),
                 SizedBox(width: t.sp),
-                Text(_wroteMeta(w), style: _mono(t, t.labelSize)),
+                Text(_wroteMeta(w), style: agentMono(t)),
               ],
             ),
           ),
@@ -1219,9 +1364,24 @@ List<(String, String)> aboutRows(
   required String host,
   required String? writeVault,
   required List<String>? integrations,
+  AgentOverview? overview,
 }) => [
   ('Agent', providerLabel(s.provider)),
-  ('Workspace', '${s.workspace} on $host'),
+  if (s.model != null) ('Model', s.model!),
+  if (s.permissionMode case final mode?)
+    ('Permission mode', permissionModeLabel(mode)),
+  (
+    'Workspace',
+    s.spawn.isChild
+        ? childWorkspaceText(
+            s,
+            overview?.byId(s.spawn.parentSession!)?.workspace ??
+                'its parent’s workspace',
+            host,
+          )
+        : '${s.workspace} on $host',
+  ),
+  ...spawnAboutRows(s, overview),
   (
     'Vault access',
     s.isShell
@@ -1253,6 +1413,8 @@ List<(String, String)> aboutRows(
       ].join('\n'),
     ),
   ('Network', 'Inherits $host’s policy'),
+  if (s.identityUnverified) ('Identity', '$kIdentityNotVerified.'),
+  if (s.isolationLabel case final label?) ('Isolation', '$label.'),
 ];
 
 /// Under About when a plugin's remote server was skipped: it reaches a
@@ -1295,23 +1457,33 @@ class _About extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
     final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final rows = aboutRows(
+      session,
+      host: host,
+      writeVault: vaults
+          .where((v) => v.id == session.writeVaultId)
+          .firstOrNull
+          ?.name,
+      integrations: sessionIntegrations(ref, session),
+      overview: ref.watch(agentOverviewProvider).value,
+    );
+    // Crew and Role sit after Agent and Workspace (handoff 4e).
     return Column(
+      key: const Key('session-about'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        KeyValueList(
-          key: const Key('session-about'),
-          rows: aboutRows(
-            session,
-            host: host,
-            writeVault: vaults
-                .where((v) => v.id == session.writeVaultId)
-                .firstOrNull
-                ?.name,
-            integrations: sessionIntegrations(ref, session),
-          ),
-        ),
+        KeyValueList(rows: rows.take(2).toList()),
+        AboutCrewRole(session: session),
+        SizedBox(height: t.sp * 1.75),
+        KeyValueList(rows: rows.skip(2).toList()),
         AddSkippedToIntegrations(session: session),
+        if (session.spawn.switchState != null && !session.ended) ...[
+          SizedBox(height: t.sp * 1.75),
+          SpawnSwitchRow(session: session, host: host),
+        ],
+        SpawnChildrenSection(session: session),
       ],
     );
   }
@@ -1342,6 +1514,7 @@ class SessionDetailsSheet extends ConsumerStatefulWidget {
 class _DetailsState extends ConsumerState<SessionDetailsSheet> {
   bool _confirm = false;
   bool _ending = false;
+  bool _endTree = false;
 
   @override
   Widget build(BuildContext context) {
@@ -1362,6 +1535,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       host: widget.host,
       writeVault: vaults.where((v) => v.id == s.writeVaultId).firstOrNull?.name,
       integrations: sessionIntegrations(ref, s),
+      overview: ref.watch(agentOverviewProvider).value,
     );
 
     final children = <Widget>[
@@ -1391,8 +1565,29 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
           ),
           SizedBox(height: t.sp),
           SessionStatusChip(status: s.status),
+          SpawnHeaderLine(session: s),
         ],
       ),
+      if (s.spawn.switchState != null && !s.ended)
+        SpawnSwitchRow(session: s, host: widget.host),
+      if (showsActs(s))
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('ACTIVITY', style: label),
+            SizedBox(height: t.sp * 0.25),
+            ActsPanel(session: s, sheet: true),
+          ],
+        ),
+      if (s.spawn.isChild)
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('WORK', style: label),
+            SizedBox(height: t.sp * 0.75),
+            ChildWorkPanel(session: s, sheet: true),
+          ],
+        ),
       if (s.context != null)
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1485,7 +1680,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
                             ),
                           ),
                         ),
-                        Text(_wroteMeta(w), style: _mono(t, t.labelSize)),
+                        Text(_wroteMeta(w), style: agentMono(t)),
                       ],
                     ),
                   ),
@@ -1493,10 +1688,18 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
               ),
         ],
       ),
+      // The same Crew and Role a long-press on its row raises (138n).
+      CrewRoleSections(session: s),
       KeyValueList(rows: rows),
       AddSkippedToIntegrations(session: s),
+      SpawnChildrenSection(session: s),
       if (!s.ended) ...[
-        if (_confirm) ...[
+        if (_endTree)
+          EndTreeBanner(
+            session: s,
+            onDone: () => setState(() => _endTree = false),
+          )
+        else if (_confirm) ...[
           Text(
             'The agent and everything it started are stopped on the host.',
             style: TextStyle(
@@ -1542,7 +1745,13 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             key: const Key('end-session'),
             label: 'End session',
             dangerText: true,
-            onTap: () => setState(() => _confirm = true),
+            onTap: () {
+              final o = ref.read(agentOverviewProvider).value;
+              final kids =
+                  o != null && childrenOf(o, s.id).any((k) => !k.ended);
+              if (kids) ref.invalidate(sessionDescendantsProvider(s.id));
+              setState(() => kids ? _endTree = true : _confirm = true);
+            },
           ),
       ],
     ];
@@ -1570,7 +1779,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
   }
 }
 
-/// Esc, Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
+/// Esc, Tab, Shift+Tab, sticky Ctrl and Shift, arrows and Paste: the keys a phone
 /// keyboard lacks (freeze §10, AC-F4). Shown while the session is live;
 /// Done appears with the keyboard and only puts it away (plan §5.1).
 class _ExtraKeys extends StatelessWidget {
@@ -1631,6 +1840,13 @@ class _ExtraKeys extends StatelessWidget {
                         tooltip: 'Shift, for the next key',
                         active: term.stickyShift,
                         onTap: () => term.stickyShift = !term.stickyShift,
+                      ),
+                      // Claude Code's mode switch (decision 147b).
+                      _Key(
+                        key: const Key('key-backtab'),
+                        label: '⇧Tab',
+                        tooltip: 'Shift+Tab: switch the agent’s mode',
+                        onTap: term.backTab,
                       ),
                       _Key(label: '←', tooltip: 'Left', onTap: term.left),
                       _Key(label: '→', tooltip: 'Right', onTap: term.right),

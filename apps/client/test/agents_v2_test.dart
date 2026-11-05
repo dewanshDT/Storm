@@ -246,6 +246,9 @@ void main() {
       await tester.tap(find.byKey(const Key('session-header')));
       await tester.pumpAndSettle();
       expect(find.text('AGENT'), findsOneWidget);
+      // Below Crew and Role (138-5), so it may need scrolling to.
+      await tester.ensureVisible(find.byKey(const Key('end-session')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('end-session')));
       await tester.pumpAndSettle();
       expect(
@@ -254,6 +257,8 @@ void main() {
         ),
         findsOneWidget,
       );
+      await tester.ensureVisible(find.byKey(const Key('confirm-action')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('confirm-action')));
       await tester.pumpAndSettle();
       expect(agents.count('POST', '/v1/agent/sessions/ags_1/end'), 1);
@@ -613,6 +618,137 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('New workspace… makes one on the host and picks it', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+
+      Future<void> ask(String name) async {
+        await tester.tap(find.byKey(const Key('launcher-workspace')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('New workspace…').last);
+        await tester.pumpAndSettle();
+        await tester.enterText(
+          find.byKey(const Key('new-workspace-name')),
+          name,
+        );
+        await tester.pump();
+      }
+
+      // A name already taken: said as a sentence, and the dialog stays.
+      agents.refuseNewWorkspace = (409, 'exists');
+      await ask('storm');
+      expect(
+        tester
+            .widget<StormToggle>(find.byKey(const Key('new-workspace-git')))
+            .value,
+        isTrue,
+        reason: 'a git repository unless turned off',
+      );
+      await tester.tap(find.byKey(const Key('new-workspace-create')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('There is already a folder named “storm” on this host.'),
+        findsOneWidget,
+      );
+      expect(find.text('exists'), findsNothing);
+
+      await tester.enterText(
+        find.byKey(const Key('new-workspace-name')),
+        '  demo  ',
+      );
+      await tester.tap(find.byKey(const Key('new-workspace-git')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('new-workspace-create')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('new-workspace-name')), findsNothing);
+      expect(agents.newWorkspaces, [
+        {'name': 'storm', 'git': true},
+        {'name': 'demo', 'git': false},
+      ]);
+      expect(inField('launcher-workspace', 'demo'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(agents.launches.single['workspace'], 'demo');
+      await disposeShell(tester, c);
+    });
+
+    // Round 4's stray launch: a launch the server refused because the host
+    // was offline is never sent again on its own, and the launcher keeps
+    // what the person chose for their next click.
+    testWidgets('an offline refusal keeps the choices and never relaunches', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+      await tester.enterText(find.byKey(const Key('launcher-model')), 'haiku');
+      await tester.tap(find.byKey(const Key('launcher-writes')));
+      await tester.pumpAndSettle();
+      expect(find.text('Read only'), findsOneWidget);
+
+      agents.refuseLaunch = (503, 'the host is offline');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(find.text('The host is offline.'), findsOneWidget);
+      expect(agents.launches, hasLength(1));
+
+      // The host comes back: nothing is sent without a click.
+      c.invalidate(agentOverviewProvider);
+      for (var i = 0; i < 6; i++) {
+        await tester.pump(const Duration(seconds: 10));
+      }
+      await tester.pumpAndSettle();
+      expect(agents.launches, hasLength(1));
+      expect(find.byKey(const Key('launch')), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('launcher-model')))
+            .controller!
+            .text,
+        'haiku',
+      );
+      expect(find.text('Read only'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(agents.launches, hasLength(2));
+      expect(agents.launches.last['model'], 'haiku');
+      expect(agents.launches.last.containsKey('write_vault_id'), isFalse);
+      expect(agents.launches.last['host_id'], agents.launches.first['host_id']);
+      expect(
+        agents.launches.last['workspace'],
+        agents.launches.first['workspace'],
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a refused launch is a sentence, never its code', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(hosts: [agentHost()]);
+      final c = await open(tester, agents);
+      await launchFrom(tester);
+
+      agents.refuseLaunch = (409, 'workspace_held');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Another session is working in this workspace.'),
+        findsOneWidget,
+      );
+      expect(find.text('workspace_held'), findsNothing);
+
+      agents.refuseLaunch = (409, 'something_new');
+      await tester.tap(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
+      expect(find.text("Couldn't launch: something_new"), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
     testWidgets('without a note it writes to the first vault, or not at all', (
       tester,
     ) async {
@@ -785,7 +921,12 @@ void main() {
       expect(find.byKey(const Key('agent-card-claude-code')), findsOneWidget);
       expect(find.byKey(const Key('agent-card-shell')), findsOneWidget);
       expect(find.textContaining('1 of 2 hosts online'), findsOneWidget);
-      expect(find.text('mac-mini · storm · failed'), findsOneWidget);
+      // The sidebar's row: only the workspace gives way (decision 138l),
+      // all of it where even "…" has no room.
+      expect(
+        find.textContaining(RegExp(r'^mac-mini · (\S* · )?failed$')),
+        findsOneWidget,
+      );
       await tester.tap(find.byKey(const Key('work-ags_site')));
       await tester.pumpAndSettle();
       expect(where(c).path, '/agents/s/ags_site');

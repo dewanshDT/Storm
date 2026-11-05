@@ -477,8 +477,11 @@ def main():
               and '"--permission-mode" "default"' in text, text[-400:])
         check("W3", "its USERPROFILE is the account's home", f"HOME={HOME}".lower() in text.lower(), text[-400:])
         m = re.search(r"ENV_PATH=([^\s]+)", text)
-        check("W3", "its PATH starts with the account's own bins",
-              m is not None and m.group(1).lower().startswith(os.path.join(HOME, ".local", "bin").lower()),
+        # Storm's managed agents first (decision 133-2), then the account's own.
+        managed = os.path.join(STATE, "agents", "managed", "bin")
+        check("W3", "its PATH starts with Storm's agents, then the account's own bins",
+              m is not None and m.group(1).lower().startswith(
+                  f"{managed};{os.path.join(HOME, '.local', 'bin')}".lower()),
               m.group(1) if m else text[-300:])
         owner.end(sid)
 

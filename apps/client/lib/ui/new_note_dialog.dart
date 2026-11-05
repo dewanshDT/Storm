@@ -12,46 +12,76 @@ class NewNote {
   final Accent accent;
 }
 
-/// Asks for a note's name — not its path.
+/// Asks for a note's name, which may carry folders: `Ideas/Plan` makes
+/// `Plan` in `Ideas` under [folder], `/Ideas/Plan` the same from the top of
+/// the vault, and [noteFileName] turns either into a path. Missing folders
+/// are made by the create.
 ///
-/// The old dialog asked for `Folder/Note.md` and made the user supply both the
-/// folder and the extension. Neither is a decision worth asking about: the
-/// folder is wherever they already are, and every note is markdown. So this
-/// takes a name and [noteFileName] turns it into a path.
-Future<NewNote?> promptForNewNote(BuildContext context, {String folder = ''}) =>
-    showDialog<NewNote>(
-      context: context,
-      builder: (_) => _NewNoteDialog(folder: folder),
-    );
+/// With [create], the dialog runs it before closing: a create that made
+/// nothing returns why, and the dialog says so and stays open.
+Future<NewNote?> promptForNewNote(
+  BuildContext context, {
+  String folder = '',
+  Future<String?> Function(NewNote note)? create,
+}) => showDialog<NewNote>(
+  context: context,
+  builder: (_) => _NewNoteDialog(folder: folder, create: create),
+);
 
 /// Turns a note's name into a vault-relative path.
 ///
-/// Separators are stripped rather than rejected: typing `Q1/Plan` into a name
-/// field means the words, not a folder — and letting it through would create
-/// a directory the user did not ask for. Everything the server's path rules
-/// forbid is removed here, so a name can never fail validation downstream.
+/// A `/` separates folders, relative to [folder] unless the name starts with
+/// one. Everything the server's path rules forbid is removed rather than
+/// refused, so a name can never fail validation downstream: empty segments
+/// and `.`/`..` go, as do each segment's leading dots. [newNoteNameError] is
+/// what the dialog refuses first.
 String noteFileName(String name, {String folder = ''}) {
-  // Separators first: `Q1/Plan` is two words, not a folder.
-  var clean = name.replaceAll(RegExp(r'[/\\]'), ' ');
-  // Then every leading dot and space together, not just the first run — a
-  // `../../` becomes `.. .. ` above, and stopping after one run would leave
-  // a stray `..` in the filename.
-  clean = clean.replaceAll(RegExp(r'^[\s.]+'), '');
-  // Collapse what the substitutions left behind.
-  clean = clean.replaceAll(RegExp(r'\s+'), ' ').trim();
+  final fromRoot = name.trimLeft().startsWith('/');
+  final parts = [
+    for (final s in name.split('/'))
+      if (_segment(s) case final c when c.isNotEmpty) c,
+  ];
+  var leaf = parts.isEmpty ? 'Untitled' : parts.removeLast();
+  if (!leaf.toLowerCase().endsWith('.md')) leaf = '$leaf.md';
+  return [if (!fromRoot && folder.isNotEmpty) folder, ...parts, leaf].join('/');
+}
 
-  if (clean.isEmpty) clean = 'Untitled';
-  if (!clean.toLowerCase().endsWith('.md')) clean = '$clean.md';
-  return folder.isEmpty ? clean : '$folder/$clean';
+String _segment(String s) => s
+    .replaceAll(r'\', ' ')
+    .replaceAll(RegExp(r'^[\s.]+'), '')
+    .replaceAll(RegExp(r'\s+'), ' ')
+    .trim();
+
+/// Where a note at [path] lands, folder by folder: `in Work / Q1`.
+String newNoteDestination(String path) {
+  final cut = path.lastIndexOf('/');
+  if (cut < 0) return 'at the top of the vault';
+  return 'in ${path.substring(0, cut).split('/').join(' / ')}';
+}
+
+/// Why the dialog won't create [name]: a `..`, which would otherwise be
+/// dropped and land the note somewhere unasked, or nothing after the last
+/// `/`.
+String? newNoteNameError(String name) {
+  final segments = name.trim().split('/');
+  if (segments.any((s) => s.trim() == '..')) {
+    return "A name can't use “..”: start it with / to begin at the top "
+        'of the vault.';
+  }
+  if (segments.length > 1 && segments.last.trim().isEmpty) {
+    return 'Name the note after the last /.';
+  }
+  return null;
 }
 
 /// A `StatefulWidget` so the controller outlives the closing animation —
 /// disposing it as `showDialog` returns kills it mid-animation, which is the
 /// red screen that once appeared right after naming a note.
 class _NewNoteDialog extends StatefulWidget {
-  const _NewNoteDialog({required this.folder});
+  const _NewNoteDialog({required this.folder, this.create});
 
   final String folder;
+  final Future<String?> Function(NewNote note)? create;
 
   @override
   State<_NewNoteDialog> createState() => _NewNoteDialogState();
@@ -67,8 +97,34 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
     super.dispose();
   }
 
-  void _submit() =>
-      Navigator.pop(context, NewNote(name: _controller.text, accent: _accent));
+  String? _error;
+  bool _creating = false;
+
+  Future<void> _submit() async {
+    if (_creating) return;
+    final error = newNoteNameError(_controller.text);
+    if (error != null) {
+      setState(() => _error = error);
+      return;
+    }
+    final note = NewNote(name: _controller.text, accent: _accent);
+    final create = widget.create;
+    if (create != null) {
+      setState(() => _creating = true);
+      final failed = await create(note);
+      if (!mounted) return;
+      setState(() => _creating = false);
+      if (failed != null) {
+        setState(() => _error = failed);
+        return;
+      }
+    }
+    if (mounted) Navigator.pop(context, note);
+  }
+
+  /// Said, not asked: where the note will land as the name stands.
+  String _where() =>
+      newNoteDestination(noteFileName(_controller.text, folder: widget.folder));
 
   @override
   Widget build(BuildContext context) {
@@ -87,19 +143,31 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
             labelText: 'Name',
             hintText: 'Weekly review',
             onSubmitted: (_) => _submit(),
+            onChanged: (_) => setState(() => _error = null),
           ),
-          if (widget.folder.isNotEmpty) ...[
-            SizedBox(height: t.sp),
-            // Said, not asked: the folder follows where they are.
-            Text(
-              'in ${widget.folder}',
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.labelSize,
-                color: t.text3,
-              ),
+          SizedBox(height: t.sp),
+          Text(
+            _error ?? _where(),
+            key: const Key('new-note-where'),
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.labelSize,
+              color: _error == null ? t.text3 : t.danger,
             ),
-          ],
+          ),
+          SizedBox(height: t.sp * 0.5),
+          Text(
+            '“Here” is what you picked last: a folder in the sidebar, a '
+            'folder you opened, or the folder of the note you opened. A / '
+            'makes folders from here; start with / to begin at the top of '
+            'the vault.',
+            key: const Key('new-note-hint'),
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.labelSize,
+              color: t.text3,
+            ),
+          ),
           SizedBox(height: t.sp * 2.25),
           const SectionLabel('Colour'),
           SizedBox(height: t.sp),
@@ -115,7 +183,10 @@ class _NewNoteDialogState extends State<_NewNoteDialog> {
           onPressed: () => Navigator.pop(context),
           child: const Text('Cancel'),
         ),
-        FilledButton(onPressed: _submit, child: const Text('Create')),
+        FilledButton(
+          onPressed: _creating ? null : _submit,
+          child: const Text('Create'),
+        ),
       ],
     );
   }

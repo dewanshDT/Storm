@@ -15,6 +15,7 @@ import 'ui/login_screen.dart';
 import 'agent/agents_screen.dart';
 import 'agent/agents_shell.dart';
 import 'agent/agent_state.dart' show sessionTabOf;
+import 'agent/crew_screen.dart';
 import 'agent/session_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
@@ -25,6 +26,7 @@ import 'ui/shell/notes_home.dart';
 import 'ui/shell/vault_shell.dart';
 import 'ui/starting_screen.dart';
 import 'ui/tags_screen.dart';
+import 'ui/trash_screen.dart';
 
 /// Where the app can be.
 ///
@@ -56,6 +58,9 @@ abstract final class Routes {
   static String agentSession(String id, {String? tab}) =>
       '/agents/s/${Uri.encodeComponent(id)}${tab == null ? '' : '?tab=$tab'}';
 
+  /// One crew's page (decision 138).
+  static String agentCrew(String id) => '/agents/c/${Uri.encodeComponent(id)}';
+
   /// The settings list on a phone; the first page at desk width.
   static const settings = '/settings';
   static String settingsPage(String id) => '/settings/$id';
@@ -74,6 +79,7 @@ abstract final class Routes {
   static String browse(String vaultId) => '${vault(vaultId)}/browse';
   static String search(String vaultId) => '${vault(vaultId)}/search';
   static String tags(String vaultId) => '${vault(vaultId)}/tags';
+  static String trash(String vaultId) => '${vault(vaultId)}/trash';
 
   /// [session] marks a note pushed from that agent session, which its back
   /// link then names.
@@ -259,6 +265,10 @@ final routerProvider = Provider<GoRouter>((ref) {
                 path: '/v/:vault/tags',
                 builder: (_, _) => _leaf(const TagsScreen()),
               ),
+              GoRoute(
+                path: '/v/:vault/trash',
+                builder: (_, _) => _leaf(const TrashScreen()),
+              ),
             ],
           ),
           ShellRoute(
@@ -268,6 +278,11 @@ final routerProvider = Provider<GoRouter>((ref) {
               GoRoute(
                 path: Routes.agents,
                 builder: (_, _) => _leaf(const AgentsScreen()),
+              ),
+              GoRoute(
+                path: '/agents/c/:id',
+                builder: (_, state) =>
+                    _leaf(CrewScreen(crewId: state.pathParameters['id']!)),
               ),
               GoRoute(
                 path: '/agents/s/:id',

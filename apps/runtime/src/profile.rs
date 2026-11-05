@@ -159,6 +159,149 @@ pub fn get(id: &str) -> Option<&'static Profile> {
     BUILT_IN.iter().find(|p| p.id == id)
 }
 
+/// The model a session runs, as its agent's own launch flag (decision 145b).
+/// The rules are `docs/agent-model-vectors.json`'s, which the server applies
+/// too: only ASCII letters, digits and `.` `_` `:` `/` `-`, a letter or digit
+/// first, and a bounded length, so a value reaches argv (and a Windows batch
+/// shim, AM53) unescaped. Anything else, and any other agent, is refused with
+/// the forms it would take.
+pub fn model_args(provider: &str, model: &str) -> Result<Vec<String>, String> {
+    let alnum = |c: char| c.is_ascii_alphanumeric();
+    let lower = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit();
+    let first = |s: &str, ok: &dyn Fn(char) -> bool| s.chars().next().is_some_and(ok);
+    let (ok, flag, forms) = match provider {
+        "claude-code" => {
+            let ok = matches!(model, "haiku" | "sonnet" | "opus")
+                || (model.len() <= 64
+                    && model.strip_prefix("claude-").is_some_and(|rest| {
+                        first(rest, &lower)
+                            && rest.chars().all(|c| lower(c) || c == '.' || c == '-')
+                    }));
+            (
+                ok,
+                "--model",
+                "Claude Code takes an alias (haiku, sonnet or opus) or a full model id such as claude-sonnet-4-5",
+            )
+        }
+        "opencode" => {
+            let ok = model.len() <= 128
+                && model.split_once('/').is_some_and(|(p, m)| {
+                    first(p, &lower)
+                        && p.chars().all(|c| lower(c) || c == '_' || c == '-')
+                        && first(m, &alnum)
+                        && m.chars().all(|c| alnum(c) || ".:_/-".contains(c))
+                });
+            (
+                ok,
+                "--model",
+                "OpenCode takes provider/model, such as anthropic/claude-sonnet-4-5",
+            )
+        }
+        "codex" => {
+            let ok = model.len() <= 64
+                && first(model, &alnum)
+                && model.chars().all(|c| alnum(c) || "._:-".contains(c));
+            (ok, "-m", "Codex takes a model id such as gpt-5-codex")
+        }
+        _ => return Err(format!("Storm passes no model to {provider}")),
+    };
+    if ok {
+        Ok(vec![flag.to_string(), model.to_string()])
+    } else {
+        Err(format!("{model:?} is not a model Storm can pass: {forms}"))
+    }
+}
+
+/// What a permission mode the person chose (decision 146b) adds to a
+/// launch: the agent's own flag, or keys in Storm's OpenCode config layer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PermissionLaunch {
+    pub args: Vec<String>,
+    pub opencode_permission: Vec<(String, String)>,
+    /// Auto is out of Claude Code's Shift+Tab cycle (147c): every mode but
+    /// `auto` itself.
+    pub auto_off: bool,
+    /// A child's baseline in Claude Code's `permissions.allow` (148a).
+    pub allow: Vec<String>,
+    /// OpenCode: Storm's layer turns every ask into a deny (148a).
+    pub deny_asks: bool,
+}
+
+/// A permission mode as `provider` takes it (146b, 147a), by
+/// `docs/agent-permission-mode-vectors.json`'s rule, which the server applies
+/// too. Claude Code always gets a flag, since its own default became auto
+/// (2.1.312): `default` is `--permission-mode default`, the mode that asks,
+/// a spelling every Claude Code takes (2.1.312 calls it Manual and takes
+/// `manual` too; an older one knows only `default`), so no version check is
+/// needed. `accept_edits` is `acceptEdits`, `auto` is `auto`; every mode but
+/// auto takes auto out of the cycle. OpenCode takes `edit: allow` for
+/// `accept_edits`; anything else, and every bypass, is refused, so the start
+/// fails rather than fall back.
+pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
+    let flag = |value: &str| PermissionLaunch {
+        args: vec!["--permission-mode".into(), value.into()],
+        auto_off: value != "auto",
+        ..Default::default()
+    };
+    match (provider, mode) {
+        ("claude-code", "default") => Ok(flag("default")),
+        (_, "default") => Ok(PermissionLaunch::default()),
+        ("claude-code", "accept_edits") => Ok(flag("acceptEdits")),
+        ("claude-code", "auto") => Ok(flag("auto")),
+        ("opencode", "accept_edits") => Ok(PermissionLaunch {
+            opencode_permission: vec![("edit".into(), "allow".into())],
+            ..Default::default()
+        }),
+        _ => Err(format!(
+            "{:?} is not a permission mode Storm gives {provider}",
+            mode.chars().take(40).collect::<String>()
+        )),
+    }
+}
+
+/// What a child is allowed outright in Claude Code `dontAsk` (148a): edits
+/// and reads inside its own workspace, and commands. Its workspace, user and
+/// namespace are already its own (136, 137), and nothing reaches the
+/// person's workspace until they Apply it.
+pub const CHILD_BASELINE: [&str; 3] = ["Edit(./**)", "Read(./**)", "Bash"];
+
+/// Whether Claude Code's auto mode can fall back to asking the person.
+/// G-148 found it does (2.1.312: after repeated classifier blocks the call
+/// goes to the CLI's own prompt), and no documented setting turns that into
+/// a denial (`autoMode` takes only classifier rules), so a child never runs
+/// in auto.
+pub const AUTO_CAN_ASK: bool = true;
+
+/// A child's mode as `provider` takes it (148a): never a prompt, whatever its
+/// parent's mode. Claude Code runs `dontAsk` with [`CHILD_BASELINE`], for an
+/// auto parent too: G-148 found auto falls back to asking after repeated
+/// blocks, and no documented setting turns that into a denial. OpenCode
+/// gets `edit` and `bash` allowed and every other ask denied. `mode` is still
+/// checked as [`permission_mode`] checks it; any other agent is refused,
+/// since nothing documented keeps it from asking.
+pub fn child_permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
+    permission_mode(provider, mode)?;
+    match provider {
+        "claude-code" => Ok(PermissionLaunch {
+            args: vec!["--permission-mode".into(), "dontAsk".into()],
+            auto_off: true,
+            allow: CHILD_BASELINE.map(String::from).to_vec(),
+            ..Default::default()
+        }),
+        "opencode" => Ok(PermissionLaunch {
+            opencode_permission: vec![
+                ("bash".into(), "allow".into()),
+                ("edit".into(), "allow".into()),
+            ],
+            deny_asks: true,
+            ..Default::default()
+        }),
+        _ => Err(format!(
+            "{provider} cannot run as a child: nothing documented keeps it from asking"
+        )),
+    }
+}
+
 /// Whether Storm can give `id`'s sessions their own MCP servers: `Some` for
 /// a built-in, `None` for an id it knows nothing about (the server keeps its
 /// older behaviour for those).
@@ -194,6 +337,189 @@ fn is_uuid(id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn model_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!("../../../docs/agent-model-vectors.json")).unwrap()
+    }
+
+    /// 145b: every accepted model becomes exactly its flag, every refused
+    /// one is refused, as the server's copy of the rule decides too.
+    #[test]
+    fn a_model_is_passed_exactly_as_the_vectors_say() {
+        let v = model_vectors();
+        for case in v["accepted"].as_array().unwrap() {
+            let (agent, model) = (
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            );
+            let want: Vec<String> = serde_json::from_value(case["args"].clone()).unwrap();
+            assert_eq!(model_args(agent, model), Ok(want), "{agent} {model}");
+        }
+        for case in v["refused"].as_array().unwrap() {
+            let (agent, model) = (
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            );
+            let refused = model_args(agent, model);
+            assert!(refused.is_err(), "{agent} {model:?}: {refused:?}");
+        }
+        for (agent, max) in v["max_len"].as_object().unwrap() {
+            let max = max.as_u64().unwrap() as usize;
+            let at = match agent.as_str() {
+                "claude-code" => format!("claude-{}", "a".repeat(max - 7)),
+                "opencode" => format!("a/{}", "b".repeat(max - 2)),
+                _ => "c".repeat(max),
+            };
+            assert!(model_args(agent, &at).is_ok(), "{agent} at {max}");
+            assert!(
+                model_args(agent, &format!("{at}x")).is_err(),
+                "{agent} past {max}"
+            );
+        }
+    }
+
+    /// 145b with AM53: an accepted model needs no escaping in a Windows
+    /// batch shim's command line, so `claude.cmd` takes it as it is.
+    #[test]
+    fn every_accepted_model_passes_the_batch_file_rules() {
+        for case in model_vectors()["accepted"].as_array().unwrap() {
+            let args = model_args(
+                case["agent"].as_str().unwrap(),
+                case["model"].as_str().unwrap(),
+            )
+            .unwrap();
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &args).unwrap();
+        }
+    }
+
+    fn mode_vectors() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../docs/agent-permission-mode-vectors.json"
+        ))
+        .unwrap()
+    }
+
+    /// 146b (A-146-2): each mode becomes exactly the table's flag or config
+    /// key, as the server's copy of the rule offers it; every other mode,
+    /// bypass included, is refused; and every flag passes the Windows
+    /// batch-file rules unescaped.
+    #[test]
+    fn a_146_2_a_mode_is_mapped_exactly_as_the_vectors_say() {
+        let v = mode_vectors();
+        for case in v["accepted"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            let args: Vec<String> = serde_json::from_value(case["args"].clone()).unwrap();
+            let opencode: Vec<(String, String)> = case["opencode_permission"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                .collect();
+            let got = permission_mode(agent, mode).unwrap();
+            assert_eq!(
+                got,
+                PermissionLaunch {
+                    args: args.clone(),
+                    opencode_permission: opencode,
+                    auto_off: case["auto_off"].as_bool().unwrap(),
+                    ..Default::default()
+                },
+                "{agent} {mode}"
+            );
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &args).unwrap();
+        }
+        for case in v["refused"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            assert!(permission_mode(agent, mode).is_err(), "{agent} {mode:?}");
+        }
+        for (agent, modes) in v["offered"].as_object().unwrap() {
+            for mode in v["order"].as_array().unwrap() {
+                let mode = mode.as_str().unwrap();
+                assert_eq!(
+                    permission_mode(agent, mode).is_ok(),
+                    modes.as_array().unwrap().iter().any(|m| m == mode),
+                    "{agent} {mode}"
+                );
+            }
+        }
+        for agent in ["claude-code", "opencode", "codex"] {
+            for mode in ["accept_edits", "auto"] {
+                if let Ok(l) = permission_mode(agent, mode) {
+                    for a in &l.args {
+                        assert!(!a.contains("bypass") && !a.contains("skip"), "{a}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// 148a (A-148-1, A-148-4): a child's mode is the vectors' no-prompt
+    /// form for every mode its agent offers; Codex and every other agent
+    /// are refused as a child, and nothing reaches bypass.
+    #[test]
+    fn a_148_a_childs_mode_never_asks() {
+        let v = mode_vectors();
+        let child = &v["child"];
+        for case in child["accepted"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            let strings =
+                |key: &str| -> Vec<String> { serde_json::from_value(case[key].clone()).unwrap() };
+            let got = child_permission_mode(agent, mode).unwrap();
+            assert_eq!(
+                got,
+                PermissionLaunch {
+                    args: strings("args"),
+                    opencode_permission: case["opencode_permission"]
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
+                        .collect(),
+                    auto_off: case["auto_off"].as_bool().unwrap(),
+                    allow: strings("allow"),
+                    deny_asks: case["deny_asks"].as_bool().unwrap(),
+                },
+                "{agent} {mode}"
+            );
+            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &got.args)
+                .unwrap();
+            let text = format!("{got:?}");
+            assert!(!text.contains("bypass") && !text.contains("skip"), "{text}");
+        }
+        for case in child["refused"].as_array().unwrap() {
+            let (agent, mode) = (
+                case["agent"].as_str().unwrap(),
+                case["mode"].as_str().unwrap(),
+            );
+            assert!(
+                child_permission_mode(agent, mode).is_err(),
+                "{agent} {mode:?}"
+            );
+        }
+        let unattended: Vec<&str> = child["unattended"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a.as_str().unwrap())
+            .collect();
+        for p in BUILT_IN {
+            assert_eq!(
+                child_permission_mode(p.id, "default").is_ok(),
+                unattended.contains(&p.id),
+                "{}",
+                p.id
+            );
+        }
+    }
 
     #[test]
     fn ids_are_unique_and_valid() {

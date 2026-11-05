@@ -1,0 +1,707 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:wght@400;600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0}*{box-sizing:border-box}a{color:oklch(0.68 0.15 293)}a:hover{color:oklch(0.95 0.008 55)}</style>
+</helmet>
+<div style="{{ rootStyle }}">
+
+<sc-if value="{{ isDesktop }}" hint-placeholder-val="{{ true }}">
+  <div style="position:absolute;inset:0;display:flex">
+    <div style="width:56px;flex:none;background:var(--bg);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:16px 0 14px;gap:8px">
+      <div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control);color:var(--text3)">
+        <svg width="20" height="22" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v1h-1zM7 1h1v1h-1zM0 2h1v1h-1zM8 2h1v1h-1zM0 3h1v1h-1zM2 3h4v1h-4zM9 3h1v1h-1zM0 4h1v1h-1zM9 4h1v1h-1zM0 5h1v1h-1zM2 5h6v1h-6zM9 5h1v1h-1zM0 6h1v1h-1zM9 6h1v1h-1zM0 7h1v1h-1zM2 7h6v1h-6zM9 7h1v1h-1zM0 8h1v1h-1zM9 8h1v1h-1zM0 9h1v1h-1zM9 9h1v1h-1zM1 10h8v1h-8z"></path></svg>
+      </div>
+      <div style="{{ agentsRailStyle }}">
+        <svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg>
+      </div>
+      <div style="flex:1"></div>
+      <div style="width:40px;height:32px;display:flex;align-items:center;justify-content:center"><div style="width:9px;height:9px;border-radius:999px;background:var(--green)"></div></div>
+      <div style="{{ settingsRailStyle }}">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg>
+      </div>
+    </div>
+
+    <div style="{{ sidebarStyle }}">
+      <sc-if value="{{ sideLoading }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:16px 12px;display:flex;flex-direction:column;gap:10px">
+          <div style="font-size:14px;font-weight:600;color:var(--text);padding:6px 8px 4px">Agents</div>
+          <div style="height:36px;border-radius:var(--r-control);background:var(--surface2)"></div>
+          <div style="height:10px;width:60px;border-radius:4px;background:var(--surface2);margin-top:14px"></div>
+          <div style="display:flex;gap:10px;align-items:center"><div style="width:28px;height:28px;border-radius:var(--r-control);background:var(--surface2)"></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="height:9px;width:70%;border-radius:4px;background:var(--surface2)"></div><div style="height:8px;width:50%;border-radius:4px;background:var(--surface2)"></div></div></div>
+          <div style="display:flex;gap:10px;align-items:center"><div style="width:28px;height:28px;border-radius:var(--r-control);background:var(--surface2)"></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="height:9px;width:55%;border-radius:4px;background:var(--surface2)"></div><div style="height:8px;width:45%;border-radius:4px;background:var(--surface2)"></div></div></div>
+          <div style="display:flex;gap:10px;align-items:center"><div style="width:28px;height:28px;border-radius:var(--r-control);background:var(--surface2)"></div><div style="flex:1;display:flex;flex-direction:column;gap:5px"><div style="height:9px;width:65%;border-radius:4px;background:var(--surface2)"></div><div style="height:8px;width:40%;border-radius:4px;background:var(--surface2)"></div></div></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sideAgents }}" hint-placeholder-val="{{ true }}">
+        <div style="padding:16px 12px 8px;display:flex;flex-direction:column;gap:6px">
+          <div style="font-size:14px;font-weight:600;color:var(--text);padding:6px 8px 4px">Agents</div>
+          <div style="display:flex;align-items:center;justify-content:center;gap:6px;padding:9px;border-radius:var(--r-control);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500">＋ New session</div>
+          <div style="{{ overviewStyle }}">Overview</div>
+        </div>
+        <div style="flex:1;min-height:0;overflow:hidden;padding:0 8px 12px;display:flex;flex-direction:column;gap:2px">
+          <sc-if value="{{ hasCrews }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:12px 8px 6px">Crews</div>
+            <sc-for list="{{ crews }}" as="c" hint-placeholder-count="2">
+              <div style="{{ c.headerStyle }}">
+                <span style="width:12px;flex:none;color:var(--text3);font-size:10px">{{ c.chev }}</span>
+                <span style="{{ c.sqStyle }}"></span>
+                <span style="flex:1;min-width:0;font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ c.name }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);flex:none">{{ c.summary }}</span>
+              </div>
+              <sc-if value="{{ c.open }}" hint-placeholder-val="{{ true }}">
+                <div style="display:flex;flex-direction:column;gap:2px;margin:0 0 4px 13px;padding-left:6px;border-left:1px solid var(--border)">
+                  <sc-for list="{{ c.members }}" as="m" hint-placeholder-count="3">
+                    <div style="{{ m.rowStyle }}">
+                      {{ m.markEl }}
+                      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                        <div style="display:flex;align-items:center;gap:6px;min-width:0">
+                          <span style="min-width:0;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.name }}</span>
+                          <sc-if value="{{ m.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ m.roleStyle }}">{{ m.role }}</span></sc-if>
+                        </div>
+                        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.sub }}</span>
+                      </div>
+                    </div>
+                  </sc-for>
+                </div>
+              </sc-if>
+            </sc-for>
+          </sc-if>
+          <sc-if value="{{ hasRunning }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 8px 6px">Running</div>
+            <sc-for list="{{ running }}" as="m" hint-placeholder-count="2">
+              <div style="{{ m.rowStyle }}">
+                {{ m.markEl }}
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                  <div style="display:flex;align-items:center;gap:6px;min-width:0">
+                    <span style="min-width:0;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.name }}</span>
+                    <sc-if value="{{ m.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ m.roleStyle }}">{{ m.role }}</span></sc-if>
+                  </div>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.sub }}</span>
+                </div>
+                <sc-if value="{{ m.selected }}" hint-placeholder-val="{{ false }}">
+                  <span style="width:18px;height:18px;flex:none;border-radius:999px;background:var(--accent);color:var(--on-accent);font-size:11px;display:flex;align-items:center;justify-content:center">✓</span>
+                </sc-if>
+                <sc-if value="{{ m.drop }}" hint-placeholder-val="{{ false }}">
+                  <span style="position:absolute;right:6px;top:-10px;font-size:11px;font-weight:500;background:var(--accent);color:var(--on-accent);border-radius:999px;padding:1px 9px;z-index:4">Make crew</span>
+                  <div style="position:absolute;left:44px;top:22px;transform:rotate(-2deg);display:flex;align-items:center;gap:8px;padding:6px 12px 6px 8px;border-radius:var(--r-control);background:var(--surface2);border:1px solid var(--border);box-shadow:var(--shadow);z-index:5">
+                    {{ ghostMark }}
+                    <span style="font-size:13px;color:var(--text)">docs-pass</span>
+                  </div>
+                </sc-if>
+              </div>
+            </sc-for>
+          </sc-if>
+          <sc-if value="{{ hasEnded }}" hint-placeholder-val="{{ true }}">
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 8px 6px">Ended</div>
+            <sc-for list="{{ ended }}" as="m" hint-placeholder-count="1">
+              <div style="{{ m.rowStyle }}">
+                {{ m.markEl }}
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:1px">
+                  <span style="min-width:0;font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.name }}</span>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ m.sub }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </sc-if>
+        </div>
+        <sc-if value="{{ selectBar }}" hint-placeholder-val="{{ false }}">
+          <div style="margin:0 10px 12px;padding:10px 12px;border-radius:var(--r-card);background:var(--surface2);border:1px solid var(--border);box-shadow:var(--shadow);display:flex;flex-direction:column;gap:8px">
+            <span style="font-size:13px;color:var(--text)">2 sessions selected</span>
+            <div style="display:flex;gap:6px">
+              <span style="flex:1;text-align:center;padding:7px;border-radius:var(--r-control);background:var(--accent);color:var(--on-accent);font-size:13px;font-weight:500">Make crew</span>
+              <span style="padding:7px 10px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px">Move to…</span>
+              <span style="padding:7px 6px;color:var(--text3);font-size:13px">Esc</span>
+            </div>
+          </div>
+        </sc-if>
+      </sc-if>
+
+      <sc-if value="{{ sideSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="padding:22px 12px 12px;display:flex;flex-direction:column;gap:2px">
+          <div style="font-size:14px;font-weight:600;color:var(--text);padding:0 8px 10px">Settings</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">This device</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Terminal</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Devices &amp; access</div>
+          <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 8px 6px">Storm</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Vaults</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text);background:var(--surface2);border-radius:var(--r-control)">AI access</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Integrations</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Hosts &amp; default agent</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Storage</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Connection</div>
+          <div style="padding:7px 10px;font-size:13px;color:var(--text2)">Advanced</div>
+        </div>
+      </sc-if>
+    </div>
+
+    <div style="flex:1;min-width:0;position:relative;background:var(--bg)">
+      <sc-if value="{{ mainLoading }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;padding:28px 40px;display:flex;flex-direction:column;gap:18px;max-width:820px">
+          <div style="font-size:25px;font-weight:600;color:var(--text)">Agents</div>
+          <div style="height:12px;width:58%;border-radius:4px;background:var(--surface2)"></div>
+          <div style="height:150px;border-radius:var(--r-card);border:1px solid var(--border);background:var(--surface)"></div>
+          <div style="height:110px;border-radius:var(--r-card);border:1px solid var(--border);background:var(--surface)"></div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ mainOverview }}" hint-placeholder-val="{{ true }}">
+        <div style="position:absolute;inset:0;overflow:hidden">
+          <div style="max-width:820px;padding:28px 40px 40px;display:flex;flex-direction:column;gap:20px">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <div style="font-size:25px;font-weight:600;color:var(--text)">Agents</div>
+              <div style="font-size:14px;color:var(--text2);line-height:1.5">What your agents are working on. Sessions keep running on your hosts when you close Storm.</div>
+            </div>
+            <sc-if value="{{ hasCrews }}" hint-placeholder-val="{{ true }}">
+              <div style="display:flex;flex-direction:column;gap:12px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Crews</div>
+                <sc-for list="{{ crewCards }}" as="g" hint-placeholder-count="2">
+                  <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);padding:14px 18px;display:flex;flex-direction:column;gap:2px">
+                    <div style="display:flex;align-items:center;gap:9px;padding-bottom:6px">
+                      <span style="{{ g.sqStyle }}"></span>
+                      <span style="font-size:15px;font-weight:600;color:var(--text)">{{ g.name }}</span>
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ g.summary }}</span>
+                      <span style="flex:1"></span>
+                      <span style="color:var(--text3);font-size:15px;letter-spacing:1px">···</span>
+                    </div>
+                    <sc-if value="{{ g.open }}" hint-placeholder-val="{{ true }}">
+                      <sc-for list="{{ g.rows }}" as="s" hint-placeholder-count="3">
+                        <div style="{{ s.cardRowStyle }}">
+                          {{ s.markEl }}
+                          <span style="font-size:14px;color:var(--text);white-space:nowrap">{{ s.name }}</span>
+                          <sc-if value="{{ s.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ s.roleStyle }}">{{ s.role }}</span></sc-if>
+                          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">{{ s.meta }}</span>
+                          <span style="flex:1"></span>
+                          <sc-if value="{{ s.hasCtx }}" hint-placeholder-val="{{ false }}">
+                            <span style="font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--r-control);padding:2px 8px;display:flex;align-items:center;gap:5px;white-space:nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>{{ s.ctx }}</span>
+                          </sc-if>
+                          <sc-if value="{{ s.hasWrote }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);white-space:nowrap">{{ s.wroteLabel }}</span></sc-if>
+                        </div>
+                      </sc-for>
+                    </sc-if>
+                    <sc-if value="{{ g.closed }}" hint-placeholder-val="{{ false }}">
+                      <div style="display:flex;align-items:center;gap:8px;padding:2px 0 2px">
+                        <div style="display:flex">{{ g.stack }}</div>
+                        <span style="font-size:13px;color:var(--text3)">{{ g.closedLine }}</span>
+                      </div>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </sc-if>
+            <sc-if value="{{ noCrewsHint }}" hint-placeholder-val="{{ false }}">
+              <div style="font-size:13px;color:var(--text2);line-height:1.5;padding:12px 14px;border-radius:var(--r-control);border:1px dashed var(--border)">Working on one thing across several sessions? Drag one session onto another to make a crew, or pick a crew when you launch.</div>
+            </sc-if>
+            <div style="display:flex;flex-direction:column;gap:12px">
+              <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ looseLabel }}</div>
+              <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);padding:10px 18px;display:flex;flex-direction:column;gap:2px">
+                <sc-for list="{{ looseCards }}" as="s" hint-placeholder-count="3">
+                  <div style="{{ s.cardRowStyle }}">
+                    {{ s.markEl }}
+                    <span style="font-size:14px;color:var(--text);white-space:nowrap">{{ s.name }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">{{ s.meta }}</span>
+                    <span style="flex:1"></span>
+                    <sc-if value="{{ s.hasCtx }}" hint-placeholder-val="{{ false }}">
+                      <span style="font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--r-control);padding:2px 8px;display:flex;align-items:center;gap:5px;white-space:nowrap"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>{{ s.ctx }}</span>
+                    </sc-if>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">2 of 2 hosts online · 2 integrations · <span style="color:var(--accent)">Settings ›</span></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ mainCrew }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;overflow:hidden">
+          <div style="max-width:820px;padding:28px 40px 40px;display:flex;flex-direction:column;gap:18px;position:relative">
+            <div style="display:flex;flex-direction:column;gap:6px">
+              <div style="display:flex;align-items:center;gap:10px">
+                <span style="{{ cp.sqBig }}"></span>
+                <span style="font-size:25px;font-weight:600;color:var(--text)">{{ cp.name }}</span>
+                <span style="flex:1"></span>
+                <span style="display:flex;align-items:center;gap:6px;padding:7px 12px;border-radius:var(--r-control);background:var(--accent-soft);color:var(--accent);font-size:13px;font-weight:500">＋ New session in crew</span>
+                <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--accent);color:var(--text2);font-size:15px;letter-spacing:1px;line-height:18px">···</span>
+              </div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ cp.summary }}</span>
+            </div>
+            <div style="background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);padding:10px 18px;display:flex;flex-direction:column;gap:2px">
+              <sc-for list="{{ cp.rows }}" as="s" hint-placeholder-count="3">
+                <div style="{{ s.cardRowStyle }}">
+                  {{ s.markEl }}
+                  <span style="font-size:14px;color:var(--text);white-space:nowrap">{{ s.name }}</span>
+                  <sc-if value="{{ s.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ s.roleStyle }}">{{ s.role }}</span></sc-if>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">{{ s.metaLong }}</span>
+                  <span style="flex:1"></span>
+                  <sc-if value="{{ s.hasWrote }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);white-space:nowrap">{{ s.wroteLabel }}</span></sc-if>
+                </div>
+              </sc-for>
+            </div>
+            <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr);gap:28px">
+              <div style="display:flex;flex-direction:column;gap:8px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Started from</div>
+                <sc-for list="{{ cp.ctx }}" as="n" hint-placeholder-count="2">
+                  <div style="display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:var(--r-control);border:1px solid var(--border)">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--text3)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>
+                    <span style="flex:1;font-size:14px;color:var(--text)">{{ n.title }}</span>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ n.meta }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;flex-direction:column;gap:2px">
+                <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-bottom:6px">Wrote</div>
+                <sc-for list="{{ cp.wrote }}" as="w" hint-placeholder-count="3">
+                  <div style="display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border)">
+                    <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">{{ w.title }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.crumb }}</span></div>
+                    <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);text-align:right">{{ w.meta }}</span>
+                  </div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="font-size:12px;color:var(--text3)">Collected from each member's context note and Wrote list. The crew itself holds no notes.</div>
+            <div style="position:absolute;top:70px;right:40px;width:230px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow);padding:8px;display:flex;flex-direction:column;z-index:5">
+              <div style="padding:8px 10px;font-size:13px;color:var(--text)">Rename</div>
+              <div style="padding:6px 10px 8px;display:flex;flex-direction:column;gap:7px">
+                <span style="font-size:13px;color:var(--text)">Colour</span>
+                <div style="display:flex;gap:6px"><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 135);box-shadow:0 0 0 2px var(--surface2),0 0 0 3.5px var(--accent)"></span><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 25)"></span><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 70)"></span><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 210)"></span><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 290)"></span><span style="width:16px;height:16px;border-radius:999px;background:oklch(0.62 0.085 340)"></span></div>
+              </div>
+              <div style="height:1px;background:var(--border);margin:4px 6px"></div>
+              <div style="padding:8px 10px;font-size:13px;color:var(--text);display:flex"><span style="flex:1">Collapse in sidebar</span></div>
+              <div style="height:1px;background:var(--border);margin:4px 6px"></div>
+              <div style="padding:8px 10px;font-size:13px;color:var(--text);display:flex"><span style="flex:1">Dismiss ended</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">1</span></div>
+              <div style="padding:8px 10px;font-size:13px;color:var(--danger);display:flex"><span style="flex:1">End all running…</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px">2</span></div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ mainSession }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;display:flex;flex-direction:column;min-height:0">
+          <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+            <div style="display:flex;align-items:center;gap:10px">
+              <span style="min-width:0;font-size:16px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ ss.name }}</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);border:1px solid var(--border);border-radius:999px;padding:2px 9px;flex:none"><span style="width:7px;height:7px;border-radius:999px;background:var(--accent)"></span>Running</span>
+              <span style="flex:1"></span>
+              <span style="{{ inspToggleStyle }}"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M15 3v18"></path></svg></span>
+              <span style="font-size:12.8px;color:var(--text2);padding:5px 10px;border:1px solid var(--border);border-radius:var(--r-control)">End</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ ss.meta }}</span>
+              <span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--r-control);padding:1px 8px"><span style="{{ ss.sqStyle }}"></span>{{ ss.crew }}</span>
+              <span style="{{ ss.roleStyle }}">{{ ss.role }}</span>
+              <sc-if value="{{ ss.hasParent }}" hint-placeholder-val="{{ false }}">
+                <span style="font-size:12px;color:var(--accent)">↳ started by {{ ss.parent }} ›</span>
+              </sc-if>
+            </div>
+          </div>
+          <div style="flex:1;min-height:0;display:flex">
+            <div style="flex:1;min-width:0;overflow:hidden;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
+              <sc-for list="{{ ss.lines }}" as="l" hint-placeholder-count="4"><div style="{{ l.style }}">{{ l.text }}</div></sc-for>
+              <div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div>
+            </div>
+            <sc-if value="{{ inspOpen }}" hint-placeholder-val="{{ true }}">
+              <div style="width:320px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg);position:relative">
+                <div style="position:absolute;left:-3px;top:0;bottom:0;width:5px;cursor:col-resize"></div>
+                <div style="display:flex;align-items:center;gap:4px;padding:10px 14px;border-bottom:1px solid var(--border)">
+                  <span style="padding:6px 12px;border-radius:var(--r-control);font-size:13px;color:var(--text3)">Context</span>
+                  <span style="padding:6px 12px;border-radius:var(--r-control);font-size:13px;color:var(--text3)">{{ ss.wroteTab }}</span>
+                  <span style="padding:6px 12px;border-radius:var(--r-control);font-size:13px;font-weight:600;color:var(--accent);background:var(--accent-soft)">About</span>
+                  <span style="flex:1"></span>
+                  <span style="color:var(--text3);font-size:15px;padding:2px 6px">×</span>
+                </div>
+                <div style="padding:20px 16px;display:flex;flex-direction:column;gap:14px;overflow:hidden">
+                  <sc-for list="{{ ss.about }}" as="a" hint-placeholder-count="6">
+                    <div style="display:flex;flex-direction:column;gap:3px">
+                      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ a.k }}</span>
+                      <span style="font-size:14px;color:var(--text);line-height:1.45">{{ a.v }}</span>
+                      <sc-if value="{{ a.hasLink }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--accent)">{{ a.link }}</span></sc-if>
+                    </div>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ mainSettings }}" hint-placeholder-val="{{ false }}">
+        <div style="position:absolute;inset:0;overflow:hidden">
+          <div style="max-width:680px;padding:28px 40px 60px;display:flex;flex-direction:column;gap:16px">
+            <div style="font-size:25px;font-weight:600;color:var(--text)">AI access</div>
+            <div style="font-size:14px;color:var(--text2);line-height:1.5;margin-top:-6px">What AI apps outside Storm, and agents inside it, can do with your notes.</div>
+            <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:8px">Storm agents</div>
+            <div style="display:flex;flex-direction:column">
+              <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+                <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">Sessions can read your vaults</span><span style="font-size:12px;color:var(--text3)">Every session except a shell.</span></div>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">always</span>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+                <div style="flex:1;display:flex;flex-direction:column;gap:2px"><span style="font-size:14px;color:var(--text)">Allow writes when chosen at launch</span><span style="font-size:12px;color:var(--text3)">You pick one vault per session. Agents never delete notes.</span></div>
+                <div style="width:38px;height:22px;flex:none;border-radius:999px;position:relative;background:var(--accent);border:1px solid var(--accent)"><div style="position:absolute;top:2px;left:18px;width:16px;height:16px;border-radius:999px;background:var(--on-accent)"></div></div>
+              </div>
+              <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid var(--border)">
+                <div style="flex:1;display:flex;flex-direction:column;gap:3px">
+                  <div style="display:flex;align-items:center;gap:8px"><span style="font-size:14px;color:var(--text)">Let agents start agents</span><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--text3);border:1px solid var(--border);border-radius:5px;padding:0 5px">Phase 3</span></div>
+                  <span style="font-size:12px;color:var(--text3);line-height:1.45">Off: when an agent asks to start a session, the request waits for you. On: it starts without asking. Either way, the new session never gets more access than the agent that started it.</span>
+                </div>
+                <div style="width:38px;height:22px;flex:none;border-radius:999px;position:relative;background:var(--surface2);border:1px solid var(--border)"><div style="position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:999px;background:var(--text3)"></div></div>
+              </div>
+            </div>
+            <div style="font-size:12px;color:var(--text3);line-height:1.5">This is the global default for every session. A later per-session setting in the launcher could narrow it for one session. It could never widen it.</div>
+          </div>
+        </div>
+      </sc-if>
+    </div>
+  </div>
+  <sc-if value="{{ dLaunch }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:49"></div>
+    <div style="position:absolute;left:50%;top:72px;transform:translateX(-50%);width:460px;background:var(--surface);border:1px solid var(--border);border-radius:var(--r-card);box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:14px;z-index:50">
+      <div style="display:flex;align-items:center"><span style="font-size:18px;font-weight:600;color:var(--text)">New session</span><span style="flex:1"></span><span style="color:var(--text3);font-size:16px">×</span></div>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Context</span>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-control);background:var(--accent-soft);border:1px solid var(--border)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="color:var(--accent)"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path></svg>
+          <span style="flex:1;font-size:14px;color:var(--text)">Gateway spec</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">personal / projects / storm</span>
+          <span style="color:var(--text3)">×</span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:10px">
+        <span style="font-size:13px;color:var(--text2)">Host</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:9px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">build-vm · online<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+        <span style="font-size:13px;color:var(--text2)">Workspace</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:9px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">storm<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+        <span style="font-size:13px;color:var(--text2)">Agent</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:9px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">Claude Code · default<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+        <span style="font-size:13px;color:var(--text2)">Can write to</span><div style="display:flex;align-items:center;gap:10px"><div style="width:38px;height:22px;flex:none;border-radius:999px;position:relative;background:var(--accent);border:1px solid var(--accent)"><div style="position:absolute;top:2px;left:18px;width:16px;height:16px;border-radius:999px;background:var(--on-accent)"></div></div><span style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:7px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">personal<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span></div>
+        <span style="font-size:13px;color:var(--text2)">Crew</span>
+        <div style="position:relative">
+          <span style="background:var(--surface2);border:1px solid var(--accent);border-radius:var(--r-control);padding:9px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.62 0.085 25)"></span>New crew: Gateway spec<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <div style="position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:3;background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);box-shadow:var(--shadow);padding:6px;display:flex;flex-direction:column">
+            <span style="padding:6px 8px;font-size:13px;color:var(--text2)">None</span>
+            <span style="padding:6px 8px;font-size:13px;color:var(--text);background:var(--surface);border-radius:calc(var(--r-control) * .7);display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.62 0.085 25)"></span><span style="flex:1">New crew: Gateway spec</span><span style="color:var(--accent);font-size:12px">✓</span></span>
+            <span style="padding:6px 8px;font-size:13px;color:var(--text2);display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.62 0.085 135)"></span>Gateway release</span>
+            <span style="padding:6px 8px;font-size:13px;color:var(--text2);display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.62 0.085 210)"></span>Relay hardening</span>
+          </div>
+        </div>
+        <span style="font-size:13px;color:var(--text2)">Role</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:9px 12px;font-size:14px;color:var(--text2);display:flex;align-items:center;gap:8px">None · a plain agent<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+      </div>
+      <div style="font-size:12px;color:var(--text3);line-height:1.55;padding:10px 12px;border-radius:var(--r-control);background:var(--surface2)">Network: inherits build-vm’s policy. This session can use your integrations (Linear, GitHub) and read your vaults, with that network access.</div>
+      <div style="display:flex;align-items:center;gap:10px"><span style="font-size:12px;color:var(--text3)">The agent reads the note through Storm.</span><span style="flex:1"></span><span style="padding:10px 20px;border-radius:var(--r-control);background:var(--accent);color:var(--on-accent);font-size:14px;font-weight:500">Launch</span></div>
+    </div>
+  </sc-if>
+</sc-if>
+<sc-if value="{{ phase3 }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;top:12px;left:50%;transform:translateX(-50%);font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--text);background:var(--surface2);border:1px dashed var(--text3);border-radius:999px;padding:4px 12px;z-index:60;white-space:nowrap">Phase 3 preview · not in V1</div>
+</sc-if>
+
+<sc-if value="{{ isPhone }}" hint-placeholder-val="{{ false }}">
+  <div style="position:absolute;inset:0">
+    <sc-if value="{{ pList }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:hidden;padding:80px 20px 120px;display:flex;flex-direction:column">
+        <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:4px">Agents</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 0 2px">Crews</div>
+        <sc-for list="{{ crews }}" as="c" hint-placeholder-count="2">
+          <div style="display:flex;align-items:center;gap:10px;padding:12px 0;border-bottom:1px solid var(--border)">
+            <span style="{{ c.sqStyle }}"></span>
+            <span style="flex:1;font-size:15px;font-weight:500;color:var(--text)">{{ c.name }}</span>
+            <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ c.summaryLong }}</span>
+            <span style="color:var(--text3);font-size:12px;width:12px;text-align:right">{{ c.chev }}</span>
+          </div>
+          <sc-if value="{{ c.open }}" hint-placeholder-val="{{ true }}">
+            <sc-for list="{{ c.members }}" as="m" hint-placeholder-count="3">
+              <div style="{{ m.pRowStyle }}">
+                {{ m.markEl }}
+                <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                  <div style="display:flex;align-items:center;gap:6px"><span style="font-size:15px;color:var(--text)">{{ m.name }}</span><sc-if value="{{ m.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ m.roleStyle }}">{{ m.role }}</span></sc-if></div>
+                  <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ m.sub }}</span>
+                </div>
+              </div>
+            </sc-for>
+          </sc-if>
+        </sc-for>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:20px 0 2px">Running</div>
+        <sc-for list="{{ running }}" as="m" hint-placeholder-count="2">
+          <div style="{{ m.pRowStyle }}">
+            {{ m.markEl }}
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text)">{{ m.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ m.sub }}</span></div>
+          </div>
+        </sc-for>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:20px 0 2px">Ended</div>
+        <sc-for list="{{ ended }}" as="m" hint-placeholder-count="1">
+          <div style="{{ m.pRowStyle }}">
+            {{ m.markEl }}
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px"><span style="font-size:15px;color:var(--text)">{{ m.name }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ m.sub }}</span></div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:15;padding:6px;border-radius:999px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)">
+        <div style="height:48px;padding:0 22px;border-radius:999px;display:flex;align-items:center;gap:8px;background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:500">＋ New session</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pCrew }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:hidden;padding:80px 20px 120px;display:flex;flex-direction:column;gap:4px">
+        <div style="display:flex;align-items:center;gap:10px">
+          <span style="{{ cp.sqBig }}"></span>
+          <span style="flex:1;font-size:23px;font-weight:600;color:var(--text)">{{ cp.name }}</span>
+          <span style="width:40px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);letter-spacing:1px">···</span>
+        </div>
+        <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ cp.summary }}</span>
+        <div style="height:6px"></div>
+        <sc-for list="{{ cp.members }}" as="m" hint-placeholder-count="3">
+          <div style="{{ m.pCrewRowStyle }}">
+            {{ m.markEl }}
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;gap:6px"><span style="font-size:15px;color:var(--text)">{{ m.name }}</span><sc-if value="{{ m.hasRole }}" hint-placeholder-val="{{ false }}"><span style="{{ m.roleStyle }}">{{ m.role }}</span></sc-if></div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ m.sub }}</span>
+            </div>
+          </div>
+        </sc-for>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:20px 0 6px">Started from</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <sc-for list="{{ cp.ctx }}" as="n" hint-placeholder-count="2"><span style="font-size:13px;color:var(--text);border:1px solid var(--border);border-radius:var(--r-control);padding:6px 10px">▤ {{ n.title }}</span></sc-for>
+        </div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:20px 0 2px">Wrote</div>
+        <sc-for list="{{ cp.wrote }}" as="w" hint-placeholder-count="3">
+          <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:15px;color:var(--text)">{{ w.title }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ w.metaShort }}</span></div>
+        </sc-for>
+      </div>
+      <div style="position:absolute;left:50%;bottom:26px;transform:translateX(-50%);z-index:15;padding:6px;border-radius:999px;background:var(--surface);border:1px solid var(--border);box-shadow:var(--shadow)">
+        <div style="height:48px;padding:0 22px;border-radius:999px;display:flex;align-items:center;gap:8px;background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:500;white-space:nowrap">＋ New session in crew</div>
+      </div>
+    </sc-if>
+
+    <div style="position:absolute;top:20px;left:20px;z-index:20;width:44px;height:44px;border-radius:var(--r-control);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)">
+      <sc-if value="{{ pBack }}" hint-placeholder-val="{{ false }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg></sc-if>
+      <sc-if value="{{ pPlace }}" hint-placeholder-val="{{ true }}"><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg><div style="position:absolute;top:-3px;right:-3px;width:10px;height:10px;border-radius:999px;border:2px solid var(--bg);background:var(--accent)"></div></sc-if>
+    </div>
+    <div style="position:absolute;top:20px;right:20px;z-index:20;width:44px;height:44px;border-radius:var(--r-control);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg>
+    </div>
+
+    <sc-if value="{{ pSheet }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:44"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--r-card) var(--r-card) 0 0;padding:10px 20px 30px;z-index:45;display:flex;flex-direction:column;gap:4px">
+        <div style="align-self:center;width:36px;height:4px;border-radius:2px;background:var(--border);margin-bottom:8px"></div>
+        <div style="display:flex;align-items:center;gap:8px"><span style="font-size:17px;font-weight:600;color:var(--text)">docs-pass</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent)">● running</span></div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:14px 0 2px">Crew</div>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)"><span style="width:12px;height:12px;border-radius:4px;background:oklch(0.62 0.085 135)"></span><span style="flex:1;font-size:15px;color:var(--text)">Gateway release</span></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)"><span style="width:12px;height:12px;border-radius:4px;background:oklch(0.62 0.085 210)"></span><span style="flex:1;font-size:15px;color:var(--text)">Relay hardening</span></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)"><span style="width:12px;height:12px;border-radius:4px;border:1px dashed var(--text3)"></span><span style="flex:1;font-size:15px;color:var(--text)">Not in a crew</span><span style="color:var(--accent)">✓</span></div>
+        <div style="padding:10px 0;font-size:15px;color:var(--accent)">＋ New crew…</div>
+        <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:12px 0 6px">Role · from Kit</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px">
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--accent);background:var(--accent-soft);color:var(--accent);font-size:13px">None</span>
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px;font-family:'IBM Plex Mono',monospace">architect</span>
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px;font-family:'IBM Plex Mono',monospace">coder</span>
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px;font-family:'IBM Plex Mono',monospace">lead</span>
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px;font-family:'IBM Plex Mono',monospace">researcher</span>
+          <span style="padding:6px 11px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--text2);font-size:13px;font-family:'IBM Plex Mono',monospace">reviewer</span>
+        </div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.45;padding-top:6px">Setting a role now only changes the label. The agent keeps the context it started with.</div>
+        <div style="text-align:center;margin-top:12px;padding:12px;border-radius:var(--r-control);border:1px solid var(--border);color:var(--danger);font-size:14px">End session</div>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ pLaunch }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:44"></div>
+      <div style="position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--r-card) var(--r-card) 0 0;padding:20px 20px 32px;z-index:45;display:flex;flex-direction:column;gap:12px">
+        <div style="display:flex;align-items:center"><span style="font-size:18px;font-weight:600;color:var(--text)">New session</span><span style="flex:1"></span><span style="color:var(--text3)">×</span></div>
+        <div style="display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:var(--r-control);background:var(--accent-soft);border:1px solid var(--border)"><span style="flex:1;font-size:14px;color:var(--text)">▤ Gateway spec</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">personal</span></div>
+        <div style="display:grid;grid-template-columns:92px minmax(0,1fr);align-items:center;gap:8px 10px">
+          <span style="font-size:13px;color:var(--text2)">Host</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:8px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">build-vm · online<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:13px;color:var(--text2)">Workspace</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:8px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">storm<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:13px;color:var(--text2)">Agent</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:8px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px">Claude Code · default<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:13px;color:var(--text2)">Crew</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:8px 12px;font-size:14px;color:var(--text);display:flex;align-items:center;gap:8px"><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.62 0.085 135)"></span>Gateway release<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:13px;color:var(--text2)">Role</span><span style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-control);padding:8px 12px;font-size:14px;color:var(--text);font-family:'IBM Plex Mono',monospace;display:flex;align-items:center;gap:8px">reviewer<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;margin-left:auto;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></span>
+          <span style="font-size:13px;color:var(--text2)">Can write to</span><span style="font-size:13px;color:var(--text3);padding:8px 0">Read only</span>
+        </div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.5">The agent reads Gateway spec and the Reviewer role note from Kit.</div>
+        <div style="font-size:12px;color:var(--text3);line-height:1.55;padding:10px 12px;border-radius:var(--r-control);background:var(--surface2)">Network: inherits build-vm’s policy. This session can use your integrations and read your vaults, with that network access.</div>
+        <div style="text-align:center;padding:12px;border-radius:var(--r-control);background:var(--accent);color:var(--on-accent);font-size:15px;font-weight:500">Launch</div>
+      </div>
+    </sc-if>
+  </div>
+</sc-if>
+
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:800},&quot;scene&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;overview&quot;,&quot;crew&quot;,&quot;session&quot;,&quot;drag&quot;,&quot;select&quot;,&quot;launch&quot;,&quot;nocrews&quot;,&quot;loading&quot;,&quot;narrow&quot;,&quot;phase3&quot;,&quot;settings&quot;,&quot;p-list&quot;,&quot;p-crew&quot;,&quot;p-sheet&quot;,&quot;p-launch&quot;,&quot;p-phase3&quot;],&quot;default&quot;:&quot;overview&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const CLAUDE_PATH = 'm4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z';
+const VARS = "--bg:oklch(0.22 0.008 55);--surface:oklch(0.27 0.008 55);--surface2:oklch(0.31 0.008 55);--border:oklch(0.36 0.008 55);--text:oklch(0.95 0.008 55);--text2:oklch(0.74 0.008 55);--text3:oklch(0.66 0.008 55);--accent:oklch(0.68 0.15 293);--accent-soft:oklch(0.30 0.05 293);--on-accent:oklch(0.16 0.03 293);--amber:oklch(0.74 0.14 68);--green:oklch(0.74 0.13 148);--danger:oklch(0.70 0.17 25);--r-card:16px;--r-control:10px;--shadow:0 12px 42px -8px rgba(0,0,0,.35)";
+const S = {
+  impl: { name: 'gateway-impl', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'running', age: '40m', role: 'coder', by: 'me', ctx: 'Gateway spec', wrote: 1 },
+  review: { name: 'review-gateway', agent: 'opencode', host: 'build-vm', ws: 'storm', st: 'running', age: '12m', role: 'reviewer', by: 'me', ctx: 'Gateway spec', wrote: 0 },
+  notes: { name: 'release-notes', agent: 'claude', host: 'build-vm', ws: 'site', st: 'completed', age: '2h', ctx: 'BOARD', wrote: 2 },
+  child: { name: 'test-gateway', agent: 'claude', host: 'build-vm', ws: 'storm', st: 'running', age: '3m', role: 'reviewer', by: 'agent', parent: 'gateway-impl', ctx: 'Gateway spec', wrote: 0 },
+  r1: { name: 'relay-timeouts', agent: 'claude', host: 'mac-mini', ws: 'relay', st: 'running', age: '3h', role: 'lead', by: 'me' },
+  r2: { name: 'relay-load-test', agent: 'shell', host: 'mac-mini', ws: 'relay', st: 'completed', age: '4h' },
+  r3: { name: 'relay-review', agent: 'opencode', host: 'mac-mini', ws: 'relay', st: 'failed', age: '5h' },
+  docs: { name: 'docs-pass', agent: 'opencode', host: 'build-vm', ws: 'site', st: 'running', age: '1h', ctx: 'Install guide' },
+  shell: { name: 'shell-1', agent: 'shell', host: 'build-vm', ws: 'storm', st: 'running', age: '5m' },
+  lint: { name: 'lint-fix', agent: 'claude', host: 'mac-mini', ws: 'storm', st: 'failed', age: '5h' }
+};
+const CREWS = [
+  { id: 'gw', name: 'Gateway release', hue: 135, members: ['impl', 'review', 'notes'], open: true },
+  { id: 'relay', name: 'Relay hardening', hue: 210, members: ['r1', 'r2', 'r3'], open: false }
+];
+const SC = {
+  overview: { dev: 'd', main: 'overview', sel: 'overview' },
+  crew: { dev: 'd', main: 'crew', sel: 'crew:gw' },
+  session: { dev: 'd', main: 'session', sel: 'review', sess: 'review', insp: true },
+  drag: { dev: 'd', main: 'overview', sel: 'overview', drag: { from: 'docs', to: 'shell' } },
+  select: { dev: 'd', main: 'overview', sel: 'overview', selected: ['docs', 'shell'] },
+  nocrews: { dev: 'd', main: 'overview', sel: 'overview', noCrews: true },
+  loading: { dev: 'd', main: 'loading', loading: true },
+  narrow: { dev: 'n', main: 'session', sel: 'impl', sess: 'impl', insp: false },
+  phase3: { dev: 'd', main: 'session', sel: 'child', sess: 'child', insp: true, phase3: true },
+  settings: { dev: 'd', main: 'settings', settings: true, phase3: true },
+  launch: { dev: 'd', main: 'overview', sel: 'overview', launch: true },
+  'p-phase3': { dev: 'p', p: 'crew', phase3: true },
+  'p-list': { dev: 'p', p: 'list' },
+  'p-crew': { dev: 'p', p: 'crew' },
+  'p-sheet': { dev: 'p', p: 'list', sheet: true },
+  'p-launch': { dev: 'p', p: 'crew', launch: true }
+};
+const LIVE = (s) => s.st === 'running';
+const LINES = {
+  review: ['$ opencode', '› read personal/projects/storm/Gateway spec', '› read kit/agents/Reviewer', '› reviewing the gateway diff on branch gateway-v1…', '› 2 comments so far'],
+  impl: ['$ claude', '› read personal/projects/storm/Gateway spec', '› read kit/agents/Coder', '› implementing token refresh in gateway/oauth.rs', '› updated BOARD: 1 item moved to Done'],
+  child: ['$ claude', '› started by gateway-impl: "write tests for token refresh"', '› read kit/agents/Reviewer', '› running cargo test -p gateway…']
+};
+
+class Component extends DCLogic {
+  mark(s, size, ringBg) {
+    const h = React.createElement, ended = !LIVE(s), g = size * 0.6;
+    const glyph = s.agent === 'claude'
+      ? h('svg', { width: g, height: g, viewBox: '0 0 24 24' }, h('path', { fill: '#D97757', d: CLAUDE_PATH }))
+      : s.agent === 'opencode'
+        ? h('svg', { width: g * 0.8, height: g * 0.8, viewBox: '0 0 24 24' }, h('path', { fill: 'var(--text)', fillRule: 'evenodd', d: 'M22 24H2V0h20zM17 4.8H7v14.4h10z' }))
+        : h('svg', { width: g, height: g, viewBox: '0 0 24 24', fill: 'none', stroke: 'var(--text2)', strokeWidth: 2, strokeLinecap: 'round', strokeLinejoin: 'round' }, h('path', { d: 'm7 11 2-2-2-2' }), h('path', { d: 'M11 13h4' }), h('rect', { x: 3, y: 3, width: 18, height: 18, rx: 2 }));
+    const badge = s.st === 'running' ? 'var(--accent)' : s.st === 'failed' ? 'var(--danger)' : null;
+    const dot = Math.round(size * 0.34);
+    return h('div', { style: { position: 'relative', width: size, height: size, flex: 'none' } },
+      h('div', { style: { width: size, height: size, borderRadius: 'var(--r-control)', background: 'var(--surface2)', display: 'flex', alignItems: 'center', justifyContent: 'center', opacity: ended ? 0.55 : 1 } }, glyph),
+      badge && h('div', { style: { position: 'absolute', right: -dot * 0.25, bottom: -dot * 0.25, width: dot, height: dot, borderRadius: 999, boxSizing: 'border-box', border: `2px solid ${ringBg}`, background: badge } }));
+  }
+  sq(hue, size) { return `width:${size}px;height:${size}px;flex:none;border-radius:${Math.round(size / 3)}px;background:oklch(0.62 0.085 ${hue})`; }
+  roleStyle(by) { return `font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:16px;color:var(--text2);border:1px ${by === 'agent' ? 'dashed var(--text3)' : 'solid var(--border)'};border-radius:5px;padding:0 5px;flex:none`; }
+
+  renderVals() {
+    const sc = SC[this.props.scene] || SC.overview;
+    const phone = sc.dev === 'p', narrow = sc.dev === 'n';
+    const w = phone ? 390 : narrow ? 900 : 1280, hgt = phone ? 844 : narrow ? 640 : 800;
+    const sideBg = 'var(--surface)';
+    const crewsData = sc.noCrews ? [] : CREWS.map(c => ({ ...c, members: sc.phase3 && c.id === 'gw' ? ['impl', 'child', 'review', 'notes'] : c.members }));
+    const grouped = new Set(crewsData.flatMap(c => c.members));
+    const all = ['impl', 'review', 'notes', 'r1', 'r2', 'r3', 'docs', 'shell', 'lint'];
+    const loose = all.filter(id => !grouped.has(id));
+    const order = (ids) => [...ids.filter(id => LIVE(S[id])), ...ids.filter(id => !LIVE(S[id]))];
+
+    const row = (id, inCrew) => {
+      const s = S[id], ended = !LIVE(s), selRow = sc.sel === id;
+      const isSel = (sc.selected || []).includes(id);
+      const isDrop = sc.drag && sc.drag.to === id, isFrom = sc.drag && sc.drag.from === id;
+      const child = !!s.parent;
+      const status = LIVE(s) ? s.age : s.st;
+      return {
+        name: s.name, hasRole: !!s.role, role: s.role, roleStyle: this.roleStyle(s.by),
+        sub: child ? `↳ from ${s.parent} · ${status}` : `${s.ws} · ${status}`,
+        meta: `${s.ws} · ${status}`, metaLong: `${s.ws} on ${s.host} · ${status}`,
+        hasCtx: !!s.ctx, ctx: s.ctx, hasWrote: !!s.wrote, wroteLabel: `wrote ${s.wrote}`,
+        selected: isSel, drop: !!isDrop,
+        markEl: this.mark(s, phone ? 32 : 28, phone ? 'var(--bg)' : selRow ? 'var(--surface2)' : isSel || isDrop ? 'var(--accent-soft)' : sideBg),
+        rowStyle: `display:flex;align-items:center;gap:10px;padding:6px 8px 6px ${8 + (child ? 16 : 0)}px;border-radius:var(--r-control);position:relative;${child ? 'margin-left:4px;border-left:1px dashed var(--text3);border-top-left-radius:0;border-bottom-left-radius:0;' : ''}background:${selRow ? 'var(--surface2)' : isSel || isDrop ? 'var(--accent-soft)' : 'transparent'};${isDrop ? 'box-shadow:inset 0 0 0 1.5px var(--accent);' : ''}opacity:${isFrom ? 0.3 : ended ? 0.62 : 1}`,
+        pRowStyle: `display:flex;align-items:center;gap:12px;padding:10px 0 10px ${inCrew ? 12 : 0}px;${inCrew ? 'margin-left:5px;border-left:1px solid var(--border);' : ''}border-bottom:1px solid var(--border);opacity:${ended ? 0.62 : 1}`,
+        pCrewRowStyle: `display:flex;align-items:center;gap:12px;padding:10px 0 10px ${child ? 14 : 0}px;${child ? 'margin-left:16px;border-left:1px dashed var(--text3);' : ''}border-bottom:1px solid var(--border);opacity:${ended ? 0.62 : 1}`,
+        cardRowStyle: `display:flex;align-items:center;gap:10px;padding:7px 8px 7px ${8 + (child ? 22 : 0)}px;margin:0 -8px;border-radius:var(--r-control);opacity:${ended ? 0.62 : 1}`
+      };
+    };
+    const summary = (ids) => {
+      const r = ids.filter(id => LIVE(S[id])).length, e = ids.length - r;
+      return [r ? `${r} running` : null, e ? `${e} ended` : null].filter(Boolean).join(' · ');
+    };
+    const crews = crewsData.map(c => {
+      const ids = order(c.members);
+      return {
+        name: c.name, open: c.open, chev: c.open ? '▾' : '▸', sqStyle: this.sq(c.hue, phone ? 12 : 10),
+        summary: c.open ? `${ids.filter(id => LIVE(S[id])).length} ${narrow ? 'run' : 'running'}` : `${ids.filter(id => LIVE(S[id])).length} · ${ids.filter(id => !LIVE(S[id])).length}`, summaryLong: summary(ids),
+        headerStyle: `display:flex;align-items:center;gap:8px;padding:7px 8px;border-radius:var(--r-control);background:${sc.sel === 'crew:' + c.id ? 'var(--surface2)' : 'transparent'}`,
+        members: ids.map(id => row(id, true))
+      };
+    });
+    const crewCards = crewsData.map(c => {
+      const ids = order(c.members), h = React.createElement;
+      return {
+        name: c.name, open: c.open, closed: !c.open, sqStyle: this.sq(c.hue, 12), summary: summary(ids),
+        rows: ids.map(id => row(id, true)),
+        stack: h('div', { style: { display: 'flex' } }, ids.map((id, i) => h('div', { key: id, style: { marginLeft: i ? -8 : 0 } }, this.mark(S[id], 24, 'var(--surface)')))),
+        closedLine: `Collapsed · ${ids.map(id => S[id].name).join(', ')}`
+      };
+    });
+    const gw = crewsData.find(c => c.id === 'gw') || CREWS[0];
+    const gwIds = order(gw.members);
+    const cp = {
+      name: gw.name, sqBig: this.sq(135, phone ? 16 : 18),
+      summary: `${summary(gwIds)} · build-vm · storm, site`,
+      rows: gwIds.map(id => row(id, true)), members: gwIds.map(id => row(id, true)),
+      ctx: [{ title: 'Gateway spec', meta: '2 sessions' }, { title: 'BOARD', meta: '1 session' }],
+      wrote: [
+        { title: 'BOARD', crumb: 'personal / projects / storm', meta: 'v53 · gateway-impl', metaShort: 'v53' },
+        { title: 'Release notes 0.4', crumb: 'personal / projects / storm', meta: 'new · release-notes', metaShort: 'new' },
+        { title: '2026-10-24', crumb: 'personal / projects / storm / log', meta: 'new · release-notes', metaShort: 'new' }
+      ]
+    };
+    const sid = sc.sess || 'review', ss0 = S[sid];
+    const ss = {
+      name: ss0.name, crew: 'Gateway release', sqStyle: this.sq(135, 9), role: ss0.role, roleStyle: this.roleStyle(ss0.by),
+      meta: `${ss0.agent === 'claude' ? 'Claude Code' : 'OpenCode'} · ${ss0.ws} on ${ss0.host} · started ${ss0.age} ago`,
+      hasParent: !!ss0.parent, parent: ss0.parent, wroteTab: `Wrote ${ss0.wrote || 0}`,
+      lines: (LINES[sid] || []).map(t => ({ text: t, style: `white-space:pre-wrap;color:${t.startsWith('$') ? 'var(--text)' : /updated|kit\//.test(t) ? 'var(--accent)' : 'var(--text2)'}` })),
+      about: ss0.parent ? [
+        { k: 'Started by', v: `${ss0.parent}, an agent. You approved the request.`, hasLink: true, link: `Open ${ss0.parent} ›` },
+        { k: 'Crew', v: 'Gateway release · joined its starter’s crew', hasLink: false },
+        { k: 'Role', v: 'reviewer · set by gateway-impl', hasLink: true, link: 'Change role ▾' },
+        { k: 'Access', v: 'Same as gateway-impl or less. Reads all vaults. No writes.', hasLink: false }
+      ] : [
+        { k: 'Agent', v: 'OpenCode', hasLink: false },
+        { k: 'Workspace', v: 'storm on build-vm', hasLink: false },
+        { k: 'Crew', v: 'Gateway release', hasLink: true, link: 'Move to crew ▾' },
+        { k: 'Role', v: 'reviewer · set by you at launch. The agent read kit / agents / Reviewer.', hasLink: true, link: 'Change role ▾' },
+        { k: 'Vault access', v: 'Reads all vaults. No writes.', hasLink: false },
+        { k: 'Network', v: 'Inherits build-vm’s policy', hasLink: false }
+      ]
+    };
+    const rail = (on) => `width:40px;height:40px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:var(--r-control);color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accent-soft)' : 'transparent'}`;
+    return {
+      rootStyle: `${VARS};position:relative;width:${w}px;height:${hgt}px;overflow:hidden;background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased;border:1px solid var(--border);border-radius:${phone ? 36 : 12}px`,
+      isDesktop: !phone, isPhone: phone, phase3: !!sc.phase3,
+      agentsRailStyle: rail(!sc.settings), settingsRailStyle: rail(!!sc.settings),
+      sidebarStyle: `width:${narrow ? 220 : 260}px;flex:none;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0`,
+      sideLoading: !!sc.loading, sideAgents: !sc.loading && !sc.settings, sideSettings: !!sc.settings,
+      overviewStyle: `padding:7px 10px;border-radius:var(--r-control);font-size:13px;color:${sc.sel === 'overview' ? 'var(--text)' : 'var(--text2)'};background:${sc.sel === 'overview' ? 'var(--surface2)' : 'transparent'}`,
+      hasCrews: crews.length > 0, crews, crewCards,
+      running: order(loose).filter(id => LIVE(S[id])).map(id => row(id, false)), ended: loose.filter(id => !LIVE(S[id])).map(id => row(id, false)),
+      hasRunning: loose.some(id => LIVE(S[id])), hasEnded: loose.some(id => !LIVE(S[id])),
+      ghostMark: this.mark(S.docs, 24, 'var(--surface2)'), selectBar: !!sc.selected,
+      mainLoading: sc.main === 'loading', mainOverview: sc.main === 'overview', mainCrew: sc.main === 'crew', mainSession: sc.main === 'session', mainSettings: sc.main === 'settings',
+      noCrewsHint: !!sc.noCrews, looseLabel: sc.noCrews ? 'Sessions' : 'Not in a crew',
+      looseCards: order(loose).map(id => row(id, false)),
+      cp, ss, inspOpen: !!sc.insp,
+      inspToggleStyle: `display:flex;padding:6px;border-radius:var(--r-control);color:${sc.insp ? 'var(--text2)' : 'var(--text3)'}`,
+      dLaunch: !phone && !!sc.launch,
+      pList: sc.p === 'list', pCrew: sc.p === 'crew', pBack: sc.p === 'crew', pPlace: sc.p !== 'crew', pSheet: !!sc.sheet, pLaunch: !!sc.launch
+    };
+  }
+}
+</script>
+</body>
+</html>

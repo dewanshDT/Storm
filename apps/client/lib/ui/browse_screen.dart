@@ -15,7 +15,8 @@ import 'shell/nav_bubble.dart' show NewNoteRequest;
 import 'shell/sidebar_rows.dart';
 import 'states.dart';
 import 'shell/storm_scaffold.dart';
-import 'shell/vault_sidebar.dart' show NoNoteSelected;
+import 'shell/vault_sidebar.dart' show NoNoteSelected, TrashRow;
+import 'trash_screen.dart' show confirmDestructive, notesCount;
 import 'shell/vault_gate.dart';
 
 /// The phone's Notes list (handoff §2.4): the vault root with RECENT above
@@ -134,6 +135,9 @@ class BrowseScreen extends ConsumerWidget {
                           )
                         : unseen.contains(entry.note!.id),
                   ),
+              // The phone has no sidebar; the vault root carries the Trash.
+              if (parts.isEmpty && !context.isExpanded)
+                TrashRow(vaultId: vaultId),
             ],
           );
         },
@@ -525,13 +529,40 @@ Future<void> showFolderActions(
     return;
   }
 
+  await deleteFolderToTrash(context, ref, vaultId, entry);
+}
+
+/// "Delete folder X and its N notes? They go to Trash." (decision 150a).
+Future<bool> confirmFolderDelete(
+  BuildContext context,
+  BrowseEntry entry,
+) => confirmDestructive(
+  context,
+  title: 'Delete folder?',
+  body:
+      'Delete folder ${entry.name} and its ${notesCount(entry.childCount)}? '
+      'They go to Trash.',
+  action: 'Delete',
+);
+
+/// A folder holding notes goes to the trash only once the person confirms;
+/// an empty one needs no question.
+Future<void> deleteFolderToTrash(
+  BuildContext context,
+  WidgetRef ref,
+  String vaultId,
+  BrowseEntry entry,
+) async {
+  final api = ref.read(apiProvider);
+  if (api == null) return;
+  if (entry.childCount > 0 && !await confirmFolderDelete(context, entry)) {
+    return;
+  }
   try {
-    await api.deleteFolder(vaultId, entry.path);
+    await api.deleteFolder(vaultId, entry.path, toTrash: true);
     ref.read(vaultRevisionProvider.notifier).state++;
     ref.invalidate(treeProvider);
   } catch (e) {
-    // The server refuses a folder that still holds notes rather than taking
-    // them with it. Surfacing its wording keeps the count accurate.
     if (context.mounted) _toast(context, describeFailure(e));
   }
 }

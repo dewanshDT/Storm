@@ -61,6 +61,7 @@
 //!   the service account and service manager, the default `PATH`, and a PTY
 //!   write's wait for room. Nothing else matches on `target_os`.
 
+pub mod agents;
 pub mod bridge;
 pub mod cli;
 pub mod client;
@@ -69,14 +70,19 @@ pub mod command_code;
 pub mod config;
 pub mod connection;
 pub mod credential;
+pub mod credential_paths;
 pub mod cursor;
 pub mod fake;
 pub mod fsutil;
 pub mod harness;
 pub mod host;
 pub mod identity;
+pub mod install;
+pub mod isolation;
+pub mod isolation_probe;
 pub mod mcp;
 pub mod mcp_connect;
+pub mod peer_identity;
 pub mod platform;
 pub mod plugins;
 pub mod profile;

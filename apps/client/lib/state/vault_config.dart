@@ -83,6 +83,10 @@ const _kOptionsPrefix = 'storm.options.';
 const _kDescription = 'storm.description';
 const _kColor = 'storm.color';
 
+/// How long the vault's trash keeps an item (decision 150b): days, or
+/// `never`. Read by the server's hourly sweep.
+const kTrashRetention = 'storm.trash.retention';
+
 /// A vault's property types and description, read from its config note.
 class VaultConfig {
   const VaultConfig({
@@ -163,6 +167,10 @@ class VaultConfig {
 
   String withDescription(String text) =>
       fme.setScalar(raw, _kDescription, text);
+
+  /// [days] null is never.
+  String withTrashRetention(int? days) =>
+      fme.setScalar(raw, kTrashRetention, days == null ? 'never' : '$days');
 
   /// The vault's accent, for its card on the dashboard.
   Accent get accent => Accent.parse(color);

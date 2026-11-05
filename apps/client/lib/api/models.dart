@@ -525,3 +525,99 @@ class CreatedMcpKey {
   factory CreatedMcpKey.fromJson(Map<String, dynamic> j) =>
       CreatedMcpKey(key: McpKey.fromJson(j), secret: j['secret'] as String);
 }
+
+/// Who deleted a trash item (decision 150a).
+class DeletedBy {
+  const DeletedBy({
+    required this.kind,
+    this.id,
+    this.name,
+    this.sessionId,
+    this.reason,
+  });
+
+  /// `person`, `key`, `agent` or `sync`.
+  final String kind;
+  final String? id;
+
+  /// The device's name, for a person's delete.
+  final String? name;
+  final String? sessionId;
+
+  /// An agent's own words for why. Shown as plain text, never as markdown.
+  final String? reason;
+
+  factory DeletedBy.fromJson(Map<String, dynamic> j) => DeletedBy(
+    kind: j['kind'] as String? ?? '',
+    id: j['id'] as String?,
+    name: j['name'] as String?,
+    sessionId: j['session_id'] as String?,
+    reason: j['reason'] as String?,
+  );
+}
+
+/// One entry in a vault's trash: a note, or a folder with its notes.
+class TrashItem {
+  const TrashItem({
+    required this.id,
+    required this.kind,
+    required this.name,
+    required this.originalPath,
+    required this.deletedAt,
+    required this.deletedBy,
+    required this.noteCount,
+    this.sessionName,
+  });
+
+  final String id;
+
+  /// `note` or `folder`.
+  final String kind;
+  final String name;
+  final String originalPath;
+  final String deletedAt;
+  final DeletedBy deletedBy;
+  final int noteCount;
+  final String? sessionName;
+
+  bool get isFolder => kind == 'folder';
+
+  /// Who deleted it, as the row says it.
+  String get byLabel => switch (deletedBy.kind) {
+    'person' => deletedBy.name ?? 'you',
+    'agent' => sessionName == null ? 'an agent' : 'an agent ($sessionName)',
+    'key' => 'an MCP key',
+    'sync' => 'outside Storm',
+    _ => deletedBy.kind,
+  };
+
+  factory TrashItem.fromJson(Map<String, dynamic> j) => TrashItem(
+    id: j['id'] as String,
+    kind: j['kind'] as String? ?? 'note',
+    name: j['name'] as String? ?? '',
+    originalPath: j['original_path'] as String? ?? '',
+    deletedAt: j['deleted_at'] as String? ?? '',
+    deletedBy: DeletedBy.fromJson(
+      (j['deleted_by'] as Map?)?.cast<String, dynamic>() ?? const {},
+    ),
+    noteCount: (j['note_count'] as num?)?.toInt() ?? 0,
+    sessionName: j['session_name'] as String?,
+  );
+}
+
+class TrashPage {
+  const TrashPage({required this.items, required this.retentionDays});
+
+  final List<TrashItem> items;
+
+  /// Days an item is kept; null for never.
+  final int? retentionDays;
+
+  factory TrashPage.fromJson(Map<String, dynamic> j) => TrashPage(
+    items: [
+      for (final i in (j['items'] as List? ?? const []))
+        TrashItem.fromJson((i as Map).cast<String, dynamic>()),
+    ],
+    retentionDays: (j['retention_days'] as num?)?.toInt(),
+  );
+}

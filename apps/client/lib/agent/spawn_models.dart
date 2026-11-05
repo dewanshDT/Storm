@@ -1,0 +1,574 @@
+/// Agent spawning as the client sees it (decision 134; 138p corrects the
+/// handoff's §6). Field names are the server's; every rule is the server's,
+/// and nothing here decides anything.
+library;
+
+/// What a session's view says about spawning: its lineage (134d), whether
+/// it waits for a person (134p), a child's own workspace (137) and the spawn
+/// switch (134c). All absent on a server or host that has none of it, which
+/// is every host until one passes its gates.
+class SpawnFacts {
+  const SpawnFacts({
+    this.parentSession,
+    this.rootSession,
+    this.depth = 0,
+    this.needsAttention,
+    this.childWorkspace,
+    this.switchState,
+    this.childActivity,
+    this.pendingEvents,
+    this.recentEvents = const [],
+  });
+
+  static const none = SpawnFacts();
+
+  /// Who started it; null for a top-level session, a resumed child included
+  /// (C7).
+  final String? parentSession;
+  final String? rootSession;
+  final int depth;
+
+  /// `permission_prompt`, `usage_limit` (144b) or `blocked`; never from
+  /// idle (A3). An older server's `approval` is read and shown as nothing.
+  final String? needsAttention;
+
+  /// A child's activity as evidence says it (144b): `working` or `idle`
+  /// only from a signal that passed its gate, else `unknown`. Null on a
+  /// session nobody started.
+  final String? childActivity;
+
+  /// A child's events its parent has not acknowledged (144a).
+  final int? pendingEvents;
+
+  /// A child's latest events, oldest first (144a).
+  final List<ChildEvent> recentEvents;
+
+  /// A child's own workspace, once its host has made it.
+  final ChildWorkspace? childWorkspace;
+
+  /// The spawn switch, only where its host could offer spawning now or it is
+  /// already on. Null everywhere else, and the client then shows none of it.
+  final SpawnSwitch? switchState;
+
+  bool get isChild => parentSession != null;
+
+  factory SpawnFacts.fromJson(Map<String, dynamic> j) {
+    final ws = j['child_workspace'];
+    final sw = j['spawn'];
+    final attention = j['needs_attention'];
+    return SpawnFacts(
+      parentSession: j['parent_session'] as String?,
+      rootSession: j['root_session'] as String?,
+      depth: (j['depth'] as num?)?.toInt() ?? 0,
+      needsAttention: attention is String ? attention : null,
+      childWorkspace: ws is Map<String, dynamic>
+          ? ChildWorkspace.fromJson(ws)
+          : null,
+      switchState: sw is Map<String, dynamic> ? SpawnSwitch.fromJson(sw) : null,
+      childActivity: j['child_activity'] as String?,
+      pendingEvents: (j['pending_events'] as num?)?.toInt(),
+      recentEvents: [
+        for (final e in j['recent_events'] as List? ?? const [])
+          if (e is Map<String, dynamic>) ChildEvent.fromJson(e),
+      ],
+    );
+  }
+}
+
+/// One change of a child's, as its parent's queue holds it (144a): codes
+/// only, never the child's own text.
+class ChildEvent {
+  const ChildEvent({
+    required this.id,
+    required this.seq,
+    required this.child,
+    required this.kind,
+    required this.source,
+    required this.confidence,
+    required this.at,
+    this.reason,
+    this.status,
+    this.activity,
+    this.needsAttention,
+    this.tool,
+    this.detail,
+    this.count = 1,
+    this.round,
+    this.durationMs,
+    this.inputTokens,
+    this.outputTokens,
+  });
+
+  final String id;
+  final int seq;
+  final String child;
+  final String kind;
+  final String? reason;
+
+  /// The child's state after the change.
+  final String? status;
+  final String? activity;
+  final String? needsAttention;
+
+  /// A `denied` event's tool and what it was refused for: the command or
+  /// path, the child's own text, shown only as data (decision 148b).
+  final String? tool;
+  final String? detail;
+
+  /// Identical denials in one round, merged (148b).
+  final int count;
+
+  /// A round's `reported`, `failed`, `ended` or `parked` (145f): which
+  /// round, how long it ran, and its tokens where the agent counted them
+  /// (cache reads and writes are input).
+  final int? round;
+  final int? durationMs;
+  final int? inputTokens;
+  final int? outputTokens;
+
+  /// `host_process`, `storm`, `provider_hook` or `output_pattern` (144b).
+  final String source;
+
+  /// `certain`, `reported` or `heuristic`.
+  final String confidence;
+  final String at;
+
+  bool get certain => confidence == 'certain';
+
+  factory ChildEvent.fromJson(Map<String, dynamic> j) {
+    final state = j['state'] is Map<String, dynamic>
+        ? j['state'] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final usage = j['usage'] is Map<String, dynamic>
+        ? j['usage'] as Map<String, dynamic>
+        : null;
+    int? tokens(List<String> keys) {
+      if (usage == null) return null;
+      final counts = [
+        for (final k in keys)
+          if (usage[k] case final num n) n.toInt(),
+      ];
+      return counts.isEmpty ? null : counts.reduce((a, b) => a + b);
+    }
+
+    return ChildEvent(
+      id: j['id'] as String? ?? '',
+      seq: (j['seq'] as num?)?.toInt() ?? 0,
+      child: j['child'] as String? ?? '',
+      kind: j['kind'] as String? ?? '',
+      reason: j['reason'] as String?,
+      status: state['status'] as String?,
+      activity: state['activity'] as String?,
+      needsAttention: state['needs_attention'] as String?,
+      tool: j['tool'] as String?,
+      detail: j['detail'] as String?,
+      count: (j['count'] as num?)?.toInt() ?? 1,
+      round: (j['round'] as num?)?.toInt(),
+      durationMs: (j['duration_ms'] as num?)?.toInt(),
+      inputTokens: tokens(const [
+        'input_tokens',
+        'cache_read_tokens',
+        'cache_write_tokens',
+      ]),
+      outputTokens: tokens(const ['output_tokens']),
+      source: j['source'] as String? ?? 'storm',
+      confidence: j['confidence'] as String? ?? 'certain',
+      at: j['at'] as String? ?? '',
+    );
+  }
+}
+
+/// "Started", "Reported: succeeded": an event as a person reads it.
+String childEventLabel(ChildEvent e) => switch (e.kind) {
+  'started' => 'Started',
+  'needs_approval' => 'Asked for approval',
+  // A child never asks (148a): a prompt there is a fault its parent hears.
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Unexpected prompt',
+  'denied' => deniedLabel(e),
+  'idle_timeout' => 'Idle for 10 minutes',
+  'usage_limit' => 'Out of usage',
+  'failed' => e.reason == null ? 'Failed' : 'Failed: ${e.reason}',
+  'reported' => e.reason == null ? 'Reported' : 'Reported: ${e.reason}',
+  'ended' => e.reason == null ? 'Ended' : 'Ended: ${e.reason}',
+  'parked' => 'Parked until its next message',
+  'unknown' => 'Lost touch',
+  _ => e.kind,
+};
+
+/// "Round 2 · 14s · 12.3k in · 456 out": what a round took (145f), its
+/// tokens only where the agent counted them. Null for any other event.
+String? roundLabel(ChildEvent e) {
+  final parts = [
+    if (e.round case final r?) 'Round $r',
+    if (e.durationMs case final ms?) _duration(ms),
+    if (e.inputTokens case final n?) '${_count(n)} in',
+    if (e.outputTokens case final n?) '${_count(n)} out',
+  ];
+  return parts.isEmpty ? null : parts.join(' · ');
+}
+
+String _duration(int ms) {
+  final s = (ms / 1000).round();
+  if (s < 60) return '${s}s';
+  final m = s ~/ 60;
+  return m < 60 ? '${m}m ${s % 60}s' : '${m ~/ 60}h ${m % 60}m';
+}
+
+String _count(int n) {
+  if (n < 1000) return '$n';
+  if (n < 1000000) return '${(n / 1000).toStringAsFixed(n < 10000 ? 1 : 0)}k';
+  return '${(n / 1000000).toStringAsFixed(1)}M';
+}
+
+/// "Denied Bash ×3": what a child was refused (148b). Its detail is shown
+/// beside it, as plain text.
+String deniedLabel(ChildEvent e) => [
+  e.tool == null || e.tool!.isEmpty ? 'Denied' : 'Denied ${e.tool}',
+  if (e.count > 1) '×${e.count}',
+].join(' ');
+
+/// Where a signal came from, when it is not certain (144b): null for what
+/// the host's process or Storm itself saw.
+String? evidenceLabel(ChildEvent e) {
+  if (e.certain) return null;
+  final from = switch (e.source) {
+    'provider_hook' => 'agent hook',
+    'output_pattern' => 'output',
+    _ => e.source,
+  };
+  return '$from · ${e.confidence}';
+}
+
+/// A child's activity, said plainly: unknown is never working (144b).
+String? activityLabel(String? activity) => switch (activity) {
+  null => null,
+  'working' => 'Working',
+  'idle' => 'Idle',
+  _ => 'Unknown',
+};
+
+/// The spawn switch on a session's view (134-10).
+class SpawnSwitch {
+  const SpawnSwitch({
+    required this.enabled,
+    this.refused,
+    this.launchedOn = false,
+  });
+
+  final bool enabled;
+
+  /// Launched with the switch on (141e): only such a session turns it on.
+  final bool launchedOn;
+
+  /// What turning it on would be refused with now (134-2's codes), or null.
+  final String? refused;
+
+  factory SpawnSwitch.fromJson(Map<String, dynamic> j) => SpawnSwitch(
+    enabled: j['enabled'] == true,
+    refused: j['refused'] as String?,
+    launchedOn: j['launched_on'] == true,
+  );
+}
+
+/// A child's own workspace (137b, 137c): a clone of its parent's last commit
+/// or a scratch folder beside a read-only view of the parent's.
+/// A child's workspace kind: `clone` (W2) or `scratch` (W3), which an
+/// older or partial answer leaves as `scratch`.
+mixin _WorkspaceMode {
+  String get mode;
+
+  bool get clone => mode == 'clone';
+}
+
+String _modeOf(Map<String, dynamic> j) => j['mode'] as String? ?? 'scratch';
+
+class ChildWorkspace with _WorkspaceMode {
+  const ChildWorkspace({
+    required this.mode,
+    this.commit,
+    this.branch,
+    this.submodules = false,
+    this.largeFiles = false,
+  });
+
+  @override
+  final String mode;
+  final String? commit;
+  final String? branch;
+  final bool submodules;
+  final bool largeFiles;
+
+  factory ChildWorkspace.fromJson(Map<String, dynamic> j) => ChildWorkspace(
+    mode: _modeOf(j),
+    commit: j['commit'] as String?,
+    branch: j['branch'] as String?,
+    submodules: j['submodules'] == true,
+    largeFiles: j['large_files'] == true,
+  );
+}
+
+/// A start, message or end a session's agent did (decision 145a): acted at
+/// once under the launch switch, and listed here for the person to see.
+/// Rows from before 145 may be denied or expired; they are read the same.
+class AgentAct {
+  const AgentAct({
+    required this.id,
+    required this.kind,
+    required this.requester,
+    required this.createdAt,
+    this.target,
+    this.outcome,
+    this.reason,
+    this.cap,
+    this.session,
+    this.decidedAt,
+    this.task,
+    this.name,
+    this.contextTitle,
+    this.agent,
+    this.model,
+    this.text,
+    this.round,
+  });
+
+  final String id;
+
+  /// `start`, `message` or `end`.
+  final String kind;
+  final String requester;
+  final String? target;
+  final String createdAt;
+
+  /// `started`, `start_failed`, `delivered`, `ended`, or from before 145
+  /// `denied`, `expired` or `refused`.
+  final String? outcome;
+  final String? reason;
+  final String? cap;
+
+  /// A start's child.
+  final String? session;
+  final String? decidedAt;
+
+  /// Exactly what the agent sent: a start's task, a message's text.
+  final String? task;
+  final String? name;
+  final String? contextTitle;
+
+  /// A start's child's agent and model.
+  final String? agent;
+  final String? model;
+  final String? text;
+
+  /// The round a message started or joined (145).
+  final int? round;
+
+  factory AgentAct.fromJson(Map<String, dynamic> j) {
+    final note = j['context_note'];
+    return AgentAct(
+      id: j['id'] as String? ?? '',
+      kind: j['kind'] as String? ?? 'start',
+      requester: j['requester'] as String? ?? '',
+      target: j['target'] as String?,
+      createdAt: j['created_at'] as String? ?? '',
+      outcome: j['outcome'] as String?,
+      reason: j['reason'] as String?,
+      cap: j['cap'] as String?,
+      session: j['session'] as String?,
+      decidedAt: j['decided_at'] as String?,
+      task: j['task'] as String?,
+      name: j['name'] as String?,
+      contextTitle: note is Map ? note['title'] as String? : null,
+      agent: j['agent'] as String? ?? j['provider'] as String?,
+      model: j['model'] as String?,
+      text: j['text'] as String?,
+      round: (j['round'] as num?)?.toInt(),
+    );
+  }
+}
+
+/// A session under another, as ending it would stop it (C1).
+class DescendantRef {
+  const DescendantRef({
+    required this.id,
+    required this.name,
+    required this.status,
+    this.endReason,
+  });
+
+  final String id;
+  final String name;
+  final String status;
+  final String? endReason;
+
+  factory DescendantRef.fromJson(Map<String, dynamic> j) => DescendantRef(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? j['id'] as String,
+    status: j['status'] as String? ?? 'unknown',
+    endReason: j['end_reason'] as String?,
+  );
+}
+
+/// What ending a session, or ending its children, would stop.
+class Descendants {
+  const Descendants({required this.running, required this.ended});
+
+  final List<DescendantRef> running;
+  final List<DescendantRef> ended;
+
+  factory Descendants.fromJson(Map<String, dynamic> j) => Descendants(
+    running: [
+      for (final d in j['running'] as List? ?? const [])
+        DescendantRef.fromJson(d as Map<String, dynamic>),
+    ],
+    ended: [
+      for (final d in j['ended'] as List? ?? const [])
+        DescendantRef.fromJson(d as Map<String, dynamic>),
+    ],
+  );
+}
+
+/// One file in a child's work: a clone's changed file with its line counts
+/// (null for a binary), or a scratch file with its size.
+class ChildFile {
+  const ChildFile({required this.path, this.added, this.removed, this.size});
+
+  final String path;
+  final int? added;
+  final int? removed;
+  final int? size;
+
+  factory ChildFile.fromJson(Map<String, dynamic> j) => ChildFile(
+    path: j['path'] as String? ?? '',
+    added: (j['added'] as num?)?.toInt(),
+    removed: (j['removed'] as num?)?.toInt(),
+    size: (j['size'] as num?)?.toInt(),
+  );
+}
+
+/// An ended child's work as data (137e), for a person to read before Apply.
+class ChildWork with _WorkspaceMode {
+  const ChildWork({
+    required this.mode,
+    this.tip,
+    this.base,
+    this.baseFound = true,
+    this.commits = const [],
+    this.moreCommits = false,
+    this.files = const [],
+    this.moreFiles = false,
+    this.patch,
+    this.patchTruncated = false,
+    this.fileCount,
+    this.bytes,
+    this.skipped = 0,
+  });
+
+  @override
+  final String mode;
+  final String? tip;
+  final String? base;
+  final bool baseFound;
+  final List<({String id, String subject})> commits;
+  final bool moreCommits;
+  final List<ChildFile> files;
+  final bool moreFiles;
+  final String? patch;
+  final bool patchTruncated;
+  final int? fileCount;
+  final int? bytes;
+  final int skipped;
+
+  factory ChildWork.fromJson(Map<String, dynamic> j) => ChildWork(
+    mode: _modeOf(j),
+    tip: j['tip'] as String?,
+    base: j['base'] as String?,
+    baseFound: j['base_found'] != false,
+    commits: [
+      for (final c in j['commits'] as List? ?? const [])
+        if (c is Map)
+          (id: '${c['id'] ?? ''}', subject: '${c['subject'] ?? ''}'),
+    ],
+    moreCommits: j['more_commits'] == true,
+    files: [
+      for (final f in j['files'] as List? ?? const [])
+        if (f is Map<String, dynamic>) ChildFile.fromJson(f),
+    ],
+    moreFiles: j['more_files'] == true,
+    patch: j['patch'] as String?,
+    patchTruncated: j['patch_truncated'] == true,
+    fileCount: (j['file_count'] as num?)?.toInt(),
+    bytes: (j['bytes'] as num?)?.toInt(),
+    skipped: (j['skipped'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// "abc1234": a commit as people read it.
+String shortCommit(String? commit) =>
+    commit == null ? '' : commit.substring(0, commit.length.clamp(0, 7));
+
+/// What a session waiting for a person shows beside its activity (134p).
+/// A permission prompt shows nothing: only a child reports one, and a child
+/// never asks the person (decision 148).
+String? attentionLabel(String? kind) => switch (kind) {
+  // Decision 149c: a deletion waits for the person's Approve.
+  'delete_approval' => 'Needs you',
+  'usage_limit' => 'Out of usage',
+  'blocked' => 'Blocked',
+  _ => null,
+};
+
+/// Why the spawn switch would not turn on, as specific as the server is
+/// (138p point 9).
+String spawnRefusalText(String code, String agent) => switch (code) {
+  'identity_unverified' => "This host's session identity isn't verified",
+  'isolation_unverified' => "This host doesn't isolate sessions",
+  'workspace_held' => 'Another session is working in this workspace',
+  'provider_cannot_spawn' => "$agent can't start agents",
+  'launched_without_spawn' => kSpawnAtLaunch,
+  'session_not_live' => 'The session has ended',
+  _ => code.replaceAll('_', ' '),
+};
+
+/// What a child shows where a crew move would be offered (145i): it is in
+/// its root's crew, and goes where that goes.
+const kMovesWithParent = 'moves with the agent that started it';
+
+/// The agents that can start agents (134-2).
+const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
+
+/// Why a session launched without the switch can't turn it on (141e).
+const kSpawnAtLaunch =
+    'To let an agent start agents, start a new session with "Allow this '
+    'session to start agents" on.';
+
+/// The cap a request hit, in the decision's words (C4).
+String capText(String? cap) => switch (cap) {
+  'depth' => 'children can’t start agents yet',
+  'children' => '3 live children',
+  'tree' => '6 live sessions in a tree',
+  'max_sessions' => 'the host’s session limit',
+  'inbox' => 'the child’s inbox is full',
+  _ => cap ?? 'a limit',
+};
+
+/// Why an act was refused, for rows recorded before decision 145.
+String requestRefusalText(String? reason, String? cap) => switch (reason) {
+  'limit' => 'limit: ${capText(cap)}',
+  'not_permitted' => 'not permitted for this session',
+  'revoked' => 'starting agents was turned off for this session',
+  'requester_ended' => 'the asking session ended',
+  'target_gone' => 'the session it named is gone or has ended',
+  'identity_unverified' => 'the host’s session identity isn’t verified',
+  'isolation_unverified' => 'the host doesn’t isolate sessions',
+  'agent_unavailable' => 'the host can’t start that agent for a child',
+  null => 'refused',
+  _ => reason.replaceAll('_', ' '),
+};
+
+/// What a scratch child's work is applied as by default: the parent's
+/// workspace and the child, `<ws>-<child>` (138p point 9). A person may
+/// rename it.
+String scratchApplyName(String parentWorkspace, String child) {
+  final base = parentWorkspace.split('/').where((p) => p.isNotEmpty).lastOrNull;
+  return '${base ?? 'workspace'}-$child';
+}

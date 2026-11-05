@@ -245,6 +245,19 @@ args = ["-i"]
         check("it offers fake and shell", {p["id"] for p in caps["providers"]} == {"fake", "shell"}, caps)
         check("it lists its workspaces", sorted(caps["workspaces"]) == ["site", "storm"], caps)
         check("egress is the host's", host["egress"] == "host")
+        # Decision 135d: the host row carries the identity the host reported.
+        identity = host.get("identity") or {}
+        check("the host row carries its bridge identity, as its capabilities say",
+              sorted(identity) == ["mechanism", "reason", "state"]
+              and identity == caps.get("identity")
+              and identity["state"] in ("verified", "unsupported", "unavailable"), host)
+        # Decision 136j: and its session isolation, off here.
+        isolation = host.get("isolation") or {}
+        check("the host row carries its isolation, as its capabilities say: off here",
+              sorted(isolation) == ["mechanism", "reason", "state"]
+              and isolation == caps.get("isolation")
+              and isolation["state"] in ("unsupported", "unavailable")
+              and isolation["reason"] in ("off", "macos", "windows"), host)
         status, wss = call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=owner)
         check("workspaces carry live counts", status == 200 and all("live_sessions" in w for w in wss), wss)
 
@@ -284,6 +297,11 @@ args = ["-i"]
         check("the agent's title reaches the stream as a status (D15 AM42)",
               not closed and seen[-1]["activity"] == "working", seen[-1:])
         check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
+        check("a working agent needs no attention (134p)", session(owner, sid)["needs_attention"] is None)
+        write(owner, sid, "\x1b]0;\u2733 Fix the login\x07")
+        idle = wait(lambda: (lambda r: r if r["activity"] == "idle" else None)(session(owner, sid)), "the idle title")
+        check("nor an idle one: idle never sets needs_attention (134p, A3)",
+              idle and idle["needs_attention"] is None, idle)
         png = b"\x89PNG\r\n\x1a\n" + bytes(64)
         status, staged = call("POST", f"/v1/agent/sessions/{sid}/terminal/images", auth=owner,
                               raw=png, timeout=40)
@@ -389,6 +407,37 @@ args = ["-i"]
         call("POST", f"/v1/agent/sessions/{again['id']}/end", auth=owner)
         wait(lambda: session(owner, again["id"])["status"] == "stopped", "stopped")
 
+        print("\n=== a launch role and crew (decision 138f, 138-2) ===")
+        status, roles = call("GET", "/v1/agent/roles", auth=owner)
+        check("Kit's role notes are listed", status == 200 and len(roles) > 0, (status, roles))
+        role = roles[0]
+        role_ref = {"vault_id": role["vault_id"], "note_id": role["note_id"]}
+        status, cast = launch_with({**ctx, "role": role_ref, "crew": {"new_name": "E2E launch crew"}})
+        check("a launch with a role and a new crew is accepted", status == 200, cast)
+        check("it records the launch role",
+              cast["launch_role"] == {**role_ref, "title": role["title"]}, cast.get("launch_role"))
+        check("the role is also its first label",
+              cast["role"] == {**role_ref, "title": role["title"]}, cast.get("role"))
+        check("it is the new crew's first member", cast["crew"]["order"] == 0, cast.get("crew"))
+        running(owner, cast["id"])
+        view = session(owner, cast["id"])
+        check("the session view reads the launch role and crew back",
+              view["launch_role"] == cast["launch_role"] and view["crew"] == cast["crew"], view)
+        status, sh = launch_with({"provider": "shell", "role": role_ref})
+        check("a shell launch with a role gets the label only",
+              status == 200 and sh["launch_role"] is None and sh["role"]["note_id"] == role["note_id"], sh)
+        status, _ = launch_with({"role": {"vault_id": vault, "note_id": note["id"]}})
+        check("a note outside Kit's agents/ folders is not a role", status == 400, status)
+        for rec in (cast, sh):
+            running(owner, rec["id"])
+            call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        wait(lambda: all(session(owner, r["id"])["status"] == "stopped" for r in (cast, sh)),
+             "the role sessions to stop")
+        for rec in (cast, sh):
+            call("DELETE", f"/v1/agent/sessions/{rec['id']}", auth=owner)
+        check("dismissing its only member removes the launch crew",
+              call("GET", "/v1/agent/crews", auth=owner)[1] == [])
+
         print("\n=== offset resume and gap ===")
         status, rec = launch(owner, host_id, provider="fake")
         sid2 = rec["id"]
@@ -419,11 +468,20 @@ args = ["-i"]
         gap = wait(past_capacity, "the cache to pass its capacity", timeout=60)
         g = json.loads(gap[2])
         check("a reader below the floor gets an explicit gap", g["from"] == 0 and g["to"] > 0, g)
+        status, made = call("POST", "/v1/agent/crews",
+                            {"name": "E2E crew", "session_ids": [sid2]}, auth=owner)
+        check("a crew is made around a session (decision 138)", status == 201, (status, made))
+        crew_id = made["crew"]["id"]
+        check("the session lists its crew",
+              session(owner, sid2)["crew"] == {"id": crew_id, "order": 0}, session(owner, sid2))
         call("POST", f"/v1/agent/sessions/{sid2}/end", auth=owner)
         wait(lambda: session(owner, sid2)["status"] == "stopped", "stopped")
-        status, _ = call("DELETE", f"/v1/agent/sessions/{sid2}", auth=owner)
-        check("an ended session is dismissed", status == 204, status)
+        status, gone = call("DELETE", f"/v1/agent/sessions/{sid2}", auth=owner)
+        check("an ended session is dismissed", status == 200, status)
         check("and is gone", call("GET", f"/v1/agent/sessions/{sid2}", auth=owner)[0] == 404)
+        check("its emptied crew goes with it, returned for Undo (138c)",
+              gone["removed_crew"]["id"] == crew_id
+              and call("GET", "/v1/agent/crews", auth=owner)[1] == [], gone)
 
         print("\n=== a real shell in a PTY ===")
         status, rec = launch(owner, host_id, workspace="site", provider="shell")
@@ -480,6 +538,7 @@ args = ["-i"]
         wait(lambda: session(owner, survivor)["status"] == "unknown", "the session to go unknown", timeout=60)
         check("a dropped link makes the session unknown", True)
         check("input is refused while the host is offline", write(owner, survivor, "x") == 503)
+        before = {s["id"] for s in call("GET", "/v1/agent/sessions", auth=owner)[1]}
         status, _ = launch(owner, host_id, provider="fake")
         check("a launch is refused while the host is offline", status == 503, status)
         runtime = start_runtime()
@@ -488,6 +547,34 @@ args = ["-i"]
         check("its sessions became failed (host_restart), none restarted",
               rec["end_reason"] == "host_restart", rec)
         wait(host_online, "the host back online", timeout=60)
+        time.sleep(3)
+        after = {s["id"] for s in call("GET", "/v1/agent/sessions", auth=owner)[1]}
+        check("the refused launch never starts once the host is back (round 4's stray launch)",
+              after == before, after - before)
+
+        print("\n=== a start the host takes too late never runs ===")
+        # A paused VM: the host's link outlives it, so a launch is sent;
+        # Storm drops the silent host and fails the start, and the host,
+        # resumed, reads the start from its stale link and asks first.
+        runtime.send_signal(signal.SIGSTOP)
+        try:
+            status, rec = launch(owner, host_id, provider="fake")
+            check("a launch to a host whose link has not yet gone is sent", status == 200, status)
+            late = rec["id"]
+            wait(lambda: session(owner, late)["status"] == "failed", "the start to fail", timeout=90)
+            rec = session(owner, late)
+            check("its start failed when the link went (start_failure), never unknown",
+                  rec["end_reason"] == "start_failure", rec)
+        finally:
+            runtime.send_signal(signal.SIGCONT)
+        wait(host_online, "the host back online", timeout=90)
+        time.sleep(5)
+        rec = session(owner, late)
+        check("the host, resumed, never ran it", rec["status"] == "failed" and not rec.get("started_at"), rec)
+        # Whether the resumed host read the start before its link timed out
+        # is the kernel's to say; either way it must not run.
+        dropped = "Storm no longer wants this start" in open(RUNTIME_LOG).read()
+        print(f"  info  the resumed host {'read and dropped' if dropped else 'never read'} the start")
 
         print("\n=== AM37: SIGTERM ends the host's sessions and everything they spawned ===")
         status, rec = launch(owner, host_id, provider="shell")

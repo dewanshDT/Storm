@@ -50,6 +50,38 @@ pub struct RuntimeConfig {
     /// integrations (decision 132), or gets Storm's alone.
     #[serde(default)]
     pub agent_mcp: AgentMcp,
+    /// Whether the app may install, update and remove agent CLIs on this
+    /// host (decision 133). `"off"` is for an operator who pins CLIs by hand.
+    #[serde(default)]
+    pub agent_install: AgentInstall,
+    /// Whether Storm updates the agents it installed by itself, once a day
+    /// and only while none of that agent's sessions runs (133-5).
+    #[serde(default)]
+    pub agent_updates: AgentUpdates,
+    /// Per-session isolation (decision 136a), set by `storm-runtime-isolation
+    /// on` and `off`, which also convert the workspaces. On, no session ever
+    /// runs as this host's account: one that cannot be isolated is refused.
+    #[serde(default)]
+    pub isolation: Isolation,
+    /// With isolation on, the TCP ports on this host's loopback a session
+    /// may reach from its own network (136d); the helper reads them.
+    #[serde(default)]
+    pub isolation_host_ports: Vec<u16>,
+    /// With isolation on, the most one spawned child's workspace may take,
+    /// in bytes (decision 137f; default 2 GiB); the helper reads it.
+    #[serde(default)]
+    pub child_workspace_max: Option<u64>,
+    /// And every child's on this host together (default 20 GiB).
+    #[serde(default)]
+    pub children_max: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Isolation {
+    #[default]
+    Off,
+    PerSession,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -66,6 +98,22 @@ pub enum AgentMcp {
     #[default]
     Own,
     StormOnly,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentInstall {
+    #[default]
+    On,
+    Off,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentUpdates {
+    #[default]
+    Auto,
+    Manual,
 }
 
 fn default_max_sessions() -> u32 {
@@ -96,6 +144,12 @@ impl Default for RuntimeConfig {
             forbidden_roots: default_forbidden(),
             plugin_mcp: PluginMcp::default(),
             agent_mcp: AgentMcp::default(),
+            agent_install: AgentInstall::default(),
+            agent_updates: AgentUpdates::default(),
+            isolation: Isolation::default(),
+            isolation_host_ports: Vec::new(),
+            child_workspace_max: None,
+            children_max: None,
         }
     }
 }
@@ -129,6 +183,10 @@ fn cli_kind() -> String {
 }
 
 impl RuntimeConfig {
+    pub fn isolated(&self) -> bool {
+        self.isolation == Isolation::PerSession
+    }
+
     /// Loads `path`, or the defaults when it does not exist.
     pub fn load(path: &Path) -> Result<Self> {
         let config: Self = match std::fs::read_to_string(path) {
@@ -139,7 +197,33 @@ impl RuntimeConfig {
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
         };
         config.check_roots()?;
+        config.check_host_ports()?;
+        config.check_child_caps()?;
         Ok(config)
+    }
+
+    /// The helper's rule (`net::host_ports`), so a list it would refuse
+    /// stops the host here with the reason, not every session later.
+    pub fn check_host_ports(&self) -> Result<()> {
+        if self.isolation_host_ports.contains(&0) {
+            bail!("isolation_host_ports: 0 is not a port");
+        }
+        let mut ports = self.isolation_host_ports.clone();
+        ports.sort_unstable();
+        ports.dedup();
+        if ports.len() > 64 {
+            bail!("isolation_host_ports: at most 64 ports");
+        }
+        Ok(())
+    }
+
+    /// The helper's rule (`HelperConfig::caps`): a cap of 0 refuses every
+    /// child, which no operator means.
+    pub fn check_child_caps(&self) -> Result<()> {
+        if self.child_workspace_max == Some(0) || self.children_max == Some(0) {
+            bail!("child_workspace_max and children_max must be above 0");
+        }
+        Ok(())
     }
 
     /// A workspace root may not be inside, or contain, a Storm data root this
@@ -204,6 +288,19 @@ impl RuntimeConfig {
         }
     }
 
+    /// [`Self::search_path`] with `managed` (the folder of the agents Storm
+    /// installed, decision 133-2) first, so a session finds Storm's copy
+    /// before any other.
+    pub fn search_path_with(&self, managed: &Path) -> Result<OsString> {
+        let rest = match self.search_path()? {
+            Some(path) => Some(path),
+            None => std::env::var_os("PATH"),
+        };
+        let mut dirs = vec![managed.to_path_buf()];
+        dirs.extend(rest.iter().flat_map(std::env::split_paths));
+        std::env::join_paths(dirs).context("the host's search path")
+    }
+
     /// The `settings` of the `opencode` provider entry, as JSON.
     pub fn opencode_settings(&self) -> Option<serde_json::Value> {
         self.providers
@@ -217,10 +314,38 @@ impl RuntimeConfig {
 
     /// The providers this host offers, by id.
     pub fn providers(&self) -> Result<Vec<Arc<dyn Provider>>> {
-        let path = self.search_path()?;
-        let on_path = |p: CliProvider| match &path {
-            Some(path) => p.with_path(path.clone()),
-            None => p,
+        self.providers_on(self.search_path()?, None)
+    }
+
+    /// [`Self::providers`] on [`Self::search_path_with`] `managed`.
+    pub fn providers_with(&self, managed: &Path) -> Result<Vec<Arc<dyn Provider>>> {
+        self.providers_on(Some(self.search_path_with(managed)?), None)
+    }
+
+    /// [`Self::providers_with`], each `cli` provider's sessions started by
+    /// the isolation helper (decision 136).
+    pub fn providers_isolated(
+        &self,
+        managed: &Path,
+        link: crate::isolation::Link,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        self.providers_on(Some(self.search_path_with(managed)?), Some(link))
+    }
+
+    fn providers_on(
+        &self,
+        path: Option<OsString>,
+        isolation: Option<crate::isolation::Link>,
+    ) -> Result<Vec<Arc<dyn Provider>>> {
+        let on_path = |p: CliProvider| {
+            let p = match &path {
+                Some(path) => p.with_path(path.clone()),
+                None => p,
+            };
+            match &isolation {
+                Some(link) => p.isolated(link.clone()),
+                None => p,
+            }
         };
         // With no list, every built-in (decision 130): one that is not
         // installed is offered as such, and the launcher says so.
@@ -321,6 +446,21 @@ pub fn list_workspaces(roots: &[PathBuf]) -> Vec<String> {
     names
 }
 
+/// Each of `names`' canonical directory, as a session would start in it, so
+/// the server's WS-9 check (137-2) sees two names for one directory
+/// (overlapping roots) as one. A name that no longer resolves is left out,
+/// which the server reads as possibly any workspace.
+pub fn workspace_paths(roots: &[PathBuf], names: &[String]) -> HashMap<String, String> {
+    let roots = canonical_roots(roots);
+    names
+        .iter()
+        .filter_map(|name| {
+            let dir = resolve_in(&roots, name)?;
+            Some((name.clone(), dir.display().to_string()))
+        })
+        .collect()
+}
+
 /// Resolves a workspace name to its directory, **inside a root only**: a name
 /// is never a path, and a symlink that leads out of the root is refused.
 pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
@@ -333,19 +473,86 @@ pub fn resolve_workspace(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
     {
         return None;
     }
-    for root in roots {
-        let Ok(root) = root.canonicalize() else {
-            continue;
-        };
-        let candidate = root.join(name);
-        if let Ok(real) = candidate.canonicalize()
-            && real.starts_with(&root)
-            && real.is_dir()
-        {
-            return Some(real);
-        }
+    resolve_in(&canonical_roots(roots), name)
+}
+
+/// Whether `name` may name a new workspace (decision 141c): what
+/// [`resolve_workspace`] accepts, and no control character, no `\` or `:`
+/// on any platform, and nothing a reader could mistake for another name.
+pub fn new_workspace_name_ok(name: &str) -> bool {
+    (1..=128).contains(&name.chars().count())
+        && !name.starts_with('.')
+        && name.trim() == name
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+}
+
+/// Makes the workspace `name` in the first root (decision 141c), with
+/// `create_dir`, never through a link, and `git init` it if asked. Never
+/// replaces anything: a name in any root is `exists`. The error is the
+/// stable code the server is told.
+pub fn create_workspace(roots: &[PathBuf], name: &str, git: bool) -> Result<String, &'static str> {
+    if !new_workspace_name_ok(name) {
+        return Err("bad_name");
     }
-    None
+    let root = roots
+        .first()
+        .and_then(|r| r.canonicalize().ok())
+        .filter(|r| r.is_dir())
+        .ok_or("no_root")?;
+    // A later root's workspace of that name would be hidden by this one.
+    if roots
+        .iter()
+        .any(|r| std::fs::symlink_metadata(r.join(name)).is_ok())
+    {
+        return Err("exists");
+    }
+    let dir = root.join(name);
+    if let Err(e) = std::fs::create_dir(&dir) {
+        return Err(match e.kind() {
+            std::io::ErrorKind::AlreadyExists => "exists",
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::ReadOnlyFilesystem => {
+                "not_writable"
+            }
+            _ => "failed",
+        });
+    }
+    if git && let Err(e) = git_init(&dir) {
+        tracing::warn!(error = %e, "new workspace: git init failed; removed it");
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err("git_failed");
+    }
+    Ok(name.to_string())
+}
+
+fn git_init(dir: &Path) -> Result<()> {
+    let mut git = std::process::Command::new("git");
+    git.args(["init", "-q", "-b", "main", "--"])
+        .arg(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .env("GIT_TERMINAL_PROMPT", "0");
+    // The account's own template directory or hooks are not the folder's.
+    #[cfg(unix)]
+    git.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null");
+    let out = git.output().context("running git")?;
+    if !out.status.success() {
+        bail!("git init: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
+}
+
+fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
+    roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
+}
+
+fn resolve_in(roots: &[PathBuf], name: &str) -> Option<PathBuf> {
+    roots.iter().find_map(|root| {
+        let real = root.join(name).canonicalize().ok()?;
+        (real.starts_with(root) && real.is_dir()).then_some(real)
+    })
 }
 
 #[cfg(test)]
@@ -353,6 +560,88 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// 141c: a new workspace is one plain name, made in the first root
+    /// only, never over anything that exists in any root.
+    #[test]
+    fn a_new_workspace_is_made_in_the_first_root_and_never_over_one() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        std::fs::create_dir(second.path().join("taken")).unwrap();
+        let roots = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+
+        assert_eq!(
+            create_workspace(&roots, "demo 2", false),
+            Ok("demo 2".into())
+        );
+        assert!(first.path().join("demo 2").is_dir());
+        assert!(!first.path().join("demo 2/.git").exists());
+        assert!(list_workspaces(&roots).contains(&"demo 2".to_string()));
+        for taken in ["demo 2", "taken"] {
+            assert_eq!(
+                create_workspace(&roots, taken, false),
+                Err("exists"),
+                "{taken}"
+            );
+        }
+        let long = "x".repeat(129);
+        for bad in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "a/b",
+            "../x",
+            "/etc",
+            "a\\b",
+            "c:",
+            "bell\u{7}",
+            "new\nline",
+            " pad",
+            "pad ",
+            &long,
+        ] {
+            assert_eq!(
+                create_workspace(&roots, bad, false),
+                Err("bad_name"),
+                "{bad:?}"
+            );
+        }
+        assert!(!second.path().join("demo 2").exists());
+
+        let gone = vec![first.path().join("missing"), second.path().to_path_buf()];
+        assert_eq!(create_workspace(&gone, "x", false), Err("no_root"));
+        assert!(!second.path().join("x").exists(), "never a later root");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_workspace_never_goes_through_a_link() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path().join("nowhere"), root.path().join("dangling"))
+            .unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        assert_eq!(create_workspace(&roots, "dangling", false), Err("exists"));
+        assert!(!outside.path().join("nowhere").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_new_workspace_can_start_as_a_git_repository_on_main() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        assert_eq!(create_workspace(&roots, "repo", true), Ok("repo".into()));
+        let head = std::fs::read_to_string(root.path().join("repo/.git/HEAD")).unwrap();
+        assert_eq!(head.trim(), "ref: refs/heads/main");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -371,6 +660,26 @@ mod tests {
         let listed = list_workspaces(&roots);
         assert!(listed.contains(&"storm".to_string()));
         assert!(!listed.contains(&".hidden".to_string()));
+    }
+
+    /// 137-2: a root inside another lists one directory under two names;
+    /// their reported directories are what tells the server so.
+    #[cfg(unix)]
+    #[test]
+    fn overlapping_roots_report_one_directory_for_both_names() {
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(outer.path().join("storm/site")).unwrap();
+        std::fs::create_dir(outer.path().join("other")).unwrap();
+        let linked = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outer.path(), linked.path().join("root")).unwrap();
+        // The same root through a symlink first, then a root inside it.
+        let roots = vec![linked.path().join("root"), outer.path().join("storm")];
+        let paths = workspace_paths(&roots, &list_workspaces(&roots));
+        let real = outer.path().canonicalize().unwrap();
+        assert_eq!(paths["storm"], real.join("storm").display().to_string());
+        assert_eq!(paths["site"], real.join("storm/site").display().to_string());
+        assert_eq!(paths["other"], real.join("other").display().to_string());
+        assert_eq!(paths.len(), list_workspaces(&roots).len());
     }
 
     /// A scratch directory a workspace root may be in: on Windows, the
@@ -566,6 +875,81 @@ mod tests {
     }
 
     /// Decision 131b: plugin servers are allowed unless the host says off.
+    #[test]
+    fn agent_install_and_updates_default_on_and_auto() {
+        let c = RuntimeConfig::default();
+        assert_eq!(c.agent_install, AgentInstall::On);
+        assert_eq!(c.agent_updates, AgentUpdates::Auto);
+        let off: RuntimeConfig =
+            toml::from_str("agent_install = \"off\"\nagent_updates = \"manual\"").unwrap();
+        assert_eq!(off.agent_install, AgentInstall::Off);
+        assert_eq!(off.agent_updates, AgentUpdates::Manual);
+    }
+
+    /// Decision 136a: off unless the operator's command turned it on, and
+    /// only its two values parse.
+    #[test]
+    fn isolation_defaults_off() {
+        assert_eq!(RuntimeConfig::default().isolation, Isolation::Off);
+        let on: RuntimeConfig = toml::from_str("isolation = \"per-session\"").unwrap();
+        assert_eq!(on.isolation, Isolation::PerSession);
+        for bad in [
+            "isolation = \"on\"",
+            "isolation = true",
+            "isolation = \"per_session\"",
+        ] {
+            assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_child_caps_are_bytes_above_zero() {
+        let c: RuntimeConfig =
+            toml::from_str("child_workspace_max = 1073741824\nchildren_max = 10737418240").unwrap();
+        assert_eq!(
+            (c.child_workspace_max, c.children_max),
+            (Some(1 << 30), Some(10 << 30))
+        );
+        assert!(c.check_child_caps().is_ok());
+        assert!(RuntimeConfig::default().check_child_caps().is_ok());
+        let zero: RuntimeConfig = toml::from_str("children_max = 0").unwrap();
+        assert!(zero.check_child_caps().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("child_workspace_max = \"2 GiB\"").is_err());
+    }
+
+    #[test]
+    fn isolation_host_ports_default_empty_and_are_checked() {
+        assert!(RuntimeConfig::default().isolation_host_ports.is_empty());
+        let c: RuntimeConfig = toml::from_str("isolation_host_ports = [11434, 5432]").unwrap();
+        assert_eq!(c.isolation_host_ports, [11434, 5432]);
+        c.check_host_ports().unwrap();
+        let zero: RuntimeConfig = toml::from_str("isolation_host_ports = [0]").unwrap();
+        assert!(zero.check_host_ports().is_err());
+        let many = RuntimeConfig {
+            isolation_host_ports: (1..=65).collect(),
+            ..RuntimeConfig::default()
+        };
+        assert!(many.check_host_ports().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("isolation_host_ports = [70000]").is_err());
+    }
+
+    #[test]
+    fn the_managed_folder_comes_first_on_the_search_path() {
+        let c: RuntimeConfig = toml::from_str("path = [\"/usr/bin\", \"/bin\"]").unwrap();
+        let path = c
+            .search_path_with(Path::new("/state/agents/managed/bin"))
+            .unwrap();
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            dirs,
+            [
+                PathBuf::from("/state/agents/managed/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin")
+            ]
+        );
+    }
+
     #[test]
     fn agent_mcp_defaults_to_the_agents_own() {
         assert_eq!(RuntimeConfig::default().agent_mcp, AgentMcp::Own);

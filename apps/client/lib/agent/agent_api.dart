@@ -6,6 +6,14 @@ import 'package:http/http.dart' as http;
 import '../api/models.dart';
 import 'agent_models.dart';
 
+/// A refusal from `/v1/agent/*`, with the server's stable code when it gave
+/// one.
+class AgentRefusal extends StormApiException {
+  AgentRefusal(super.statusCode, super.message, this.code);
+
+  final String? code;
+}
+
 /// REST client for the Agent Runtime routes (`/v1/agent/*`, owner only;
 /// decisions 77c and 77d).
 ///
@@ -39,13 +47,15 @@ class AgentApi {
         503 => 'The host is offline.',
         _ => 'HTTP ${r.statusCode}',
       };
+      String? code;
       try {
         final body = jsonDecode(r.body);
-        if (body is Map && body['error'] != null && r.statusCode != 503) {
-          message = '${body['error']}';
+        if (body is Map && body['error'] != null) {
+          code = '${body['error']}';
+          if (r.statusCode != 503) message = code;
         }
       } catch (_) {}
-      throw StormApiException(r.statusCode, message);
+      throw AgentRefusal(r.statusCode, message, code);
     }
     if (r.bodyBytes.isEmpty) return null;
     return jsonDecode(utf8.decode(r.bodyBytes));
@@ -75,6 +85,41 @@ class AgentApi {
         AgentHost.fromJson(h as Map<String, dynamic>),
     ];
   }
+
+  String _agentOn(String hostId, String agent) =>
+      '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/'
+      '${Uri.encodeComponent(agent)}';
+
+  /// Starts an install, update or removal (`op`) of [agent] on a host
+  /// (decision 133). The answer is the job, still queued or running.
+  Future<AgentJob> startAgentJob(
+    String hostId,
+    String agent,
+    String op,
+  ) async => AgentJob.fromJson(
+    _decode(
+          await _client.post(
+            _uri(_agentOn(hostId, agent)),
+            headers: _headers,
+            body: jsonEncode({'op': op}),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  Future<AgentJob> agentJob(String hostId, String jobId) async =>
+      AgentJob.fromJson(
+        _decode(
+              await _client.get(
+                _uri(
+                  '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/jobs/'
+                  '${Uri.encodeComponent(jobId)}',
+                ),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>,
+      );
 
   /// Issues an enrollment. The string carries a single-use secret and is
   /// shown once; nothing stores it.
@@ -126,6 +171,25 @@ class AgentApi {
     ];
   }
 
+  /// Makes a workspace on a host (decision 141c): a folder in its first
+  /// workspace root, a git repository if [git]. Answers its name.
+  Future<String> createWorkspace(
+    String hostId,
+    String name, {
+    required bool git,
+  }) async =>
+      (_decode(
+                await _client.post(
+                  _uri(
+                    '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/workspaces',
+                  ),
+                  headers: _headers,
+                  body: jsonEncode({'name': name, 'git': git}),
+                ),
+              )
+              as Map)['name']
+          as String;
+
   Future<List<AgentSession>> sessions() async {
     final json = _decode(
       await _client.get(_uri('/v1/agent/sessions'), headers: _headers),
@@ -150,6 +214,11 @@ class AgentApi {
     ({String vaultId, String noteId})? context,
     String? writeVaultId,
     String? resumeOf,
+    LaunchCrew? crew,
+    ({String vaultId, String noteId})? role,
+    bool spawn = false,
+    String? model,
+    String? permissionMode,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -171,6 +240,17 @@ class AgentApi {
               'write_vault_id': ?writeVaultId,
               // The server takes the rest from that session (decision 89).
               'resume_of': ?resumeOf,
+              if (crew != null)
+                'crew': crew.id != null
+                    ? {'id': crew.id}
+                    : {'new_name': crew.newName},
+              if (role != null)
+                'role': {'vault_id': role.vaultId, 'note_id': role.noteId},
+              if (spawn) 'spawn': true,
+              if (model != null && model.isNotEmpty) 'model': model,
+              // Absent is the agent's own (decision 146b).
+              if (permissionMode != null && permissionMode != 'default')
+                'permission_mode': permissionMode,
             }),
           ),
         )
@@ -199,8 +279,139 @@ class AgentApi {
     _decode(await _client.post(_uri('${_s(id)}/end'), headers: _headers));
   }
 
-  Future<void> dismiss(String id) async {
-    _decode(await _client.delete(_uri(_s(id)), headers: _headers));
+  /// The crews its dismissal emptied and so deleted (138c); none from a
+  /// server before decision 138, which answers with no body. [tree]
+  /// dismisses a whole tree, once every member has ended (C8).
+  Future<List<Crew>> dismiss(String id, {bool tree = false}) async {
+    final body = _decode(
+      await _client.delete(
+        _uri(_s(id), tree ? const {'tree': 'true'} : null),
+        headers: _headers,
+      ),
+    );
+    if (body is! Map) return const [];
+    return [
+      for (final c in body['removed_crews'] as List? ?? [body['removed_crew']])
+        if (c is Map<String, dynamic>) Crew.fromJson(c),
+    ];
+  }
+
+  // ---- crews and role labels (decision 138; plan §3.2) -------------------
+
+  String _c(String id) => '/v1/agent/crews/${Uri.encodeComponent(id)}';
+
+  Future<List<Crew>> crews() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/agent/crews'), headers: _headers),
+    );
+    return [
+      for (final c in json as List) Crew.fromJson(c as Map<String, dynamic>),
+    ];
+  }
+
+  /// Makes a crew and moves [sessionIds] into it, in that order. Null
+  /// [color] takes the next free palette word.
+  Future<CrewChange> createCrew(
+    String name, {
+    String? color,
+    List<String> sessionIds = const [],
+  }) async => CrewChange.fromJson(
+    _decode(
+          await _client.post(
+            _uri('/v1/agent/crews'),
+            headers: _headers,
+            body: jsonEncode({
+              'name': name,
+              'color': ?color,
+              'session_ids': sessionIds,
+            }),
+          ),
+        )
+        as Map<String, dynamic>?,
+  );
+
+  Future<Crew> updateCrew(String id, {String? name, String? color}) async =>
+      Crew.fromJson(
+        _decode(
+              await _client.patch(
+                _uri(_c(id)),
+                headers: _headers,
+                body: jsonEncode({'name': ?name, 'color': ?color}),
+              ),
+            )
+            as Map<String, dynamic>,
+      );
+
+  /// [ids] must be every crew, in the new order.
+  Future<void> reorderCrews(List<String> ids) async {
+    _decode(
+      await _client.put(
+        _uri('/v1/agent/crews/order'),
+        headers: _headers,
+        body: jsonEncode({'ids': ids}),
+      ),
+    );
+  }
+
+  /// [sessionIds] must be every member of the crew, in the new order.
+  Future<void> reorderCrewMembers(String id, List<String> sessionIds) async {
+    _decode(
+      await _client.put(
+        _uri('${_c(id)}/members/order'),
+        headers: _headers,
+        body: jsonEncode({'ids': sessionIds}),
+      ),
+    );
+  }
+
+  /// Deletes a crew; its members become loose.
+  Future<void> deleteCrew(String id) async {
+    _decode(await _client.delete(_uri(_c(id)), headers: _headers));
+  }
+
+  /// Joins, moves, reorders or (with a null [crewId]) leaves. [before] is a
+  /// member to go in front of; last when absent.
+  Future<CrewChange> moveToCrew(
+    String sessionId,
+    String? crewId, {
+    String? before,
+  }) async => CrewChange.fromJson(
+    _decode(
+          await _client.put(
+            _uri('${_s(sessionId)}/crew'),
+            headers: _headers,
+            body: jsonEncode({'crew_id': crewId, 'before': ?before}),
+          ),
+        )
+        as Map<String, dynamic>?,
+  );
+
+  /// Sets the role label only; the launch role never changes (138f).
+  Future<void> setRole(String sessionId, String vaultId, String noteId) async {
+    _decode(
+      await _client.put(
+        _uri('${_s(sessionId)}/role'),
+        headers: _headers,
+        body: jsonEncode({'vault_id': vaultId, 'note_id': noteId}),
+      ),
+    );
+  }
+
+  Future<void> clearRole(String sessionId) async {
+    _decode(
+      await _client.delete(_uri('${_s(sessionId)}/role'), headers: _headers),
+    );
+  }
+
+  /// Kit's role notes, read live (138e).
+  Future<List<RoleNote>> roles() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/agent/roles'), headers: _headers),
+    );
+    return [
+      for (final r in json as List)
+        RoleNote.fromJson(r as Map<String, dynamic>),
+    ];
   }
 
   /// Raw input bytes. At most once: never retried (freeze §11.3).
@@ -256,6 +467,20 @@ class AgentApi {
               )
               as Map)['ticket']
           as String;
+
+  /// One request to an owner-only route, decoded: what the spawning
+  /// client's calls (`spawn_api.dart`) are built on.
+  Future<dynamic> send(
+    String method,
+    String path, {
+    Object? body,
+    Map<String, String>? query,
+  }) async {
+    final req = http.Request(method, _uri(path, query))
+      ..headers.addAll(_headers);
+    if (body != null) req.body = jsonEncode(body);
+    return _decode(await http.Response.fromStream(await _client.send(req)));
+  }
 
   void dispose() => _client.close();
 }

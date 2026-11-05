@@ -70,10 +70,20 @@ void main() {
       .opacity;
 
   testWidgets('each agent shows its own mark', (tester) async {
-    await pump(tester, session());
-    expect(find.byType(SvgPicture), findsOneWidget);
-    await pump(tester, session(provider: 'opencode'));
-    expect(find.byType(SvgPicture), findsOneWidget);
+    for (final p in [
+      'claude-code',
+      'opencode',
+      'codex',
+      'cursor',
+      'command-code',
+    ]) {
+      await pump(tester, session(provider: p));
+      final svg = tester.widget<SvgPicture>(find.byType(SvgPicture));
+      expect(
+        (svg.bytesLoader as SvgAssetLoader).assetName,
+        'assets/agents/$p.svg',
+      );
+    }
     await pump(tester, session(provider: 'shell'));
     expect(find.byIcon(LucideIcons.square_terminal), findsOneWidget);
     await pump(tester, session(provider: 'mystery'));

@@ -290,7 +290,7 @@ impl Indexer {
             scan.unreadable.iter().map(|(p, _)| p.as_str()).collect();
         for note in indexed {
             if !seen_ids.contains(&note.id) && !unreadable.contains(note.path.as_str()) {
-                self.db.delete_note(&note.id, &now_rfc3339())?;
+                self.trash_vanished(&note, &db::DeletedBy::sync())?;
                 report.removed += 1;
             }
         }
@@ -298,7 +298,7 @@ impl Indexer {
     }
 
     /// Builds an index row, carrying `created` forward from any previous one.
-    fn row_for(
+    pub(crate) fn row_for(
         &self,
         id: &str,
         path: &str,
@@ -424,7 +424,7 @@ impl Indexer {
     /// Read fresh on each mutation rather than cached: the set changes through
     /// the folder API, and a stale copy would either delete a folder someone
     /// just made or strand one they just removed.
-    fn protected_folders(&self) -> std::collections::HashSet<String> {
+    pub(crate) fn protected_folders(&self) -> std::collections::HashSet<String> {
         self.db
             .list_folders()
             .unwrap_or_default()
@@ -455,11 +455,13 @@ impl Indexer {
         })
     }
 
-    pub fn delete_note(&mut self, id: &str) -> IndexResult<i64> {
-        let current = self.db.get_note(id)?.ok_or_else(|| no_note(id))?;
-        self.vault
-            .delete(&current.path, &self.protected_folders())?;
-        Ok(self.db.delete_note(id, &now_rfc3339())?)
+    /// Every delete goes to the trash (decision 150a).
+    pub fn delete_note(
+        &mut self,
+        id: &str,
+        by: &db::DeletedBy,
+    ) -> IndexResult<crate::trash::Trashed> {
+        self.trash_note(id, by)
     }
 
     // ---- folders -------------------------------------------------------
@@ -691,7 +693,7 @@ impl Indexer {
         };
         if gone {
             if let Some(note) = self.db.get_note_by_path(rel_path)? {
-                return self.db.delete_note(&note.id, &now_rfc3339()).map(Some);
+                return self.trash_vanished(&note, &db::DeletedBy::sync()).map(Some);
             }
             return Ok(None);
         }
@@ -753,7 +755,7 @@ impl Indexer {
 }
 
 /// The non-empty `id` a note's frontmatter carries, if any.
-fn id_of(content: &str) -> Option<String> {
+pub(crate) fn id_of(content: &str) -> Option<String> {
     frontmatter::parse(content)
         .frontmatter
         .as_ref()
@@ -772,7 +774,7 @@ fn normalise(content: &str) -> String {
 /// `Vault::resolve` already rejects `..`, absolute paths and dotted segments;
 /// running the folder through it here means the folder API cannot be a way
 /// around the checks the note API enforces.
-fn normalise_folder(path: &str) -> IndexResult<String> {
+pub(crate) fn normalise_folder(path: &str) -> IndexResult<String> {
     let clean = path.trim().trim_matches('/');
     if clean.is_empty() {
         return Err(IndexError::Invalid(
@@ -896,7 +898,7 @@ mod tests {
         let (_d, mut ix) = indexer();
         let id = note_at_version(&mut ix, "A.md", 3);
         let content = ix.vault.read("A.md").unwrap();
-        ix.delete_note(&id).unwrap();
+        ix.delete_note(&id, &db::DeletedBy::default()).unwrap();
         ix.vault.write("A.md", &content).unwrap();
         ix.refresh_paths(&paths(&["A.md"])).unwrap();
 
@@ -1387,7 +1389,8 @@ mod tests {
     fn delete_removes_the_file_and_the_index_row() {
         let (_d, mut ix) = indexer();
         let created = ix.create_note("A.md", "# A\n").unwrap();
-        ix.delete_note(&created.note.id).unwrap();
+        ix.delete_note(&created.note.id, &db::DeletedBy::default())
+            .unwrap();
         assert!(!ix.vault.exists("A.md"));
         assert!(ix.db.get_note(&created.note.id).unwrap().is_none());
     }
@@ -1403,7 +1406,8 @@ mod tests {
         ix.create_folder("Projects").unwrap();
         let note = ix.create_note("Projects/A.md", "# A\n").unwrap();
 
-        ix.delete_note(&note.note.id).unwrap();
+        ix.delete_note(&note.note.id, &db::DeletedBy::default())
+            .unwrap();
 
         assert!(ix.all_folders().unwrap().contains(&"Projects".to_string()));
     }
@@ -1414,7 +1418,8 @@ mod tests {
         // the old behaviour — otherwise every transient directory sticks.
         let (_d, mut ix) = indexer();
         let note = ix.create_note("Derived/A.md", "# A\n").unwrap();
-        ix.delete_note(&note.note.id).unwrap();
+        ix.delete_note(&note.note.id, &db::DeletedBy::default())
+            .unwrap();
         assert!(!ix.all_folders().unwrap().contains(&"Derived".to_string()));
     }
 
@@ -1445,7 +1450,8 @@ mod tests {
         assert!(err.contains("1 note"), "unhelpful message: {err}");
         assert!(ix.vault.exists("Projects/A.md"), "notes must be untouched");
 
-        ix.delete_note(&note.note.id).unwrap();
+        ix.delete_note(&note.note.id, &db::DeletedBy::default())
+            .unwrap();
         ix.delete_folder("Projects").unwrap();
         assert!(ix.all_folders().unwrap().is_empty());
     }
@@ -1596,7 +1602,8 @@ mod tests {
             .touch_note_access(&created.note.id, "2026-08-07T10:00:00Z")
             .unwrap();
 
-        ix.delete_note(&created.note.id).unwrap();
+        ix.delete_note(&created.note.id, &db::DeletedBy::default())
+            .unwrap();
         assert!(ix.db.recent_notes(10).unwrap().is_empty());
     }
 }

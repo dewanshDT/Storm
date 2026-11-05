@@ -2,7 +2,9 @@
 /// 77d). Field names are the server's; nothing here is invented.
 library;
 
+import '../ui/accents.dart';
 import 'claude_login_api.dart' show claudeCredentialNotice;
+import 'spawn_models.dart';
 
 /// A provider a host offers.
 class ProviderCap {
@@ -11,11 +13,40 @@ class ProviderCap {
     required this.kind,
     required this.available,
     this.mcp,
+    this.version,
+    this.source,
+    this.installable = false,
+    this.installBlocked,
+    this.checksumVerified = true,
+    this.latest,
   });
 
   final String id;
   final String kind;
   final bool available;
+
+  /// What the installed CLI reports; null when not installed or not probed
+  /// yet (decision 133).
+  final String? version;
+
+  /// `storm` (Storm installed it and can update or remove it) or `system`
+  /// (the owner's own install); null when not installed.
+  final String? source;
+
+  /// The host could install it now.
+  final bool installable;
+
+  /// Why it could not: `disabled`, `unsupported_platform`, `no_node` or
+  /// `node_too_old`.
+  final String? installBlocked;
+
+  /// False for Cursor, whose downloads have no published checksum.
+  final bool checksumVerified;
+
+  /// The newest version available, when the server knows it.
+  final String? latest;
+
+  bool get managed => source == 'storm';
 
   /// The host can give its sessions Storm's MCP (decision 130a); null from a
   /// host too old to say, or for an agent it has no adapter for.
@@ -26,6 +57,12 @@ class ProviderCap {
     kind: j['kind'] as String? ?? 'cli',
     available: j['available'] as bool? ?? false,
     mcp: j['mcp'] as bool?,
+    version: j['version'] as String?,
+    source: j['source'] as String?,
+    installable: j['installable'] as bool? ?? false,
+    installBlocked: j['install_blocked'] as String?,
+    checksumVerified: j['checksum_verified'] as bool? ?? true,
+    latest: j['latest'] as String?,
   );
 
   /// Its sessions can read your vaults and use your integrations: what the
@@ -63,6 +100,10 @@ class AgentHost {
     this.resumes = const [],
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
+    this.agentInstall = false,
+    this.identityState,
+    this.isolationState,
+    this.isolationReason,
   });
 
   final String id;
@@ -89,7 +130,33 @@ class AgentHost {
   /// Whether it has said what it can do: an offline host has not.
   final bool capabilitiesKnown;
 
+  /// It can install, update and remove agents (decision 133); false for an
+  /// older runtime.
+  final bool agentInstall;
+
+  /// Its bridge identity (decision 135d): `verified`, `unsupported` or
+  /// `unavailable`; null from a server that does not say.
+  final String? identityState;
+
+  /// Anything but `verified` is labelled (135d). The label is disclosure,
+  /// not a control.
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
+
+  /// Its session isolation (decision 136j): state and reason; null from a
+  /// server that does not say.
+  final String? isolationState;
+  final String? isolationReason;
+
+  /// What the host row says about it; nothing while isolation is off.
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
+
   bool get online => status == 'online';
+
+  /// C0 as its view says (134r, 141e): identity and isolation verified.
+  bool get offersSpawning =>
+      identityState == 'verified' && isolationState == 'verified';
 
   bool get receivesClaudeLogin =>
       providerCredentials.contains('claude_subscription_token');
@@ -121,8 +188,115 @@ class AgentHost {
           k as String,
       ],
       capabilitiesKnown: caps != null,
+      agentInstall: caps?['agent_install'] == true,
+      identityState: _identityState(j),
+      isolationState: _isolation(j).$1,
+      isolationReason: _isolation(j).$2,
     );
   }
+}
+
+String? _identityState(Map<String, dynamic> j) {
+  final identity = j['identity'];
+  return identity is Map ? '${identity['state'] ?? 'unavailable'}' : null;
+}
+
+(String?, String?) _isolation(Map<String, dynamic> j) {
+  final isolation = j['isolation'];
+  if (isolation is! Map) return (null, null);
+  final reason = isolation['reason'];
+  return (
+    '${isolation['state'] ?? 'unavailable'}',
+    reason is String ? reason : null,
+  );
+}
+
+/// What Storm says about a host's session isolation (decision 136j). Nothing
+/// where it is not on: off (the default), an older host, or a platform that
+/// has none. Anything but `verified` with isolation on refuses new sessions.
+String? isolationLabelFor(String? state, String? reason) {
+  if (state == null || state == 'unsupported') return null;
+  if (state == 'verified') return kIsolationVerified;
+  if (reason == null || reason == 'off' || reason == 'old_host') return null;
+  final why = switch (reason) {
+    'pending' => 'self-test running',
+    'self_test' => 'self-test failed',
+    'no_passt' => 'pasta missing',
+    'helper' => 'helper not answering',
+    'no_helper' => 'no isolation helper',
+    _ => reason.replaceAll('_', ' '),
+  };
+  return 'Session isolation unavailable ($why) — new sessions are refused';
+}
+
+/// A host whose sessions each run as their own user (decision 136j).
+const kIsolationVerified = 'Sessions isolated — each runs as its own user';
+
+/// What Storm says on a host or session whose identity is not verified
+/// (decision 135d).
+const kIdentityNotVerified =
+    'Session identity not verified — sessions on this host can act as each '
+    'other';
+
+/// The agents a host can install from Settings › Agents, in the page's
+/// order (decision 133).
+const kInstallableAgents = [
+  'claude-code',
+  'opencode',
+  'codex',
+  'cursor',
+  'command-code',
+];
+
+/// An install, update or removal of an agent on a host (decision 133).
+class AgentJob {
+  const AgentJob({
+    required this.id,
+    required this.hostId,
+    required this.agent,
+    required this.op,
+    required this.state,
+    this.step,
+    this.error,
+    this.version,
+    this.created,
+    this.updated,
+  });
+
+  final String id;
+  final String hostId;
+  final String agent;
+
+  /// `install`, `update` or `remove`.
+  final String op;
+
+  /// `queued`, `running`, `done` or `failed`.
+  final String state;
+
+  /// `Downloading`, `Verifying` or `Installing`, while running.
+  final String? step;
+
+  /// The stable failure code, once failed.
+  final String? error;
+  final String? version;
+  final String? created;
+  final String? updated;
+
+  bool get done => state == 'done';
+  bool get failed => state == 'failed';
+
+  factory AgentJob.fromJson(Map<String, dynamic> j) => AgentJob(
+    id: j['id'] as String,
+    hostId: j['host_id'] as String? ?? '',
+    agent: j['agent'] as String? ?? '',
+    op: j['op'] as String? ?? '',
+    state: j['state'] as String? ?? 'queued',
+    step: j['step'] as String?,
+    error: j['error'] as String?,
+    version: j['version'] as String?,
+    created: j['created'] as String?,
+    updated: j['updated'] as String?,
+  );
 }
 
 /// A workspace on a host, with how many live sessions already share it.
@@ -195,6 +369,130 @@ class SkippedServer {
   );
 }
 
+/// A crew (decision 138a): a named, coloured group of sessions. A label on
+/// the server; it changes how the Agents page is organised and nothing else.
+class Crew {
+  const Crew({
+    required this.id,
+    required this.name,
+    required this.color,
+    required this.order,
+  });
+
+  final String id;
+  final String name;
+
+  /// A vault palette word; anything else reads as no colour.
+  final String color;
+  final int order;
+
+  Accent get accent => Accent.parse(color);
+
+  factory Crew.fromJson(Map<String, dynamic> j) => Crew(
+    id: j['id'] as String,
+    name: j['name'] as String? ?? '',
+    color: j['color'] as String? ?? 'none',
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// The crew a session is in and its place there.
+class SessionCrew {
+  const SessionCrew({required this.id, required this.order});
+
+  final String id;
+  final int order;
+
+  factory SessionCrew.fromJson(Map<String, dynamic> j) => SessionCrew(
+    id: j['id'] as String,
+    order: (j['order'] as num?)?.toInt() ?? 0,
+  );
+}
+
+/// A Kit note used as a role (138d, 138f), by id. The label's [title] is read
+/// live, so it follows a rename; null once the note is deleted.
+class RoleRef {
+  const RoleRef({required this.vaultId, required this.noteId, this.title});
+
+  final String vaultId;
+  final String noteId;
+  final String? title;
+
+  bool get deleted => title == null;
+
+  bool sameNote(RoleRef? other) =>
+      other != null && other.vaultId == vaultId && other.noteId == noteId;
+
+  factory RoleRef.fromJson(Map<String, dynamic> j) => RoleRef(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String?,
+  );
+}
+
+/// A note the role picker offers (`GET /v1/agent/roles`, 138e).
+class RoleNote {
+  const RoleNote({
+    required this.vaultId,
+    required this.noteId,
+    required this.title,
+    required this.path,
+    required this.folder,
+    this.summary,
+  });
+
+  final String vaultId;
+  final String noteId;
+  final String title;
+  final String path;
+
+  /// `agents` or `projects/<name>/agents`: what the picker groups by.
+  final String folder;
+  final String? summary;
+
+  factory RoleNote.fromJson(Map<String, dynamic> j) => RoleNote(
+    vaultId: j['vault_id'] as String,
+    noteId: j['note_id'] as String,
+    title: j['title'] as String? ?? '',
+    path: j['path'] as String? ?? '',
+    folder: j['folder'] as String? ?? 'agents',
+    summary: j['summary'] as String?,
+  );
+}
+
+/// The crew a launch joins (138h): an existing one by [id], or a new one
+/// named [newName].
+class LaunchCrew {
+  const LaunchCrew.join(String this.id) : newName = null;
+  const LaunchCrew.create(String this.newName) : id = null;
+
+  final String? id;
+  final String? newName;
+}
+
+/// A crew change, with the crews it emptied and so deleted (138c).
+class CrewChange {
+  const CrewChange({this.crew, this.removedCrews = const []});
+
+  final Crew? crew;
+  final List<Crew> removedCrews;
+
+  factory CrewChange.fromJson(Map<String, dynamic>? j) => CrewChange(
+    crew: j?['crew'] is Map<String, dynamic>
+        ? Crew.fromJson(j!['crew'] as Map<String, dynamic>)
+        : null,
+    removedCrews: [
+      for (final c in j?['removed_crews'] as List? ?? const [])
+        if (c is Map<String, dynamic>) Crew.fromJson(c),
+    ],
+  );
+}
+
+/// A [AgentSession._copy] argument left as it is, where null is a value.
+const _keep = Object();
+
+Map<String, dynamic>? _map(Object? v) => v is Map<String, dynamic> ? v : null;
+
 class AgentSession {
   AgentSession({
     required this.id,
@@ -224,6 +522,17 @@ class AgentSession {
     this.resumedFrom,
     this.mcpSkipped = const [],
     this.mcpPluginLocal = const [],
+    this.identityState,
+    this.isolationState,
+    this.isolationReason,
+    this.spawn = SpawnFacts.none,
+    this.crew,
+    this.role,
+    this.launchRole,
+    this.model,
+    this.permissionMode,
+    this.modeRequest,
+    this.deleteRequest,
   }) : name = name ?? workspace;
 
   final String id;
@@ -254,8 +563,9 @@ class AgentSession {
   /// `working` or `idle` while running, when the agent says.
   final String? activity;
 
-  /// What every surface calls the session.
-  String get displayName => title ?? name;
+  /// What every surface calls the session. A child goes by the name its
+  /// parent gave it (145b), never by its agent's terminal title.
+  String get displayName => spawn.isChild ? name : title ?? name;
 
   bool get working => activity == 'working';
 
@@ -272,6 +582,48 @@ class AgentSession {
   /// Its plugins' local MCP servers, which run on the host outside Storm's
   /// integrations (131a).
   final List<String> mcpPluginLocal;
+
+  /// Its host's bridge identity (decision 135d); null from a server that
+  /// does not say.
+  final String? identityState;
+
+  bool get identityUnverified =>
+      identityState != null && identityState != 'verified';
+
+  /// Its host's session isolation (decision 136j).
+  final String? isolationState;
+  final String? isolationReason;
+
+  String? get isolationLabel =>
+      isolationLabelFor(isolationState, isolationReason);
+
+  /// Its lineage, attention, own workspace and spawn switch (decision 134).
+  final SpawnFacts spawn;
+
+  /// Its crew, null when loose or from a server before decision 138.
+  final SessionCrew? crew;
+
+  /// Its role label (138d), set by a person; a later change moves only this.
+  final RoleRef? role;
+
+  /// The role note it was launched with, titled as then (138f). Fixed.
+  final RoleRef? launchRole;
+
+  /// The model it was launched with (decision 145b); null for the agent's
+  /// own default.
+  final String? model;
+
+  /// `accept_edits` or `auto` as the person chose at launch, or inherited
+  /// (decision 146b); null for the agent's own.
+  final String? permissionMode;
+
+  /// Its agent's request for auto (decision 147c), while it waits for the
+  /// person or once approved; null otherwise.
+  final ModeRequest? modeRequest;
+
+  /// Its agent's deletion waiting for the person (decision 149); null
+  /// otherwise.
+  final DeleteRequest? deleteRequest;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -304,6 +656,9 @@ class AgentSession {
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
     'running' => 'Running',
+    // 145e: a child whose round is done, its process stopped until its
+    // parent's next message resumes it.
+    'parked' => 'Parked',
     'unknown' => 'Unknown',
     'completed' => 'Completed',
     'stopped' => 'Stopped',
@@ -316,6 +671,10 @@ class AgentSession {
     'failed' => switch (endReason) {
       'host_restart' => 'host restarted',
       'host_revoked' => 'host revoked',
+      // Decision 136f: an isolated host had no credential it may use.
+      'credential_unavailable' => 'no credential this host may use',
+      // Decision 136j: the host's isolation was not verified.
+      'isolation_unavailable' => 'isolation unavailable on this host',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',
@@ -328,33 +687,87 @@ class AgentSession {
   /// carries the bare record: no name, context or count.
   AgentSession withLive(AgentSession? live) => live == null || live.id != id
       ? this
-      : AgentSession(
-          id: id,
-          hostId: hostId,
-          workspace: workspace,
-          provider: provider,
+      : _copy(
           status: live.status,
           endReason: live.endReason,
           exitCode: live.exitCode,
           signal: live.signal,
           cols: live.cols,
           rows: live.rows,
-          createdAt: createdAt,
-          fallback: fallback,
           startedAt: live.startedAt ?? startedAt,
           endedAt: live.endedAt ?? endedAt,
-          name: name,
-          context: context,
-          writeVaultId: writeVaultId,
-          wroteCount: wroteCount,
-          integrations: integrations,
           title: live.title ?? title,
           activity: live.activity,
           harnessSession: live.harnessSession ?? harnessSession,
-          resumedFrom: resumedFrom,
-          mcpSkipped: mcpSkipped,
-          mcpPluginLocal: mcpPluginLocal,
+          launchNotice: null,
+          credential: null,
         );
+
+  /// This record in [crew] (null: none), as a change not yet confirmed
+  /// draws it.
+  AgentSession withCrew(SessionCrew? crew) => _copy(crew: crew);
+
+  /// This record with the label [role] (null: none).
+  AgentSession withRole(RoleRef? role) => _copy(role: role);
+
+  AgentSession _copy({
+    String? status,
+    Object? endReason = _keep,
+    Object? exitCode = _keep,
+    Object? signal = _keep,
+    int? cols,
+    int? rows,
+    String? startedAt,
+    String? endedAt,
+    String? title,
+    Object? activity = _keep,
+    String? harnessSession,
+    Object? launchNotice = _keep,
+    Object? credential = _keep,
+    Object? crew = _keep,
+    Object? role = _keep,
+  }) => AgentSession(
+    id: id,
+    hostId: hostId,
+    workspace: workspace,
+    provider: provider,
+    status: status ?? this.status,
+    endReason: endReason == _keep ? this.endReason : endReason as String?,
+    exitCode: exitCode == _keep ? this.exitCode : exitCode as int?,
+    signal: signal == _keep ? this.signal : signal as int?,
+    cols: cols ?? this.cols,
+    rows: rows ?? this.rows,
+    createdAt: createdAt,
+    fallback: fallback,
+    startedAt: startedAt ?? this.startedAt,
+    endedAt: endedAt ?? this.endedAt,
+    name: name,
+    context: context,
+    writeVaultId: writeVaultId,
+    wroteCount: wroteCount,
+    integrations: integrations,
+    launchNotice: launchNotice == _keep
+        ? this.launchNotice
+        : launchNotice as String?,
+    credential: credential == _keep ? this.credential : credential as String?,
+    title: title ?? this.title,
+    activity: activity == _keep ? this.activity : activity as String?,
+    harnessSession: harnessSession ?? this.harnessSession,
+    resumedFrom: resumedFrom,
+    mcpSkipped: mcpSkipped,
+    mcpPluginLocal: mcpPluginLocal,
+    identityState: identityState,
+    isolationState: isolationState,
+    isolationReason: isolationReason,
+    spawn: spawn,
+    crew: crew == _keep ? this.crew : crew as SessionCrew?,
+    role: role == _keep ? this.role : role as RoleRef?,
+    launchRole: launchRole,
+    model: model,
+    permissionMode: permissionMode,
+    modeRequest: modeRequest,
+    deleteRequest: deleteRequest,
+  );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
@@ -400,8 +813,159 @@ class AgentSession {
     mcpPluginLocal: [
       for (final n in j['mcp_plugin_local'] as List? ?? const []) '$n',
     ],
+    identityState: _identityState(j),
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
+    spawn: SpawnFacts.fromJson(j),
+    crew: _map(j['crew']) == null
+        ? null
+        : SessionCrew.fromJson(_map(j['crew'])!),
+    role: _map(j['role']) == null ? null : RoleRef.fromJson(_map(j['role'])!),
+    launchRole: _map(j['launch_role']) == null
+        ? null
+        : RoleRef.fromJson(_map(j['launch_role'])!),
+    model: j['model'] as String?,
+    permissionMode: permissionModeOf(j['permission_mode']),
+    modeRequest: _map(j['mode_request']) == null
+        ? null
+        : ModeRequest.fromJson(_map(j['mode_request'])!),
+    deleteRequest: _map(j['delete_request']) == null
+        ? null
+        : DeleteRequest.fromJson(_map(j['delete_request'])!),
   );
 }
+
+/// An agent's deletion waiting for the person (decision 149). The reason is
+/// the agent's own words: shown as plain data, never rendered or followed.
+class DeleteRequest {
+  const DeleteRequest({
+    required this.id,
+    required this.sessionId,
+    required this.vaultId,
+    required this.kind,
+    required this.path,
+    required this.reason,
+    required this.notes,
+    required this.size,
+    required this.paths,
+    required this.state,
+    this.noteId,
+    this.title,
+    this.modified,
+    this.decidedBy,
+  });
+
+  final String id;
+  final String sessionId;
+  final String vaultId;
+
+  /// `note` or `folder`.
+  final String kind;
+  final String? noteId;
+  final String path;
+  final String? title;
+  final String reason;
+  final int notes;
+  final int size;
+  final String? modified;
+
+  /// A folder's paths, sorted; the first ones only.
+  final List<String> paths;
+
+  /// `pending`, `deleted`, `declined`, `timed_out` or `gone`.
+  final String state;
+
+  /// The device that answered, by name.
+  final String? decidedBy;
+
+  bool get pending => state == 'pending';
+  bool get isFolder => kind == 'folder';
+
+  factory DeleteRequest.fromJson(Map<String, dynamic> j) => DeleteRequest(
+    id: j['id'] as String,
+    sessionId: j['session_id'] as String? ?? '',
+    vaultId: j['vault_id'] as String? ?? '',
+    kind: j['kind'] as String? ?? 'note',
+    noteId: j['note_id'] as String?,
+    path: j['path'] as String? ?? '',
+    title: j['title'] as String?,
+    reason: j['reason'] as String? ?? '',
+    notes: (j['notes'] as num?)?.toInt() ?? 0,
+    size: (j['size'] as num?)?.toInt() ?? 0,
+    modified: j['modified'] as String?,
+    paths: [for (final p in j['paths'] as List? ?? const []) '$p'],
+    state: j['state'] as String? ?? 'pending',
+    decidedBy: j['decided_by'] as String?,
+  );
+}
+
+/// An agent's request for auto (decision 147c). The reason is the agent's
+/// own words: shown as data, never acted on.
+class ModeRequest {
+  const ModeRequest({
+    required this.id,
+    required this.mode,
+    required this.reason,
+    required this.expiresAt,
+    required this.state,
+    this.switchedTo,
+    this.switchFailed = false,
+  });
+
+  final String id;
+  final String mode;
+  final String reason;
+  final DateTime? expiresAt;
+
+  /// `pending`, `approved`, `denied` or `expired`.
+  final String state;
+
+  /// The session the approved switch resumed into.
+  final String? switchedTo;
+  final bool switchFailed;
+
+  bool get pending => state == 'pending';
+  bool get approved => state == 'approved';
+
+  factory ModeRequest.fromJson(Map<String, dynamic> j) => ModeRequest(
+    id: j['id'] as String,
+    mode: j['mode'] as String? ?? 'auto',
+    reason: j['reason'] as String? ?? '',
+    expiresAt: DateTime.tryParse(j['expires_at'] as String? ?? ''),
+    state: j['state'] as String? ?? 'pending',
+    switchedTo: j['switched_to'] as String?,
+    switchFailed: j['switch_failed'] == true,
+  );
+}
+
+/// The permission modes each agent offers at launch (decision 146b), the
+/// agent's own first. There is never a bypass.
+const kPermissionModes = {
+  'claude-code': ['default', 'accept_edits', 'auto'],
+  'opencode': ['default', 'accept_edits'],
+};
+
+List<String> permissionModesOf(String? provider) =>
+    kPermissionModes[provider] ?? const ['default'];
+
+/// Only a mode Storm knows; anything else reads as the agent's own.
+String? permissionModeOf(Object? v) =>
+    v == 'accept_edits' || v == 'auto' ? v as String : null;
+
+/// "accept edits", "auto": a row's word for a mode; null for the default.
+String? permissionModeWord(String? mode) => switch (mode) {
+  'accept_edits' => 'accept edits',
+  'auto' => 'auto',
+  _ => null,
+};
+
+/// The launcher's and About's name for a mode. The one that asks is
+/// Manual, as Claude Code itself now calls it (decision 147a).
+String permissionModeLabel(String mode) => switch (mode) {
+  'accept_edits' => 'Accept edits',
+  'auto' => 'Auto',
+  _ => 'Manual (asks)',
+};
 
 /// Everything the launch answer says out loud: the MCP notice, then the
 /// Claude login's, unless the server already said it.

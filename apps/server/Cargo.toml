@@ -78,6 +78,10 @@ sha2 = "0.10.9"
 thiserror = "2.0.19"
 time = { version = "0.3.55", features = ["formatting", "parsing", "macros", "serde"] }
 tokio = { version = "1.53.1", features = ["full"] }
+# A child's terminal as its parent's `read_output` shows it (145g): Claude
+# Code draws by cursor position, so its bytes read as lines are its spinner.
+# Pure Rust, on the vte the runtime already uses.
+vt100 = "0.18"
 # `ReceiverStream` only — the adapter that turns the SSE feed's channel into
 # the `Stream` `Body::from_stream` wants. Already in the tree via tokio-util.
 tokio-stream = "0.1.19"

@@ -40,15 +40,81 @@ On every platform:
   `host.json.revoked` and exits 3, and stays stopped.** Enroll it again to
   bring it back; no `--force` is needed.
 
+**Session identity (Linux).** A session's Storm tools and its Resume reports
+reach the host through a local socket. On Linux the host also checks, with
+the kernel's peer credentials, that each connection comes from a live process
+inside that session; anything else is refused and logged as
+`identity_mismatch`, even with a valid handle. At start the host logs
+`bridge identity` as `verified`, or as `unavailable` with the reason — most
+often `ptrace_scope` (the kernel's `kernel.yama.ptrace_scope` must be 1 or
+more) or a kernel older than 6.5. macOS hosts report `unavailable`
+(`macos_not_gated`): the macOS check is built, but stays off until it has
+been tested with real agents on a Mac. Windows hosts report `unsupported`.
+Both keep working as before. This binds a
+connection to its session's processes. It does not isolate sessions of one
+host from each other: they share an account and its files.
+
+**Known limit: code running inside a session passes as that session.** One
+session can get code run inside another's process tree through the files
+the account shares — the agent's settings and hooks, the agent's own
+install, its global config, a workspace and its git hooks. That code is a
+descendant of the other session, so the host accepts it as that session.
+On a `verified` host this check stops a session's handle being replayed
+from outside it; it does not prove that a request comes from the session's
+agent.
+
+A host that is not `verified` — macOS, Windows, a Linux host missing a
+precondition, or a runtime too old to say — shows *"Session identity not
+verified — sessions on this host can act as each other"* on its row in
+**Settings › Hosts** and in each of its sessions' Details. That is a
+disclosure, not a restriction: every tool keeps working there. Each of an
+agent's calls to Storm or an integration is audited as `verified` or
+`unverified`, and a connection the host refused is recorded on the server as
+an `identity_mismatch` event on the session it named.
+
 **Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
 default agent › Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt.
+
+## Installing agents from the app
+
+**Settings › Agents** (beta) lists every agent on every host, with its version
+and whether you or Storm installed it, and can **Install**, **Update** and
+**Remove** Claude Code, OpenCode, Codex, Cursor and Command Code on a Linux or
+macOS host. No sudo and no terminal:
+
+- The host installs into its own folder, `agents/managed` under its state
+  directory, which comes first on its search path. A CLI you installed
+  yourself keeps working, and Storm only ever updates or removes its own
+  copies.
+- The host downloads from each vendor's own release channel and checks the
+  checksum the vendor publishes; a download that does not match is never
+  installed. Cursor publishes no checksum, and its row says so.
+- Codex and Command Code install through npm, so they need Node.js on the
+  host (Command Code needs Node 22).
+- A running session keeps the version it started with; the next one gets the
+  new one. An agent with a live session can't be removed.
+- Once a day the host checks for newer versions and updates what it
+  installed while none of that agent's sessions is running. Every install,
+  update and removal, automatic or not, is recorded on your server.
+- Signing in stays the agent's own: Claude Code from **Settings › Claude
+  login**, the others from a shell session on the host (`opencode auth
+  login`, `codex login --device-auth`, `cursor-agent login`).
+
+To turn this off for a host, or keep its versions where they are, set in
+its `runtime.toml`:
+
+```toml
+agent_install = "off"     # no installs, updates or removals from the app
+agent_updates = "manual"  # installs from the app, but no automatic updates
+```
 
 ## Linux
 
 ```sh
 sudo apt install storm-runtime
 # Workspaces are the directories under /var/lib/storm-runtime/workspaces.
+# Make one here, or later from the launcher's "New workspace…".
 sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
 # In the app: Settings › Hosts & default agent › Enroll a host. Paste the string here:
 sudo -u storm-runtime storm-runtime enroll
@@ -62,20 +128,49 @@ sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```sh
 sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
-sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
-  codex login --device-auth
 ```
 
 **Codex** keeps its login and its conversations in Storm's own Codex home,
 `agents/codex` under the host's state directory, not in `~/.codex`: Storm
-writes its own session settings there, so log it in with `CODEX_HOME` set as
-above (or `codex login --with-api-key`). Everything else in that home is
-yours: MCP servers you add with `codex mcp add` (with the same `CODEX_HOME`),
-plugins, ChatGPT apps, hooks. They load in Storm sessions beside your
-integrations, and Codex asks its own questions about them, such as whether
-to trust a workspace's own `.codex/` settings. Codex sessions run **without
-Codex's own sandbox**: it needs user namespaces, which this unit forbids, so
-the `storm-runtime` account is the boundary, as it is for every agent. Codex
+writes its own session settings there. The easiest way to log it in, on every
+platform, is a **Shell** session on the host (in the app, a new session with
+the agent **Shell**). It already runs as the host's account, in a directory
+that account can read, with the host's `PATH`:
+
+```sh
+export CODEX_HOME=/var/lib/storm-runtime/agents/codex
+mkdir -p "$CODEX_HOME" && codex login --device-auth
+```
+
+Codex refuses a `CODEX_HOME` that does not exist yet, hence the `mkdir`.
+`--device-auth` prints a link and a code, so you finish signing in on
+whichever device you are using (or use `codex login --with-api-key`). On
+macOS the Codex home is `/Library/StormRuntime/state/agents/codex`. On
+Windows, in the PowerShell a Shell session runs:
+
+```powershell
+$env:CODEX_HOME = 'C:\ProgramData\StormRuntime\state\agents\codex'
+New-Item -ItemType Directory -Force $env:CODEX_HOME | Out-Null; codex login --device-auth
+```
+
+From the host's own terminal instead:
+
+```sh
+cd / && sudo -u storm-runtime mkdir -p /var/lib/storm-runtime/agents/codex
+sudo -u storm-runtime -H env CODEX_HOME=/var/lib/storm-runtime/agents/codex \
+  "$(command -v codex)" login --device-auth
+```
+
+The `cd /` matters: Codex reads settings from the current directory, and the
+account cannot read your home.
+
+Everything else in that home is yours: MCP servers you add with `codex mcp
+add` (with the same `CODEX_HOME`), plugins, ChatGPT apps, hooks. They load in
+Storm sessions beside your integrations, and Codex asks its own questions
+about them, such as whether to trust a workspace's own `.codex/` settings.
+Codex sessions run **without Codex's own sandbox**: it needs user namespaces,
+which this unit forbids, so the `storm-runtime` account is the boundary, as it
+is for every agent. Codex
 still asks before the commands it is unsure of and before every Storm tool.
 
 Or keep one Claude login in Storm and give it to the hosts you tick:
@@ -98,6 +193,87 @@ sudo systemctl edit storm-runtime
 **The unit is sandboxed,** with one setting deliberately absent:
 `MemoryDenyWriteExecute`, under which OpenCode cannot start. The unit's
 `RestartPreventExitStatus=3` keeps a revoked host stopped.
+
+**Per-session isolation is being built, and is off.** The package ships a
+second, separate root service, `storm-runtime-isolation`, disabled. When it
+is finished, `sudo storm-runtime-isolation on` will run each session as its
+own system user in its own sandbox, so sessions on one host cannot reach each
+other. Turning it on needs systemd 255 or newer and `passt`, stops nothing by
+itself (stop the host first), creates the user pools and gives each workspace
+a group; `sudo storm-runtime-isolation off` puts every workspace back as it
+was, except setuid and setgid bits, which it never restores. Both refuse a
+workspace root that is a symbolic link or has one anywhere in its path, and
+one that overlaps a system directory (`/etc`, `/usr`, `/home` and the like),
+`/var/lib/storm-runtime-isolation`, or `/var/lib/storm-runtime` itself or its
+`agents`, `sessions`, `launch` or `home`. `on` leaves a file with more than
+one hard link, or one that neither `storm-runtime` nor a session user owns,
+as it is, and lists it. With it on, the host starts each session through the
+helper, in its own systemd unit (`storm-session-<id>.service`) under a leased pool user, with
+its own `/tmp`, `/dev/shm` and IPC, its own home, and only its own workspace
+and session files visible; it never runs one the old way. Each session also
+has its own network: it reaches the internet and resolves names through
+`pasta` (from `passt`), but not the host's loopback services nor another
+session's. If a session must reach a service on the host's loopback (a local
+model server, say), list its TCP port in `runtime.toml`:
+`isolation_host_ports = [11434]`.
+
+Each isolated session starts in a fresh home holding a copy of your agent's
+configuration: its settings, instructions, MCP servers, plugins, skills and
+your shell's start-up files. Most of it is read-only to the session, and
+nothing it changes there reaches your own configuration; edit yours, and the
+next session gets it. **Logins that refresh themselves are never copied**:
+Claude Code's own `/login`, Codex's ChatGPT login and OpenCode's OAuth
+logins would let one session rotate the tokens out from under another. An
+isolated Claude Code session needs a synced token or an API key in its env
+file; Codex an `OPENAI_API_KEY` there;
+OpenCode an API key, or one of its free models. A session with none of these
+fails with `credential_unavailable` rather than using your login. The agents
+Storm installs belong to a separate `storm-install` account while isolation
+is on: sessions can run them but not change them, and installs and updates
+from Settings › Agents run as that account.
+
+Each isolated session reaches Storm through **its own bridge socket**, in
+its own session directory, which only it and the host can open; the host
+takes a connection there only from the system user the session was leased,
+and, where the host's identity is verified, only from under the session's
+own process. Pasted images land in the same directory, readable to that
+session alone. **Before an isolated host starts any session it runs a
+self-test**: two probe sessions, the second trying to see, signal or read
+the first, connect to its sockets and local ports, and write where agents
+live. The host reports `isolation: verified` only when every attempt is
+refused; until then, or if the helper stops answering or `pasta` goes
+missing later, it reports `unavailable` with the reason, the app says so on
+the host row and in each session's Details, and **new sessions fail with
+"isolation unavailable on this host"** while running ones carry on.
+
+On an isolated host, an agent that starts another agent (agent spawning, not
+yet available) gives the new one **a workspace of its own**, made under the
+new session's user, in `/var/lib/storm-runtime-isolation/children/`, never
+inside a workspace root. In a git repository it is an independent clone of
+the commit you have checked out: only committed files, never your untracked,
+ignored or uncommitted ones, and nothing from the repository or your git
+configuration (hooks, filters, `core.fsmonitor`, includes) runs while it is
+made. Submodules and Git LFS files are not fetched. Anywhere else, the new
+session sees your workspace read-only and writes in a scratch directory.
+Two caps in `runtime.toml`, in bytes, keep clones from filling the disk:
+`child_workspace_max` (one child, default 2 GiB) and `children_max` (all of
+them, default 20 GiB); a child that would go over either does not start.
+When the new session ends its workspace is kept, and belongs to a separate
+system user, `storm-review`, which `on` creates. You read what it did, and
+**Apply** it if you want it: in a git repository its commits, and what it
+left uncommitted (as one more commit by Storm, `.gitignore` respected),
+become a new branch, `storm/<session>`, beside yours (Storm never merges, never moves an
+existing branch and never touches the branch you have checked out); anywhere
+else its files are copied into a new folder in your workspace that you name,
+never over one that exists. Storm reads or applies a workspace only for a
+session an agent started on that host, once it has ended. A kept workspace
+stays until you delete it or dismiss the sessions it came from, and
+anything under the children folder Storm has no record of is listed for you,
+never removed on its own. On a host turned on before this version, run
+`sudo storm-runtime-isolation on` again to create `storm-review`.
+Isolation is still being finished, so leave it off for now. A workspace root outside `/var/lib/storm-runtime`
+needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
+`storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 
 Remove it with `sudo apt remove storm-runtime`.
 
@@ -214,7 +390,7 @@ have, and it fails there. The token route works:
 
    Type `CLAUDE_CODE_OAUTH_TOKEN=<the token>`, then Enter, then Ctrl-D.
 3. Name that file in `runtime.toml`. Listing providers replaces the
-   defaults, so list all three:
+   defaults, so list every agent you want offered:
 
    ```toml
    [[providers]]
@@ -223,6 +399,9 @@ have, and it fails there. The token route works:
 
    [[providers]]
    id = "opencode"
+
+   [[providers]]
+   id = "codex"
 
    [[providers]]
    id = "shell"
@@ -234,7 +413,24 @@ have, and it fails there. The token route works:
 cd / && sudo -u _stormruntime -H opencode auth login
 ```
 
-Storm never stores or transmits what is in it. Also, a login running as
+**Codex** logs in most easily from a Shell session on this host (see
+[Linux](#linux) for why it has its own home):
+
+```sh
+export CODEX_HOME=/Library/StormRuntime/state/agents/codex
+mkdir -p "$CODEX_HOME" && codex login --device-auth
+```
+
+From your own terminal, name Homebrew's copy by its full path, since `sudo`
+may find one in your own home that the account cannot run:
+
+```sh
+cd / && sudo -u _stormruntime mkdir -p /Library/StormRuntime/state/agents/codex
+sudo -u _stormruntime -H env CODEX_HOME=/Library/StormRuntime/state/agents/codex \
+  /opt/homebrew/bin/codex login --device-auth
+```
+
+Storm never stores or transmits these logins. Also, a login running as
 `_stormruntime` is ended if the host restarts during it (the
 `--exclusive-account` sweep), so log in while the host is up.
 
@@ -365,7 +561,7 @@ checkout, clone or move it into the workspace root.
 
 **Never run a Runtime Host under the server's account, or under any account
 that can read or write the vaults.** Storm enforces what a session may do
-(read only, its one write vault, never delete) in the server, on the tools
+(read only, its one write vault, deletes only with your Approve) in the server, on the tools
 it offers. An agent is a process: it can also do anything its OS account can
 do to files. A host running as the server's user, or as a member of its group,
 can edit or delete vault files on disk and bypass all of that. The 2026-10-08

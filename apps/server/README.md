@@ -301,8 +301,9 @@ of the router when `mcp_writable` is off, so a read-only server does not
 advertise them at all — an agent cannot choose a tool it was never shown.
 `update_note` carries `base_version` into the same diff3 merge the Flutter
 client uses, and `create_note` stamps `source: ai` through the frontmatter
-line-splicer. There is no trash: `delete_note` removes the file at once, exactly
-as the client's delete does, and only `note_versions` still holds the text.
+line-splicer. `delete_note` moves the note to the vault's trash, as the client's delete
+does (decision 150). An agent session's `delete_note` and `delete_folder`
+wait for the person's Approve instead (decision 149, `ops::agent_delete`).
 
 **Off by default, and switched at runtime.** The setting lives in
 `state/vaults.json` beside the storage root, so it survives a restart, and the

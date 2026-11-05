@@ -16,10 +16,42 @@
 //! across an `.await`, so no request can wedge another the way a held
 //! `auth_db` guard once did.
 
+pub mod acts;
+pub mod attention;
 pub mod cache;
+pub mod cascade;
 pub mod credential;
+pub mod deletes;
+pub mod events;
 pub mod images;
+pub mod inbox;
+pub mod jobs;
+pub mod mode;
+pub mod model;
+pub mod park;
+pub mod permission;
+pub mod round;
+pub mod said;
+pub mod scope;
 pub mod store;
+pub mod wake;
+
+#[cfg(test)]
+mod acts_tests;
+#[cfg(test)]
+mod attention_tests;
+#[cfg(test)]
+mod cascade_tests;
+#[cfg(test)]
+mod events_tests;
+#[cfg(test)]
+mod inbox_tests;
+#[cfg(test)]
+mod lifecycle_tests;
+#[cfg(test)]
+mod scope_tests;
+#[cfg(test)]
+mod spawn_tests;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -31,10 +63,35 @@ use tokio::sync::{mpsc, watch};
 
 use cache::{OutputCache, Read};
 use credential::CredentialOutcome;
+pub use store::{Crew, Membership, RoleLabel};
 use store::{Fallback, LaunchRecord, McpGrant, SessionRecord, Store, WriteRecord};
 
 /// The fallback order when a host lacks the requested provider (freeze §6).
 pub const FALLBACK_ORDER: [&str; 3] = ["claude-code", "opencode", "shell"];
+
+/// The adapters that may be a spawning parent (decision 134, "candidate").
+pub const SPAWN_PROVIDERS: [&str; 3] = ["claude-code", "opencode", "codex"];
+
+/// A spawn switch a person set: the session, what it was and what it is
+/// now.
+#[derive(Debug)]
+pub struct SpawnChange {
+    pub session: SessionRecord,
+    pub was: bool,
+    pub enabled: bool,
+}
+
+/// A session's spawn switch on its view (134-10).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SpawnView {
+    pub enabled: bool,
+    /// Launched with the switch on (141e): only such a session turns it on.
+    pub launched_on: bool,
+    /// What turning it on would be refused with now (134-2's codes); absent
+    /// when it would turn on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub refused: Option<&'static str>,
+}
 pub const DEFAULT_PROVIDER: &str = "claude-code";
 /// Largest input POST (freeze §11.1).
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
@@ -56,8 +113,9 @@ pub enum Command {
         /// anyway, which is why a launch never relies on it (§6, old hosts).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         mcp: Vec<McpGrant>,
-        /// The session was started from a note: the runtime adds its fixed
-        /// opening prompt. A flag, never text, so no note data reaches argv.
+        /// The session was started from a note or with a role (decision
+        /// 138f): the runtime adds its fixed opening prompt. A flag, never
+        /// text, so no note data reaches argv.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         context: bool,
         /// The agent's own session to reopen (decision 89). Omitted on a
@@ -70,6 +128,31 @@ pub enum Command {
         /// bytes are unchanged for every other launch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider_credential: Option<String>,
+        /// The model the agent starts on (decision 145b), checked for its
+        /// agent; the host's profile checks it again and passes it as the
+        /// agent's own flag. Omitted when none is chosen.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The permission mode the person chose (decision 146b), checked for
+        /// the agent; the host maps it to the agent's own flag or config.
+        /// Omitted for `default`, so every other start's bytes are unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        permission_mode: Option<String>,
+        /// A session launched with the spawn switch on (146a): its host
+        /// pre-allows the spawn tools in the agent's own config. Omitted
+        /// otherwise.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        spawn: bool,
+        /// A resume's predecessor (decision 136e): an isolated host copies
+        /// the conversation from that session's kept files, never from
+        /// another's. Omitted on a fresh launch; an old host ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        resumed_from: Option<String>,
+        /// A spawned child's parent (134-5): the host makes the child's own
+        /// workspace from `workspace`, the parent's, before it starts it
+        /// (137-1). Omitted for every other start.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_of: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -105,6 +188,54 @@ pub enum Command {
         blake3: String,
         ext: String,
     },
+    /// Install, update or remove an agent CLI (decision 133). The host
+    /// reports on `/v1/runtime/agents/jobs/{job}`.
+    #[serde(rename = "agent.install")]
+    AgentInstall {
+        job: String,
+        agent: String,
+        op: String,
+    },
+    /// A person's look at, Apply of or delete of a child's workspace
+    /// (decision 137e, 137g). The host carries it to its isolation helper,
+    /// which checks every field, and answers on
+    /// `/v1/runtime/children/{request}`.
+    #[serde(rename = "child.workspace")]
+    ChildWorkspace {
+        request: String,
+        op: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+    /// A person's new workspace (decision 141c): a folder under the host's
+    /// first workspace root, a git repository if `git`. The host answers on
+    /// `/v1/runtime/workspaces/{request}`.
+    #[serde(rename = "workspace.create")]
+    WorkspaceCreate {
+        request: String,
+        name: String,
+        git: bool,
+    },
+    /// 145e: stop a child whose round is done, keeping its conversation
+    /// and its workspace for the message that resumes it. The host stops it
+    /// as an `end` does and reports it `parked`.
+    #[serde(rename = "park")]
+    Park { session: String },
+    /// 144c, 145d: the session has something unread, up to `mark`: events
+    /// (a parent, `kind: "events"`) or a message (a child, `"message"`). A
+    /// mark of 0 is nothing unread. Codes and a number only, never content;
+    /// the host's waker turns it into the agent's documented wake. Sent only
+    /// for an agent on `events::WAKE`.
+    #[serde(rename = "wake")]
+    Wake {
+        session: String,
+        kind: String,
+        mark: i64,
+    },
 }
 
 impl Command {
@@ -119,6 +250,11 @@ impl Command {
             Self::Refresh => "refresh",
             Self::McpMessage { .. } => "mcp.message",
             Self::TerminalImage { .. } => "terminal.image",
+            Self::AgentInstall { .. } => "agent.install",
+            Self::ChildWorkspace { .. } => "child.workspace",
+            Self::WorkspaceCreate { .. } => "workspace.create",
+            Self::Park { .. } => "park",
+            Self::Wake { .. } => "wake",
         }
     }
 
@@ -127,12 +263,17 @@ impl Command {
         match self {
             Self::Start { session, .. }
             | Self::End { session }
+            | Self::Park { session }
+            | Self::Wake { session, .. }
             | Self::Input { session, .. }
             | Self::Resize { session, .. }
             | Self::Replay { session, .. }
             | Self::McpMessage { session, .. }
             | Self::TerminalImage { session, .. } => Some(session),
-            Self::Refresh => None,
+            Self::Refresh
+            | Self::AgentInstall { .. }
+            | Self::ChildWorkspace { .. }
+            | Self::WorkspaceCreate { .. } => None,
         }
     }
 }
@@ -192,6 +333,127 @@ pub struct Capabilities {
     /// 131g), for the owner's suggestions. An old host says nothing.
     #[serde(default)]
     pub plugin_mcp_remote: Vec<PluginRemote>,
+    /// The host takes `agent.install` (decision 133). An old host does not,
+    /// and is never sent one.
+    #[serde(default)]
+    pub agent_install: bool,
+    /// The host carries `child.workspace` to its isolation helper (decision
+    /// 137-3). Only an isolated host says so; any other is never sent one.
+    #[serde(default)]
+    pub child_workspaces: bool,
+    /// The host takes `workspace.create` (decision 141c). An old host does
+    /// not, and is never sent one.
+    #[serde(default)]
+    pub workspace_create: bool,
+    /// Whether the host checks who connects for a session (decision 135d).
+    /// An old host does not say, and is `unavailable: old_host`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub identity: Identity,
+    /// Whether each session runs as its own identity, from the host's
+    /// self-test (decision 136j). The same three states and the same fail
+    /// closed reading: an old host is `unavailable: old_host`, anything this
+    /// server does not know is never `verified`.
+    #[serde(default, deserialize_with = "identity_or_unavailable")]
+    pub isolation: Isolation,
+    /// Each listed workspace's canonical directory, so WS-9 can tell two
+    /// names for one directory apart from two directories (137-2). An old
+    /// host does not say, and then any two of its workspaces may be one.
+    #[serde(default)]
+    pub workspace_paths: HashMap<String, String>,
+}
+
+/// A host's session isolation (decision 136j), shaped as [`Identity`] is.
+pub type Isolation = Identity;
+
+/// Which of a host's two self-reported labels, alike in shape but kept apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostLabel {
+    Identity,
+    Isolation,
+}
+
+impl HostLabel {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Isolation => "isolation",
+        }
+    }
+}
+
+/// A host's bridge identity (decision 135d): `verified`, `unsupported` or
+/// `unavailable`, with the mechanism and the reason as the host gave them.
+/// Only `verified` means the host checks every connection's peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub state: String,
+    pub mechanism: Option<String>,
+    pub reason: Option<String>,
+}
+
+pub const IDENTITY_VERIFIED: &str = "verified";
+pub const IDENTITY_UNSUPPORTED: &str = "unsupported";
+pub const IDENTITY_UNAVAILABLE: &str = "unavailable";
+
+impl Default for Identity {
+    fn default() -> Self {
+        Self::unavailable("old_host")
+    }
+}
+
+impl Identity {
+    fn unavailable(reason: &str) -> Self {
+        Self {
+            state: IDENTITY_UNAVAILABLE.into(),
+            mechanism: None,
+            reason: Some(reason.into()),
+        }
+    }
+
+    pub fn verified(&self) -> bool {
+        self.state == IDENTITY_VERIFIED
+    }
+
+    /// A host's words, kept short: they reach every client's host list.
+    fn bounded(mut self) -> Self {
+        for field in [&mut self.mechanism, &mut self.reason] {
+            if let Some(s) = field
+                && s.len() > IDENTITY_WORD_MAX
+            {
+                let mut end = IDENTITY_WORD_MAX;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                s.truncate(end);
+            }
+        }
+        self
+    }
+}
+
+const IDENTITY_WORD_MAX: usize = 64;
+
+/// Fails closed: a field that is null, malformed or names a state this server
+/// does not know is never `verified`, and never refuses the host's `hello`.
+fn identity_or_unavailable<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Identity, D::Error> {
+    let value = serde_json::Value::deserialize(d)?;
+    if value.is_null() {
+        return Ok(Identity::default());
+    }
+    Ok(match serde_json::from_value::<Identity>(value) {
+        Ok(i)
+            if [
+                IDENTITY_VERIFIED,
+                IDENTITY_UNSUPPORTED,
+                IDENTITY_UNAVAILABLE,
+            ]
+            .contains(&i.state.as_str()) =>
+        {
+            i
+        }
+        _ => Identity::unavailable("unrecognised"),
+    }
+    .bounded())
 }
 
 /// At most this many entries in each of a session's 131a lists.
@@ -247,6 +509,25 @@ pub struct ProviderCap {
     /// has no adapter for: granted as before.
     #[serde(default)]
     pub mcp: Option<bool>,
+    /// What the host found installed (decision 133). Each of these is absent
+    /// from an older host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `storm` (installed by the host, so removable) or `system`; absent when
+    /// not installed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub installable: Option<bool>,
+    /// Why not, when `installable` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install_blocked: Option<String>,
+    /// False for an agent whose download has no published checksum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checksum_verified: Option<bool>,
+    /// The newest version the host can install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest: Option<String>,
 }
 
 /// One session in a host's `hello`.
@@ -272,6 +553,18 @@ pub struct StatusReport {
     pub title: Option<String>,
     #[serde(default)]
     pub activity: Option<String>,
+    /// `permission_prompt` while the agent's own prompt waits for a person,
+    /// from a host whose hooks report it for the adapter (134-9).
+    #[serde(default)]
+    pub attention: Option<String>,
+    /// Where `attention` came from (144b): `provider_hook` (the default, as
+    /// the hooks of 134-9 report it) or `output_pattern`.
+    #[serde(default)]
+    pub attention_source: Option<String>,
+    /// Where `activity` came from (144b): `output_pattern` (the default, as
+    /// AM42's terminal title reports it) or `provider_hook`.
+    #[serde(default)]
+    pub activity_source: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -285,6 +578,50 @@ pub struct StatusReport {
     /// The plugins' local servers it runs outside the gateway (131a).
     #[serde(default)]
     pub mcp_plugin_local: Option<Vec<String>>,
+    /// A spawned child's own workspace as its host made it (137-1); carried
+    /// by its first `running` report only.
+    #[serde(default)]
+    pub child_workspace: Option<ChildWorkspace>,
+}
+
+/// A spawned child's own workspace (decision 137): a clone of its parent's
+/// committed `HEAD` (W2) or a scratch directory beside a read-only view of
+/// the parent's (W3). Where it is stays the host's.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildWorkspace {
+    /// `clone` or `scratch`.
+    pub mode: String,
+    /// The commit a clone starts from: the base an Apply's diff is against.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// Submodules and large-file pointers were not materialized (137b).
+    #[serde(default)]
+    pub submodules: bool,
+    #[serde(default)]
+    pub large_files: bool,
+}
+
+impl ChildWorkspace {
+    /// What a host may say, and nothing longer: a hex commit, a branch of
+    /// the clone's own characters.
+    fn valid(&self) -> bool {
+        let hex = |c: &str| matches!(c.len(), 40 | 64) && c.bytes().all(|b| b.is_ascii_hexdigit());
+        let branch = |b: &str| {
+            !b.is_empty()
+                && b.len() <= 255
+                && b.bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || b"._/-+@".contains(&c))
+        };
+        match self.mode.as_str() {
+            "clone" => {
+                self.commit.as_deref().is_some_and(hex) && self.branch.as_deref().is_none_or(branch)
+            }
+            "scratch" => self.commit.is_none() && self.branch.is_none(),
+            _ => false,
+        }
+    }
 }
 
 /// One server a session will not have (131a), by name only.
@@ -330,12 +667,58 @@ pub struct Launch {
     /// session's, whatever else the request says.
     #[serde(default)]
     pub resume_of: Option<String>,
+    /// The crew the session joins, last, or a new crew it starts (decision
+    /// 138h). A resume ignores it and joins its predecessor's crew.
+    #[serde(default)]
+    pub crew: Option<LaunchCrew>,
+    /// A Kit role note (138f): handed to the agent beside the context note,
+    /// and the session's first role label. A resume ignores it.
+    #[serde(default)]
+    pub role: Option<ContextRef>,
+    /// Launch with the spawn switch on (141e). Refused unless the session
+    /// could be offered the spawn tools: it reads Storm, runs a spawning
+    /// adapter and C0 holds.
+    #[serde(default)]
+    pub spawn: bool,
+    /// The model the agent starts on (145b): checked for its agent, else
+    /// `model_unavailable`. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The permission mode (146b): `default`, `accept_edits` or `auto`,
+    /// checked for its agent, else `permission_mode_unavailable`. There is
+    /// no bypass. A resume keeps its predecessor's.
+    #[serde(default)]
+    pub permission_mode: Option<String>,
+    /// Set only by Storm, never by a request: the mode an approved switch
+    /// (147c) resumes into, instead of the predecessor's.
+    #[serde(skip)]
+    pub switch_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContextRef {
     pub vault_id: String,
     pub note_id: String,
+}
+
+/// `{id}` joins an existing crew; `{new_name}` starts one.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum LaunchCrew {
+    Existing { id: String },
+    New { new_name: String },
+}
+
+/// The crew a launch puts its session in, once the caller has resolved it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CrewJoin {
+    /// An existing crew, as its last member.
+    Existing(String),
+    /// A new crew holding only this session.
+    New { name: String, color: String },
+    /// A resume: the crew this ended session is in, right after it. Nothing
+    /// when it is in none.
+    After(String),
 }
 
 /// What the launch resolved before the manager runs it.
@@ -348,6 +731,14 @@ pub struct LaunchMeta {
     /// What token sync would deliver to this host (decision 124), before the
     /// provider and the host's capability are known.
     pub provider_credential: Option<&'static str>,
+    /// The launch role (138f). Recorded only when the session reads Storm.
+    pub role: Option<store::Context>,
+    /// The session's first role label, written whatever the agent: the launch
+    /// role, or a resumed session's predecessor's label.
+    pub label: Option<RoleLabel>,
+    pub crew: Option<CrewJoin>,
+    /// The person's device, for a switch turned on at launch (141e).
+    pub device: Option<String>,
 }
 
 /// What a launch did about the MCP Gateway (spec §6).
@@ -394,6 +785,11 @@ pub enum AgentError {
     Timeout,
     /// The host could not stage it, and said why (502).
     HostFailed(String),
+    /// The isolation helper refused a child workspace request, or the host
+    /// could not carry it (decision 137-3). The code is the helper's.
+    ChildRefused(String),
+    /// The host did not make a workspace, and the code says why (141c).
+    WorkspaceRefused(String),
     Internal(anyhow::Error),
 }
 
@@ -414,24 +810,50 @@ struct HostLink {
     last_seen: std::time::Instant,
     /// Bumped on every inventory the host reports.
     inventory: watch::Sender<u64>,
+    /// This link has sent `hello` or an inventory. What it carried over
+    /// from an earlier link says nothing about now, so C0 waits for this.
+    reported: bool,
 }
 
 struct SessionLive {
     cache: OutputCache,
     /// `working` / `idle`, as the host last said (D15 AM42).
     activity: Option<String>,
+    /// A permission prompt or usage limit waiting, as a gated signal last
+    /// said (134-9, 144b).
+    attention: Option<String>,
+    /// `working` / `idle` from a gated idle signal only (144b), and its
+    /// source.
+    health: Option<String>,
+    health_source: Option<&'static str>,
+    /// When the current idle spell began, by [`AgentManager::clock`], and
+    /// whether its `idle_timeout` was written.
+    idle_since: Option<std::time::SystemTime>,
+    idle_fired: bool,
     /// Bumped on every output and status change. Stream readers wait on it.
     version: watch::Sender<u64>,
     /// The credential kind its `start` named (decision 124): the only one the
     /// host may pull for it.
     credential: Option<&'static str>,
+    /// 145e: Storm asked its host to park it, so its host's `parked` is
+    /// taken; any other `parked` is a stop.
+    parking: bool,
+    /// 144c: the unread mark last sent to its host, so each is sent once.
+    wake_sent: Option<(&'static str, i64)>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
+            parking: false,
+            wake_sent: None,
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
+            attention: None,
+            health: None,
+            health_source: None,
+            idle_since: None,
+            idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
         }
@@ -447,7 +869,35 @@ struct Live {
     hosts: HashMap<String, HostLink>,
     sessions: HashMap<String, SessionLive>,
     next_generation: u64,
+    /// Whether C0 held for each host when its agents were last told, so a
+    /// flip sends `list_changed` once (134-3). Kept across links.
+    c0: HashMap<String, bool>,
+    /// Cascade targets sent their `end` in this run (134-6, 134-7), with the
+    /// generation of the link it went down: one per link, so an `end` lost
+    /// with its link is sent again on the next.
+    stopping: HashMap<String, u64>,
+    /// Starts sent and not yet acknowledged by any report from their host:
+    /// the link generation each went down and when. A start is wanted only
+    /// on the link it was sent on and only for [`START_ACK_DEADLINE`]; past
+    /// either it has failed, and its host is told so if it runs it late.
+    starts: HashMap<String, PendingStart>,
 }
+
+#[derive(Debug, Clone)]
+struct PendingStart {
+    host: String,
+    generation: u64,
+    sent: std::time::Instant,
+}
+
+/// How long a `start` may wait for its host's first report of it before it
+/// has failed: a host that takes a start this late (a VM resumed, a link
+/// whose bytes sat in a send buffer) never runs it.
+pub const START_ACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// What a host is told when it asks to go on with a start Storm has given up
+/// on: it drops the start.
+pub const START_UNWANTED: &str = "start_unwanted";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct AgentConfig {
@@ -459,8 +909,29 @@ pub struct AgentManager {
     store: Mutex<Store>,
     live: Mutex<Live>,
     images: Mutex<images::Images>,
+    jobs: Mutex<jobs::Jobs>,
+    /// `child.workspace` requests waiting for their host's answer.
+    children: Mutex<HashMap<String, HostPending>>,
+    /// `workspace.create` requests waiting for their host's answer.
+    new_workspaces: Mutex<HashMap<String, HostPending>>,
     config_path: PathBuf,
     config: Mutex<AgentConfig>,
+    /// The signals taken from hosts (134-9, 144b).
+    signals: Mutex<&'static [attention::GatedSignal]>,
+    /// Added to the wall clock that times idle spells; only tests move it.
+    clock_skew: Mutex<std::time::Duration>,
+    /// The agents whose final message is a round's result (145c).
+    result_sources: Mutex<&'static [round::ResultSource]>,
+    /// The agents Storm may wake (144c, 145d).
+    wakes: Mutex<&'static [events::GatedWake]>,
+    /// The agents whose children's words are kept (145g), and those words.
+    said_gate: Mutex<&'static [&'static str]>,
+    said: Mutex<said::Said>,
+    /// Something a wake mark depends on changed outside the event queue:
+    /// a message, a read, a host's return.
+    pub(crate) wake_poke: tokio::sync::Notify,
+    /// Bumped whenever the delete requests a client lists change (149).
+    deletes_changed: watch::Sender<u64>,
 }
 
 /// How long a paste waits for its host to stage the image.
@@ -469,6 +940,47 @@ const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
 } else {
     std::time::Duration::from_secs(30)
 };
+
+/// How long a child workspace request waits for its host: an export or an
+/// Apply runs in a unit whose own limit is 600 s, and the host waits 660 s
+/// for the helper.
+const CHILD_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(700)
+};
+
+struct HostPending {
+    host: String,
+    done: tokio::sync::oneshot::Sender<std::result::Result<serde_json::Value, String>>,
+}
+
+/// How long a new workspace waits for its host: a `mkdir` and a `git init`.
+const WORKSPACE_DEADLINE: std::time::Duration = if cfg!(test) {
+    std::time::Duration::from_millis(300)
+} else {
+    std::time::Duration::from_secs(30)
+};
+
+/// What a `child.workspace` request does on the host's helper.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChildOp {
+    List,
+    Export,
+    Import,
+    Dispose,
+}
+
+impl ChildOp {
+    fn name(self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Export => "export",
+            Self::Import => "import",
+            Self::Dispose => "dispose",
+        }
+    }
+}
 
 /// A staged image: the path the client pastes.
 #[derive(Debug, Clone, Serialize)]
@@ -511,8 +1023,19 @@ impl AgentManager {
             store: Mutex::new(store),
             live: Mutex::new(Live::default()),
             images: Mutex::new(images::Images::default()),
+            jobs: Mutex::new(jobs::Jobs::default()),
+            children: Mutex::new(HashMap::new()),
+            new_workspaces: Mutex::new(HashMap::new()),
             config_path,
             config: Mutex::new(config),
+            signals: Mutex::new(attention::GATED_SIGNALS),
+            clock_skew: Mutex::new(std::time::Duration::ZERO),
+            result_sources: Mutex::new(round::RESULT_SOURCES),
+            wakes: Mutex::new(events::WAKE),
+            said_gate: Mutex::new(said::SAID),
+            said: Mutex::new(said::Said::default()),
+            wake_poke: tokio::sync::Notify::new(),
+            deletes_changed: watch::channel(0).0,
         })
     }
 
@@ -555,6 +1078,7 @@ impl AgentManager {
                 capabilities,
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
+                reported: false,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -573,9 +1097,37 @@ impl AgentManager {
             }
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
-        // Its sessions are unknown until it reconnects and reports them.
-        let _ = self.transition_host_sessions(host_id, |r| {
-            (!r.is_ended()).then(|| ("unknown".to_string(), None, None, None))
+        // A start that went down this link and was never reported has
+        // failed: the host may still read it from a stale connection, and
+        // must not run it then.
+        let unstarted: std::collections::HashSet<String> = {
+            let mut live = self.live.lock().unwrap();
+            let gone: Vec<String> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.host == host_id && p.generation == generation)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &gone {
+                live.starts.remove(id);
+            }
+            gone.into_iter().collect()
+        };
+        // Its other sessions are unknown until it reconnects and reports
+        // them. A parked child has no process there to be unsure of (145e).
+        let _ = self.transition_host_sessions(host_id, events::HOST_PROCESS, |r| {
+            if r.is_ended() || r.status == "parked" {
+                None
+            } else if unstarted.contains(&r.id) {
+                Some((
+                    "failed".to_string(),
+                    Some("start_failure".to_string()),
+                    None,
+                    None,
+                ))
+            } else {
+                Some(("unknown".to_string(), None, None, None))
+            }
         });
     }
 
@@ -676,12 +1228,91 @@ impl AgentManager {
                 "command sent"
             ),
         }
+        let start = match &command {
+            Command::Start { session, .. } => Some(session.clone()),
+            _ => None,
+        };
         let envelope = Envelope {
             cmd_seq: link.next_seq,
             command,
         };
         link.next_seq += 1;
-        link.tx.send(envelope).map_err(|_| AgentError::HostOffline)
+        let generation = link.generation;
+        link.tx
+            .send(envelope)
+            .map_err(|_| AgentError::HostOffline)?;
+        if let Some(session) = start {
+            live.starts.insert(
+                session,
+                PendingStart {
+                    host: host_id.to_string(),
+                    generation,
+                    sent: std::time::Instant::now(),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// The host reported `session`: its start, if one was waiting, arrived.
+    fn start_acknowledged(&self, session_id: &str) {
+        self.live.lock().unwrap().starts.remove(session_id);
+    }
+
+    /// A session Storm has ended that its host says is running (a start it
+    /// took late): it is ended there too. Never a status change here.
+    fn end_unwanted(&self, host_id: &str, r: &SessionRecord) {
+        tracing::warn!(
+            host = host_id,
+            session = %r.id,
+            status = %r.status,
+            "the host runs a session that has ended: ending it"
+        );
+        let _ = self.send(
+            host_id,
+            Command::End {
+                session: r.id.clone(),
+            },
+        );
+    }
+
+    /// Every start whose host has not reported it within `deadline` has
+    /// failed (`start_failure`): its host is no longer waited for, and if
+    /// it takes the start later it drops it or is told to end it. Returns
+    /// the sessions it failed.
+    pub fn expire_starts(&self, deadline: std::time::Duration) -> Vec<String> {
+        let due: Vec<(String, String)> = {
+            let mut live = self.live.lock().unwrap();
+            let due: Vec<(String, String)> = live
+                .starts
+                .iter()
+                .filter(|(_, p)| p.sent.elapsed() > deadline)
+                .map(|(id, p)| (id.clone(), p.host.clone()))
+                .collect();
+            for (id, _) in &due {
+                live.starts.remove(id);
+            }
+            due
+        };
+        let mut failed = Vec::new();
+        for (id, host) in due {
+            let Ok(Some(mut r)) = self.store.lock().unwrap().get(&id) else {
+                continue;
+            };
+            if r.is_ended() || !matches!(r.status.as_str(), "creating" | "starting" | "unknown") {
+                continue;
+            }
+            tracing::warn!(host = %host, session = %id, "its host never took the start: failed");
+            r.status = "failed".into();
+            r.end_reason = Some("start_failure".into());
+            r.ended_at.get_or_insert_with(now);
+            if self.update_record(&r, events::HOST_PROCESS).is_ok() {
+                self.forget_stop(&r);
+                self.bump(&r.id);
+                failed.push(id);
+            }
+        }
+        failed
     }
 
     /// Applies `change` to every session on `host_id`. `change` returns the
@@ -689,6 +1320,7 @@ impl AgentManager {
     fn transition_host_sessions(
         &self,
         host_id: &str,
+        source: &'static str,
         change: impl Fn(&SessionRecord) -> Option<(String, Option<String>, Option<i32>, Option<i32>)>,
     ) -> Result<()> {
         let records = self.store.lock().unwrap().for_host(host_id)?;
@@ -702,11 +1334,26 @@ impl AgentManager {
                     r.signal = signal;
                     r.ended_at.get_or_insert_with(now);
                 }
-                self.store.lock().unwrap().update(&r)?;
+                // Nothing a gated signal said holds once the link is gone
+                // (144b): the idle spell starts again from its next report.
+                if let Some(s) = self.live.lock().unwrap().sessions.get_mut(&r.id) {
+                    s.health = None;
+                    s.health_source = None;
+                    s.idle_since = None;
+                }
+                self.update_record(&r, source)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
             }
         }
         Ok(())
+    }
+
+    /// An ended session is no longer a cascade target to stop.
+    fn forget_stop(&self, r: &SessionRecord) {
+        if r.is_ended() {
+            self.live.lock().unwrap().stopping.remove(&r.id);
+        }
     }
 
     fn bump(&self, session_id: &str) {
@@ -729,11 +1376,16 @@ impl AgentManager {
             last_cmd_seq = hello.last_cmd_seq,
             "runtime host hello"
         );
+        let identity = hello.capabilities.identity.clone();
+        let isolation = hello.capabilities.isolation.clone();
         {
             let mut live = self.live.lock().unwrap();
             let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
             link.capabilities = Some(hello.capabilities);
+            link.reported = true;
         }
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
         let reported: HashMap<String, ReportedSession> = hello
             .sessions
             .into_iter()
@@ -744,10 +1396,20 @@ impl AgentManager {
         for mut r in records {
             match reported.get(&r.id) {
                 Some(rep) => {
+                    self.start_acknowledged(&r.id);
+                    if r.is_ended() && matches!(rep.status.status.as_str(), "starting" | "running")
+                    {
+                        self.end_unwanted(host_id, &r);
+                    }
                     if !r.is_ended() {
                         apply_report(&mut r, &rep.status)?;
-                        self.store.lock().unwrap().update(&r)?;
-                        self.set_activity(&r, &rep.status);
+                        // An end Storm sent before a restart (LT-6).
+                        if let Some(reason) = self.storm_stop(&r)? {
+                            r.status = "stopped".into();
+                            r.end_reason = Some(reason);
+                        }
+                        self.record_report(&r, &rep.status)?;
+                        self.forget_stop(&r);
                         self.bump(&r.id);
                     }
                     let empty = {
@@ -760,11 +1422,14 @@ impl AgentManager {
                         replay.push(r.id.clone());
                     }
                 }
-                None if !r.is_ended() && r.status != "creating" => {
+                // A parked child (145e) runs nowhere: its host has nothing
+                // to report of it.
+                None if !r.is_ended() && r.status != "creating" && r.status != "parked" => {
                     r.status = "failed".into();
                     r.end_reason = Some("lost".into());
                     r.ended_at.get_or_insert_with(now);
-                    self.store.lock().unwrap().update(&r)?;
+                    self.update_record(&r, events::HOST_PROCESS)?;
+                    self.forget_stop(&r);
                     self.bump(&r.id);
                 }
                 None => {}
@@ -773,6 +1438,8 @@ impl AgentManager {
         for session in replay {
             self.send(host_id, Command::Replay { session, from: 0 })?;
         }
+        self.reassess_spawn_gate(host_id);
+        self.forget_wakes_sent(host_id);
         Ok(())
     }
 
@@ -798,11 +1465,398 @@ impl AgentManager {
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
-        let mut live = self.live.lock().unwrap();
-        let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
-        link.capabilities = Some(capabilities);
-        link.inventory.send_modify(|v| *v += 1);
+        let identity = capabilities.identity.clone();
+        let isolation = capabilities.isolation.clone();
+        {
+            let mut live = self.live.lock().unwrap();
+            let link = live.hosts.get_mut(host_id).ok_or(AgentError::HostOffline)?;
+            link.capabilities = Some(capabilities);
+            link.reported = true;
+            link.inventory.send_modify(|v| *v += 1);
+        }
+        self.record_label(HostLabel::Identity, host_id, &identity);
+        self.record_label(HostLabel::Isolation, host_id, &isolation);
+        self.reassess_spawn_gate(host_id);
         Ok(())
+    }
+
+    /// Never fails the report it came with: the label it keeps is for while
+    /// the host is away, and the link's own copy is what calls are judged by.
+    fn record_label(&self, kind: HostLabel, host_id: &str, label: &Identity) {
+        let store = self.store.lock().unwrap();
+        let stored = store.host_label(kind, host_id);
+        if matches!(&stored, Ok(Some(known)) if known == label) {
+            return;
+        }
+        tracing::info!(
+            host = host_id,
+            state = label.state,
+            reason = label.reason.as_deref(),
+            "runtime host {}",
+            kind.name()
+        );
+        if let Err(e) = store.set_host_label(kind, host_id, label, &now()) {
+            tracing::warn!(error = %e, host = host_id, "could not record a host's {}", kind.name());
+        }
+    }
+
+    /// Reads one thing from the host's live capabilities, under the lock.
+    fn with_live<T>(&self, host_id: &str, f: impl FnOnce(&Capabilities) -> T) -> Option<T> {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .and_then(|link| link.capabilities.as_ref())
+            .map(f)
+    }
+
+    /// Whether the host's link says it checks every connection (135d), as
+    /// that link has itself reported: what a new link carried over says
+    /// nothing until then (135-2 as-built 4).
+    pub fn host_verified(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.identity.verified())
+    }
+
+    /// Whether the host's session isolation (136j, IG-7) is `verified` as
+    /// its live link says it now; fail closed. Never the stored copy, nor
+    /// what a new link carried over before it said anything itself.
+    pub fn host_isolated(&self, host_id: &str) -> bool {
+        self.live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .is_some_and(|caps| caps.isolation.verified())
+    }
+
+    /// Test-only: the host sends an inventory saying `isolation: verified`,
+    /// through the same path a real one takes.
+    #[cfg(test)]
+    pub fn verify_isolation_for_tests(&self, host_id: &str) {
+        let caps = self.host_live(host_id).capabilities;
+        if let Some(mut caps) = caps {
+            caps.isolation = Isolation {
+                state: IDENTITY_VERIFIED.into(),
+                mechanism: Some("systemd_units".into()),
+                reason: None,
+            };
+            self.inventory(host_id, caps).unwrap();
+        }
+    }
+
+    /// Test-only: the host's inventory names each child's own directory, as
+    /// a host does once it has made it (134-5), so WS-9 sees them apart.
+    #[cfg(test)]
+    pub fn report_children_for_tests(&self, host_id: &str) {
+        let children: Vec<String> = self
+            .store
+            .lock()
+            .unwrap()
+            .for_host(host_id)
+            .unwrap()
+            .into_iter()
+            .map(|r| r.workspace)
+            .filter(|w| w.starts_with("children/"))
+            .collect();
+        if let Some(mut caps) = self.host_live(host_id).capabilities {
+            for w in children {
+                caps.workspace_paths
+                    .insert(w.clone(), format!("/var/{w}/workspace"));
+            }
+            self.inventory(host_id, caps).unwrap();
+        }
+    }
+
+    /// Where a session's work began: its own workspace, or for a spawned
+    /// child, whose own is no listed workspace, its parent's (134-5). A
+    /// resumed child (C7) is a new top-level session there.
+    pub fn origin_workspace(&self, session_id: &str) -> AgentResult<String> {
+        Ok(origin_workspace(&self.store.lock().unwrap(), session_id)?)
+    }
+
+    /// C0 (134r): nothing privileged unless the host checks every
+    /// connection's identity and isolates its sessions, both as its live
+    /// link says now. The refusal names the first that fails.
+    pub fn spawn_gate(&self, host_id: &str) -> std::result::Result<(), &'static str> {
+        if !self.host_verified(host_id) {
+            return Err("identity_unverified");
+        }
+        if !self.host_isolated(host_id) {
+            return Err("isolation_unverified");
+        }
+        Ok(())
+    }
+
+    /// Whether a session is offered the spawn tools now: its switch is on
+    /// and C0 holds. Checked on every call, never cached.
+    pub fn spawn_offered(&self, session_id: &str) -> bool {
+        let (record, on) = {
+            let store = self.store.lock().unwrap();
+            (
+                store.get(session_id).ok().flatten(),
+                store.spawn_enabled(session_id).unwrap_or(false),
+            )
+        };
+        on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
+    }
+
+    /// Whether an approved switch (147c) carries a session's switch: it was
+    /// launched with it on and the person has not turned it off since.
+    pub fn spawn_carried(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store.spawn_launched(session_id).unwrap_or(false)
+            && store.spawn_enabled(session_id).unwrap_or(false)
+    }
+
+    pub fn spawn_launched(&self, session_id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .spawn_launched(session_id)
+            .unwrap_or(false)
+    }
+
+    /// Whether a session launched with the switch on has it off now, so a
+    /// spawn tool call can say how to turn it back on (141e).
+    pub fn spawn_turned_off(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store.spawn_launched(session_id).unwrap_or(false)
+            && !store.spawn_enabled(session_id).unwrap_or(true)
+    }
+
+    #[cfg(test)]
+    pub fn spawn_enabled(&self, session_id: &str) -> AgentResult<bool> {
+        Ok(self.store.lock().unwrap().spawn_enabled(session_id)?)
+    }
+
+    /// Why turning a session's switch on would be refused now, in 134-2's
+    /// order, or `None` when it would not. A shared workspace is not a
+    /// reason (decision 141a): the approval card says so instead.
+    fn enable_refusal(&self, r: &SessionRecord, store: &Store) -> Result<Option<&'static str>> {
+        if r.is_ended() {
+            return Ok(Some("session_not_live"));
+        }
+        if !SPAWN_PROVIDERS.contains(&r.provider.as_str()) {
+            return Ok(Some("provider_cannot_spawn"));
+        }
+        if let Err(code) = self.spawn_gate(&r.host_id) {
+            return Ok(Some(code));
+        }
+        if !store.spawn_launched(&r.id)? {
+            return Ok(Some("launched_without_spawn"));
+        }
+        Ok(None)
+    }
+
+    /// The spawn switch as a session's view shows it (134-10): only where
+    /// C0 holds on its host now, or the switch is already on, so a person
+    /// can still turn it off after a downgrade. Elsewhere `None`: a host
+    /// that cannot offer spawning shows nothing of it.
+    pub fn spawn_view(&self, r: &SessionRecord) -> Result<Option<SpawnView>> {
+        let store = self.store.lock().unwrap();
+        let enabled = store.spawn_enabled(&r.id)?;
+        if !enabled && self.spawn_gate(&r.host_id).is_err() {
+            return Ok(None);
+        }
+        // A switch turned on before 141e is not refused for how it launched.
+        let refused = self
+            .enable_refusal(r, &store)?
+            .filter(|code| !(enabled && *code == "launched_without_spawn"));
+        Ok(Some(SpawnView {
+            enabled,
+            launched_on: store.spawn_launched(&r.id)?,
+            refused,
+        }))
+    }
+
+    /// A person turns a session's spawn switch on or off (134c, B1, B2).
+    /// Off always succeeds and stops the session's next act at once. On
+    /// needs a live session of a spawning adapter launched with it on, and
+    /// C0; otherwise the inner error is the refusal's code.
+    pub fn set_spawn(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+    ) -> AgentResult<std::result::Result<SpawnChange, &'static str>> {
+        let r = self.get(session_id)?;
+        let mut store = self.store.lock().unwrap();
+        let was = store.spawn_enabled(session_id)?;
+        if enabled && let Some(code) = self.enable_refusal(&r, &store)? {
+            return Ok(Err(code));
+        }
+        store.set_spawn(session_id, enabled, device, &now())?;
+        Ok(Ok(SpawnChange {
+            session: r,
+            was,
+            enabled,
+        }))
+    }
+
+    /// The host's bridge identity (135d) or session isolation (136j) for
+    /// its views: what its link says now, else what it last said; `None`
+    /// for a host not heard from since that label was recorded.
+    pub fn host_label(&self, kind: HostLabel, host_id: &str) -> Result<Option<Identity>> {
+        let live = self.with_live(host_id, |caps| match kind {
+            HostLabel::Identity => caps.identity.clone(),
+            HostLabel::Isolation => caps.isolation.clone(),
+        });
+        if live.is_some() {
+            return Ok(live);
+        }
+        self.store.lock().unwrap().host_label(kind, host_id)
+    }
+
+    // ---- agent installs (decision 133) ----------------------------------
+
+    /// Fails jobs their hosts went silent on and forgets old ones. Returns
+    /// the jobs it failed, for their audit rows.
+    pub fn prune_agent_jobs(&self) -> Vec<jobs::Finished> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .prune(std::time::Instant::now(), &now())
+    }
+
+    /// Starts an install, update or removal the owner asked for, and sends it
+    /// to the host. Each refusal is a stable code.
+    pub fn start_agent_job(
+        &self,
+        host_id: &str,
+        agent: &str,
+        op: &str,
+        user_id: &str,
+    ) -> AgentResult<jobs::AgentJob> {
+        if !jobs::INSTALLABLE.contains(&agent) {
+            return Err(AgentError::BadRequest("unknown_agent".into()));
+        }
+        if !jobs::OPS.contains(&op) {
+            return Err(AgentError::BadRequest("unknown_op".into()));
+        }
+        let caps = self
+            .host_live(host_id)
+            .capabilities
+            .ok_or(AgentError::HostOffline)?;
+        if !caps.agent_install {
+            return Err(AgentError::Conflict("host_too_old".into()));
+        }
+        let cap = caps.providers.iter().find(|p| p.id == agent);
+        if op == "remove" {
+            if cap.and_then(|c| c.source.as_deref()) != Some("storm") {
+                return Err(AgentError::Conflict("not_managed".into()));
+            }
+            let in_use = self
+                .store
+                .lock()
+                .unwrap()
+                .for_host(host_id)?
+                .iter()
+                .any(|r| r.provider == agent && !r.is_ended());
+            if in_use {
+                return Err(AgentError::Conflict("agent_in_use".into()));
+            }
+        } else if let Some(c) = cap
+            && c.installable == Some(false)
+        {
+            // The host's reason, if it is one we know; never its free text.
+            let code = c
+                .install_blocked
+                .as_deref()
+                .filter(|b| jobs::BLOCKED.contains(b))
+                .unwrap_or("install_blocked");
+            return Err(AgentError::Conflict(code.into()));
+        }
+        let job = self
+            .jobs
+            .lock()
+            .unwrap()
+            .admit(
+                jobs::NewJob {
+                    host_id,
+                    agent,
+                    op,
+                    auto: false,
+                    user_id: Some(user_id),
+                    state: jobs::JobState::Queued,
+                },
+                &now(),
+            )
+            .map_err(|code| AgentError::Conflict(code.into()))?;
+        let command = Command::AgentInstall {
+            job: job.id.clone(),
+            agent: agent.into(),
+            op: op.into(),
+        };
+        if let Err(e) = self.send(host_id, command) {
+            self.jobs.lock().unwrap().remove(&job.id);
+            return Err(e);
+        }
+        Ok(job)
+    }
+
+    /// A host starting an update of its own (decision 133-5): it is already
+    /// running, so nothing is sent.
+    pub fn start_auto_job(
+        &self,
+        host_id: &str,
+        agent: &str,
+        op: &str,
+    ) -> AgentResult<jobs::AgentJob> {
+        if !jobs::INSTALLABLE.contains(&agent) {
+            return Err(AgentError::BadRequest("unknown_agent".into()));
+        }
+        if op != "update" {
+            return Err(AgentError::BadRequest("auto_update_only".into()));
+        }
+        self.jobs
+            .lock()
+            .unwrap()
+            .admit(
+                jobs::NewJob {
+                    host_id,
+                    agent,
+                    op,
+                    auto: true,
+                    user_id: None,
+                    state: jobs::JobState::Running,
+                },
+                &now(),
+            )
+            .map_err(|code| AgentError::Conflict(code.into()))
+    }
+
+    /// A job on `host_id`. Another host's job is not found.
+    pub fn agent_job(&self, host_id: &str, id: &str) -> AgentResult<jobs::AgentJob> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .get(host_id, id)
+            .ok_or(AgentError::NotFound("no such job"))
+    }
+
+    /// A host's report on its own job. Returns the job when this report
+    /// finished it.
+    pub fn report_agent_job(
+        &self,
+        host_id: &str,
+        id: &str,
+        report: jobs::Report,
+    ) -> AgentResult<Option<jobs::Finished>> {
+        self.jobs
+            .lock()
+            .unwrap()
+            .report(host_id, id, report, &now())
+            .ok_or(AgentError::NotFound("no such job"))
     }
 
     fn owned_by(&self, host_id: &str, session_id: &str) -> AgentResult<SessionRecord> {
@@ -841,7 +1895,7 @@ impl AgentManager {
         let stamp = now();
         if r.last_activity.as_deref().map(|l| &l[..19.min(l.len())]) != Some(&stamp[..19]) {
             r.last_activity = Some(stamp);
-            self.store.lock().unwrap().update(&r)?;
+            self.update_record(&r, events::HOST_PROCESS)?;
         }
         Ok(())
     }
@@ -854,12 +1908,37 @@ impl AgentManager {
         report: &StatusReport,
     ) -> AgentResult<()> {
         let mut r = self.owned_by(host_id, session_id)?;
+        self.start_acknowledged(session_id);
         if r.is_ended() {
-            // An ending is final; a late duplicate changes nothing.
+            // An ending is final; a late duplicate changes nothing. A host
+            // that runs it anyway took a start Storm gave up on: a host
+            // about to start it drops it, one that started it ends it.
+            match report.status.as_str() {
+                "starting" => return Err(AgentError::Conflict(START_UNWANTED.into())),
+                "running" => self.end_unwanted(host_id, &r),
+                _ => {}
+            }
             return Ok(());
         }
+        // 145e: `parked` only answers Storm's own `park`; anything else that
+        // says it is a stop.
+        let unasked;
+        let report = if report.status == "parked" && !self.take_parking(session_id) {
+            unasked = StatusReport {
+                status: "stopped".into(),
+                ..report.clone()
+            };
+            &unasked
+        } else {
+            report
+        };
         let before = r.status.clone();
         apply_report(&mut r, report)?;
+        if let Some(reason) = self.storm_stop(&r)? {
+            // Storm stopped it for a cascade (L-4, LT-1, LT-13).
+            r.status = "stopped".into();
+            r.end_reason = Some(reason);
+        }
         if r.status != before || r.is_ended() {
             tracing::info!(
                 host = host_id,
@@ -869,13 +1948,33 @@ impl AgentManager {
                 "session status"
             );
         }
-        self.store.lock().unwrap().update(&r)?;
+        self.record_report(&r, report)?;
+        self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
         }
-        self.set_activity(&r, report);
+        if let Some(made) = &report.child_workspace {
+            self.record_child_workspace(session_id, made)?;
+        }
         self.bump(session_id);
         Ok(())
+    }
+
+    /// A child's workspace as its host made it, kept once. Only a session
+    /// with a parent has one; anything else, or anything malformed, is
+    /// dropped.
+    fn record_child_workspace(&self, session_id: &str, made: &ChildWorkspace) -> AgentResult<()> {
+        let store = self.store.lock().unwrap();
+        if store.lineage(session_id)?.parent_session.is_none() || !made.valid() {
+            tracing::warn!(session = session_id, "a child workspace report was dropped");
+            return Ok(());
+        }
+        store.record_child_workspace(session_id, made, &now())?;
+        Ok(())
+    }
+
+    pub fn child_workspace_of(&self, session_id: &str) -> Result<Option<ChildWorkspace>> {
+        self.store.lock().unwrap().child_workspace(session_id)
     }
 
     /// The host's word on what the session will not have (131a): bounded, so
@@ -956,13 +2055,14 @@ impl AgentManager {
                 req.workspace
             )));
         }
+        // A parked child has no process (145e).
         let live_on_host = self
             .store
             .lock()
             .unwrap()
             .for_host(&req.host_id)?
             .iter()
-            .filter(|r| !r.is_ended())
+            .filter(|r| !r.is_ended() && r.status != "parked")
             .count();
         if caps.max_sessions > 0 && live_on_host >= caps.max_sessions as usize {
             return Err(AgentError::TooManySessions);
@@ -1054,8 +2154,71 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&provider.id, meta.provider_credential, &caps);
+        // 141e: the CLI lists its tools once, at start, so only a session
+        // that could be offered them then is launched with the switch on.
+        let may_spawn = reads_storm
+            && SPAWN_PROVIDERS.contains(&provider.id.as_str())
+            && self.spawn_gate(&req.host_id).is_ok();
+        // A resume never turns on more than its predecessor launched with,
+        // and an approved switch (147c) keeps the switch only if it can.
+        if let Some((old, _)) = resume.as_ref()
+            && req.spawn
+            && !self.store.lock().unwrap().spawn_launched(old)?
+        {
+            return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let spawn = req.spawn && (may_spawn || req.switch_mode.is_none());
+        if spawn && !may_spawn {
+            return Err(AgentError::Conflict("spawn_unavailable".into()));
+        }
+        let model = match resume.as_ref() {
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.model)
+                .filter(|m| model::check(&provider.id, m).is_ok()),
+            None => req.model.clone().filter(|m| !m.is_empty()),
+        };
+        if let Some(m) = &model
+            && let Err(sentence) = model::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "model_unavailable: {sentence}"
+            )));
+        }
+        let permission_mode = match resume.as_ref() {
+            Some(_) if req.switch_mode.is_some() => req.switch_mode.clone(),
+            Some((old, _)) => self
+                .store
+                .lock()
+                .unwrap()
+                .launch(old)?
+                .and_then(|l| l.permission_mode)
+                .filter(|m| permission::check(&provider.id, m).is_ok()),
+            None => req
+                .permission_mode
+                .as_deref()
+                .filter(|m| !m.is_empty())
+                .and_then(permission::stored),
+        };
+        if let Some(m) = &permission_mode
+            && let Err(sentence) = permission::check(&provider.id, m)
+        {
+            return Err(AgentError::BadRequest(format!(
+                "permission_mode_unavailable: {sentence}"
+            )));
+        }
         let launch = {
             let mut store = self.store.lock().unwrap();
+            // Checked under the same lock as the writes below, so the crew
+            // cannot be deleted between the check and the join.
+            if let Some(CrewJoin::Existing(id)) = &meta.crew
+                && store.crew(id)?.is_none()
+            {
+                return Err(AgentError::NotFound("no such crew"));
+            }
             let launch = LaunchRecord {
                 session_id: record.id.clone(),
                 name: session_name(
@@ -1064,8 +2227,12 @@ impl AgentManager {
                     &store.live_names()?,
                 ),
                 context: meta.context,
-                // A session that cannot reach Storm has nothing to write with.
+                // A session that cannot reach Storm has nothing to write with,
+                // and cannot read a role note (138g).
                 write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
+                role: meta.role.filter(|_| reads_storm),
+                model: model.clone(),
+                permission_mode: permission_mode.clone(),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -1075,6 +2242,13 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            if spawn {
+                store.record_spawn_launch(
+                    &record.id,
+                    meta.device.as_deref(),
+                    &record.created_at,
+                )?;
+            }
             let integrations: Vec<store::SessionIntegration> = grants
                 .iter()
                 .filter(|g| g.id != crate::gateway::connections::BUILTIN_ID)
@@ -1089,6 +2263,41 @@ impl AgentManager {
                 })
                 .collect();
             store.insert_integrations(&record.id, &integrations)?;
+            if let Some(label) = &meta.label {
+                store.set_role(&record.id, Some(label), &record.created_at)?;
+            }
+            match meta.crew {
+                Some(CrewJoin::Existing(id)) => {
+                    store.move_session(&record.id, Some(&id), None)?;
+                }
+                Some(CrewJoin::New { name, color }) => {
+                    let crew = Crew {
+                        id: crate::auth::identity::random_id("crw_"),
+                        name,
+                        color,
+                        order: 0,
+                    };
+                    store.create_crew(
+                        &crew,
+                        owner,
+                        std::slice::from_ref(&record.id),
+                        &record.created_at,
+                    )?;
+                }
+                Some(CrewJoin::After(old)) => {
+                    if let Some(m) = store.membership(&old)? {
+                        let members = store.members(&m.id)?;
+                        let old = store::crew_root(&store.conn, &old)?;
+                        let before = members
+                            .iter()
+                            .position(|s| *s == old)
+                            .and_then(|at| members.get(at + 1))
+                            .cloned();
+                        store.move_session(&record.id, Some(&m.id), before.as_deref())?;
+                    }
+                }
+                None => {}
+            }
             launch
         };
         let mut session_live = SessionLive::new();
@@ -1108,9 +2317,15 @@ impl AgentManager {
                 interaction: "terminal".into(),
                 terminal: req.terminal,
                 mcp: grants,
-                context: reads_storm && launch.context.is_some(),
+                // `launch.role` is only set for a session that reads Storm.
+                context: reads_storm && (launch.context.is_some() || launch.role.is_some()),
+                resumed_from: resume.as_ref().map(|(old, _)| old.clone()),
                 resume: resume.map(|(_, id)| id),
                 provider_credential: credential.kind().map(Into::into),
+                model,
+                permission_mode,
+                spawn,
+                child_of: None,
             },
         );
         let mut record = record;
@@ -1122,7 +2337,7 @@ impl AgentManager {
                 record.ended_at = Some(now());
             }
         }
-        self.store.lock().unwrap().update(&record)?;
+        self.update_record(&record, events::STORM)?;
         self.bump(&record.id);
         Ok((record, launch, outcome, credential))
     }
@@ -1162,7 +2377,7 @@ impl AgentManager {
             ));
         };
         if req.host_id != r.host_id
-            || req.workspace != r.workspace
+            || req.workspace != origin_workspace(&store, &r.id)?
             || req.provider.as_deref() != Some(r.provider.as_str())
         {
             return Err(AgentError::BadRequest(
@@ -1227,7 +2442,6 @@ impl AgentManager {
         self.store.lock().unwrap().grant(session_id, connection_id)
     }
 
-    #[cfg(test)]
     pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
         self.store.lock().unwrap().grants_of(session_id)
     }
@@ -1274,19 +2488,17 @@ impl AgentManager {
         Ok(records.into_iter().map(|r| self.with_activity(r)).collect())
     }
 
-    fn set_activity(&self, r: &SessionRecord, report: &StatusReport) {
-        let activity = report
-            .activity
-            .as_deref()
-            .filter(|a| !r.is_ended() && matches!(*a, "working" | "idle"))
-            .map(str::to_owned);
-        self.live
-            .lock()
-            .unwrap()
-            .sessions
-            .entry(r.id.clone())
-            .or_insert_with(SessionLive::new)
-            .activity = activity;
+    /// A host's report written back, with what its gated signals say and
+    /// the events it makes, in one transaction (144a).
+    fn record_report(&self, r: &SessionRecord, report: &StatusReport) -> AgentResult<()> {
+        let taken = self.take_signals(r, report);
+        let ctx = events::EventCtx {
+            source: events::HOST_PROCESS,
+            live: taken.live,
+            extra: taken.extra,
+        };
+        self.store.lock().unwrap().update_with(r, &ctx)?;
+        Ok(())
     }
 
     /// Activity is shown only while the session runs: an `unknown` session's
@@ -1319,6 +2531,11 @@ impl AgentManager {
         let r = self.get(id)?;
         if r.is_ended() {
             return Err(AgentError::Conflict("the session has ended".into()));
+        }
+        if r.status == "parked" {
+            return Err(AgentError::Conflict(
+                "the session is parked: a message from the agent that started it resumes it".into(),
+            ));
         }
         Ok(r)
     }
@@ -1422,6 +2639,136 @@ impl AgentManager {
         Ok(())
     }
 
+    /// One request to a host's isolation helper about its child workspaces
+    /// (decision 137-3), and the helper's answer. A host that does not say
+    /// it has child workspaces is never sent one.
+    pub async fn child_workspace(
+        &self,
+        host_id: &str,
+        op: ChildOp,
+        child: Option<&str>,
+        parent: Option<&str>,
+        target: Option<&str>,
+    ) -> AgentResult<serde_json::Value> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.is_some_and(|c| c.child_workspaces) {
+            return Err(AgentError::ChildRefused("isolation_off".into()));
+        }
+        let request = crate::auth::identity::random_id("cwr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.children.lock().unwrap().insert(
+            request.clone(),
+            HostPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::ChildWorkspace {
+            request: request.clone(),
+            op: op.name().into(),
+            child: child.map(str::to_string),
+            parent: parent.map(str::to_string),
+            target: target.map(str::to_string),
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(CHILD_DEADLINE, rx).await,
+            Err(e) => {
+                self.children.lock().unwrap().remove(&request);
+                return Err(e);
+            }
+        };
+        self.children.lock().unwrap().remove(&request);
+        match outcome {
+            Ok(Ok(Ok(answer))) => Ok(answer),
+            Ok(Ok(Err(code))) => Err(AgentError::ChildRefused(code)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::ChildRefused("timeout".into())),
+        }
+    }
+
+    /// A host's answer to its own `child.workspace` request, never
+    /// another's.
+    pub fn child_answered(
+        &self,
+        host_id: &str,
+        request: &str,
+        outcome: std::result::Result<serde_json::Value, String>,
+    ) -> AgentResult<()> {
+        let mut children = self.children.lock().unwrap();
+        match children.get(request) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = children.remove(request) {
+            let _ = p.done.send(outcome);
+        }
+        Ok(())
+    }
+
+    /// Asks a host to make a workspace (decision 141c) and waits for its
+    /// answer: the name, once the host has reported it in an inventory.
+    pub async fn create_workspace(
+        &self,
+        host_id: &str,
+        name: &str,
+        git: bool,
+    ) -> AgentResult<String> {
+        let live = self.host_live(host_id);
+        if !live.online {
+            return Err(AgentError::HostOffline);
+        }
+        if !live.capabilities.is_some_and(|c| c.workspace_create) {
+            return Err(AgentError::WorkspaceRefused("old_host".into()));
+        }
+        let request = crate::auth::identity::random_id("wsr_");
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.new_workspaces.lock().unwrap().insert(
+            request.clone(),
+            HostPending {
+                host: host_id.to_string(),
+                done: tx,
+            },
+        );
+        let command = Command::WorkspaceCreate {
+            request: request.clone(),
+            name: name.to_string(),
+            git,
+        };
+        let outcome = match self.send(host_id, command) {
+            Ok(()) => tokio::time::timeout(WORKSPACE_DEADLINE, rx).await,
+            Err(e) => {
+                self.new_workspaces.lock().unwrap().remove(&request);
+                return Err(e);
+            }
+        };
+        self.new_workspaces.lock().unwrap().remove(&request);
+        match outcome {
+            Ok(Ok(Ok(_))) => Ok(name.to_string()),
+            Ok(Ok(Err(code))) => Err(AgentError::WorkspaceRefused(code)),
+            Ok(Err(_)) | Err(_) => Err(AgentError::WorkspaceRefused("timeout".into())),
+        }
+    }
+
+    /// A host's answer to its own `workspace.create`, never another's.
+    pub fn workspace_created(
+        &self,
+        host_id: &str,
+        request: &str,
+        outcome: std::result::Result<serde_json::Value, String>,
+    ) -> AgentResult<()> {
+        let mut pending = self.new_workspaces.lock().unwrap();
+        match pending.get(request) {
+            Some(p) if p.host == host_id => {}
+            _ => return Err(AgentError::NotFound("no such request")),
+        }
+        if let Some(p) = pending.remove(request) {
+            let _ = p.done.send(outcome);
+        }
+        Ok(())
+    }
+
     /// Raw input. At most once: refused while the host is offline, never
     /// queued (freeze §11.3).
     pub fn input(&self, id: &str, bytes: &[u8]) -> AgentResult<()> {
@@ -1457,29 +2804,165 @@ impl AgentManager {
         )?;
         r.cols = size.cols;
         r.rows = size.rows;
-        self.store.lock().unwrap().update(&r)?;
+        self.update_record(&r, events::STORM)?;
         self.bump(id);
         Ok(())
     }
 
-    /// Asks the host to end the session. Its status changes when the host
-    /// reports it.
-    pub fn end(&self, id: &str) -> AgentResult<()> {
-        let r = self.live_record(id)?;
-        self.send(&r.host_id, Command::End { session: r.id })
+    /// Test-only: a session outside any tree dismissed, and the crew it
+    /// emptied (decision 138c).
+    #[cfg(test)]
+    pub fn dismiss(&self, id: &str) -> AgentResult<Option<Crew>> {
+        Ok(self.dismiss_session(id, false)?.crews.into_iter().next())
     }
 
-    /// Removes an ended session from the list (freeze §7.4).
-    pub fn dismiss(&self, id: &str) -> AgentResult<()> {
-        let r = self.get(id)?;
-        if !r.is_ended() {
-            return Err(AgentError::Conflict(
-                "only an ended session can be dismissed".into(),
+    // ---- crews and role labels (decision 138) ------------------------------
+    //
+    // Labels only: nothing here touches a grant, a host or how a session runs
+    // (138a). Each method checks and writes under one lock of the store, so a
+    // concurrent change cannot slip between the check and the write.
+
+    pub fn crews(&self) -> Result<Vec<Crew>> {
+        self.store.lock().unwrap().crews()
+    }
+
+    /// Test-only: a crew's stored rows, which hold only roots (145i).
+    #[cfg(test)]
+    pub fn stored_members_for_tests(&self, crew_id: &str) -> Vec<String> {
+        self.store.lock().unwrap().members(crew_id).unwrap()
+    }
+
+    /// `agent.db`'s upgrades not yet audited (145i).
+    pub fn unaudited_migrations(&self) -> Result<Vec<store::Migration>> {
+        self.store.lock().unwrap().unaudited_migrations()
+    }
+
+    pub fn mark_migration_audited(&self, name: &str, now: &str) -> Result<()> {
+        self.store.lock().unwrap().mark_migration_audited(name, now)
+    }
+
+    pub fn membership(&self, session_id: &str) -> Result<Option<Membership>> {
+        self.store.lock().unwrap().membership(session_id)
+    }
+
+    pub fn role_of(&self, session_id: &str) -> Result<Option<RoleLabel>> {
+        self.store.lock().unwrap().role_of(session_id)
+    }
+
+    /// A new crew, last in the list, holding `sessions` in that order. Returns
+    /// it and any crews the move emptied.
+    pub fn create_crew(
+        &self,
+        owner_user_id: &str,
+        name: &str,
+        color: &str,
+        sessions: &[String],
+    ) -> AgentResult<(Crew, Vec<Crew>)> {
+        let mut store = self.store.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for s in sessions {
+            if !seen.insert(s.as_str()) {
+                return Err(AgentError::BadRequest(format!("{s} is listed twice")));
+            }
+            if store.get(s)?.is_none() {
+                return Err(AgentError::NotFound("no such session"));
+            }
+        }
+        let crew = Crew {
+            id: crate::auth::identity::random_id("crw_"),
+            name: name.to_string(),
+            color: color.to_string(),
+            order: 0,
+        };
+        Ok(store.create_crew(&crew, owner_user_id, sessions, &now())?)
+    }
+
+    pub fn update_crew(
+        &self,
+        id: &str,
+        name: Option<&str>,
+        color: Option<&str>,
+    ) -> AgentResult<Crew> {
+        let store = self.store.lock().unwrap();
+        if store.crew(id)?.is_none() {
+            return Err(AgentError::NotFound("no such crew"));
+        }
+        store.update_crew(id, name, color)?;
+        Ok(store.crew(id)?.expect("just updated"))
+    }
+
+    /// `ids` must name every crew exactly once.
+    pub fn reorder_crews(&self, ids: &[String]) -> AgentResult<()> {
+        let mut store = self.store.lock().unwrap();
+        let all: Vec<String> = store.crews()?.into_iter().map(|c| c.id).collect();
+        if !is_permutation(ids, &all) {
+            return Err(AgentError::BadRequest(
+                "the order must name every crew exactly once".into(),
             ));
         }
-        self.store.lock().unwrap().delete(id)?;
-        self.live.lock().unwrap().sessions.remove(id);
+        Ok(store.reorder_crews(ids)?)
+    }
+
+    /// `sessions` must name every member of the crew exactly once.
+    pub fn reorder_members(&self, crew_id: &str, sessions: &[String]) -> AgentResult<()> {
+        let mut store = self.store.lock().unwrap();
+        if store.crew(crew_id)?.is_none() {
+            return Err(AgentError::NotFound("no such crew"));
+        }
+        if !is_permutation(sessions, &store.members(crew_id)?) {
+            return Err(AgentError::BadRequest(
+                "the order must name every member exactly once".into(),
+            ));
+        }
+        Ok(store.reorder_members(crew_id, sessions)?)
+    }
+
+    /// Deletes a crew; its sessions stay, outside any crew.
+    pub fn delete_crew(&self, id: &str) -> AgentResult<()> {
+        if !self.store.lock().unwrap().delete_crew(id)? {
+            return Err(AgentError::NotFound("no such crew"));
+        }
         Ok(())
+    }
+
+    /// Joins, moves within or leaves a crew. Returns the crew this emptied.
+    pub fn move_session(
+        &self,
+        session_id: &str,
+        crew_id: Option<&str>,
+        before: Option<&str>,
+    ) -> AgentResult<Option<Crew>> {
+        let mut store = self.store.lock().unwrap();
+        if store.get(session_id)?.is_none() {
+            return Err(AgentError::NotFound("no such session"));
+        }
+        if let Some(crew_id) = crew_id {
+            if store.crew(crew_id)?.is_none() {
+                return Err(AgentError::NotFound("no such crew"));
+            }
+            if let Some(before) = before
+                && (before == session_id || !store.members(crew_id)?.iter().any(|m| m == before))
+            {
+                return Err(AgentError::BadRequest(
+                    "`before` must be another member of that crew".into(),
+                ));
+            }
+        } else if before.is_some() {
+            return Err(AgentError::BadRequest(
+                "`before` needs a crew to place the session in".into(),
+            ));
+        }
+        Ok(store.move_session(session_id, crew_id, before)?)
+    }
+
+    /// Sets or clears a session's role label. The caller has checked that the
+    /// note is a role note.
+    pub fn set_role(&self, session_id: &str, role: Option<&RoleLabel>) -> AgentResult<()> {
+        let store = self.store.lock().unwrap();
+        if store.get(session_id)?.is_none() {
+            return Err(AgentError::NotFound("no such session"));
+        }
+        Ok(store.set_role(session_id, role, &now())?)
     }
 
     /// Fails live and dismisses ended sessions not owned by `account_id`.
@@ -1498,7 +2981,8 @@ impl AgentManager {
                 r.status = "failed".into();
                 r.end_reason = Some("owner_removed".into());
                 r.ended_at.get_or_insert_with(now);
-                self.store.lock().unwrap().update(&r)?;
+                self.update_record(&r, events::STORM)?;
+                self.forget_stop(&r);
                 self.bump(&r.id);
                 failed += 1;
             }
@@ -1511,7 +2995,7 @@ impl AgentManager {
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
-        self.transition_host_sessions(host_id, |r| {
+        self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (
                     "failed".to_string(),
@@ -1545,10 +3029,105 @@ impl AgentManager {
             None => Read::Ahead,
         }
     }
+
+    /// 145g: the last `lines` lines of a session's terminal, from the
+    /// output cache, as its screen and scrollback show them. Empty when
+    /// nothing is cached.
+    pub fn output_tail(&self, id: &str, lines: usize) -> Vec<String> {
+        let bytes = {
+            let live = self.live.lock().unwrap();
+            let Some(s) = live.sessions.get(id) else {
+                return Vec::new();
+            };
+            let from = s
+                .cache
+                .floor()
+                .max(s.cache.end().saturating_sub(TAIL_BYTES));
+            match s.cache.read(from, TAIL_BYTES as usize) {
+                Read::Data { bytes, .. } => bytes,
+                _ => return Vec::new(),
+            }
+        };
+        let size = match self.store.lock().unwrap().get(id) {
+            Ok(Some(r)) => (r.cols, r.rows),
+            _ => (80, 24),
+        };
+        screen_lines(&bytes, size, lines)
+    }
+}
+
+/// How much of the end of a session's output a peek reads (145g).
+const TAIL_BYTES: u64 = 256 * 1024;
+/// The longest line a peek returns, in characters.
+const TAIL_LINE_CHARS: usize = 1000;
+/// The scrollback a peek renders into, above the screen.
+const TAIL_SCROLLBACK: usize = 1000;
+
+/// Terminal output as the person would see it at `(cols, rows)`: run
+/// through a terminal emulator, then its scrollback and screen as plain
+/// lines, the last `n` non-empty ones kept, each bounded. A TUI that draws
+/// by cursor position (Claude Code) reads as its screen, not as every
+/// spinner frame it drew.
+pub fn screen_lines(bytes: &[u8], (cols, rows): (u16, u16), n: usize) -> Vec<String> {
+    let (cols, rows) = (cols.clamp(20, 500), rows.clamp(5, 300));
+    let size = |n: u16| std::num::NonZeroU16::new(n).expect("clamped above 0");
+    let mut parser = vt100::Parser::new(size(rows), size(cols), TAIL_SCROLLBACK);
+    parser.process(bytes);
+    parser.screen_mut().set_scrollback(usize::MAX);
+    let back = parser.screen().scrollback();
+    let rows = usize::from(rows);
+    let mut all: Vec<String> = vec![String::new(); back + rows];
+    let mut offset = back;
+    loop {
+        parser.screen_mut().set_scrollback(offset);
+        for (r, row) in parser.screen().rows(0, cols).enumerate() {
+            all[back - offset + r] = row;
+        }
+        if offset == 0 {
+            break;
+        }
+        offset = offset.saturating_sub(rows);
+    }
+    let kept: Vec<String> = all
+        .into_iter()
+        .map(|l| {
+            l.trim_end()
+                .chars()
+                .take(TAIL_LINE_CHARS)
+                .collect::<String>()
+        })
+        .filter(|l| !l.is_empty())
+        .collect();
+    kept[kept.len().saturating_sub(n)..].to_vec()
 }
 
 /// A session's name: the slug of its context note's title, else
 /// `{workspace}-{n}`; a name a live session holds gets `-2`, `-3`, ….
+/// Whether `given` names each of `all` exactly once.
+fn is_permutation(given: &[String], all: &[String]) -> bool {
+    let mut a: Vec<&str> = given.iter().map(String::as_str).collect();
+    let mut b: Vec<&str> = all.iter().map(String::as_str).collect();
+    a.sort_unstable();
+    b.sort_unstable();
+    a == b
+}
+
+fn origin_workspace(store: &store::Store, session_id: &str) -> Result<String> {
+    let mut id = session_id.to_string();
+    // Lineage is at most C4's depth; the bound only guards a cycle no
+    // trigger allows.
+    for _ in 0..=store::spawn::MAX_DEPTH {
+        match store.lineage(&id)?.parent_session {
+            Some(parent) => id = parent,
+            None => break,
+        }
+    }
+    store
+        .get(&id)?
+        .map(|r| r.workspace)
+        .ok_or_else(|| anyhow::anyhow!("no session {id}"))
+}
+
 pub fn session_name(title: Option<&str>, workspace: &str, live: &[String]) -> String {
     let taken = |name: &str| live.iter().any(|l| l == name);
     match title.map(slug).filter(|s| !s.is_empty()) {
@@ -1606,6 +3185,8 @@ fn apply_report(r: &mut SessionRecord, report: &StatusReport) -> AgentResult<()>
             }
             r.status = report.status.clone();
         }
+        // 145e: its process stopped at Storm's word; the session goes on.
+        "parked" => r.status = "parked".into(),
         "completed" | "failed" | "stopped" => {
             r.status = report.status.clone();
             r.exit_code = report.exit_code;
@@ -1682,6 +3263,12 @@ mod tests {
                     interactions: vec!["terminal".into()],
                     available: *available,
                     mcp: None,
+                    version: None,
+                    source: None,
+                    installable: None,
+                    install_blocked: None,
+                    checksum_verified: None,
+                    latest: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -1693,6 +3280,15 @@ mod tests {
             resume: vec!["claude-code".into(), "opencode".into()],
             provider_credentials: Vec::new(),
             plugin_mcp_remote: Vec::new(),
+            agent_install: false,
+            child_workspaces: false,
+            workspace_create: false,
+            identity: Identity::default(),
+            isolation: Isolation::default(),
+            workspace_paths: [("storm", "/work/storm"), ("site", "/work/site")]
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect(),
         }
     }
 
@@ -1755,6 +3351,12 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
+                spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             meta,
             grants,
@@ -1775,6 +3377,12 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: Some(old.id.clone()),
+                crew: None,
+                role: None,
+                spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -1793,9 +3401,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -1852,6 +3464,8 @@ mod tests {
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert_eq!(wire["type"], "start");
         assert_eq!(wire["resume"], uuid);
+        // 136e: the host is told whose conversation it is.
+        assert_eq!(wire["resumed_from"], first.id.as_str());
         assert_eq!(
             m.get(&second.id).unwrap().resumed_from.as_deref(),
             Some(first.id.as_str())
@@ -1922,9 +3536,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -1977,6 +3595,107 @@ mod tests {
         );
         let wire = serde_json::to_value(rx.try_recv().unwrap()).unwrap();
         assert!(wire.get("context").is_none(), "{wire}");
+    }
+
+    #[test]
+    fn a_launch_role_sets_the_start_flag_only_for_a_session_that_reads_storm() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true), ("shell", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let role = store::Context {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+            title: "Storm Reviewer".into(),
+        };
+        let label = RoleLabel {
+            vault_id: "vlt_KIT".into(),
+            note_id: "note-reviewer".into(),
+        };
+        let with_role = || LaunchMeta {
+            role: Some(role.clone()),
+            label: Some(label.clone()),
+            ..LaunchMeta::default()
+        };
+        let start = |rx: &mut mpsc::UnboundedReceiver<Envelope>| {
+            serde_json::to_value(rx.try_recv().unwrap()).unwrap()
+        };
+
+        // Reads Storm: the role is the launch's, and the host is told.
+        let (r, launch, _) = launch_meta(&m, None, offered(), with_role()).unwrap();
+        assert_eq!(launch.role, Some(role.clone()));
+        assert_eq!(start(&mut rx)["context"], true);
+        assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        assert_eq!(
+            m.launch_of(&r.id).unwrap().unwrap().role,
+            Some(role.clone())
+        );
+
+        // Neither a note nor a role: no flag.
+        launch_meta(&m, None, offered(), LaunchMeta::default()).unwrap();
+        assert!(start(&mut rx).get("context").is_none());
+
+        // Without Storm's connection the role is a label only (138g).
+        for (provider, grants) in [(Some("shell"), offered()), (None, offered()[1..].to_vec())] {
+            let (r, launch, _) = launch_meta(&m, provider, grants, with_role()).unwrap();
+            assert_eq!(launch.role, None, "{provider:?}");
+            let wire = start(&mut rx);
+            assert!(wire.get("context").is_none(), "{wire}");
+            assert_eq!(m.role_of(&r.id).unwrap(), Some(label.clone()));
+        }
+    }
+
+    #[test]
+    fn a_launch_joins_or_starts_its_crew_before_start_and_refuses_an_unknown_one() {
+        let (m, _d) = manager();
+        let mut c = caps(&[("claude-code", true)]);
+        c.max_sessions = 8;
+        let mut rx = online(&m, "hst_A", c);
+        let crew = |join: CrewJoin| LaunchMeta {
+            crew: Some(join),
+            ..LaunchMeta::default()
+        };
+        let (a, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::New {
+                name: "Release".into(),
+                color: "sage".into(),
+            }),
+        )
+        .unwrap();
+        let made = m.membership(&a.id).unwrap().unwrap();
+        assert_eq!(m.crews().unwrap()[0].name, "Release");
+        let (b, _, _) = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing(made.id.clone())),
+        )
+        .unwrap();
+        // A resume's join lands right after its predecessor.
+        let (c, _, _) =
+            launch_meta(&m, None, offered(), crew(CrewJoin::After(a.id.clone()))).unwrap();
+        assert_eq!(
+            m.store.lock().unwrap().members(&made.id).unwrap(),
+            [a.id.clone(), c.id.clone(), b.id.clone()]
+        );
+        while rx.try_recv().is_ok() {}
+
+        let before = m.list().unwrap().len();
+        let refused = launch_meta(
+            &m,
+            None,
+            offered(),
+            crew(CrewJoin::Existing("crw_NOPE".into())),
+        );
+        assert!(
+            matches!(refused, Err(AgentError::NotFound(_))),
+            "{refused:?}"
+        );
+        assert_eq!(m.list().unwrap().len(), before, "no session is left behind");
+        assert!(rx.try_recv().is_err(), "nothing was sent to the host");
     }
 
     #[test]
@@ -2333,6 +4052,12 @@ mod tests {
                     write_vault_id: None,
                     allow_vault_writes: false,
                     resume_of: None,
+                    crew: None,
+                    role: None,
+                    spawn: false,
+                    model: None,
+                    permission_mode: None,
+                    switch_mode: None,
                 },
                 meta,
                 offered(),
@@ -2437,9 +4162,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2454,9 +4183,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2476,9 +4209,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2531,6 +4268,12 @@ mod tests {
                 write_vault_id: None,
                 allow_vault_writes: false,
                 resume_of: None,
+                crew: None,
+                role: None,
+                spawn: false,
+                model: None,
+                permission_mode: None,
+                switch_mode: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -2562,9 +4305,13 @@ mod tests {
                 signal: None,
                 title: None,
                 activity: None,
+                attention: None,
+                attention_source: None,
+                activity_source: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
+                child_workspace: None,
             },
         )
         .unwrap();
@@ -2575,6 +4322,146 @@ mod tests {
         assert!(matches!(
             launch(&m, Some("shell")),
             Err(AgentError::HostOffline)
+        ));
+    }
+
+    fn sent_starts(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut starts = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::Start { session, .. } = e.command {
+                starts.push(session);
+            }
+        }
+        starts
+    }
+
+    fn sent_ends(rx: &mut mpsc::UnboundedReceiver<Envelope>) -> Vec<String> {
+        let mut ends = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            if let Command::End { session } = e.command {
+                ends.push(session);
+            }
+        }
+        ends
+    }
+
+    fn hello_with(m: &AgentManager, sessions: Vec<ReportedSession>) {
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: caps(&[("shell", true)]),
+                sessions,
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+    }
+
+    /// Round 4's stray launch: a launch refused because its host is offline
+    /// leaves nothing behind. No session is written, and when the host
+    /// comes back nothing is started on it.
+    #[test]
+    fn a_launch_refused_offline_is_never_kept_or_replayed() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let (generation, _) = {
+            let live = m.live.lock().unwrap();
+            (live.hosts["hst_A"].generation, ())
+        };
+        m.disconnect_host("hst_A", generation);
+        drop(rx);
+        assert!(matches!(
+            launch(&m, Some("shell")),
+            Err(AgentError::HostOffline)
+        ));
+        assert!(m.list().unwrap().is_empty(), "nothing written");
+        assert!(m.live.lock().unwrap().starts.is_empty());
+
+        let (_, rx2) = m.connect_host("hst_A");
+        rx = rx2;
+        hello_with(&m, vec![]);
+        assert!(sent_starts(&mut rx).is_empty(), "nothing replayed");
+        assert!(m.list().unwrap().is_empty());
+    }
+
+    /// A start whose link went down before its host reported it has failed:
+    /// it is never left `unknown` to come back as running. When the host
+    /// asks to go on with it, it is told `start_unwanted`; a host that ran
+    /// it anyway is told to end it, and the session stays failed. A start
+    /// the host reported is `unknown` across a drop, as before.
+    #[test]
+    fn a_start_its_link_lost_before_the_host_took_it_never_runs_later() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let generation = m.live.lock().unwrap().hosts["hst_A"].generation;
+        let late = launch(&m, Some("shell")).unwrap();
+        let taken = launch(&m, Some("shell")).unwrap();
+        assert_eq!(sent_starts(&mut rx), [late.id.clone(), taken.id.clone()]);
+        m.host_status("hst_A", &taken.id, &report("running", None, None))
+            .unwrap();
+
+        m.disconnect_host("hst_A", generation);
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&taken.id).unwrap().status, "unknown");
+
+        let (_, mut rx) = m.connect_host("hst_A");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(code)) if code == START_UNWANTED
+        ));
+        assert!(sent_ends(&mut rx).is_empty());
+        m.host_status("hst_A", &late.id, &report("running", None, None))
+            .unwrap();
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        hello_with(
+            &m,
+            vec![
+                ReportedSession {
+                    id: late.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+                ReportedSession {
+                    id: taken.id.clone(),
+                    status: report("running", None, None),
+                    output_end_offset: 0,
+                },
+            ],
+        );
+        assert_eq!(sent_ends(&mut rx), std::slice::from_ref(&late.id));
+        assert_eq!(m.get(&late.id).unwrap().status, "failed");
+        assert_eq!(m.get(&taken.id).unwrap().status, "running");
+    }
+
+    /// A start no report has answered within the deadline has failed, on a
+    /// link that is still up too; one its host answered is left alone.
+    #[test]
+    fn a_start_never_answered_in_time_fails() {
+        let (m, _d) = manager();
+        let mut rx = online(&m, "hst_A", caps(&[("shell", true)]));
+        let late = launch(&m, Some("shell")).unwrap();
+        let answered = launch(&m, Some("shell")).unwrap();
+        sent_starts(&mut rx);
+        m.host_status("hst_A", &answered.id, &report("starting", None, None))
+            .unwrap();
+        assert!(m.expire_starts(START_ACK_DEADLINE).is_empty());
+        assert_eq!(
+            m.expire_starts(std::time::Duration::ZERO),
+            std::slice::from_ref(&late.id)
+        );
+        let r = m.get(&late.id).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.end_reason.as_deref()),
+            ("failed", Some("start_failure"))
+        );
+        assert_eq!(m.get(&answered.id).unwrap().status, "starting");
+        assert!(matches!(
+            m.host_status("hst_A", &late.id, &report("starting", None, None)),
+            Err(AgentError::Conflict(_))
         ));
     }
 
@@ -2602,6 +4489,8 @@ mod tests {
             },
         );
         let r = launch(&m, Some("shell")).unwrap();
+        m.host_status("hst_A", &r.id, &report("running", None, None))
+            .unwrap();
         let _old = online(&m, "hst_OLD", caps(&[("shell", true)]));
 
         assert!(m.reap_silent(std::time::Duration::from_secs(60)).is_empty());
@@ -2684,9 +4573,13 @@ mod tests {
                         signal: None,
                         title: None,
                         activity: None,
+                        attention: None,
+                        attention_source: None,
+                        activity_source: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
+                        child_workspace: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -2717,9 +4610,13 @@ mod tests {
             end_reason: None,
             title: title.map(str::to_owned),
             activity: activity.map(str::to_owned),
+            attention: None,
+            attention_source: None,
+            activity_source: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
+            child_workspace: None,
             signal: None,
         }
     }
@@ -2850,6 +4747,30 @@ mod tests {
         let m = AgentManager::open(d.path()).unwrap();
         let old = m.get("ags_OLD").unwrap();
         assert_eq!((old.status.as_str(), old.title), ("completed", None));
+        drop(m);
+        AgentManager::open(d.path()).unwrap();
+    }
+
+    /// 138f is additive: a launch row from before it reads back with no role.
+    #[test]
+    fn an_old_launch_table_gains_the_role_columns() {
+        let d = tempdir::TempDir::new("storm-agent").unwrap();
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let conn = rusqlite::Connection::open(d.path().join("agent/agent.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE session_launch (
+                 session_id TEXT PRIMARY KEY, name TEXT NOT NULL, context_vault_id TEXT,
+                 context_note_id TEXT, context_title TEXT, write_vault_id TEXT,
+                 created_at TEXT NOT NULL);
+             INSERT INTO session_launch VALUES ('ags_OLD', 'plan', 'vlt_P', 'note-plan',
+                 'Plan', NULL, '2026-10-01T00:00:00Z');",
+        )
+        .unwrap();
+        drop(conn);
+        let m = AgentManager::open(d.path()).unwrap();
+        let old = m.launch_of("ags_OLD").unwrap().unwrap();
+        assert_eq!(old.role, None);
+        assert_eq!(old.context.unwrap().title, "Plan");
         drop(m);
         AgentManager::open(d.path()).unwrap();
     }
@@ -3019,9 +4940,13 @@ mod tests {
                     signal: None,
                     title: None,
                     activity: None,
+                    attention: None,
+                    attention_source: None,
+                    activity_source: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
+                    child_workspace: None,
                 },
             )
             .unwrap();
@@ -3068,7 +4993,7 @@ mod tests {
         assert_eq!(v["type"], "terminal.replay");
 
         // A native `start` is byte for byte what it was before token sync.
-        let start = |provider_credential: Option<String>| Envelope {
+        let start_with = |provider_credential: Option<String>, model: Option<String>| Envelope {
             cmd_seq: 1,
             command: Command::Start {
                 session: "ags_X".into(),
@@ -3080,8 +5005,14 @@ mod tests {
                 context: false,
                 resume: None,
                 provider_credential,
+                model,
+                permission_mode: None,
+                spawn: false,
+                resumed_from: None,
+                child_of: None,
             },
         };
+        let start = |provider_credential| start_with(provider_credential, None);
         assert_eq!(
             serde_json::to_string(&start(None)).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24}}"#
@@ -3091,5 +5022,452 @@ mod tests {
             serde_json::to_string(&synced).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"provider_credential":"claude_subscription_token"}"#
         );
+        // 145b: a model, when one is chosen, and no asks (145a).
+        assert_eq!(
+            serde_json::to_string(&start_with(None, Some("haiku".into()))).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"model":"haiku"}"#
+        );
+        // 146: a mode other than default, and a spawning parent's flag.
+        let mut moded = start(None);
+        if let Command::Start {
+            permission_mode,
+            spawn,
+            ..
+        } = &mut moded.command
+        {
+            *permission_mode = Some("accept_edits".into());
+            *spawn = true;
+        }
+        assert_eq!(
+            serde_json::to_string(&moded).unwrap(),
+            r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"permission_mode":"accept_edits","spawn":true}"#
+        );
+    }
+
+    #[test]
+    fn a_providers_install_fields_round_trip_and_are_absent_when_unknown() {
+        let old = r#"{"id":"codex","kind":"cli","interactions":["terminal"],"available":true,"mcp":null}"#;
+        let cap: ProviderCap = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            (cap.version.clone(), cap.source.clone(), cap.latest.clone()),
+            (None, None, None)
+        );
+        let wire = serde_json::to_value(&cap).unwrap();
+        for key in [
+            "version",
+            "source",
+            "installable",
+            "install_blocked",
+            "checksum_verified",
+            "latest",
+        ] {
+            assert!(wire.get(key).is_none(), "{key}: {wire}");
+        }
+
+        let new = serde_json::json!({
+            "id": "cursor", "kind": "cli", "interactions": ["terminal"], "available": true,
+            "version": "2026.10.1", "source": "storm", "installable": true,
+            "checksum_verified": false, "latest": "2026.10.2",
+        });
+        let cap: ProviderCap = serde_json::from_value(new.clone()).unwrap();
+        assert_eq!(cap.source.as_deref(), Some("storm"));
+        assert_eq!(cap.checksum_verified, Some(false));
+        assert_eq!(
+            serde_json::from_value::<ProviderCap>(serde_json::to_value(&cap).unwrap()).unwrap(),
+            cap
+        );
+        let mut expected = new;
+        expected["mcp"] = serde_json::Value::Null;
+        assert_eq!(serde_json::to_value(&cap).unwrap(), expected);
+
+        let blocked: ProviderCap = serde_json::from_value(serde_json::json!({
+            "id": "codex", "kind": "cli", "available": false,
+            "installable": false, "install_blocked": "no_node",
+        }))
+        .unwrap();
+        assert_eq!(blocked.install_blocked.as_deref(), Some("no_node"));
+
+        let caps: Capabilities = serde_json::from_str("{}").unwrap();
+        assert!(!caps.agent_install);
+        let caps: Capabilities = serde_json::from_str(r#"{"agent_install":true}"#).unwrap();
+        assert!(caps.agent_install);
+    }
+
+    /// G-135-3 on the server (135d): a host that says nothing, says null,
+    /// or says something this server does not know is never `verified`,
+    /// and its `hello` is still taken.
+    #[test]
+    fn identity_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Identity {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .identity
+        };
+        let old_host = Identity {
+            state: "unavailable".into(),
+            mechanism: None,
+            reason: Some("old_host".into()),
+        };
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"identity": null})), old_host);
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "trusted", "mechanism": "so_peerpidfd"}),
+            serde_json::json!("verified"),
+            serde_json::json!({"mechanism": "so_peerpidfd"}),
+        ] {
+            let i = parse(serde_json::json!({"identity": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"identity":
+            {"state": "verified", "mechanism": "so_peerpidfd", "reason": null}}));
+        assert!(v.verified());
+        assert_eq!(v.mechanism.as_deref(), Some("so_peerpidfd"));
+        let w =
+            parse(serde_json::json!({"identity": {"state": "unsupported", "reason": "windows"}}));
+        assert_eq!(
+            (w.state.as_str(), w.reason.as_deref()),
+            ("unsupported", Some("windows"))
+        );
+        let long = parse(serde_json::json!({"identity":
+            {"state": "unavailable", "reason": "é".repeat(100)}}));
+        assert!(long.reason.unwrap().len() <= IDENTITY_WORD_MAX);
+        // Always all three keys on the way out, as the host sends them.
+        assert_eq!(
+            serde_json::to_value(&old_host).unwrap(),
+            serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"})
+        );
+    }
+
+    #[test]
+    fn a_hosts_identity_is_kept_while_it_is_away_and_its_link_wins() {
+        let (m, _d) = manager();
+        assert_eq!(m.host_label(HostLabel::Identity, "hst_A").unwrap(), None);
+        let verified = Identity {
+            state: "verified".into(),
+            mechanism: Some("so_peerpidfd".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    identity: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.inventory("hst_A", caps(&[("shell", true)])).unwrap();
+        assert!(!m.host_verified("hst_A"));
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(Identity::default())
+        );
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                identity: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert!(!m.host_verified("hst_A"), "an offline host checks nothing");
+        assert_eq!(
+            m.host_label(HostLabel::Identity, "hst_A").unwrap(),
+            Some(verified)
+        );
+    }
+
+    /// 135-2 as-built 4: a new link carries the old one's capabilities over,
+    /// but its identity says nothing until the link itself reports.
+    #[test]
+    fn a_copied_identity_is_not_verified_until_the_link_reports() {
+        let (m, _d) = manager();
+        let verified = Capabilities {
+            identity: Identity {
+                state: "verified".into(),
+                mechanism: Some("so_peerpidfd".into()),
+                reason: None,
+            },
+            ..caps(&[("shell", true)])
+        };
+        m.connect_host("hst_A");
+        m.inventory("hst_A", verified.clone()).unwrap();
+        assert!(m.host_verified("hst_A"));
+        m.connect_host("hst_A");
+        assert!(
+            m.host_live("hst_A").capabilities.is_some(),
+            "carried over for views"
+        );
+        assert!(!m.host_verified("hst_A"));
+        m.inventory("hst_A", verified).unwrap();
+        assert!(m.host_verified("hst_A"));
+    }
+
+    /// 136j, read as 135-2 reads `identity`: an old host is
+    /// `unavailable: old_host`, and nothing this server does not know is
+    /// ever `verified`.
+    #[test]
+    fn isolation_fails_closed_and_an_old_host_is_unavailable_old_host() {
+        let parse = |caps: serde_json::Value| -> Isolation {
+            serde_json::from_value::<Capabilities>(caps)
+                .unwrap()
+                .isolation
+        };
+        let old_host = Isolation::default();
+        assert_eq!(old_host.reason.as_deref(), Some("old_host"));
+        assert_eq!(parse(serde_json::json!({})), old_host);
+        assert_eq!(parse(serde_json::json!({"isolation": null})), old_host);
+        // `identity` verified says nothing about isolation.
+        assert_eq!(
+            parse(serde_json::json!({"identity": {"state": "verified"}})),
+            old_host
+        );
+        for odd in [
+            serde_json::json!({"state": "VERIFIED"}),
+            serde_json::json!({"state": "isolated", "mechanism": "systemd_units"}),
+            serde_json::json!(true),
+            serde_json::json!({"mechanism": "systemd_units"}),
+        ] {
+            let i = parse(serde_json::json!({"isolation": odd}));
+            assert!(!i.verified(), "{odd}");
+            assert_eq!(i.reason.as_deref(), Some("unrecognised"), "{odd}");
+        }
+        let v = parse(serde_json::json!({"isolation":
+            {"state": "verified", "mechanism": "systemd_units", "reason": null}}));
+        assert!(v.verified());
+        let off = parse(serde_json::json!({"isolation":
+            {"state": "unavailable", "mechanism": null, "reason": "off"}}));
+        assert_eq!(off.reason.as_deref(), Some("off"));
+    }
+
+    /// `host_isolated` is the live link's alone: verified only while a
+    /// link says so, never offline whatever was stored, and the
+    /// stored copy only labels views.
+    #[test]
+    fn a_hosts_isolation_is_its_live_links_and_kept_for_its_views() {
+        let (m, _d) = manager();
+        assert!(!m.host_isolated("hst_A"));
+        assert_eq!(m.host_label(HostLabel::Isolation, "hst_A").unwrap(), None);
+        let verified = Isolation {
+            state: "verified".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: None,
+        };
+        let (generation, _rx) = m.connect_host("hst_A");
+        m.hello(
+            "hst_A",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: verified.clone(),
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(m.host_isolated("hst_A"));
+        assert!(!m.host_verified("hst_A"), "identity is its own");
+        // A downgrade in the inventory takes effect at once.
+        let down = Isolation {
+            state: "unavailable".into(),
+            mechanism: Some("systemd_units".into()),
+            reason: Some("no_passt".into()),
+        };
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: down.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        assert!(!m.host_isolated("hst_A"));
+        m.inventory(
+            "hst_A",
+            Capabilities {
+                isolation: verified.clone(),
+                ..caps(&[("shell", true)])
+            },
+        )
+        .unwrap();
+        m.disconnect_host("hst_A", generation);
+        assert!(
+            !m.host_isolated("hst_A"),
+            "an offline host isolates nothing new"
+        );
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_A").unwrap(),
+            Some(verified)
+        );
+        let (_g, _rx) = m.connect_host("hst_B");
+        m.hello(
+            "hst_B",
+            Hello {
+                capabilities: Capabilities {
+                    isolation: Isolation {
+                        state: "unsupported".into(),
+                        mechanism: None,
+                        reason: Some("windows".into()),
+                    },
+                    ..caps(&[("shell", true)])
+                },
+                sessions: Vec::new(),
+                last_cmd_seq: 0,
+            },
+        )
+        .unwrap();
+        assert!(!m.host_isolated("hst_B"));
+        assert_eq!(
+            m.host_label(HostLabel::Isolation, "hst_B")
+                .unwrap()
+                .unwrap()
+                .state,
+            IDENTITY_UNSUPPORTED
+        );
+    }
+
+    #[test]
+    fn agent_install_is_its_wire_command() {
+        let e = Envelope {
+            cmd_seq: 3,
+            command: Command::AgentInstall {
+                job: "agj_X".into(),
+                agent: "codex".into(),
+                op: "install".into(),
+            },
+        };
+        assert_eq!(
+            serde_json::to_string(&e).unwrap(),
+            r#"{"cmd_seq":3,"type":"agent.install","job":"agj_X","agent":"codex","op":"install"}"#
+        );
+        assert_eq!(e.command.session(), None);
+    }
+
+    fn install_caps() -> Capabilities {
+        let mut c = caps(&[("claude-code", true), ("shell", true)]);
+        c.agent_install = true;
+        let cap = |id: &str, source: Option<&str>, installable: bool, blocked: Option<&str>| {
+            ProviderCap {
+                id: id.into(),
+                kind: "cli".into(),
+                interactions: vec!["terminal".into()],
+                available: source.is_some(),
+                mcp: None,
+                version: source.map(|_| "1.0.0".into()),
+                source: source.map(Into::into),
+                installable: Some(installable),
+                install_blocked: blocked.map(Into::into),
+                checksum_verified: None,
+                latest: None,
+            }
+        };
+        c.providers[0].source = Some("storm".into());
+        c.providers.extend([
+            cap("codex", None, false, Some("no_node")),
+            cap("cursor", None, false, Some("we were told: rm -rf")),
+            cap("opencode", Some("system"), true, None),
+            cap("command-code", Some("storm"), true, None),
+        ]);
+        c
+    }
+
+    fn refusal(r: AgentResult<jobs::AgentJob>) -> String {
+        match r {
+            Err(AgentError::Conflict(c)) | Err(AgentError::BadRequest(c)) => c,
+            Err(AgentError::HostOffline) => "offline".into(),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_install_is_refused_with_its_code() {
+        let (m, _dir) = manager();
+        let start = |agent: &str, op: &str| m.start_agent_job("hst_A", agent, op, "usr_1");
+        assert_eq!(refusal(start("codex", "install")), "offline");
+
+        let mut old = install_caps();
+        old.agent_install = false;
+        let _link = online(&m, "hst_A", old);
+        assert_eq!(refusal(start("codex", "install")), "host_too_old");
+
+        m.inventory("hst_A", install_caps()).unwrap();
+        assert_eq!(refusal(start("vim", "install")), "unknown_agent");
+        assert_eq!(refusal(start("shell", "install")), "unknown_agent");
+        assert_eq!(refusal(start("codex", "upgrade")), "unknown_op");
+        assert_eq!(refusal(start("codex", "install")), "no_node");
+        assert_eq!(refusal(start("codex", "update")), "no_node");
+        assert_eq!(refusal(start("cursor", "install")), "install_blocked");
+        assert_eq!(refusal(start("opencode", "remove")), "not_managed");
+        assert_eq!(refusal(start("codex", "remove")), "not_managed");
+
+        launch(&m, Some("claude-code")).unwrap();
+        assert_eq!(refusal(start("claude-code", "remove")), "agent_in_use");
+
+        start("command-code", "update").unwrap();
+        assert_eq!(refusal(start("command-code", "remove")), "busy");
+        start("opencode", "update").unwrap();
+        assert_eq!(refusal(start("claude-code", "update")), "busy");
+    }
+
+    #[test]
+    fn a_job_goes_to_its_host_and_only_that_host_reports_it() {
+        let (m, _dir) = manager();
+        let mut link = online(&m, "hst_A", install_caps());
+        let _other = online(&m, "h2", install_caps());
+        let job = m
+            .start_agent_job("hst_A", "command-code", "remove", "usr_1")
+            .unwrap();
+        assert_eq!(job.state, jobs::JobState::Queued);
+        assert!(job.id.starts_with("agj_"));
+        let sent = link.try_recv().unwrap();
+        assert_eq!(
+            sent.command,
+            Command::AgentInstall {
+                job: job.id.clone(),
+                agent: "command-code".into(),
+                op: "remove".into(),
+            }
+        );
+        assert!(matches!(
+            m.agent_job("h2", &job.id),
+            Err(AgentError::NotFound(_))
+        ));
+        assert!(matches!(
+            m.report_agent_job("h2", &job.id, jobs::Report::Done(None)),
+            Err(AgentError::NotFound(_))
+        ));
+        let done = m
+            .report_agent_job("hst_A", &job.id, jobs::Report::Done(None))
+            .unwrap()
+            .unwrap();
+        assert_eq!(done.user_id.as_deref(), Some("usr_1"));
+        assert_eq!(
+            m.agent_job("hst_A", &job.id).unwrap().state,
+            jobs::JobState::Done
+        );
+    }
+
+    #[test]
+    fn a_job_that_could_not_be_sent_is_not_kept() {
+        let (m, _dir) = manager();
+        let link = online(&m, "h1", install_caps());
+        drop(link);
+        assert_eq!(
+            refusal(m.start_agent_job("h1", "opencode", "update", "usr_1")),
+            "offline"
+        );
+        // Nothing holds the agent busy.
+        let _link = online(&m, "h1", install_caps());
+        m.start_agent_job("h1", "opencode", "update", "usr_1")
+            .unwrap();
     }
 }

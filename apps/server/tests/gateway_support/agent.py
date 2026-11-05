@@ -13,7 +13,9 @@ configuration it would give the real CLI (AM32). It:
 - answers `plugin list --json` as Claude Code would, with one plugin that
   declares a remote server (decision 131);
 - sends whatever the suite drops into `inbox/` (`NNN.json`:
-  `{"slug": …, "message": …}`) to that bridge, in order.
+  `{"slug": …, "message": …}`) to that bridge, in order;
+- runs `{"run": <shell command>, "input": …, "out": <file>}` as its own
+  child, the way Claude Code runs a hook, and writes the result to `out`.
 
 It never sees a credential: there is none to see. A test fixture, not Storm.
 """
@@ -78,6 +80,15 @@ def main():
                 item = json.load(open(path))
             except json.JSONDecodeError:
                 continue  # still being written
+            if "run" in item:
+                ran = subprocess.run(item["run"], shell=True, capture_output=True,
+                                     input=item.get("input", "").encode())
+                with open(os.path.join(HERE, item["out"] + ".tmp"), "w") as f:
+                    json.dump({"returncode": ran.returncode, "stdout": ran.stdout.decode(),
+                               "stderr": ran.stderr.decode()}, f)
+                os.rename(os.path.join(HERE, item["out"] + ".tmp"), os.path.join(HERE, item["out"]))
+                os.rename(path, path + ".sent")
+                continue
             p = bridges.get(item["slug"])
             if p:
                 p.stdin.write((json.dumps(item["message"]) + "\n").encode())

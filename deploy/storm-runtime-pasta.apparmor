@@ -1,0 +1,17 @@
+# Storm's AppArmor profile for pasta in a session's network unit
+# (decision 140). The distribution's own profile for pasta is made for
+# rootless containers and allows none of the unit's paths. This one attaches
+# only by name, through the unit's AppArmorProfile=, never by path, so pasta
+# run anywhere else keeps its own profile.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile storm-runtime-pasta flags=(attach_disconnected) {
+  include if exists <abstractions/pasta>
+
+  /usr/bin/pasta{,.avx2} mr,
+  /run/storm-session-*-net/ r,
+  /run/storm-session-*-net/netns r,
+  /run/storm-session-*-net/pasta.pid rw,
+}

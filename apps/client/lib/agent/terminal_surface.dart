@@ -157,7 +157,51 @@ class StormTerminal {
   };
 
   void escape() => key(TerminalKey.escape);
-  void tab() => key(TerminalKey.tab);
+
+  /// Tab, or Shift+Tab with the sticky Shift armed: always the legacy bytes
+  /// (decision 147b), which every agent reads, whatever keyboard protocol
+  /// it asked for.
+  void tab() {
+    final shift = stickyShift;
+    stickyCtrl = false;
+    stickyShift = false;
+    _send(shift ? backTabBytes : tabBytes);
+  }
+
+  /// Shift+Tab, `ESC [ Z`: Claude Code's mode switch.
+  void backTab() {
+    stickyCtrl = false;
+    stickyShift = false;
+    _send(backTabBytes);
+  }
+
+  static const tabBytes = '\t';
+  static const backTabBytes = '\x1b[Z';
+
+  void _send(String data) =>
+      onInput?.call(Uint8List.fromList(utf8.encode(data)));
+
+  /// How long after an Escape a Tab leaves the terminal instead of reaching
+  /// the agent (decision 147b, WCAG 2.1.2).
+  static const escapeThenTab = Duration(milliseconds: 1500);
+
+  static final _modifiers = {
+    LogicalKeyboardKey.shiftLeft,
+    LogicalKeyboardKey.shiftRight,
+    LogicalKeyboardKey.controlLeft,
+    LogicalKeyboardKey.controlRight,
+    LogicalKeyboardKey.altLeft,
+    LogicalKeyboardKey.altRight,
+    LogicalKeyboardKey.metaLeft,
+    LogicalKeyboardKey.metaRight,
+  };
+
+  /// When the last key typed was an Escape, else null.
+  DateTime? _escapedAt;
+
+  /// The clock, for tests.
+  @visibleForTesting
+  DateTime Function() clock = DateTime.now;
   void up() => key(TerminalKey.arrowUp);
   void down() => key(TerminalKey.arrowDown);
   void left() => key(TerminalKey.arrowLeft);
@@ -200,9 +244,22 @@ class StormTerminal {
     return null;
   }
 
-  KeyEventResult _onKeyEvent(FocusNode _, KeyEvent event) {
-    if (event is KeyUpEvent) return KeyEventResult.ignored;
+  KeyEventResult _onKeyEvent(FocusNode node, KeyEvent event) {
     final keys = HardwareKeyboard.instance;
+    if (event.logicalKey == LogicalKeyboardKey.tab &&
+        !keys.isControlPressed &&
+        !keys.isAltPressed &&
+        !keys.isMetaPressed) {
+      return _onTab(node, event, shift: keys.isShiftPressed);
+    }
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    // A modifier on its own is no next key: Escape, then Shift+Tab, leaves
+    // backwards.
+    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
+      _escapedAt = event.logicalKey == LogicalKeyboardKey.escape
+          ? clock()
+          : null;
+    }
     final chord = pasteChord(
       event.logicalKey,
       shift: keys.isShiftPressed,
@@ -240,6 +297,32 @@ class StormTerminal {
     );
     if (bytes == null) return KeyEventResult.ignored;
     _emit(bytes);
+    return KeyEventResult.handled;
+  }
+
+  /// **Tab and Shift+Tab belong to the agent while the terminal has focus**
+  /// (decision 147b): Shift+Tab is Claude Code's mode switch, Tab its
+  /// completion. The terminal sends them itself, before xterm2 or Flutter's
+  /// focus traversal sees them, on every platform. The way out is Escape,
+  /// then Tab (or Shift+Tab) within [escapeThenTab]: the Escape still
+  /// reaches the agent, and the Tab moves focus instead of being sent.
+  KeyEventResult _onTab(FocusNode node, KeyEvent event, {required bool shift}) {
+    if (event is KeyUpEvent) return KeyEventResult.handled;
+    final escaped = _escapedAt;
+    _escapedAt = null;
+    if (event is KeyDownEvent &&
+        escaped != null &&
+        clock().difference(escaped) <= escapeThenTab) {
+      if (shift) {
+        node.previousFocus();
+      } else {
+        node.nextFocus();
+      }
+      return KeyEventResult.handled;
+    }
+    stickyCtrl = false;
+    stickyShift = false;
+    _send(shift ? backTabBytes : tabBytes);
     return KeyEventResult.handled;
   }
 
@@ -412,27 +495,41 @@ class StormTerminalView extends StatelessWidget {
         for (final activator in stormGlobalShortcuts().keys)
           activator: const DoNothingAndStopPropagationIntent(),
       },
-      child: LayoutBuilder(
-        builder: (context, box) => TerminalView(
-          terminal._terminal,
-          focusNode: focusNode,
-          autofocus: autofocus,
-          readOnly: readOnly,
-          contentInsertionConfiguration: readOnly ? null : terminal._insertion,
-          // Asked first; whatever it leaves goes to xterm2's own encoding.
-          onKeyEvent: readOnly ? null : terminal._onKeyEvent,
-          theme: theme,
-          padding: evenTerminalPadding(base, box.maxHeight, cell),
-          textStyle: style,
-          keyboardAppearance: Brightness.dark,
-          // Agents redraw on resize; the terminal follows its box.
-          autoResize: true,
-          onTapUp: (details, cell) => _onTapUp(context, details, cell),
+      // Tab is the agent's here, so the way out is said (147b, WCAG 2.1.2).
+      child: Semantics(
+        container: true,
+        label: readOnly ? terminalReadOnlyLabel : terminalLabel,
+        child: LayoutBuilder(
+          builder: (context, box) => TerminalView(
+            terminal._terminal,
+            focusNode: focusNode,
+            autofocus: autofocus,
+            readOnly: readOnly,
+            contentInsertionConfiguration: readOnly
+                ? null
+                : terminal._insertion,
+            // Asked first; whatever it leaves goes to xterm2's own encoding.
+            onKeyEvent: readOnly ? null : terminal._onKeyEvent,
+            theme: theme,
+            padding: evenTerminalPadding(base, box.maxHeight, cell),
+            textStyle: style,
+            keyboardAppearance: Brightness.dark,
+            // Agents redraw on resize; the terminal follows its box.
+            autoResize: true,
+            onTapUp: (details, cell) => _onTapUp(context, details, cell),
+          ),
         ),
       ),
     );
   }
 }
+
+/// The terminal's accessible name: what it is, and how keyboard focus
+/// leaves it, since Tab and Shift+Tab go to the agent (decision 147b).
+const terminalLabel =
+    'Agent terminal. Tab and Shift+Tab go to the agent. To leave, press '
+    'Escape, then Tab.';
+const terminalReadOnlyLabel = 'Agent terminal, ended.';
 
 /// xterm2's link modifier: Cmd on macOS, Ctrl elsewhere.
 bool _linkModifierPressed() => switch (defaultTargetPlatform) {

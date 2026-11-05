@@ -10,11 +10,14 @@ import '../ui/states.dart';
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
 import '../ui/widgets.dart' show PopoverItem;
+import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'claude_login_api.dart';
+import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
+import 'spawn_models.dart' show kSpawnProviders;
 
 typedef NoteRef = ({String vaultId, String noteId});
 
@@ -29,6 +32,7 @@ class LaunchPrefill {
     this.contextTitle,
     this.writes,
     this.writeVaultId,
+    this.crewId,
   });
 
   /// Everything the session was launched with. Its host may be offline by
@@ -54,6 +58,9 @@ class LaunchPrefill {
   /// Null: on when Settings allows agent writes (handoff §4.5).
   final bool? writes;
   final String? writeVaultId;
+
+  /// The crew to join: preset when opened from a crew page (138h).
+  final String? crewId;
 }
 
 /// The New session launcher: a centred modal at desk width, a bottom sheet
@@ -85,8 +92,27 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   NoteRef? _context;
   bool? _writes;
   String? _writeVault;
+
+  /// [_noCrew], [_newCrew] or a crew's id (138h).
+  late String _crew = widget.prefill.crewId ?? _noCrew;
+  RoleNote? _role;
+
+  /// "Allow this session to start agents" (141e): off by default.
+  bool _spawn = false;
+
+  /// The model (decision 145b): empty is the agent's own default.
+  final _model = TextEditingController();
+
+  /// The permission mode (decision 146b), one [permissionModesOf] offers.
+  String _mode = 'default';
   String? _error;
   bool _busy = false;
+
+  @override
+  void dispose() {
+    _model.dispose();
+    super.dispose();
+  }
 
   List<AgentHost> get _online => [
     for (final h in widget.hosts)
@@ -169,13 +195,28 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ws.firstOrNull?.name;
       });
     } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
+      if (mounted) setState(() => _error = launchErrorText(e));
     } finally {
       api.dispose();
     }
   }
 
-  Future<void> _launch(bool writes, String? writeVault) async {
+  /// "New workspace…" (decision 141c): made on the host, then picked.
+  Future<void> _newWorkspace(AgentHost host) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => NewWorkspaceDialog(host: host),
+    );
+    if (name == null || !mounted || _host?.id != host.id) return;
+    setState(() => _error = null);
+    await _pickHost(host, keepWorkspace: name);
+  }
+
+  Future<void> _launch(
+    bool writes,
+    String? writeVault,
+    LaunchCrew? crew,
+  ) async {
     final host = _host, ws = _workspace;
     if (host == null || ws == null) return;
     final api = agentApi(ref);
@@ -195,6 +236,14 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         rows: (size.height / 20).clamp(12, 80).floor(),
         context: _context,
         writeVaultId: writes && _reachesStorm ? writeVault : null,
+        crew: crew,
+        // An agent that can't read Storm notes is never sent one (138g).
+        role: _role == null || !_reachesStorm
+            ? null
+            : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+        spawn: _spawn && _spawnable,
+        model: modelHint(_provider) == null ? null : _model.text.trim(),
+        permissionMode: _permissionMode,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -206,7 +255,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       }
       Navigator.of(context).pop(session);
     } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
+      if (mounted) setState(() => _error = launchErrorText(e));
     } finally {
       api.dispose();
       if (mounted) setState(() => _busy = false);
@@ -222,6 +271,17 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           .firstOrNull
           ?.reachesStorm ??
       _provider != 'shell';
+
+  /// The launch can carry the switch: the host passes C0 and the agent can
+  /// start agents with Storm's tools (141e). The server decides.
+  bool get _spawnable =>
+      (_host?.offersSpawning ?? false) &&
+      kSpawnProviders.contains(_provider) &&
+      _reachesStorm;
+
+  /// The chosen mode while the agent offers it, else its own.
+  String get _permissionMode =>
+      permissionModesOf(_provider).contains(_mode) ? _mode : 'default';
 
   @override
   Widget build(BuildContext context) {
@@ -244,6 +304,32 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     final hostName = host?.name ?? 'the host';
     final claudeLogin = ref.watch(claudeLoginSummaryProvider).value;
     final ctx = _context;
+    final crews = ref.watch(agentOverviewProvider).value?.crews;
+    final roles = ref.watch(rolesProvider).value ?? const <RoleNote>[];
+    final ctxNote = ctx == null
+        ? null
+        : ref.watch(agentNoteProvider(ctx)).value;
+    final ctxTitle = ctx == null
+        ? null
+        : widget.prefill.context == ctx && widget.prefill.contextTitle != null
+        ? widget.prefill.contextTitle
+        : ctxNote == null
+        ? null
+        : noteTitleOf(ctxNote.meta.title, ctxNote.meta.path);
+    final crewOptions = [
+      const _Opt(_noCrew, 'None'),
+      if (ctxTitle != null && ctxTitle.isNotEmpty)
+        _Opt(_newCrew, 'New crew: $ctxTitle'),
+      for (final c in crews ?? const <Crew>[]) _Opt(c.id, c.name),
+    ];
+    // A preset crew that has since gone, or a new crew without its note.
+    final crewKey = crewOptions.any((o) => o.value == _crew) ? _crew : _noCrew;
+    final crew = switch (crewKey) {
+      _noCrew => null,
+      _newCrew => LaunchCrew.create(ctxTitle!),
+      final id => LaunchCrew.join(id),
+    };
+    final roleKey = _role == null ? _noRole : _roleKey(_role!);
 
     final children = <Widget>[
       Row(
@@ -288,7 +374,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             key: const Key('launcher-host'),
             label: 'Host',
             value: host?.id,
-            options: [for (final h in _online) (h.id, '${h.name} · online')],
+            options: [
+              for (final h in _online) _Opt(h.id, '${h.name} · online'),
+            ],
             onChanged: (id) => _pickHost(_online.firstWhere((h) => h.id == id)),
           ),
         ),
@@ -303,14 +391,18 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 : 'No workspaces on this host',
             options: [
               for (final w in _workspaces ?? const <AgentWorkspace>[])
-                (
+                _Opt(
                   w.name,
                   w.liveSessions > 0
                       ? '${w.name}  (another session is working here)'
                       : w.name,
                 ),
+              if (host != null && _workspaces != null)
+                const _Opt(_newWorkspaceKey, 'New workspace…'),
             ],
-            onChanged: (w) => setState(() => _workspace = w),
+            onChanged: (w) => w == _newWorkspaceKey
+                ? _newWorkspace(host!)
+                : setState(() => _workspace = w),
           ),
         ),
         if (host != null && _workspaces != null && _workspaces!.isEmpty)
@@ -324,17 +416,59 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             options: [
               for (final p in host?.providers ?? const <ProviderCap>[])
                 if (p.available)
-                  (p.id, p.id == _default ? '${p.label} · default' : p.label),
+                  _Opt(
+                    p.id,
+                    p.id == _default ? '${p.label} · default' : p.label,
+                  ),
             ],
             disabled: [
               for (final p in host?.providers ?? const <ProviderCap>[])
                 if (!p.available) '${p.label} (not installed)',
             ],
-            onChanged: (p) => setState(() => _provider = _chosen = p),
+            onChanged: (p) => setState(() {
+              _provider = _chosen = p;
+              _mode = _permissionMode;
+            }),
           ),
         ),
         if (_provider == 'claude-code' && host != null && claudeLogin != null)
           _ClaudeLoginLine(login: claudeLogin, host: host),
+        if (modelHint(_provider) case final hint?)
+          _Field(
+            label: 'Model',
+            under: _Under(key: const Key('launcher-model-hint'), text: hint),
+            child: TextField(
+              key: const Key('launcher-model'),
+              controller: _model,
+              autocorrect: false,
+              enableSuggestions: false,
+              maxLength: 128,
+              style: TextStyle(
+                fontFamily: StormTokens.monoFamily,
+                fontSize: t.codeSize,
+                color: t.text,
+              ),
+              decoration: const InputDecoration(
+                isDense: true,
+                counterText: '',
+                hintText: 'the agent’s default',
+              ),
+            ),
+          ),
+        if (permissionModesOf(_provider).length > 1)
+          _Field(
+            label: 'Permission mode',
+            child: _Select<String>(
+              key: const Key('launcher-permission-mode'),
+              label: 'Permission mode',
+              value: _permissionMode,
+              options: [
+                for (final m in permissionModesOf(_provider))
+                  _Opt(m, permissionModeLabel(m)),
+              ],
+              onChanged: (m) => setState(() => _mode = m),
+            ),
+          ),
         if (!shell)
           _Field(
             label: 'Can write to',
@@ -357,7 +491,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                           label: 'Write vault',
                           value: writeVault,
                           compact: true,
-                          options: [for (final v in vaults) (v.id, v.name)],
+                          options: [for (final v in vaults) _Opt(v.id, v.name)],
                           onChanged: (v) => setState(() => _writeVault = v),
                         )
                       : Text(
@@ -369,6 +503,87 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                             color: t.text3,
                           ),
                         ),
+                ),
+              ],
+            ),
+          ),
+        if (crews != null)
+          _Field(
+            label: 'Crew',
+            child: _Select<String>(
+              key: const Key('launcher-crew'),
+              label: 'Crew',
+              value: crewKey,
+              options: crewOptions,
+              onChanged: (c) => setState(() => _crew = c),
+            ),
+          ),
+        _Field(
+          label: 'Role',
+          under: shell
+              ? _Under(
+                  key: const Key('launcher-role-label-only'),
+                  text:
+                      "${providerLabel(_provider ?? '')} can't read Storm notes. "
+                      'A role would only be a label.',
+                )
+              : writes && _role != null
+              ? const _Under(
+                  key: Key('launcher-role-may-not-write'),
+                  text: 'The role note may tell the agent not to write.',
+                )
+              : null,
+          child: _Select<String>(
+            key: const Key('launcher-role'),
+            label: 'Role',
+            value: shell ? _noRole : roleKey,
+            enabled: !shell,
+            options: [
+              const _Opt(_noRole, 'None'),
+              for (final r in roles) _Opt(_roleKey(r), r.title),
+            ],
+            menu: (popover, room) => RoleMenu(
+              roles: roles,
+              room: room,
+              selected: _role == null
+                  ? null
+                  : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+              onPick: (r) =>
+                  Navigator.of(popover).pop(r == null ? _noRole : _roleKey(r)),
+            ),
+            onChanged: (k) => setState(
+              () => _role = roles.where((r) => _roleKey(r) == k).firstOrNull,
+            ),
+          ),
+        ),
+        if (_spawnable)
+          _Field(
+            label: 'Agents',
+            under: const _Under(
+              key: Key('launcher-spawn-note'),
+              text:
+                  'Its starts, messages and ends act at once and show in About.',
+            ),
+            child: Row(
+              children: [
+                Semantics(
+                  label: 'Allow this session to start agents',
+                  child: StormToggle(
+                    key: const Key('launcher-spawn'),
+                    value: _spawn,
+                    onChanged: (v) => setState(() => _spawn = v),
+                  ),
+                ),
+                SizedBox(width: t.sp * 1.25),
+                Expanded(
+                  child: Text(
+                    'Allow this session to start agents',
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      color: t.text,
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -436,7 +651,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             label: _busy ? 'Starting' : 'Launch',
             onPressed: _busy || host == null || _workspace == null
                 ? null
-                : () => _launch(writes, writeVault),
+                : () => _launch(writes, writeVault, crew),
           ),
         ],
       ),
@@ -588,6 +803,11 @@ class _ClaudeLoginLine extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final route = claudeLoginRoute(login, host);
+    // Decision 136f: an isolated session never uses the host's own login.
+    final own = host.isolationState == 'verified'
+        ? 'Claude: needs your synced Claude login or an API key, since this '
+              'host isolates sessions'
+        : "Claude: this host's own login";
     final soon =
         route == ClaudeLoginRoute.synced &&
         login.warn == '7d' &&
@@ -598,16 +818,14 @@ class _ClaudeLoginLine extends StatelessWidget {
             ? 'Claude: your synced login · expires in ${login.daysLeft} '
                   '${login.daysLeft == 1 ? 'day' : 'days'}, replace it in Settings'
             : 'Claude: your synced login',
-      ClaudeLoginRoute.own => "Claude: this host's own login",
+      ClaudeLoginRoute.own => own,
       ClaudeLoginRoute.oldHost =>
-        "Claude: this host's own login · ${host.name} can't receive your "
-            'synced login, update storm-runtime',
+        "$own · ${host.name} can't receive your synced login, update "
+            'storm-runtime',
       ClaudeLoginRoute.expired =>
-        "Claude: this host's own login · your synced login has expired, "
-            're-sync it in Settings',
+        '$own · your synced login has expired, re-sync it in Settings',
       ClaudeLoginRoute.needsResync =>
-        "Claude: this host's own login · your synced login can't be read, "
-            'sync it again in Settings',
+        "$own · your synced login can't be read, sync it again in Settings",
     };
     final warn =
         soon ||
@@ -676,15 +894,18 @@ class _NoWorkspaces extends StatelessWidget {
 }
 
 class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.child});
+  const _Field({required this.label, required this.child, this.under});
 
   final String label;
   final Widget child;
 
+  /// A line under [child], lined up with it.
+  final Widget? under;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    return Row(
+    final row = Row(
       children: [
         SizedBox(
           width: t.sp * 12,
@@ -701,10 +922,68 @@ class _Field extends StatelessWidget {
         Expanded(child: child),
       ],
     );
+    if (under == null) return row;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        row,
+        Padding(
+          padding: EdgeInsets.only(left: t.sp * 13.25, top: t.sp * 0.75),
+          child: under,
+        ),
+      ],
+    );
   }
 }
 
-/// A select: `surface2`, a hairline, `rControl`, and a popover of options.
+/// What the launcher's Model field says for [provider], or null where Storm
+/// passes no model (decision 145b).
+String? modelHint(String? provider) => switch (provider) {
+  'claude-code' => 'haiku, sonnet, opus or a full id like claude-sonnet-4-5',
+  'opencode' => 'provider/model, e.g. anthropic/claude-sonnet-4-5',
+  'codex' => 'a model id, e.g. gpt-5-codex',
+  _ => null,
+};
+
+/// No workspace name starts with a dot, so this is never one.
+const _newWorkspaceKey = '.new';
+const _noCrew = '';
+const _newCrew = 'new';
+const _noRole = '';
+
+String _roleKey(RoleNote r) => '${r.vaultId}/${r.noteId}';
+
+/// A quiet line under a field's control.
+class _Under extends StatelessWidget {
+  const _Under({super.key, required this.text});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Text(
+      text,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.labelSize * 1.09,
+        height: 1.45,
+        color: t.text3,
+      ),
+    );
+  }
+}
+
+/// One choice in a [_Select].
+class _Opt<T> {
+  const _Opt(this.value, this.label);
+
+  final T value;
+  final String label;
+}
+
+/// A select: `surface2`, a hairline, `rControl`, a trailing chevron (138h),
+/// and a popover of options.
 class _Select<T> extends StatefulWidget {
   const _Select({
     super.key,
@@ -715,17 +994,26 @@ class _Select<T> extends StatefulWidget {
     this.disabled = const [],
     this.placeholder = '',
     this.compact = false,
+    this.enabled = true,
+    this.menu,
   });
 
   final String label;
   final T? value;
-  final List<(T, String)> options;
+  final List<_Opt<T>> options;
   final ValueChanged<T> onChanged;
 
   /// Shown in the menu, never choosable (an agent not installed).
   final List<String> disabled;
   final String placeholder;
   final bool compact;
+
+  /// False draws it muted and opens nothing.
+  final bool enabled;
+
+  /// The popover in place of the plain list, given the height it has; it
+  /// pops the value picked.
+  final Widget Function(BuildContext popover, double room)? menu;
 
   @override
   State<_Select<T>> createState() => _SelectState<T>();
@@ -736,21 +1024,24 @@ class _SelectState<T> extends State<_Select<T>> {
 
   Future<void> _open() async {
     final box = _anchor.currentContext?.findRenderObject() as RenderBox?;
+    final room = popoverRoom(context, _anchor);
     final picked = await showStormPopover<T>(
       context: context,
       anchorKey: _anchor,
       width: box?.size.width ?? 240,
-      builder: (popover) => StormPopover(
-        children: [
-          for (final (value, label) in widget.options)
-            PopoverItem(
-              label: label,
-              selected: value == widget.value,
-              onTap: () => Navigator.of(popover).pop(value),
-            ),
-          for (final label in widget.disabled) PopoverItem(label: label),
-        ],
-      ),
+      builder: (popover) =>
+          widget.menu?.call(popover, room) ??
+          StormPopover(
+            children: [
+              for (final o in widget.options)
+                PopoverItem(
+                  label: o.label,
+                  selected: o.value == widget.value,
+                  onTap: () => Navigator.of(popover).pop(o.value),
+                ),
+              for (final label in widget.disabled) PopoverItem(label: label),
+            ],
+          ),
     );
     if (picked != null && picked != widget.value) widget.onChanged(picked);
   }
@@ -759,11 +1050,15 @@ class _SelectState<T> extends State<_Select<T>> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final shown =
-        widget.options.where((o) => o.$1 == widget.value).firstOrNull?.$2 ??
+        widget.options
+            .where((o) => o.value == widget.value)
+            .firstOrNull
+            ?.label ??
         widget.placeholder;
-    final live = widget.options.isNotEmpty;
+    final live = widget.enabled && widget.options.isNotEmpty;
     return Semantics(
       button: true,
+      enabled: live,
       label: '${widget.label}: $shown',
       excludeSemantics: true,
       onTap: live ? _open : null,
@@ -782,15 +1077,28 @@ class _SelectState<T> extends State<_Select<T>> {
               horizontal: t.sp * 1.5,
               vertical: t.sp * (widget.compact ? 0.875 : 1.125),
             ),
-            child: Text(
-              shown,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.uiSize,
-                color: live ? t.text : t.text3,
-              ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    shown,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: live ? t.text : t.text3,
+                    ),
+                  ),
+                ),
+                SizedBox(width: t.sp),
+                Icon(
+                  LucideIcons.chevron_down,
+                  key: const Key('select-chevron'),
+                  size: t.codeSize,
+                  color: live ? t.text2 : t.text3,
+                ),
+              ],
             ),
           ),
         ),
@@ -845,7 +1153,7 @@ Future<AgentSession?> showNewSessionLauncher(
     pageBuilder: (dialog, _, _) => Align(
       alignment: Alignment.topCenter,
       child: Padding(
-        padding: EdgeInsets.only(top: t.sp * 12),
+        padding: EdgeInsets.only(top: t.sp * 12, bottom: t.sp * 3),
         child: SizedBox(
           width: t.sp * 57.5,
           child: DecoratedBox(
@@ -859,7 +1167,8 @@ Future<AgentSession?> showNewSessionLauncher(
                 borderRadius: BorderRadius.circular(t.rCard),
                 side: BorderSide(color: t.border, width: t.bw),
               ),
-              child: Padding(
+              // Scrolls in a short window rather than overflowing it.
+              child: SingleChildScrollView(
                 padding: EdgeInsets.all(t.sp * 2.75),
                 child: launcher,
               ),
@@ -869,4 +1178,170 @@ Future<AgentSession?> showNewSessionLauncher(
       ),
     ),
   );
+}
+
+/// A launch's or a workspace list's failure as a sentence (decision 141d):
+/// a refusal code is never shown bare.
+String launchErrorText(Object e) {
+  final code = e is AgentRefusal ? e.code : null;
+  // 145b: the server names the forms the agent accepts in a sentence.
+  const model = 'model_unavailable';
+  if (code != null && code.startsWith(model)) {
+    final why = code.substring(model.length).replaceFirst(RegExp(r'^:\s*'), '');
+    return why.isEmpty ? 'That model isn’t one this agent takes.' : why;
+  }
+  if (code == null || !_isCode(code)) return describeFailure(e);
+  return switch (code) {
+    'workspace_held' => 'Another session is working in this workspace.',
+    'credential_unavailable' =>
+      'This host isolates sessions, so Claude Code needs your synced Claude '
+          'login or an API key.',
+    'isolation_unavailable' || 'isolation_unverified' =>
+      "This host's session isolation isn't working, so it isn't starting "
+          'new sessions.',
+    'owner_only' => 'Only the server’s owner can do that.',
+    'spawn_unavailable' =>
+      "This host or agent can't offer starting agents now. Turn off "
+          '"Allow this session to start agents" to launch.',
+    _ => "Couldn't launch: $code",
+  };
+}
+
+/// What a refused "New workspace…" says (decision 141c).
+String newWorkspaceErrorText(Object e, String name) {
+  final code = e is AgentRefusal ? e.code : null;
+  if (e is AgentRefusal && e.statusCode == 503) return 'The host is offline.';
+  return switch (code) {
+    'bad_name' =>
+      'A workspace name is one folder name: no “/”, “\\” or “:”, and not '
+          'starting with a dot.',
+    'exists' => 'There is already a folder named “$name” on this host.',
+    'no_root' =>
+      "This host's workspace folder is missing. Check workspace_roots in its "
+          'runtime.toml.',
+    'not_writable' =>
+      "storm-runtime can't write to this host's workspace "
+          'folder.',
+    'git_failed' =>
+      "It couldn't be started as a git repository (is git installed on the "
+          'host?), so it wasn’t kept.',
+    'old_host' =>
+      "This host's storm-runtime can't make workspaces. Update it, or make "
+          'the folder on the host.',
+    'timeout' => "The host didn't answer in time. Check the list again.",
+    'owner_only' => 'Only the server’s owner can make workspaces.',
+    'failed' => "The host couldn't make the folder.",
+    null => describeFailure(e),
+    _ => "Couldn't make the workspace: $code",
+  };
+}
+
+bool _isCode(String s) => RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(s);
+
+/// "New workspace…": a name and whether to start it as a git repository
+/// (on by default). It stays open on a refusal, saying why; it pops the
+/// workspace's name once the host has made it.
+class NewWorkspaceDialog extends ConsumerStatefulWidget {
+  const NewWorkspaceDialog({super.key, required this.host});
+
+  final AgentHost host;
+
+  @override
+  ConsumerState<NewWorkspaceDialog> createState() => _NewWorkspaceState();
+}
+
+class _NewWorkspaceState extends ConsumerState<NewWorkspaceDialog> {
+  late final _name = TextEditingController();
+  bool _git = true;
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  Future<void> _create() async {
+    final name = _name.text.trim();
+    if (name.isEmpty || _busy) return;
+    final api = agentApi(ref);
+    if (api == null) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      final made = await api.createWorkspace(widget.host.id, name, git: _git);
+      if (mounted) Navigator.of(context).pop(made);
+    } catch (e) {
+      if (mounted) setState(() => _error = newWorkspaceErrorText(e, name));
+    } finally {
+      api.dispose();
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final style = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: t.text2,
+    );
+    return AlertDialog(
+      title: Text('New workspace on ${widget.host.name}'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          TextField(
+            key: const Key('new-workspace-name'),
+            controller: _name,
+            autofocus: true,
+            autocorrect: false,
+            maxLength: 128,
+            decoration: const InputDecoration(labelText: 'Name'),
+            onChanged: (_) => setState(() {}),
+            onSubmitted: (_) => _create(),
+          ),
+          SizedBox(height: t.sp),
+          Row(
+            children: [
+              Semantics(
+                label: 'Start as a git repository',
+                child: StormToggle(
+                  key: const Key('new-workspace-git'),
+                  value: _git,
+                  onChanged: _busy ? null : (v) => setState(() => _git = v),
+                ),
+              ),
+              SizedBox(width: t.sp),
+              Flexible(child: Text('Start as a git repository', style: style)),
+            ],
+          ),
+          if (_error != null) ...[
+            SizedBox(height: t.sp * 1.5),
+            Text(
+              _error!,
+              key: const Key('new-workspace-error'),
+              style: style.copyWith(color: t.danger),
+            ),
+          ],
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('new-workspace-create'),
+          onPressed: _busy || _name.text.trim().isEmpty ? null : _create,
+          child: Text(_busy ? 'Creating' : 'Create'),
+        ),
+      ],
+    );
+  }
 }
