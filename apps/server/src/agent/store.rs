@@ -1671,6 +1671,18 @@ pub mod spawn {
                 [],
             )?;
         }
+        // 151m: a launch from before the tick is unticked.
+        let has_children_write = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('session_spawn_launch') WHERE name = 'children_write'",
+            )?
+            .exists([])?;
+        if !has_children_write {
+            conn.execute(
+                "ALTER TABLE session_spawn_launch ADD COLUMN children_write INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         // 145a: nothing waits for a person any more. What an older server
         // left waiting expires, and its messages with it.
         let now = crate::index::now_rfc3339();
@@ -2091,20 +2103,27 @@ pub mod spawn {
                 .optional()?)
         }
 
-        /// Records a launch with the switch on (141e) and turns it on, before
+        /// Records a launch with the switch on (141e), and whether its
+        /// children write to its write vault (151m), and turns it on, before
         /// the host is sent `start`.
         pub fn record_spawn_launch(
             &mut self,
             session_id: &str,
+            children_write: bool,
             device: Option<&str>,
             now: &str,
         ) -> Result<()> {
             self.conn.execute(
-                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at) VALUES (?1, ?2)",
-                params![session_id, now],
+                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at, children_write)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, now, children_write],
             )?;
             self.set_spawn(session_id, true, device, now)?;
             Ok(())
+        }
+
+        pub fn children_write(&self, session_id: &str) -> Result<bool> {
+            children_write(&self.conn, session_id)
         }
 
         pub fn spawn_launched(&self, session_id: &str) -> Result<bool> {
@@ -2643,7 +2662,8 @@ pub mod spawn {
             if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
-            let child = spawn_child(&tx, &r, agent, payload, true, now)?;
+            let writes = children_write(&tx, &r.id)?;
+            let child = spawn_child(&tx, &r, agent, payload, writes, now)?;
             insert_act(
                 &tx,
                 act,
@@ -2987,10 +3007,24 @@ pub mod spawn {
         format!("children/{child}")
     }
 
+    /// Whether a session was launched with its children's writes ticked
+    /// (151m); no spawn launch row is no.
+    fn children_write(conn: &Connection, session_id: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT children_write FROM session_spawn_launch WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
-    /// parent's write vault when `write_vault` and the parent launched with
-    /// one it may write (145a: a start inherits it; nothing wider). Spawn is off: a child has no switch row. Its workspace
+    /// parent's write vault only when `write_vault` (its launch ticked it,
+    /// 151m) and the parent launched with one it may write; nothing wider.
+    /// Spawn is off: a child has no switch row. Its workspace
     /// is its own (137-1), its agent `agent` (143a), its name the one asked
     /// for or one made from the task, unique among its live siblings, and
     /// its model and role the start's (145b).

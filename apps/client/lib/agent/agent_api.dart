@@ -217,6 +217,7 @@ class AgentApi {
     LaunchCrew? crew,
     ({String vaultId, String noteId})? role,
     bool spawn = false,
+    bool childrenWrite = false,
     String? model,
     String? permissionMode,
   }) async => AgentSession.fromJson(
@@ -247,6 +248,7 @@ class AgentApi {
               if (role != null)
                 'role': {'vault_id': role.vaultId, 'note_id': role.noteId},
               if (spawn) 'spawn': true,
+              if (childrenWrite) 'children_write': true,
               if (model != null && model.isNotEmpty) 'model': model,
               // Absent is the agent's own (decision 146b).
               if (permissionMode != null && permissionMode != 'default')
