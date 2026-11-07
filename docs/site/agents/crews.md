@@ -54,13 +54,14 @@ all running**. They can't be moved on their own; where a move would be,
 they say "moves with the agent that started it". Moving the session that
 started them, or making a crew from it, takes them along.
 
-Agents a session started never ask you anything. They run without
-permission prompts, inside their own copy of the workspace, and whatever
-their permissions don't cover is refused rather than asked. Each refusal
-goes to the session that started them, which decides what to do next: give
-the agent another task, do the step itself (which may ask you, in its own
-terminal), end it or start another. You deal only with the session you
-started. Its **Activity** and its list of children show what was refused.
+Agents a session started run in its permission mode, inside their own copy
+of the workspace, or in their own agent's setting when their agent doesn't
+have that mode. In a mode that asks, such an agent can stop on its own
+permission prompt: it shows **Needs you**, and you answer it in that
+agent's terminal, as you would any other. Whatever its permissions refuse
+goes to the session that started it, which decides what to do next: give
+the agent another task, do the step itself, end it or start another. Its
+**Activity** and its list of children show what was refused.
 
 Collapsing a crew, or the whole CREWS section, is remembered on each device
 separately. Everything else about a crew is kept on your server, so your

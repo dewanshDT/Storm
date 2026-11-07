@@ -1,9 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_models.dart';
@@ -14,9 +12,9 @@ import 'agent_fakes.dart';
 import 'shell_harness.dart';
 
 /// Decision 147 in the client: Tab and Shift+Tab reach the agent from
-/// Storm's terminal, with Escape-then-Tab as the way out (147b); the touch
-/// key bar's Tab and ⇧Tab; the launcher's Manual (147a); and the request
-/// card for auto (147c).
+/// Storm's terminal, with Escape-then-Tab as the way out (147b), so the
+/// person switches modes there; the touch key bar's Tab and ⇧Tab; and the
+/// launcher's default, the agent's own setting (151 N5).
 void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
@@ -71,9 +69,9 @@ void main() {
     });
   });
 
-  group('A-147-1: Manual is the first and default choice', () {
+  group('151 N5: the agent\'s own setting is the first and default choice', () {
     testWidgets(
-      'the launcher shows Manual (asks) first and sends nothing for it',
+      'the launcher shows the agent\'s own setting first and sends nothing for it',
       (t) async {
         final agents = FakeAgentServer(
           hosts: [
@@ -90,130 +88,17 @@ void main() {
         expect(
           find.descendant(
             of: find.byKey(const Key('launcher-permission-mode')),
-            matching: find.text('Manual (asks)'),
+            matching: find.text("The agent's own setting"),
           ),
           findsOneWidget,
         );
         expect(permissionModesOf('claude-code').first, 'default');
-        expect(permissionModeLabel('default'), 'Manual (asks)');
+        expect(permissionModeLabel('default'), "The agent's own setting");
         await t.tap(find.byKey(const Key('launch')));
         await t.pumpAndSettle();
         expect(agents.launches.single.containsKey('permission_mode'), isFalse);
         await disposeShell(t, c);
       },
     );
-  });
-
-  group('A-147-4: the request card', () {
-    Map<String, dynamic> asking(String id, {String state = 'pending'}) => {
-      ...agentSession(id, name: 'fixer'),
-      'mode_request': {
-        'id': 'amr_1',
-        'session_id': id,
-        'mode': 'auto',
-        'reason': 'Running the <b>test</b> suite asks for every command.',
-        'created_at': DateTime.now().toUtc().toIso8601String(),
-        'expires_at': DateTime.now()
-            .toUtc()
-            .add(const Duration(minutes: 10))
-            .toIso8601String(),
-        'state': state,
-      },
-    };
-
-    Future<(ProviderContainer, FakeAgentServer, List<Map>)> open(
-      WidgetTester t,
-      Map<String, dynamic> session, {
-      String? switchTo,
-    }) async {
-      final decisions = <Map>[];
-      final agents = FakeAgentServer(hosts: [agentHost()], sessions: [session]);
-      agents.extra = (req) async {
-        final seg = req.url.pathSegments;
-        if (req.method == 'POST' &&
-            seg.length == 6 &&
-            seg[4] == 'mode-requests') {
-          final body = jsonDecode(req.body) as Map;
-          decisions.add(body);
-          final approve = body['decision'] == 'approve';
-          final s = agents.sessions.firstWhere((s) => s['id'] == seg[3]);
-          final r = Map<String, dynamic>.from(s['mode_request'] as Map)
-            ..['state'] = approve ? 'approved' : 'denied';
-          if (approve && switchTo != null) {
-            r['switched_to'] = switchTo;
-            agents.sessions.add(agentSession(switchTo, name: 'fixer'));
-            s['status'] = 'stopped';
-          }
-          s['mode_request'] = approve ? r : null;
-          return http.Response(jsonEncode(r), 200);
-        }
-        return null;
-      };
-      final c = shellContainer(agentClient: agents.client);
-      await pumpShell(t, c, size: const Size(1400, 900));
-      c.read(routerProvider).go('/agents/s/${session['id']}');
-      await t.pumpAndSettle();
-      return (c, agents, decisions);
-    }
-
-    testWidgets('one card, the reason as plain data, and the row says so', (
-      t,
-    ) async {
-      final (c, _, _) = await open(t, asking('ags_a'));
-      expect(find.byKey(const Key('mode-request-card')), findsOneWidget);
-      expect(find.text('fixer asks to switch to Auto'), findsOneWidget);
-      expect(
-        find.text('Running the <b>test</b> suite asks for every command.'),
-        findsOneWidget,
-        reason: 'the agent’s words, unrendered',
-      );
-      expect(find.textContaining('Expires in 10 minutes'), findsOneWidget);
-      expect(
-        find.textContaining(RegExp('bypass|skip', caseSensitive: false)),
-        findsNothing,
-      );
-      c.read(routerProvider).go(Routes.agents);
-      await t.pumpAndSettle();
-      expect(find.byKey(const Key('mode-ask-tag')), findsWidgets);
-      await disposeShell(t, c);
-    });
-
-    testWidgets('Deny answers it and the card goes', (t) async {
-      final (c, _, decisions) = await open(t, asking('ags_d'));
-      await t.tap(find.byKey(const Key('mode-request-deny')));
-      await t.pumpAndSettle();
-      expect(decisions, [
-        {'decision': 'deny'},
-      ]);
-      expect(find.byKey(const Key('mode-request-card')), findsNothing);
-      await disposeShell(t, c);
-    });
-
-    testWidgets('Approve answers it and follows the switch', (t) async {
-      final (c, _, decisions) = await open(
-        t,
-        asking('ags_old'),
-        switchTo: 'ags_new',
-      );
-      await t.tap(find.byKey(const Key('mode-request-approve')));
-      await t.pump(const Duration(seconds: 2));
-      await t.pumpAndSettle();
-      expect(decisions, [
-        {'decision': 'approve'},
-      ]);
-      expect(
-        c.read(routerProvider).state.uri.path,
-        '/agents/s/ags_new',
-        reason: 'the approving device follows the session into auto',
-      );
-      await disposeShell(t, c);
-    });
-
-    testWidgets('an ended session shows no card to answer', (t) async {
-      final ended = asking('ags_e')..['status'] = 'stopped';
-      final (c, _, _) = await open(t, ended);
-      expect(find.byKey(const Key('mode-request-approve')), findsNothing);
-      await disposeShell(t, c);
-    });
   });
 }

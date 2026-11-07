@@ -302,8 +302,7 @@ vault's Trash for 30 days. See
 An agent in a Storm session gets the same tools through the MCP Gateway, plus
 `session_context`, with differences. With a write vault, `delete_note` and
 `delete_folder` each wait for the person to Approve in the app, every time.
-A Claude Code session no agent started has `request_permission_mode` to ask
-for Auto. Where
+Where
 spawning is on (above), the session gets `start_agent`, `list_agents`,
 `agent_status`, `list_children`, `wait_agent`, `send_message`, `end_agent`
 and `read_output`, and the agents it starts get `report_result` and

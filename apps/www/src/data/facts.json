@@ -71,13 +71,6 @@
       "approval": false
     },
     {
-      "name": "request_permission_mode",
-      "description": "Ask the person to switch this session to auto mode, where Claude Code runs routine actions, shell commands included, without asking, each checked by its own safety classifier. Only mode \"auto\" can be asked for. Give the reason in a sentence: the person sees it on a card and approves or denies. Ask only when the person's own prompts are slowing work they asked for; never to get around something they refused. Returns {status}: approved (Storm restarts this session in auto with its conversation kept, so end your turn), denied, expired (after 10 minutes), pending (call again with the same mode to keep waiting; it never makes a second card), already, or refused with a reason (permission_mode_unavailable, which a child always gets: it never asks; live_children). Manual, accept edits and plan are the person's to choose with Shift+Tab; accept edits covers file edits only, never shell commands. Nothing turns permission checks off.",
-      "access": "read",
-      "agents": true,
-      "approval": false
-    },
-    {
       "name": "list_scripts",
       "description": "The kit vault's canonical scripts: names, sizes, modified times, Sorted. Optionally filter to one topic with prefix (e.g. 'psi-item-import/').",
       "access": "read",

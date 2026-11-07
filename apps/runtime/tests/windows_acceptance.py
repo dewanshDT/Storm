@@ -474,7 +474,7 @@ def main():
         text = owner.output(sid, "ARGS=")
         # cmd.exe hands a batch file each argument quoted (wincmd).
         check("W3", "a .cmd CLI runs through PATHEXT, with its arguments", "STUB=claude" in text
-              and '"--permission-mode" "default"' in text, text[-400:])
+              and '"--settings"' in text, text[-400:])
         check("W3", "its USERPROFILE is the account's home", f"HOME={HOME}".lower() in text.lower(), text[-400:])
         m = re.search(r"ENV_PATH=([^\s]+)", text)
         # Storm's managed agents first (decision 133-2), then the account's own.

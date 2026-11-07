@@ -183,7 +183,7 @@ String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
   'needs_approval' => 'Asked for approval',
   // A child never asks (148a): a prompt there is a fault its parent hears.
-  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Unexpected prompt',
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Permission prompt',
   'denied' => deniedLabel(e),
   'idle_timeout' => 'Idle for 10 minutes',
   'usage_limit' => 'Out of usage',
@@ -507,11 +507,11 @@ String shortCommit(String? commit) =>
     commit == null ? '' : commit.substring(0, commit.length.clamp(0, 7));
 
 /// What a session waiting for a person shows beside its activity (134p).
-/// A permission prompt shows nothing: only a child reports one, and a child
-/// never asks the person (decision 148).
 String? attentionLabel(String? kind) => switch (kind) {
   // Decision 149c: a deletion waits for the person's Approve.
   'delete_approval' => 'Needs you',
+  // 151 N5: a child's own prompt waits for the person, in its terminal.
+  'permission_prompt' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,

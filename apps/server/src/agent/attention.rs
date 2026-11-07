@@ -3,8 +3,8 @@
 //!
 //! - `permission_prompt`: the agent's own CLI prompt waits, as its host
 //!   reports it — only through a signal on the gated list below, and only
-//!   for a child, where since 148b it is a fault detector: a child never
-//!   asks, so its parent's event says `unexpected_prompt`;
+//!   for a child, whose parent's event says `permission_prompt` too (151
+//!   N5): the person answers it in the child's terminal;
 //! - `usage_limit` (144b): the agent's account is out of usage, the same way;
 //! - `blocked`: the session reported a result whose outcome is `blocked`
 //!   (134h) and is still live.
@@ -61,10 +61,6 @@ pub const GATED_SIGNALS: &[GatedSignal] = &[
 pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
 
 pub const PERMISSION_PROMPT: &str = "permission_prompt";
-/// 148b: a prompt in a child means its no-prompt mode failed. Its parent's
-/// `needs_attention` event says so; the person is shown nothing but the
-/// child's own terminal.
-pub const UNEXPECTED_PROMPT: &str = "unexpected_prompt";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const BLOCKED: &str = "blocked";
 /// 149c: a top-level session's deletion waits for the person's Approve.
@@ -136,14 +132,14 @@ impl AgentManager {
         if let Some(a) = attention.as_deref()
             && s.attention.as_deref() != Some(a)
         {
-            let (kind, reason) = if a == PERMISSION_PROMPT {
-                (events::NEEDS_ATTENTION, UNEXPECTED_PROMPT)
+            let kind = if a == PERMISSION_PROMPT {
+                events::NEEDS_ATTENTION
             } else {
-                (events::USAGE_LIMIT_EVENT, a)
+                events::USAGE_LIMIT_EVENT
             };
             extra.push(Extra {
                 kind,
-                reason: Some(reason.to_string()),
+                reason: Some(a.to_string()),
                 source: attention_source.unwrap_or(PROVIDER_HOOK),
             });
         }
