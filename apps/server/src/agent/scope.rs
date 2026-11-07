@@ -289,6 +289,14 @@ impl AgentManager {
             .unwrap();
     }
 
+    /// Test-only: a running top-level session `id` on `host` in `workspace`.
+    #[cfg(test)]
+    pub fn session_in_for_tests(&self, owner: &str, host: &str, id: &str, workspace: &str) {
+        let mut record = test_record(owner, host, id, "running");
+        record.workspace = workspace.into();
+        self.store.lock().unwrap().insert(&record).unwrap();
+    }
+
     /// Test-only: the switch's row written as a person's enable writes it,
     /// past the route's checks (C0, WS-9).
     #[cfg(test)]
