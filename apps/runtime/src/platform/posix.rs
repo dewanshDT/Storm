@@ -109,6 +109,11 @@ pub fn check_exclusive_account() -> Result<(), String> {
     exclusive_account_allowed(uid, account_name(uid).as_deref())
 }
 
+/// The running process's account: its effective uid's login name.
+pub fn current_account() -> Option<String> {
+    account_name(rustix::process::geteuid().as_raw())
+}
+
 /// The login name of `uid`, from the password database (`getpwuid_r`).
 pub fn account_name(uid: u32) -> Option<String> {
     let mut buf = vec![0 as libc::c_char; 16 * 1024];

@@ -84,6 +84,15 @@ pub enum Isolation {
     PerSession,
 }
 
+impl Isolation {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::PerSession => "per-session",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PluginMcp {

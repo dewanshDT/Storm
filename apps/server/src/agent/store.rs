@@ -318,6 +318,27 @@ impl Store {
                  mechanism   TEXT,
                  reason      TEXT,
                  reported_at TEXT NOT NULL
+             );
+             -- Who each host's processes run as, as it last said (decision
+             -- 151), for its views while it is away.
+             CREATE TABLE IF NOT EXISTS host_execution (
+                 host_id     TEXT PRIMARY KEY,
+                 account     TEXT,
+                 isolation   TEXT NOT NULL,
+                 reported_at TEXT NOT NULL
+             );
+             -- Who a session ran as, from its host at its first `running`
+             -- (decision 151); never replaced.
+             CREATE TABLE IF NOT EXISTS session_ran_as (
+                 session_id          TEXT PRIMARY KEY,
+                 account             TEXT,
+                 isolation_state     TEXT NOT NULL,
+                 isolation_mechanism TEXT,
+                 isolation_reason    TEXT,
+                 identity_state      TEXT NOT NULL,
+                 identity_mechanism  TEXT,
+                 identity_reason     TEXT,
+                 recorded_at         TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -1096,6 +1117,105 @@ impl Store {
             params![host_id, label.state, label.mechanism, label.reason, now],
         )?;
         Ok(())
+    }
+
+    pub fn host_execution(&self, host_id: &str) -> Result<Option<super::Execution>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(super::Execution {
+                        account: r.get(0)?,
+                        isolation: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// `None` forgets it: a host that stopped saying is an old host again.
+    pub fn set_host_execution(
+        &self,
+        host_id: &str,
+        execution: Option<&super::Execution>,
+        now: &str,
+    ) -> Result<()> {
+        match execution {
+            Some(e) => self.conn.execute(
+                "INSERT INTO host_execution (host_id, account, isolation, reported_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (host_id) DO UPDATE SET account = excluded.account,
+                     isolation = excluded.isolation, reported_at = excluded.reported_at",
+                params![host_id, e.account, e.isolation, now],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// A session's first snapshot; never replaced.
+    pub fn record_ran_as(&self, session_id: &str, ran: &super::RanAs, now: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO session_ran_as
+                 (session_id, account, isolation_state, isolation_mechanism, isolation_reason,
+                  identity_state, identity_mechanism, identity_reason, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                ran.account,
+                ran.isolation.state,
+                ran.isolation.mechanism,
+                ran.isolation.reason,
+                ran.identity.state,
+                ran.identity.mechanism,
+                ran.identity.reason,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: a session from before 151, with no snapshot.
+    #[cfg(test)]
+    pub fn forget_ran_as_for_tests(&self, session_id: &str) {
+        self.conn
+            .execute(
+                "DELETE FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+            )
+            .unwrap();
+    }
+
+    pub fn ran_as(&self, session_id: &str) -> Result<Option<super::RanAs>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation_state, isolation_mechanism, isolation_reason,
+                        identity_state, identity_mechanism, identity_reason
+                 FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(super::RanAs {
+                        account: r.get(0)?,
+                        isolation: super::Identity {
+                            state: r.get(1)?,
+                            mechanism: r.get(2)?,
+                            reason: r.get(3)?,
+                        },
+                        identity: super::Identity {
+                            state: r.get(4)?,
+                            mechanism: r.get(5)?,
+                            reason: r.get(6)?,
+                        },
+                    })
+                },
+            )
+            .optional()?)
     }
 }
 
@@ -3214,6 +3334,7 @@ pub mod spawn {
             "session_spawn_asks",
             "session_spawn_launch",
             "session_child_workspace",
+            "session_ran_as",
             "session_task",
             "session_result",
             "session_round",

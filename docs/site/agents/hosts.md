@@ -244,7 +244,18 @@ live. The host reports `isolation: verified` only when every attempt is
 refused; until then, or if the helper stops answering or `pasta` goes
 missing later, it reports `unavailable` with the reason, the app says so on
 the host row and in each session's Details, and **new sessions fail with
-"isolation unavailable on this host"** while running ones carry on.
+"isolation unavailable on this host"** while running ones carry on. A host
+set to isolate that has no helper to ask (its socket is not there because
+`storm-runtime-isolation on` was not run, or the host does not use the
+packaged state directory) reports `unavailable: no_helper` at once rather
+than waiting on a self-test.
+
+Every host also reports **which account it runs as** and the isolation it is
+set to (`off` or `per-session`). When a session starts running, Storm keeps
+that account and the host's isolation and identity as they were then, and
+the session's Details shows the isolation it started under, not what the
+host says later. This is status only: Storm reads no agent setting to
+report it and changes none.
 
 On an isolated host, an agent that starts another agent (agent spawning, not
 yet available) gives the new one **a workspace of its own**, made under the

@@ -742,6 +742,12 @@ impl Host {
             // Whether each session runs as its own identity, from the
             // self-test (decision 136j). A host without it is `old_host`.
             "isolation": self.isolation_status.report().to_json(),
+            // Who its processes run as and the isolation it is set to
+            // (decision 151): status only, never derived from `identity`.
+            "execution": {
+                "account": crate::platform::current_account(),
+                "isolation": self.config.isolation.as_str(),
+            },
         });
         // It carries `child.workspace` to the helper (decision 137-3). Only
         // an isolated host has child workspaces; every other host's bytes
@@ -6414,6 +6420,19 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             } else {
                 json!({"state": "unsupported", "mechanism": null, "reason": "macos"})
             }
+        );
+    }
+
+    /// 151: a host says which account it runs as and the isolation it is
+    /// set to.
+    #[tokio::test]
+    async fn a_host_reports_who_it_runs_as() {
+        let (host, _seen, _state, _roots) = test_host(Vec::new()).await;
+        let me = crate::platform::current_account();
+        assert!(me.is_some(), "the test runner has an account name");
+        assert_eq!(
+            host.capabilities()["execution"],
+            json!({"account": me, "isolation": "off"})
         );
     }
 
