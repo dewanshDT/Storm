@@ -46,6 +46,7 @@ pub const NAME: &str = "windows";
 pub const DEFAULT_STATE: &str = winsvc::STATE;
 pub const DEFAULT_CONFIG: &str = winsvc::CONFIG;
 pub const SERVICE_ACCOUNT: &str = winsvc::ACCOUNT;
+pub const SERVICE_COMMAND: &str = r#"& "$env:ProgramFiles\StormRuntime\storm-runtime.exe""#;
 /// The machine decides: [`refused_root`].
 pub const PROTECTED_ROOTS: &[&str] = &[];
 

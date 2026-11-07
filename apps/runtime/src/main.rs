@@ -236,6 +236,8 @@ async fn main() -> Result<()> {
             std::process::exit(storm_runtime::isolation_probe::main(&args))
         }
         Command::Enroll { state, name, force } => {
+            #[cfg(unix)]
+            storm_runtime::platform::check_enroll(&state).map_err(anyhow::Error::msg)?;
             let enrollment = read_enrollment()?;
             let name = name.unwrap_or_else(storm_runtime::platform::host_name);
             // Said before host.json exists: writing it may start the host,
@@ -247,7 +249,7 @@ async fn main() -> Result<()> {
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             })
             .await?;
-            if cfg!(windows) && state == std::path::Path::new(DEFAULT_STATE) {
+            if cfg!(windows) && storm_runtime::platform::is_service_state(&state) {
                 start_the_service();
             }
             Ok(())

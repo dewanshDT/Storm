@@ -109,6 +109,34 @@ pub fn check_exclusive_account() -> Result<(), String> {
     exclusive_account_allowed(uid, account_name(uid).as_deref())
 }
 
+/// Why `enroll` must not run as `uid`, named `name`, against `state`, or
+/// `None`. Root is refused: the key and `host.json` it writes would belong
+/// to root, and the host's own account could not read them.
+pub fn enroll_refusal(uid: u32, name: Option<&str>, state: &Path) -> Option<String> {
+    if uid != 0 {
+        return None;
+    }
+    let hint = if super::is_service_state(state) {
+        format!(
+            "Run it as the service account: {}.",
+            super::service_command("enroll")
+        )
+    } else {
+        "Run it as the account the host will run as.".into()
+    };
+    Some(format!(
+        "enroll refuses to run as {} (uid 0): what it writes would belong to root, \
+         and the host could not read it. {hint}",
+        name.unwrap_or("root")
+    ))
+}
+
+/// [`enroll_refusal`] for the running process.
+pub fn check_enroll(state: &Path) -> Result<(), String> {
+    let uid = rustix::process::geteuid().as_raw();
+    enroll_refusal(uid, account_name(uid).as_deref(), state).map_or(Ok(()), Err)
+}
+
 /// The login name of `uid`, from the password database (`getpwuid_r`).
 pub fn account_name(uid: u32) -> Option<String> {
     let mut buf = vec![0 as libc::c_char; 16 * 1024];
@@ -229,6 +257,29 @@ mod tests {
             targets.contains(&(child.id() as i32)),
             "a process of this account is missing: {targets:?}"
         );
+    }
+
+    #[test]
+    fn enroll_refuses_root_and_names_the_service_account_only_for_its_state() {
+        let default = Path::new(super::super::DEFAULT_STATE);
+        let refused = enroll_refusal(0, Some("root"), default).unwrap();
+        assert!(refused.contains("root"), "{refused}");
+        assert!(
+            refused.contains(&format!("sudo -u {SERVICE_ACCOUNT} ")),
+            "{refused}"
+        );
+        assert_eq!(
+            refused.contains("cd / && "),
+            cfg!(target_os = "macos"),
+            "{refused}"
+        );
+
+        let elsewhere = enroll_refusal(0, None, Path::new("/srv/host")).unwrap();
+        assert!(elsewhere.contains("uid 0"), "{elsewhere}");
+        assert!(!elsewhere.contains("sudo"), "{elsewhere}");
+
+        assert_eq!(enroll_refusal(501, Some("alice"), default), None);
+        assert_eq!(enroll_refusal(1000, None, Path::new("/srv/host")), None);
     }
 
     #[test]

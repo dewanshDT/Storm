@@ -16,8 +16,8 @@ mod posix;
 use posix as shared;
 #[cfg(unix)]
 pub use posix::{
-    account_name, check_exclusive_account, exclusive_account_allowed, host_name, session_members,
-    sweep_account, sweep_targets, tagged_processes,
+    account_name, check_enroll, check_exclusive_account, enroll_refusal, exclusive_account_allowed,
+    host_name, session_members, sweep_account, sweep_targets, tagged_processes,
 };
 #[cfg(unix)]
 pub(crate) use posix::{wait_readable, wait_writable};
@@ -74,6 +74,40 @@ pub const DEFAULT_CONFIG: &str = os::DEFAULT_CONFIG;
 
 /// The dedicated account the packaged service runs as (77e, AM34, AM49).
 pub const SERVICE_ACCOUNT: &str = os::SERVICE_ACCOUNT;
+
+/// Whether `state` is the packaged service's state directory, which only
+/// its account (and, on Windows, administrators) can read.
+pub fn is_service_state(state: &std::path::Path) -> bool {
+    state == std::path::Path::new(DEFAULT_STATE)
+}
+
+/// How a person runs `storm-runtime <sub>` against the service's state:
+/// as its account on Linux and macOS, elevated on Windows.
+pub fn service_command(sub: &str) -> String {
+    let command = format!("{} {sub}", os::SERVICE_COMMAND);
+    if cfg!(windows) {
+        format!("`{command}` in PowerShell as administrator")
+    } else {
+        format!("`{command}`")
+    }
+}
+
+/// What to do when `state` cannot be read or written by this account: run
+/// `storm-runtime <sub>` as the account that owns it.
+pub fn state_access_hint(state: &std::path::Path, sub: &str) -> String {
+    if is_service_state(state) {
+        format!(
+            "{} belongs to the service account {SERVICE_ACCOUNT}: run {}.",
+            state.display(),
+            service_command(sub)
+        )
+    } else {
+        format!(
+            "Run storm-runtime as the account that owns {}.",
+            state.display()
+        )
+    }
+}
 
 /// The environment variable that marks every process a session started:
 /// `STORM_RUNTIME_SESSION=<session id>`. Children inherit it, so it follows
