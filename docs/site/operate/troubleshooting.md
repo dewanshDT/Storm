@@ -18,6 +18,7 @@ relays. On Linux the log is `journalctl -u storm-server -f`.
 | **Offline** or **N unsent** in the status bar | Changes are queued on this device. They send when the server answers; keep the app open until it clears. |
 | Conflict markers in a note | Two devices changed the same lines. Edit the note to keep what you want; see [Sync](/docs/notes/sync/). |
 | A Runtime Host never comes online | `storm-runtime check` on the host proves the whole path; see the per-platform tables in [Runtime Hosts](/docs/agents/hosts/). |
+| `storm-runtime check` or `enroll` says **permission denied**, or `enroll` refuses root | Run it as the host's own account, with the command the message prints (on Linux `sudo -u storm-runtime storm-runtime check`); see [Runtime Hosts](/docs/agents/hosts/). **Not enrolled** and **revoked** mean what they say: enroll it. |
 | `claude` or `opencode` shows as **not installed** | The CLI must be reachable by the host's own account, not just yours ([Runtime Hosts](/docs/agents/hosts/)). |
 | An integration says **Needs sign-in** | The service stopped accepting Storm's credential; sign in again from a Storm app. |
 | An AI app's MCP calls fail with a `storm_error` | The message names the reason — usually MCP is off in **Settings › AI access**, the key was revoked, or the server is unreachable. |
