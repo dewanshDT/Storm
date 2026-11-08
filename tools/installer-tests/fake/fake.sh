@@ -38,7 +38,9 @@ rt_user() {
 }
 
 rt_state() {
-  if rt_user; then
+  if rt_user && macos; then
+    printf '%s' "$HOME/Library/Application Support/StormRuntime/state"
+  elif rt_user; then
     printf '%s' "$HOME/.local/state/storm-runtime"
   elif macos; then
     printf '%s' "$STORM_TEST_SYSROOT/Library/StormRuntime/state"
@@ -163,6 +165,13 @@ case "$name" in
     case "${1:-}" in
       --version) echo "storm-runtime ${FAKE_RUNTIME_VERSION:-0.6.0}" ;;
       install)
+        if [ "${2:-}" = --user ] && macos; then
+          place "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime"
+          mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Application Support/StormRuntime/state"
+          : >"$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
+          echo "Installed the Runtime Host as you (LaunchAgent)."
+          exit 0
+        fi
         if [ "${2:-}" = --user ]; then
           place "$HOME/.local/bin/storm-runtime"
           mkdir -p "$HOME/.config/systemd/user" "$HOME/.local/state/storm-runtime/workspaces"
@@ -196,7 +205,9 @@ case "$name" in
         echo "Usage: storm-runtime mcp-connect --server <ID> --pk <KEY> --addr <URL>"
         ;;
       uninstall)
-        if [ "${2:-}" = --user ]; then
+        if [ "${2:-}" = --user ] && macos; then
+          rm -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime"
+        elif [ "${2:-}" = --user ]; then
           rm -f "$HOME/.config/systemd/user/storm-runtime.service" "$HOME/.local/bin/storm-runtime"
         else
           rm -f "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime"
@@ -215,7 +226,8 @@ case "$name" in
             *storm-runtime*)
               place "$FAKE_DIR/installed/storm-runtime"
               # The package's postinst makes it.
-              mkdir -p "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces"
+              mkdir -p "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces" "$STORM_TEST_SYSROOT/lib/systemd/system"
+              : >"$STORM_TEST_SYSROOT/lib/systemd/system/storm-runtime.service"
               ;;
           esac
         done
@@ -223,7 +235,8 @@ case "$name" in
       remove)
         for a in "$@"; do
           case "$a" in
-            storm-server | storm-runtime) rm -f "$FAKE_DIR/installed/$a" ;;
+            storm-server) rm -f "$FAKE_DIR/installed/$a" ;;
+            storm-runtime) rm -f "$FAKE_DIR/installed/$a" "$STORM_TEST_SYSROOT/lib/systemd/system/storm-runtime.service" ;;
             storm-app) rm -f "$STORM_TEST_SYSROOT/usr/lib/storm-app/storm" ;;
           esac
         done

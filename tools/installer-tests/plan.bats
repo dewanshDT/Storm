@@ -13,8 +13,8 @@ dry() {
   run storm_main --dry-run --from-dir "$ASSETS" --addr 10.0.0.5 "$@"
 }
 
-@test "linux everything: every step, the sudo ones marked, nothing executed" {
-  dry --everything
+@test "linux everything --service: every step, the sudo ones marked, nothing executed" {
+  dry --everything --service
   [ "$status" -eq 0 ]
   [[ "$output" == *"Dry run: nothing was changed."* ]]
   descs=$(plan_descs "$output")
@@ -40,7 +40,7 @@ dry() {
 }
 
 @test "linux everything from the apt repo plans the repository once" {
-  run storm_main --dry-run --version v0.6.0 --addr 10.0.0.5 --everything
+  run storm_main --dry-run --version v0.6.0 --addr 10.0.0.5 --everything --service
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c "Add Storm's apt repository")" -eq 1 ]
   [[ "$output" == *"sudo apt-get install -y storm-server"* ]]
@@ -62,8 +62,8 @@ dry() {
   [ ! -s "$FAKE_LOG" ]
 }
 
-@test "linux runtime only: paste enrollment, agents need a terminal" {
-  dry --runtime --agents --enroll-from-stdin
+@test "linux runtime --service: paste enrollment, agents need a terminal" {
+  dry --runtime --agents --enroll-from-stdin --service
   [ "$status" -eq 0 ]
   [[ "$output" == *"Install the storm-runtime package"* ]]
   [[ "$output" == *"Enroll this runtime with your Storm server (paste its enrollment string)"* ]]
@@ -82,8 +82,8 @@ dry() {
   [[ "$output" == *"Pass --enroll-from-stdin"* ]]
 }
 
-@test "linux runtime with --workspace: made as the runtime's account, with sudo" {
-  dry --runtime --enroll-from-stdin --workspace scratch
+@test "linux runtime --service with --workspace: made as the runtime's account, with sudo" {
+  dry --runtime --enroll-from-stdin --workspace scratch --service
   [ "$status" -eq 0 ]
   [[ "$(plan_descs "$output")" == *"Add the workspace scratch, unless the runtime has one"* ]]
   [[ "$output" == *"sudo -u storm-runtime mkdir $STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch"* ]]
@@ -97,21 +97,23 @@ dry() {
   dry --runtime --enroll-from-stdin
   [ "$status" -eq 0 ]
   [[ "$(plan_descs "$output")" != *"workspace"* ]]
+  [[ "$output" == *"Pass --workspace NAME or a git URL, or make a folder in $HOME/.local/state/storm-runtime/workspaces"* ]]
+  dry --runtime --enroll-from-stdin --service
   [[ "$output" == *"Pass --workspace NAME or a git URL, or make a folder in $STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces"* ]]
 }
 
-@test "macos runtime with a git --workspace: cloned as the user, no sudo" {
+@test "macos runtime --service with a git --workspace: cloned as the user, no sudo" {
   use_macos
-  dry --runtime --enroll-from-stdin --workspace https://github.com/me/app.git
+  dry --runtime --enroll-from-stdin --workspace https://github.com/me/app.git --service
   [ "$status" -eq 0 ]
   [[ "$output" == *"git clone https://github.com/me/app.git $STORM_TEST_SYSROOT/Library/StormRuntime/workspaces/app"* ]]
   run assert_sudo_marks_consistent "$output"
   [ "$status" -eq 0 ]
 }
 
-@test "macos everything: the server is never sudo; the runtime install is" {
+@test "macos everything --service: the server is never sudo; the runtime install is" {
   use_macos
-  dry --everything
+  dry --everything --service
   [ "$status" -eq 0 ]
   descs=$(plan_descs "$output")
   [[ "$descs" == *"Download and verify storm-server-0.6.0-macos-universal.tar.gz"* ]]
@@ -152,9 +154,9 @@ dry() {
   [ ! -s "$FAKE_LOG" ]
 }
 
-@test "macos runtime only" {
+@test "macos runtime --service" {
   use_macos
-  dry --runtime --agents --enroll-from-stdin
+  dry --runtime --agents --enroll-from-stdin --service
   [ "$status" -eq 0 ]
   [[ "$output" == *"Install the Runtime Host"* ]]
   [[ "$output" == *"paste its enrollment string"* ]]
@@ -208,7 +210,7 @@ dry() {
 @test "macos on a release without the server tarball: unavailable, with the reason" {
   use_macos
   make_assets 0.5.0 runtime-tar app-zip apk
-  run storm_main --dry-run --from-dir "$ASSETS" --addr 10.0.0.5 --everything --enroll-from-stdin
+  run storm_main --dry-run --from-dir "$ASSETS" --addr 10.0.0.5 --everything --enroll-from-stdin --service
   [ "$status" -eq 0 ]
   [[ "$output" == *"Storm server is unavailable: the macOS server ships from v0.6.0; this release is v0.5.0"* ]]
   [[ "$output" != *"LaunchAgent"* ]]
@@ -308,7 +310,7 @@ dry() {
 }
 
 @test "agents never ask for a login, interactive or not (decision 124s)" {
-  dry --runtime --agents --enroll-from-stdin
+  dry --runtime --agents --enroll-from-stdin --service
   [ "$status" -eq 0 ]
   [[ "$output" != *"setup-token"* ]]
   [[ "$output" != *"auth login"*"sudo"* ]]

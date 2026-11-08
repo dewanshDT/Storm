@@ -130,7 +130,9 @@ jobs:
       - name: Install everything
         shell: pwsh
         # The account from stdin, as install.sh's --password-stdin (84g).
-        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -App -Yes -Workspace scratch -PasswordStdin"
+        # -Service: the host as the StormRuntime service (with -Server it is
+        # anyway; decision 151 E5's default elsewhere is a logon task as you).
+        run: "'ci-installer-password-1' | pwsh -NoProfile -File ./deploy/install.ps1 -FromDir dist -Server -Runtime -Service -App -Yes -Workspace scratch -PasswordStdin"
       - name: Check it
         shell: pwsh
         run: |
@@ -165,6 +167,12 @@ jobs:
           Check '-User refuses an elevated shell' ($said -match 'not elevated')
           $said = try { ./deploy/install.ps1 -FromDir dist -Server -User -Yes; '' } catch { "$_" }
           Check '-User refuses -Server' ($said -match 'holds your notes')
+          # Decision 151 E5: with no switch, the installed service stays the service.
+          ./deploy/install.ps1 -FromDir dist -Runtime -Yes
+          Check 'a re-run of the service host keeps the service' ($? -and (Get-Service StormRuntime).Status -eq 'Running')
+          Check 'and adds no logon task' (-not (Test-Path "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe"))
+          $said = try { ./deploy/install.ps1 -FromDir dist -Runtime -User -Service -Yes; '' } catch { "$_" }
+          Check '-User and -Service are refused together' ($said -match 'pick one')
           & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
           & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
           if (-not $ok) { exit 1 }

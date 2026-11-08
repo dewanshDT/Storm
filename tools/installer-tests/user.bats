@@ -32,12 +32,17 @@ user_paths_ok() {
   user_paths_ok
 }
 
-@test "debian: the service, unless --user or a user unit is installed" {
+@test "debian: as you by default (151 E5); the service with --service" {
   os_release debian
+  platform
+  user_paths_ok
+  [ "$RT_SHAPE_WHY" = default ]
+  OPT_SERVICE=1
   platform
   [ "$RT_USER" = 0 ]
   [ "$RT_ACCOUNT" = storm-runtime ]
-  OPT_USER=1
+  [ "$RT_SHAPE_WHY" = flag ]
+  OPT_SERVICE=0 OPT_USER=1
   platform
   user_paths_ok
   OPT_USER=0
@@ -45,6 +50,7 @@ user_paths_ok() {
   : >"$HOME/.config/systemd/user/storm-runtime.service"
   platform
   user_paths_ok
+  [ "$RT_SHAPE_WHY" = installed ]
 }
 
 @test "XDG directories move the paths; a relative one is ignored" {

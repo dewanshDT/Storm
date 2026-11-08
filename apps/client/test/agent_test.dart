@@ -784,19 +784,21 @@ void main() {
 
     void expectOnly(HostPlatform shown) {
       for (final platform in HostPlatform.values) {
-        for (final step in enrollSteps(platform)) {
+        for (final shape in EnrollShape.values) {
+          for (final step in enrollSteps(platform, shape)) {
+            expect(
+              inDialog(find.text(step.command)),
+              platform == shown ? findsWidgets : findsNothing,
+              reason: '${step.command} on $shown',
+            );
+          }
           expect(
-            inDialog(find.text(step.command)),
+            find.text(enrollFootnote(platform, shape)),
             platform == shown ? findsOneWidget : findsNothing,
-            reason: '${step.command} on $shown',
+            reason: 'the $shape footnote for $platform, on $shown',
           );
         }
       }
-      expect(
-        find.text(enrollFootnote(shown)),
-        findsOneWidget,
-        reason: 'the footnote for $shown',
-      );
     }
 
     testWidgets('the enroll sheet shows one platform at a time and switches', (
@@ -860,10 +862,87 @@ void main() {
       }
     });
 
+    // Decision 151 E5: a new host runs as you, so the sheet lists those
+    // commands first and the service's second.
+    testWidgets('the enroll sheet lists as you first, the service second', (
+      tester,
+    ) async {
+      expect(EnrollShape.values, [EnrollShape.you, EnrollShape.service]);
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('enroll-host')));
+      await tester.pumpAndSettle();
+      for (final platform in ['Linux', 'macOS', 'Windows']) {
+        await tester.tap(inDialog(find.text(platform)));
+        await tester.pumpAndSettle();
+        double top(String key) => tester.getTopLeft(find.byKey(Key(key))).dy;
+        expect(find.text('As you'), findsOneWidget);
+        expect(find.text('As its own account'), findsOneWidget);
+        expect(
+          top('enroll-shape-you'),
+          lessThan(top('enroll-shape-service')),
+          reason: platform,
+        );
+        expect(
+          top('enroll-footnote-you'),
+          lessThan(top('enroll-shape-service')),
+          reason: '$platform: every as-you line before the service heading',
+        );
+        expect(
+          top('enroll-shape-service'),
+          lessThan(top('enroll-service-command-0')),
+          reason: platform,
+        );
+      }
+    });
+
+    test('the as-you steps need no sudo and no administrator', () {
+      for (final platform in HostPlatform.values) {
+        final you = enrollSteps(platform, EnrollShape.you);
+        for (final step in you) {
+          expect(step.command, isNot(contains('sudo')), reason: step.command);
+          expect(step.command, isNot(contains('ProgramFiles')));
+          expect(step.command, isNot(contains('_stormruntime')));
+          expect(step.command, isNot(contains('apt ')));
+        }
+        expect(you.map((s) => s.command).join('\n'), contains('--user'));
+      }
+      expect(
+        enrollSteps(HostPlatform.linux, EnrollShape.you).first.command,
+        'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
+        'sh -s -- --yes --runtime --user',
+      );
+      expect(
+        enrollSteps(HostPlatform.macos, EnrollShape.you).last.command,
+        r'"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" enroll',
+      );
+      expect(
+        enrollSteps(HostPlatform.windows, EnrollShape.you).last.command,
+        r'& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" enroll',
+      );
+      expect(
+        enrollFootnote(HostPlatform.windows, EnrollShape.you),
+        contains('not as administrator'),
+      );
+      expect(
+        enrollFootnote(HostPlatform.macos, EnrollShape.you),
+        contains('LaunchAgent'),
+      );
+    });
+
     test('each platform\'s steps are its own, with one enroll step', () {
-      final linux = enrollSteps(HostPlatform.linux);
-      final mac = enrollSteps(HostPlatform.macos);
-      final windows = enrollSteps(HostPlatform.windows);
+      final linux = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.linux, shape),
+      ];
+      final mac = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.macos, shape),
+      ];
+      final windows = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.windows, shape),
+      ];
       for (final step in linux) {
         expect(step.command, isNot(contains('brew')));
         expect(step.command, isNot(contains('_stormruntime')));
@@ -880,27 +959,35 @@ void main() {
         expect(step.command, isNot(contains('systemctl')));
         expect(step.command, isNot(contains('/Library/')));
       }
-      for (final steps in [linux, mac, windows]) {
-        final enroll = steps.where((s) => s.pastesString).toList();
-        expect(enroll, hasLength(1));
-        expect(enroll.single.command, contains('storm-runtime'));
-        expect(enroll.single.command, endsWith(' enroll'));
-        // The enrollment string is a secret: never an argument (freeze §5.3).
-        expect(enroll.single.command, isNot(contains('storm-enroll:')));
+      for (final platform in HostPlatform.values) {
+        for (final shape in EnrollShape.values) {
+          final steps = enrollSteps(platform, shape);
+          final enroll = steps.where((s) => s.pastesString).toList();
+          expect(enroll, hasLength(1), reason: '$platform $shape');
+          expect(enroll.single.command, contains('storm-runtime'));
+          expect(enroll.single.command, endsWith(' enroll'));
+          // The enrollment string is a secret: never an argument (freeze §5.3).
+          expect(enroll.single.command, isNot(contains('storm-enroll:')));
+        }
       }
+      final macService = enrollSteps(HostPlatform.macos, EnrollShape.service);
       expect(
-        mac.last.command,
+        macService.last.command,
         'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       );
-      expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
-      // `install` puts the binary in Program Files; enroll runs from there.
       expect(
-        windows.last.command,
+        enrollFootnote(HostPlatform.macos, EnrollShape.service),
+        contains('dev.storm.runtime'),
+      );
+      // `install` puts the binary in Program Files; enroll runs from there.
+      final winService = enrollSteps(HostPlatform.windows, EnrollShape.service);
+      expect(
+        winService.last.command,
         r'& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll',
       );
-      expect(windows[1].command, endsWith(' install'));
+      expect(winService[1].command, endsWith(' install'));
       expect(
-        enrollFootnote(HostPlatform.windows),
+        enrollFootnote(HostPlatform.windows, EnrollShape.service),
         contains(r'NT SERVICE\StormRuntime'),
       );
     });
