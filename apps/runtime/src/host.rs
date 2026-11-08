@@ -5326,7 +5326,9 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
             "a bad slug is dropped"
         );
         assert_eq!(
-            servers["storm"]["default_tools_approval_mode"].as_str(),
+            servers["storm"]
+                .get("default_tools_approval_mode")
+                .and_then(toml::Value::as_str),
             crate::platform::is_service_context().then_some("prompt"),
             "G2 is the service's"
         );
