@@ -13178,6 +13178,73 @@ pub(crate) mod tests {
         }
     }
 
+    /// 137-2: live sessions count by canonical directory, so two names for
+    /// one directory both see the other's session, two directories never
+    /// do, and a child's own directory never counts for its parent's. An
+    /// old host that names no directories counts by name.
+    #[tokio::test]
+    async fn the_shared_workspace_notice_counts_by_canonical_directory() {
+        let dir = tempdir::TempDir::new("storm-shared-workspace").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, _) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, mut link) = state.agent.connect_host(&host);
+        let mut caps = install_caps(false);
+        caps["workspaces"] = serde_json::json!(["storm", "alias", "other"]);
+        caps["workspace_paths"] =
+            serde_json::json!({"storm": "/w/storm", "alias": "/w/storm", "other": "/w/other"});
+        state
+            .agent
+            .hello(&host, serde_json::from_value(caps.clone()).unwrap())
+            .unwrap();
+        let agent = &state.agent;
+        agent.session_in_for_tests(&owner, &host, "ags_A", "storm");
+        agent.spawn_child_for_tests("ags_A", "a task");
+        agent.spawn_child_for_tests("ags_A", "another");
+
+        let counts = async |link: &mut tokio::sync::mpsc::UnboundedReceiver<_>| {
+            let path = format!("/v1/agent/hosts/{host}/workspaces");
+            let refresh = async {
+                link.recv().await.unwrap();
+                let caps = state.agent.host_live(&host).capabilities.unwrap();
+                state.agent.inventory(&host, caps).unwrap();
+            };
+            let ((status, body), ()) =
+                tokio::join!(send(&app, get_with_auth(&path, &owner_bearer)), refresh);
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|w| {
+                    (
+                        w["name"].as_str().unwrap().to_string(),
+                        w["live_sessions"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let want = |storm: usize, alias: usize, other: usize| {
+            vec![
+                ("storm".to_string(), serde_json::json!(storm)),
+                ("alias".to_string(), serde_json::json!(alias)),
+                ("other".to_string(), serde_json::json!(other)),
+            ]
+        };
+        assert_eq!(counts(&mut link).await, want(1, 1, 0));
+
+        agent.session_in_for_tests(&owner, &host, "ags_B", "other");
+        assert_eq!(counts(&mut link).await, want(1, 1, 1));
+        agent.session_in_for_tests(&owner, &host, "ags_C", "alias");
+        assert_eq!(counts(&mut link).await, want(2, 2, 1));
+
+        caps["workspace_paths"] = serde_json::json!({});
+        agent
+            .inventory(&host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        assert_eq!(counts(&mut link).await, want(1, 1, 1));
+    }
+
     /// 141c: the owner's new workspace goes to the host as
     /// `workspace.create` and is answered with its name; each attempt is
     /// audited with the name only.
