@@ -714,7 +714,7 @@ void main() {
       expect(
         find.text(
           'online now · Claude Code (not installed), Shell · '
-          'network: host policy',
+          'network: host policy\n$kRunsAsUnknown',
         ),
         findsOneWidget,
       );

@@ -65,8 +65,9 @@ agent.
 
 A host that is not `verified` — macOS, Windows, a Linux host missing a
 precondition, or a runtime too old to say — shows *"Session identity not
-verified — sessions on this host can act as each other"* on its row in
-**Settings › Hosts** and in each of its sessions' Details. That is a
+verified — Storm can't tell which session is calling"* as an extra line on
+its row in **Settings › Hosts** and in each of its sessions' Details. A
+verified host shows no identity line. That is a
 disclosure, not a restriction: every tool keeps working there. Each of an
 agent's calls to Storm or an integration is audited as `verified` or
 `unverified`, and a connection the host refused is recorded on the server as
@@ -251,11 +252,16 @@ packaged state directory) reports `unavailable: no_helper` at once rather
 than waiting on a self-test.
 
 Every host also reports **which account it runs as** and the isolation it is
-set to (`off` or `per-session`). When a session starts running, Storm keeps
-that account and the host's isolation and identity as they were then, and
-the session's Details shows the isolation it started under, not what the
-host says later. This is status only: Storm reads no agent setting to
-report it and changes none.
+set to (`off` or `per-session`). Every host row in **Settings › Hosts**, and
+the launcher under **Host**, says *"Runs as storm-runtime"* (the account's
+name), with *"· each session isolated"* added on a host set to
+`per-session`. A runtime too old to say, or one that can't name its account,
+shows *"Runs as an unknown account"*. When a session starts running, Storm
+keeps that account and the host's isolation and identity as they were then,
+and the session's Details shows them under **Ran as**, not what the host
+says later. A session from before Storm kept this shows *"Not recorded"*.
+This is status only: Storm reads no agent setting to report it and changes
+none.
 
 On an isolated host, an agent that starts another agent (agent spawning, not
 yet available) gives the new one **a workspace of its own**, made under the

@@ -60,8 +60,8 @@ void main() {
 
   test('only a verified session, or one from an older server, has no row', () {
     const label =
-        'Session identity not verified — sessions on this host can act as '
-        'each other.';
+        "Session identity not verified — Storm can't tell which session is "
+        'calling.';
     expect(about(session(identity('unavailable', 'old_host'))), [label]);
     expect(about(session(identity('unsupported', 'windows'))), [label]);
     expect(about(session(identity('unavailable', 'ptrace_scope'))), [label]);
@@ -116,7 +116,7 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    final line = 'online now · Shell · network: host policy';
+    const line = 'online now · Shell · network: host policy\n$kRunsAsUnknown';
     expect(find.text('$line\n$kIdentityNotVerified'), findsOneWidget);
     expect(find.text(line), findsNWidgets(2));
   });
