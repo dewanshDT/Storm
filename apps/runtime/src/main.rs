@@ -135,12 +135,21 @@ enum Command {
     /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
     /// elevated shell): creates `C:\ProgramData\StormRuntime` and the
     /// `StormRuntime` service, which enrolling starts. Re-run it to upgrade.
-    /// On Linux the package does this.
+    /// On Linux the package does this, and `--user` runs the host as you.
     Install {
         /// Who shares the workspace root with the host. Defaults to the user
         /// who ran sudo.
         #[arg(long)]
         operator: Option<String>,
+        /// Linux, as yourself, no root: copy this binary to
+        /// `~/.local/bin`, write `~/.config/systemd/user/storm-runtime.service`
+        /// and enable it, and turn on linger so it starts at boot without a
+        /// login (or print the one command an administrator runs for that).
+        #[arg(long, conflicts_with = "operator")]
+        user: bool,
+        /// With `--user`: leave linger as it is.
+        #[arg(long, requires = "user")]
+        no_linger: bool,
     },
     /// Remove the system service `install` set up, as root (elevated on
     /// Windows). Workspaces are always kept.
@@ -148,6 +157,10 @@ enum Command {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
         purge: bool,
+        /// Linux: remove what `install --user` set up, as yourself. Leaves no
+        /// file outside your home.
+        #[arg(long)]
+        user: bool,
     },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
@@ -311,11 +324,20 @@ async fn main() -> Result<()> {
                 | storm_runtime::serve::Outcome::Failed(_) => std::process::exit(3),
             }
         }
-        Command::Install { operator } => {
-            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
-        }
-        Command::Uninstall { purge } => {
-            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
+        Command::Install {
+            operator,
+            user,
+            no_linger,
+        } => storm_runtime::platform::install(&storm_runtime::platform::InstallOptions {
+            operator,
+            user,
+            no_linger,
+        }),
+        Command::Uninstall { purge, user } => {
+            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions {
+                purge,
+                user,
+            })
         }
         Command::Check { state } => {
             let state = state_or_default(state)?;

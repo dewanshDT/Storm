@@ -42,6 +42,7 @@ echo "== shellcheck (the body's line N is install.sh line N+$start)"
 # The nightly backup has no bats suite (apps/server/tests/backup_root.rs drives
 # it against the real binary); it is linted here, the one job with the linter.
 "$SHELLCHECK" -s bash "$root/deploy/storm-backup.sh"
+"$SHELLCHECK" -s sh "$root/deploy/runtime-tarball.sh"
 bash -n "$tmp/install-body.bash"
 echo "shellcheck: clean"
 

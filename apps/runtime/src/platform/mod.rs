@@ -57,6 +57,7 @@ pub mod ipc;
 pub mod launchd;
 pub mod paths;
 pub mod peer;
+pub mod systemd_user;
 pub mod wincmd;
 pub mod winsvc;
 
@@ -291,6 +292,11 @@ pub struct InstallOptions {
     /// Who the workspace root is shared with. Defaults to `$SUDO_USER`; on
     /// Windows, the user who opened the elevated shell.
     pub operator: Option<String>,
+    /// Linux: a `systemd --user` unit that runs the host as this person,
+    /// with no root (decision 151 E1).
+    pub user: bool,
+    /// With `user`: leave linger as it is.
+    pub no_linger: bool,
 }
 
 /// `storm-runtime uninstall` (AM35).
@@ -299,18 +305,28 @@ pub struct UninstallOptions {
     /// Also remove the identity, state, logs, config and the account.
     /// Workspaces are never removed.
     pub purge: bool,
+    /// Linux: remove what `install --user` set up.
+    pub user: bool,
 }
 
 /// Installs this binary as the platform's system service. macOS: the
 /// `_stormruntime` account, `/Library/StormRuntime` and the LaunchDaemon.
 /// Windows: `C:\ProgramData\StormRuntime` and the `StormRuntime` service
-/// (AM50). Linux: the `.deb` does this, so it refuses with a pointer to it.
+/// (AM50). Linux: the `.deb` does this, so it refuses with a pointer to it;
+/// `user` installs a `systemd --user` unit instead.
 pub fn install(options: &InstallOptions) -> anyhow::Result<()> {
+    if options.user && !cfg!(target_os = "linux") {
+        anyhow::bail!("--user is for Linux; on {NAME}, run the host as yourself with `serve`");
+    }
     os::install(options)
 }
 
-/// Removes the system service `install` set up.
+/// Removes the system service `install` set up, or with `user` what
+/// `install --user` did.
 pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
+    if options.user && !cfg!(target_os = "linux") {
+        anyhow::bail!("--user is for Linux");
+    }
     os::uninstall(options)
 }
 

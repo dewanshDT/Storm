@@ -202,6 +202,13 @@ jobs:
           mkdir -p dist
           cp target/x86_64-unknown-linux-musl/release/storm-runtime \
             "dist/storm-runtime-${GITHUB_REF_NAME#v}-x86_64-linux"
+      # Decision 151 E1: the same binary as a tarball, for distributions
+      # without the .deb, installed as yourself with `install --user`.
+      - name: Package the user-run tarball
+        working-directory: apps/runtime
+        run: |
+          sh ../../deploy/runtime-tarball.sh target/x86_64-unknown-linux-musl/release/storm-runtime \
+            "${GITHUB_REF_NAME#v}" dist
       # The isolation helper (decision 136): its own crate, shipped in the
       # same .deb, built the same way.
       - name: Build the isolation helper
@@ -765,6 +772,9 @@ jobs:
           **Runtime Host (optional):** \`storm-runtime_${VERSION}-1_amd64.deb\`
           runs agent sessions for a server, on the server's machine or another.
           Setup is in \`deploy/README.md\` under "Runtime Hosts".
+          Or on any Linux with systemd, as yourself with no root:
+          \`storm-runtime-${VERSION}-x86_64-linux.tar.gz\`, then
+          \`./storm-runtime install --user\` and enroll.
 
           **Runtime Host for macOS (optional):**
           \`storm-runtime-${VERSION}-macos-universal.tar.gz\` (arm64 + x86_64) runs
