@@ -2095,13 +2095,22 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
             "the host is offline".into(),
         )
     })?;
-    let counts = state.agent.live_counts(host_id).map_err(agent_error)?;
+    // By canonical directory (137-2), else by name; a path never matches a name.
+    let paths = &caps.workspace_paths;
+    let dir = |name: &str| match paths.get(name) {
+        Some(path) => (true, path.clone()),
+        None => (false, name.to_string()),
+    };
+    let mut counts = std::collections::HashMap::new();
+    for (name, n) in state.agent.live_counts(host_id).map_err(agent_error)? {
+        *counts.entry(dir(&name)).or_insert(0) += n;
+    }
     Ok(caps
         .workspaces
-        .into_iter()
+        .iter()
         .map(|name| WorkspaceView {
-            live_sessions: counts.get(&name).copied().unwrap_or(0),
-            name,
+            live_sessions: counts.get(&dir(name)).copied().unwrap_or(0),
+            name: name.clone(),
         })
         .collect())
 }
@@ -5889,6 +5898,7 @@ async fn switch_to_auto(
         crew: None,
         role: None,
         spawn,
+        children_write: false,
         model: None,
         permission_mode: None,
         switch_mode: Some(crate::agent::permission::AUTO.into()),

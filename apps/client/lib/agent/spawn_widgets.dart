@@ -860,6 +860,13 @@ List<(String, String)> spawnAboutRows(AgentSession s, AgentOverview? o) {
         'Was started by ${o?.byId(oldParent)?.displayName ?? oldParent} '
             '(history). Resumed by you, so it runs on its own now.',
       ),
+    if (s.spawn.switchState case final sw? when sw.launchedOn)
+      (
+        'Agents it starts',
+        sw.childrenWrite
+            ? 'Write to the same vault as this session.'
+            : 'Read only. They write to no vault.',
+      ),
   ];
 }
 

@@ -309,6 +309,53 @@ void main() {
       await disposeShell(t, c2);
     });
 
+    testWidgets('151m: children writing shows only with spawn on and a '
+        'write vault, off by default, and is sent', (t) async {
+      final agents = server(host: c0());
+      final c = await launcher(t, agents);
+      const tick = Key('launcher-children-write');
+      expect(find.byKey(tick), findsNothing);
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      expect(find.byKey(tick), findsOneWidget);
+      await t.tap(find.byKey(const Key('launcher-writes')));
+      await t.pumpAndSettle();
+      expect(find.byKey(tick), findsNothing, reason: 'read only');
+      await t.tap(find.byKey(const Key('launcher-writes')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(agents.launches.single['spawn'], true);
+      expect(agents.launches.single.containsKey('children_write'), isFalse);
+      await disposeShell(t, c);
+
+      final again = server(host: c0());
+      final c2 = await launcher(t, again);
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(tick));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      final sent = again.launches.single;
+      expect((sent['spawn'], sent['children_write']), (true, true));
+      expect(sent['write_vault_id'], isNotNull);
+      await disposeShell(t, c2);
+
+      final off = server(host: c0());
+      final c3 = await launcher(t, off);
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(tick));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('launcher-spawn')));
+      await t.pumpAndSettle();
+      await t.tap(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
+      expect(off.launches.single.containsKey('children_write'), isFalse);
+      await disposeShell(t, c3);
+    });
+
     testWidgets('only for a host that passes C0 and an agent that can '
         'start agents', (t) async {
       for (final host in [

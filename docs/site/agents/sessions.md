@@ -25,6 +25,8 @@ launcher asks for:
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
 | **Role** | A role note from your Kit the agent reads at launch, as a [role](/docs/agents/crews/#roles). Off for an agent that can't read Storm notes. |
+| **Agents** | **Allow this session to start agents**, off by default: the session may then start, message and end agents of its own, which run in its [crew](/docs/agents/crews/) with it. Offered only on a host that verifies session identity and isolation, for Claude Code, OpenCode and Codex. |
+| **Agents' writes** | Shown only with **Agents** on and a **Can write to** vault chosen, and off by default: **The agents it starts can write to {vault}**. Off, they are read only. On, they write only to that vault, never another. About shows which. |
 
 Any number of sessions can work in one workspace. The launcher marks a
 workspace another session is working in; they see each other's changes as
