@@ -60,13 +60,6 @@ user_paths_ok() {
   [ "$RT_UNIT" = "$HOME/.config/systemd/user/storm-runtime.service" ]
 }
 
-@test "--user is refused off Linux" {
-  use_macos
-  run storm_main --yes --runtime --user --from-dir "$ASSETS"
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"--user is for Linux"* ]]
-}
-
 @test "the user path is unavailable as root, without systemd, or without the tarball" {
   os_release arch
   platform

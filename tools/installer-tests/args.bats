@@ -34,9 +34,9 @@ setup() {
 
 @test "--user asks for the Runtime Host as you" {
   parse_args --runtime
-  [ "$OPT_RT_USER" = 0 ]
+  [ "$OPT_USER" = 0 ]
   parse_args --runtime --user
-  [ "$OPT_RT_USER" = 1 ]
+  [ "$OPT_USER" = 1 ]
 }
 
 @test "--workspace takes a folder name or a git URL, nothing else" {
