@@ -26,7 +26,6 @@ pub mod events;
 pub mod images;
 pub mod inbox;
 pub mod jobs;
-pub mod mode;
 pub mod model;
 pub mod park;
 pub mod permission;
@@ -736,15 +735,11 @@ pub struct Launch {
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
     pub model: Option<String>,
-    /// The permission mode (146b): `default`, `accept_edits` or `auto`,
-    /// checked for its agent, else `permission_mode_unavailable`. There is
-    /// no bypass. A resume keeps its predecessor's.
+    /// The permission mode (146b, 151 N5): one its agent offers, passed
+    /// through as its own flag, else `permission_mode_unavailable`.
+    /// `default` passes nothing. A resume keeps its predecessor's.
     #[serde(default)]
     pub permission_mode: Option<String>,
-    /// Set only by Storm, never by a request: the mode an approved switch
-    /// (147c) resumes into, instead of the predecessor's.
-    #[serde(skip)]
-    pub switch_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1717,14 +1712,6 @@ impl AgentManager {
         on && record.is_some_and(|r| !r.is_ended() && self.spawn_gate(&r.host_id).is_ok())
     }
 
-    /// Whether an approved switch (147c) carries a session's switch: it was
-    /// launched with it on and the person has not turned it off since.
-    pub fn spawn_carried(&self, session_id: &str) -> bool {
-        let store = self.store.lock().unwrap();
-        store.spawn_launched(session_id).unwrap_or(false)
-            && store.spawn_enabled(session_id).unwrap_or(false)
-    }
-
     pub fn spawn_launched(&self, session_id: &str) -> bool {
         self.store
             .lock()
@@ -2270,15 +2257,14 @@ impl AgentManager {
         let may_spawn = reads_storm
             && SPAWN_PROVIDERS.contains(&provider.id.as_str())
             && self.spawn_gate(&req.host_id).is_ok();
-        // A resume never turns on more than its predecessor launched with,
-        // and an approved switch (147c) keeps the switch only if it can.
+        // A resume never turns on more than its predecessor launched with.
         if let Some((old, _)) = resume.as_ref()
             && req.spawn
             && !self.store.lock().unwrap().spawn_launched(old)?
         {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
-        let spawn = req.spawn && (may_spawn || req.switch_mode.is_none());
+        let spawn = req.spawn;
         if spawn && !may_spawn {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
@@ -2310,7 +2296,6 @@ impl AgentManager {
             )));
         }
         let permission_mode = match resume.as_ref() {
-            Some(_) if req.switch_mode.is_some() => req.switch_mode.clone(),
             Some((old, _)) => self
                 .store
                 .lock()
@@ -2564,6 +2549,7 @@ impl AgentManager {
         self.store.lock().unwrap().grant(session_id, connection_id)
     }
 
+    #[cfg(test)]
     pub fn grants_of(&self, session_id: &str) -> Result<Vec<McpGrant>> {
         self.store.lock().unwrap().grants_of(session_id)
     }
@@ -3480,7 +3466,6 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
-                switch_mode: None,
             },
             meta,
             grants,
@@ -3507,7 +3492,6 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
-                switch_mode: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -4183,7 +4167,6 @@ mod tests {
                     children_write: false,
                     model: None,
                     permission_mode: None,
-                    switch_mode: None,
                 },
                 meta,
                 offered(),
@@ -4400,7 +4383,6 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
-                switch_mode: None,
             },
             LaunchMeta::default(),
             Vec::new(),

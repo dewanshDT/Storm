@@ -7,7 +7,6 @@ import '../ui/shell/nav_bubble.dart' show StormPill;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'crew_widgets.dart' show RoleTagRow;
-import 'mode_request.dart' show ModeAskTag;
 import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
@@ -206,9 +205,6 @@ class SessionRow extends StatelessWidget {
                   if (!s.ended && s.spawn.needsAttention != null) ...[
                     SizedBox(width: t.sp * 0.75),
                     Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
-                  ] else if (!s.ended && (s.modeRequest?.pending ?? false)) ...[
-                    SizedBox(width: t.sp * 0.75),
-                    const Flexible(child: ModeAskTag()),
                   ],
                 ],
               ),

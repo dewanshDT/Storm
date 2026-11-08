@@ -31,7 +31,6 @@ import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'delete_request.dart';
-import 'mode_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
 import 'session_inspector.dart';
@@ -187,11 +186,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       Padding(
         padding: padding,
         child: DeleteRequestCard(session: s),
-      ),
-    if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
-      Padding(
-        padding: padding,
-        child: ModeRequestCard(session: s),
       ),
     if (_endTree && !s.ended)
       Padding(

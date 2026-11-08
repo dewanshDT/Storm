@@ -754,7 +754,7 @@ def main():
             # Storm's managed agents first (decision 133-2), then AM38's.
             check("M3", "its PATH is Storm's agents, then AM38's",
                   env.get("ENV_PATH") == f"{STATE}/agents/managed/bin:{AM38_PATH}", env.get("ENV_PATH"))
-            check("M3", "claude-code is started in default permission mode", "--permission-mode default" in env.get("ARGS", ""), env)
+            check("M3", "claude-code is started with no permission flag (151 N5)", "--permission-mode" not in env.get("ARGS", ""), env)
             check("M3", "the agent runs as _stormruntime", f"ID={ACCOUNT}" in text, text[-300:])
         else:
             manual("M3", "a non-shell session's environment", "a real `claude` is installed; checked with the shell only")

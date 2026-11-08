@@ -25,7 +25,7 @@ use std::sync::Mutex;
 use anyhow::{Context, Result};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 /// A granted connection, as the server's `start` names it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,11 +154,6 @@ pub const SPAWN_ALLOWED_TOOLS: [&str; 8] = [
     "read_output",
 ];
 
-/// The Storm tool a top-level Claude Code session asks for auto with
-/// (147c), allowed outright so the person sees only Storm's card, never
-/// the CLI's own prompt for the call first.
-pub const MODE_ALLOWED_TOOLS: [&str; 1] = ["request_permission_mode"];
-
 /// The Storm tools a top-level session deletes with (149b), allowed
 /// outright so the person sees only Storm's dialog, which every deletion
 /// waits on whatever the mode, never the CLI's prompt first. The server
@@ -167,8 +162,8 @@ pub const DELETE_ALLOWED_TOOLS: [&str; 2] = ["delete_note", "delete_folder"];
 
 /// The Storm tools that only read, allowed outright for a top-level session
 /// reading Storm, so its reads before a delete or a spawn never stop on
-/// the CLI's prompt. Every server tool not in its write, spawn or mode
-/// lists, held to them by a test.
+/// the CLI's prompt. Every server tool not in its write or spawn lists,
+/// held to them by a test.
 pub const READ_ALLOWED_TOOLS: [&str; 12] = [
     "list_vaults",
     "get_vault",
@@ -185,16 +180,14 @@ pub const READ_ALLOWED_TOOLS: [&str; 12] = [
 ];
 
 /// What Storm's own layer of a session's CLI config says about permissions
-/// (decisions 146, 148, 149): the Storm tools allowed outright, the keys a
-/// permission mode sets in OpenCode's config, and whether every other
-/// OpenCode ask becomes a deny (a child's, 148a). Empty for a session that
-/// does not read Storm and runs in `default`, whose config is then
-/// byte-identical to before.
+/// (decisions 146, 149, 151 N5): the Storm tools allowed outright, and the
+/// keys the person's permission mode sets in OpenCode's config. Empty for a
+/// session that does not read Storm and runs in `default`, whose config is
+/// then byte-identical to before.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StormLayer {
     pub allow: Vec<&'static str>,
     pub opencode_permission: Vec<(String, String)>,
-    pub deny_asks: bool,
 }
 
 impl StormLayer {
@@ -211,14 +204,7 @@ impl StormLayer {
         Self {
             allow,
             opencode_permission,
-            deny_asks: false,
         }
-    }
-
-    /// With `request_permission_mode` allowed too (147c).
-    pub fn asking_for_modes(mut self) -> Self {
-        self.allow.extend(MODE_ALLOWED_TOOLS);
-        self
     }
 
     /// With the read-only tools allowed too.
@@ -230,12 +216,6 @@ impl StormLayer {
     /// With the delete tools allowed too (149b).
     pub fn deleting(mut self) -> Self {
         self.allow.extend(DELETE_ALLOWED_TOOLS);
-        self
-    }
-
-    /// A child's OpenCode layer (148a): every ask a deny.
-    pub fn denying_asks(mut self) -> Self {
-        self.deny_asks = true;
         self
     }
 
@@ -282,175 +262,6 @@ pub fn opencode_account_files(storm_only: bool) -> Result<Vec<String>> {
             std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))
         })
         .collect()
-}
-
-/// An OpenCode config file's JSON: JSONC's comments and trailing commas
-/// dropped first, outside strings.
-fn parse_jsonc(text: &str) -> Result<Value> {
-    let mut out = String::with_capacity(text.len());
-    let mut chars = text.chars().peekable();
-    let mut in_string = false;
-    while let Some(c) = chars.next() {
-        if in_string {
-            out.push(c);
-            match c {
-                '\\' => out.extend(chars.next()),
-                '"' => in_string = false,
-                _ => {}
-            }
-            continue;
-        }
-        match (c, chars.peek()) {
-            ('"', _) => {
-                in_string = true;
-                out.push(c);
-            }
-            ('/', Some('/')) => {
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            ('/', Some('*')) => {
-                chars.next();
-                let mut last = ' ';
-                for c in chars.by_ref() {
-                    if last == '*' && c == '/' {
-                        break;
-                    }
-                    last = c;
-                }
-                out.push(' ');
-            }
-            (',', _) => {
-                let rest: String = chars.clone().collect();
-                let next = rest.trim_start().chars().next();
-                if !matches!(next, Some('}') | Some(']')) {
-                    out.push(c);
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    Ok(serde_json::from_str(&out)?)
-}
-
-/// OpenCode's own asks, from its defaults (1.19.4): a loop, a path outside
-/// the workspace, a question for the person, entering plan mode, and
-/// reading an env file. A child's layer denies each (148a).
-const OPENCODE_DEFAULT_ASKS: [&str; 3] = ["doom_loop", "question", "plan_enter"];
-
-/// Turns every OpenCode ask a child's config would hold into a deny
-/// (148a): Storm's own keys in place, each the account's configs give
-/// (top level and per agent) under the same key, so its merged position is
-/// kept, and OpenCode's defaults. An explicit allow or deny is left as it
-/// is. Nothing here allows anything.
-fn deny_asks(
-    config: &mut Map<String, Value>,
-    permission: &mut Map<String, Value>,
-    account: &[Value],
-) {
-    fn deny_in(v: &mut Value) {
-        match v {
-            Value::String(s) if s == "ask" => *v = json!("deny"),
-            Value::Object(m) => m.values_mut().for_each(deny_in),
-            _ => {}
-        }
-    }
-    fn merge_asks(into: &mut Map<String, Value>, theirs: &Map<String, Value>) {
-        for (key, value) in theirs {
-            match value {
-                Value::String(s) if s == "ask" => {
-                    into.insert(key.clone(), json!("deny"));
-                }
-                Value::Object(patterns) => {
-                    let asks: Vec<&String> = patterns
-                        .iter()
-                        .filter(|(_, a)| *a == "ask")
-                        .map(|(p, _)| p)
-                        .collect();
-                    if asks.is_empty() {
-                        continue;
-                    }
-                    let entry = into.entry(key.clone()).or_insert_with(|| json!({}));
-                    if let Value::Object(own) = entry {
-                        for p in asks {
-                            own.insert(p.clone(), json!("deny"));
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-    permission.values_mut().for_each(deny_in);
-    let mut agents = Map::new();
-    for file in account {
-        if let Some(theirs) = file.get("permission").and_then(Value::as_object) {
-            merge_asks(permission, theirs);
-        }
-        for (name, agent) in file
-            .get("agent")
-            .and_then(Value::as_object)
-            .into_iter()
-            .flatten()
-        {
-            if let Some(theirs) = agent.get("permission").and_then(Value::as_object) {
-                let own = agents
-                    .entry(name.clone())
-                    .or_insert_with(|| json!({"permission": {}}));
-                merge_asks(
-                    own["permission"].as_object_mut().expect("an object"),
-                    theirs,
-                );
-            }
-        }
-    }
-    for key in OPENCODE_DEFAULT_ASKS {
-        if !matches!(permission.get(key), Some(Value::String(s)) if s != "ask") {
-            permission.insert(key.into(), json!("deny"));
-        }
-    }
-    for (key, patterns) in [
-        ("external_directory", json!({"*": "deny"})),
-        (
-            "read",
-            json!({"*.env": "deny", "*.env.*": "deny", "*.env.example": "allow"}),
-        ),
-    ] {
-        let entry = permission.entry(key).or_insert_with(|| json!({}));
-        if let Value::Object(own) = entry {
-            for (p, a) in patterns.as_object().expect("an object") {
-                own.entry(p.clone()).or_insert_with(|| a.clone());
-            }
-        }
-    }
-    if let Some(Value::Object(own)) = config.get_mut("agent") {
-        for agent in own.values_mut() {
-            if let Some(p) = agent.get_mut("permission") {
-                deny_in(p);
-            }
-        }
-    }
-    for (name, theirs) in agents {
-        let own = config
-            .entry("agent")
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .and_then(|a| a.entry(name).or_insert_with(|| json!({})).as_object_mut());
-        if let Some(own) = own {
-            let into = own.entry("permission").or_insert_with(|| json!({}));
-            if let (Some(into), Some(theirs)) =
-                (into.as_object_mut(), theirs["permission"].as_object())
-            {
-                for (k, v) in theirs {
-                    into.entry(k.clone()).or_insert_with(|| v.clone());
-                }
-            }
-        }
-    }
 }
 
 /// The key an allow is written under (146a): the tool's own name, or with as
@@ -683,23 +494,14 @@ pub fn write_provider_config(
                     key.clone(),
                     json!({ "type": "local", "command": command, "environment": env, "enabled": true }),
                 );
-                // Last, so no setting can relax it; a child is never asked.
-                let action = if layer.deny_asks { "deny" } else { "ask" };
-                permission.insert(format!("{key}_*"), json!(action));
+                // Last, so no setting can relax it.
+                permission.insert(format!("{key}_*"), json!("ask"));
             }
-            let files = if layer.deny_asks || !layer.allow.is_empty() {
-                account()?
-            } else {
+            let files = if layer.allow.is_empty() {
                 Vec::new()
+            } else {
+                account()?
             };
-            if layer.deny_asks {
-                let parsed = files
-                    .iter()
-                    .map(|f| parse_jsonc(f))
-                    .collect::<Result<Vec<_>>>()
-                    .context("an OpenCode config Storm cannot read could make a child ask")?;
-                deny_asks(&mut config, &mut permission, &parsed);
-            }
             let seen = format!(
                 "{}{}",
                 files.concat(),
@@ -715,15 +517,8 @@ pub fn write_provider_config(
                     );
                 }
             }
-            // A child's allows follow the denies above under keys of their
-            // own, as Storm's tool allows do (148a).
             for (k, v) in &layer.opencode_permission {
-                let k = if layer.deny_asks {
-                    opencode_allow_key(k, &seen)
-                } else {
-                    k.clone()
-                };
-                permission.insert(k, json!(v));
+                permission.insert(k.clone(), json!(v));
             }
             config.insert("$schema".into(), json!("https://opencode.ai/config.json"));
             // Replaces any `mcp` key the settings had: a host setting can
@@ -778,7 +573,7 @@ pub const OPENING_PROMPT: &str =
 /// message from its parent is its next round's task, and that a refusal is
 /// reported `blocked` (148b), since nobody answers a child. Word for word
 /// `docs/spawned-start-vectors.json`'s `opening_prompt`.
-pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round. Nobody can answer a prompt of yours: if something you need is refused, say so in report_result with outcome blocked and stop that path.";
+pub const SPAWNED_OPENING_PROMPT: &str = "Read your task with the storm session_context tool and do it. At the end of each round, report your result with the storm report_result tool. Then call the storm read_messages tool with wait set, and keep calling it until you are ended: each message from the agent that started you is the task for your next round. If something you need is refused, say so in report_result with outcome blocked and stop that path.";
 
 /// Which opening prompt a session gets: a spawned child's, else a note's.
 /// A child resumed from its parked conversation (145e) already knows its
