@@ -288,6 +288,16 @@ needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 
 Remove it with `sudo apt remove storm-runtime`.
 
+**Troubleshooting:**
+
+| Symptom | Check |
+|---|---|
+| `check` or `enroll` says **permission denied** | `/var/lib/storm-runtime` belongs to the `storm-runtime` account, so run them as it: `sudo -u storm-runtime storm-runtime check`. For a directory you passed with `--state`, run them as the account that owns it. |
+| `enroll` **refuses to run as root** | `sudo storm-runtime enroll` would leave a key and `host.json` that only root can read. Run `sudo -u storm-runtime storm-runtime enroll`. |
+| It says **not enrolled: there is no `…/host.json`** | Nothing has been enrolled in that state directory. Enroll it (the command above), with the same `--state` if you use one. |
+| It says the server **revoked** it, and `host.json.revoked` exists | It was revoked. Enroll it again; the old enrollment is kept under `revoked/`. |
+| It says a **key is missing** | `host.json` names a key that is not in `identity/`. Enroll again with `--force`. |
+
 ## macOS
 
 The host runs as a **LaunchDaemon under the `_stormruntime` account**, never
@@ -488,6 +498,8 @@ Storm never stores or transmits these logins. Also, a login running as
 | `claude` or `opencode` shows as not installed | Run `sudo -u _stormruntime -H sh -c 'command -v claude'` with the `PATH` above. A CLI in your home is not reachable; install it with Homebrew or as the account. |
 | The host exits at start with "refused" or "root" | A `workspace_roots` entry is under `/Users`, `/Volumes` or `/Network`, or overlaps a Storm data root. Move it to `/Library/StormRuntime/workspaces`. |
 | The host stays stopped and `host.json.revoked` exists | It was revoked. Enroll it again (the command above). |
+| `check` or `enroll` says **permission denied** | Only `_stormruntime` can read `/Library/StormRuntime/state`. Run them as it, from `/`: `cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check`. |
+| `enroll` **refuses to run as root** | `sudo storm-runtime enroll` would leave files only root can read. Use the `sudo -u _stormruntime` command above. |
 | An agent cannot read a file you put in a workspace | The file came from outside (moved, not copied, from a home folder), so it lacks the inherited ACL. `ls -le` shows it. Re-copy it, or `chmod -R +a "user:_stormruntime allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,list,search,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" <dir>`. |
 
 ## Windows
@@ -563,6 +575,7 @@ checkout, clone or move it into the workspace root.
 | Symptom | Check |
 |---|---|
 | The service stops at once with code 2 | It is not enrolled: run `enroll` as administrator. |
+| `check` or `enroll` says **permission denied** | Only administrators and the service can read `C:\ProgramData\StormRuntime\state`: run it in PowerShell as administrator. |
 | It stopped with code 3 and `host.json.revoked` exists | It was revoked. Enroll it again. |
 | `claude` or `opencode` shows as not installed | Install it machine-wide or as the account (from a Storm shell session), then `Restart-Service StormRuntime`. |
 | It exits at start naming AM54 | A `workspace_roots` entry is under `C:\Users`, a share, or a removable drive. |

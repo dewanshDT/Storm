@@ -157,7 +157,11 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
         Text.rich(
           TextSpan(
             children: [
-              const TextSpan(text: 'Enrolling shows a one-time string. Run '),
+              const TextSpan(
+                text:
+                    'Enrolling shows a one-time string and the commands to '
+                    'run on the machine. Paste the string when ',
+              ),
               TextSpan(
                 text: 'storm-runtime enroll',
                 style: TextStyle(
@@ -165,7 +169,7 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
                   color: t.text2,
                 ),
               ),
-              const TextSpan(text: ' on the machine and paste it.'),
+              const TextSpan(text: ' asks for it.'),
             ],
           ),
           style: TextStyle(

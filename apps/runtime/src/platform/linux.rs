@@ -8,6 +8,7 @@ pub const NAME: &str = "linux";
 pub const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
 pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
 pub const SERVICE_ACCOUNT: &str = "storm-runtime";
+pub const SERVICE_COMMAND: &str = "sudo -u storm-runtime storm-runtime";
 /// The unit's `ProtectHome` already hides `/home`, `/root` and
 /// `/run/user` (77e).
 pub const PROTECTED_ROOTS: &[&str] = &[];

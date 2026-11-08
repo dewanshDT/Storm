@@ -235,7 +235,10 @@ pub async fn enroll(
     announce: impl FnOnce(&HostConfig),
 ) -> Result<HostConfig> {
     let enrollment = Enrollment::parse(enrollment).map_err(|e| anyhow!("{e}"))?;
-    if HostConfig::path(state_dir).exists() && !force {
+    let enrolled = HostConfig::exists(state_dir).map_err(|e| {
+        crate::identity::unreadable(state_dir, &HostConfig::path(state_dir), e, "enroll")
+    })?;
+    if enrolled && !force {
         bail!(
             "{} already exists: this host is enrolled. Pass --force to enroll it again \
              (the old enrollment should be revoked in the app).",
@@ -255,7 +258,20 @@ pub async fn enroll(
     client.verify_server().await?;
 
     let key = HostKey::generate();
-    key.save(state_dir)?;
+    key.save(state_dir).map_err(|e| {
+        let denied = e
+            .root_cause()
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied);
+        if denied {
+            anyhow!(
+                "{e:#}. {}",
+                crate::platform::state_access_hint(state_dir, "enroll")
+            )
+        } else {
+            e
+        }
+    })?;
     let host_id = client.enroll(&enrollment.token, &key, name).await?;
     let config = HostConfig {
         server_url: enrollment.server_url,
