@@ -104,6 +104,7 @@ class AgentHost {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.execution,
   });
 
   final String id;
@@ -152,6 +153,12 @@ class AgentHost {
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
 
+  /// Who it runs as (decision 151); null for a host too old to say.
+  final HostExecution? execution;
+
+  /// What every host row and the launcher say about who it runs as.
+  String get executionLine => executionLineFor(execution);
+
   bool get online => status == 'online';
 
   /// C0 as its view says (134r, 141e): identity and isolation verified.
@@ -192,9 +199,40 @@ class AgentHost {
       identityState: _identityState(j),
       isolationState: _isolation(j).$1,
       isolationReason: _isolation(j).$2,
+      execution: _map(j['execution']) == null
+          ? null
+          : HostExecution.fromJson(_map(j['execution'])!),
     );
   }
 }
+
+/// A host's `execution` (decision 151): the account it runs as, and whether
+/// each session runs as its own user.
+class HostExecution {
+  const HostExecution({this.account, this.isolation});
+
+  /// Null when the host could not name it.
+  final String? account;
+
+  /// `off` or `per-session`.
+  final String? isolation;
+
+  bool get perSession => isolation == 'per-session';
+
+  factory HostExecution.fromJson(Map<String, dynamic> j) => HostExecution(
+    account: j['account'] as String?,
+    isolation: j['isolation'] as String?,
+  );
+}
+
+/// "Runs as storm-runtime": one line, never more than the host said.
+String executionLineFor(HostExecution? e) {
+  final account = e?.account;
+  if (account == null || account.isEmpty) return kRunsAsUnknown;
+  return 'Runs as $account${e!.perSession ? ' · each session isolated' : ''}';
+}
+
+const kRunsAsUnknown = 'Runs as an unknown account';
 
 String? _identityState(Map<String, dynamic> j) {
   final identity = j['identity'];
@@ -253,14 +291,25 @@ class RanAs {
   );
 }
 
+/// What Details says a session ran as, from its snapshot only.
+String ranAsLine(RanAs? r) {
+  if (r == null) return 'Not recorded';
+  final account = r.account == '' ? null : r.account;
+  if (r.isolationState == 'verified') {
+    return 'Its own session user (isolated)'
+        '${account == null ? '' : ' · the host runs as $account'}';
+  }
+  return account ?? 'An unknown account';
+}
+
 /// A host whose sessions each run as their own user (decision 136j).
 const kIsolationVerified = 'Sessions isolated — each runs as its own user';
 
 /// What Storm says on a host or session whose identity is not verified
 /// (decision 135d).
 const kIdentityNotVerified =
-    'Session identity not verified — sessions on this host can act as each '
-    'other';
+    "Session identity not verified — Storm can't tell which session is "
+    'calling';
 
 /// The agents a host can install from Settings › Agents, in the page's
 /// order (decision 133).

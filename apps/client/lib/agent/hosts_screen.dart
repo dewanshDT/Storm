@@ -249,6 +249,12 @@ class _HostTile extends StatelessWidget {
         : host.providers
               .map((p) => p.available ? p.label : '${p.label} (not installed)')
               .join(', ');
+    // The execution line already says a working sandbox isolates.
+    final isolation =
+        host.execution?.perSession == true &&
+            host.isolationLabel == kIsolationVerified
+        ? null
+        : host.isolationLabel;
     // Freeze §12.2: V1 has no egress policy of its own, and says so.
     return Opacity(
       opacity: revoked ? 0.55 : 1,
@@ -265,8 +271,9 @@ class _HostTile extends StatelessWidget {
         label: host.name,
         sub:
             '$state · $agents · network: host policy'
+            '\n${host.executionLine}'
             '${host.identityUnverified && !revoked ? '\n$kIdentityNotVerified' : ''}'
-            '${host.isolationLabel != null && !revoked ? '\n${host.isolationLabel}' : ''}',
+            '${isolation != null && !revoked ? '\n$isolation' : ''}',
         monoSub: true,
         trailing: revoked
             ? null

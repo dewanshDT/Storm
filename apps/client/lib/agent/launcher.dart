@@ -407,6 +407,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       else ...[
         _Field(
           label: 'Host',
+          under: host == null
+              ? null
+              : _Under(
+                  key: const Key('launcher-host-execution'),
+                  text: host.executionLine,
+                ),
           child: _Select<String>(
             key: const Key('launcher-host'),
             label: 'Host',

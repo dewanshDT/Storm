@@ -65,6 +65,13 @@ Beside the terminal, **Context**, **Wrote** and **About** show the note it
 started from, the notes it has written, and how it was launched. A note an
 agent wrote says so on its version line, linking back to the session.
 
+About's **Ran as** row is the account the session ran as, kept from when it
+started running, so it stays as it was if the host changes later. On an
+isolated host it reads *"Its own session user (isolated)"*, with the host's
+account after it. A session from before Storm kept this reads *"Not
+recorded"*; one whose host couldn't name its account reads *"An unknown
+account"*.
+
 ## Switching to Auto
 
 Unless you launched a Claude Code session in **Auto**, Auto is not among the

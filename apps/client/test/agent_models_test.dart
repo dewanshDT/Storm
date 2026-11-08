@@ -82,4 +82,29 @@ void main() {
       isNull,
     );
   });
+
+  test('a host says its account and isolation; an old host says neither', () {
+    AgentHost host(Object? execution) => AgentHost.fromJson({
+      'id': 'hst_1',
+      'name': 'build-vm',
+      'status': 'online',
+      'execution': ?execution,
+    });
+    final mine = host({'account': 'dewansh', 'isolation': 'off'});
+    expect(mine.execution?.account, 'dewansh');
+    expect(mine.execution?.perSession, isFalse);
+    expect(mine.executionLine, 'Runs as dewansh');
+    final box = host({'account': 'storm-runtime', 'isolation': 'per-session'});
+    expect(box.execution?.perSession, isTrue);
+    expect(box.executionLine, 'Runs as storm-runtime · each session isolated');
+    for (final old in [
+      host(null),
+      host('garbled'),
+      host({'account': null, 'isolation': 'off'}),
+      host({'account': '', 'isolation': 'per-session'}),
+    ]) {
+      expect(old.executionLine, kRunsAsUnknown);
+    }
+    expect(host(null).execution, isNull);
+  });
 }

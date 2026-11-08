@@ -561,6 +561,7 @@ void main() {
                     'id': 'hst_1',
                     'name': 'build-vm',
                     'status': 'online',
+                    'execution': {'account': 'dewansh', 'isolation': 'off'},
                     'capabilities': {
                       'providers': [
                         {'id': 'claude-code', 'kind': 'cli', 'available': true},
@@ -589,7 +590,10 @@ void main() {
       await open(tester, c, 'hosts');
       expect(find.text('build-vm'), findsOneWidget);
       expect(
-        find.text('online now · Claude Code, Shell · network: host policy'),
+        find.text(
+          'online now · Claude Code, Shell · network: host policy\n'
+          'Runs as dewansh',
+        ),
         findsOneWidget,
       );
       expect(find.byKey(const Key('rename-host-hst_1')), findsOneWidget);
