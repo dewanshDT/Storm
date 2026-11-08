@@ -473,7 +473,8 @@ jobs:
           printf '<plist version="1.0"><dict/></plist>\n' > app/Storm.app/Contents/Info.plist
           (cd app && ditto -c -k --keepParent Storm.app "../dist/Storm-$CI_VERSION-macos-arm64.zip")
           (cd dist && shasum -a 256 * > checksums.txt && cat checksums.txt)
-      # --service: the LaunchDaemon (decision 151 E5's default is a LaunchAgent).
+      # The LaunchDaemon: with --server it is the default on a Mac (decision
+      # 151), which --service also asks for.
       - name: Install everything but the agent CLIs (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |

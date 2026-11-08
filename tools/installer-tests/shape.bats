@@ -1,7 +1,9 @@
 #!/usr/bin/env bats
 # How a new Runtime Host runs (decision 151 E5): as you by default, the
 # service one flag (--service) or one menu choice away, and a host already
-# installed as the service keeps that shape on every re-run.
+# installed as the service keeps that shape on every re-run. On a Mac with
+# the server, which runs as you, the host is the service, and --user is
+# refused.
 
 load helpers
 
@@ -229,4 +231,63 @@ typed() {
   out=$(cat "$STORM_TTY_OUT")
   [[ "$out" == *"As its own account  - _stormruntime, a LaunchDaemon"* ]]
   [[ "$out" == *"Install the Runtime Host (a LaunchDaemon as _stormruntime"* ]]
+}
+
+@test "macos --server --runtime: the host is the LaunchDaemon, since the server runs as you" {
+  use_macos
+  for preset in "--server --runtime" "--everything"; do
+    # shellcheck disable=SC2086
+    dry $preset --enroll-from-stdin
+    [ "$status" -eq 0 ]
+    [[ "$(plan_descs "$output")" == *"Install the Runtime Host (a LaunchDaemon as _stormruntime"* ]]
+    [[ "$output" == *"the server runs as you on this Mac, so the host runs as its own account (_stormruntime)"* ]]
+    [[ "$output" != *"install --user"* ]]
+    [[ "$output" != *"re-run with --service"* ]]
+  done
+  platform
+  [ "$RT_USER" = 1 ]
+  OPT_COMPONENTS="server runtime" platform
+  [ "$RT_USER" = 0 ]
+  [ "$RT_SHAPE_WHY" = server ]
+}
+
+@test "macos --server --runtime --user is refused, and says why" {
+  use_macos
+  for preset in "--server --runtime" "--everything"; do
+    # shellcheck disable=SC2086
+    run storm_main --dry-run --from-dir "$ASSETS" $preset --user
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"--user with --server on a Mac would run agents as the account that holds your notes"* ]]
+  done
+  dry --runtime --user --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  dry --server --runtime --service --enroll-from-stdin
+  [ "$status" -eq 0 ]
+}
+
+@test "linux --server --runtime --user stays allowed: the server is a system service" {
+  os_release debian
+  dry --server --runtime --user
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Install the Runtime Host as tester (a systemd --user unit; no root)"* ]]
+}
+
+@test "macos interactive: Everything asks nothing about the host and plans the LaunchDaemon" {
+  use_macos
+  typed "1" "" "" "" "" "" "" "" "3"
+  run storm_main --from-dir "$ASSETS"
+  [ "$status" -eq 0 ]
+  out=$(cat "$STORM_TTY_OUT")
+  [[ "$out" != *"How should the Runtime Host run?"* ]]
+  [[ "$out" == *"Install the Runtime Host (a LaunchDaemon as _stormruntime"* ]]
+  [[ "$out" == *"the server runs as you on this Mac"* ]]
+}
+
+@test "macos: a host installed as you is kept beside a new server, with a warning" {
+  use_macos
+  install_fake macos-runtime-user
+  dry --server --runtime
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the server runs as you too, so its agents can read your vaults on disk"* ]]
+  [[ "$output" != *"LaunchDaemon as _stormruntime"* ]]
 }

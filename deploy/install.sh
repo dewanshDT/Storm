@@ -53,7 +53,7 @@ POLL_SLEEP=2
 HEALTH_TRIES=15
 
 # Defaults until parse_args and ui_init set them properly.
-OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 OPT_SERVICE=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
+OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 OPT_SERVICE=0 RT_SHAPE_ASKED=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
 WORK_DIR="" LOG_FILE=/dev/null STTY_SAVED="" SPIN_PID=""
 FW_KIND=none FW_TARGETS="" FW_CONSENT="" FW_PUBLIC_ONLY=0 FW_RECORD="" FW_UFW_CONF=""
 
@@ -81,11 +81,13 @@ Components:
   --user               run the Runtime Host as you, with no root: the default for
                        a new host. Linux: a systemd --user unit (the only way
                        where there is no .deb). macOS: a LaunchAgent, which runs
-                       while you're logged in. Either uses your own CLIs and logins
+                       while you're logged in. Either uses your own CLIs and logins.
+                       Not with --server on a Mac, where the server runs as you
   --service            run the Runtime Host as its own account instead, a system
                        service (Linux: the storm-runtime .deb; macOS: the
-                       _stormruntime LaunchDaemon). Needs sudo. A host already
-                       installed keeps the way it runs without either flag
+                       _stormruntime LaunchDaemon). Needs sudo. The default on a
+                       Mac with --server. A host already installed keeps the way
+                       it runs without either flag
   --app                the desktop app (macOS; Linux: the apt package, or in your home)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
 
@@ -130,7 +132,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
-  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0
+  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0 RT_SHAPE_ASKED=0
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -386,7 +388,9 @@ set_paths() {
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
       # The host as you (decisions 151 E2, E5): the default, unless asked
-      # for the LaunchDaemon or that is what is installed.
+      # for the LaunchDaemon, that is what is installed, or the server is
+      # being installed too: it runs as you, and a host as you would share
+      # its account with the vaults.
       if [ "${OPT_SERVICE:-0}" = 1 ]; then
         RT_SHAPE_WHY=flag svc=1
       elif [ "${OPT_USER:-0}" = 1 ]; then
@@ -395,6 +399,8 @@ set_paths() {
         RT_SHAPE_WHY=installed svc=1
       elif [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ]; then
         RT_SHAPE_WHY=installed
+      elif rt_with_server; then
+        RT_SHAPE_WHY=server svc=1
       else
         RT_SHAPE_WHY=default
       fi
@@ -462,6 +468,21 @@ set_paths() {
   # MCP only: a plain copy where a GUI app's PATH and a shell's both look.
   MCP_BIN="$root/usr/local/bin/storm-runtime"
   LOG_PATH=$LOG_FILE
+}
+
+# Whether the server is being installed with the runtime: the components
+# chosen, else the flags.
+rt_with_server() {
+  case " ${SEL:-$OPT_COMPONENTS} " in *" server "*) return 0 ;; esac
+  return 1
+}
+
+# On a Mac the server runs as you, so --user beside it would run agents as
+# the account that holds the vaults (decision 151). Windows refuses -User
+# with -Server the same way; on Linux the server is a system service.
+rt_shape_refused() {
+  [ "$OS" = macos ] && [ "${OPT_USER:-0}" = 1 ] && in_sel server && in_sel runtime || return 1
+  arg_error "--user with --server on a Mac would run agents as the account that holds your notes (the server runs as you): install the Runtime Host as its own account (drop --user)"
 }
 
 # The storm-runtime .deb's service, installed here (under ROOT in tests).
@@ -2140,6 +2161,11 @@ runtime_plan() {
     plan_note "Runtime: this $MACHINE runs it as its own account ($RT_ACCOUNT); it stays that way."
   elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = root ]; then
     plan_note "Runtime: the installer runs as root, so the host is the service ($RT_ACCOUNT). To run it as you, run the installer as yourself, without sudo."
+  elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = server ]; then
+    plan_note "Runtime: the server runs as you on this Mac, so the host runs as its own account ($RT_ACCOUNT): never as the account that holds your notes."
+  fi
+  if [ "$OS" = macos ] && [ "$RT_USER" = 1 ] && [ "$RT_SHAPE_WHY" = installed ] && in_sel server; then
+    plan_note "Runtime: this Mac runs the host as you, and the server runs as you too, so its agents can read your vaults on disk. To keep them out, move the host to its own account: https://storm.dewansh.space/docs/agents/hosts/#moving-a-host-to-another-account"
   fi
   if [ "$mode" != keep ]; then
     case "$OS" in
@@ -3437,10 +3463,41 @@ ask_questions() {
   choose_enroll_action
 }
 
+# The paths again, after the components changed what the host's shape is.
+rt_reshape() {
+  local lf=$LOG_FILE
+  set_paths
+  LOG_FILE=$lf
+  detect_all
+  availability_all
+}
+
 # A new host where it can run either way: ask, as you first (decision 151 E5).
+# On a Mac with the server, it is the service and nothing is asked; a menu
+# answer of "as you" gives way to it if the server is chosen later.
 choose_runtime_shape() {
   local lf=$LOG_FILE you svc
-  [ "$INTERACTIVE" = 1 ] && [ "$RT_SHAPE_WHY" = default ] && in_sel runtime || return 0
+  [ "$INTERACTIVE" = 1 ] && in_sel runtime || return 0
+  if [ "$OS" = macos ]; then
+    if [ "$RT_SHAPE_ASKED" = 1 ] && [ "${OPT_USER:-0}" = 1 ] && in_sel server; then
+      OPT_USER=0 RT_SHAPE_ASKED=0
+      rt_reshape
+      return 0
+    fi
+    case "$RT_SHAPE_WHY" in
+      default)
+        if in_sel server; then
+          rt_reshape
+          return 0
+        fi
+        ;;
+      server)
+        in_sel server && return 0
+        rt_reshape
+        ;;
+    esac
+  fi
+  [ "$RT_SHAPE_WHY" = default ] || return 0
   if [ "$OS" = macos ]; then
     you="a LaunchAgent: your CLIs and logins, while you're logged in; no sudo"
     svc="_stormruntime, a LaunchDaemon that runs without a login; needs sudo"
@@ -3450,6 +3507,7 @@ choose_runtime_shape() {
   fi
   ui_menu "How should the Runtime Host run?" "As you ($ME)|$you" "As its own account|$svc" || UI_INDEX=1
   if [ "$UI_INDEX" = 2 ]; then OPT_SERVICE=1; else OPT_USER=1; fi
+  RT_SHAPE_ASKED=1
   set_paths
   LOG_FILE=$lf
   detect_all
@@ -3617,6 +3675,7 @@ flow_install() {
   fi
   while :; do
     choose_runtime_shape
+    if rt_shape_refused; then return 2; fi
     filter_selection
     if [ -z "$SEL" ]; then
       ui_fail "Nothing selected can be installed on this $MACHINE."

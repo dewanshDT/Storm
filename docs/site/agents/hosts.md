@@ -17,7 +17,8 @@ It is the same `storm-runtime` on every platform, and it runs one of two
 ways:
 
 - **As yourself.** `storm-runtime install --user`, and the installer's
-  default, has your own service manager run it, with no root or
+  default (except beside the server on a Mac or Windows PC, where the
+  server runs as you), has your own service manager run it, with no root or
   administrator. Its agents run as you: they
   use your CLIs, your logins and your folders, and they can do whatever you
   can do. Storm adds no sandbox of its own; an agent's own permission prompts
@@ -369,7 +370,9 @@ Or run it **as yourself, as a LaunchAgent**: see
 your own CLIs, logins and folders, and stops when you log out.
 
 **Install.** The installer's `--runtime --service` installs and enrolls
-it this way. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
+it this way, and so does `--server --runtime` (or `--everything`) with no
+flag: the server on a Mac runs as you, so the host beside it is this
+account, and the installer refuses `--user` there. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
 needs Rust and takes a couple of minutes):
 
 ```sh
@@ -830,7 +833,9 @@ is `~/Library/Logs/StormRuntime/storm-runtime.log`.
   Keychain, works; no token file is needed.
 - **Never install it on a Mac where a Storm server runs as you.** An agent
   could then read the vaults on disk; `install --user` warns when it finds
-  one. Use the LaunchDaemon there.
+  one, and the installer refuses `--user` with `--server` (with
+  `--server --runtime` it installs the LaunchDaemon). Use the LaunchDaemon
+  there.
 - **Upgrade** by running the new binary's `install --user`, which replaces
   the copy and restarts the host. **Uninstall** with
   `"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" uninstall --user`;

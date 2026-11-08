@@ -75,6 +75,8 @@ So, on a host you run as yourself:
   **Settings › Hosts** and enroll it again.
 - **One machine, server and host together.** On Linux the server's data
   belongs to `storm` and its group, so a host you run as yourself cannot
-  read the vaults unless you join that group; never do. On a Mac or a Windows PC where the server
+  read the vaults unless you join that group; never do (`install --user`
+  warns if you have). On a Mac or a Windows PC where the server
   runs as you, a host as you could read the vaults on disk, so run the host
-  as the service there ([Runtime Hosts](/docs/agents/hosts/#never-share-an-account-with-the-vaults)).
+  as the service there; the installers do, given the server and the host
+  together ([Runtime Hosts](/docs/agents/hosts/#never-share-an-account-with-the-vaults)).

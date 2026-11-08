@@ -82,7 +82,9 @@ runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
 `--dry-run`; `sh install.sh --help` lists the rest. `--runtime` installs
 the Runtime Host as you (below); add `--service` for its own account
-instead. A host already installed as the service stays one. **MCP only** (`--mcp`)
+instead. On a Mac, where the server runs as you, `--server --runtime` and
+`--everything` install the host as its own account. A host already
+installed as the service stays one. **MCP only** (`--mcp`)
 puts just `storm-runtime` on a laptop's PATH for an AI app's `mcp-connect`
 (below).
 
