@@ -846,7 +846,16 @@ Specification*; the slices are decisions 81 and 81a onward):
   its own** (146b): only a mode the person chose at launch is passed
   (`profile::permission_mode`), a child's being its parent's; a bypass
   comes only from that choice.
-- **Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
+- **On a host a person runs as themselves, Codex runs in the account's own
+  `CODEX_HOME` and Storm writes nothing there** (151 N3, `runtime.toml`
+  `codex_home`, `codex::baseline_own`): every key, server and the hook with
+  its trust record (`/<session-flags>/config.toml:session_start:0:0`, Codex
+  0.166) is a `-c` override, the bridge handle in the session's environment
+  through `env_vars`, never argv. The sandbox/approval pins
+  (`profile::service_args`) and G2's `"prompt"` are the service's only.
+  Windows keeps Storm's home by default (cmd.exe cannot carry the `-c`
+  values to `codex.cmd`), as does isolation.
+- **On the service, Codex runs in Storm's own `CODEX_HOME`** (130b, `apps/runtime/src/codex.rs`),
   `<state>/agents/codex`, shared by its sessions so Resume finds a
   conversation; a session's servers are in its own `-p` profile (`0600`,
   removed at the end), each `default_tools_approval_mode = "prompt"`, named

@@ -132,9 +132,11 @@ sudo -u storm-runtime -H claude                 # then /login
 sudo -u storm-runtime -H opencode auth login
 ```
 
-**Codex** keeps its login and its conversations in Storm's own Codex home,
-`agents/codex` under the host's state directory, not in `~/.codex`: Storm
-writes its own session settings there. The easiest way to log it in, on every
+**Codex**, on the service, keeps its login and its conversations in Storm's
+own Codex home, `agents/codex` under the host's state directory, not in
+`~/.codex`: Storm writes its own session settings there. (A host you run as
+yourself uses your own; see [Running a host as
+yourself](#running-a-host-as-yourself).) The easiest way to log it in, on every
 platform, is a **Shell** session on the host (in the app, a new session with
 the agent **Shell**). It already runs as the host's account, in a directory
 that account can read, with the host's `PATH`:
@@ -632,6 +634,17 @@ a flag wins over both.
   provider's env file still wins. An older host refuses a `runtime.toml`
   with `import_env` (an unknown key stops it at start), so upgrade the host
   before you add it.
+- **Codex uses your own home and login**: `$CODEX_HOME`, else `~/.codex`.
+  Storm writes nothing there. Its session settings, your integrations and
+  the hook that lets Resume find a conversation (with its trust record, so
+  Codex runs it without asking) are `-c` options on that session's command
+  line alone; the integrations' session handle stays in its environment.
+  Your sandbox and approval settings apply as you set them: the service's
+  `--sandbox danger-full-access --ask-for-approval on-request`, and its
+  "ask before every Storm tool", are the service's only. `codex_home =
+  "storm"` in `runtime.toml` keeps Storm's own home under the state
+  directory instead. On Windows that is still the default, since cmd.exe
+  cannot pass those options to npm's `codex.cmd`.
 - **A state directory nested too deep is refused at start.** The host's
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.

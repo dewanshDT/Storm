@@ -1163,7 +1163,9 @@ impl Host {
             .providers
             .iter()
             .any(|p| mcp_of(p) == Some(Mcp::Codex))
-            .then(|| crate::codex::home(&self.state_dir));
+            .then(|| self.codex_home().ok())
+            .flatten()
+            .map(|home| home.path().to_path_buf());
         if claude.is_empty() && codex.is_none() {
             return;
         }
@@ -2486,18 +2488,31 @@ impl Host {
                 .collect();
             match mcp {
                 _ if grants.is_empty() => Default::default(),
-                Some(Mcp::Codex) => (
-                    crate::codex::write_profile(
-                        &crate::codex::home(&self.state_dir),
-                        session,
-                        &grants,
-                        &handle,
-                        &socket,
-                        &exe,
-                        &crate::codex::own_servers(&crate::codex::home(&self.state_dir)),
-                    )?,
-                    None,
-                ),
+                Some(Mcp::Codex) => {
+                    // G2's prompt is the service's (decision 151 N3).
+                    let ask = crate::platform::is_service_context();
+                    let extras = match self.codex_home()? {
+                        crate::codex::Home::Storm(home) => crate::codex::write_profile(
+                            &home,
+                            session,
+                            &grants,
+                            &handle,
+                            &socket,
+                            &exe,
+                            &crate::codex::own_servers(&home),
+                            ask,
+                        )?,
+                        crate::codex::Home::Own(home) => crate::codex::session_servers(
+                            &grants,
+                            &handle,
+                            &socket,
+                            &exe,
+                            &crate::codex::own_servers(&home),
+                            ask,
+                        ),
+                    };
+                    (extras, None)
+                }
                 Some(Mcp::Cursor) => {
                     let home = account_home()?;
                     let (extras, plan) = crate::cursor::write_session(
@@ -2551,8 +2566,24 @@ impl Host {
         Ok((extras, plan))
     }
 
-    /// What every Codex session gains, grants or not (decision 130b): Storm's
-    /// home, with its own keys written for this workspace, and under
+    /// The home this host's Codex sessions run in (decision 151 N3).
+    fn codex_home(&self) -> Result<crate::codex::Home> {
+        Ok(
+            match self
+                .config
+                .codex_home_for(crate::platform::is_service_context())
+            {
+                crate::config::CodexHome::Storm => {
+                    crate::codex::Home::Storm(crate::codex::home(&self.state_dir))
+                }
+                crate::config::CodexHome::Own => crate::codex::Home::Own(crate::codex::own_home()?),
+            },
+        )
+    }
+
+    /// What every Codex session gains, grants or not (decision 130b): its
+    /// home, with Storm's own keys for this workspace (written into Storm's
+    /// home, or `-c` overrides on the account's own, 151 N3), and under
     /// `storm-only` what keeps the account's servers out and its plugin plan
     /// (decisions 131i, 132c). Nothing for any other provider.
     fn codex_baseline(
@@ -2566,13 +2597,14 @@ impl Host {
         let exe = std::env::current_exe().context("finding this binary for the hook")?;
         let allow = self.config.plugin_mcp == crate::config::PluginMcp::Allow;
         let storm_only = self.config.agent_mcp == crate::config::AgentMcp::StormOnly;
-        let (extras, plan) = crate::codex::baseline(
-            &crate::codex::home(&self.state_dir),
-            workspace,
-            &exe,
-            allow,
-            storm_only,
-        )?;
+        let (extras, plan) = match self.codex_home()? {
+            crate::codex::Home::Storm(home) => {
+                crate::codex::baseline(&home, workspace, &exe, allow, storm_only)?
+            }
+            crate::codex::Home::Own(home) => {
+                crate::codex::baseline_own(&home, workspace, &exe, allow, storm_only)?
+            }
+        };
         Ok((extras, storm_only.then_some(plan)))
     }
 
@@ -3875,8 +3907,9 @@ mod tests {
         }
         .save(state.path())
         .unwrap();
+        // Never the account's own Codex home from a test.
         let mut toml = format!(
-            "{settings}\nworkspace_roots = [{:?}]\n",
+            "{settings}\ncodex_home = \"storm\"\nworkspace_roots = [{:?}]\n",
             roots.path().display().to_string()
         );
         for id in ["claude-code", "opencode", "codex"] {
@@ -5392,8 +5425,11 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
             "a bad slug is dropped"
         );
         assert_eq!(
-            servers["storm"]["default_tools_approval_mode"].as_str(),
-            Some("prompt")
+            servers["storm"]
+                .get("default_tools_approval_mode")
+                .and_then(toml::Value::as_str),
+            crate::platform::is_service_context().then_some("prompt"),
+            "G2 is the service's"
         );
         let config: toml::Table = std::fs::read_to_string(home.join("config.toml"))
             .unwrap()
@@ -7235,7 +7271,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             o = out.display()
         );
         let mut toml = format!(
-            "workspace_roots = [{:?}]\n",
+            "codex_home = \"storm\"\nworkspace_roots = [{:?}]\n",
             roots.path().display().to_string()
         );
         for id in ["claude-code", "opencode", "codex"] {

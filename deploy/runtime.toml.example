@@ -25,6 +25,13 @@ scrollback_bytes = 4194304
 # (decision 132).
 # agent_mcp = "own"
 
+# Which CODEX_HOME Codex sessions run in (decision 151 N3): "own" is the
+# account's ($CODEX_HOME, else ~/.codex), which Storm never writes, passing
+# its session settings as -c options; "storm" is <state>/agents/codex.
+# Omitted: "own" on a host you run as yourself, "storm" for the service,
+# with isolation on, and on Windows.
+# codex_home = "storm"
+
 # Agent CLIs from the app (decision 133): Settings › Agents may install,
 # update and remove Claude Code, OpenCode, Codex, Cursor and Command Code on
 # this host, into <state>/agents/managed, which comes first on the path; a CLI

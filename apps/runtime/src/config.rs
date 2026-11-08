@@ -50,6 +50,13 @@ pub struct RuntimeConfig {
     /// integrations (decision 132), or gets Storm's alone.
     #[serde(default)]
     pub agent_mcp: AgentMcp,
+    /// Which `CODEX_HOME` a Codex session runs in (decision 151 N3): the
+    /// account's own (`$CODEX_HOME`, else `~/.codex`), which Storm never
+    /// writes, or Storm's, `<state>/agents/codex`. Omitted: the account's own
+    /// for a host a person runs as themselves, Storm's for the service, with
+    /// isolation on, and on Windows.
+    #[serde(default)]
+    pub codex_home: Option<CodexHome>,
     /// Whether the app may install, update and remove agent CLIs on this
     /// host (decision 133). `"off"` is for an operator who pins CLIs by hand.
     #[serde(default)]
@@ -117,6 +124,13 @@ pub enum AgentMcp {
     StormOnly,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexHome {
+    Own,
+    Storm,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentInstall {
@@ -161,6 +175,7 @@ impl Default for RuntimeConfig {
             forbidden_roots: default_forbidden(),
             plugin_mcp: PluginMcp::default(),
             agent_mcp: AgentMcp::default(),
+            codex_home: None,
             agent_install: AgentInstall::default(),
             agent_updates: AgentUpdates::default(),
             isolation: Isolation::default(),
@@ -219,6 +234,7 @@ impl RuntimeConfig {
         config.check_host_ports()?;
         config.check_child_caps()?;
         config.check_import_env()?;
+        config.check_codex_home()?;
         Ok(config)
     }
 
@@ -231,6 +247,27 @@ impl RuntimeConfig {
             bail!("import_env: `{bad}` is not a variable name (PATH is always imported)");
         }
         Ok(())
+    }
+
+    /// An isolated session's home is a snapshot of Storm's Codex home
+    /// (136-4), so the account's own cannot be one.
+    pub fn check_codex_home(&self) -> Result<()> {
+        if self.isolated() && self.codex_home == Some(CodexHome::Own) {
+            bail!("codex_home = \"own\" cannot be used with isolation on");
+        }
+        Ok(())
+    }
+
+    /// The Codex home this host's sessions run in, for a host that acts for
+    /// the service (`service`) or not.
+    pub fn codex_home_for(&self, service: bool) -> CodexHome {
+        match self.codex_home {
+            Some(home) => home,
+            // Windows runs npm's `codex.cmd`, and cmd.exe cannot carry the
+            // `-c` overrides the account's own home needs.
+            None if service || self.isolated() || cfg!(windows) => CodexHome::Storm,
+            None => CodexHome::Own,
+        }
     }
 
     /// The helper's rule (`net::host_ports`), so a list it would refuse
@@ -1170,6 +1207,29 @@ mod tests {
         let only: RuntimeConfig = toml::from_str("agent_mcp = \"storm-only\"").unwrap();
         assert_eq!(only.agent_mcp, AgentMcp::StormOnly);
         assert!(toml::from_str::<RuntimeConfig>("agent_mcp = \"strict\"").is_err());
+    }
+
+    #[test]
+    fn codex_home_is_the_accounts_own_only_for_a_person() {
+        let none = RuntimeConfig::default();
+        assert_eq!(none.codex_home_for(true), CodexHome::Storm);
+        let person = if cfg!(windows) {
+            CodexHome::Storm
+        } else {
+            CodexHome::Own
+        };
+        assert_eq!(none.codex_home_for(false), person);
+        let isolated: RuntimeConfig = toml::from_str("isolation = \"per-session\"").unwrap();
+        assert_eq!(isolated.codex_home_for(false), CodexHome::Storm);
+        let storm: RuntimeConfig = toml::from_str("codex_home = \"storm\"").unwrap();
+        assert_eq!(storm.codex_home_for(false), CodexHome::Storm);
+        let own: RuntimeConfig = toml::from_str("codex_home = \"own\"").unwrap();
+        assert_eq!(own.codex_home_for(true), CodexHome::Own);
+        assert!(own.check_codex_home().is_ok());
+        let both: RuntimeConfig =
+            toml::from_str("codex_home = \"own\"\nisolation = \"per-session\"").unwrap();
+        assert!(both.check_codex_home().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("codex_home = \"mine\"").is_err());
     }
 
     #[test]
