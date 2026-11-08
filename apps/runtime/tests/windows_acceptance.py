@@ -18,6 +18,12 @@ install unless `STORM_ACCEPT_REPLACE=1`.
     set RUNTIME_BIN=…\\storm-runtime.exe
     python apps\\runtime\\tests\\windows_acceptance.py
 
+Then the same server enrolls a second host, installed as this user with
+`install --user` (decision 151 E3): the logon task, registered without
+elevation from an unelevated child of this harness (`runas /trustlevel`),
+its sessions in Job Objects, a hard stop standing in for a logoff, and
+`uninstall --user`. A runner that cannot drop elevation reports it MANUAL.
+
 `STORM_ACCEPT_ARTIFACTS=<dir>`: where the server and host logs are copied.
 What it cannot automate is `MANUAL`, never `PASS`: a real Claude Code or
 OpenCode login and prompt, the handoff to a phone, and a reboot. Exits
@@ -60,6 +66,14 @@ WORKSPACES = os.path.join(ROOT, "workspaces")
 LOG = os.path.join(ROOT, "logs", "storm-runtime.log")
 OPERATOR_PROFILE = os.environ.get("USERPROFILE", "")
 WS = "accept"
+
+# Decision 151 E3: what `install --user` makes, for this user.
+USER_TASK = "Storm Runtime Host"
+USER_ROOT = os.path.join(os.environ.get("LOCALAPPDATA", ""), "StormRuntime")
+USER_BIN = os.path.join(USER_ROOT, "bin", "storm-runtime.exe")
+USER_STATE = os.path.join(USER_ROOT, "state")
+USER_CONFIG = os.path.join(USER_ROOT, "runtime.toml")
+USER_LOG = os.path.join(USER_ROOT, "logs", "storm-runtime.log")
 
 results = []  # (ac, name, status, detail)
 
@@ -626,6 +640,8 @@ def main():
 
         for path in stubs:
             os.remove(path)
+
+        user_pass(owner)
     except Exception as e:  # a step that cannot continue is a FAIL, never a crash
         check("--", "the harness ran to the end", False, repr(e))
     finally:
@@ -644,6 +660,199 @@ def main():
     report()
 
 
+# --- decision 151 E3: the host as this user -------------------------------------
+
+def task_xml():
+    rc, out = sh(["schtasks", "/query", "/tn", USER_TASK, "/xml"])
+    return out if rc == 0 else None
+
+
+def unescape(text):
+    return text.replace("&quot;", '"').replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+def element(xml, name):
+    m = re.search(rf"<{name}[^>]*>(.*?)</{name}>", xml or "", re.S)
+    return unescape(m.group(1)) if m else ""
+
+
+def interactive_session():
+    """Whether this user has an interactive logon session, which an
+    InteractiveToken task needs to run. A CI runner may have none."""
+    rc, out = sh(["query", "user"])
+    user = os.environ.get("USERNAME", "").lower()
+    return any(user in line.lower() and "active" in line.lower() for line in out.splitlines())
+
+
+def user_host_pids():
+    rc, out = ps("Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq '"
+                 + USER_BIN.replace("'", "''") + "' } | ForEach-Object { $_.ProcessId }")
+    return [int(p) for p in out.split() if p.strip().isdigit()]
+
+
+def user_pass(owner):
+    """Decision 151 E3. Elevated, `install --user` refuses; the rest runs in
+    an unelevated child of this harness, as an ordinary user would, and
+    reports back through files in WORK."""
+    print("\n=== E3: the host as this user ===")
+    rc, out = sh([RUNTIME_BIN, "install", "--user"])
+    check("E3", "install --user refuses to run elevated", rc != 0 and "not elevated" in out, out[-300:])
+    check("E3", "and registers no task", task_xml() is None)
+
+    job = os.path.join(WORK, "user-pass.json")
+    with open(job, "w") as f:
+        json.dump({"port": PORT, "auth": owner.auth, "work": WORK}, f)
+    line = subprocess.list2cmdline([sys.executable, os.path.abspath(__file__), "--user-pass", job])
+    rc, out = sh(["runas", "/trustlevel:0x20000", line])
+    started = try_wait(lambda: os.path.exists(job + ".started"), timeout=60)
+    if not started:
+        manual("E3", "the user-run pass", f"this runner cannot start an unelevated process (runas: {out.strip()[:200]})")
+        return
+    with open(job + ".started") as f:
+        if json.load(f).get("elevated"):
+            manual("E3", "the user-run pass", "runas /trustlevel did not drop elevation on this runner")
+            return
+    done = try_wait(lambda: os.path.exists(job + ".done"), timeout=900, every=2)
+    if not done:
+        check("E3", "the user-run pass finished", False, "no result within 15 minutes")
+    else:
+        with open(job + ".done") as f:
+            for ac, name, status, detail in json.load(f):
+                results.append((ac, name, status, detail))
+                print(f"  {status}  [{ac}] {name}" + (f"   {detail}" if detail else ""), flush=True)
+    if ARTIFACTS and os.path.exists(job + ".log"):
+        shutil.copy(job + ".log", os.path.join(ARTIFACTS, "storm-runtime-user.log"))
+    check("E3", "nothing of the user-run host is left registered", task_xml() is None)
+
+
+def user_pass_child(job):
+    """The unelevated half of `user_pass`."""
+    global PORT, BASE, WORK
+    with open(job) as f:
+        spec = json.load(f)
+    PORT, WORK = spec["port"], spec["work"]
+    BASE = f"http://127.0.0.1:{PORT}"
+    elevated = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    with open(job + ".started", "w") as f:
+        json.dump({"elevated": elevated}, f)
+    if elevated:
+        return
+    owner = Owner(spec["auth"])
+    direct = None
+    try:
+        rc, out = sh([RUNTIME_BIN, "install", "--user"], timeout=180)
+        check("E3", "install --user succeeds unelevated", rc == 0, out[-400:])
+        for path in (USER_BIN, USER_CONFIG, USER_STATE):
+            check("E3", f"{path} exists", os.path.exists(path))
+        acl = icacls(USER_STATE)
+        user = os.environ.get("USERNAME", "")
+        check("E3", "the state is this user's, and no one else's",
+              user.lower() in acl.lower() and "BUILTIN\\Users" not in acl and "Everyone" not in acl, acl)
+        xml = task_xml() or ""
+        check("E3", "the logon task is registered", "<LogonTrigger>" in xml, xml[:400])
+        principal = element(xml, "Principal")
+        rc, sid_out = sh(["whoami", "/user", "/fo", "csv", "/nh"])
+        my_sid = sid_out.strip().rsplit(",", 1)[-1].strip('"').lower() if rc == 0 else "-"
+        check("E3", "for this user, InteractiveToken, not elevated",
+              (user.lower() in principal.lower() or my_sid in principal.lower())
+              and "InteractiveToken" in principal
+              and "HighestAvailable" not in principal, principal)
+        command, arguments = element(xml, "Command"), element(xml, "Arguments")
+        check("E3", "it runs serve on the per-user paths in a windowless console",
+              command.lower().endswith("conhost.exe") and arguments.startswith("--headless ")
+              and USER_BIN.lower() in arguments.lower() and USER_STATE.lower() in arguments.lower()
+              and "--log-file" in arguments and "--exclusive-account" not in arguments, (command, arguments))
+        settings = element(xml, "Settings")
+        check("E3", "never stopped for its age", "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in settings, settings)
+        check("E3", "and off until enrolled", "<Enabled>false</Enabled>" in settings, settings)
+
+        ws_root = os.path.join(WORK, "user-workspaces")
+        os.makedirs(os.path.join(ws_root, WS), exist_ok=True)
+        with open(USER_CONFIG, "a") as f:
+            f.write(f"\nworkspace_roots = ['{ws_root}']\n")
+
+        status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner.auth)
+        rc, out = sh([USER_BIN, "enroll", "--name", "windows-accept-user"], input=issued["enrollment"] + "\n")
+        m = re.search(r"\((hst_[0-9A-Z]{26})\)", out)
+        host_id = m.group(1) if m else None
+        check("E3", "enroll as this user succeeds", rc == 0 and host_id is not None, out[-400:])
+        # Without an interactive session `schtasks /run` itself fails.
+        session = interactive_session()
+        check("E3", "and turns the logon task on and starts it",
+              ("Started the host's logon task" in out or not session)
+              and task_xml() is not None
+              and "<Enabled>false</Enabled>" not in element(task_xml(), "Settings"), out[-300:])
+
+        def start_as_the_task_would():
+            return subprocess.Popen(subprocess.list2cmdline([command]) + " " + arguments,
+                                    creationflags=subprocess.CREATE_NO_WINDOW)
+
+        if not try_wait(user_host_pids, timeout=30) and not session:
+            manual("E3", "the logon task starts the host", "this runner has no interactive logon session")
+            direct = start_as_the_task_would()
+        host = try_wait(lambda: owner.online(host_id), timeout=90)
+        check("E3", "the user-run host is online", host is not None, owner.host(host_id))
+        caps = (host or {}).get("capabilities") or {}
+        check("E3", "with its own workspace root",
+              any(ws_root.lower() in r.lower() for r in caps.get("workspace_roots", [])), caps)
+        rc, out = ps("Get-Process storm-runtime -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq '"
+                     + USER_BIN.replace("'", "''") + "' } | ForEach-Object { $_.MainWindowHandle }")
+        handles = [h for h in out.split() if h.strip().isdigit()]
+        check("E3", "it has no window", handles and all(h == "0" for h in handles), out)
+
+        sid = owner.launch(host_id, "shell")
+        text = owner.run(sid, "whoami")
+        check("E3", "its sessions run as this user", user.lower() in text.lower()
+              and "nt service" not in text.lower(), text[-300:])
+        text = owner.run(sid, "$env:USERPROFILE")
+        check("E3", "with this user's profile", OPERATOR_PROFILE.lower() in text.lower(), text[-300:])
+        child = ps_pid_of(owner.run(sid, DETACHED), "child")
+        owner.end(sid)
+        check("E3", "End ends the session's detached child, through the job",
+              child is not None and try_wait(lambda: not alive(child), timeout=15) is not None, child)
+
+        # A hard stop stands in for a logoff, which a runner cannot do.
+        sid = owner.launch(host_id, "shell")
+        child = ps_pid_of(owner.run(sid, DETACHED), "child")
+        for pid in user_host_pids():
+            sh(["taskkill", "/F", "/PID", str(pid)])
+        check("E3", "the host's end kills every descendant",
+              child is not None and try_wait(lambda: not alive(child), timeout=15) is not None, child)
+        if direct:
+            direct.kill()
+            direct = start_as_the_task_would()
+        else:
+            sh(["schtasks", "/run", "/tn", USER_TASK])
+        check("E3", "started again, it is online", try_wait(lambda: owner.online(host_id), timeout=90)
+              is not None, owner.host(host_id))
+        rec = try_wait(lambda: owner.session(sid) if owner.session(sid).get("status") == "failed" else None,
+                       timeout=30) or owner.session(sid)
+        check("E3", "and the session it ran is failed (host_restart)",
+              (rec.get("status"), rec.get("end_reason")) == ("failed", "host_restart"), rec)
+        manual("E3", "logoff ends the host; the next logon starts it (host_restart)", "a runner cannot log off")
+        with open(USER_LOG, encoding="utf-8", errors="replace") as f:
+            log = f.read()
+        check("E3", "it logs to its file", "starting" in log, log[-300:])
+        shutil.copy(USER_LOG, job + ".log")
+
+        rc, out = sh([RUNTIME_BIN, "uninstall", "--user"], timeout=120)
+        check("E3", "uninstall --user removes the task and stops the host",
+              rc == 0 and task_xml() is None and try_wait(lambda: not user_host_pids(), timeout=30) is not None, out)
+        check("E3", "and the binary, keeping the state", not os.path.exists(USER_BIN)
+              and os.path.exists(os.path.join(USER_STATE, "host.json")), out)
+        rc, out = sh([RUNTIME_BIN, "uninstall", "--user", "--purge"], timeout=120)
+        check("E3", "--purge removes the state too", rc == 0 and not os.path.exists(USER_STATE), out)
+        check("E3", "and never the workspaces", os.path.isdir(os.path.join(ws_root, WS)))
+    except Exception as e:
+        check("E3", "the user-run pass ran to the end", False, repr(e))
+    finally:
+        if direct and direct.poll() is None:
+            direct.kill()
+        sh([RUNTIME_BIN, "uninstall", "--user", "--purge"], timeout=120)
+        with open(job + ".done", "w") as f:
+            json.dump(results, f)
+
+
 def report():
     print("\n" + "=" * 78)
     print(f"{'AC':<5}{'result':<8}criterion")
@@ -659,4 +868,7 @@ def report():
 
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) == 3 and sys.argv[1] == "--user-pass":
+        user_pass_child(sys.argv[2])
+    else:
+        main()

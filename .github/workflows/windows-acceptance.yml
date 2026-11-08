@@ -5,13 +5,16 @@ name: Windows acceptance
 # under NT SERVICE\StormRuntime, enrolled with a throwaway storm-server built
 # from the same commit, and driven through install, enrollment, providers,
 # sessions, process lifecycle, filesystem, the pipe, secrets, revocation and
-# uninstall by apps/runtime/tests/windows_acceptance.py. The server (AC-WS1,
+# uninstall by apps/runtime/tests/windows_acceptance.py, which then installs a
+# second host as the runner's user (`install --user`, decision 151 E3) from an
+# unelevated child. The server (AC-WS1,
 # WS2, WS5, WS6): storm-server's per-user Scheduled Task, by
 # tools/windows-server-acceptance.py. The runner is disposable, which is why
 # the harnesses may install services and tasks here.
 #
 # What a runner cannot do — a logged-in Claude Code or OpenCode taking a
-# prompt, the handoff to a phone, a reboot — is reported MANUAL, never PASS.
+# prompt, the handoff to a phone, a reboot, a logoff — is reported MANUAL,
+# never PASS.
 # Nothing here publishes anything (decision 45).
 
 on:
@@ -156,6 +159,12 @@ jobs:
           ./deploy/install.ps1 -RemoveApp
           Check 'RemoveApp removes the app and its shortcut' (-not (Test-Path $appDir) -and -not (Test-Path $lnk))
           Check 'a rule opened wider is narrowed back to private' ("$((Get-NetFirewallRule -DisplayName 'Storm Server').Profile)" -eq 'Private')
+          # Decision 151 E3: -User is the host as you, never from an elevated
+          # shell (the runtime-host job checks it unelevated), never with -Server.
+          $said = try { ./deploy/install.ps1 -FromDir dist -Runtime -User -Yes; '' } catch { "$_" }
+          Check '-User refuses an elevated shell' ($said -match 'not elevated')
+          $said = try { ./deploy/install.ps1 -FromDir dist -Server -User -Yes; '' } catch { "$_" }
+          Check '-User refuses -Server' ($said -match 'holds your notes')
           & "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall --purge
           & "$env:LOCALAPPDATA\Storm\bin\storm-server.exe" uninstall
           if (-not $ok) { exit 1 }

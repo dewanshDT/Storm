@@ -51,7 +51,7 @@ pub use windows::{
     sweep_targets,
 };
 #[cfg(windows)]
-pub use windows_service::{enable_and_start, service_main};
+pub use windows_service::{enable_and_start, service_main, start_user_task};
 
 pub mod ipc;
 pub mod launchd;
@@ -59,6 +59,7 @@ pub mod paths;
 pub mod peer;
 pub mod wincmd;
 pub mod winsvc;
+pub mod wintask;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("storm-runtime runs on Linux, macOS and Windows (D14, D16)");
@@ -291,6 +292,9 @@ pub struct InstallOptions {
     /// Who the workspace root is shared with. Defaults to `$SUDO_USER`; on
     /// Windows, the user who opened the elevated shell.
     pub operator: Option<String>,
+    /// The host as the person running `install`, not as the service
+    /// (decision 151 E3): a logon task on Windows.
+    pub user: bool,
 }
 
 /// `storm-runtime uninstall` (AM35).
@@ -299,19 +303,41 @@ pub struct UninstallOptions {
     /// Also remove the identity, state, logs, config and the account.
     /// Workspaces are never removed.
     pub purge: bool,
+    /// Remove what `install --user` set up.
+    pub user: bool,
 }
 
 /// Installs this binary as the platform's system service. macOS: the
 /// `_stormruntime` account, `/Library/StormRuntime` and the LaunchDaemon.
 /// Windows: `C:\ProgramData\StormRuntime` and the `StormRuntime` service
 /// (AM50). Linux: the `.deb` does this, so it refuses with a pointer to it.
+/// `user` on Windows: a logon task that runs the host as the person.
 pub fn install(options: &InstallOptions) -> anyhow::Result<()> {
+    if options.user && !cfg!(windows) {
+        anyhow::bail!("install --user is not available on {NAME} yet");
+    }
     os::install(options)
 }
 
-/// Removes the system service `install` set up.
+/// Removes the system service `install` set up, or with `user` what
+/// `install --user` did.
 pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
+    if options.user && !cfg!(windows) {
+        anyhow::bail!("uninstall --user is not available on {NAME} yet");
+    }
     os::uninstall(options)
+}
+
+/// Opens `path` to append the host's log to, keeping one previous file past
+/// 10 MiB.
+pub fn open_log(path: &std::path::Path) -> io::Result<std::fs::File> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// Asserts `path` is private: exactly `mode` on Unix (A2), AM49's DACL on

@@ -518,6 +518,11 @@ each inside a Job Object, so ending a session, stopping the service, or the
 host dying in any way ends everything the session started. Windows 10 1809 /
 Server 2019 or later.
 
+Or run it **as yourself, from a logon task**: see
+[As yourself on Windows](#as-yourself-on-windows). That one needs no
+administrator, uses your own CLIs, logins and folders, and stops when you sign
+out.
+
 **Install.** In PowerShell **as administrator**, either the installer:
 
 ```powershell
@@ -587,6 +592,65 @@ checkout, clone or move it into the workspace root.
 | It exits at start naming AM54 | A `workspace_roots` entry is under `C:\Users`, a share, or a removable drive. |
 | git says "dubious ownership" in your own shell | Run the `safe.directory` line `install` printed, as yourself. |
 
+### As yourself on Windows
+
+`install --user` installs the host as you, with no administrator: a Scheduled
+Task named `Storm Runtime Host` that you register for yourself, with the
+per-user paths of [Running a host as yourself](#running-a-host-as-yourself).
+Run it in a PowerShell that is **not** elevated; elevated, it refuses, since
+an elevated shell is the service's.
+
+```powershell
+& "$env:TEMP\storm-runtime\storm-runtime.exe" install --user
+& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" enroll   # paste the string
+Get-ScheduledTask 'Storm Runtime Host' | Get-ScheduledTaskInfo      # LastTaskResult 267009 = running
+```
+
+Or with the installer, in a PowerShell that is not elevated:
+
+```powershell
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -User
+```
+
+It:
+- copies the binary to `%LOCALAPPDATA%\StormRuntime\bin`;
+- writes `runtime.toml` there if there is none, naming no workspace root;
+- registers the task: at your logon, as you, only while you are logged on
+  (`InteractiveToken`), never elevated, never stopped for its age, restarted
+  if it fails. It runs `serve` with `--state`, `--config` and `--log-file`
+  set to your paths, inside `conhost --headless`, so no console window opens;
+- leaves the task off until you enroll. Enrolling turns it on and starts the
+  host; from then on it starts at each logon.
+
+**Signing out stops the host**, and with it every session (each session's
+Job Object goes with it); they show as `failed (host_restart)` when your next
+sign-in starts it again. The log is
+`%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log`.
+
+- **Workspaces are the folders you name.** A root may be in your profile.
+  Add one, then restart the host:
+
+  ```toml
+  workspace_roots = ['C:\Users\you\Code']
+  ```
+
+  ```powershell
+  schtasks /end /tn "Storm Runtime Host"; schtasks /run /tn "Storm Runtime Host"
+  ```
+
+- **Agents run as you**, with your environment and `PATH`, so the CLIs you
+  installed for yourself and their logins are the host's.
+- **Never install it on a PC where a Storm server runs as you.** An agent could
+  then read the vaults on disk; `install --user` warns when it finds one, and
+  the installer refuses `-User` with `-Server`. Use the service there.
+- **One user per PC.** The task's name is the same for everyone, so a second
+  person on the same PC cannot register theirs.
+- **Upgrade** by running the new binary's `install --user`, which stops the
+  host, replaces the copy and starts it again. **Uninstall** with
+  `& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" uninstall --user`;
+  add `--purge` to remove its state, config and logs too. Your folders are
+  never touched.
+
 ## Running a host as yourself
 
 `--state` and `--config` are optional for `enroll`, `check` and `serve`. Run
@@ -601,7 +665,9 @@ your own, which you own:
 | Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
 
 So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
-host as you. `STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
+host as you. On Windows, `storm-runtime install --user` has a logon task do
+the `serve` ([As yourself on Windows](#as-yourself-on-windows)).
+`STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
 a flag wins over both.
 
 - **A workspace root may be in your home.** The service's refusals of homes,
