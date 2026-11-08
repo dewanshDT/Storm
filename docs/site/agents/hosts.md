@@ -371,8 +371,10 @@ your own CLIs, logins and folders, and stops when you log out.
 
 **Install.** The installer's `--runtime --service` installs and enrolls
 it this way, and so does `--server --runtime` (or `--everything`) with no
-flag: the server on a Mac runs as you, so the host beside it is this
-account, and the installer refuses `--user` there. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
+flag, or `--runtime` on a Mac where the server is installed already: the
+server on a Mac runs as you, so the host beside it is this account, and
+the installer refuses `--user` there. A host you already run as yourself
+keeps running that way, and the installer warns. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
 needs Rust and takes a couple of minutes):
 
 ```sh
@@ -841,9 +843,9 @@ is `~/Library/Logs/StormRuntime/storm-runtime.log`.
   Keychain, works; no token file is needed.
 - **Never install it on a Mac where a Storm server runs as you.** An agent
   could then read the vaults on disk; `install --user` warns when it finds
-  one, and the installer refuses `--user` with `--server` (with
-  `--server --runtime` it installs the LaunchDaemon). Use the LaunchDaemon
-  there.
+  one, and the installer refuses `--user` with `--server` or beside an
+  installed server (there, `--runtime` installs the LaunchDaemon). Use the
+  LaunchDaemon there.
 - **Upgrade** by running the new binary's `install --user`, which replaces
   the copy and restarts the host. **Uninstall** with
   `"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" uninstall --user`;

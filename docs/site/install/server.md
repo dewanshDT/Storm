@@ -38,8 +38,9 @@ to run it as its own account, a system service, instead. Run as root on
 Debian or Ubuntu, it installs the service; on Arch and anywhere without the
 `.deb`, the host always runs as you. With `--server --runtime` on Linux the
 server is a system service and the host runs as you. On a Mac the server
-runs as you, so `--server --runtime` (and `--everything`) installs the host
-as its own account, the `_stormruntime` LaunchDaemon, and refuses `--user`:
+runs as you, so `--server --runtime` (and `--everything`), or `--runtime`
+on a Mac where the server is installed already, installs the host as its
+own account, the `_stormruntime` LaunchDaemon, and refuses `--user`:
 a host as you would [share an account with the
 vaults](/docs/agents/hosts/#never-share-an-account-with-the-vaults). On Windows, `-Runtime`
 in a PowerShell that is not elevated installs a logon task as you;

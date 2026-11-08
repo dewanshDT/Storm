@@ -389,8 +389,8 @@ set_paths() {
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
       # The host as you (decisions 151 E2, E5): the default, unless asked
       # for the LaunchDaemon, that is what is installed, or the server is
-      # being installed too: it runs as you, and a host as you would share
-      # its account with the vaults.
+      # here or being installed too: it runs as you, and a host as you would
+      # share its account with the vaults.
       if [ "${OPT_SERVICE:-0}" = 1 ]; then
         RT_SHAPE_WHY=flag svc=1
       elif [ "${OPT_USER:-0}" = 1 ]; then
@@ -399,7 +399,7 @@ set_paths() {
         RT_SHAPE_WHY=installed svc=1
       elif [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ]; then
         RT_SHAPE_WHY=installed
-      elif rt_with_server; then
+      elif rt_with_server || rt_server_here; then
         RT_SHAPE_WHY=server svc=1
       else
         RT_SHAPE_WHY=default
@@ -477,11 +477,20 @@ rt_with_server() {
   return 1
 }
 
-# On a Mac the server runs as you, so --user beside it would run agents as
-# the account that holds the vaults (decision 151). Windows refuses -User
-# with -Server the same way; on Linux the server is a system service.
+# A Storm server installed on this Mac, which runs as you: its binary, its
+# record or its LaunchAgent.
+rt_server_here() {
+  [ "$OS" = macos ] || return 1
+  [ -x "$SRV_INSTALLED_BIN" ] || [ -f "$SRV_RECORD" ] || [ -f "$HOME/Library/LaunchAgents/dev.storm.server.plist" ]
+}
+
+# On a Mac the server runs as you, so --user beside it, installed now or
+# already, would run agents as the account that holds the vaults (decision
+# 151). Windows refuses -User with -Server the same way; on Linux the server
+# is a system service.
 rt_shape_refused() {
-  [ "$OS" = macos ] && [ "${OPT_USER:-0}" = 1 ] && in_sel server && in_sel runtime || return 1
+  [ "$OS" = macos ] && [ "${OPT_USER:-0}" = 1 ] && in_sel runtime || return 1
+  { in_sel server || rt_server_here; } || return 1
   arg_error "--user with --server on a Mac would run agents as the account that holds your notes (the server runs as you): install the Runtime Host as its own account (drop --user)"
 }
 
@@ -2164,7 +2173,7 @@ runtime_plan() {
   elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = server ]; then
     plan_note "Runtime: the server runs as you on this Mac, so the host runs as its own account ($RT_ACCOUNT): never as the account that holds your notes."
   fi
-  if [ "$OS" = macos ] && [ "$RT_USER" = 1 ] && [ "$RT_SHAPE_WHY" = installed ] && in_sel server; then
+  if [ "$OS" = macos ] && [ "$RT_USER" = 1 ] && [ "$RT_SHAPE_WHY" = installed ] && { in_sel server || rt_server_here; }; then
     plan_note "Runtime: this Mac runs the host as you, and the server runs as you too, so its agents can read your vaults on disk. To keep them out, move the host to its own account: https://storm.dewansh.space/docs/agents/hosts/#moving-a-host-to-another-account"
   fi
   if [ "$mode" != keep ]; then
@@ -3493,13 +3502,14 @@ rt_reshape() {
 }
 
 # A new host where it can run either way: ask, as you first (decision 151 E5).
-# On a Mac with the server, it is the service and nothing is asked; a menu
-# answer of "as you" gives way to it if the server is chosen later.
+# On a Mac with the server, here or chosen, it is the service and nothing is
+# asked; a menu answer of "as you" gives way to it if the server is chosen
+# later.
 choose_runtime_shape() {
   local lf=$LOG_FILE you svc
   [ "$INTERACTIVE" = 1 ] && in_sel runtime || return 0
   if [ "$OS" = macos ]; then
-    if [ "$RT_SHAPE_ASKED" = 1 ] && [ "${OPT_USER:-0}" = 1 ] && in_sel server; then
+    if [ "$RT_SHAPE_ASKED" = 1 ] && [ "${OPT_USER:-0}" = 1 ] && { in_sel server || rt_server_here; }; then
       OPT_USER=0 RT_SHAPE_ASKED=0
       rt_reshape
       return 0
@@ -3512,7 +3522,7 @@ choose_runtime_shape() {
         fi
         ;;
       server)
-        in_sel server && return 0
+        { in_sel server || rt_server_here; } && return 0
         rt_reshape
         ;;
     esac

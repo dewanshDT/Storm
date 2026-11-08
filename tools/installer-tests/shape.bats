@@ -291,3 +291,52 @@ typed() {
   [[ "$output" == *"the server runs as you too, so its agents can read your vaults on disk"* ]]
   [[ "$output" != *"LaunchDaemon as _stormruntime"* ]]
 }
+
+@test "macos with a server installed already: --runtime alone is the LaunchDaemon, and says why" {
+  use_macos
+  install_fake macos-server
+  platform
+  [ "$RT_USER" = 0 ]
+  [ "$RT_SHAPE_WHY" = server ]
+  dry --runtime --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$(plan_descs "$output")" == *"Install the Runtime Host (a LaunchDaemon as _stormruntime"* ]]
+  [[ "$output" == *"the server runs as you on this Mac, so the host runs as its own account (_stormruntime)"* ]]
+  [[ "$output" != *"install --user"* ]]
+  run storm_main --dry-run --from-dir "$ASSETS" --runtime --user
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"--user with --server on a Mac would run agents as the account that holds your notes"* ]]
+}
+
+@test "macos with a server installed already: a host as you stays, with the warning" {
+  use_macos
+  install_fake macos-server
+  install_fake macos-runtime-user
+  platform
+  [ "$RT_USER" = 1 ]
+  [ "$RT_SHAPE_WHY" = installed ]
+  dry --runtime
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the server runs as you too, so its agents can read your vaults on disk"* ]]
+  [[ "$output" != *"LaunchDaemon as _stormruntime"* ]]
+}
+
+@test "macos with a server installed already: the menu asks nothing about the host" {
+  use_macos
+  install_fake macos-server
+  typed "3" "3"
+  run storm_main --from-dir "$ASSETS"
+  [ "$status" -eq 0 ]
+  out=$(cat "$STORM_TTY_OUT")
+  [[ "$out" != *"How should the Runtime Host run?"* ]]
+  [[ "$out" == *"Install the Runtime Host (a LaunchDaemon as _stormruntime"* ]]
+}
+
+@test "linux with a server installed already: --runtime is still as you" {
+  install_fake linux-server
+  dry --runtime --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Install the Runtime Host as tester (a systemd --user unit; no root)"* ]]
+  dry --runtime --user --enroll-from-stdin
+  [ "$status" -eq 0 ]
+}
