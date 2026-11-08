@@ -65,8 +65,9 @@ agent.
 
 A host that is not `verified` — macOS, Windows, a Linux host missing a
 precondition, or a runtime too old to say — shows *"Session identity not
-verified — sessions on this host can act as each other"* on its row in
-**Settings › Hosts** and in each of its sessions' Details. That is a
+verified — Storm can't tell which session is calling"* as an extra line on
+its row in **Settings › Hosts** and in each of its sessions' Details. A
+verified host shows no identity line. That is a
 disclosure, not a restriction: every tool keeps working there. Each of an
 agent's calls to Storm or an integration is audited as `verified` or
 `unverified`, and a connection the host refused is recorded on the server as
@@ -244,7 +245,23 @@ live. The host reports `isolation: verified` only when every attempt is
 refused; until then, or if the helper stops answering or `pasta` goes
 missing later, it reports `unavailable` with the reason, the app says so on
 the host row and in each session's Details, and **new sessions fail with
-"isolation unavailable on this host"** while running ones carry on.
+"isolation unavailable on this host"** while running ones carry on. A host
+set to isolate that has no helper to ask (its socket is not there because
+`storm-runtime-isolation on` was not run, or the host does not use the
+packaged state directory) reports `unavailable: no_helper` at once rather
+than waiting on a self-test.
+
+Every host also reports **which account it runs as** and the isolation it is
+set to (`off` or `per-session`). Every host row in **Settings › Hosts**, and
+the launcher under **Host**, says *"Runs as storm-runtime"* (the account's
+name), with *"· each session isolated"* added on a host set to
+`per-session`. A runtime too old to say, or one that can't name its account,
+shows *"Runs as an unknown account"*. When a session starts running, Storm
+keeps that account and the host's isolation and identity as they were then,
+and the session's Details shows them under **Ran as**, not what the host
+says later. A session from before Storm kept this shows *"Not recorded"*.
+This is status only: Storm reads no agent setting to report it and changes
+none.
 
 On an isolated host, an agent that starts another agent (agent spawning, not
 yet available) gives the new one **a workspace of its own**, made under the
@@ -276,6 +293,16 @@ needs the same `ReadWritePaths` drop-in for `storm-runtime-isolation` as for
 `storm-runtime`. `storm-runtime.service` itself is unchanged either way.
 
 Remove it with `sudo apt remove storm-runtime`.
+
+**Troubleshooting:**
+
+| Symptom | Check |
+|---|---|
+| `check` or `enroll` says **permission denied** | `/var/lib/storm-runtime` belongs to the `storm-runtime` account, so run them as it: `sudo -u storm-runtime storm-runtime check`. For a directory you passed with `--state`, run them as the account that owns it. |
+| `enroll` **refuses to run as root** | `sudo storm-runtime enroll` would leave a key and `host.json` that only root can read. Run `sudo -u storm-runtime storm-runtime enroll`. |
+| It says **not enrolled: there is no `…/host.json`** | Nothing has been enrolled in that state directory. Enroll it (the command above), with the same `--state` if you use one. |
+| It says the server **revoked** it, and `host.json.revoked` exists | It was revoked. Enroll it again; the old enrollment is kept under `revoked/`. |
+| It says a **key is missing** | `host.json` names a key that is not in `identity/`. Enroll again with `--force`. |
 
 ## macOS
 
@@ -477,6 +504,8 @@ Storm never stores or transmits these logins. Also, a login running as
 | `claude` or `opencode` shows as not installed | Run `sudo -u _stormruntime -H sh -c 'command -v claude'` with the `PATH` above. A CLI in your home is not reachable; install it with Homebrew or as the account. |
 | The host exits at start with "refused" or "root" | A `workspace_roots` entry is under `/Users`, `/Volumes` or `/Network`, or overlaps a Storm data root. Move it to `/Library/StormRuntime/workspaces`. |
 | The host stays stopped and `host.json.revoked` exists | It was revoked. Enroll it again (the command above). |
+| `check` or `enroll` says **permission denied** | Only `_stormruntime` can read `/Library/StormRuntime/state`. Run them as it, from `/`: `cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime check`. |
+| `enroll` **refuses to run as root** | `sudo storm-runtime enroll` would leave files only root can read. Use the `sudo -u _stormruntime` command above. |
 | An agent cannot read a file you put in a workspace | The file came from outside (moved, not copied, from a home folder), so it lacks the inherited ACL. `ls -le` shows it. Re-copy it, or `chmod -R +a "user:_stormruntime allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,list,search,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" <dir>`. |
 
 ## Windows
@@ -552,10 +581,41 @@ checkout, clone or move it into the workspace root.
 | Symptom | Check |
 |---|---|
 | The service stops at once with code 2 | It is not enrolled: run `enroll` as administrator. |
+| `check` or `enroll` says **permission denied** | Only administrators and the service can read `C:\ProgramData\StormRuntime\state`: run it in PowerShell as administrator. |
 | It stopped with code 3 and `host.json.revoked` exists | It was revoked. Enroll it again. |
 | `claude` or `opencode` shows as not installed | Install it machine-wide or as the account (from a Storm shell session), then `Restart-Service StormRuntime`. |
 | It exits at start naming AM54 | A `workspace_roots` entry is under `C:\Users`, a share, or a removable drive. |
 | git says "dubious ownership" in your own shell | Run the `safe.directory` line `install` printed, as yourself. |
+
+## Running a host as yourself
+
+`--state` and `--config` are optional for `enroll`, `check` and `serve`. Run
+as the service account (or as root, or elevated on Windows) they mean the
+service's paths in the tables above. Run as anyone else, they mean paths of
+your own, which you own:
+
+| | State | Config |
+|---|---|---|
+| Linux | `$XDG_STATE_HOME/storm-runtime` (`~/.local/state/storm-runtime`) | `$XDG_CONFIG_HOME/storm-runtime/runtime.toml` (`~/.config/storm-runtime/runtime.toml`) |
+| macOS | `~/Library/Application Support/StormRuntime/state` | `~/Library/Application Support/StormRuntime/runtime.toml` |
+| Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
+
+So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
+host as you. `STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
+a flag wins over both.
+
+- **A workspace root may be in your home.** The service's refusals of homes,
+  volumes, profiles and shares (AM39, AM54) apply only to the service. A
+  root that overlaps a Storm data root is refused to every host.
+- **Nothing else of yours is ended.** The account sweep is the service's
+  alone. Instead, when a host starts after a crash, it ends only the
+  processes that carry the tag of a session it was running.
+- **A state directory nested too deep is refused at start.** The host's
+  socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
+  most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
+
+The rule below still holds: never run it as an account that can read the
+vaults.
 
 ## Never share an account with the vaults
 

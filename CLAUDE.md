@@ -530,9 +530,11 @@ decision 77):
   report `starting`, which such a session answers `409 start_unwanted`, and
   the host drops it. A host that runs one anyway (an older host) is sent
   `end` when it reports it. The client sends a launch only on a click.
-- **`storm-runtime` is its own account and never joins the server's group**
-  (decision 77e). The group mode of P3 is all that keeps a co-located runtime
-  out of the vaults. Its unit never sets `MemoryDenyWriteExecute`, because
+- **The service account `storm-runtime` is its own account and never joins
+  the server's group** (decision 77e). The group mode of P3 is all that keeps
+  a co-located runtime out of the vaults. A host a person runs as themselves
+  (151 N2) uses their own per-user paths, never the service's sweep or
+  AM39/AM54 refusals. Its unit never sets `MemoryDenyWriteExecute`, because
   OpenCode cannot start under it, and `RestartPreventExitStatus=3` keeps a
   revoked host stopped. `apps/runtime/tests/packaging.rs` holds all three.
 - **A host verifies its server before sending it anything** — a token, a

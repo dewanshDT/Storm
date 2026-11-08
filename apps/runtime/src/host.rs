@@ -579,6 +579,13 @@ impl Host {
                 sessions = died.len(),
                 "sessions from before this restart are gone; reporting them as host_restart"
             );
+            // The service's control group or account sweep ends these (AM37).
+            if !crate::platform::is_service_context() {
+                let ended = end_survivors(&died);
+                if ended > 0 {
+                    tracing::info!(ended, "ended what those sessions left running");
+                }
+            }
         }
         let isolation_status = match &isolation {
             Some(link) => link.status(),
@@ -742,6 +749,12 @@ impl Host {
             // Whether each session runs as its own identity, from the
             // self-test (decision 136j). A host without it is `old_host`.
             "isolation": self.isolation_status.report().to_json(),
+            // Who its processes run as and the isolation it is set to
+            // (decision 151): status only, never derived from `identity`.
+            "execution": {
+                "account": crate::platform::current_account(),
+                "isolation": self.config.isolation.as_str(),
+            },
         });
         // It carries `child.workspace` to the helper (decision 137-3). Only
         // an isolated host has child workspaces; every other host's bytes
@@ -3551,6 +3564,34 @@ fn read_table(state_dir: &Path) -> SessionTable {
         .unwrap_or_default()
 }
 
+/// SIGKILL to every process of this account that carries the tag of one of
+/// `died`: what a host that crashed, or was killed, left of its sessions.
+/// Nothing else of the account's is touched (decision 151 N2). Returns how
+/// many were signalled. On Windows a session's Job Object already ended
+/// them when the host's handle closed (AM52).
+fn end_survivors(died: &[String]) -> usize {
+    #[cfg(unix)]
+    {
+        let mut ended = 0;
+        for id in died.iter().filter(|id| !id.is_empty()) {
+            for pid in crate::platform::tagged_processes(id).unwrap_or_default() {
+                let Some(pid) = rustix::process::Pid::from_raw(pid) else {
+                    continue;
+                };
+                if rustix::process::kill_process(pid, rustix::process::Signal::KILL).is_ok() {
+                    ended += 1;
+                }
+            }
+        }
+        ended
+    }
+    #[cfg(windows)]
+    {
+        let _ = died;
+        0
+    }
+}
+
 /// Clears a session's armed waiter when that waiter lets go, unless a
 /// newer one took over.
 struct Disarm<'a>(&'a AtomicU64, u64);
@@ -5474,6 +5515,56 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         );
     }
 
+    /// Decision 151 N2: at start, a person's host ends what carries the tag
+    /// of a session `sessions.json` lists, and nothing else of the account's.
+    #[test]
+    #[cfg(unix)]
+    fn a_start_ends_a_dead_sessions_tagged_survivors_only() {
+        use std::os::unix::process::ExitStatusExt;
+        let state = tempfile::tempdir().unwrap();
+        let nonce = format!(
+            "{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let (dead, live) = (format!("ags_N2DEAD{nonce}"), format!("ags_N2LIVE{nonce}"));
+        std::fs::write(
+            state.path().join(SESSIONS_FILE),
+            serde_json::to_vec(&json!({ "sessions": [dead] })).unwrap(),
+        )
+        .unwrap();
+        let sleep = |tag: Option<&str>| {
+            let mut c = std::process::Command::new("sleep");
+            c.arg("30").env_remove(crate::platform::SESSION_TAG);
+            if let Some(tag) = tag {
+                c.env(crate::platform::SESSION_TAG, tag);
+            }
+            c.spawn().unwrap()
+        };
+        let mut survivor = sleep(Some(&dead));
+        let mut other_session = sleep(Some(&live));
+        let mut untagged = sleep(None);
+        // /proc shows the new environment once exec has happened.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::platform::tagged_processes(&dead).unwrap().is_empty() {
+            assert!(Instant::now() < deadline, "the tagged process never showed");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        assert_eq!(end_survivors(&read_table(state.path()).sessions), 1);
+        assert_eq!(survivor.wait().unwrap().signal(), Some(9));
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(other_session.try_wait().unwrap().is_none());
+        assert!(untagged.try_wait().unwrap().is_none());
+        for mut c in [other_session, untagged] {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
+    }
+
     /// A host on the recording server with `providers`, its link up.
     async fn test_host(
         providers: Vec<Arc<dyn Provider>>,
@@ -6386,6 +6477,19 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             } else {
                 json!({"state": "unsupported", "mechanism": null, "reason": "macos"})
             }
+        );
+    }
+
+    /// 151: a host says which account it runs as and the isolation it is
+    /// set to.
+    #[tokio::test]
+    async fn a_host_reports_who_it_runs_as() {
+        let (host, _seen, _state, _roots) = test_host(Vec::new()).await;
+        let me = crate::platform::current_account();
+        assert!(me.is_some(), "the test runner has an account name");
+        assert_eq!(
+            host.capabilities()["execution"],
+            json!({"account": me, "isolation": "off"})
         );
     }
 

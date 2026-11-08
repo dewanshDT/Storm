@@ -213,12 +213,12 @@
       {
         "name": "enroll",
         "summary": "Enroll this host with a Storm Server",
-        "help": "Enroll this host with a Storm Server.\n\nReads the enrollment string the app showed you from stdin, or prompts for it without echo. **Never pass it as an argument**: it carries a single-use secret, and arguments are visible to every user in `ps`.\n\nUsage: storm-runtime enroll [OPTIONS]\n\nOptions:\n      --state <STATE>\n          [env: STORM_RUNTIME_STATE=]\n          [default: /var/lib/storm-runtime]\n\n      --name <NAME>\n          How this host appears in the app. Defaults to the hostname\n\n      --force\n          Replace an existing enrollment\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
+        "help": "Enroll this host with a Storm Server.\n\nReads the enrollment string the app showed you from stdin, or prompts for it without echo. **Never pass it as an argument**: it carries a single-use secret, and arguments are visible to every user in `ps`.\n\nUsage: storm-runtime enroll [OPTIONS]\n\nOptions:\n      --state <STATE>\n          The host's state: its key, `host.json` and its session table. Defaults to the service's for its account or an administrator, and otherwise to your own: `~/.local/state/storm-runtime` on Linux, `~/Library/Application Support/StormRuntime/state` on macOS, `%LOCALAPPDATA%\\StormRuntime\\state` on Windows\n          \n          [env: STORM_RUNTIME_STATE=]\n\n      --name <NAME>\n          How this host appears in the app. Defaults to the hostname\n\n      --force\n          Replace an existing enrollment\n\n  -h, --help\n          Print help (see a summary with '-h')\n"
       },
       {
         "name": "serve",
         "summary": "Run the host: connect to the server and run the agents it asks for",
-        "help": "Run the host: connect to the server and run the agents it asks for\n\nUsage: storm-runtime serve [OPTIONS]\n\nOptions:\n      --state <STATE>      [env: STORM_RUNTIME_STATE=] [default: /var/lib/storm-runtime]\n      --config <CONFIG>    [env: STORM_RUNTIME_CONFIG=] [default: /etc/storm-runtime/runtime.toml]\n      --exclusive-account  Declare that this account runs nothing but this host (AM37): at startup and after shutdown, end every other process of it. Passed by the packaged service definitions; refused unless running as the service account, and never as root\n  -h, --help               Print help\n"
+        "help": "Run the host: connect to the server and run the agents it asks for\n\nUsage: storm-runtime serve [OPTIONS]\n\nOptions:\n      --state <STATE>      The host's state: its key, `host.json` and its session table. Defaults to the service's for its account or an administrator, and otherwise to your own: `~/.local/state/storm-runtime` on Linux, `~/Library/Application Support/StormRuntime/state` on macOS, `%LOCALAPPDATA%\\StormRuntime\\state` on Windows [env: STORM_RUNTIME_STATE=]\n      --config <CONFIG>    The host's `runtime.toml`, chosen the way `--state` is; your own is `~/.config/storm-runtime/runtime.toml` on Linux, and beside the state directory elsewhere [env: STORM_RUNTIME_CONFIG=]\n      --exclusive-account  Declare that this account runs nothing but this host (AM37): at startup and after shutdown, end every other process of it. Passed by the packaged service definitions; refused unless running as the service account, and never as root\n  -h, --help               Print help\n"
       },
       {
         "name": "mcp-bridge",
@@ -248,7 +248,7 @@
       {
         "name": "check",
         "summary": "Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is",
-        "help": "Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is\n\nUsage: storm-runtime check [OPTIONS]\n\nOptions:\n      --state <STATE>  [env: STORM_RUNTIME_STATE=] [default: /var/lib/storm-runtime]\n  -h, --help           Print help\n"
+        "help": "Check this host's enrollment: verify the server, prove the key, and ask the server who it thinks this host is\n\nUsage: storm-runtime check [OPTIONS]\n\nOptions:\n      --state <STATE>  The host's state: its key, `host.json` and its session table. Defaults to the service's for its account or an administrator, and otherwise to your own: `~/.local/state/storm-runtime` on Linux, `~/Library/Application Support/StormRuntime/state` on macOS, `%LOCALAPPDATA%\\StormRuntime\\state` on Windows [env: STORM_RUNTIME_STATE=]\n  -h, --help           Print help\n"
       }
     ]
   }

@@ -464,6 +464,8 @@ void main() {
 
     await tester.tap(find.byKey(const Key('start-session')));
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const Key('launch')));
+    await tester.pump();
     await tester.tap(find.byKey(const Key('launch')));
     await tester.pumpAndSettle();
     final id = agents.sessions.single['id'] as String;

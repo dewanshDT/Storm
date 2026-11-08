@@ -318,6 +318,27 @@ impl Store {
                  mechanism   TEXT,
                  reason      TEXT,
                  reported_at TEXT NOT NULL
+             );
+             -- Who each host's processes run as, as it last said (decision
+             -- 151), for its views while it is away.
+             CREATE TABLE IF NOT EXISTS host_execution (
+                 host_id     TEXT PRIMARY KEY,
+                 account     TEXT,
+                 isolation   TEXT NOT NULL,
+                 reported_at TEXT NOT NULL
+             );
+             -- Who a session ran as, from its host at its first `running`
+             -- (decision 151); never replaced.
+             CREATE TABLE IF NOT EXISTS session_ran_as (
+                 session_id          TEXT PRIMARY KEY,
+                 account             TEXT,
+                 isolation_state     TEXT NOT NULL,
+                 isolation_mechanism TEXT,
+                 isolation_reason    TEXT,
+                 identity_state      TEXT NOT NULL,
+                 identity_mechanism  TEXT,
+                 identity_reason     TEXT,
+                 recorded_at         TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -1096,6 +1117,105 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn host_execution(&self, host_id: &str) -> Result<Option<super::Execution>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(super::Execution {
+                        account: r.get(0)?,
+                        isolation: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// `None` forgets it: a host that stopped saying is an old host again.
+    pub fn set_host_execution(
+        &self,
+        host_id: &str,
+        execution: Option<&super::Execution>,
+        now: &str,
+    ) -> Result<()> {
+        match execution {
+            Some(e) => self.conn.execute(
+                "INSERT INTO host_execution (host_id, account, isolation, reported_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (host_id) DO UPDATE SET account = excluded.account,
+                     isolation = excluded.isolation, reported_at = excluded.reported_at",
+                params![host_id, e.account, e.isolation, now],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// A session's first snapshot; never replaced.
+    pub fn record_ran_as(&self, session_id: &str, ran: &super::RanAs, now: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO session_ran_as
+                 (session_id, account, isolation_state, isolation_mechanism, isolation_reason,
+                  identity_state, identity_mechanism, identity_reason, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                ran.account,
+                ran.isolation.state,
+                ran.isolation.mechanism,
+                ran.isolation.reason,
+                ran.identity.state,
+                ran.identity.mechanism,
+                ran.identity.reason,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: a session from before 151, with no snapshot.
+    #[cfg(test)]
+    pub fn forget_ran_as_for_tests(&self, session_id: &str) {
+        self.conn
+            .execute(
+                "DELETE FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+            )
+            .unwrap();
+    }
+
+    pub fn ran_as(&self, session_id: &str) -> Result<Option<super::RanAs>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation_state, isolation_mechanism, isolation_reason,
+                        identity_state, identity_mechanism, identity_reason
+                 FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(super::RanAs {
+                        account: r.get(0)?,
+                        isolation: super::Identity {
+                            state: r.get(1)?,
+                            mechanism: r.get(2)?,
+                            reason: r.get(3)?,
+                        },
+                        identity: super::Identity {
+                            state: r.get(4)?,
+                            mechanism: r.get(5)?,
+                            reason: r.get(6)?,
+                        },
+                    })
+                },
+            )
+            .optional()?)
+    }
 }
 
 fn label_table(kind: super::HostLabel) -> &'static str {
@@ -1670,6 +1790,18 @@ pub mod spawn {
                 [],
             )?;
         }
+        // 151m: a launch from before the tick is unticked.
+        let has_children_write = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('session_spawn_launch') WHERE name = 'children_write'",
+            )?
+            .exists([])?;
+        if !has_children_write {
+            conn.execute(
+                "ALTER TABLE session_spawn_launch ADD COLUMN children_write INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         // 145a: nothing waits for a person any more. What an older server
         // left waiting expires, and its messages with it.
         let now = crate::index::now_rfc3339();
@@ -2086,20 +2218,27 @@ pub mod spawn {
                 .optional()?)
         }
 
-        /// Records a launch with the switch on (141e) and turns it on, before
+        /// Records a launch with the switch on (141e), and whether its
+        /// children write to its write vault (151m), and turns it on, before
         /// the host is sent `start`.
         pub fn record_spawn_launch(
             &mut self,
             session_id: &str,
+            children_write: bool,
             device: Option<&str>,
             now: &str,
         ) -> Result<()> {
             self.conn.execute(
-                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at) VALUES (?1, ?2)",
-                params![session_id, now],
+                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at, children_write)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, now, children_write],
             )?;
             self.set_spawn(session_id, true, device, now)?;
             Ok(())
+        }
+
+        pub fn children_write(&self, session_id: &str) -> Result<bool> {
+            children_write(&self.conn, session_id)
         }
 
         pub fn spawn_launched(&self, session_id: &str) -> Result<bool> {
@@ -2638,7 +2777,8 @@ pub mod spawn {
             if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
-            let child = spawn_child(&tx, &r, agent, payload, true, now)?;
+            let writes = children_write(&tx, &r.id)?;
+            let child = spawn_child(&tx, &r, agent, payload, writes, now)?;
             insert_act(
                 &tx,
                 act,
@@ -2982,10 +3122,24 @@ pub mod spawn {
         format!("children/{child}")
     }
 
+    /// Whether a session was launched with its children's writes ticked
+    /// (151m); no spawn launch row is no.
+    fn children_write(conn: &Connection, session_id: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT children_write FROM session_spawn_launch WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
-    /// parent's write vault when `write_vault` and the parent launched with
-    /// one it may write (145a: a start inherits it; nothing wider). Spawn is off: a child has no switch row. Its workspace
+    /// parent's write vault only when `write_vault` (its launch ticked it,
+    /// 151m) and the parent launched with one it may write; nothing wider.
+    /// Spawn is off: a child has no switch row. Its workspace
     /// is its own (137-1), its agent `agent` (143a), its name the one asked
     /// for or one made from the task, unique among its live siblings, and
     /// its model and role the start's (145b).
@@ -3209,6 +3363,7 @@ pub mod spawn {
             "session_spawn_asks",
             "session_spawn_launch",
             "session_child_workspace",
+            "session_ran_as",
             "session_task",
             "session_result",
             "session_round",

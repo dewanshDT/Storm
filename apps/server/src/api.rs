@@ -7961,47 +7961,53 @@ pub(crate) mod tests {
     async fn a_hosts_isolation_is_on_its_row_and_its_sessions() {
         let dir = tempdir::TempDir::new("storm-isolation-route").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
-        let seen = |f: &GatewayFixture| {
+        let row = |f: &GatewayFixture| {
             let (app, bearer, host_id) = (f.app.clone(), f.owner_bearer.clone(), f.host_id.clone());
             async move {
                 let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &bearer)).await;
-                let host = hosts
+                hosts
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|h| h["id"] == host_id)
                     .unwrap()
-                    .clone();
-                host["isolation"].clone()
+                    .clone()
             }
+        };
+        let seen = |f: &GatewayFixture| {
+            let row = row(f);
+            async move { row.await["isolation"].clone() }
         };
         let old_host =
             serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"});
         assert_eq!(seen(&f).await, old_host);
-        let session = f.launch("claude-code", false).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let _start = f.link.try_recv().unwrap();
-        let view = |f: &GatewayFixture| {
-            let (app, bearer, session) = (f.app.clone(), f.owner_bearer.clone(), session.clone());
+        assert_eq!(row(&f).await["execution"], serde_json::Value::Null);
+        let view = |f: &GatewayFixture, session: &str| {
+            let (app, bearer, session) =
+                (f.app.clone(), f.owner_bearer.clone(), session.to_string());
             async move {
                 send(
                     &app,
                     get_with_auth(&format!("/v1/agent/sessions/{session}"), &bearer),
                 )
                 .await
-                .1["isolation"]
-                    .clone()
+                .1
             }
         };
-        assert_eq!(view(&f).await, old_host);
+        let before = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _start = f.link.try_recv().unwrap();
+        assert_eq!(view(&f, &before).await["isolation"], old_host);
         assert!(!f.state.agent.host_isolated(&f.host_id));
 
         let verified =
             serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+        let execution = serde_json::json!({"account": "storm-runtime", "isolation": "per-session"});
         let mut caps = host_caps(true);
         caps["isolation"] = verified.clone();
+        caps["execution"] = execution.clone();
         let (code, _) = send(
             &f.app,
             post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
@@ -8009,17 +8015,56 @@ pub(crate) mod tests {
         .await;
         assert!(code.is_success());
         assert_eq!(seen(&f).await, verified);
-        assert_eq!(view(&f).await, verified);
+        assert_eq!(row(&f).await["execution"], execution);
+        // 151: a session keeps what its host said when it started.
+        assert_eq!(view(&f, &before).await["isolation"], old_host);
+        assert_eq!(
+            view(&f, &before).await["ran_as"]["account"],
+            serde_json::Value::Null
+        );
         assert!(f.state.agent.host_isolated(&f.host_id));
+        let after = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ran_as = view(&f, &after).await["ran_as"].clone();
+        assert_eq!(ran_as["account"], "storm-runtime");
+        assert_eq!(ran_as["isolation"], verified);
+        assert_eq!(ran_as["identity"]["reason"], "old_host");
+
+        let mut caps = host_caps(true);
+        caps["execution"] = execution.clone();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        assert_eq!(seen(&f).await, old_host);
+        assert_eq!(view(&f, &after).await["isolation"], verified, "unchanged");
+        let mut caps = host_caps(true);
+        caps["isolation"] = verified.clone();
+        caps["execution"] = execution.clone();
+        send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
 
         let generation = f.state.agent.connect_host(&f.host_id).0;
         f.state.agent.disconnect_host(&f.host_id, generation);
         assert_eq!(seen(&f).await, verified, "kept for the row");
-        assert_eq!(view(&f).await, verified);
+        assert_eq!(row(&f).await["execution"], execution, "kept offline");
+        assert_eq!(view(&f, &after).await["isolation"], verified);
         assert!(
             !f.state.agent.host_isolated(&f.host_id),
             "never judged by the stored copy"
         );
+
+        // A session from before 151 has no snapshot: not recorded.
+        f.state.agent.forget_ran_as_for_tests(&before);
+        assert_eq!(view(&f, &before).await["ran_as"], serde_json::Value::Null);
+        assert_eq!(view(&f, &before).await["isolation"], verified, "its host's");
     }
 
     /// C0 where 134 meets 136-5: a host's `hello`, posted to the real route,
@@ -9967,7 +10012,7 @@ pub(crate) mod tests {
         let launched = f.launch_on("claude-code").await;
         assert_eq!(
             launched["spawn"],
-            serde_json::json!({"enabled": true, "launched_on": true})
+            serde_json::json!({"enabled": true, "launched_on": true, "children_write": false})
         );
         let session = launched["id"].as_str().unwrap().to_string();
         f.initialize(&session, "storm").await;
@@ -13158,6 +13203,73 @@ pub(crate) mod tests {
                 .map(|(_, detail)| serde_json::from_str(&detail).unwrap())
                 .collect()
         }
+    }
+
+    /// 137-2: live sessions count by canonical directory, so two names for
+    /// one directory both see the other's session, two directories never
+    /// do, and a child's own directory never counts for its parent's. An
+    /// old host that names no directories counts by name.
+    #[tokio::test]
+    async fn the_shared_workspace_notice_counts_by_canonical_directory() {
+        let dir = tempdir::TempDir::new("storm-shared-workspace").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host, _) = enroll_a_host(&app, &owner_bearer).await;
+        let (_, mut link) = state.agent.connect_host(&host);
+        let mut caps = install_caps(false);
+        caps["workspaces"] = serde_json::json!(["storm", "alias", "other"]);
+        caps["workspace_paths"] =
+            serde_json::json!({"storm": "/w/storm", "alias": "/w/storm", "other": "/w/other"});
+        state
+            .agent
+            .hello(&host, serde_json::from_value(caps.clone()).unwrap())
+            .unwrap();
+        let agent = &state.agent;
+        agent.session_in_for_tests(&owner, &host, "ags_A", "storm");
+        agent.spawn_child_for_tests("ags_A", "a task");
+        agent.spawn_child_for_tests("ags_A", "another");
+
+        let counts = async |link: &mut tokio::sync::mpsc::UnboundedReceiver<_>| {
+            let path = format!("/v1/agent/hosts/{host}/workspaces");
+            let refresh = async {
+                link.recv().await.unwrap();
+                let caps = state.agent.host_live(&host).capabilities.unwrap();
+                state.agent.inventory(&host, caps).unwrap();
+            };
+            let ((status, body), ()) =
+                tokio::join!(send(&app, get_with_auth(&path, &owner_bearer)), refresh);
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body.as_array()
+                .unwrap()
+                .iter()
+                .map(|w| {
+                    (
+                        w["name"].as_str().unwrap().to_string(),
+                        w["live_sessions"].clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let want = |storm: usize, alias: usize, other: usize| {
+            vec![
+                ("storm".to_string(), serde_json::json!(storm)),
+                ("alias".to_string(), serde_json::json!(alias)),
+                ("other".to_string(), serde_json::json!(other)),
+            ]
+        };
+        assert_eq!(counts(&mut link).await, want(1, 1, 0));
+
+        agent.session_in_for_tests(&owner, &host, "ags_B", "other");
+        assert_eq!(counts(&mut link).await, want(1, 1, 1));
+        agent.session_in_for_tests(&owner, &host, "ags_C", "alias");
+        assert_eq!(counts(&mut link).await, want(2, 2, 1));
+
+        caps["workspace_paths"] = serde_json::json!({});
+        agent
+            .inventory(&host, serde_json::from_value(caps).unwrap())
+            .unwrap();
+        assert_eq!(counts(&mut link).await, want(1, 1, 1));
     }
 
     /// 141c: the owner's new workspace goes to the host as
@@ -18935,7 +19047,7 @@ pub(crate) mod tests {
         f.state.agent.verify_isolation_for_tests(&f.host_id);
         assert_eq!(
             view(&f, before.clone()).await["spawn"],
-            serde_json::json!({"enabled": false, "launched_on": false,
+            serde_json::json!({"enabled": false, "launched_on": false, "children_write": false,
                 "refused": "launched_without_spawn"})
         );
         f.report(&before, "completed").await;
@@ -18943,34 +19055,34 @@ pub(crate) mod tests {
         let plain = f.launch("claude-code", false).await;
         assert_eq!(
             plain["spawn"],
-            serde_json::json!({"enabled": false, "launched_on": false,
+            serde_json::json!({"enabled": false, "launched_on": false, "children_write": false,
                 "refused": "launched_without_spawn"})
         );
         let session = f.launch_on("claude-code").await;
         assert_eq!(
             session["spawn"],
-            serde_json::json!({"enabled": true, "launched_on": true})
+            serde_json::json!({"enabled": true, "launched_on": true, "children_write": false})
         );
         let session = session["id"].as_str().unwrap().to_string();
         assert_eq!(f.spawn(&session, false).await.0, StatusCode::OK);
         let shell = f.launch("shell", false).await;
         assert_eq!(
             shell["spawn"],
-            serde_json::json!({"enabled": false, "launched_on": false,
+            serde_json::json!({"enabled": false, "launched_on": false, "children_write": false,
                 "refused": "provider_cannot_spawn"})
         );
         // 141a: another live session shares its workspace, which is no
         // reason to refuse.
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": false, "launched_on": true})
+            serde_json::json!({"enabled": false, "launched_on": true, "children_write": false})
         );
         let shell = shell["id"].as_str().unwrap().to_string();
         f.report(&shell, "completed").await;
         assert_eq!(f.spawn(&session, true).await.0, StatusCode::OK);
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": true, "launched_on": true})
+            serde_json::json!({"enabled": true, "launched_on": true, "children_write": false})
         );
 
         // A downgrade: the switch that is on stays shown, with why it is
@@ -18978,7 +19090,7 @@ pub(crate) mod tests {
         f.state.agent.lose_isolation_for_tests(&f.host_id);
         assert_eq!(
             view(&f, session.clone()).await["spawn"],
-            serde_json::json!({"enabled": true, "launched_on": true,
+            serde_json::json!({"enabled": true, "launched_on": true, "children_write": false,
                 "refused": "isolation_unverified"})
         );
         assert!(view(&f, before).await.get("spawn").is_none());
@@ -19140,6 +19252,37 @@ pub(crate) mod tests {
         serde_json::json!({"vault": vault, "path": path, "reason": "An old project, finished."})
     }
 
+    /// 151m: a launch ticking its children's writes needs spawn on and a
+    /// write vault; else it is a 409 and nothing launches.
+    #[tokio::test]
+    async fn children_write_without_spawn_or_a_write_vault_is_a_409() {
+        let dir = tempdir::TempDir::new("storm-151m").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        f.spawning_parent().await;
+        f.agent_writes(true).await;
+        let before = f.state.agent.list().unwrap().len();
+        for extra in [
+            serde_json::json!({"write_vault_id": work, "children_write": true}),
+            serde_json::json!({"spawn": true, "children_write": true}),
+        ] {
+            let (status, body) = f.launch_body(extra.clone()).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{extra}: {body}");
+            assert!(
+                body.to_string().contains("children_write_unavailable"),
+                "{body}"
+            );
+        }
+        assert_eq!(f.state.agent.list().unwrap().len(), before);
+        let (status, body) = f
+            .launch_body(serde_json::json!({
+                "write_vault_id": work, "spawn": true, "children_write": true,
+            }))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["spawn"]["children_write"], true, "{body}");
+    }
+
     /// A-149-1: a writable top-level session lists both delete tools; a
     /// read-only one and a child of a writable parent list neither, and
     /// cannot call them.
@@ -19157,7 +19300,12 @@ pub(crate) mod tests {
         let (_, read_only) = f.launch_body(serde_json::json!({})).await;
         let read_only = read_only["id"].as_str().unwrap().to_string();
         f.initialize(&read_only, "storm").await;
-        let parent = f.deleter(&work, serde_json::json!({"spawn": true})).await;
+        let parent = f
+            .deleter(
+                &work,
+                serde_json::json!({"spawn": true, "children_write": true}),
+            )
+            .await;
         assert!(
             f.storm_tools(&parent)
                 .await

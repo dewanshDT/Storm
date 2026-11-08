@@ -1407,8 +1407,11 @@ List<(String, String)> aboutRows(
       ].join('\n'),
     ),
   ('Network', 'Inherits $host’s policy'),
+  ('Ran as', ranAsLine(s.ranAs)),
   if (s.identityUnverified) ('Identity', '$kIdentityNotVerified.'),
-  if (s.isolationLabel case final label?) ('Isolation', '$label.'),
+  // Ran as says a working isolation from the snapshot; only a fault stays.
+  if (s.isolationLabel case final label? when label != kIsolationVerified)
+    ('Isolation', '$label.'),
 ];
 
 /// Under About when a plugin's remote server was skipped: it reaches a

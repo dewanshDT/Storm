@@ -181,7 +181,6 @@ class ChildEvent {
 /// "Started", "Reported: succeeded": an event as a person reads it.
 String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
-  'needs_approval' => 'Asked for approval',
   // A child never asks (148a): a prompt there is a fault its parent hears.
   'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Permission prompt',
   'denied' => deniedLabel(e),
@@ -253,12 +252,16 @@ class SpawnSwitch {
     required this.enabled,
     this.refused,
     this.launchedOn = false,
+    this.childrenWrite = false,
   });
 
   final bool enabled;
 
   /// Launched with the switch on (141e): only such a session turns it on.
   final bool launchedOn;
+
+  /// Its children write to its write vault (151m).
+  final bool childrenWrite;
 
   /// What turning it on would be refused with now (134-2's codes), or null.
   final String? refused;
@@ -267,6 +270,7 @@ class SpawnSwitch {
     enabled: j['enabled'] == true,
     refused: j['refused'] as String?,
     launchedOn: j['launched_on'] == true,
+    childrenWrite: j['children_write'] == true,
   );
 }
 
@@ -521,7 +525,7 @@ String? attentionLabel(String? kind) => switch (kind) {
 /// (138p point 9).
 String spawnRefusalText(String code, String agent) => switch (code) {
   'identity_unverified' => "This host's session identity isn't verified",
-  'isolation_unverified' => "This host doesn't isolate sessions",
+  'isolation_unverified' => 'Starting agents needs an isolated host',
   'workspace_held' => 'Another session is working in this workspace',
   'provider_cannot_spawn' => "$agent can't start agents",
   'launched_without_spawn' => kSpawnAtLaunch,
@@ -559,7 +563,7 @@ String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'requester_ended' => 'the asking session ended',
   'target_gone' => 'the session it named is gone or has ended',
   'identity_unverified' => 'the host’s session identity isn’t verified',
-  'isolation_unverified' => 'the host doesn’t isolate sessions',
+  'isolation_unverified' => 'starting agents needs an isolated host',
   'agent_unavailable' => 'the host can’t start that agent for a child',
   null => 'refused',
   _ => reason.replaceAll('_', ' '),

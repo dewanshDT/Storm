@@ -1088,7 +1088,11 @@ void main() {
     );
     expect(
       requestRefusalText('isolation_unverified', null),
-      'the host doesn’t isolate sessions',
+      'starting agents needs an isolated host',
+    );
+    expect(
+      spawnRefusalText('isolation_unverified', 'Claude Code'),
+      'Starting agents needs an isolated host',
     );
     expect(
       requestRefusalText('agent_unavailable', null),

@@ -40,6 +40,8 @@ pub async fn run(
         exclusive_account,
         "starting"
     );
+    crate::platform::ipc::check_path(&crate::mcp::socket_path(state))
+        .map_err(anyhow::Error::msg)?;
     crate::platform::prepare_home();
     let config = crate::config::RuntimeConfig::load(config)?;
     let host = crate::host::Host::new(state, config)?;

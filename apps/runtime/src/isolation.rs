@@ -37,6 +37,8 @@ pub enum ChildMode {
     Scratch,
 }
 
+#[cfg(target_os = "linux")]
+use std::path::Path;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -49,6 +51,14 @@ pub const MECHANISM: &str = "systemd_units";
 /// A failed self-test is tried again no sooner than this, when a session
 /// asks for one.
 pub const RETRY_AFTER: Duration = Duration::from_secs(60);
+
+/// Whether this host has a helper to start its sessions: the packaged state
+/// directory, and the helper's socket there. Without either it is
+/// `no_helper`, never a self-test left `pending`.
+#[cfg(target_os = "linux")]
+pub fn helper_at(state_dir: &Path, socket: &Path) -> bool {
+    state_dir == Path::new(crate::platform::DEFAULT_STATE) && socket.exists()
+}
 
 /// The host's isolation state (136j): `verified` only when isolation is on,
 /// the helper answers, pasta works and the self-test passed. A helper that
@@ -178,6 +188,28 @@ mod status_tests {
             assert_eq!(s.report().mechanism, Some(MECHANISM));
         } else {
             assert_eq!(r.state, State::Unsupported);
+        }
+    }
+
+    /// 151: isolation on with no socket, or a state directory the helper
+    /// does not read, is `no_helper` and runs no self-test.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn on_without_a_reachable_helper_is_no_helper() {
+        let t = tempfile::tempdir().unwrap();
+        let socket = t.path().join("helper.sock");
+        let default = Path::new(crate::platform::DEFAULT_STATE);
+        assert!(!helper_at(default, &socket), "no socket");
+        std::fs::write(&socket, b"").unwrap();
+        assert!(helper_at(default, &socket));
+        assert!(!helper_at(t.path(), &socket), "not the default state");
+        for helper in [
+            helper_at(default, &t.path().join("gone")),
+            helper_at(t.path(), &socket),
+        ] {
+            let s = Status::new(true, helper);
+            assert_eq!(s.report().reason, Some("no_helper"));
+            assert!(!s.pending() && !s.may_test());
         }
     }
 
@@ -543,8 +575,7 @@ mod imp {
         /// packaged one the helper would read the wrong launches, so there
         /// is none: with isolation on, that host starts nothing.
         pub fn installed(state_dir: &Path, status: Arc<super::Status>) -> Option<Self> {
-            if !cfg!(target_os = "linux") || state_dir != Path::new(crate::platform::DEFAULT_STATE)
-            {
+            if !super::helper_at(state_dir, Path::new(SOCKET)) {
                 return None;
             }
             Some(Self {

@@ -714,9 +714,28 @@ void main() {
       expect(
         find.text(
           'online now · Claude Code (not installed), Shell · '
-          'network: host policy',
+          'network: host policy\n$kRunsAsUnknown',
         ),
         findsOneWidget,
+      );
+    });
+
+    testWidgets('the enroll blurb points at the sheet, not a bare command', (
+      tester,
+    ) async {
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining(
+          'Enrolling shows a one-time string and the commands to run on the '
+          'machine. Paste the string when storm-runtime enroll asks for it.',
+          findRichText: true,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('on the machine and paste it', findRichText: true),
+        findsNothing,
       );
     });
 

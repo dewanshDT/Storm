@@ -104,6 +104,7 @@ class AgentHost {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.execution,
   });
 
   final String id;
@@ -152,6 +153,12 @@ class AgentHost {
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
 
+  /// Who it runs as (decision 151); null for a host too old to say.
+  final HostExecution? execution;
+
+  /// What every host row and the launcher say about who it runs as.
+  String get executionLine => executionLineFor(execution);
+
   bool get online => status == 'online';
 
   /// C0 as its view says (134r, 141e): identity and isolation verified.
@@ -192,9 +199,40 @@ class AgentHost {
       identityState: _identityState(j),
       isolationState: _isolation(j).$1,
       isolationReason: _isolation(j).$2,
+      execution: _map(j['execution']) == null
+          ? null
+          : HostExecution.fromJson(_map(j['execution'])!),
     );
   }
 }
+
+/// A host's `execution` (decision 151): the account it runs as, and whether
+/// each session runs as its own user.
+class HostExecution {
+  const HostExecution({this.account, this.isolation});
+
+  /// Null when the host could not name it.
+  final String? account;
+
+  /// `off` or `per-session`.
+  final String? isolation;
+
+  bool get perSession => isolation == 'per-session';
+
+  factory HostExecution.fromJson(Map<String, dynamic> j) => HostExecution(
+    account: j['account'] as String?,
+    isolation: j['isolation'] as String?,
+  );
+}
+
+/// "Runs as storm-runtime": one line, never more than the host said.
+String executionLineFor(HostExecution? e) {
+  final account = e?.account;
+  if (account == null || account.isEmpty) return kRunsAsUnknown;
+  return 'Runs as $account${e!.perSession ? ' · each session isolated' : ''}';
+}
+
+const kRunsAsUnknown = 'Runs as an unknown account';
 
 String? _identityState(Map<String, dynamic> j) {
   final identity = j['identity'];
@@ -229,14 +267,49 @@ String? isolationLabelFor(String? state, String? reason) {
   return 'Session isolation unavailable ($why) — new sessions are refused';
 }
 
+/// Who a session ran as (decision 151), as its host said at its first
+/// `running`: the host's account and its isolation and identity then.
+class RanAs {
+  const RanAs({
+    this.account,
+    this.isolationState,
+    this.isolationReason,
+    this.identityState,
+  });
+
+  /// Null when the host could not name it.
+  final String? account;
+  final String? isolationState;
+  final String? isolationReason;
+  final String? identityState;
+
+  factory RanAs.fromJson(Map<String, dynamic> j) => RanAs(
+    account: j['account'] as String?,
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
+    identityState: _identityState(j),
+  );
+}
+
+/// What Details says a session ran as, from its snapshot only.
+String ranAsLine(RanAs? r) {
+  if (r == null) return 'Not recorded';
+  final account = r.account == '' ? null : r.account;
+  if (r.isolationState == 'verified') {
+    return 'Its own session user (isolated)'
+        '${account == null ? '' : ' · the host runs as $account'}';
+  }
+  return account ?? 'An unknown account';
+}
+
 /// A host whose sessions each run as their own user (decision 136j).
 const kIsolationVerified = 'Sessions isolated — each runs as its own user';
 
 /// What Storm says on a host or session whose identity is not verified
 /// (decision 135d).
 const kIdentityNotVerified =
-    'Session identity not verified — sessions on this host can act as each '
-    'other';
+    "Session identity not verified — Storm can't tell which session is "
+    'calling';
 
 /// The agents a host can install from Settings › Agents, in the page's
 /// order (decision 133).
@@ -525,6 +598,7 @@ class AgentSession {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.ranAs,
     this.spawn = SpawnFacts.none,
     this.crew,
     this.role,
@@ -595,6 +669,10 @@ class AgentSession {
 
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
+
+  /// Who it ran as from its first `running` (decision 151); null for a
+  /// session from before, or one not yet running: not recorded.
+  final RanAs? ranAs;
 
   /// Its lineage, attention, own workspace and spawn switch (decision 134).
   final SpawnFacts spawn;
@@ -754,6 +832,7 @@ class AgentSession {
     identityState: identityState,
     isolationState: isolationState,
     isolationReason: isolationReason,
+    ranAs: ranAs,
     spawn: spawn,
     crew: crew == _keep ? this.crew : crew as SessionCrew?,
     role: role == _keep ? this.role : role as RoleRef?,
@@ -810,6 +889,9 @@ class AgentSession {
     identityState: _identityState(j),
     isolationState: _isolation(j).$1,
     isolationReason: _isolation(j).$2,
+    ranAs: _map(j['ran_as']) == null
+        ? null
+        : RanAs.fromJson(_map(j['ran_as'])!),
     spawn: SpawnFacts.fromJson(j),
     crew: _map(j['crew']) == null
         ? null

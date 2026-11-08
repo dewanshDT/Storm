@@ -89,9 +89,21 @@ impl Fixture {
     }
 
     fn launch_as(&self, workspace: &str, write_vault: Option<&str>, spawn: bool) -> SessionRecord {
+        self.try_launch(workspace, write_vault, spawn, false)
+            .unwrap()
+    }
+
+    fn try_launch(
+        &self,
+        workspace: &str,
+        write_vault: Option<&str>,
+        spawn: bool,
+        children_write: bool,
+    ) -> Result<SessionRecord, super::AgentError> {
         let launch: Launch = serde_json::from_value(serde_json::json!({
             "host_id": "hst_A", "workspace": workspace, "provider": "claude-code",
             "terminal": {"cols": 80, "rows": 24}, "spawn": spawn,
+            "children_write": children_write,
         }))
         .unwrap();
         let meta = LaunchMeta {
@@ -100,10 +112,9 @@ impl Fixture {
         };
         let (r, ..) = self
             .m
-            .launch("usr_A", launch, meta, vec![grant("storm"), grant("con_X")])
-            .unwrap();
+            .launch("usr_A", launch, meta, vec![grant("storm"), grant("con_X")])?;
         self.report(&r.id, "running");
-        r
+        Ok(r)
     }
 
     fn report(&self, id: &str, status: &str) {
@@ -115,6 +126,11 @@ impl Fixture {
     /// A launched session with a write vault and spawn on.
     fn parent(&self) -> SessionRecord {
         self.launch_as("storm", Some("vlt_W"), true)
+    }
+
+    /// [Self::parent] with its children's writes ticked (151m).
+    fn writing_parent(&self) -> SessionRecord {
+        self.try_launch("storm", Some("vlt_W"), true, true).unwrap()
     }
 
     /// A running child of `parent`, recorded the way an approval records
@@ -578,8 +594,32 @@ fn a_start_records_the_child_narrowed_under_its_parent() {
         names(store.grants_of(&child.id).unwrap()),
         ["con_X", "storm"]
     );
-    // 145a: a start inherits the write vault its parent launched with,
-    // and nothing wider.
+    // 151m: its parent's launch did not tick its children's writes.
+    assert_eq!(
+        store.launch(&child.id).unwrap().unwrap().write_vault_id,
+        None
+    );
+    assert!(matches!(
+        store.grant(&child.id, "storm"),
+        Ok(Some((_, false)))
+    ));
+    // 134-5: it is started in its own workspace, which its host makes from
+    // the parent's.
+    assert_eq!(
+        (c.status.as_str(), c.end_reason.as_deref()),
+        ("starting", None)
+    );
+    assert_eq!(c.workspace, format!("children/{}", child.id));
+}
+
+/// 151m, 151 X9: ticked at launch, a start inherits the write vault its
+/// parent launched with, and nothing wider.
+#[test]
+fn a_start_ticked_at_launch_inherits_only_its_parents_write_vault() {
+    let f = fixture(16);
+    let p = f.writing_parent();
+    let child = f.start(&p.id).unwrap();
+    let store = f.m.store.lock().unwrap();
     assert_eq!(
         store
             .launch(&child.id)
@@ -593,13 +633,20 @@ fn a_start_records_the_child_narrowed_under_its_parent() {
         store.grant(&child.id, "storm"),
         Ok(Some((_, true)))
     ));
-    // 134-5: it is started in its own workspace, which its host makes from
-    // the parent's.
-    assert_eq!(
-        (c.status.as_str(), c.end_reason.as_deref()),
-        ("starting", None)
-    );
-    assert_eq!(c.workspace, format!("children/{}", child.id));
+}
+
+/// 151m: the tick needs spawn on and a write vault, else nothing launches.
+#[test]
+fn a_tick_without_spawn_or_a_write_vault_is_refused() {
+    let f = fixture(16);
+    for (write_vault, spawn) in [(Some("vlt_W"), false), (None, true), (None, false)] {
+        let refused = f.try_launch("storm", write_vault, spawn, true).unwrap_err();
+        assert!(
+            matches!(&refused, super::AgentError::Conflict(c) if c == "children_write_unavailable"),
+            "{write_vault:?} {spawn}: {refused:?}"
+        );
+    }
+    assert!(f.m.list().unwrap().is_empty(), "nothing is recorded");
 }
 
 /// AP-7: a grant the parent lost before the start never reaches the child.
@@ -879,13 +926,26 @@ fn a_child_is_started_narrowed_in_its_own_workspace() {
     assert_eq!(c.workspace, format!("children/{}", child.id));
     assert!(!f.m.spawn_enabled(&c.id).unwrap(), "spawn is off");
     let launch = f.m.launch_of(&c.id).unwrap().unwrap();
+    assert_eq!(launch.write_vault_id, None, "not ticked at launch");
+    assert_eq!(launch.name, "Test writer");
+    assert_eq!(launch.model.as_deref(), Some("haiku"));
+}
+
+/// 151m: ticked at launch, the child is started with its parent's write
+/// vault.
+#[test]
+fn a_ticked_child_is_started_with_its_parents_write_vault() {
+    let mut f = fixture(16);
+    let p = f.writing_parent();
+    f.starts();
+    let child = f.start(&p.id).unwrap();
+    assert_eq!(f.starts().len(), 1);
+    let launch = f.m.launch_of(&child.id).unwrap().unwrap();
     assert_eq!(
         launch.write_vault_id.as_deref(),
         Some("vlt_W"),
         "its parent's"
     );
-    assert_eq!(launch.name, "Test writer");
-    assert_eq!(launch.model.as_deref(), Some("haiku"));
 }
 
 /// 143a, the checks table's provider row: a child runs its parent's agent,
