@@ -263,8 +263,16 @@ says later. A session from before Storm kept this shows *"Not recorded"*.
 This is status only: Storm reads no agent setting to report it and changes
 none.
 
-On an isolated host, an agent that starts another agent (agent spawning, not
-yet available) gives the new one **a workspace of its own**, made under the
+An agent that starts another agent (agent spawning) needs a host that says
+which account it runs as. On a host with isolation `off` the new agent is an
+ordinary session of that account, started in the parent's workspace, or in a
+folder the parent names that is already canonical (no links, `.` or `..`)
+and inside one of `workspace_roots`; anything else is refused. Storm makes
+no copy, worktree or sandbox for it, and resuming it is refused once that
+folder is gone (*"working directory no longer exists"*).
+
+On an isolated host, an agent that starts another agent gives the new one
+**a workspace of its own**, made under the
 new session's user, in `/var/lib/storm-runtime-isolation/children/`, never
 inside a workspace root. In a git repository it is an independent clone of
 the commit you have checked out: only committed files, never your untracked,

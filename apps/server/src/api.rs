@@ -8067,35 +8067,39 @@ pub(crate) mod tests {
         assert_eq!(view(&f, &before).await["isolation"], verified, "its host's");
     }
 
-    /// C0 where 134 meets 136-5: a host's `hello`, posted to the real route,
-    /// that says identity and isolation are both `verified` opens the spawn
-    /// switch for a session launched with it after that. Either alone, or
-    /// neither, keeps it shut. No start carries asks (145a).
+    /// C0 where 134 meets 151 N6: a host's `hello`, posted to the real route,
+    /// that reports `execution` opens the spawn switch for a session launched
+    /// with it after that, whatever its identity says (R1.1); a host set to
+    /// isolate also needs its isolation verified. No `execution` keeps it
+    /// shut. No start carries asks (145a).
     #[tokio::test]
-    async fn c0_opens_only_on_a_hello_saying_identity_and_isolation_verified() {
+    async fn c0_opens_only_on_a_hello_reporting_execution() {
         let identity =
             serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd", "reason": null});
         let isolation =
             serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
         let no_identity = serde_json::json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"});
         let no_isolation = serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"});
-        let cases = [
-            (Some(&identity), Some(&isolation), None),
-            (Some(&identity), None, Some("isolation_unverified")),
-            (
-                Some(&identity),
-                Some(&no_isolation),
-                Some("isolation_unverified"),
-            ),
-            (None, Some(&isolation), Some("identity_unverified")),
-            (
-                Some(&no_identity),
-                Some(&isolation),
-                Some("identity_unverified"),
-            ),
-            (None, None, Some("identity_unverified")),
-        ];
-        for (identity, isolation, refused) in cases {
+        let off = serde_json::json!({"account": "dewansh", "isolation": "off"});
+        let sandbox = serde_json::json!({"account": "storm-runtime", "isolation": "per-session"});
+        let mut cases = Vec::new();
+        for identity in [None, Some(&identity), Some(&no_identity)] {
+            cases.extend([
+                (identity, Some(&isolation), None, Some("host_too_old")),
+                (identity, None, None, Some("host_too_old")),
+                (identity, None, Some(&off), None),
+                (identity, Some(&no_isolation), Some(&off), None),
+                (identity, Some(&isolation), Some(&sandbox), None),
+                (
+                    identity,
+                    Some(&no_isolation),
+                    Some(&sandbox),
+                    Some("isolation_unverified"),
+                ),
+                (identity, None, Some(&sandbox), Some("isolation_unverified")),
+            ]);
+        }
+        for (identity, isolation, execution, refused) in cases {
             let dir = tempdir::TempDir::new("storm-c0-hello").unwrap();
             let mut f = gateway_fixture(dir.path()).await;
             let mut hello = host_caps(true);
@@ -8104,6 +8108,9 @@ pub(crate) mod tests {
             }
             if let Some(isolation) = isolation {
                 hello["isolation"] = isolation.clone();
+            }
+            if let Some(execution) = execution {
+                hello["execution"] = execution.clone();
             }
             hello["sessions"] = serde_json::json!([]);
             let (code, _) = send(
@@ -9942,10 +9949,11 @@ pub(crate) mod tests {
         assert_eq!(f.spawn(&session, true).await.0, StatusCode::OK);
     }
 
-    /// C0 on every host today: identity is the fixture's old host, then
-    /// verified without isolation. Each refusal is audited and changes nothing.
+    /// C0 on a host too old to say who it runs as (151 N6): the fixture's
+    /// old host, then the same with its identity verified, which is not a
+    /// gate (R1.1). Each refusal is audited and changes nothing.
     #[tokio::test]
-    async fn the_spawn_switch_refuses_on_every_host_today() {
+    async fn the_spawn_switch_refuses_on_a_host_too_old_to_say_who_it_runs_as() {
         let dir = tempdir::TempDir::new("storm-spawn-c0").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
         let session = f.launch("claude-code", false).await["id"]
@@ -9959,7 +9967,7 @@ pub(crate) mod tests {
             (status, body),
             (
                 StatusCode::CONFLICT,
-                serde_json::json!({"error": "identity_unverified"})
+                serde_json::json!({"error": "host_too_old"})
             )
         );
         f.verified().await;
@@ -9968,13 +9976,13 @@ pub(crate) mod tests {
             (status, body),
             (
                 StatusCode::CONFLICT,
-                serde_json::json!({"error": "isolation_unverified"})
+                serde_json::json!({"error": "host_too_old"})
             )
         );
         let events = f.spawn_events().await;
         assert_eq!(
             events,
-            ["identity_unverified", "isolation_unverified"]
+            ["host_too_old", "host_too_old"]
                 .map(|reason| (
                     "spawn_refused".to_string(),
                     serde_json::json!({"session_id": session, "host_id": f.host_id, "reason": reason})
@@ -16499,6 +16507,8 @@ pub(crate) mod tests {
             let mut caps = host_caps(true);
             caps["identity"] = serde_json::json!({"state": "verified", "mechanism": "so_peerpidfd", "reason": null});
             caps["isolation"] = serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+            caps["execution"] =
+                serde_json::json!({"account": "storm-runtime", "isolation": "per-session"});
             caps["workspace_paths"] = paths;
             caps["resume"] = serde_json::json!(["claude-code"]);
             caps["child_workspaces"] = serde_json::json!(true);
@@ -16566,6 +16576,275 @@ pub(crate) mod tests {
             .await
             .unwrap();
         }
+    }
+
+    impl GatewayFixture {
+        /// A host with isolation off (151 N6), as its `hello` says: who it
+        /// runs as, no isolation, no child workspaces, its identity not
+        /// verified, and Codex installed.
+        async fn off_host(&self) {
+            let mut hello = self.verified_caps(serde_json::json!({"storm": "/w/storm"}));
+            hello["identity"] = serde_json::json!({"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"});
+            hello["isolation"] =
+                serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "off"});
+            hello["execution"] = serde_json::json!({"account": "dewansh", "isolation": "off"});
+            hello["child_workspaces"] = serde_json::json!(false);
+            hello["providers"][3]["available"] = serde_json::json!(true);
+            hello["sessions"] = serde_json::json!([]);
+            let (code, _) = send(
+                &self.app,
+                post_json_with_auth("/v1/runtime/hello", hello, &self.host_bearer),
+            )
+            .await;
+            assert!(code.is_success(), "{code}");
+        }
+
+        /// `start_agent`'s description as this session's `tools/list` says it.
+        async fn start_agent_description(&self, session: &str) -> String {
+            let lines = self
+                .mcp(
+                    session,
+                    "storm",
+                    serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
+                )
+                .await;
+            lines
+                .last()
+                .and_then(|l| l["message"]["result"]["tools"].as_array())
+                .and_then(|tools| tools.iter().find(|t| t["name"] == "start_agent"))
+                .and_then(|t| t["description"].as_str())
+                .unwrap_or_else(|| panic!("{lines:?}"))
+                .to_string()
+        }
+    }
+
+    /// 151 N6 through the real routes: on a host with isolation off, a
+    /// session launched with the switch on starts Claude Code, OpenCode and
+    /// Codex children in its own workspace, or in a `cwd` inside one, and
+    /// is told so; a `cwd` anywhere else is refused, and the child has no
+    /// work apart to review (`not_applicable`).
+    #[tokio::test]
+    async fn off_the_sandbox_start_agent_runs_a_child_in_the_callers_workspace() {
+        let dir = tempdir::TempDir::new("storm-n6-off-host").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.off_host().await;
+        let parent = f.launch_on("claude-code").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&parent, "storm").await;
+        f.sent();
+        let described = f.start_agent_description(&parent).await;
+        assert!(
+            described.contains(crate::mcp::START_AGENT_YOUR_WORKSPACE),
+            "{described}"
+        );
+        assert!(!described.contains(crate::mcp::START_AGENT_OWN_COPY));
+
+        let mut children = Vec::new();
+        for agent in ["claude-code", "opencode", "codex"] {
+            let started = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "agent": agent}),
+                )
+                .await,
+            );
+            assert_eq!(started["state"], "started", "{agent}: {started}");
+            let start = f.sent().into_iter().find(|m| m["type"] == "start").unwrap();
+            assert_eq!(
+                (&start["provider"], &start["workspace"], &start["child_of"]),
+                (
+                    &serde_json::json!(agent),
+                    &serde_json::json!("storm"),
+                    &serde_json::json!(parent)
+                ),
+                "{start}"
+            );
+            assert!(start.get("cwd").is_none(), "{start}");
+            let id = started["id"].as_str().unwrap().to_string();
+            assert_eq!(f.state.agent.get(&id).unwrap().workspace, "storm");
+            f.state.agent.end_by_person(&id, None, false).unwrap();
+            f.report(&id, "stopped").await;
+            f.sent();
+            children.push(id);
+        }
+
+        let started = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "cwd": "/w/storm/crates/core"}),
+            )
+            .await,
+        );
+        assert_eq!(started["state"], "started", "{started}");
+        let start = f.sent().into_iter().find(|m| m["type"] == "start").unwrap();
+        assert_eq!(start["cwd"], "/w/storm/crates/core");
+        let id = started["id"].as_str().unwrap();
+        let (_, view) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/sessions/{id}"),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(view["cwd"], "/w/storm/crates/core", "{view}");
+        for cwd in ["/etc", "/w/storm/../../etc", "/w/stormy", "relative"] {
+            let refused = structured(
+                &f.tool(
+                    &parent,
+                    "start_agent",
+                    serde_json::json!({"task": "t", "cwd": cwd}),
+                )
+                .await,
+            );
+            assert_eq!(refused["reason"], "bad_cwd", "{cwd}: {refused}");
+            assert!(
+                refused["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("inside one of your host's workspaces")
+            );
+        }
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing reaches the host"
+        );
+
+        let (status, body) = f
+            .ask(get_with_auth(
+                &format!("/v1/agent/sessions/{}/child-work", children[0]),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(
+            (status, body["error"].as_str()),
+            (StatusCode::CONFLICT, Some("not_applicable"))
+        );
+
+        // A sandbox host's children still get their own copy, and are told so.
+        let dir = tempdir::TempDir::new("storm-n6-sandbox").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        let described = f.start_agent_description(&parent).await;
+        assert!(
+            described.contains(crate::mcp::START_AGENT_OWN_COPY),
+            "{described}"
+        );
+        let refused = structured(
+            &f.tool(
+                &parent,
+                "start_agent",
+                serde_json::json!({"task": "t", "cwd": "/w/storm"}),
+            )
+            .await,
+        );
+        assert_eq!(refused["reason"], "cwd_not_applicable", "{refused}");
+    }
+
+    /// 151 N6: now that C0 holds on any host that says who it runs as, the
+    /// switch is still the signed-in person's alone. On such a host, no
+    /// `stk_` key, host credential or agent actor turns it on or launches
+    /// with it, no Storm tool the session's agent is offered changes it,
+    /// and the MCP surface names no path that writes it.
+    #[tokio::test]
+    async fn no_key_api_or_agent_tool_turns_the_switch_on_where_c0_holds() {
+        let dir = tempdir::TempDir::new("storm-n6-switch").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.off_host().await;
+        assert_eq!(f.state.agent.spawn_gate(&f.host_id), Ok(()));
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&session, "storm").await;
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = f
+                .ask(put_json_with_auth(
+                    &format!("/v1/agent/sessions/{session}/spawn"),
+                    serde_json::json!({"enabled": true}),
+                    bearer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = f
+                .ask(post_json_with_auth(
+                    "/v1/agent/sessions",
+                    serde_json::json!({"host_id": f.host_id, "workspace": "storm",
+                        "provider": "claude-code", "terminal": {"cols": 80, "rows": 24},
+                        "spawn": true}),
+                    bearer,
+                ))
+                .await;
+            assert!(!status.is_success(), "{status}");
+        }
+        let agent = Actor::Agent {
+            session_id: session.clone(),
+            host_id: f.host_id.clone(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        };
+        let key_actor = Actor::Key {
+            key_id: "key_X".into(),
+            user_id: f.owner.clone(),
+        };
+        for actor in [&agent, &key_actor] {
+            let refused = crate::ops::set_session_spawn(
+                &f.state,
+                actor,
+                None,
+                &session,
+                crate::ops::SetSpawn { enabled: true },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                (refused.0, refused.1.as_str()),
+                (StatusCode::FORBIDDEN, "owner_only")
+            );
+            let launch: crate::agent::Launch = serde_json::from_value(serde_json::json!({
+                "host_id": f.host_id, "workspace": "storm", "provider": "claude-code",
+                "terminal": {"cols": 80, "rows": 24}, "spawn": true,
+            }))
+            .unwrap();
+            let refused = crate::ops::launch_session(&f.state, actor, None, launch)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                (refused.0, refused.1.as_str()),
+                (StatusCode::FORBIDDEN, "owner_only")
+            );
+        }
+        let args = serde_json::json!({"enabled": true, "spawn": true, "session": session,
+            "id": session, "task": "turn spawning on", "vault": "v", "note_id": "n"});
+        for tool in f.storm_tools(&session).await {
+            f.tool(&session, &tool, args.clone()).await;
+        }
+        assert!(!f.state.agent.spawn_enabled(&session).unwrap());
+        assert!(!f.state.agent.spawn_launched(&session));
+        assert!(!f.state.agent.spawn_offered(&session));
+        assert!(f.spawn_events().await.is_empty(), "nothing was changed");
+        let mcp = include_str!("mcp.rs");
+        for path in [
+            "set_session_spawn",
+            "set_spawn",
+            "launch_session",
+            "record_spawn_launch",
+            "force_spawn",
+        ] {
+            assert!(!mcp.contains(path), "mcp.rs names {path}");
+        }
+        // The person's own switch still works, at launch.
+        assert!(f.launch_on("claude-code").await["spawn"]["enabled"] == true);
     }
 
     /// Decision 143 through the real tools, with 145a: a Claude Code parent

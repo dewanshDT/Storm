@@ -131,6 +131,11 @@ pub enum Command {
         /// the helper makes the child's own from it before it starts (137-1).
         #[serde(default)]
         child_of: Option<String>,
+        /// Where the session starts instead of `workspace` (151 N6): a child
+        /// on a host without child workspaces, or a resume of one. Checked
+        /// canonical and inside a root here; never on an isolated host.
+        #[serde(default)]
+        cwd: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -1576,6 +1581,7 @@ impl Host {
                 spawn,
                 resumed_from,
                 child_of,
+                cwd,
             } => {
                 self.start(
                     session,
@@ -1589,7 +1595,7 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
-                    (permission_mode, spawn),
+                    (permission_mode, spawn, cwd),
                 )
                 .await
             }
@@ -1755,7 +1761,7 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
-        (permission_mode, spawn): (Option<String>, bool),
+        (permission_mode, spawn, cwd): (Option<String>, bool, Option<String>),
     ) {
         if !self.start_wanted(&id).await {
             tracing::warn!(session = %id, "Storm no longer wants this start: dropped");
@@ -1776,7 +1782,7 @@ impl Host {
             refuse("max_sessions reached");
             return self.post_start_failure(&id).await;
         }
-        let Some(dir) = resolve_workspace(&self.config.workspace_roots, &workspace) else {
+        let Some(mut dir) = resolve_workspace(&self.config.workspace_roots, &workspace) else {
             refuse("no such workspace");
             return self.post_start_failure(&id).await;
         };
@@ -1831,18 +1837,31 @@ impl Host {
         };
         let isolated = self.config.isolated();
         if let Some(parent) = &child_of {
-            // A child's workspace is its own user's (WS-1): only the helper
-            // can make one, so a host without it starts no child at all.
-            if !isolated {
-                refuse("a spawned session starts only on an isolated host");
-                return self.post_start_failure(&id).await;
-            }
             // 145e: a child resumes only itself, from the conversation it
             // kept when it was parked.
             let resumes_another = resume.is_some() && resumed_from.as_deref() != Some(id.as_str());
             if !crate::credential_paths::session_id_ok(parent) || *parent == id || resumes_another {
                 refuse("not a parent this session can have");
                 return self.post_start_failure(&id).await;
+            }
+        }
+        // 151 N6: off the sandbox a child starts as a plain session of
+        // this account, in its parent's workspace or in `cwd`.
+        if let Some(cwd) = &cwd {
+            if isolated {
+                refuse("an isolated session starts in its workspace, never a cwd");
+                return self.post_start_failure(&id).await;
+            }
+            match crate::config::resolve_cwd(&self.config.workspace_roots, cwd) {
+                Ok(real) => dir = real,
+                Err(crate::config::CwdRefusal::Gone) => {
+                    tracing::warn!(session = %id, "start refused: cwd_gone");
+                    return self.post_start_ended(&id, EndReason::CwdGone).await;
+                }
+                Err(crate::config::CwdRefusal::Outside) => {
+                    refuse("cwd is not a canonical directory inside a workspace root");
+                    return self.post_start_failure(&id).await;
+                }
             }
         }
         if isolated && let Err(reason) = self.isolation_ready().await {
@@ -3763,6 +3782,7 @@ mod tests {
                 spawn: false,
                 resumed_from: None,
                 child_of: None,
+                cwd: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -3897,6 +3917,7 @@ mod tests {
             spawn: false,
             resumed_from: None,
             child_of: None,
+            cwd: None,
         }
     }
 
@@ -5026,6 +5047,112 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// 151 N6: a host with isolation off still has no child workspaces, but
+    /// starts a child itself, as a plain session of its account, in its
+    /// parent's workspace, or in a `cwd` that is canonical and inside a
+    /// root; anything else fails its start, and a `cwd` gone is `cwd_gone`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_host_without_isolation_starts_a_child_in_its_parents_workspace() {
+        let out = tempfile::tempdir().unwrap();
+        let script = format!("pwd > {}/pwd.$$; exec sleep 1000", out.path().display());
+        let (host, seen, _state, roots) = harness_host(&script).await;
+        assert!(host.capabilities().get("child_workspaces").is_none());
+        let w = roots.path().join("w").canonicalize().unwrap();
+        std::fs::create_dir(w.join("sub")).unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), w.join("link")).unwrap();
+        let status = |id: &str| -> Option<serde_json::Value> {
+            let path = format!("/sessions/{}/status", id.to_lowercase());
+            seen.lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|(p, _)| p.ends_with(&path))
+                .map(|(_, b)| b.clone())
+        };
+        let pwds = || -> Vec<String> {
+            let mut all: Vec<String> = std::fs::read_dir(out.path())
+                .unwrap()
+                .flatten()
+                .map(|e| {
+                    std::fs::read_to_string(e.path())
+                        .unwrap()
+                        .trim()
+                        .to_string()
+                })
+                .collect();
+            all.sort();
+            all
+        };
+        let start = |id: &str, cwd: Option<String>| {
+            let mut start = spawned_start();
+            if let Command::Start {
+                session, cwd: to, ..
+            } = &mut start
+            {
+                *session = id.into();
+                *to = cwd;
+            }
+            start
+        };
+
+        host.clone().handle(start("ags_N6PLAIN", None)).await;
+        wait_for("the child's directory", || pwds().len() == 1).await;
+        assert_eq!(pwds(), [w.display().to_string()]);
+        wait_for("its running report", || {
+            status("ags_N6PLAIN").is_some_and(|b| b["status"] == "running")
+        })
+        .await;
+        assert!(
+            status("ags_N6PLAIN")
+                .unwrap()
+                .get("child_workspace")
+                .is_none(),
+            "no workspace of its own"
+        );
+
+        let sub = w.join("sub").display().to_string();
+        host.clone()
+            .handle(start("ags_N6CWD", Some(sub.clone())))
+            .await;
+        wait_for("the second child's directory", || pwds().len() == 2).await;
+        assert!(pwds().contains(&sub), "{:?}", pwds());
+
+        for (id, cwd, why) in [
+            (
+                "ags_N6OUT",
+                elsewhere.path().display().to_string(),
+                "start_failure",
+            ),
+            (
+                "ags_N6LINK",
+                w.join("link").display().to_string(),
+                "start_failure",
+            ),
+            (
+                "ags_N6DOTS",
+                format!("{}/sub/../sub", w.display()),
+                "start_failure",
+            ),
+            ("ags_N6REL", "w/sub".to_string(), "start_failure"),
+            (
+                "ags_N6GONE",
+                w.join("gone").display().to_string(),
+                "cwd_gone",
+            ),
+        ] {
+            host.clone().handle(start(id, Some(cwd.clone()))).await;
+            assert_eq!(
+                status(id),
+                Some(json!({"status": "failed", "end_reason": why})),
+                "{cwd}"
+            );
+        }
+        assert_eq!(pwds().len(), 2, "nothing else started");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
     /// Decision 141c: `workspace.create` as the server sends it makes the
     /// folder, names it in an inventory posted before the answer, and a
     /// refusal is its code; a malformed request id is never answered.
@@ -5351,6 +5478,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 spawn: false,
                 resumed_from: None,
                 child_of: None,
+                cwd: None,
             })
             .await;
 
@@ -5448,6 +5576,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 spawn: false,
                 resumed_from: None,
                 child_of: None,
+                cwd: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -6812,6 +6941,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             spawn: false,
             resumed_from: None,
             child_of: None,
+            cwd: None,
         }
     }
 
@@ -7137,6 +7267,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             spawn: false,
             resumed_from: None,
             child_of: None,
+            cwd: None,
         }
     }
 

@@ -2994,6 +2994,9 @@ pub struct StartAgent {
     /// For a foreground start, seconds to wait at most, capped as
     /// `wait_agent` is.
     pub timeout: Option<u64>,
+    /// Where it starts on a host without child workspaces (151 N6); the
+    /// caller's workspace when absent.
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3151,8 +3154,9 @@ fn agent_unavailable(state: &Shared, caller: &str, agent: &str) -> ApiResult<Str
 }
 
 /// `start_agent {task, name?, agent?, model?, role?, background?,
-/// context_note?}` (134-5, 145b): starts a child at once on the caller's
-/// host, in its own workspace, running the caller's agent or another its
+/// context_note?, cwd?}` (134-5, 145b, 151 N6): starts a child at once on
+/// the caller's host, in its own workspace where the host makes one, else
+/// in the caller's or in `cwd`, running the caller's agent or another its
 /// host can start (143a), on `model` (checked for that agent), with no more
 /// than the caller's grants (134e). In the background (the default) it
 /// answers at once; `background: false` waits for its first result within
@@ -3310,6 +3314,7 @@ pub async fn start_agent(
         model: model.clone(),
         permission_mode: permission_mode.clone(),
         role,
+        cwd: req.cwd.filter(|c| !c.is_empty()),
     };
     let child = match state
         .agent
@@ -3333,6 +3338,14 @@ pub async fn start_agent(
                 ),
                 "limit" => Some(
                     "End children you are done with (end_agent) before starting another.".into(),
+                ),
+                "bad_cwd" => Some(
+                    "cwd must be an absolute directory inside one of your host's workspaces, written as is: no '.', '..' or trailing separator."
+                        .into(),
+                ),
+                "cwd_not_applicable" => Some(
+                    "This host starts each agent in its own copy of your workspace: start it without cwd."
+                        .into(),
                 ),
                 _ => None,
             };
@@ -3924,6 +3937,8 @@ async fn checked_child(
     let early = match &session {
         Some(_) if parent.is_none() => Some("lineage_mismatch"),
         Some(r) if r.host_id != host_id => Some("wrong_host"),
+        // 151 N6: a child that ran in a shared workspace has no work apart.
+        Some(r) if !crate::agent::store::spawn::has_own_workspace(r) => Some("not_applicable"),
         Some(r) if !r.is_ended() => Some("child_live"),
         _ => None,
     };
@@ -4381,6 +4396,10 @@ pub struct SessionView {
     /// Its permission mode (146b), absent for `default`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The directory it started in when not its workspace's own (151 N6);
+    /// absent otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
     /// Its agent's deletion waiting for the person (149c), shown under its
     /// Needs you; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4462,7 +4481,7 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id, launch_role, model, permission_mode) = match launch {
+    let (name, context, write_vault_id, launch_role, model, permission_mode, cwd) = match launch {
         Some(l) => (
             l.name,
             l.context,
@@ -4470,8 +4489,17 @@ fn session_view(
             l.role,
             l.model,
             l.permission_mode,
+            l.cwd,
         ),
-        None => (session.workspace.clone(), None, None, None, None, None),
+        None => (
+            session.workspace.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     };
     let delete_request = state
         .agent
@@ -4506,6 +4534,7 @@ fn session_view(
         launch_role,
         model,
         permission_mode,
+        cwd,
         delete_request,
     })
 }
@@ -4825,6 +4854,7 @@ pub async fn launch_session(
         launch_role: launch.role,
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),
+        cwd: launch.cwd.clone(),
         delete_request: None,
     }];
     name_roles(state, &mut view).await?;
@@ -6722,6 +6752,9 @@ struct Authorized {
     /// The delete tools are offered (149a): vault writes, and not a child,
     /// which never asks the person (149d).
     deletes: bool,
+    /// The host makes each child its own workspace (137-1), as its live
+    /// link says: what `start_agent`'s description tells the agent.
+    child_workspaces: bool,
 }
 
 impl Authorized {
@@ -6881,6 +6914,11 @@ async fn authorize_call(
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
         deletes: vault_writes && top_level,
+        child_workspaces: state
+            .agent
+            .host_live(host_id)
+            .capabilities
+            .is_some_and(|c| c.child_workspaces),
     })
 }
 
@@ -7109,6 +7147,11 @@ async fn run_call(
         }
         // The agent sees only what it may call (G-D16, G-D5).
         tools.retain(|t| authorized.may_call(t.get("name").and_then(|n| n.as_str()).unwrap_or("")));
+        if authorized.connection.is_none() {
+            for tool in tools.iter_mut() {
+                crate::mcp::describe_for_host(tool, authorized.child_workspaces);
+            }
+        }
     }
     Ok(result)
 }

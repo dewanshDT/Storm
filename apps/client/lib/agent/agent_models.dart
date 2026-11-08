@@ -161,9 +161,11 @@ class AgentHost {
 
   bool get online => status == 'online';
 
-  /// C0 as its view says (134r, 141e): identity and isolation verified.
+  /// C0 as its view says (151 N6): the host says who it runs as, and one
+  /// set to isolate has its isolation verified. Identity is not a gate.
   bool get offersSpawning =>
-      identityState == 'verified' && isolationState == 'verified';
+      execution != null &&
+      (execution!.isolation == 'off' || isolationState == 'verified');
 
   bool get receivesClaudeLogin =>
       providerCredentials.contains('claude_subscription_token');
@@ -725,6 +727,11 @@ class AgentSession {
 
   bool get isShell => provider == 'shell';
 
+  /// A child given its own workspace, `children/<id>` (137-1). Any other
+  /// child runs in a workspace of its host's, beside its parent (151 N6),
+  /// and has no work apart to review.
+  bool get hasOwnWorkspace => spawn.isChild && workspace == 'children/$id';
+
   /// The handoff's status words (§3.2); why it ended is [endDetail].
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
@@ -748,6 +755,8 @@ class AgentSession {
       'credential_unavailable' => 'no credential this host may use',
       // Decision 136j: the host's isolation was not verified.
       'isolation_unavailable' => 'isolation unavailable on this host',
+      // 151 N6: the directory it was to start in is gone.
+      'cwd_gone' => 'working directory no longer exists',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',

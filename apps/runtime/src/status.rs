@@ -65,6 +65,8 @@ pub enum EndReason {
     /// A spawned child's parent repository could not be cloned: unreadable,
     /// or with no commit to start from (137h).
     UnreadableRepository,
+    /// The directory it was to start in no longer exists (151 N6).
+    CwdGone,
     /// A signal the owner did not send ended it.
     Signal(i32),
     /// Its host restarted; the session died with it.
@@ -84,6 +86,7 @@ impl EndReason {
             Self::IsolationUnavailable => "isolation_unavailable",
             Self::WorkspaceCap => "workspace_cap",
             Self::UnreadableRepository => "unreadable_repository",
+            Self::CwdGone => "cwd_gone",
             Self::Signal(_) => "signal",
             Self::HostRestart => "host_restart",
             Self::HostRevoked => "host_revoked",

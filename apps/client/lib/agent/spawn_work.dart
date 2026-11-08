@@ -30,6 +30,8 @@ String childWorkRefusal(String? code, {String? target, required String ws}) =>
       'child_live' => 'Its work can be applied once it has ended.',
       'no_child' => 'Its workspace is gone: it was deleted, or never made.',
       'isolation_off' => 'Its host can’t reach child workspaces now.',
+      'not_applicable' =>
+        'It worked in a shared workspace, so there is no copy to review.',
       'no_review_identity' =>
         'Its host has no review identity yet. Re-run storm-runtime-isolation '
             'on there.',
