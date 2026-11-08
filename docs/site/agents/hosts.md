@@ -724,7 +724,10 @@ a flag wins over both.
   "ask before every Storm tool", are the service's only. `codex_home =
   "storm"` in `runtime.toml` keeps Storm's own home under the state
   directory instead. On Windows that is still the default, since cmd.exe
-  cannot pass those options to npm's `codex.cmd`.
+  cannot pass those options to npm's `codex.cmd`. After a host moves to your
+  own home (`codex_home = "own"`), the Codex conversations started in Storm's
+  (`agents/codex` under the state directory) can no longer be resumed:
+  start new ones. Storm does not migrate them.
 - **A state directory nested too deep is refused at start.** The host's
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
@@ -781,6 +784,11 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime
 
 The agent CLIs are yours: log them in as you, once (`claude`, then `/login`;
 `opencode auth login`), and the host finds them on your login shell's `PATH`.
+
+**After `apt upgrade`**, when your unit runs the package's
+`/usr/bin/storm-runtime`: the upgrade replaces the binary but does not
+restart a user unit, so the host keeps running the old one until you run
+`systemctl --user restart storm-runtime`.
 
 `storm-runtime uninstall --user` stops and disables the unit and removes it,
 the copy in `~/.local/bin`, and linger if install turned it on (or prints
@@ -885,7 +893,9 @@ It:
 - registers the task: at your logon, as you, only while you are logged on
   (`InteractiveToken`), never elevated, never stopped for its age, restarted
   if it fails. It runs `serve` with `--state`, `--config` and `--log-file`
-  set to your paths, inside `conhost --headless`, so no console window opens;
+  set to your paths, inside `conhost --headless`, so no console window opens
+  (`--headless` is not documented by Microsoft; were a later Windows to drop
+  it, the host would run in a visible console window);
 - leaves the task off until you enroll. Enrolling turns it on and starts the
   host; from then on it starts at each logon.
 
