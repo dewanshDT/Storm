@@ -5,7 +5,8 @@
 //!
 //! Pure functions of the platform, the account and the environment, compiled
 //! on every platform, so the Linux suite tests each platform's answer.
-//! Windows paths are built as strings: a `Path` on Linux would not split them.
+//! Each platform's paths are built as strings in its own separator: a `Path`
+//! on Linux would not split a Windows path, nor one on Windows join a Unix one.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -36,6 +37,12 @@ pub const LINUX_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
 pub const LINUX_ACCOUNT: &str = "storm-runtime";
 
 pub const MACOS_ACCOUNT: &str = "_stormruntime";
+
+/// `rel` under `base`, joined with `/` whatever the platform.
+pub fn unix_join(base: impl AsRef<std::ffi::OsStr>, rel: &str) -> PathBuf {
+    let base = base.as_ref().to_string_lossy();
+    format!("{}/{rel}", base.trim_end_matches('/')).into()
+}
 
 /// A host's state directory and `runtime.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,20 +110,21 @@ pub fn resolve(
             // The XDG spec ignores a relative value.
             let xdg = |name: &str, fallback: &str| match var(name) {
                 Some(v) if v.to_string_lossy().starts_with('/') => Ok(PathBuf::from(v)),
-                _ => home().map(|h| h.join(fallback)),
+                _ => home().map(|h| unix_join(h, fallback)),
             };
             Ok(HostPaths {
-                state: xdg("XDG_STATE_HOME", ".local/state")?.join("storm-runtime"),
-                config: xdg("XDG_CONFIG_HOME", ".config")?
-                    .join("storm-runtime")
-                    .join("runtime.toml"),
+                state: unix_join(xdg("XDG_STATE_HOME", ".local/state")?, "storm-runtime"),
+                config: unix_join(
+                    xdg("XDG_CONFIG_HOME", ".config")?,
+                    "storm-runtime/runtime.toml",
+                ),
             })
         }
         Os::Macos => {
-            let root = home()?.join("Library/Application Support/StormRuntime");
+            let root = unix_join(home()?, "Library/Application Support/StormRuntime");
             Ok(HostPaths {
-                state: root.join("state"),
-                config: root.join("runtime.toml"),
+                state: unix_join(&root, "state"),
+                config: unix_join(&root, "runtime.toml"),
             })
         }
         Os::Windows => {

@@ -8,7 +8,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::paths::{self, Os};
+use super::paths::{self, Os, unix_join};
 
 pub const UNIT_NAME: &str = "storm-runtime.service";
 
@@ -44,17 +44,22 @@ pub fn layout(env: impl Fn(&str) -> Option<OsString>) -> Result<Layout, String> 
     let var = |name: &str| env(name).filter(|v| !v.is_empty()).map(PathBuf::from);
     let home = var("HOME").ok_or("HOME is not set, so there is no home to install into")?;
     let config_home = var("XDG_CONFIG_HOME")
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| home.join(".config"));
-    let units = config_home.join("systemd/user");
+        .filter(|p| is_absolute(p))
+        .unwrap_or_else(|| unix_join(&home, ".config"));
+    let units = unix_join(&config_home, "systemd/user");
     Ok(Layout {
-        bin: home.join(".local/bin/storm-runtime"),
-        unit: units.join(UNIT_NAME),
-        wants: units.join("default.target.wants").join(UNIT_NAME),
-        workspaces: host.state.join("workspaces"),
+        bin: unix_join(&home, ".local/bin/storm-runtime"),
+        unit: unix_join(&units, UNIT_NAME),
+        wants: unix_join(&units, &format!("default.target.wants/{UNIT_NAME}")),
+        workspaces: unix_join(&host.state, "workspaces"),
         state: host.state,
         config: host.config,
     })
+}
+
+/// Absolute on Linux, wherever this is compiled: on Windows `/home` is not.
+fn is_absolute(path: &Path) -> bool {
+    path.to_string_lossy().starts_with('/')
 }
 
 /// One `ExecStart` word: quoted when it must be, with systemd's `%`
@@ -83,7 +88,7 @@ pub fn exec_word(path: &Path) -> Result<String, String> {
 /// manager need not share your shell's `XDG_*` variables, and `enroll` used
 /// them.
 pub fn render_unit(binary: &Path, layout: &Layout, linger_ours: bool) -> Result<String, String> {
-    if !binary.is_absolute() {
+    if !is_absolute(binary) {
         return Err(format!("{} is not an absolute path", binary.display()));
     }
     let exec = format!(
