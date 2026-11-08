@@ -112,9 +112,9 @@ typed() {
   ! grep -q 'launchctl' "$FAKE_LOG"
 }
 
-@test "macos with the runtime too: the tarball is fetched once" {
+@test "macos with the runtime's LaunchDaemon too: the tarball is fetched once" {
   use_macos
-  run storm_main --dry-run --from-dir "$ASSETS" --runtime --mcp --enroll-from-stdin
+  run storm_main --dry-run --from-dir "$ASSETS" --runtime --service --mcp --enroll-from-stdin
   [ "$status" -eq 0 ]
   [ "$(printf '%s\n' "$output" | grep -c 'Download and verify storm-runtime-0.6.0-macos-universal.tar.gz')" -eq 1 ]
   [[ "$output" == *"Install the Runtime Host"* ]]
@@ -127,6 +127,32 @@ typed() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"the Runtime Host's storm-runtime is on PATH already"* ]]
   [[ "$output" != *"Put storm-runtime on PATH"* ]]
+}
+
+@test "a host you run is the MCP command, by its full path: nothing is put on PATH" {
+  run storm_main --dry-run --from-dir "$ASSETS" --runtime --mcp --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"In an app's MCP config, the command is its full path, $HOME/.local/bin/storm-runtime: an app's PATH may not include $HOME/.local/bin."* ]]
+  [[ "$output" != *"Put storm-runtime on PATH"* ]]
+  [[ "$output" != *"is on PATH already"* ]]
+  use_macos
+  run storm_main --dry-run --from-dir "$ASSETS" --runtime --mcp --enroll-from-stdin
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the command is its full path, $HOME/Library/Application Support/StormRuntime/bin/storm-runtime"* ]]
+  [[ "$output" != *"Put storm-runtime on PATH"* ]]
+  [ -z "$(plan_steps "$output" | grep sudo)" ]
+}
+
+@test "linux run with a host you run: the summary names its full path" {
+  run storm_main --yes --from-dir "$ASSETS" --runtime --mcp --enroll-from-stdin <<<"storm-enroll:v1:MCP"
+  [ "$status" -eq 0 ]
+  [ ! -e "$(mcp_bin)" ]
+  [[ "$output" == *"AI apps here can run $HOME/.local/bin/storm-runtime mcp-connect"* ]]
+  [[ "$output" == *"Use that full path as the command"* ]]
+  platform
+  runtime_detect
+  [ "$(mcp_command)" = "$HOME/.local/bin/storm-runtime" ]
+  [[ "$(mcp_status_line)" == *"at $HOME/.local/bin/storm-runtime"* ]]
 }
 
 @test "the MCP copy on PATH is not mistaken for the Runtime Host" {

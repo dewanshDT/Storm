@@ -2562,9 +2562,10 @@ mcp_detect() {
   return 0
 }
 
-# On Linux the Runtime Host's package already puts storm-runtime on PATH.
+# On Linux the Runtime Host's package already puts storm-runtime on PATH; a
+# host you run (either platform) has its own copy at $RT_BIN.
 mcp_via_runtime() {
-  [ "$OS" = linux ] || return 1
+  [ "$OS" = linux ] || [ "$RT_USER" = 1 ] || return 1
   if in_sel runtime; then
     [ "$(comp_mode runtime)" != uninstall ]
     return
@@ -2572,11 +2573,26 @@ mcp_via_runtime() {
   [ "$RT_INSTALLED" = 1 ]
 }
 
+# What an AI app runs for mcp-connect. A host you run is in your home
+# (~/.local/bin, ~/Library/Application Support/StormRuntime/bin), which a GUI
+# app's PATH may not include, so it is named by its full path.
+mcp_command() {
+  if [ "$MCP_INSTALLED" = 1 ]; then
+    printf '%s' "$MCP_BIN"
+  elif [ "$RT_USER" = 1 ] && mcp_via_runtime; then
+    printf '%s' "$RT_BIN"
+  else
+    printf 'storm-runtime'
+  fi
+}
+
 mcp_status_line() {
   if [ "$MCP_LINKED" = 1 ]; then
     printf '%s is a link (Homebrew?), left alone' "$MCP_BIN"
   elif [ "$MCP_INSTALLED" = 1 ]; then
     printf 'installed%s %s %s' "${MCP_VERSION:+ v$MCP_VERSION}" "$G_DOT" "$MCP_BIN"
+  elif [ "$RT_USER" = 1 ] && [ "$RT_INSTALLED" = 1 ]; then
+    printf "the Runtime Host's, at %s" "$RT_BIN"
   elif [ "$OS" = linux ] && [ "$RT_INSTALLED" = 1 ]; then
     printf 'storm-runtime is on PATH (the Runtime Host)'
   else
@@ -2596,7 +2612,11 @@ mcp_plan() {
     return 0
   fi
   if [ "$MCP_INSTALLED" != 1 ] && mcp_via_runtime; then
-    plan_note "MCP: the Runtime Host's storm-runtime is on PATH already; AI apps run its mcp-connect."
+    if [ "$RT_USER" = 1 ]; then
+      plan_note "MCP: AI apps run the Runtime Host's own storm-runtime. In an app's MCP config, the command is its full path, $(mcp_command): an app's PATH may not include $(dirname "$RT_BIN")."
+    else
+      plan_note "MCP: the Runtime Host's storm-runtime is on PATH already; AI apps run its mcp-connect."
+    fi
     return 0
   fi
   if [ "$mode" != keep ]; then
@@ -3863,9 +3883,12 @@ summary_screen() {
       ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $RT_WORKSPACES"
     fi
   fi
-  if in_sel mcp && [ "$MCP_INSTALLED" = 1 ]; then
-    ui_info "AI apps here can run $MCP_BIN mcp-connect. In the Storm app, Settings ›"
+  if in_sel mcp && { [ "$MCP_INSTALLED" = 1 ] || { [ "$RT_USER" = 1 ] && mcp_via_runtime; }; }; then
+    ui_info "AI apps here can run $(mcp_command) mcp-connect. In the Storm app, Settings ›"
     ui_info "Devices & access › New key shows the line to paste into the app's MCP config."
+    if [ "$MCP_INSTALLED" != 1 ]; then
+      ui_info "Use that full path as the command: an app's PATH may not include $(dirname "$RT_BIN")."
+    fi
   fi
   i=1
   while [ "$i" -le "$PLAN_N" ]; do

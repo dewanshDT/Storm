@@ -80,3 +80,10 @@ shape() { code | sed -n '/^if (\$Runtime -and -not \$User -and -not \$Service) {
   code | grep -qF "if (\$User) { \$root = Join-Path \$runtimeState 'workspaces' }"
   ! code | grep -q "Workspace is for the service"
 }
+
+@test "install.ps1: with a host you run, MCP is that host's exe by its full path" {
+  code | grep -qF "\$userRuntimeBin = Join-Path \$env:LOCALAPPDATA 'StormRuntime\\bin\\storm-runtime.exe'"
+  code | grep -qF "\$mcpViaHost = \$Mcp -and ((\$Runtime -and \$User) -or (-not \$Runtime -and \$userHost))"
+  code | grep -qF 'the command is its full path: $userRuntimeBin'
+  code | grep -qF "storm-runtime.exe into \$mcpDir, on your PATH"
+}

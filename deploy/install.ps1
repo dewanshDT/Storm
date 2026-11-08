@@ -30,7 +30,8 @@
     already.
   - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
     PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
-    enrollment, no administrator.
+    enrollment, no administrator. With a host you run, nothing is copied: an AI
+    app runs that host's storm-runtime.exe, by its full path.
   - App: the Storm app in %LOCALAPPDATA%\Programs\Storm\App, with a Start-menu
     shortcut. No administrator. A running Storm is closed first, never killed.
 
@@ -229,6 +230,10 @@ if ($User) {
 }
 $dataState = Join-Path $env:USERPROFILE 'Storm\state'
 $mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
+# A host you run has its own storm-runtime.exe: AI apps run that, by its
+# full path, rather than a second copy on PATH.
+$userRuntimeBin = Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe'
+$mcpViaHost = $Mcp -and (($Runtime -and $User) -or (-not $Runtime -and $userHost))
 
 Step "Plan ($(if ($Version) { $Version } else { "from $FromDir" }))"
 if ($Server) {
@@ -244,7 +249,9 @@ if ($Runtime -and $User) {
     Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
     if ($Workspace) { Say "  workspace: $Workspace" }
 }
-if ($Mcp) {
+if ($mcpViaHost) {
+    Say "  mcp      : the Runtime Host's own $userRuntimeBin (nothing copied)"
+} elseif ($Mcp) {
     Say "  mcp      : $RuntimeZip, checked; storm-runtime.exe into $mcpDir, on your PATH (no service)"
 }
 if ($App) {
@@ -412,7 +419,13 @@ if ($Runtime) {
 
 # --- MCP only -------------------------------------------------------------------
 
-if ($Mcp) {
+if ($mcpViaHost) {
+    Step 'MCP connector'
+    & $userRuntimeBin mcp-connect --help *> $null
+    if ($LASTEXITCODE -ne 0) { Fail 'this storm-runtime has no mcp-connect: it predates it' }
+    Say "AI apps here run the Runtime Host's own storm-runtime. In an app's MCP config, the command is its full path: $userRuntimeBin"
+    Say 'In the Storm app: Settings > Devices & access > New key shows the line to paste into your AI app.'
+} elseif ($Mcp) {
     Step 'MCP connector'
     $dir = Checked $RuntimeZip
     New-Item -ItemType Directory -Force -Path $mcpDir | Out-Null
