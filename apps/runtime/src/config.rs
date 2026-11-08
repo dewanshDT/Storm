@@ -569,6 +569,40 @@ fn git_init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Why a start's `cwd` was refused (151 N6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwdRefusal {
+    /// Nothing is there now.
+    Gone,
+    /// Not absolute, not canonical, not a directory, or outside every root.
+    Outside,
+}
+
+/// A start's `cwd` as the directory it names (R3.3): absolute, already
+/// canonical (no link, `.` or `..` resolved away), a directory, and inside
+/// one of `roots` as they resolve now.
+pub fn resolve_cwd(roots: &[PathBuf], cwd: &str) -> Result<PathBuf, CwdRefusal> {
+    let path = Path::new(cwd);
+    if cwd.contains('\0') || !path.is_absolute() {
+        return Err(CwdRefusal::Outside);
+    }
+    let real = match path.canonicalize() {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CwdRefusal::Gone),
+        Err(_) => return Err(CwdRefusal::Outside),
+    };
+    if real.as_os_str() != path.as_os_str() || !real.is_dir() {
+        return Err(CwdRefusal::Outside);
+    }
+    if !canonical_roots(roots)
+        .iter()
+        .any(|root| real.starts_with(root))
+    {
+        return Err(CwdRefusal::Outside);
+    }
+    Ok(real)
+}
+
 fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
 }
@@ -585,6 +619,44 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// 151 N6 (R3.3): a start's `cwd` is an absolute, canonical directory
+    /// inside a root as it resolves now; one that is not there is `Gone`.
+    #[test]
+    #[cfg(unix)]
+    fn a_cwd_is_canonical_and_inside_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("w/sub")).unwrap();
+        std::fs::write(real.join("w/file"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), real.join("w/out")).unwrap();
+        std::os::unix::fs::symlink(real.join("w/sub"), real.join("w/alias")).unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        let at = |p: &str| real.join(p).display().to_string();
+
+        assert_eq!(resolve_cwd(&roots, &at("w/sub")), Ok(real.join("w/sub")));
+        assert_eq!(resolve_cwd(&roots, &at("w")), Ok(real.join("w")));
+        for bad in [
+            at("w/out"),
+            at("w/alias"),
+            at("w/sub/../sub"),
+            at("w/./sub"),
+            at("w/sub/"),
+            at("w/file"),
+            outside.path().canonicalize().unwrap().display().to_string(),
+            "w/sub".into(),
+            format!("{}\0", at("w/sub")),
+        ] {
+            assert_eq!(
+                resolve_cwd(&roots, &bad),
+                Err(CwdRefusal::Outside),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(resolve_cwd(&roots, &at("w/gone")), Err(CwdRefusal::Gone));
+        assert_eq!(resolve_cwd(&[], &at("w/sub")), Err(CwdRefusal::Outside));
+    }
 
     /// 141c: a new workspace is one plain name, made in the first root
     /// only, never over anything that exists in any root.

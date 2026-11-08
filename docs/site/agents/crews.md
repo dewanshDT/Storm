@@ -58,9 +58,16 @@ Agents a session started are read only unless you ticked **The agents it
 starts can write to {vault}** when you launched it; then they write to that
 vault and no other. The session's **About** says which.
 
-Agents a session started run in its permission mode, inside their own copy
-of the workspace, or in their own agent's setting when their agent doesn't
-have that mode. In a mode that asks, such an agent can stop on its own
+Agents a session started run in its permission mode, or in their own
+agent's setting when their agent doesn't have that mode. Where they run
+depends on the host: on a host that isolates sessions each gets its own copy
+of the workspace, which you can review and apply from its **Work** tab; on
+any other host it runs as the same account, in the session's own workspace
+(or a folder inside one of the host's workspaces that the session names),
+beside the session and anything else working there, and has no Work tab.
+Storm starts the agent there and records who started it; it makes no copy,
+worktree or sandbox of its own, and the agent's permissions are its own
+settings'. In a mode that asks, such an agent can stop on its own
 permission prompt: it shows **Needs you**, and you answer it in that
 agent's terminal, as you would any other. Whatever its permissions refuse
 goes to the session that started it, which decides what to do next: give

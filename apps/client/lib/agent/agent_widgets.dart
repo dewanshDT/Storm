@@ -283,7 +283,7 @@ class SessionSubLine extends StatelessWidget {
     // A child's workspace is `children/<id>` on its host: named by what it
     // is instead, as its meta line does (134l).
     final ws = session.spawn.isChild
-        ? childWorkspaceLabel(session.spawn.childWorkspace)
+        ? childWorkspaceLabel(session)
         : session.workspace;
     // The model, when one was chosen (145b), stays whole with the age.
     final when = [

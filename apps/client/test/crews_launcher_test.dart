@@ -307,11 +307,16 @@ void main() {
   });
 
   group('"Allow this session to start agents" (141e)', () {
-    Map<String, dynamic> c0({String identity = 'verified'}) => agentHost(
+    Map<String, dynamic> c0({
+      String identity = 'verified',
+      String isolation = 'verified',
+      String mode = 'per-session',
+    }) => agentHost(
       providers: ['claude-code', 'opencode', 'shell', 'cursor'],
       mcp: {'cursor': false},
       identity: identity,
-      isolation: 'verified',
+      isolation: isolation,
+      execution: {'account': 'storm-runtime', 'isolation': mode},
     );
 
     testWidgets('off by default, sent only when turned on', (t) async {
@@ -388,14 +393,24 @@ void main() {
 
     testWidgets('only for a host that passes C0 and an agent that can '
         'start agents', (t) async {
+      // 151 N6: a host too old to say who it runs as, or a sandbox whose
+      // isolation isn't verified, offers none of it.
       for (final host in [
         agentHost(),
-        agentHost(identity: 'verified'),
-        agentHost(isolation: 'verified'),
-        c0(identity: 'unavailable'),
+        agentHost(identity: 'verified', isolation: 'verified'),
+        c0(isolation: 'unavailable'),
       ]) {
         final c = await launcher(t, server(host: host));
         expect(find.byKey(const Key('launcher-spawn')), findsNothing);
+        await disposeShell(t, c);
+      }
+      // Identity is not a gate, and a host with isolation off offers it.
+      for (final host in [
+        c0(identity: 'unavailable'),
+        c0(isolation: 'unavailable', mode: 'off'),
+      ]) {
+        final c = await launcher(t, server(host: host));
+        expect(find.byKey(const Key('launcher-spawn')), findsOneWidget);
         await disposeShell(t, c);
       }
       final agents = server(host: c0());

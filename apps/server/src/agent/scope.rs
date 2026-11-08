@@ -269,13 +269,10 @@ impl AgentManager {
                 .insert(&test_record(owner, host, parent, "completed"))
                 .unwrap();
         }
+        let mut record = test_record(owner, host, child, status);
+        record.workspace = super::store::spawn::child_workspace(child);
         store
-            .insert_spawned(
-                &test_record(owner, host, child, status),
-                parent,
-                "a task",
-                &now(),
-            )
+            .insert_spawned(&record, parent, "a task", &now())
             .unwrap();
     }
 

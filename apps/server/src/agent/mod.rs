@@ -154,6 +154,12 @@ pub enum Command {
         /// (137-1). Omitted for every other start.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_of: Option<String>,
+        /// Where a child on a host without child workspaces starts, or a
+        /// resume of one that did (151 N6): an absolute directory the host
+        /// checks is canonical and inside one of its roots. Omitted
+        /// otherwise, so the session starts in `workspace`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -367,6 +373,20 @@ pub struct Capabilities {
     pub execution: Option<Execution>,
 }
 
+impl Capabilities {
+    /// `(name, canonical directory)` of each workspace the host lists, never
+    /// a child's own (151 N6): where a `cwd` may be.
+    pub fn listed_workspace_paths(&self) -> Vec<(String, String)> {
+        self.workspaces
+            .iter()
+            .filter_map(|name| {
+                let path = self.workspace_paths.get(name)?;
+                Some((name.clone(), path.clone()))
+            })
+            .collect()
+    }
+}
+
 /// A host's session isolation (decision 136j), shaped as [`Identity`] is.
 pub type Isolation = Identity;
 
@@ -380,6 +400,9 @@ pub struct Execution {
 }
 
 const EXECUTION_WORD_MAX: usize = 256;
+
+/// A host's `execution.isolation` when it runs every session as itself.
+pub const ISOLATION_OFF: &str = "off";
 
 fn execution_or_none<'de, D: serde::Deserializer<'de>>(
     d: D,
@@ -1641,8 +1664,9 @@ impl AgentManager {
             .is_some_and(|caps| caps.isolation.verified())
     }
 
-    /// Test-only: the host sends an inventory saying `isolation: verified`,
-    /// through the same path a real one takes.
+    /// Test-only: the host sends an inventory as a sandbox host does once
+    /// its self-test passed (`isolation: verified`, set to `per-session`,
+    /// child workspaces), through the same path a real one takes.
     #[cfg(test)]
     pub fn verify_isolation_for_tests(&self, host_id: &str) {
         let caps = self.host_live(host_id).capabilities;
@@ -1652,6 +1676,11 @@ impl AgentManager {
                 mechanism: Some("systemd_units".into()),
                 reason: None,
             };
+            caps.execution = Some(Execution {
+                account: Some("storm-runtime".into()),
+                isolation: "per-session".into(),
+            });
+            caps.child_workspaces = true;
             self.inventory(host_id, caps).unwrap();
         }
     }
@@ -1686,14 +1715,24 @@ impl AgentManager {
         Ok(origin_workspace(&self.store.lock().unwrap(), session_id)?)
     }
 
-    /// C0 (134r): nothing privileged unless the host checks every
-    /// connection's identity and isolates its sessions, both as its live
-    /// link says now. The refusal names the first that fails.
+    /// C0 (151 N6): the host's live link has said who its processes run as,
+    /// and a host set to isolate has its isolation verified. Identity is
+    /// disclosure, not a gate (R1.1). The refusal names the first that fails.
     pub fn spawn_gate(&self, host_id: &str) -> std::result::Result<(), &'static str> {
-        if !self.host_verified(host_id) {
-            return Err("identity_unverified");
-        }
-        if !self.host_isolated(host_id) {
+        let execution = self
+            .live
+            .lock()
+            .unwrap()
+            .hosts
+            .get(host_id)
+            .filter(|link| link.reported)
+            .and_then(|link| link.capabilities.as_ref())
+            .and_then(|caps| caps.execution.clone());
+        let Some(execution) = execution else {
+            return Err("host_too_old");
+        };
+        // Anything but `off` is read as isolating: fail closed.
+        if execution.isolation != ISOLATION_OFF && !self.host_isolated(host_id) {
             return Err("isolation_unverified");
         }
         Ok(())
@@ -2170,6 +2209,18 @@ impl AgentManager {
             Some(old) => Some(self.resumable(owner, old, &req, &caps)?),
             None => None,
         };
+        // A resume starts where its session did (151 N6), or not at all.
+        let cwd = match resume.as_ref() {
+            Some((old, _)) => self.store.lock().unwrap().launch(old)?.and_then(|l| l.cwd),
+            None => None,
+        };
+        if let Some(cwd) = &cwd
+            && store::spawn::cwd_workspace(cwd, &caps.listed_workspace_paths()).is_none()
+        {
+            return Err(AgentError::Conflict(
+                "working directory no longer exists".into(),
+            ));
+        }
         let requested = req
             .provider
             .clone()
@@ -2339,6 +2390,7 @@ impl AgentManager {
                 role: meta.role.filter(|_| reads_storm),
                 model: model.clone(),
                 permission_mode: permission_mode.clone(),
+                cwd: cwd.clone(),
             };
             store.insert(&record)?;
             store.insert_grants(
@@ -2433,6 +2485,7 @@ impl AgentManager {
                 permission_mode,
                 spawn,
                 child_of: None,
+                cwd,
             },
         );
         let mut record = record;
@@ -5119,6 +5172,7 @@ mod tests {
                 spawn: false,
                 resumed_from: None,
                 child_of: None,
+                cwd: None,
             },
         };
         let start = |provider_credential| start_with(provider_credential, None);

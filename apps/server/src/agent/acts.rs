@@ -3,8 +3,7 @@
 //! person's standing approval (141e); every check of 134 stays (C0, the
 //! switch, scope, the caps), and every act is recorded and audited.
 //!
-//! Dark: C0 refuses on every host until a host's own report says its
-//! identity and isolation are verified.
+//! C0 refuses on a host too old to say who its processes run as (151 N6).
 
 use super::credential;
 use super::store::SessionRecord;
@@ -38,6 +37,8 @@ impl AgentManager {
             .with_live(host_id, |caps| HostNow {
                 max_sessions: caps.max_sessions,
                 agents: child_agents(caps),
+                child_workspaces: caps.child_workspaces,
+                workspace_paths: caps.listed_workspace_paths(),
             })
             .unwrap_or_default())
     }
@@ -218,13 +219,14 @@ impl AgentManager {
         let parent = parent.map(|p| self.get(&p)).transpose()?;
         let start = parent.and_then(|parent| {
             let caps = self.host_live(&child.host_id).capabilities?;
-            let (mcp, model, permission_mode) = {
+            let (mcp, model, permission_mode, cwd) = {
                 let store = self.store.lock().unwrap();
                 let launch = store.launch(&child.id).ok()?;
                 (
                     store.grants_of(&child.id).ok()?,
                     launch.as_ref().and_then(|l| l.model.clone()),
-                    launch.and_then(|l| l.permission_mode),
+                    launch.as_ref().and_then(|l| l.permission_mode.clone()),
+                    launch.and_then(|l| l.cwd),
                 )
             };
             let reads_storm = mcp
@@ -251,6 +253,7 @@ impl AgentManager {
                     spawn: false,
                     resumed_from: None,
                     child_of: Some(parent.id.clone()),
+                    cwd,
                 },
             ))
         });

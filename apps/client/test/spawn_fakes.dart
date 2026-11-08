@@ -32,12 +32,15 @@ Map<String, dynamic> spawnSession(
   List<Map<String, dynamic>>? recentEvents,
   String? model,
   String? permissionMode,
+  bool ownWorkspace = true,
+  String? cwd,
 }) => {
   ...agentSession(
     id,
     status: status,
     name: name,
-    workspace: parent == null ? workspace : 'children/$id',
+    workspace: parent == null || !ownWorkspace ? workspace : 'children/$id',
+
     writeVaultId: writeVaultId,
     resumedFrom: resumedFrom,
   ),
@@ -47,6 +50,7 @@ Map<String, dynamic> spawnSession(
   'needs_attention': needsAttention,
   'spawn': ?spawn,
   'child_workspace': ?childWorkspace,
+  'cwd': ?cwd,
   'identity': {'state': identity},
   'isolation': {'state': isolation},
   'child_activity': ?childActivity,

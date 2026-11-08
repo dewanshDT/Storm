@@ -75,7 +75,7 @@ String? lineageLine(AgentSession s, AgentOverview? o) {
   if (parentId == null) return null;
   final parent = o?.byId(parentId);
   final ws = parent?.workspace ?? 'its parent’s workspace';
-  final mode = childWorkspaceLabel(s.spawn.childWorkspace, parent: ws);
+  final mode = childWorkspaceLabel(s, parent: ws);
   return [
     '↳ from ${parent?.displayName ?? 'its parent'}',
     mode,
@@ -86,12 +86,15 @@ String? lineageLine(AgentSession s, AgentOverview? o) {
 
 /// A child's workspace named for what it is rather than its record's
 /// `children/<id>`, with its [parent]'s workspace where the line has room.
-String childWorkspaceLabel(ChildWorkspace? w, {String? parent}) =>
-    switch (w?.mode) {
-      'clone' => parent == null ? 'own copy' : 'own copy of $parent',
-      'scratch' => parent == null ? 'scratch folder' : 'scratch beside $parent',
-      _ => 'own workspace',
-    };
+/// A child without one of its own runs in a workspace by name (151 N6).
+String childWorkspaceLabel(AgentSession s, {String? parent}) {
+  if (!s.hasOwnWorkspace) return 'in ${s.workspace}';
+  return switch (s.spawn.childWorkspace?.mode) {
+    'clone' => parent == null ? 'own copy' : 'own copy of $parent',
+    'scratch' => parent == null ? 'scratch folder' : 'scratch beside $parent',
+    _ => 'own workspace',
+  };
+}
 
 /// [row] on the dashed indent when its parent is listed in [list] too
 /// (134l).
@@ -815,15 +818,17 @@ String spawnMeta(String meta, AgentSession s, AgentOverview? o) {
   final parent = s.spawn.parentSession;
   if (parent == null) return meta;
   final ws = o?.byId(parent)?.workspace ?? 'its parent’s workspace';
-  return meta.replaceFirst(
-    s.workspace,
-    childWorkspaceLabel(s.spawn.childWorkspace, parent: ws),
-  );
+  return meta.replaceFirst(s.workspace, childWorkspaceLabel(s, parent: ws));
 }
 
 /// A child's workspace as About says it (137b, 137c): where its work is, and
 /// the commit a copy starts from.
 String childWorkspaceText(AgentSession s, String parentWorkspace, String host) {
+  if (!s.hasOwnWorkspace) {
+    final where = s.spawn.cwd ?? s.workspace;
+    return '$where on $host, beside the agent that started it '
+        '(no copy of its own)';
+  }
   final w = s.spawn.childWorkspace;
   if (w == null) return 'Its own workspace on $host, made when it starts';
   if (w.clone) {

@@ -341,6 +341,11 @@ pub struct StartAgentParams {
     /// A note you can read, given to it as its context note.
     #[serde(default)]
     pub context_note: Option<NoteParams>,
+    /// Where it starts, when your host starts agents in your workspace: an
+    /// absolute directory inside one of your host's workspaces. Yours when
+    /// absent.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -466,6 +471,28 @@ pub const SPAWN_TOOLS: &[&str] = &[
     "end_agent",
     "read_output",
 ];
+
+/// Where `start_agent`'s description says a child runs on a host that makes
+/// each its own workspace (137-1), word for word as the description has it.
+pub const START_AGENT_OWN_COPY: &str = "in its own copy of your workspace's committed history (or a scratch directory beside a read-only view of it)";
+
+/// What replaces [`START_AGENT_OWN_COPY`] on every other host (151 N6).
+pub const START_AGENT_YOUR_WORKSPACE: &str = "in your workspace, beside you and any other session there, or in cwd (an absolute directory inside one of your host's workspaces; bad_cwd otherwise)";
+
+/// A `tools/list` entry as the session's host makes it true: off the
+/// sandbox, `start_agent` says its child runs in the caller's workspace.
+pub fn describe_for_host(tool: &mut serde_json::Value, child_workspaces: bool) {
+    if child_workspaces || tool.get("name").and_then(|n| n.as_str()) != Some("start_agent") {
+        return;
+    }
+    if let Some(d) = tool.get_mut("description")
+        && let Some(text) = d.as_str()
+    {
+        *d = serde_json::Value::String(
+            text.replace(START_AGENT_OWN_COPY, START_AGENT_YOUR_WORKSPACE),
+        );
+    }
+}
 
 /// Decision 134's tools for a spawned session, offered only to a session with
 /// a parent while C0 holds.
@@ -833,6 +860,7 @@ impl Storm {
             background,
             timeout,
             context_note,
+            cwd,
         }): Parameters<StartAgentParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let req = crate::ops::StartAgent {
@@ -848,6 +876,7 @@ impl Storm {
             role,
             background,
             timeout,
+            cwd,
         };
         respond_object(crate::ops::start_agent(&self.state, self.actor()?, req).await)
     }

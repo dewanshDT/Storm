@@ -1088,11 +1088,20 @@ void main() {
     );
     expect(
       requestRefusalText('isolation_unverified', null),
-      'starting agents needs an isolated host',
+      'the host’s session isolation isn’t working',
     );
     expect(
       spawnRefusalText('isolation_unverified', 'Claude Code'),
-      'Starting agents needs an isolated host',
+      "This host's session isolation isn't working",
+    );
+    // 151 N6: only a host too old to say who it runs as is refused for it.
+    expect(
+      spawnRefusalText('host_too_old', 'Claude Code'),
+      'Update storm-runtime on this host to let agents start agents',
+    );
+    expect(
+      requestRefusalText('host_too_old', null),
+      'the host’s storm-runtime is too old to start agents',
     );
     expect(
       requestRefusalText('agent_unavailable', null),
