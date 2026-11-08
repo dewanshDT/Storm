@@ -120,7 +120,7 @@ setup() {
 }
 
 @test "without the test flag the sysroot is ignored" {
-  STORM_INSTALL_TEST=0 platform
+  STORM_INSTALL_TEST=0 OPT_SERVICE=1 platform
   [ "$DEFAULT_DATA" = /srv/storm ]
   # This machine's own os-release decides; elsewhere the runtime is the user's.
   if [ "$DEBIAN_LIKE" = 1 ]; then [ "$RT_STATE" = /var/lib/storm-runtime ]; fi
