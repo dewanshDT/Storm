@@ -152,6 +152,11 @@ fn invoking_user() -> Option<String> {
 
 /// `storm-runtime install` (AM50).
 pub fn install(options: &InstallOptions) -> Result<()> {
+    if options.user {
+        bail!(
+            "install --user is not available on Windows yet; run `storm-runtime serve` as yourself"
+        );
+    }
     require_elevation("storm-runtime install")?;
     let layout = layout();
     let operator = options
@@ -293,6 +298,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// `storm-runtime uninstall [--purge]`. Workspaces are never deleted.
 pub fn uninstall(options: &UninstallOptions) -> Result<()> {
+    if options.user {
+        bail!("uninstall --user is not available on Windows yet");
+    }
     require_elevation("storm-runtime uninstall")?;
     let layout = layout();
     let manager = manager(ServiceManagerAccess::CONNECT)?;

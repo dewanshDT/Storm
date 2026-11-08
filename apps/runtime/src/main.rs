@@ -139,15 +139,18 @@ enum Command {
     Install {
         /// Who shares the workspace root with the host. Defaults to the user
         /// who ran sudo.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "user")]
         operator: Option<String>,
-        /// Linux, as yourself, no root: copy this binary to
-        /// `~/.local/bin`, write `~/.config/systemd/user/storm-runtime.service`
-        /// and enable it, and turn on linger so it starts at boot without a
-        /// login (or print the one command an administrator runs for that).
+        /// Install the host as yourself instead, with no root. Linux: copy
+        /// this binary to `~/.local/bin`, write
+        /// `~/.config/systemd/user/storm-runtime.service` and enable it, and
+        /// turn on linger so it starts at boot without a login (or print the
+        /// one command an administrator runs for that). macOS: a LaunchAgent
+        /// in `~/Library/LaunchAgents`, with your own state, which runs while
+        /// you are logged in.
         #[arg(long, conflicts_with = "operator")]
         user: bool,
-        /// With `--user`: leave linger as it is.
+        /// Linux, with `--user`: leave linger as it is.
         #[arg(long, requires = "user")]
         no_linger: bool,
     },
@@ -157,8 +160,8 @@ enum Command {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
         purge: bool,
-        /// Linux: remove what `install --user` set up, as yourself. Leaves no
-        /// file outside your home.
+        /// Remove what `install --user` set up, as yourself. Leaves no file
+        /// outside your home.
         #[arg(long)]
         user: bool,
     },

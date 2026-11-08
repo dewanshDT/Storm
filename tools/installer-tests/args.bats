@@ -32,6 +32,13 @@ setup() {
   [ "$OPT_ADDR" = 10.1.2.3:9000 ]
 }
 
+@test "--user asks for the Runtime Host as you" {
+  parse_args --runtime
+  [ "$OPT_RT_USER" = 0 ]
+  parse_args --runtime --user
+  [ "$OPT_RT_USER" = 1 ]
+}
+
 @test "--workspace takes a folder name or a git URL, nothing else" {
   parse_args --workspace scratch
   [ "$OPT_WORKSPACE" = scratch ]

@@ -166,6 +166,11 @@ install_fake() {
       mkdir -p "$STORM_TEST_SYSROOT/Library/StormRuntime/bin" "$STORM_TEST_SYSROOT/Library/StormRuntime/state"
       cp "$FAKE_DIR/tools/storm-runtime" "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime"
       ;;
+    macos-runtime-user)
+      mkdir -p "$HOME/Library/Application Support/StormRuntime/bin" "$HOME/Library/LaunchAgents"
+      cp "$FAKE_DIR/tools/storm-runtime" "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime"
+      : >"$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
+      ;;
     macos-app) mkdir -p "$STORM_TEST_SYSROOT/Applications/Storm.app/Contents" ;;
   esac
 }

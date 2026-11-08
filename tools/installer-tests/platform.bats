@@ -82,6 +82,39 @@ setup() {
   [ "$LOG_FILE" = "$HOME/Library/Logs/Storm/install.log" ]
 }
 
+@test "macOS paths for the host as you (--user): your own, the same as storm-runtime's" {
+  use_macos
+  OPT_RT_USER=1 platform
+  [ "$RT_USER" = 1 ]
+  [ "$RT_ACCOUNT" = tester ]
+  [ "$RT_BIN" = "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" ]
+  [ "$RT_STATE" = "$HOME/Library/Application Support/StormRuntime/state" ]
+  [ "$RT_CONFIG" = "$HOME/Library/Application Support/StormRuntime/runtime.toml" ]
+  [ -z "$RT_WORKSPACES" ]
+  [ "$WS_SUDO" = 0 ]
+}
+
+@test "macOS: a host installed as you is found without --user; the LaunchDaemon wins" {
+  use_macos
+  install_fake macos-runtime-user
+  platform
+  [ "$RT_USER" = 1 ]
+  [ "$RT_BIN" = "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" ]
+  install_fake macos-runtime
+  platform
+  [ "$RT_USER" = 0 ]
+  [ "$RT_ACCOUNT" = _stormruntime ]
+}
+
+@test "linux: --user is the macOS installer's alone, for now" {
+  OPT_RT_USER=1
+  platform
+  [ "$RT_USER" = 0 ]
+  REASON=""
+  runtime_available || :
+  [[ "$REASON" == *"macOS-only"* ]]
+}
+
 @test "linux paths, and the log under XDG_STATE_HOME" {
   platform
   [ "$RT_ACCOUNT" = storm-runtime ]

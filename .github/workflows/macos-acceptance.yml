@@ -59,6 +59,43 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # Decision 151 E2: the same host as the runner's own user, a LaunchAgent
+  # installed with `install --user` and enrolled without sudo, a workspace
+  # root under ~/Code, revocation and `uninstall --user`. Logging out, a
+  # Keychain login and a privacy prompt need a person: MANUAL.
+  runtime-host-user:
+    name: macOS Runtime Host as you (151 E2)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - name: Build storm-server and storm-runtime
+        run: |
+          (cd apps/server && cargo build)
+          (cd apps/runtime && cargo build)
+      - name: Acceptance
+        env:
+          SERVER_BIN: ${{ github.workspace }}/apps/server/target/debug/storm-server
+          RUNTIME_BIN: ${{ github.workspace }}/apps/runtime/target/debug/storm-runtime
+          STORM_ACCEPT_STUBS: "1"
+          STORM_ACCEPT_CLEANUP: "1"
+          STORM_ACCEPT_ARTIFACTS: ${{ runner.temp }}/macos-acceptance-user
+        run: python3 apps/runtime/tests/macos_acceptance.py --user
+      - name: Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-acceptance-user-logs
+          path: ${{ runner.temp }}/macos-acceptance-user
+          if-no-files-found: ignore
+          retention-days: 14
+
   # Decision 84d: storm-server as a LaunchAgent, as the runner's user, with the
   # data in ~/Storm — up, health, the account and enrollment commands the
   # installer drives, the nightly backup, down, and an uninstall that keeps

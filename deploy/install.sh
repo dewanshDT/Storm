@@ -78,8 +78,10 @@ Components:
   --mcp                MCP only: storm-runtime on PATH so AI apps here can reach
                        your Storm (mcp-connect); no host, no service
   --agents             Claude Code / OpenCode for the Runtime Host
-  --user               Linux: run the Runtime Host as you, under systemd --user,
-                       with no root (the only way where there is no .deb)
+  --user               run the Runtime Host as you, not as its own account, with
+                       no root. Linux: a systemd --user unit (the only way where
+                       there is no .deb). macOS: a LaunchAgent, which runs while
+                       you're logged in. Either uses your own CLIs and logins
   --app                the desktop app (macOS; Linux: the apt package, or in your home)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
 
@@ -374,9 +376,21 @@ set_paths() {
       APP_DIR="$root/Applications"
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
+      # The host as you (decision 151 E2): asked for, or already installed
+      # that way and not as the LaunchDaemon.
+      RT_USER=0
+      if [ "${OPT_USER:-0}" = 1 ] || { [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ] && [ ! -x "$RT_BIN" ]; }; then
+        RT_USER=1 RT_ACCOUNT=$ME WS_SUDO=0
+        RT_ROOT="$HOME/Library/Application Support/StormRuntime"
+        RT_BIN="$RT_ROOT/bin/storm-runtime"
+        RT_STATE="$RT_ROOT/state"
+        RT_CONFIG="$RT_ROOT/runtime.toml"
+        RT_WORKSPACES=""
+      fi
       ;;
     *)
       MACHINE=machine
+      RT_USER=0
       RT_ACCOUNT=storm-runtime
       RT_ROOT="$root/var/lib/storm-runtime"
       RT_BIN=storm-runtime
@@ -1989,7 +2003,10 @@ runtime_detect() {
   out=$(probe "$RT_BIN" --version) && RT_VERSION=$(printf '%s\n' "$out" | parse_version_out)
   if [ "$RT_USER" = 1 ]; then
     [ -f "$RT_STATE/host.json" ] && RT_ENROLLED=yes
-    if [ "$OPT_DRY_RUN" = 1 ]; then
+    if [ "$OS" = macos ]; then
+      out=$(probe launchctl print "gui/$MY_UID/dev.storm.runtime") || out=""
+      case "$out" in *"state = running"*) RT_RUNNING=yes ;; esac
+    elif [ "$OPT_DRY_RUN" = 1 ]; then
       RT_RUNNING=unknown
     else
       probe systemctl --user is-active --quiet storm-runtime && RT_RUNNING=yes
@@ -2060,8 +2077,13 @@ runtime_plan() {
           "sudo systemctl disable --now storm-runtime\nsudo apt-get remove -y storm-runtime" runtime_uninstall
         ;;
       macos)
-        plan_add spin 1 "Remove the Runtime Host's LaunchDaemon and binary (workspaces stay)" \
-          "sudo $(shq "$RT_BIN") uninstall${RT_PURGE:+ --purge}" runtime_uninstall
+        if [ "$RT_USER" = 1 ]; then
+          plan_add spin 0 "Remove the Runtime Host's LaunchAgent and binary (workspaces stay)" \
+            "$(shq "$RT_BIN") uninstall --user${RT_PURGE:+ --purge}" runtime_uninstall
+        else
+          plan_add spin 1 "Remove the Runtime Host's LaunchDaemon and binary (workspaces stay)" \
+            "sudo $(shq "$RT_BIN") uninstall${RT_PURGE:+ --purge}" runtime_uninstall
+        fi
         ;;
     esac
     return 0
@@ -2084,8 +2106,13 @@ runtime_plan() {
         ;;
       macos)
         plan_fetch runtime
-        plan_add spin 1 "Install the Runtime Host (a LaunchDaemon as $RT_ACCOUNT; workspaces shared with $ME)" \
-          "sudo ./storm-runtime install --operator $ME" runtime_install daemon
+        if [ "$RT_USER" = 1 ]; then
+          plan_add spin 0 "Install the Runtime Host as a LaunchAgent running as $ME (it runs while you're logged in)" \
+            "./storm-runtime install --user" runtime_install agent
+        else
+          plan_add spin 1 "Install the Runtime Host (a LaunchDaemon as $RT_ACCOUNT; workspaces shared with $ME)" \
+            "sudo ./storm-runtime install --operator $ME" runtime_install daemon
+        fi
         ;;
     esac
   fi
@@ -2101,7 +2128,7 @@ runtime_plan() {
         plan_add fg "$(rt_sudo)" "Enroll this runtime with your Storm server (paste its enrollment string)" \
           "printf '%s\\\\n' <the enrollment string> | $(rt_enroll_display)" runtime_configure enroll-paste
       fi
-      if [ "$RT_USER" = 1 ]; then
+      if [ "$RT_USER" = 1 ] && [ "$OS" = linux ]; then
         plan_add spin 0 "Start the Runtime Host" "systemctl --user enable --now storm-runtime" runtime_configure start
       elif [ "$OS" = linux ]; then
         plan_add spin 1 "Start the Runtime Host" "sudo systemctl enable --now storm-runtime" runtime_configure start
@@ -2112,7 +2139,11 @@ runtime_plan() {
     plan_add spin "$(rt_sudo)" "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
   fi
   # Sessions run in a workspace; a fresh host has none.
-  if [ -n "$OPT_WORKSPACE" ]; then
+  if [ "$RT_USER" = 1 ] && [ "$OS" = macos ]; then
+    if [ "$mode" = install ] || [ -n "$OPT_WORKSPACE" ]; then
+      plan_note "Runtime: it works in the folders you name. Set workspace_roots in $RT_CONFIG, then: launchctl kickstart -k gui/$MY_UID/dev.storm.runtime"
+    fi
+  elif [ -n "$OPT_WORKSPACE" ]; then
     plan_add spin "$WS_SUDO" "Add the workspace $(ws_name "$OPT_WORKSPACE"), unless the runtime has one" \
       "$(ws_display "$OPT_WORKSPACE")" runtime_workspace "$OPT_WORKSPACE"
   elif [ "$INTERACTIVE" = 1 ]; then
@@ -2242,12 +2273,16 @@ runtime_install() {
       ;;
     package) apt_install_pkg storm-runtime "${2:-install}" ;;
     restart) as_root systemctl try-restart storm-runtime ;;
-    daemon)
+    daemon | agent)
       if [ ! -x "$WORK_DIR/runtime/storm-runtime" ]; then
         echo "the runtime tarball has no storm-runtime"
         return 1
       fi
-      (cd "$WORK_DIR/runtime" && as_root ./storm-runtime install --operator "$ME")
+      if [ "$1" = agent ]; then
+        (cd "$WORK_DIR/runtime" && ./storm-runtime install --user)
+      else
+        (cd "$WORK_DIR/runtime" && as_root ./storm-runtime install --operator "$ME")
+      fi
       ;;
   esac
 }
@@ -2381,7 +2416,11 @@ runtime_uninstall() {
       as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y storm-runtime
       ;;
     macos)
-      if [ -n "${RT_PURGE:-}" ]; then
+      if [ "$RT_USER" = 1 ] && [ -n "${RT_PURGE:-}" ]; then
+        "$RT_BIN" uninstall --user --purge
+      elif [ "$RT_USER" = 1 ]; then
+        "$RT_BIN" uninstall --user
+      elif [ -n "${RT_PURGE:-}" ]; then
         as_root "$RT_BIN" uninstall --purge
       else
         as_root "$RT_BIN" uninstall
@@ -2615,12 +2654,13 @@ agents_plan() {
     return 0
   fi
   home_note="CLIs in your home directory are out of the host account's reach, by design."
-  if [ "$RT_USER" = 1 ]; then
+  if [ "$RT_USER" = 1 ] && [ "$OS" = linux ]; then
     [ -n "$CLAUDE_BIN" ] || plan_note "Claude Code isn't installed: install it as you; the host finds it on your login shell's PATH."
     [ -n "$OPENCODE_BIN" ] || plan_note "OpenCode isn't installed: install it as you; the host finds it on your login shell's PATH."
     plan_note "Agent logins: the host runs as you, so it uses your own (claude, then /login; opencode auth login)."
     return 0
   fi
+  [ "${RT_USER:-0}" = 1 ] && home_note="The host also finds them on your login shell's PATH."
   [ "$OS" = macos ] && brew_hint=" (Homebrew: https://brew.sh)"
   if [ -z "$CLAUDE_BIN" ]; then
     if [ "$OS" = macos ] && [ -n "$BREW_BIN" ]; then
@@ -2639,6 +2679,10 @@ agents_plan() {
     [ -n "$OPENCODE_IN_HOME" ] && plan_note "Found $OPENCODE_IN_HOME, which $RT_ACCOUNT can't run. $home_note"
   fi
   # No agent login here (decision 124s): the app syncs Claude Code's token.
+  if [ "${RT_USER:-0}" = 1 ]; then
+    plan_note "Agent logins: the host runs as you, so the logins you already have (claude, opencode auth login) are its own."
+    return 0
+  fi
   plan_note "Agent logins: Claude Code signs in from the Storm app (Settings › Claude login, then tick this host); OpenCode from a Storm shell session on this host (opencode auth login)."
   return 0
 }
@@ -3651,7 +3695,7 @@ flow_uninstall() {
   [ "$OPT_DRY_RUN" = 1 ] && return "$rc"
   ui_head "  What remains"
   in_sel server && ui_info "Your data: $DATA_ROOT (vaults, state, backups)"
-  in_sel runtime && ui_info "The runtime's workspaces: $RT_WORKSPACES"
+  in_sel runtime && [ -n "$RT_WORKSPACES" ] && ui_info "The runtime's workspaces: $RT_WORKSPACES"
   in_sel runtime && [ -z "$RT_PURGE" ] && ui_info "The runtime's state and config: $RT_STATE, $RT_CONFIG"
   [ "$OS" = linux ] && [ -e "$LIST_PATH" ] && ui_info "Storm's apt source: $LIST_PATH (remove it to stop updates)"
   ui_info "This installer's log: $LOG_FILE"
@@ -3675,10 +3719,14 @@ summary_screen() {
   fi
   if [ "$RT_INSTALLED" = 1 ]; then
     if [ "$RT_USER" = 1 ]; then
-      ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $RT_WORKSPACES"
-      if [ "$(loginctl show-user "$ME" --property=Linger --value 2>/dev/null)" != yes ]; then
-        ui_info "It runs while you're logged in. To start it at boot without a login, an"
-        ui_info "administrator runs once: sudo loginctl enable-linger $ME"
+      if [ "$OS" = macos ]; then
+        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: the roots in $RT_CONFIG"
+      else
+        ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $RT_WORKSPACES"
+        if [ "$(loginctl show-user "$ME" --property=Linger --value 2>/dev/null)" != yes ]; then
+          ui_info "It runs while you're logged in. To start it at boot without a login, an"
+          ui_info "administrator runs once: sudo loginctl enable-linger $ME"
+        fi
       fi
     elif [ "$OS" = macos ]; then
       ui_info "The Runtime Host runs as $RT_ACCOUNT (LaunchDaemon dev.storm.runtime); workspaces: $RT_WORKSPACES"
@@ -3744,10 +3792,6 @@ storm_main() {
   fi
   detect_platform
   set_paths
-  if [ "$OPT_USER" = 1 ] && [ "$OS" != linux ]; then
-    arg_error "--user is for Linux; on $OS_LABEL the Runtime Host installs as a service"
-    return 2
-  fi
   ui_init
   trap cleanup EXIT
   trap 'cleanup; exit 130' INT
