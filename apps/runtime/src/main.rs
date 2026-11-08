@@ -139,8 +139,13 @@ enum Command {
     Install {
         /// Who shares the workspace root with the host. Defaults to the user
         /// who ran sudo.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "user")]
         operator: Option<String>,
+        /// Install the host as yourself instead, without sudo. macOS: a
+        /// LaunchAgent in `~/Library/LaunchAgents`, with your own state, which
+        /// runs while you are logged in.
+        #[arg(long)]
+        user: bool,
     },
     /// Remove the system service `install` set up, as root (elevated on
     /// Windows). Workspaces are always kept.
@@ -148,6 +153,9 @@ enum Command {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
         purge: bool,
+        /// Remove what `install --user` set up, as yourself.
+        #[arg(long)]
+        user: bool,
     },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
@@ -311,11 +319,17 @@ async fn main() -> Result<()> {
                 | storm_runtime::serve::Outcome::Failed(_) => std::process::exit(3),
             }
         }
-        Command::Install { operator } => {
-            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
+        Command::Install { operator, user } => {
+            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions {
+                operator,
+                user,
+            })
         }
-        Command::Uninstall { purge } => {
-            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
+        Command::Uninstall { purge, user } => {
+            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions {
+                purge,
+                user,
+            })
         }
         Command::Check { state } => {
             let state = state_or_default(state)?;

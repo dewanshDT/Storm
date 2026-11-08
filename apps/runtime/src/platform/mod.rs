@@ -291,6 +291,9 @@ pub struct InstallOptions {
     /// Who the workspace root is shared with. Defaults to `$SUDO_USER`; on
     /// Windows, the user who opened the elevated shell.
     pub operator: Option<String>,
+    /// The host as the person running `install`, not as the service
+    /// (decision 151 E2): a LaunchAgent on macOS.
+    pub user: bool,
 }
 
 /// `storm-runtime uninstall` (AM35).
@@ -299,6 +302,8 @@ pub struct UninstallOptions {
     /// Also remove the identity, state, logs, config and the account.
     /// Workspaces are never removed.
     pub purge: bool,
+    /// Remove what `install --user` set up.
+    pub user: bool,
 }
 
 /// Installs this binary as the platform's system service. macOS: the

@@ -91,6 +91,9 @@ Options:
   --enroll-from-stdin  read the runtime's enrollment string from stdin
   --workspace NAME|URL the runtime's first workspace: a folder to make, or a
                        git repository to clone (only if it has none)
+  --user               run the Runtime Host as you, not as its own account
+                       (macOS: a LaunchAgent, no sudo; it runs while you're
+                       logged in, with your own CLIs and logins)
   --password-stdin     set the new server account's password from stdin
   --no-firewall        don't add the LAN-only firewall rule for the server
                        (ufw or firewalld); the default is to add it
@@ -121,7 +124,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
-  OPT_WORKSPACE="" OPT_NO_FIREWALL=0
+  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_RT_USER=0
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -239,6 +242,7 @@ parse_args() {
       --enroll-from-stdin) OPT_ENROLL_STDIN=1 ;;
       --password-stdin) OPT_PASSWORD_STDIN=1 ;;
       --no-firewall) OPT_NO_FIREWALL=1 ;;
+      --user) OPT_RT_USER=1 ;;
       -h | --help) OPT_HELP=1 ;;
       status | upgrade | uninstall | install) SUBCOMMAND=$1 ;;
       *)
@@ -369,9 +373,21 @@ set_paths() {
       APP_DIR="$root/Applications"
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
+      # The host as you (decision 151 E2): asked for, or already installed
+      # that way and not as the LaunchDaemon.
+      RT_USER=0
+      if [ "${OPT_RT_USER:-0}" = 1 ] || { [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ] && [ ! -x "$RT_BIN" ]; }; then
+        RT_USER=1 RT_ACCOUNT=$ME WS_SUDO=0
+        RT_ROOT="$HOME/Library/Application Support/StormRuntime"
+        RT_BIN="$RT_ROOT/bin/storm-runtime"
+        RT_STATE="$RT_ROOT/state"
+        RT_CONFIG="$RT_ROOT/runtime.toml"
+        RT_WORKSPACES=""
+      fi
       ;;
     *)
       MACHINE=machine
+      RT_USER=0
       RT_ACCOUNT=storm-runtime
       RT_ROOT="$root/var/lib/storm-runtime"
       RT_BIN=storm-runtime
@@ -1890,6 +1906,10 @@ fw_plan() {
 runtime_available() {
   local name
   REASON=""
+  if [ "${OPT_RT_USER:-0}" = 1 ] && [ "$OS" != macos ]; then
+    REASON="--user (the Runtime Host as you) is macOS-only in this installer"
+    return 1
+  fi
   case "$OS" in
     macos)
       release_ok || return 1
@@ -1927,6 +1947,12 @@ runtime_detect() {
   esac
   [ "$RT_INSTALLED" = 1 ] || return 0
   out=$(probe "$RT_BIN" --version) && RT_VERSION=$(printf '%s\n' "$out" | parse_version_out)
+  if [ "$RT_USER" = 1 ]; then
+    [ -f "$RT_STATE/host.json" ] && RT_ENROLLED=yes
+    out=$(probe launchctl print "gui/$MY_UID/dev.storm.runtime") || out=""
+    case "$out" in *"state = running"*) RT_RUNNING=yes ;; esac
+    return 0
+  fi
   if [ "$OPT_DRY_RUN" = 1 ] || ! can_sudo_quietly; then
     RT_ENROLLED=unknown RT_RUNNING=unknown
     return 0
@@ -1951,7 +1977,9 @@ runtime_status_line() {
 }
 
 rt_as_display() {
-  if [ "$OS" = macos ]; then
+  if [ "$RT_USER" = 1 ]; then
+    shq "$RT_BIN"
+  elif [ "$OS" = macos ]; then
     printf 'cd / && sudo -u %s %s' "$RT_ACCOUNT" "$(shq "$RT_BIN")"
   else
     printf 'sudo -u %s storm-runtime' "$RT_ACCOUNT"
@@ -1959,7 +1987,9 @@ rt_as_display() {
 }
 
 rt_enroll_display() {
-  if [ "$OS" = macos ]; then
+  if [ "$RT_USER" = 1 ]; then
+    printf '%s enroll' "$(shq "$RT_BIN")"
+  elif [ "$OS" = macos ]; then
     printf '(cd / && sudo -u %s %s enroll)' "$RT_ACCOUNT" "$(shq "$RT_BIN")"
   else
     printf 'sudo -u %s storm-runtime enroll' "$RT_ACCOUNT"
@@ -1967,9 +1997,10 @@ rt_enroll_display() {
 }
 
 runtime_plan() {
-  local mode state
+  local mode state as=1
   mode=$(comp_mode runtime)
   state="$DATA_ROOT/state"
+  [ "$RT_USER" = 1 ] && as=0
   if [ "$mode" = uninstall ]; then
     case "$OS" in
       linux)
@@ -1977,8 +2008,13 @@ runtime_plan() {
           "sudo systemctl disable --now storm-runtime\nsudo apt-get remove -y storm-runtime" runtime_uninstall
         ;;
       macos)
-        plan_add spin 1 "Remove the Runtime Host's LaunchDaemon and binary (workspaces stay)" \
-          "sudo $(shq "$RT_BIN") uninstall${RT_PURGE:+ --purge}" runtime_uninstall
+        if [ "$RT_USER" = 1 ]; then
+          plan_add spin 0 "Remove the Runtime Host's LaunchAgent and binary (workspaces stay)" \
+            "$(shq "$RT_BIN") uninstall --user${RT_PURGE:+ --purge}" runtime_uninstall
+        else
+          plan_add spin 1 "Remove the Runtime Host's LaunchDaemon and binary (workspaces stay)" \
+            "sudo $(shq "$RT_BIN") uninstall${RT_PURGE:+ --purge}" runtime_uninstall
+        fi
         ;;
     esac
     return 0
@@ -1994,19 +2030,24 @@ runtime_plan() {
         ;;
       macos)
         plan_fetch runtime
-        plan_add spin 1 "Install the Runtime Host (a LaunchDaemon as $RT_ACCOUNT; workspaces shared with $ME)" \
-          "sudo ./storm-runtime install --operator $ME" runtime_install daemon
+        if [ "$RT_USER" = 1 ]; then
+          plan_add spin 0 "Install the Runtime Host as a LaunchAgent running as $ME (it runs while you're logged in)" \
+            "./storm-runtime install --user" runtime_install agent
+        else
+          plan_add spin 1 "Install the Runtime Host (a LaunchDaemon as $RT_ACCOUNT; workspaces shared with $ME)" \
+            "sudo ./storm-runtime install --operator $ME" runtime_install daemon
+        fi
         ;;
     esac
   fi
   case "$RT_ENROLL_ACTION" in
     enroll | reenroll)
       if [ "$LOCAL_SERVER" = 1 ]; then
-        plan_add spin 1 "Enroll this runtime with the server on this $MACHINE" \
+        plan_add spin "$as" "Enroll this runtime with the server on this $MACHINE" \
           "$(srv_owner_prefix "$state")$(srv_bin_display) host-enrollment --state $(shq "$state") --url http://127.0.0.1:$PORT | $(rt_enroll_display)" \
           runtime_configure enroll-local
       else
-        plan_add fg 1 "Enroll this runtime with your Storm server (paste its enrollment string)" \
+        plan_add fg "$as" "Enroll this runtime with your Storm server (paste its enrollment string)" \
           "printf '%s\\\\n' <the enrollment string> | $(rt_enroll_display)" runtime_configure enroll-paste
       fi
       if [ "$OS" = linux ]; then
@@ -2015,10 +2056,14 @@ runtime_plan() {
       ;;
   esac
   if [ "$RT_ENROLL_ACTION" != skip ] || [ "$RT_ENROLLED" = yes ]; then
-    plan_add spin 1 "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
+    plan_add spin "$as" "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
   fi
   # Sessions run in a workspace; a fresh host has none.
-  if [ -n "$OPT_WORKSPACE" ]; then
+  if [ "$RT_USER" = 1 ]; then
+    if [ "$mode" = install ] || [ -n "$OPT_WORKSPACE" ]; then
+      plan_note "Runtime: it works in the folders you name. Set workspace_roots in $RT_CONFIG, then: launchctl kickstart -k gui/$MY_UID/dev.storm.runtime"
+    fi
+  elif [ -n "$OPT_WORKSPACE" ]; then
     plan_add spin "$WS_SUDO" "Add the workspace $(ws_name "$OPT_WORKSPACE"), unless the runtime has one" \
       "$(ws_display "$OPT_WORKSPACE")" runtime_workspace "$OPT_WORKSPACE"
   elif [ "$INTERACTIVE" = 1 ]; then
@@ -2140,18 +2185,26 @@ runtime_install() {
   case "$1" in
     package) apt_install_pkg storm-runtime "${2:-install}" ;;
     restart) as_root systemctl try-restart storm-runtime ;;
-    daemon)
+    daemon | agent)
       if [ ! -x "$WORK_DIR/runtime/storm-runtime" ]; then
         echo "the runtime tarball has no storm-runtime"
         return 1
       fi
-      (cd "$WORK_DIR/runtime" && as_root ./storm-runtime install --operator "$ME")
+      if [ "$1" = agent ]; then
+        (cd "$WORK_DIR/runtime" && ./storm-runtime install --user)
+      else
+        (cd "$WORK_DIR/runtime" && as_root ./storm-runtime install --operator "$ME")
+      fi
       ;;
   esac
 }
 
 # The enrollment string arrives on stdin; never in argv.
 rt_enroll_stdin() {
+  if [ "$RT_USER" = 1 ]; then
+    "$RT_BIN" enroll
+    return
+  fi
   case "$OS" in
     macos) (cd / && run_as "$RT_ACCOUNT" "$RT_BIN" enroll) ;;
     *) run_as "$RT_ACCOUNT" storm-runtime enroll ;;
@@ -2159,7 +2212,11 @@ rt_enroll_stdin() {
 }
 
 rt_enrolled_now() {
-  as_root test -f "$RT_STATE/host.json"
+  if [ "$RT_USER" = 1 ]; then
+    test -f "$RT_STATE/host.json"
+  else
+    as_root test -f "$RT_STATE/host.json"
+  fi
 }
 
 enroll_string_ok() {
@@ -2243,7 +2300,9 @@ runtime_verify() {
     return "$STEP_SKIPPED"
   fi
   while :; do
-    if [ "$OS" = macos ]; then
+    if [ "$RT_USER" = 1 ]; then
+      "$RT_BIN" check && return 0
+    elif [ "$OS" = macos ]; then
       (cd / && run_as "$RT_ACCOUNT" "$RT_BIN" check) && return 0
     else
       run_as "$RT_ACCOUNT" storm-runtime check && return 0
@@ -2261,7 +2320,11 @@ runtime_uninstall() {
       as_root env DEBIAN_FRONTEND=noninteractive apt-get remove -y storm-runtime
       ;;
     macos)
-      if [ -n "${RT_PURGE:-}" ]; then
+      if [ "$RT_USER" = 1 ] && [ -n "${RT_PURGE:-}" ]; then
+        "$RT_BIN" uninstall --user --purge
+      elif [ "$RT_USER" = 1 ]; then
+        "$RT_BIN" uninstall --user
+      elif [ -n "${RT_PURGE:-}" ]; then
         as_root "$RT_BIN" uninstall --purge
       else
         as_root "$RT_BIN" uninstall
@@ -2466,6 +2529,11 @@ agents_detect() {
       break
     fi
   done
+  # A host that runs as you runs what you run.
+  if [ "${RT_USER:-0}" = 1 ]; then
+    CLAUDE_BIN=${CLAUDE_BIN:-$CLAUDE_IN_HOME} CLAUDE_IN_HOME=""
+    OPENCODE_BIN=${OPENCODE_BIN:-$OPENCODE_IN_HOME} OPENCODE_IN_HOME=""
+  fi
   if [ "$OS" = macos ]; then
     BREW_BIN=$(command -v brew 2>/dev/null) || BREW_BIN=""
     for p in /opt/homebrew/bin/brew /usr/local/bin/brew; do
@@ -2489,6 +2557,7 @@ agents_plan() {
     return 0
   fi
   home_note="CLIs in your home directory are out of the host account's reach, by design."
+  [ "${RT_USER:-0}" = 1 ] && home_note="The host also finds them on your login shell's PATH."
   [ "$OS" = macos ] && brew_hint=" (Homebrew: https://brew.sh)"
   if [ -z "$CLAUDE_BIN" ]; then
     if [ "$OS" = macos ] && [ -n "$BREW_BIN" ]; then
@@ -2507,6 +2576,10 @@ agents_plan() {
     [ -n "$OPENCODE_IN_HOME" ] && plan_note "Found $OPENCODE_IN_HOME, which $RT_ACCOUNT can't run. $home_note"
   fi
   # No agent login here (decision 124s): the app syncs Claude Code's token.
+  if [ "${RT_USER:-0}" = 1 ]; then
+    plan_note "Agent logins: the host runs as you, so the logins you already have (claude, opencode auth login) are its own."
+    return 0
+  fi
   plan_note "Agent logins: Claude Code signs in from the Storm app (Settings › Claude login, then tick this host); OpenCode from a Storm shell session on this host (opencode auth login)."
   return 0
 }
@@ -3519,7 +3592,7 @@ flow_uninstall() {
   [ "$OPT_DRY_RUN" = 1 ] && return "$rc"
   ui_head "  What remains"
   in_sel server && ui_info "Your data: $DATA_ROOT (vaults, state, backups)"
-  in_sel runtime && ui_info "The runtime's workspaces: $RT_WORKSPACES"
+  in_sel runtime && [ -n "$RT_WORKSPACES" ] && ui_info "The runtime's workspaces: $RT_WORKSPACES"
   in_sel runtime && [ -z "$RT_PURGE" ] && ui_info "The runtime's state and config: $RT_STATE, $RT_CONFIG"
   [ "$OS" = linux ] && ui_info "Storm's apt source: $LIST_PATH (remove it to stop updates)"
   ui_info "This installer's log: $LOG_FILE"
@@ -3542,7 +3615,9 @@ summary_screen() {
     ui_info "Web client: ${C_BOLD}$(web_url)${C_RESET}"
   fi
   if [ "$RT_INSTALLED" = 1 ]; then
-    if [ "$OS" = macos ]; then
+    if [ "$RT_USER" = 1 ]; then
+      ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: the roots in $RT_CONFIG"
+    elif [ "$OS" = macos ]; then
       ui_info "The Runtime Host runs as $RT_ACCOUNT (LaunchDaemon dev.storm.runtime); workspaces: $RT_WORKSPACES"
     else
       ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $RT_WORKSPACES"
