@@ -18,6 +18,10 @@
     then enrollment: straight from the server on this machine, or by pasting the
     app's enrollment string at a hidden prompt. It never reaches a command line,
     the screen or a log. Optionally a first workspace (a folder name or a git URL).
+  - Runtime with -User: `storm-runtime install --user` as you (a logon task that
+    runs the host while you are logged on, your own state in
+    %LOCALAPPDATA%\StormRuntime), then enrollment. No administrator; run it in a
+    PowerShell that is not elevated (decision 151 E3).
   - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
     PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
     enrollment, no administrator.
@@ -37,6 +41,10 @@
   Install the server.
 .PARAMETER Runtime
   Install the Runtime Host. Needs an elevated PowerShell.
+.PARAMETER User
+  With -Runtime: install the Runtime Host as you, a logon task, not as the
+  StormRuntime service. No administrator. Not with -Server: the host's agents
+  would run as the account that holds your notes.
 .PARAMETER Mcp
   MCP only: put storm-runtime on your PATH for AI apps. No service.
 .PARAMETER App
@@ -64,6 +72,7 @@
 param(
     [switch]$Server,
     [switch]$Runtime,
+    [switch]$User,
     [switch]$Mcp,
     [switch]$App,
     [switch]$RemoveApp,
@@ -133,6 +142,8 @@ if ($RemoveApp) {
 
 # --- what to install -----------------------------------------------------------
 
+if ($User) { $Runtime = $true }
+
 if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
     if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp, -App' }
     Say 'Storm for Windows. What should this machine run?'
@@ -155,8 +166,14 @@ if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
 }
 
 $admin = Test-Admin
-if ($Runtime -and -not $admin) {
-    Fail 'the Runtime Host installs a Windows service: run this in PowerShell as administrator'
+if ($User -and $Server) {
+    Fail '-User with -Server would run agents as the account that holds your notes: install the Runtime Host as its own service (drop -User)'
+}
+if ($User -and $admin) {
+    Fail '-User installs the Runtime Host as you: run this in a PowerShell that is not elevated'
+}
+if ($Runtime -and -not $User -and -not $admin) {
+    Fail 'the Runtime Host installs a Windows service: run this in PowerShell as administrator (or add -User to run it as you)'
 }
 
 if (-not $Version -and -not $FromDir) {
@@ -165,6 +182,11 @@ if (-not $Version -and -not $FromDir) {
 
 $serverBin = Join-Path $env:LOCALAPPDATA 'Storm\bin\storm-server.exe'
 $runtimeBin = Join-Path $env:ProgramFiles 'StormRuntime\storm-runtime.exe'
+$runtimeState = Join-Path $env:ProgramData 'StormRuntime\state'
+if ($User) {
+    $runtimeBin = Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe'
+    $runtimeState = Join-Path $env:LOCALAPPDATA 'StormRuntime\state'
+}
 $dataState = Join-Path $env:USERPROFILE 'Storm\state'
 $mcpDir = Join-Path $env:LOCALAPPDATA 'Programs\Storm'
 
@@ -173,7 +195,10 @@ if ($Server) {
     Say "  server   : $ServerZip, checked; storm-server up as $env:USERNAME (logon task, notes in $env:USERPROFILE\Storm)"
     Say "  firewall : asks; inbound TCP $Port for storm-serverw.exe, Private networks only $(if (-not $admin) { '(needs administrator: printed instead)' })"
 }
-if ($Runtime) {
+if ($Runtime -and $User) {
+    Say "  runtime  : $RuntimeZip, checked; storm-runtime install --user (a logon task as $env:USERNAME, no administrator)"
+    Say "  enroll   : paste the enrollment string from the app (hidden)"
+} elseif ($Runtime) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service) [administrator]"
     Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
     if ($Workspace) { Say "  workspace: $Workspace" }
@@ -289,11 +314,17 @@ if ($Server) {
 if ($Runtime) {
     Step 'Runtime Host'
     $dir = Checked $RuntimeZip
-    & (Join-Path $dir 'storm-runtime.exe') install
-    if ($LASTEXITCODE -ne 0) { Fail 'storm-runtime install failed' }
+    if ($User) {
+        & (Join-Path $dir 'storm-runtime.exe') install --user
+        if ($LASTEXITCODE -ne 0) { Fail 'storm-runtime install --user failed' }
+    } else {
+        & (Join-Path $dir 'storm-runtime.exe') install
+        if ($LASTEXITCODE -ne 0) { Fail 'storm-runtime install failed' }
+    }
+    $as = if ($User) { 'in PowerShell' } else { 'in PowerShell as administrator' }
 
-    if (Test-Path (Join-Path $env:ProgramData 'StormRuntime\state\host.json')) {
-        Say 'Already enrolled; the service was upgraded in place.'
+    if (Test-Path (Join-Path $runtimeState 'host.json')) {
+        Say "Already enrolled; the $(if ($User) { 'host' } else { 'service' }) was upgraded in place."
     } elseif ($Server -and $(& $serverBin has-account --state $dataState *> $null; $LASTEXITCODE -eq 0)) {
         # The enrollment string goes from one process to the other through a
         # pipe, and never reaches a command line, the screen or a log (84e).
@@ -303,7 +334,7 @@ if ($Runtime) {
         Say "The server has no account yet. Once a device has paired, enroll, as administrator:"
         Say "  & `"$serverBin`" host-enrollment --state `"$dataState`" | & `"$runtimeBin`" enroll"
     } elseif ($Yes) {
-        Say "Enroll it later, in PowerShell as administrator:`n  & `"$runtimeBin`" enroll"
+        Say "Enroll it later, $($as):`n  & `"$runtimeBin`" enroll"
     } else {
         Say 'In the Storm app: Settings > Agents > Hosts > Enroll a host, and copy the string.'
         $secret = Read-Host 'Paste the enrollment string' -AsSecureString
@@ -314,21 +345,26 @@ if ($Runtime) {
         if ($LASTEXITCODE -ne 0) { Fail 'enrollment failed' }
     }
 
-    $root = Join-Path $env:ProgramData 'StormRuntime\workspaces'
-    $hasOne = @(Get-ChildItem -Directory $root -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }).Count -gt 0
-    if (-not $Workspace -and -not $hasOne -and -not $Yes) {
-        $Workspace = Read-Host 'A first workspace: a folder name, or a git URL to clone (Enter skips)'
-    }
-    if ($Workspace) {
-        if ($Workspace -match '^(https?://|git@|ssh://)') {
-            $env:GIT_TERMINAL_PROMPT = '0'
-            git -C $root clone $Workspace
-            if ($LASTEXITCODE -ne 0) { Say "warning: could not clone $Workspace (does it need a login?)" }
-        } elseif ($Workspace -match '^[A-Za-z0-9._ -]+$' -and -not $Workspace.StartsWith('.')) {
-            New-Item -ItemType Directory -Force -Path (Join-Path $root $Workspace) | Out-Null
-            Say "Workspace: $(Join-Path $root $Workspace)"
-        } else {
-            Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
+    if ($User) {
+        if ($Workspace) { Say "warning: -Workspace is for the service's workspace root; skipped" }
+        Say "Name the folders agents may work in (workspace_roots) in $(Join-Path $env:LOCALAPPDATA 'StormRuntime\runtime.toml')."
+    } else {
+        $root = Join-Path $env:ProgramData 'StormRuntime\workspaces'
+        $hasOne = @(Get-ChildItem -Directory $root -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }).Count -gt 0
+        if (-not $Workspace -and -not $hasOne -and -not $Yes) {
+            $Workspace = Read-Host 'A first workspace: a folder name, or a git URL to clone (Enter skips)'
+        }
+        if ($Workspace) {
+            if ($Workspace -match '^(https?://|git@|ssh://)') {
+                $env:GIT_TERMINAL_PROMPT = '0'
+                git -C $root clone $Workspace
+                if ($LASTEXITCODE -ne 0) { Say "warning: could not clone $Workspace (does it need a login?)" }
+            } elseif ($Workspace -match '^[A-Za-z0-9._ -]+$' -and -not $Workspace.StartsWith('.')) {
+                New-Item -ItemType Directory -Force -Path (Join-Path $root $Workspace) | Out-Null
+                Say "Workspace: $(Join-Path $root $Workspace)"
+            } else {
+                Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
+            }
         }
     }
 }

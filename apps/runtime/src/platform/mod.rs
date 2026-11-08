@@ -51,7 +51,7 @@ pub use windows::{
     sweep_targets,
 };
 #[cfg(windows)]
-pub use windows_service::{enable_and_start, service_main};
+pub use windows_service::{enable_and_start, service_main, start_user_task};
 
 pub mod ipc;
 pub mod launchd;
@@ -60,6 +60,7 @@ pub mod peer;
 pub mod systemd_user;
 pub mod wincmd;
 pub mod winsvc;
+pub mod wintask;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("storm-runtime runs on Linux, macOS and Windows (D14, D16)");
@@ -294,7 +295,7 @@ pub struct InstallOptions {
     pub operator: Option<String>,
     /// The host as the person running `install`, not as the service, with
     /// no root (decision 151): a `systemd --user` unit on Linux (E1), a
-    /// LaunchAgent on macOS (E2).
+    /// LaunchAgent on macOS (E2), a logon task on Windows (E3).
     pub user: bool,
     /// Linux, with `user`: leave linger as it is.
     pub no_linger: bool,
@@ -323,6 +324,18 @@ pub fn install(options: &InstallOptions) -> anyhow::Result<()> {
 /// `install --user` did.
 pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
     os::uninstall(options)
+}
+
+/// Opens `path` to append the host's log to, keeping one previous file past
+/// 10 MiB.
+pub fn open_log(path: &std::path::Path) -> io::Result<std::fs::File> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// Asserts `path` is private: exactly `mode` on Unix (A2), AM49's DACL on

@@ -234,6 +234,63 @@ fn a_revoked_host_exits_3_and_is_no_longer_enrolled() {
     );
 }
 
+/// Decision 151 E3: a host with `--log-file`, as Windows' logon task runs it
+/// (a console with no window), writes its log there, the reason it stopped
+/// included, and nothing to its standard output.
+#[test]
+fn a_host_with_a_log_file_logs_there_and_says_why_it_stopped() {
+    let state = tempfile::tempdir().unwrap();
+    let server_key = HostKey::generate();
+    let pinned = server_key.public_key_b64();
+    let url = revoking_server(server_key);
+    enrolled_state(state.path(), &url, &pinned);
+    let log = state.path().join("logs.txt");
+    std::fs::write(&log, "an earlier run\n").unwrap();
+
+    let logged = |stdout: Stdio| {
+        Command::new(env!("CARGO_BIN_EXE_storm-runtime"))
+            .args(["serve", "--state"])
+            .arg(state.path())
+            .arg("--config")
+            .arg(state.path().join("runtime.toml"))
+            .arg("--log-file")
+            .arg(&log)
+            .env("RUST_LOG", "info")
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
+    };
+    let mut child = logged(Stdio::piped());
+    let status = wait_exit(&mut child, Duration::from_secs(20));
+    assert_eq!(status.code(), Some(3), "{status:?}");
+    let mut stdout = String::new();
+    child
+        .stdout
+        .take()
+        .unwrap()
+        .read_to_string(&mut stdout)
+        .unwrap();
+    assert_eq!(stdout, "");
+
+    // Started again, unenrolled now: the reason is in the file too.
+    let mut again = logged(Stdio::null());
+    assert_ne!(
+        wait_exit(&mut again, Duration::from_secs(10)).code(),
+        Some(0)
+    );
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.starts_with("an earlier run\n"), "appended: {text}");
+    assert!(text.contains("starting"), "{text}");
+    assert!(text.contains("the server revoked this host"), "{text}");
+    assert!(
+        text.contains("the host stopped"),
+        "the next start's reason: {text}"
+    );
+    assert!(!text.contains('\x1b'), "no colour in a file: {text:?}");
+}
+
 /// AM35 + AM37: under launchd, `host.json` appearing starts the host, whose
 /// account sweep would end an `enroll` running as that account before it had
 /// said anything. So `enroll` announces first, and `host.json` is its last

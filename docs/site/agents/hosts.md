@@ -115,7 +115,7 @@ agent_updates = "manual"  # installs from the app, but no automatic updates
 
 The `.deb` below runs the host as its own `storm-runtime` service account.
 To run it as yourself instead, with no root and on any distribution with
-systemd, see [On Linux, as yourself](#on-linux-as-yourself).
+systemd, see [As yourself on Linux](#as-yourself-on-linux).
 
 ```sh
 sudo apt install storm-runtime
@@ -527,68 +527,6 @@ Storm never stores or transmits these logins. Also, a login running as
 | `enroll` **refuses to run as root** | `sudo storm-runtime enroll` would leave files only root can read. Use the `sudo -u _stormruntime` command above. |
 | An agent cannot read a file you put in a workspace | The file came from outside (moved, not copied, from a home folder), so it lacks the inherited ACL. `ls -le` shows it. Re-copy it, or `chmod -R +a "user:_stormruntime allow read,write,append,delete,readattr,writeattr,readextattr,writeextattr,readsecurity,list,search,add_file,add_subdirectory,delete_child,file_inherit,directory_inherit" <dir>`. |
 
-### As yourself on a Mac
-
-`install --user` installs the host as you, without `sudo`: a LaunchAgent in
-your own launchd session (`gui/<uid>`), with the per-user paths of
-[Running a host as yourself](#running-a-host-as-yourself).
-
-```sh
-storm-runtime install --user
-"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" enroll   # paste the string
-launchctl print gui/$(id -u)/dev.storm.runtime                          # state = running
-```
-
-It:
-- copies the binary to `~/Library/Application Support/StormRuntime/bin`;
-- writes `runtime.toml` there if there is none, naming no workspace root;
-- writes `~/Library/LaunchAgents/dev.storm.runtime.plist`, which runs
-  `serve` with `--state` and `--config` set to your paths, and loads it.
-
-As with the LaunchDaemon, launchd runs the host only while `state/host.json`
-exists: enrolling starts it, a crash restarts it, and a revoked host stays
-stopped. **Logging out stops it**; your next login starts it again. The log
-is `~/Library/Logs/StormRuntime/storm-runtime.log`.
-
-- **Workspaces are the folders you name.** Add a root, then restart the
-  host:
-
-  ```toml
-  workspace_roots = ["/Users/you/Code"]
-  ```
-
-  ```sh
-  launchctl kickstart -k gui/$(id -u)/dev.storm.runtime
-  ```
-
-  A root under `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive
-  works too: macOS asks you, in your session, before an agent reads it, and
-  the answer is yours.
-- **Agents run as you**, with the `PATH` your login shell gives, so
-  Homebrew's `claude` is found. Claude Code's own login, kept in your login
-  Keychain, works; no token file is needed.
-- **Never install it on a Mac where a Storm server runs as you.** An agent
-  could then read the vaults on disk; `install --user` warns when it finds
-  one. Use the LaunchDaemon there.
-- **Upgrade** by running the new binary's `install --user`, which replaces
-  the copy and restarts the host. **Uninstall** with
-  `"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" uninstall --user`;
-  add `--purge` to remove its state, config and logs too. Your folders are
-  never touched.
-
-**With Homebrew** instead, `brew services` runs the same host from the same
-state, straight from Homebrew's copy (use one or the other: `install --user`
-refuses while brew's is there):
-
-```sh
-storm-runtime enroll
-brew services start storm-runtime
-```
-
-Never `sudo brew services`, which would run the host as root. A host
-`brew services` started does not start by itself after enrolling: run
-`brew services restart storm-runtime`.
-
 ## Windows
 
 The host runs as the **`StormRuntime` Windows Service under the virtual
@@ -598,6 +536,11 @@ administrator, and cannot open anyone's profile. Sessions run on ConPTY,
 each inside a Job Object, so ending a session, stopping the service, or the
 host dying in any way ends everything the session started. Windows 10 1809 /
 Server 2019 or later.
+
+Or run it **as yourself, from a logon task**: see
+[As yourself on Windows](#as-yourself-on-windows). That one needs no
+administrator, uses your own CLIs, logins and folders, and stops when you sign
+out.
 
 **Install.** In PowerShell **as administrator**, either the installer:
 
@@ -682,8 +625,11 @@ your own, which you own:
 | Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
 
 So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
-host as you. On a Mac, `storm-runtime install --user` has launchd do the
-`serve` ([As yourself on a Mac](#as-yourself-on-a-mac)). `STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
+host as you. `storm-runtime install --user` has your own service manager do
+the `serve`: [systemd --user on Linux](#as-yourself-on-linux), a
+[LaunchAgent on a Mac](#as-yourself-on-a-mac), or a
+[logon task on Windows](#as-yourself-on-windows).
+`STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
 a flag wins over both.
 
 - **A workspace root may be in your home.** The service's refusals of homes,
@@ -720,7 +666,7 @@ a flag wins over both.
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
 
-### On Linux, as yourself
+### As yourself on Linux
 
 `storm-runtime install --user` installs the host as a `systemd --user` unit
 that runs as you, with no root, from the `.deb`'s binary or from the
@@ -774,6 +720,126 @@ the copy in `~/.local/bin`, and linger if install turned it on (or prints
 `sudo loginctl disable-linger <you>` if that needs an administrator). It
 leaves no file outside your home. Your state and config stay unless you add
 `--purge`; workspaces stay either way.
+
+### As yourself on a Mac
+
+`install --user` installs the host as you, without `sudo`: a LaunchAgent in
+your own launchd session (`gui/<uid>`), with the per-user paths above.
+
+```sh
+storm-runtime install --user
+"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" enroll   # paste the string
+launchctl print gui/$(id -u)/dev.storm.runtime                          # state = running
+```
+
+It:
+- copies the binary to `~/Library/Application Support/StormRuntime/bin`;
+- writes `runtime.toml` there if there is none, naming no workspace root;
+- writes `~/Library/LaunchAgents/dev.storm.runtime.plist`, which runs
+  `serve` with `--state` and `--config` set to your paths, and loads it.
+
+As with the LaunchDaemon, launchd runs the host only while `state/host.json`
+exists: enrolling starts it, a crash restarts it, and a revoked host stays
+stopped. **Logging out stops it**; your next login starts it again. The log
+is `~/Library/Logs/StormRuntime/storm-runtime.log`.
+
+- **Workspaces are the folders you name.** Add a root, then restart the
+  host:
+
+  ```toml
+  workspace_roots = ["/Users/you/Code"]
+  ```
+
+  ```sh
+  launchctl kickstart -k gui/$(id -u)/dev.storm.runtime
+  ```
+
+  A root under `~/Documents`, `~/Desktop`, `~/Downloads` or iCloud Drive
+  works too: macOS asks you, in your session, before an agent reads it, and
+  the answer is yours.
+- **Agents run as you**, with the `PATH` your login shell gives, so
+  Homebrew's `claude` is found. Claude Code's own login, kept in your login
+  Keychain, works; no token file is needed.
+- **Never install it on a Mac where a Storm server runs as you.** An agent
+  could then read the vaults on disk; `install --user` warns when it finds
+  one. Use the LaunchDaemon there.
+- **Upgrade** by running the new binary's `install --user`, which replaces
+  the copy and restarts the host. **Uninstall** with
+  `"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" uninstall --user`;
+  add `--purge` to remove its state, config and logs too. Your folders are
+  never touched.
+
+**With Homebrew** instead, `brew services` runs the same host from the same
+state, straight from Homebrew's copy (use one or the other: `install --user`
+refuses while brew's is there):
+
+```sh
+storm-runtime enroll
+brew services start storm-runtime
+```
+
+Never `sudo brew services`, which would run the host as root. A host
+`brew services` started does not start by itself after enrolling: run
+`brew services restart storm-runtime`.
+
+### As yourself on Windows
+
+`install --user` installs the host as you, with no administrator: a Scheduled
+Task named `Storm Runtime Host` that you register for yourself, with the
+per-user paths above.
+Run it in a PowerShell that is **not** elevated; elevated, it refuses, since
+an elevated shell is the service's.
+
+```powershell
+& "$env:TEMP\storm-runtime\storm-runtime.exe" install --user
+& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" enroll   # paste the string
+Get-ScheduledTask 'Storm Runtime Host' | Get-ScheduledTaskInfo      # LastTaskResult 267009 = running
+```
+
+Or with the installer, in a PowerShell that is not elevated:
+
+```powershell
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -User
+```
+
+It:
+- copies the binary to `%LOCALAPPDATA%\StormRuntime\bin`;
+- writes `runtime.toml` there if there is none, naming no workspace root;
+- registers the task: at your logon, as you, only while you are logged on
+  (`InteractiveToken`), never elevated, never stopped for its age, restarted
+  if it fails. It runs `serve` with `--state`, `--config` and `--log-file`
+  set to your paths, inside `conhost --headless`, so no console window opens;
+- leaves the task off until you enroll. Enrolling turns it on and starts the
+  host; from then on it starts at each logon.
+
+**Signing out stops the host**, and with it every session (each session's
+Job Object goes with it); they show as `failed (host_restart)` when your next
+sign-in starts it again. The log is
+`%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log`.
+
+- **Workspaces are the folders you name.** A root may be in your profile.
+  Add one, then restart the host:
+
+  ```toml
+  workspace_roots = ['C:\Users\you\Code']
+  ```
+
+  ```powershell
+  schtasks /end /tn "Storm Runtime Host"; schtasks /run /tn "Storm Runtime Host"
+  ```
+
+- **Agents run as you**, with your environment and `PATH`, so the CLIs you
+  installed for yourself and their logins are the host's.
+- **Never install it on a PC where a Storm server runs as you.** An agent could
+  then read the vaults on disk; `install --user` warns when it finds one, and
+  the installer refuses `-User` with `-Server`. Use the service there.
+- **One user per PC.** The task's name is the same for everyone, so a second
+  person on the same PC cannot register theirs.
+- **Upgrade** by running the new binary's `install --user`, which stops the
+  host, replaces the copy and starts it again. **Uninstall** with
+  `& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" uninstall --user`;
+  add `--purge` to remove its state, config and logs too. Your folders are
+  never touched.
 
 The rule below still holds: never run it as an account that can read the
 vaults.
