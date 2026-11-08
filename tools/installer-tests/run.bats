@@ -14,8 +14,8 @@ sudo_marked_steps() {
   plan_steps "$1" | awk '$2=="sudo"{print $1}' | sort -un
 }
 
-@test "linux everything --yes: installs, pairs by password, enrolls locally" {
-  run storm_main --yes --everything --from-dir "$ASSETS" --addr 10.0.0.5 --password-stdin <<<"hunter2-not-in-argv"
+@test "linux everything --yes --service: installs, pairs by password, enrolls locally" {
+  run storm_main --yes --everything --service --from-dir "$ASSETS" --addr 10.0.0.5 --password-stdin <<<"hunter2-not-in-argv"
   [ "$status" -eq 0 ]
   [ -x "$FAKE_DIR/installed/storm-server" ]
   [ -x "$FAKE_DIR/installed/storm-runtime" ]
@@ -62,9 +62,9 @@ sudo_marked_steps() {
   grep -q 'apt-get install -y storm-server$' "$FAKE_LOG"
 }
 
-@test "macos everything --yes: user-level server, sudo runtime, app installed" {
+@test "macos everything --yes --service: user-level server, sudo runtime, app installed" {
   use_macos
-  run storm_main --yes --everything --from-dir "$ASSETS" --addr 10.0.0.5 --password-stdin <<<"pw-mac"
+  run storm_main --yes --everything --service --from-dir "$ASSETS" --addr 10.0.0.5 --password-stdin <<<"pw-mac"
   [ "$status" -eq 0 ]
   [ -x "$HOME/Library/Application Support/Storm/bin/storm-server" ]
   [ -x "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime" ]
@@ -114,8 +114,8 @@ sudo_marked_steps() {
   [[ "$output" != *"PASTEDSECRET"* ]]
 }
 
-@test "runtime only with --workspace: the folder is made, as the plan said" {
-  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
+@test "runtime --service with --workspace: the folder is made, as the plan said" {
+  run storm_main --yes --runtime --service --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
   [ "$status" -eq 0 ]
   [ -d "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
   grep -q 'sudo -n -H -u storm-runtime env .* mkdir -- .*/workspaces/scratch$' "$FAKE_LOG"
@@ -126,15 +126,15 @@ sudo_marked_steps() {
 
 @test "--workspace leaves a runtime that has workspaces alone" {
   mkdir -p "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/mine"
-  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
+  run storm_main --yes --runtime --service --from-dir "$ASSETS" --enroll-from-stdin --workspace scratch <<<"storm-enroll:v1:abc"
   [ "$status" -eq 0 ]
   [ ! -e "$STORM_TEST_SYSROOT/var/lib/storm-runtime/workspaces/scratch" ]
   grep -q 'already has workspaces (mine)' "$HOME/.local/state/storm/install.log"
 }
 
-@test "macos --workspace with a git URL clones it as the user" {
+@test "macos --service --workspace with a git URL clones it as the user" {
   use_macos
-  run storm_main --yes --runtime --from-dir "$ASSETS" --enroll-from-stdin --workspace https://github.com/me/app.git <<<"storm-enroll:v1:abc"
+  run storm_main --yes --runtime --service --from-dir "$ASSETS" --enroll-from-stdin --workspace https://github.com/me/app.git <<<"storm-enroll:v1:abc"
   [ "$status" -eq 0 ]
   [ -d "$STORM_TEST_SYSROOT/Library/StormRuntime/workspaces/app" ]
   grep -q '^step=[0-9]* git clone -- https://github.com/me/app.git .*/Library/StormRuntime/workspaces/app$' "$FAKE_LOG"

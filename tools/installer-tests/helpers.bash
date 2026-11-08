@@ -153,7 +153,11 @@ make_assets() {
 install_fake() {
   case "$1" in
     linux-server) cp "$FAKE_DIR/tools/storm-server" "$FAKE_DIR/installed/storm-server" ;;
-    linux-runtime) cp "$FAKE_DIR/tools/storm-runtime" "$FAKE_DIR/installed/storm-runtime" ;;
+    linux-runtime)
+      cp "$FAKE_DIR/tools/storm-runtime" "$FAKE_DIR/installed/storm-runtime"
+      mkdir -p "$STORM_TEST_SYSROOT/lib/systemd/system"
+      : >"$STORM_TEST_SYSROOT/lib/systemd/system/storm-runtime.service"
+      ;;
     macos-server)
       mkdir -p "$HOME/Library/Application Support/Storm/bin" "$HOME/Library/LaunchAgents" "$HOME/${2:-Storm}/state"
       cp "$FAKE_DIR/tools/storm-server" "$HOME/Library/Application Support/Storm/bin/storm-server"

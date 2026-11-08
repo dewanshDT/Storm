@@ -74,10 +74,13 @@ jobs:
           sudo ufw allow 22/tcp
           sudo ufw --force enable
           sudo ufw status verbose
+      # The runtime as its own account: --service, since decision 151 E5 made
+      # the host run as you by default. The re-runs below pass no flag, and
+      # keep the service because it is installed.
       - name: Install everything (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |
-            sh deploy/install.sh --yes --everything --version "v$CI_VERSION" \
+            sh deploy/install.sh --yes --everything --service --version "v$CI_VERSION" \
               --from-dir dist --password-stdin --port 8484 --workspace scratch
       - name: Check — server, account, runtime enrolled
         run: |
@@ -113,12 +116,16 @@ jobs:
           curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:8484/v1/health
       - name: Re-run changes nothing (AC-I4)
         run: |
-          set -eux
+          set -euxo pipefail
           pid=$(systemctl show -p MainPID --value storm-server)
           rt=$(systemctl show -p MainPID --value storm-runtime)
-          sh deploy/install.sh --yes --everything --version "v$CI_VERSION" --from-dir dist
+          sh deploy/install.sh --yes --everything --version "v$CI_VERSION" --from-dir dist 2>&1 | tee rerun.txt
           test "$pid" = "$(systemctl show -p MainPID --value storm-server)"
           test "$rt" = "$(systemctl show -p MainPID --value storm-runtime)"
+          # Decision 151 E5: an installed service host stays the service.
+          grep -F 'runs it as its own account (storm-runtime); it stays that way' rerun.txt
+          test ! -e "$HOME/.config/systemd/user/storm-runtime.service"
+          test ! -e "$HOME/.local/bin/storm-runtime"
       - name: Dry run changes nothing (AC-I5)
         run: |
           set -eux
@@ -466,10 +473,11 @@ jobs:
           printf '<plist version="1.0"><dict/></plist>\n' > app/Storm.app/Contents/Info.plist
           (cd app && ditto -c -k --keepParent Storm.app "../dist/Storm-$CI_VERSION-macos-arm64.zip")
           (cd dist && shasum -a 256 * > checksums.txt && cat checksums.txt)
+      # --service: the LaunchDaemon (decision 151 E5's default is a LaunchAgent).
       - name: Install everything but the agent CLIs (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |
-            sh deploy/install.sh --yes --server --runtime --app --mobile \
+            sh deploy/install.sh --yes --server --runtime --service --app --mobile \
               --version "v$CI_VERSION" --from-dir dist --password-stdin --port 8484 \
               --workspace scratch
       - name: Check — LaunchAgent server as the user, runtime enrolled, app
@@ -490,10 +498,14 @@ jobs:
           test -d /Applications/Storm.app || test -d "$HOME/Applications/Storm.app"
       - name: Re-run changes nothing (AC-I4)
         run: |
-          set -eux
+          set -euxo pipefail
           pid=$(pgrep -f "storm-server serve")
-          sh deploy/install.sh --yes --server --runtime --app --mobile --version "v$CI_VERSION" --from-dir dist
+          sh deploy/install.sh --yes --server --runtime --app --mobile --version "v$CI_VERSION" --from-dir dist 2>&1 | tee rerun.txt
           test "$pid" = "$(pgrep -f "storm-server serve")"
+          # Decision 151 E5: the installed LaunchDaemon stays, with no flag.
+          grep -F 'runs it as its own account (_stormruntime); it stays that way' rerun.txt
+          test ! -e "$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
+          sudo launchctl print system/dev.storm.runtime | grep -E 'state = running'
       - name: No secret on record
         run: |
           set -eu

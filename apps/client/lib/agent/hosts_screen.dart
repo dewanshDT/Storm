@@ -360,12 +360,31 @@ class EnrollStep {
   final bool pastesString;
 }
 
-/// What to run on a host of [platform], and nothing of the others': Linux is
-/// the `.deb` and systemd (decision 77e), macOS is Homebrew and a launchd
-/// LaunchDaemon (D14, AM35), Windows is the release zip and a Windows Service
-/// (D16, AM50).
-List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
-  HostPlatform.linux => const [
+/// How the host runs: as the person who installs it, with their own CLIs and
+/// logins (decision 151), or as its own account, a system service. The sheet
+/// lists them in this order: as you is the default for a new host (151 E5).
+enum EnrollShape { you, service }
+
+/// What to run on a host of [platform] for [shape], and nothing of the
+/// others'. As you: the installer on Linux (`install --user`, systemd
+/// --user; there is no fixed tarball URL), `install --user` from Homebrew's
+/// binary on macOS (a LaunchAgent) and from the release zip on Windows (a
+/// logon task). As its own account: the `.deb` and systemd (decision 77e),
+/// Homebrew and a launchd LaunchDaemon (D14, AM35), the release zip and a
+/// Windows Service (D16, AM50).
+List<EnrollStep> enrollSteps(
+  HostPlatform platform,
+  EnrollShape shape,
+) => switch ((platform, shape)) {
+  (HostPlatform.linux, EnrollShape.you) => const [
+    EnrollStep(
+      'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
+      'sh -s -- --yes --runtime --user',
+    ),
+    EnrollStep('~/.local/bin/storm-runtime enroll', pastesString: true),
+    EnrollStep('systemctl --user enable --now storm-runtime'),
+  ],
+  (HostPlatform.linux, EnrollShape.service) => const [
     EnrollStep('sudo apt install storm-runtime'),
     EnrollStep(
       'sudo -u storm-runtime storm-runtime enroll',
@@ -373,7 +392,17 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
     ),
     EnrollStep('sudo systemctl enable --now storm-runtime'),
   ],
-  HostPlatform.macos => const [
+  (HostPlatform.macos, EnrollShape.you) => const [
+    EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
+    EnrollStep('brew install storm-runtime'),
+    EnrollStep('"\$(brew --prefix)/bin/storm-runtime" install --user'),
+    EnrollStep(
+      '"\$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" '
+      'enroll',
+      pastesString: true,
+    ),
+  ],
+  (HostPlatform.macos, EnrollShape.service) => const [
     EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
     EnrollStep('brew install storm-runtime'),
     // The full path: `sudo` need not search Homebrew's prefix.
@@ -385,14 +414,22 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
       pastesString: true,
     ),
   ],
+  // In a PowerShell that is not elevated. `install --user` copies the binary
+  // into %LOCALAPPDATA%; enrolling starts the logon task.
+  (HostPlatform.windows, EnrollShape.you) => const [
+    EnrollStep(_windowsDownload),
+    EnrollStep(
+      '& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install --user',
+    ),
+    EnrollStep(
+      '& "\$env:LOCALAPPDATA\\StormRuntime\\bin\\storm-runtime.exe" enroll',
+      pastesString: true,
+    ),
+  ],
   // In an elevated PowerShell. `install` copies the binary into Program
   // Files, so `enroll` runs from there; enrolling starts the service.
-  HostPlatform.windows => const [
-    EnrollStep(
-      'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
-      'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
-      'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime',
-    ),
+  (HostPlatform.windows, EnrollShape.service) => const [
+    EnrollStep(_windowsDownload),
     EnrollStep('& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install'),
     EnrollStep(
       '& "\$env:ProgramFiles\\StormRuntime\\storm-runtime.exe" enroll',
@@ -401,16 +438,51 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
   ],
 };
 
+const _windowsDownload =
+    'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
+    'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
+    'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime';
+
+/// A shape's heading and what it means, in a line.
+(String, String) enrollShapeTitle(EnrollShape shape) => switch (shape) {
+  EnrollShape.you => (
+    'As you',
+    'Your own CLIs and logins, no administrator. The default.',
+  ),
+  EnrollShape.service => (
+    'As its own account',
+    'A system service with its own files, set up as administrator.',
+  ),
+};
+
 /// Where the host runs and keeps its workspaces, in a line.
-String enrollFootnote(HostPlatform platform) => switch (platform) {
-  HostPlatform.linux =>
+String enrollFootnote(HostPlatform platform, EnrollShape shape) => switch ((
+  platform,
+  shape,
+)) {
+  (HostPlatform.linux, EnrollShape.you) =>
+    'It runs as you under your systemd user manager. The installer turns '
+        'on linger so it starts at boot, or prints the one command an '
+        'administrator runs for that. Workspaces are the folders in '
+        '~/.local/state/storm-runtime/workspaces.',
+  (HostPlatform.linux, EnrollShape.service) =>
     'It runs under systemd as the storm-runtime account. Workspaces are the '
         'folders in /var/lib/storm-runtime/workspaces.',
-  HostPlatform.macos =>
+  (HostPlatform.macos, EnrollShape.you) =>
+    'launchd starts it once it is enrolled (the LaunchAgent '
+        'dev.storm.runtime), as you, while you are logged in. Name the '
+        'folders agents may work in (workspace_roots) in '
+        '~/Library/Application Support/StormRuntime/runtime.toml.',
+  (HostPlatform.macos, EnrollShape.service) =>
     'launchd starts it by itself once it is enrolled (the LaunchDaemon '
         'dev.storm.runtime), as the dedicated _stormruntime account. '
         'Workspaces are the folders in /Library/StormRuntime/workspaces.',
-  HostPlatform.windows =>
+  (HostPlatform.windows, EnrollShape.you) =>
+    'Run them in PowerShell, not as administrator. Enrolling starts a '
+        'logon task that runs it as you while you are logged on. Name the '
+        'folders agents may work in (workspace_roots) in '
+        '%LOCALAPPDATA%\\StormRuntime\\runtime.toml.',
+  (HostPlatform.windows, EnrollShape.service) =>
     'Run them in PowerShell as administrator. Enrolling starts the '
         'StormRuntime service, as the virtual account NT SERVICE\\StormRuntime. '
         'Workspaces are the folders in C:\\ProgramData\\StormRuntime\\workspaces.',
@@ -443,8 +515,8 @@ class _EnrollDialogState extends State<_EnrollDialog> {
   bool _revealed = false;
   HostPlatform _platform = defaultHostPlatform();
 
-  /// The command whose copy button last succeeded, by index.
-  int? _copiedCommand;
+  /// The command whose copy button last succeeded, as `<shape>-<index>`.
+  String? _copiedCommand;
 
   @override
   Widget build(BuildContext context) {
@@ -454,7 +526,6 @@ class _EnrollDialogState extends State<_EnrollDialog> {
         ? 'soon'
         : '${until.hour.toString().padLeft(2, '0')}:'
               '${until.minute.toString().padLeft(2, '0')}';
-    final steps = enrollSteps(_platform);
     final mono = TextStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: t.labelSize,
@@ -487,42 +558,10 @@ class _EnrollDialogState extends State<_EnrollDialog> {
               ),
               SizedBox(height: t.sp * 1.5),
               Text(
-                'On the host, run these in order, and paste this string when '
-                'enroll asks for it. It works once, until $when.',
+                'On the host, run one of these sets in order, and paste this '
+                'string when enroll asks for it. It works once, until $when.',
               ),
               SizedBox(height: t.sp),
-              for (final (i, step) in steps.indexed) ...[
-                Container(
-                  key: Key('enroll-command-$i'),
-                  padding: EdgeInsets.only(left: t.sp),
-                  decoration: box,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: SelectableText(step.command, style: mono),
-                      ),
-                      IconButton(
-                        key: Key('copy-command-$i'),
-                        tooltip: 'Copy',
-                        iconSize: 16,
-                        icon: Icon(
-                          _copiedCommand == i
-                              ? LucideIcons.check
-                              : LucideIcons.copy,
-                        ),
-                        onPressed: () async {
-                          final ok = await copyToClipboard(step.command);
-                          if (mounted) {
-                            setState(() => _copiedCommand = ok ? i : null);
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                SizedBox(height: t.sp * 0.5),
-              ],
-              SizedBox(height: t.sp * 0.5),
               Container(
                 padding: EdgeInsets.only(left: t.sp),
                 decoration: box,
@@ -549,12 +588,62 @@ class _EnrollDialogState extends State<_EnrollDialog> {
                   ],
                 ),
               ),
-              SizedBox(height: t.sp),
-              Text(
-                enrollFootnote(_platform),
-                key: const Key('enroll-footnote'),
-                style: TextStyle(fontSize: t.labelSize, color: t.text3),
-              ),
+              for (final shape in EnrollShape.values) ...[
+                SizedBox(height: t.sp * 1.5),
+                Text(
+                  enrollShapeTitle(shape).$1,
+                  key: Key('enroll-shape-${shape.name}'),
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  enrollShapeTitle(shape).$2,
+                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                ),
+                SizedBox(height: t.sp * 0.5),
+                for (final (i, step) in enrollSteps(
+                  _platform,
+                  shape,
+                ).indexed) ...[
+                  Container(
+                    key: Key('enroll-${shape.name}-command-$i'),
+                    padding: EdgeInsets.only(left: t.sp),
+                    decoration: box,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: SelectableText(step.command, style: mono),
+                        ),
+                        IconButton(
+                          key: Key('copy-${shape.name}-command-$i'),
+                          tooltip: 'Copy',
+                          iconSize: 16,
+                          icon: Icon(
+                            _copiedCommand == '${shape.name}-$i'
+                                ? LucideIcons.check
+                                : LucideIcons.copy,
+                          ),
+                          onPressed: () async {
+                            final ok = await copyToClipboard(step.command);
+                            if (mounted) {
+                              setState(
+                                () => _copiedCommand = ok
+                                    ? '${shape.name}-$i'
+                                    : null,
+                              );
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: t.sp * 0.5),
+                ],
+                Text(
+                  enrollFootnote(_platform, shape),
+                  key: Key('enroll-footnote-${shape.name}'),
+                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                ),
+              ],
               SizedBox(height: t.sp * 0.5),
               Text(
                 'Close this and the string is gone. Issue a new one if you need '

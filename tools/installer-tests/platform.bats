@@ -69,8 +69,9 @@ setup() {
   [[ "$output" == *"supports macOS and Debian/Ubuntu Linux"* ]]
 }
 
-@test "macOS paths" {
+@test "macOS paths, the service host's with --service" {
   use_macos
+  OPT_SERVICE=1
   platform
   [ "$RT_ACCOUNT" = _stormruntime ]
   [ "$RT_BIN" = "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime" ]
@@ -106,7 +107,8 @@ setup() {
   [ "$RT_ACCOUNT" = _stormruntime ]
 }
 
-@test "linux paths, and the log under XDG_STATE_HOME" {
+@test "linux paths, the service host's with --service, and the log under XDG_STATE_HOME" {
+  OPT_SERVICE=1
   platform
   [ "$RT_ACCOUNT" = storm-runtime ]
   [ "$RT_STATE" = "$STORM_TEST_SYSROOT/var/lib/storm-runtime" ]
@@ -118,7 +120,7 @@ setup() {
 }
 
 @test "without the test flag the sysroot is ignored" {
-  STORM_INSTALL_TEST=0 platform
+  STORM_INSTALL_TEST=0 OPT_SERVICE=1 platform
   [ "$DEFAULT_DATA" = /srv/storm ]
   # This machine's own os-release decides; elsewhere the runtime is the user's.
   if [ "$DEBIAN_LIKE" = 1 ]; then [ "$RT_STATE" = /var/lib/storm-runtime ]; fi
