@@ -237,7 +237,10 @@ jobs:
         run: |
           set -eux
           unit="$HOME/.config/systemd/user/storm-runtime.service"
-          if [ "$(loginctl show-user "$USER" --property=Linger --value)" = yes ]; then
+          # A runner may linger already; install then leaves it as it found it.
+          if grep -q 'Linger=yes' linger-before.txt; then
+            test -z "$(grep '^# Linger:' "$unit")"
+          elif [ "$(loginctl show-user "$USER" --property=Linger --value)" = yes ]; then
             grep -q '^# Linger: turned on by `storm-runtime install --user`' "$unit"
           else
             grep -F "sudo loginctl enable-linger $USER" install.txt
@@ -383,13 +386,20 @@ jobs:
           set -eux
           docker restart storm-arch
           for _ in $(seq 60); do
-            docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
-              systemctl --user is-active --quiet storm-runtime && break
+            docker exec storm-arch systemctl is-active --quiet "user@$ARCH_UID.service" &&
+              docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
+                systemctl --user is-active --quiet storm-runtime && break
             sleep 2
           done
           docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
             systemctl --user is-active storm-runtime
-          ! docker exec storm-arch loginctl list-sessions --no-legend | grep -q .
+          # Lingering, logind (systemd 256+) gives the user manager a session
+          # of class manager; any other session would be a login.
+          docker exec storm-arch loginctl list-sessions --no-legend
+          for s in $(docker exec storm-arch loginctl list-sessions --no-legend | awk '{print $1}'); do
+            class=$(docker exec storm-arch loginctl show-session "$s" -p Class --value)
+            case "$class" in manager | manager-early) ;; *) exit 1 ;; esac
+          done
       - name: Check — online again after the reboot
         run: |
           set -eu
