@@ -5,9 +5,9 @@ use std::os::fd::BorrowedFd;
 use std::time::Duration;
 
 pub const NAME: &str = "linux";
-pub const DEFAULT_STATE: &str = "/var/lib/storm-runtime";
-pub const DEFAULT_CONFIG: &str = "/etc/storm-runtime/runtime.toml";
-pub const SERVICE_ACCOUNT: &str = "storm-runtime";
+pub const DEFAULT_STATE: &str = super::paths::LINUX_STATE;
+pub const DEFAULT_CONFIG: &str = super::paths::LINUX_CONFIG;
+pub const SERVICE_ACCOUNT: &str = super::paths::LINUX_ACCOUNT;
 pub const SERVICE_COMMAND: &str = "sudo -u storm-runtime storm-runtime";
 /// The unit's `ProtectHome` already hides `/home`, `/root` and
 /// `/run/user` (77e).

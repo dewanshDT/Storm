@@ -18,6 +18,35 @@ pub fn address(path: &Path) -> OsString {
     imp::address(path)
 }
 
+/// Whether the channel at `path` can be bound, so a host whose state
+/// directory is too deep fails at start with the reason: a Unix socket's
+/// path, with its NUL, must fit `sun_path` (108 bytes on Linux, 104 on
+/// macOS). A Windows pipe's name is a fixed-length digest.
+pub fn check_path(path: &Path) -> Result<(), String> {
+    #[cfg(unix)]
+    return fits_sun_path(path, if cfg!(target_os = "macos") { 104 } else { 108 });
+    #[cfg(windows)]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn fits_sun_path(path: &Path, sun_path: usize) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let len = path.as_os_str().as_bytes().len();
+    if len < sun_path {
+        return Ok(());
+    }
+    Err(format!(
+        "the host's socket {} is {len} bytes long, and a Unix socket's path may be \
+         at most {}: pass a shorter --state",
+        path.display(),
+        sun_path - 1
+    ))
+}
+
 /// The listening end, owned by the host.
 pub struct Listener(imp::Listener);
 
@@ -272,6 +301,29 @@ mod tests {
         BufReader::new(read).read_line(&mut answer).await.unwrap();
         assert_eq!(answer, "echo hello\n");
         drop(server.await.unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_path_too_long_for_sun_path_is_refused_with_the_reason() {
+        let fits = Path::new("/").join("a".repeat(106));
+        fits_sun_path(&fits, 108).unwrap();
+        let long = Path::new("/").join("a".repeat(107));
+        let err = fits_sun_path(&long, 108).unwrap_err();
+        assert!(
+            err.contains("108 bytes") && err.contains("--state"),
+            "{err}"
+        );
+        assert!(fits_sun_path(&fits, 104).is_err());
+        check_path(Path::new("/var/lib/storm-runtime/run/mcp.sock")).unwrap();
+        assert!(check_path(&long).is_err());
+
+        // The real limit: the kernel refuses what the check refuses.
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("d".repeat(120)).join("mcp.sock");
+        assert!(check_path(&deep).is_err());
+        let refused = std::os::unix::net::UnixListener::bind(&deep).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::InvalidInput, "{refused}");
     }
 
     /// AM55: the pipe is the first instance, so nothing else can create it

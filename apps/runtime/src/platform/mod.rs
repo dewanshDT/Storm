@@ -55,6 +55,7 @@ pub use windows_service::{enable_and_start, service_main};
 
 pub mod ipc;
 pub mod launchd;
+pub mod paths;
 pub mod peer;
 pub mod wincmd;
 pub mod winsvc;
@@ -75,6 +76,29 @@ pub const DEFAULT_CONFIG: &str = os::DEFAULT_CONFIG;
 
 /// The dedicated account the packaged service runs as (77e, AM34, AM49).
 pub const SERVICE_ACCOUNT: &str = os::SERVICE_ACCOUNT;
+
+/// Whether this process acts for the packaged service (decision 151 N2):
+/// it runs as [`SERVICE_ACCOUNT`], or as an administrator (root, or elevated
+/// on Windows). Such a process defaults to the service's paths and keeps the
+/// service's workspace-root rules; anyone else is a person running a host as
+/// themselves.
+pub fn is_service_context() -> bool {
+    #[cfg(unix)]
+    let admin = rustix::process::geteuid().is_root();
+    #[cfg(windows)]
+    let admin = windows::is_elevated();
+    paths::is_service(paths::OS, current_account().as_deref(), admin)
+}
+
+/// The state directory and `runtime.toml` `enroll`, `check` and `serve` use
+/// when given none: the service's for [`is_service_context`], else the
+/// person's own (Linux: XDG state and config; macOS: Application Support;
+/// Windows: `%LOCALAPPDATA%`).
+pub fn host_paths() -> Result<paths::HostPaths, String> {
+    paths::resolve(paths::OS, is_service_context(), |name| {
+        std::env::var_os(name)
+    })
+}
 
 /// Whether `state` is the packaged service's state directory, which only
 /// its account (and, on Windows, administrators) can read.
@@ -133,8 +157,8 @@ pub fn user_state_dir() -> Option<std::path::PathBuf> {
     os::user_state_dir()
 }
 
-/// Locations no workspace root may be in or contain, whatever
-/// `runtime.toml` says (AM39). macOS: every person's home (and with it
+/// Locations no workspace root of the service ([`is_service_context`]) may
+/// be in or contain, whatever `runtime.toml` says (AM39). macOS: every person's home (and with it
 /// `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive), removable and
 /// network volumes, autofs mounts, and the data volume's own spelling of
 /// all of these. A LaunchDaemon cannot answer the privacy prompts guarding
@@ -143,8 +167,8 @@ pub fn user_state_dir() -> Option<std::path::PathBuf> {
 /// machine, so [`refused_root`] decides.
 pub const PROTECTED_ROOTS: &[&str] = os::PROTECTED_ROOTS;
 
-/// Why `root` (canonical) may not be a workspace root on this machine, beyond
-/// [`PROTECTED_ROOTS`], or `None`. Windows: profiles, network shares and
+/// Why `root` (canonical) may not be a workspace root of the service on this
+/// machine, beyond [`PROTECTED_ROOTS`], or `None`. Windows: profiles, network shares and
 /// removable drives (AM54). Elsewhere: always `None`.
 pub fn refused_root(root: &std::path::Path) -> Option<String> {
     shared::refused_root(root)
