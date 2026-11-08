@@ -921,7 +921,8 @@ Specification*; the slices are decisions 81 and 81a onward):
   as `checksum_verified: false`). A version from the network is checked
   before it names a folder. **Storm updates and removes only what it
   installed**, under `<state>/agents/managed`, whose `bin/` is first on the
-  host's search path; activation swaps `bin/<command>` atomically, so a
+  service's search path (last on a host a person runs, after their login
+  shell's `PATH`, so their own CLI wins: 151 N7); activation swaps `bin/<command>` atomically, so a
   running session keeps its binary. `remove` with a live session of the
   agent is `in_use`. **No agent, MCP key or MCP tool can trigger an
   install**: the app's routes are session tier, owner only, and a job is

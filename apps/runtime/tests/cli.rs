@@ -94,7 +94,7 @@ fn workspace() -> PathBuf {
     std::env::temp_dir()
 }
 
-fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
+fn start(provider: &dyn Provider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
     // Unique per test: a session's ending ends every process carrying its
     // id, and the tests run side by side.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -320,6 +320,52 @@ fn a_session_runs_with_the_path_its_cli_was_found_on() {
         "{}",
         rec.output()
     );
+}
+
+#[test]
+fn a_variable_imported_from_the_login_shell_reaches_the_session() {
+    // 151 N7: a host run as a person reads its login shell once, and a
+    // variable `import_env` names reaches every session; others do not.
+    use std::os::unix::fs::PermissionsExt;
+    use storm_runtime::config::{ProviderConfig, RuntimeConfig};
+    let dir = tempfile::tempdir().unwrap();
+    let shell = dir.path().join("login-shell");
+    std::fs::write(
+        &shell,
+        "#!/bin/sh\nexport PATH=/usr/bin:/bin STORM_TEST_IMPORTED=from-login STORM_TEST_OTHER=no\n\
+         shift\nexec /bin/sh \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let import_env = vec!["STORM_TEST_IMPORTED".to_string()];
+    let login =
+        storm_runtime::login_env::capture(&shell, &import_env, storm_runtime::login_env::TIMEOUT)
+            .unwrap();
+    let config = RuntimeConfig {
+        providers: Some(vec![ProviderConfig {
+            id: "custom".into(),
+            kind: "cli".into(),
+            command: Some("/bin/sh".into()),
+            args: vec![
+                "-c".into(),
+                "echo \"got=$STORM_TEST_IMPORTED other=$STORM_TEST_OTHER path=$PATH\"".into(),
+            ],
+            env_file: None,
+            settings: None,
+        }]),
+        import_env,
+        person: Some(login),
+        ..RuntimeConfig::default()
+    };
+    let providers = config.providers_with(dir.path()).unwrap();
+    let (_session, rec) = start(providers[0].as_ref());
+    rec.wait_end();
+    let out = rec.output();
+    let want = format!(
+        "got=from-login other= path=/usr/bin:/bin:{}",
+        dir.path().display()
+    );
+    assert!(out.contains(&want), "{out}");
 }
 
 fn pid_after(out: &str, tag: &str) -> i32 {
