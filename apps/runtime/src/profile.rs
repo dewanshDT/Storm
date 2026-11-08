@@ -55,6 +55,10 @@ pub struct Profile {
     /// Always passed. Never a flag that skips the agent's own permission
     /// prompts (Q6).
     pub args: &'static [&'static str],
+    /// Passed after `args` only on the service account
+    /// ([`crate::platform::is_service_context`]); a person's own host leaves
+    /// these to the agent's own settings (decision 151 N3).
+    pub service_args: &'static [&'static str],
     pub mcp: Option<Mcp>,
     /// `None` for an agent with no Storm MCP: the prompt names a Storm tool.
     pub prompt: Option<Prompt>,
@@ -75,6 +79,7 @@ pub const BUILT_IN: [Profile; 6] = [
         // Gate Q6 found the operator's own CLI settings starting it in
         // another mode, so the mode is always passed.
         args: &["--permission-mode", "default"],
+        service_args: &[],
         mcp: Some(Mcp::ClaudeCode),
         prompt: Some(Prompt::Positional),
         resume: Some(IdShape::Uuid),
@@ -84,6 +89,7 @@ pub const BUILT_IN: [Profile; 6] = [
         id: "opencode",
         command: "opencode",
         args: &[],
+        service_args: &[],
         mcp: Some(Mcp::OpenCode),
         prompt: Some(Prompt::Flag("--prompt")),
         resume: Some(IdShape::OpenCode),
@@ -93,14 +99,14 @@ pub const BUILT_IN: [Profile; 6] = [
         id: "codex",
         command: "codex",
         // A session owns its process: 0.163 otherwise attaches to a shared
-        // daemon, which holds a conversation's writer lock. No Codex
-        // sandbox: it needs user namespaces, which the Runtime Host's unit
-        // forbids (`RestrictNamespaces=true`), and the host's account is the
-        // boundary for every agent (130c). Approvals stay on, and gateway
-        // tools always ask (`codex.rs`). Storm's hook carries its own trust
-        // record, so no hook runs unreviewed (132c-1).
-        args: &[
-            "--no-daemon",
+        // daemon, which holds a conversation's writer lock. Storm's hook
+        // carries its own trust record, so no hook runs unreviewed (132c-1).
+        args: &["--no-daemon"],
+        // On the service only, no Codex sandbox: it needs user namespaces,
+        // which the Runtime Host's unit forbids (`RestrictNamespaces=true`),
+        // and the host's account is the boundary for every agent (130c).
+        // Approvals stay on, and gateway tools always ask (`codex.rs`).
+        service_args: &[
             "--sandbox",
             "danger-full-access",
             "--ask-for-approval",
@@ -118,6 +124,7 @@ pub const BUILT_IN: [Profile; 6] = [
         // first choice also enables the repository's MCP servers. `--trust`
         // trusts the folder and leaves those servers waiting for approval.
         args: &["--trust"],
+        service_args: &[],
         // No grants until a real-account gate (G-C1) shows Storm's servers
         // reaching a session through `cursor.rs` (130d, 132d).
         mcp: None,
@@ -135,6 +142,7 @@ pub const BUILT_IN: [Profile; 6] = [
             "--permission-mode",
             "standard",
         ],
+        service_args: &[],
         // No grants until a real-account gate (G-CC1) shows Storm's servers
         // reaching a session through `command_code.rs` (130e, 132d).
         mcp: None,
@@ -147,6 +155,7 @@ pub const BUILT_IN: [Profile; 6] = [
         // Replaced by the platform's own shell; see `CliProvider::shell`.
         command: "",
         args: &[],
+        service_args: &[],
         mcp: None,
         prompt: None,
         resume: None,
@@ -534,7 +543,7 @@ mod tests {
     #[test]
     fn no_built_in_skips_permissions() {
         for p in BUILT_IN {
-            for a in p.args {
+            for a in p.args.iter().chain(p.service_args) {
                 for bad in [
                     "dangerously-skip",
                     "--yolo",
