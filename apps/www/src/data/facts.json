@@ -243,7 +243,7 @@
       {
         "name": "uninstall",
         "summary": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept",
-        "help": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n\nUsage: storm-runtime uninstall [OPTIONS]\n\nOptions:\n      --purge  Also remove the host's identity, state, logs, config and account\n      --user   Remove what `install --user` set up, as yourself. Leaves no file outside your home\n  -h, --help   Print help\n"
+        "help": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n\nUsage: storm-runtime uninstall [OPTIONS]\n\nOptions:\n      --purge  Also remove the host's identity, state, logs, config and account\n      --user   Remove what `install --user` set up, as yourself. On Linux and macOS it leaves no file outside your home\n  -h, --help   Print help\n"
       },
       {
         "name": "check",

@@ -166,8 +166,8 @@ enum Command {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
         purge: bool,
-        /// Remove what `install --user` set up, as yourself. Leaves no file
-        /// outside your home.
+        /// Remove what `install --user` set up, as yourself. On Linux and
+        /// macOS it leaves no file outside your home.
         #[arg(long)]
         user: bool,
     },
