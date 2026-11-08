@@ -68,12 +68,14 @@ agent › Enroll a host**, and give the host the one-time string it shows.
 
 A host runs one of two ways ([Runtime Hosts](/docs/agents/hosts/#two-ways-to-run-it)):
 
-- **As yourself**, with no root or administrator: `storm-runtime install
-  --user`, or the installer's `--runtime --user` (`-Runtime -User` on
-  Windows). Its agents run as you, with your own CLIs, logins and folders,
-  and can do whatever you can. Storm does not isolate them from you.
-- **As a service**, under the host's own account. Log the agent CLIs in
-  once on the host, as that account.
+- **As yourself**, with no root or administrator: the installer's
+  `--runtime` (`-Runtime` on Windows) does this by default, or run
+  `storm-runtime install --user`. Its agents run as you, with your own
+  CLIs, logins and folders, and can do whatever you can. Storm does not
+  isolate them from you.
+- **As a service**, under the host's own account: the installer's
+  `--runtime --service` (`-Runtime -Service`). Log the agent CLIs in once
+  on the host, as that account.
 
 **Settings › Hosts** shows which account each host runs as.
 

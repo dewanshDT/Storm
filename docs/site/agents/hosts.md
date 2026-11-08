@@ -16,15 +16,17 @@ your server. The rest of this page is the by-hand route and the details.
 It is the same `storm-runtime` on every platform, and it runs one of two
 ways:
 
-- **As yourself.** `storm-runtime install --user` has your own service
-  manager run it, with no root or administrator. Its agents run as you: they
+- **As yourself.** `storm-runtime install --user`, and the installer's
+  default, has your own service manager run it, with no root or
+  administrator. Its agents run as you: they
   use your CLIs, your logins and your folders, and they can do whatever you
   can do. Storm adds no sandbox of its own; an agent's own permission prompts
   and sandbox apply as you set them up. See
   [Running a host as yourself](#running-a-host-as-yourself).
 - **As a service.** The platform's service manager runs it as a dedicated
   account that exists for nothing else. Its agents run as that account, with
-  its own logins and the workspace root below. See [Linux](#linux),
+  its own logins and the workspace root below. The installer's `--service`
+  (`-Service` on Windows) installs it. See [Linux](#linux),
   [macOS](#macos) and [Windows](#windows).
 
 | | As yourself | As a service |
@@ -129,7 +131,8 @@ an `identity_mismatch` event on the session it named.
 
 **Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
 default agent › Enroll a host**, then paste the one-time string at the host's
-`enroll` prompt.
+`enroll` prompt. For the platform you pick, the sheet lists two sets of
+commands: **As you** first, then **As its own account**.
 
 ## Installing agents from the app
 
@@ -167,9 +170,10 @@ agent_updates = "manual"  # installs from the app, but no automatic updates
 
 ## Linux
 
-The `.deb` below runs the host as its own `storm-runtime` service account.
-To run it as yourself instead, with no root and on any distribution with
-systemd, see [As yourself on Linux](#as-yourself-on-linux).
+The `.deb` below runs the host as its own `storm-runtime` service account;
+`install.sh --runtime --service` installs it this way. To run it as
+yourself instead, with no root and on any distribution with systemd, see
+[As yourself on Linux](#as-yourself-on-linux).
 
 ```sh
 sudo apt install storm-runtime
@@ -364,8 +368,9 @@ Or run it **as yourself, as a LaunchAgent**: see
 [As yourself on a Mac](#as-yourself-on-a-mac). That one needs no `sudo`, uses
 your own CLIs, logins and folders, and stops when you log out.
 
-**Install.** With Homebrew (this repository is the tap; it builds from the
-release tag, so it needs Rust and takes a couple of minutes):
+**Install.** The installer's `--runtime --service` installs and enrolls
+it this way. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
+needs Rust and takes a couple of minutes):
 
 ```sh
 brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
@@ -576,10 +581,12 @@ Or run it **as yourself, from a logon task**: see
 administrator, uses your own CLIs, logins and folders, and stops when you sign
 out.
 
-**Install.** In PowerShell **as administrator**, either the installer:
+**Install.** In PowerShell **as administrator**, either the installer
+(elevated, `-Runtime` installs the service; `-Runtime -Service` says so
+outright):
 
 ```powershell
-irm https://dewanshdt.github.io/Storm/install.ps1 | iex
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -Service
 ```
 
 or the release zip by hand (it is not code-signed, so SmartScreen may warn):
@@ -731,11 +738,12 @@ systemctl --user start storm-runtime
 ~/.local/bin/storm-runtime check
 ```
 
-Or let the installer do all of it: `--user` with `--runtime`, which is also
-what it does on a distribution with no `.deb`:
+Or let the installer do all of it: `--runtime`, which installs the host as
+you by default (and always, on a distribution with no `.deb`);
+`--service` installs the `.deb` service instead:
 
 ```sh
-curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime --user
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime
 ```
 
 `install --user`:
@@ -845,10 +853,13 @@ an elevated shell is the service's.
 Get-ScheduledTask 'Storm Runtime Host' | Get-ScheduledTaskInfo      # LastTaskResult 267009 = running
 ```
 
-Or with the installer, in a PowerShell that is not elevated:
+Or with the installer, in a PowerShell that is not elevated, where
+`-Runtime` installs the logon task as you (`-Service`, `-Server` or an
+elevated shell installs the `StormRuntime` service instead; without `-Yes`
+it asks, with as you first):
 
 ```powershell
-& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -User
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime
 ```
 
 It:
@@ -902,7 +913,8 @@ old one. Both can run on one machine while you switch.
 
 1. **Install and enroll the new host as yourself**, with the steps for your
    platform: [Linux](#as-yourself-on-linux), [Mac](#as-yourself-on-a-mac) or
-   [Windows](#as-yourself-on-windows). It appears in **Settings › Hosts** as
+   [Windows](#as-yourself-on-windows). The installer keeps a host installed
+   as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Hosts** as
    a second host, *"Runs as"* your account. Both take the machine's name
    unless you pass `enroll --name`, so rename one there to tell them apart.
 2. **Give it your workspaces.** On a Mac or a Windows PC, add your folders to

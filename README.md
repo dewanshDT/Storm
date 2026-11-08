@@ -80,7 +80,9 @@ It shows its plan (every `sudo` step included) before changing anything, and
 re-running it is how you upgrade, check status, pair a device, enroll a
 runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
-`--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
+`--dry-run`; `sh install.sh --help` lists the rest. `--runtime` installs
+the Runtime Host as you (below); add `--service` for its own account
+instead. A host already installed as the service stays one. **MCP only** (`--mcp`)
 puts just `storm-runtime` on a laptop's PATH for an AI app's `mcp-connect`
 (below).
 
@@ -151,12 +153,13 @@ are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 own box, or another. The server needs no inbound route to it. It runs one of
 two ways, on Linux, macOS and Windows:
 
-- **As a service**, under its own account, which is never in the server's
-  group, so it can read no vault. Its agents run as that account.
-- **As yourself** (`storm-runtime install --user`), with no root: a
-  `systemd --user` unit on Linux, a LaunchAgent on a Mac, a logon task on
-  Windows. Its agents run as you, with your CLIs, logins and folders, and
-  can do whatever you can.
+- **As yourself** (`storm-runtime install --user`, and the installer's
+  default), with no root: a `systemd --user` unit on Linux, a LaunchAgent on
+  a Mac, a logon task on Windows. Its agents run as you, with your CLIs,
+  logins and folders, and can do whatever you can.
+- **As a service** (the installer's `--service`, `-Service` on Windows),
+  under its own account, which is never in the server's group, so it can
+  read no vault. Its agents run as that account.
 
 Storm coordinates agents; it does not isolate a session from the account it
 runs as. What an agent asks before acting is its own harness's setting.
@@ -175,7 +178,7 @@ sudo -u storm-runtime storm-runtime check        # proves the whole path
 
 Or as yourself, on any Linux with systemd, from the
 `storm-runtime-<version>-x86_64-linux.tar.gz` release tarball (or the
-installer's `--runtime --user`); linger starts it at boot without a login:
+installer's `--runtime`); linger starts it at boot without a login:
 
 ```sh
 ./storm-runtime install --user                   # prints the linger command if it needs an administrator
