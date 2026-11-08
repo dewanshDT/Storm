@@ -8,7 +8,7 @@ use std::time::Duration;
 pub const NAME: &str = "macos";
 pub const DEFAULT_STATE: &str = super::launchd::STATE;
 pub const DEFAULT_CONFIG: &str = super::launchd::CONFIG;
-pub const SERVICE_ACCOUNT: &str = "_stormruntime";
+pub const SERVICE_ACCOUNT: &str = super::paths::MACOS_ACCOUNT;
 /// `cd /`: the hidden account cannot read the caller's current directory.
 pub const SERVICE_COMMAND: &str =
     "cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime";

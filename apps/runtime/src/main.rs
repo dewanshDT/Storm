@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-/// The host's state: its key, `host.json` and its session table. Linux: the
-/// systemd unit's `StateDirectory` (freeze §5.8). macOS: AM33. Windows: AM48.
+/// The packaged service's state, where the isolated install job runs.
 const DEFAULT_STATE: &str = storm_runtime::platform::DEFAULT_STATE;
 
 #[derive(Parser)]
@@ -25,8 +24,13 @@ enum Command {
     /// for it without echo. **Never pass it as an argument**: it carries a
     /// single-use secret, and arguments are visible to every user in `ps`.
     Enroll {
-        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
-        state: PathBuf,
+        /// The host's state: its key, `host.json` and its session table.
+        /// Defaults to the service's for its account or an administrator, and
+        /// otherwise to your own: `~/.local/state/storm-runtime` on Linux,
+        /// `~/Library/Application Support/StormRuntime/state` on macOS,
+        /// `%LOCALAPPDATA%\StormRuntime\state` on Windows.
+        #[arg(long, env = "STORM_RUNTIME_STATE")]
+        state: Option<PathBuf>,
         /// How this host appears in the app. Defaults to the hostname.
         #[arg(long)]
         name: Option<String>,
@@ -36,10 +40,18 @@ enum Command {
     },
     /// Run the host: connect to the server and run the agents it asks for.
     Serve {
-        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
-        state: PathBuf,
-        #[arg(long, env = "STORM_RUNTIME_CONFIG", default_value = storm_runtime::config::DEFAULT_CONFIG)]
-        config: PathBuf,
+        /// The host's state: its key, `host.json` and its session table.
+        /// Defaults to the service's for its account or an administrator, and
+        /// otherwise to your own: `~/.local/state/storm-runtime` on Linux,
+        /// `~/Library/Application Support/StormRuntime/state` on macOS,
+        /// `%LOCALAPPDATA%\StormRuntime\state` on Windows.
+        #[arg(long, env = "STORM_RUNTIME_STATE")]
+        state: Option<PathBuf>,
+        /// The host's `runtime.toml`, chosen the way `--state` is; your own is
+        /// `~/.config/storm-runtime/runtime.toml` on Linux, and beside the
+        /// state directory elsewhere.
+        #[arg(long, env = "STORM_RUNTIME_CONFIG")]
+        config: Option<PathBuf>,
         /// Declare that this account runs nothing but this host (AM37): at
         /// startup and after shutdown, end every other process of it. Passed
         /// by the packaged service definitions; refused unless running as the
@@ -140,8 +152,13 @@ enum Command {
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
     Check {
-        #[arg(long, env = "STORM_RUNTIME_STATE", default_value = DEFAULT_STATE)]
-        state: PathBuf,
+        /// The host's state: its key, `host.json` and its session table.
+        /// Defaults to the service's for its account or an administrator, and
+        /// otherwise to your own: `~/.local/state/storm-runtime` on Linux,
+        /// `~/Library/Application Support/StormRuntime/state` on macOS,
+        /// `%LOCALAPPDATA%\StormRuntime\state` on Windows.
+        #[arg(long, env = "STORM_RUNTIME_STATE")]
+        state: Option<PathBuf>,
     },
     /// The Windows service's entry point (AM50). Run by the Service Control
     /// Manager, never by hand.
@@ -236,6 +253,7 @@ async fn main() -> Result<()> {
             std::process::exit(storm_runtime::isolation_probe::main(&args))
         }
         Command::Enroll { state, name, force } => {
+            let state = state_or_default(state)?;
             #[cfg(unix)]
             storm_runtime::platform::check_enroll(&state).map_err(anyhow::Error::msg)?;
             let enrollment = read_enrollment()?;
@@ -273,6 +291,17 @@ async fn main() -> Result<()> {
             // Before anything else can fail: SIGTERM must never take the
             // default action and leave sessions behind (AM37).
             let stop = stop_signal()?;
+            let (state, config) = match (state, config) {
+                (Some(state), Some(config)) => (state, config),
+                (state, config) => {
+                    let defaults =
+                        storm_runtime::platform::host_paths().map_err(anyhow::Error::msg)?;
+                    (
+                        state.unwrap_or(defaults.state),
+                        config.unwrap_or(defaults.config),
+                    )
+                }
+            };
             match storm_runtime::serve::run(&state, &config, exclusive_account, stop).await? {
                 storm_runtime::serve::Outcome::Stopped => Ok(()),
                 // A refused key is final: exit with a status the unit is told
@@ -289,6 +318,7 @@ async fn main() -> Result<()> {
             storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
         }
         Command::Check { state } => {
+            let state = state_or_default(state)?;
             let config = storm_runtime::identity::HostConfig::load(&state)?;
             let key = storm_runtime::identity::HostKey::load(&state, &config.key_id)?;
             let client = storm_runtime::client::ServerClient::for_host(&config)?;
@@ -356,6 +386,15 @@ fn start_the_service() {
             "Enrolled, but the service did not start: {e:#}\n\
              Start it from an elevated shell: Start-Service StormRuntime"
         ),
+    }
+}
+
+fn state_or_default(state: Option<PathBuf>) -> Result<PathBuf> {
+    match state {
+        Some(state) => Ok(state),
+        None => Ok(storm_runtime::platform::host_paths()
+            .map_err(anyhow::Error::msg)?
+            .state),
     }
 }
 

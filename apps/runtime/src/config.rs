@@ -238,15 +238,31 @@ impl RuntimeConfig {
     /// A workspace root may not be inside, or contain, a Storm data root this
     /// host can see (D3, freeze §8). The permissions of P3 keep
     /// `storm-runtime` out of one anyway; this keeps an operator from pointing
-    /// agents at the vault by mistake. Nor may it be in, or contain, one of
-    /// the platform's protected locations (AM39): on macOS, people's homes
-    /// and mounted volumes, which a LaunchDaemon cannot be granted without
-    /// Full Disk Access.
+    /// agents at the vault by mistake. For the service (decision 151 N2), nor
+    /// may it be in, or contain, one of the platform's protected locations
+    /// (AM39, AM54): on macOS, people's homes and mounted volumes, which a
+    /// LaunchDaemon cannot be granted without Full Disk Access. A person
+    /// running a host as themselves may work in their own home.
     pub fn check_roots(&self) -> Result<()> {
-        self.check_roots_against(crate::platform::PROTECTED_ROOTS)
+        self.check_roots_for(crate::platform::is_service_context())
     }
 
-    fn check_roots_against(&self, protected: &[&str]) -> Result<()> {
+    fn check_roots_for(&self, service: bool) -> Result<()> {
+        if service {
+            self.check_roots_against(
+                crate::platform::PROTECTED_ROOTS,
+                crate::platform::refused_root,
+            )
+        } else {
+            self.check_roots_against(&[], |_| None)
+        }
+    }
+
+    fn check_roots_against(
+        &self,
+        protected: &[&str],
+        refused: impl Fn(&Path) -> Option<String>,
+    ) -> Result<()> {
         for root in &self.workspace_roots {
             let root = canonical(root);
             for forbidden in &self.forbidden_roots {
@@ -272,7 +288,7 @@ impl RuntimeConfig {
                     );
                 }
             }
-            if let Some(place) = crate::platform::refused_root(&root) {
+            if let Some(place) = refused(&root) {
                 bail!(
                     "workspace root {} is in or contains {place} — a Runtime Host never \
                      works in people's profiles, on network shares or on removable \
@@ -790,7 +806,7 @@ mod tests {
                 ..RuntimeConfig::default()
             };
             let err = config
-                .check_roots_against(protected)
+                .check_roots_against(protected, |_| None)
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("AM39"), "{root}: {err}");
@@ -806,7 +822,7 @@ mod tests {
                 ..RuntimeConfig::default()
             };
             config
-                .check_roots_against(protected)
+                .check_roots_against(protected, |_| None)
                 .unwrap_or_else(|e| panic!("{root}: {e}"));
         }
     }
@@ -818,8 +834,44 @@ mod tests {
                 workspace_roots: vec![Path::new(first).join("x")],
                 ..RuntimeConfig::default()
             };
-            assert!(config.check_roots().is_err());
+            assert!(config.check_roots_for(true).is_err());
+            config.check_roots_for(false).unwrap();
         }
+    }
+
+    /// Decision 151 N2: a person's host may work in their home; the
+    /// service's may not where AM39 or AM54 says so. The Storm data root is
+    /// refused to both.
+    #[test]
+    fn a_root_in_a_home_is_refused_only_to_the_service() {
+        let home = if cfg!(windows) {
+            let drive = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+            PathBuf::from(format!(r"{drive}\Users\alice"))
+        } else if cfg!(target_os = "macos") {
+            PathBuf::from("/Users/alice")
+        } else {
+            PathBuf::from("/home/alice")
+        };
+        let config = RuntimeConfig {
+            workspace_roots: vec![home.join("src")],
+            forbidden_roots: vec![],
+            ..RuntimeConfig::default()
+        };
+        config.check_roots_for(false).unwrap();
+        let service = config.check_roots_for(true);
+        if cfg!(target_os = "linux") {
+            // The unit's ProtectHome hides homes; there is no list (77e).
+            service.unwrap();
+        } else {
+            let err = service.unwrap_err().to_string();
+            assert!(err.contains("AM39") || err.contains("AM54"), "{err}");
+        }
+        let config = RuntimeConfig {
+            workspace_roots: vec![home.join("src")],
+            forbidden_roots: vec![home.clone()],
+            ..RuntimeConfig::default()
+        };
+        assert!(config.check_roots_for(false).is_err());
     }
 
     #[cfg(unix)]
@@ -1005,14 +1057,15 @@ mod tests {
             forbidden_roots: vec![],
             ..RuntimeConfig::default()
         };
-        let err = config.check_roots().unwrap_err().to_string();
+        let err = config.check_roots_for(true).unwrap_err().to_string();
         assert!(err.contains("AM54"), "{err}");
+        config.check_roots_for(false).unwrap();
         let own = root_dir();
         let config = RuntimeConfig {
             workspace_roots: vec![own.path().to_path_buf()],
             forbidden_roots: vec![],
             ..RuntimeConfig::default()
         };
-        config.check_roots().unwrap();
+        config.check_roots_for(true).unwrap();
     }
 }

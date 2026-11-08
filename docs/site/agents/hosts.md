@@ -581,6 +581,36 @@ checkout, clone or move it into the workspace root.
 | It exits at start naming AM54 | A `workspace_roots` entry is under `C:\Users`, a share, or a removable drive. |
 | git says "dubious ownership" in your own shell | Run the `safe.directory` line `install` printed, as yourself. |
 
+## Running a host as yourself
+
+`--state` and `--config` are optional for `enroll`, `check` and `serve`. Run
+as the service account (or as root, or elevated on Windows) they mean the
+service's paths in the tables above. Run as anyone else, they mean paths of
+your own, which you own:
+
+| | State | Config |
+|---|---|---|
+| Linux | `$XDG_STATE_HOME/storm-runtime` (`~/.local/state/storm-runtime`) | `$XDG_CONFIG_HOME/storm-runtime/runtime.toml` (`~/.config/storm-runtime/runtime.toml`) |
+| macOS | `~/Library/Application Support/StormRuntime/state` | `~/Library/Application Support/StormRuntime/runtime.toml` |
+| Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
+
+So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
+host as you. `STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
+a flag wins over both.
+
+- **A workspace root may be in your home.** The service's refusals of homes,
+  volumes, profiles and shares (AM39, AM54) apply only to the service. A
+  root that overlaps a Storm data root is refused to every host.
+- **Nothing else of yours is ended.** The account sweep is the service's
+  alone. Instead, when a host starts after a crash, it ends only the
+  processes that carry the tag of a session it was running.
+- **A state directory nested too deep is refused at start.** The host's
+  socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
+  most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
+
+The rule below still holds: never run it as an account that can read the
+vaults.
+
 ## Never share an account with the vaults
 
 **Never run a Runtime Host under the server's account, or under any account
