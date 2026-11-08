@@ -7979,47 +7979,53 @@ pub(crate) mod tests {
     async fn a_hosts_isolation_is_on_its_row_and_its_sessions() {
         let dir = tempdir::TempDir::new("storm-isolation-route").unwrap();
         let mut f = gateway_fixture(dir.path()).await;
-        let seen = |f: &GatewayFixture| {
+        let row = |f: &GatewayFixture| {
             let (app, bearer, host_id) = (f.app.clone(), f.owner_bearer.clone(), f.host_id.clone());
             async move {
                 let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &bearer)).await;
-                let host = hosts
+                hosts
                     .as_array()
                     .unwrap()
                     .iter()
                     .find(|h| h["id"] == host_id)
                     .unwrap()
-                    .clone();
-                host["isolation"].clone()
+                    .clone()
             }
+        };
+        let seen = |f: &GatewayFixture| {
+            let row = row(f);
+            async move { row.await["isolation"].clone() }
         };
         let old_host =
             serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "old_host"});
         assert_eq!(seen(&f).await, old_host);
-        let session = f.launch("claude-code", false).await["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        let _start = f.link.try_recv().unwrap();
-        let view = |f: &GatewayFixture| {
-            let (app, bearer, session) = (f.app.clone(), f.owner_bearer.clone(), session.clone());
+        assert_eq!(row(&f).await["execution"], serde_json::Value::Null);
+        let view = |f: &GatewayFixture, session: &str| {
+            let (app, bearer, session) =
+                (f.app.clone(), f.owner_bearer.clone(), session.to_string());
             async move {
                 send(
                     &app,
                     get_with_auth(&format!("/v1/agent/sessions/{session}"), &bearer),
                 )
                 .await
-                .1["isolation"]
-                    .clone()
+                .1
             }
         };
-        assert_eq!(view(&f).await, old_host);
+        let before = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _start = f.link.try_recv().unwrap();
+        assert_eq!(view(&f, &before).await["isolation"], old_host);
         assert!(!f.state.agent.host_isolated(&f.host_id));
 
         let verified =
             serde_json::json!({"state": "verified", "mechanism": "systemd_units", "reason": null});
+        let execution = serde_json::json!({"account": "storm-runtime", "isolation": "per-session"});
         let mut caps = host_caps(true);
         caps["isolation"] = verified.clone();
+        caps["execution"] = execution.clone();
         let (code, _) = send(
             &f.app,
             post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
@@ -8027,17 +8033,56 @@ pub(crate) mod tests {
         .await;
         assert!(code.is_success());
         assert_eq!(seen(&f).await, verified);
-        assert_eq!(view(&f).await, verified);
+        assert_eq!(row(&f).await["execution"], execution);
+        // 151: a session keeps what its host said when it started.
+        assert_eq!(view(&f, &before).await["isolation"], old_host);
+        assert_eq!(
+            view(&f, &before).await["ran_as"]["account"],
+            serde_json::Value::Null
+        );
         assert!(f.state.agent.host_isolated(&f.host_id));
+        let after = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ran_as = view(&f, &after).await["ran_as"].clone();
+        assert_eq!(ran_as["account"], "storm-runtime");
+        assert_eq!(ran_as["isolation"], verified);
+        assert_eq!(ran_as["identity"]["reason"], "old_host");
+
+        let mut caps = host_caps(true);
+        caps["execution"] = execution.clone();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        assert_eq!(seen(&f).await, old_host);
+        assert_eq!(view(&f, &after).await["isolation"], verified, "unchanged");
+        let mut caps = host_caps(true);
+        caps["isolation"] = verified.clone();
+        caps["execution"] = execution.clone();
+        send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
 
         let generation = f.state.agent.connect_host(&f.host_id).0;
         f.state.agent.disconnect_host(&f.host_id, generation);
         assert_eq!(seen(&f).await, verified, "kept for the row");
-        assert_eq!(view(&f).await, verified);
+        assert_eq!(row(&f).await["execution"], execution, "kept offline");
+        assert_eq!(view(&f, &after).await["isolation"], verified);
         assert!(
             !f.state.agent.host_isolated(&f.host_id),
             "never judged by the stored copy"
         );
+
+        // A session from before 151 has no snapshot: not recorded.
+        f.state.agent.forget_ran_as_for_tests(&before);
+        assert_eq!(view(&f, &before).await["ran_as"], serde_json::Value::Null);
+        assert_eq!(view(&f, &before).await["isolation"], verified, "its host's");
     }
 
     /// C0 where 134 meets 136-5: a host's `hello`, posted to the real route,

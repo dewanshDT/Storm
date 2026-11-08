@@ -42,4 +42,44 @@ void main() {
     expect(s.withRole(null).role, isNull);
     expect(s.withRole(null).crew?.id, 'crw_1');
   });
+
+  test('ran_as parses, survives a copy, and is null when not recorded', () {
+    final s = AgentSession.fromJson({
+      ...spawnSession('ags_r'),
+      'ran_as': {
+        'account': 'storm-runtime',
+        'isolation': {
+          'state': 'verified',
+          'mechanism': 'systemd_units',
+          'reason': null,
+        },
+        'identity': {
+          'state': 'unavailable',
+          'mechanism': null,
+          'reason': 'old_host',
+        },
+      },
+    });
+    for (final r in [s, s.withCrew(null), s.withLive(s)]) {
+      expect(r.ranAs?.account, 'storm-runtime');
+      expect(r.ranAs?.isolationState, 'verified');
+      expect(r.ranAs?.isolationReason, isNull);
+      expect(r.ranAs?.identityState, 'unavailable');
+    }
+    final unnamed = AgentSession.fromJson({
+      ...spawnSession('ags_u'),
+      'ran_as': {
+        'account': null,
+        'isolation': {'state': 'unavailable', 'reason': 'off'},
+        'identity': {'state': 'verified'},
+      },
+    });
+    expect(unnamed.ranAs?.account, isNull);
+    expect(unnamed.ranAs?.isolationReason, 'off');
+    expect(AgentSession.fromJson(spawnSession('ags_o')).ranAs, isNull);
+    expect(
+      AgentSession.fromJson({...spawnSession('ags_n'), 'ran_as': null}).ranAs,
+      isNull,
+    );
+  });
 }

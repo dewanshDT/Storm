@@ -229,6 +229,30 @@ String? isolationLabelFor(String? state, String? reason) {
   return 'Session isolation unavailable ($why) — new sessions are refused';
 }
 
+/// Who a session ran as (decision 151), as its host said at its first
+/// `running`: the host's account and its isolation and identity then.
+class RanAs {
+  const RanAs({
+    this.account,
+    this.isolationState,
+    this.isolationReason,
+    this.identityState,
+  });
+
+  /// Null when the host could not name it.
+  final String? account;
+  final String? isolationState;
+  final String? isolationReason;
+  final String? identityState;
+
+  factory RanAs.fromJson(Map<String, dynamic> j) => RanAs(
+    account: j['account'] as String?,
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
+    identityState: _identityState(j),
+  );
+}
+
 /// A host whose sessions each run as their own user (decision 136j).
 const kIsolationVerified = 'Sessions isolated — each runs as its own user';
 
@@ -525,6 +549,7 @@ class AgentSession {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.ranAs,
     this.spawn = SpawnFacts.none,
     this.crew,
     this.role,
@@ -596,6 +621,10 @@ class AgentSession {
 
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
+
+  /// Who it ran as from its first `running` (decision 151); null for a
+  /// session from before, or one not yet running: not recorded.
+  final RanAs? ranAs;
 
   /// Its lineage, attention, own workspace and spawn switch (decision 134).
   final SpawnFacts spawn;
@@ -759,6 +788,7 @@ class AgentSession {
     identityState: identityState,
     isolationState: isolationState,
     isolationReason: isolationReason,
+    ranAs: ranAs,
     spawn: spawn,
     crew: crew == _keep ? this.crew : crew as SessionCrew?,
     role: role == _keep ? this.role : role as RoleRef?,
@@ -816,6 +846,9 @@ class AgentSession {
     identityState: _identityState(j),
     isolationState: _isolation(j).$1,
     isolationReason: _isolation(j).$2,
+    ranAs: _map(j['ran_as']) == null
+        ? null
+        : RanAs.fromJson(_map(j['ran_as'])!),
     spawn: SpawnFacts.fromJson(j),
     crew: _map(j['crew']) == null
         ? null

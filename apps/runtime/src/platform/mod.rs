@@ -16,8 +16,9 @@ mod posix;
 use posix as shared;
 #[cfg(unix)]
 pub use posix::{
-    account_name, check_enroll, check_exclusive_account, enroll_refusal, exclusive_account_allowed,
-    host_name, session_members, sweep_account, sweep_targets, tagged_processes,
+    account_name, check_enroll, check_exclusive_account, current_account, enroll_refusal,
+    exclusive_account_allowed, host_name, session_members, sweep_account, sweep_targets,
+    tagged_processes,
 };
 #[cfg(unix)]
 pub(crate) use posix::{wait_readable, wait_writable};

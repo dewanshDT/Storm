@@ -1793,6 +1793,9 @@ pub struct HostView {
     /// Its session isolation (decision 136j), online or not, by the same
     /// rule. `None` for a host not heard from since 136-5.
     pub isolation: Option<crate::agent::Isolation>,
+    /// Who its processes run as (decision 151), online or not. `None` for a
+    /// host that has not said.
+    pub execution: Option<crate::agent::Execution>,
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
@@ -1827,12 +1830,17 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
                 None
             }),
     };
+    let execution = state.agent.host_execution(&host.id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, host = host.id, "could not read a host's execution");
+        None
+    });
     HostView {
         host,
         status,
         capabilities: live.capabilities,
         identity,
         isolation,
+        execution,
         egress: "host",
     }
 }
@@ -4348,6 +4356,9 @@ pub struct SessionView {
     /// made it: the mode and the commit a clone starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_workspace: Option<crate::agent::ChildWorkspace>,
+    /// Who it ran as from its first `running` (decision 151); `null` for a
+    /// session from before, which Details calls not recorded.
+    pub ran_as: Option<crate::agent::RanAs>,
     /// Whether it waits for a person (134p): `approval`, `permission_prompt`,
     /// `usage_limit` (144b) or `blocked`. Beside `activity`, never a status,
     /// never from idle.
@@ -4414,10 +4425,16 @@ fn session_view(
         .agent
         .host_label(HostLabel::Identity, &session.host_id)
         .map_err(internal)?;
-    let isolation = state
-        .agent
-        .host_label(HostLabel::Isolation, &session.host_id)
-        .map_err(internal)?;
+    let ran_as = state.agent.ran_as_of(&session.id).map_err(internal)?;
+    // A session that has run keeps the isolation it ran under (151); its
+    // identity stays the host's live word, since a downgrade binds its calls.
+    let isolation = match &ran_as {
+        Some(ran) => Some(ran.isolation.clone()),
+        None => state
+            .agent
+            .host_label(HostLabel::Isolation, &session.host_id)
+            .map_err(internal)?,
+    };
     let child_workspace = state
         .agent
         .child_workspace_of(&session.id)
@@ -4491,6 +4508,7 @@ fn session_view(
         lineage,
         isolation,
         child_workspace,
+        ran_as,
         needs_attention,
         child_activity,
         pending_events,
@@ -4837,6 +4855,7 @@ pub async fn launch_session(
         },
         isolation,
         child_workspace: None,
+        ran_as: None,
         needs_attention: None,
         child_activity: None,
         pending_events: None,

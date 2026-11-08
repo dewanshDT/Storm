@@ -109,6 +109,11 @@ pub fn check_exclusive_account() -> Result<(), String> {
     exclusive_account_allowed(uid, account_name(uid).as_deref())
 }
 
+/// The running process's account: its effective uid's login name.
+pub fn current_account() -> Option<String> {
+    account_name(rustix::process::geteuid().as_raw())
+}
+
 /// Why `enroll` must not run as `uid`, named `name`, against `state`, or
 /// `None`. Root is refused: the key and `host.json` it writes would belong
 /// to root, and the host's own account could not read them.
