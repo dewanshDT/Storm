@@ -245,12 +245,12 @@
       {
         "name": "install",
         "summary": "Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this",
-        "help": "Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this\n\nUsage: storm-runtime install [OPTIONS]\n\nOptions:\n      --operator <OPERATOR>  Who shares the workspace root with the host. Defaults to the user who ran sudo\n  -h, --help                 Print help\n"
+        "help": "Install this host as a system service, as root. macOS: creates the `_stormruntime` account and `/Library/StormRuntime`, and loads the LaunchDaemon, which runs the host once it is enrolled. Windows (in an elevated shell): creates `C:\\ProgramData\\StormRuntime` and the `StormRuntime` service, which enrolling starts. Re-run it to upgrade. On Linux the package does this\n\nUsage: storm-runtime install [OPTIONS]\n\nOptions:\n      --operator <OPERATOR>  Who shares the workspace root with the host. Defaults to the user who ran sudo\n      --user                 Install the host as yourself instead, without sudo. macOS: a LaunchAgent in `~/Library/LaunchAgents`, with your own state, which runs while you are logged in\n  -h, --help                 Print help\n"
       },
       {
         "name": "uninstall",
         "summary": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept",
-        "help": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n\nUsage: storm-runtime uninstall [OPTIONS]\n\nOptions:\n      --purge  Also remove the host's identity, state, logs, config and account\n  -h, --help   Print help\n"
+        "help": "Remove the system service `install` set up, as root (elevated on Windows). Workspaces are always kept\n\nUsage: storm-runtime uninstall [OPTIONS]\n\nOptions:\n      --purge  Also remove the host's identity, state, logs, config and account\n      --user   Remove what `install --user` set up, as yourself\n  -h, --help   Print help\n"
       },
       {
         "name": "check",
