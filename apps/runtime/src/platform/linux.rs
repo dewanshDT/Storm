@@ -287,32 +287,7 @@ mod user {
     }
 
     fn purge_state(layout: &Layout) -> Result<()> {
-        let roots = std::fs::read_to_string(&layout.config)
-            .ok()
-            .and_then(|t| toml::from_str::<crate::config::RuntimeConfig>(&t).ok())
-            .map(|c| c.workspace_roots)
-            .unwrap_or_default();
-        let entries: Vec<PathBuf> = match std::fs::read_dir(&layout.state) {
-            Ok(dir) => dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", layout.state.display())),
-        };
-        for path in plan::purge_targets(layout, &entries, &roots) {
-            let gone = if path.is_dir() && !path.is_symlink() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            gone.with_context(|| format!("removing {}", path.display()))?;
-        }
-        let _ = std::fs::remove_dir(&layout.state);
-        match std::fs::remove_file(&layout.config) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("removing {}", layout.config.display()));
-            }
-        }
+        super::super::purge_user_state(&layout.state, &layout.config, &layout.workspaces)?;
         if let Some(dir) = layout.config.parent() {
             let _ = std::fs::remove_dir(dir);
         }

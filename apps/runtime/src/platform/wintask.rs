@@ -28,6 +28,8 @@ pub struct UserLayout {
     pub bin: String,
     pub config: String,
     pub state: String,
+    /// The workspace root a fresh `runtime.toml` names.
+    pub workspaces: String,
     pub logs: String,
     pub log_file: String,
     /// `storm-server up`'s record: a Storm server runs as this person.
@@ -41,11 +43,18 @@ impl UserLayout {
         let root = format!(r"{local}\StormRuntime");
         let bin_dir = format!(r"{root}\bin");
         let logs = format!(r"{root}\logs");
+        let state = format!(r"{root}\state");
         Self {
             profile: user_profile.trim_end_matches('\\').to_string(),
             bin: format!(r"{bin_dir}\storm-runtime.exe"),
             config: format!(r"{root}\runtime.toml"),
-            state: format!(r"{root}\state"),
+            workspaces: super::paths::user_workspaces(
+                super::paths::Os::Windows,
+                std::path::Path::new(&state),
+            )
+            .to_string_lossy()
+            .into_owned(),
+            state,
             log_file: format!(r"{logs}\storm-runtime.log"),
             server_record: format!(r"{local}\Storm\server.json"),
             root,
@@ -150,9 +159,9 @@ pub fn task_xml(layout: &UserLayout, user: &str, conhost: &str) -> String {
     )
 }
 
-/// The `runtime.toml` `install --user` writes when there is none. It names
-/// no workspace root: which of a person's folders an agent may work in is
-/// theirs to say. TOML literal strings, so backslashes need no escaping.
+/// The `runtime.toml` `install --user` writes when there is none, naming
+/// `workspaces` in the state directory, as on every platform. The examples
+/// are TOML literal strings, so backslashes need no escaping.
 pub fn user_default_config(layout: &UserLayout) -> String {
     format!(
         r#"# {config}: the configuration of the Storm Runtime Host you run as
@@ -161,8 +170,9 @@ pub fn user_default_config(layout: &UserLayout) -> String {
 # After editing it: schtasks /end /tn "{TASK}"; schtasks /run /tn "{TASK}"
 
 # Each subdirectory of a root is a workspace, named by its directory name.
-# There is none until you name one. A root may be in your profile.
-# workspace_roots = ['{profile}\Code']
+# A root may be in your profile.
+workspace_roots = [{workspaces}]
+# workspace_roots = [{workspaces}, '{profile}\Code']
 
 max_sessions = 8
 scrollback_bytes = 4194304
@@ -173,6 +183,7 @@ scrollback_bytes = 4194304
 "#,
         config = layout.config,
         profile = layout.profile,
+        workspaces = toml::Value::String(layout.workspaces.clone()),
     )
 }
 
@@ -261,6 +272,7 @@ pub fn plan_user_install(
     ];
     if !facts.config_exists {
         steps.push(UserStep::Config);
+        steps.push(UserStep::PrivateDir(layout.workspaces.clone()));
     }
     steps.push(UserStep::Register { user });
     steps.push(if facts.enrolled {
@@ -450,13 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn the_default_config_parses_and_names_no_root() {
+    fn the_default_config_parses_and_names_the_workspaces_in_its_state() {
         let l = ada();
+        assert_eq!(
+            l.workspaces,
+            r"C:\Users\Ada Lovelace\AppData\Local\StormRuntime\state\workspaces"
+        );
         let text = user_default_config(&l);
         let config: crate::config::RuntimeConfig = toml::from_str(&text).unwrap();
-        assert!(config.workspace_roots.is_empty());
+        assert_eq!(
+            config.workspace_roots,
+            [std::path::PathBuf::from(&l.workspaces)]
+        );
         assert!(config.path.is_none());
-        assert!(text.contains(r"# workspace_roots = ['C:\Users\Ada Lovelace\Code']"));
+        assert!(text.contains(r"'C:\Users\Ada Lovelace\Code']"));
     }
 
     fn facts() -> UserFacts {
@@ -480,6 +499,7 @@ mod tests {
                 UserStep::EndTask,
                 UserStep::Binary,
                 UserStep::Config,
+                UserStep::PrivateDir(l.workspaces.clone()),
                 UserStep::Register {
                     user: r"PC\Ada".into()
                 },
@@ -501,6 +521,7 @@ mod tests {
         )
         .unwrap();
         assert!(!steps.contains(&UserStep::Config));
+        assert!(!steps.contains(&UserStep::PrivateDir(ada().workspaces)));
         assert!(!steps.contains(&UserStep::Disable));
         assert_eq!(steps.last(), Some(&UserStep::Run));
         let end = steps.iter().position(|s| *s == UserStep::EndTask).unwrap();

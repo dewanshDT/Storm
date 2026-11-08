@@ -665,14 +665,18 @@ paths of your own, which you own:
 | macOS | `~/Library/Application Support/StormRuntime/state` | `~/Library/Application Support/StormRuntime/runtime.toml` |
 | Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
 
-`install --user` writes that `runtime.toml` once, if you have none, and the
-platforms differ in the workspace root it names:
+`install --user` writes that `runtime.toml` once, if you have none. On every
+platform it names one workspace root, `workspaces` in the state directory,
+and creates it:
 
 | | Workspace root in a new `runtime.toml` | Log |
 |---|---|---|
 | Linux | `~/.local/state/storm-runtime/workspaces` | `journalctl --user -u storm-runtime` |
-| macOS | none: you add `workspace_roots` | `~/Library/Logs/StormRuntime/storm-runtime.log` |
-| Windows | none: you add `workspace_roots` | `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log` |
+| macOS | `~/Library/Application Support/StormRuntime/state/workspaces` | `~/Library/Logs/StormRuntime/storm-runtime.log` |
+| Windows | `%LOCALAPPDATA%\StormRuntime\state\workspaces` | `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log` |
+
+Add other roots to `workspace_roots` beside it, then restart the host.
+`uninstall --user --purge` never removes a workspace root.
 
 So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
 host as you. `storm-runtime install --user` has your own service manager do
@@ -791,7 +795,8 @@ launchctl print gui/$(id -u)/dev.storm.runtime                          # state 
 
 It:
 - copies the binary to `~/Library/Application Support/StormRuntime/bin`;
-- writes `runtime.toml` there if there is none, naming no workspace root;
+- writes `runtime.toml` there if there is none, naming
+  `state/workspaces` there as the workspace root, and creates it;
 - writes `~/Library/LaunchAgents/dev.storm.runtime.plist`, which runs
   `serve` with `--state` and `--config` set to your paths, and loads it.
 
@@ -800,11 +805,14 @@ exists: enrolling starts it, a crash restarts it, and a revoked host stays
 stopped. **Logging out stops it**; your next login starts it again. The log
 is `~/Library/Logs/StormRuntime/storm-runtime.log`.
 
-- **Workspaces are the folders you name.** Add a root, then restart the
-  host:
+- **Workspaces are the folders in `state/workspaces`**, and in any other
+  root you add. Add one, then restart the host:
 
   ```toml
-  workspace_roots = ["/Users/you/Code"]
+  workspace_roots = [
+    "/Users/you/Library/Application Support/StormRuntime/state/workspaces",
+    "/Users/you/Code",
+  ]
   ```
 
   ```sh
@@ -864,7 +872,8 @@ it asks, with as you first):
 
 It:
 - copies the binary to `%LOCALAPPDATA%\StormRuntime\bin`;
-- writes `runtime.toml` there if there is none, naming no workspace root;
+- writes `runtime.toml` there if there is none, naming
+  `state\workspaces` there as the workspace root, and creates it;
 - registers the task: at your logon, as you, only while you are logged on
   (`InteractiveToken`), never elevated, never stopped for its age, restarted
   if it fails. It runs `serve` with `--state`, `--config` and `--log-file`
@@ -877,11 +886,15 @@ Job Object goes with it); they show as `failed (host_restart)` when your next
 sign-in starts it again. The log is
 `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log`.
 
-- **Workspaces are the folders you name.** A root may be in your profile.
-  Add one, then restart the host:
+- **Workspaces are the folders in `state\workspaces`**, and in any other
+  root you add. A root may be in your profile. Add one, then restart the
+  host:
 
   ```toml
-  workspace_roots = ['C:\Users\you\Code']
+  workspace_roots = [
+    'C:\Users\you\AppData\Local\StormRuntime\state\workspaces',
+    'C:\Users\you\Code',
+  ]
   ```
 
   ```powershell
@@ -917,9 +930,9 @@ old one. Both can run on one machine while you switch.
    as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Hosts** as
    a second host, *"Runs as"* your account. Both take the machine's name
    unless you pass `enroll --name`, so rename one there to tell them apart.
-2. **Give it your workspaces.** On a Mac or a Windows PC, add your folders to
-   `workspace_roots`; on Linux, a new `runtime.toml` already names
-   `~/.local/state/storm-runtime/workspaces`. The service's workspaces stay
+2. **Give it your workspaces.** A new `runtime.toml` names `workspaces` in
+   its state directory on every platform; add your own folders to
+   `workspace_roots` if you want them too. The service's workspaces stay
    where they are and still belong to its account: clone or copy the
    projects you want into your own root.
 3. **Log your agent CLIs in as yourself**, if they are not already. The

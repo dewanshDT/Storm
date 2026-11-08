@@ -404,7 +404,7 @@ set_paths() {
         RT_BIN="$RT_ROOT/bin/storm-runtime"
         RT_STATE="$RT_ROOT/state"
         RT_CONFIG="$RT_ROOT/runtime.toml"
-        RT_WORKSPACES=""
+        RT_WORKSPACES="$RT_STATE/workspaces"
       fi
       ;;
     *)
@@ -2192,11 +2192,7 @@ runtime_plan() {
     plan_add spin "$(rt_sudo)" "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
   fi
   # Sessions run in a workspace; a fresh host has none.
-  if [ "$RT_USER" = 1 ] && [ "$OS" = macos ]; then
-    if [ "$mode" = install ] || [ -n "$OPT_WORKSPACE" ]; then
-      plan_note "Runtime: it works in the folders you name. Set workspace_roots in $RT_CONFIG, then: launchctl kickstart -k gui/$MY_UID/dev.storm.runtime"
-    fi
-  elif [ -n "$OPT_WORKSPACE" ]; then
+  if [ -n "$OPT_WORKSPACE" ]; then
     plan_add spin "$WS_SUDO" "Add the workspace $(ws_name "$OPT_WORKSPACE"), unless the runtime has one" \
       "$(ws_display "$OPT_WORKSPACE")" runtime_workspace "$OPT_WORKSPACE"
   elif [ "$INTERACTIVE" = 1 ]; then
@@ -2210,10 +2206,11 @@ runtime_plan() {
 
 # ---- the first workspace
 #
-# A workspace is a folder in $RT_WORKSPACES. On macOS the operator has
-# inherited rights there (storm-runtime install --operator), so it is made as
-# them, with their git credentials; on Linux the folder is the runtime
-# account's (0750), so it is made as that account.
+# A workspace is a folder in $RT_WORKSPACES. A host run as you has its own
+# (<state>/workspaces, on every platform), made as you. On macOS the service's
+# operator has inherited rights there (storm-runtime install --operator), so
+# it is made as them, with their git credentials; on Linux the service's
+# folder is the runtime account's (0750), so it is made as that account.
 
 ws_is_url() {
   case "$1" in
@@ -3793,7 +3790,7 @@ summary_screen() {
   if [ "$RT_INSTALLED" = 1 ]; then
     if [ "$RT_USER" = 1 ]; then
       if [ "$OS" = macos ]; then
-        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: the roots in $RT_CONFIG"
+        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: $RT_WORKSPACES"
       else
         ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $RT_WORKSPACES"
         if [ "$(loginctl show-user "$ME" --property=Linger --value 2>/dev/null)" != yes ]; then

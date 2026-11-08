@@ -577,7 +577,11 @@ fn install_user() -> Result<()> {
         println!("launchd starts the host as soon as it is enrolled. To see it:");
         println!("  launchctl print {domain}/{LABEL}");
     }
-    println!("\nName the folders agents may work in: workspace_roots in");
+    println!(
+        "\nWorkspaces are the folders in {}.",
+        layout.workspaces.display()
+    );
+    println!("To add other roots: workspace_roots in");
     println!("  {}", layout.config.display());
     println!("then restart the host: launchctl kickstart -k {domain}/{LABEL}");
     println!("\nThe agents run as you, so the CLIs you use and their logins are the host's:");
@@ -603,15 +607,13 @@ fn uninstall_user(purge: bool) -> Result<()> {
     let _ = std::fs::remove_dir(layout.bin.parent().expect("bin has a parent"));
     println!("Removed the LaunchAgent and the binary.");
     if purge {
-        for d in [&layout.state, &layout.logs] {
-            match std::fs::remove_dir_all(d) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                    return Err(e).with_context(|| format!("removing {}", d.display()));
-                }
-                _ => {}
+        match std::fs::remove_dir_all(&layout.logs) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                return Err(e).with_context(|| format!("removing {}", layout.logs.display()));
             }
+            _ => {}
         }
-        remove(&layout.config)?;
+        super::purge_user_state(&layout.state, &layout.config, &layout.workspaces)?;
         let _ = std::fs::remove_dir(&layout.root);
         println!("Purged the host's identity, state, logs and config.");
     } else {

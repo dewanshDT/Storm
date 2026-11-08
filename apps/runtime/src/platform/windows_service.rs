@@ -512,7 +512,8 @@ fn install_user() -> Result<()> {
         println!("  {bin} enroll");
         println!("Enrolling turns the task on and starts the host; it starts at each logon.");
     }
-    println!("\nName the folders agents may work in: workspace_roots in");
+    println!("\nWorkspaces are the folders in {}.", layout.workspaces);
+    println!("To add other roots: workspace_roots in");
     println!("  {}", layout.config);
     println!("then restart the host: schtasks /end /tn \"{TASK}\"; schtasks /run /tn \"{TASK}\"");
     println!("\nThe agents run as you, so the CLIs you use and their logins are the host's.");
@@ -549,10 +550,13 @@ fn uninstall_user(purge: bool) -> Result<()> {
             .with_context(|| format!("removing {}", layout.bin_dir))?;
     }
     if purge {
-        for dir in [&layout.state, &layout.logs] {
-            retry_while_held(|| held(dir)).with_context(|| format!("removing {dir}"))?;
-        }
-        let _ = std::fs::remove_file(&layout.config);
+        retry_while_held(|| held(&layout.logs))
+            .with_context(|| format!("removing {}", layout.logs))?;
+        super::purge_user_state(
+            Path::new(&layout.state),
+            Path::new(&layout.config),
+            Path::new(&layout.workspaces),
+        )?;
         let _ = std::fs::remove_dir(&layout.root);
         println!("Purged the host's identity, state, logs and config.");
     } else {

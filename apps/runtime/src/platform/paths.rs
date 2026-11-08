@@ -145,9 +145,66 @@ pub fn resolve(
     }
 }
 
+/// The workspace root a fresh per-user `runtime.toml` names on every
+/// platform: `workspaces` in the state directory.
+pub fn user_workspaces(os: Os, state: &std::path::Path) -> PathBuf {
+    match os {
+        Os::Windows => format!(
+            r"{}\workspaces",
+            state.to_string_lossy().trim_end_matches('\\')
+        )
+        .into(),
+        _ => unix_join(state, "workspaces"),
+    }
+}
+
+/// What `uninstall --user --purge` removes from the state directory: every
+/// entry but one that is, or holds, one of `keep` (the workspace roots).
+/// Workspaces are never removed.
+pub fn purge_targets(entries: &[PathBuf], keep: &[PathBuf]) -> Vec<PathBuf> {
+    entries
+        .iter()
+        .filter(|e| !keep.iter().any(|r| r.starts_with(e)))
+        .cloned()
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_platforms_default_workspace_root_is_in_its_state() {
+        let home = env(&[
+            ("HOME", "/home/alice"),
+            ("LOCALAPPDATA", r"C:\Users\alice\AppData\Local"),
+        ]);
+        let ws = |os| user_workspaces(os, &resolve(os, false, &home).unwrap().state);
+        assert_eq!(
+            ws(Os::Linux),
+            PathBuf::from("/home/alice/.local/state/storm-runtime/workspaces")
+        );
+        assert_eq!(
+            ws(Os::Macos),
+            PathBuf::from("/home/alice/Library/Application Support/StormRuntime/state/workspaces")
+        );
+        assert_eq!(
+            ws(Os::Windows),
+            PathBuf::from(r"C:\Users\alice\AppData\Local\StormRuntime\state\workspaces")
+        );
+    }
+
+    #[test]
+    fn a_purge_keeps_every_entry_that_holds_a_workspace_root() {
+        let p = |s: &str| PathBuf::from(format!("/s/{s}"));
+        assert_eq!(
+            purge_targets(
+                &[p("host.json"), p("workspaces"), p("agents"), p("mine")],
+                &[p("workspaces"), p("mine/src"), PathBuf::from("/elsewhere")]
+            ),
+            [p("host.json"), p("agents")]
+        );
+    }
 
     fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |name| {

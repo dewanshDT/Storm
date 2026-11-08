@@ -196,6 +196,8 @@ pub struct UserLayout {
     pub bin: PathBuf,
     pub config: PathBuf,
     pub state: PathBuf,
+    /// The workspace root a fresh `runtime.toml` names.
+    pub workspaces: PathBuf,
     pub logs: PathBuf,
     pub log_file: PathBuf,
     pub agents: PathBuf,
@@ -208,11 +210,13 @@ impl UserLayout {
         let root = home.join("Library/Application Support/StormRuntime");
         let logs = home.join("Library/Logs/StormRuntime");
         let agents = home.join("Library/LaunchAgents");
+        let state = root.join("state");
         Self {
             home: home.to_path_buf(),
             bin: root.join("bin/storm-runtime"),
             config: root.join("runtime.toml"),
-            state: root.join("state"),
+            workspaces: super::paths::user_workspaces(super::paths::Os::Macos, &state),
+            state,
             log_file: logs.join("storm-runtime.log"),
             plist: agents.join(format!("{LABEL}.plist")),
             brew_plist: agents.join(format!("{BREW_LABEL}.plist")),
@@ -290,9 +294,8 @@ pub fn user_plist(layout: &UserLayout) -> String {
     out
 }
 
-/// The `runtime.toml` `install --user` writes when there is none. It names
-/// no workspace root: which of a person's folders an agent may work in is
-/// theirs to say.
+/// The `runtime.toml` `install --user` writes when there is none, naming
+/// `workspaces` in the state directory, as on every platform.
 pub fn user_default_config(layout: &UserLayout) -> String {
     format!(
         r#"# {config}: the configuration of the Storm Runtime Host you run as
@@ -301,9 +304,10 @@ pub fn user_default_config(layout: &UserLayout) -> String {
 # After editing it: launchctl kickstart -k gui/$(id -u)/{label}
 
 # Each subdirectory of a root is a workspace, named by its directory name.
-# There is none until you name one. A root may be in your home; one under
-# ~/Documents, ~/Desktop or ~/Downloads makes macOS ask you first.
-# workspace_roots = ["{home}/Code"]
+# A root may be in your home; one under ~/Documents, ~/Desktop or
+# ~/Downloads makes macOS ask you first.
+workspace_roots = [{workspaces}]
+# workspace_roots = [{workspaces}, "{home}/Code"]
 
 max_sessions = 8
 scrollback_bytes = 4194304
@@ -315,6 +319,7 @@ scrollback_bytes = 4194304
         config = layout.config.display(),
         home = layout.home.display(),
         label = LABEL,
+        workspaces = toml::Value::String(layout.workspaces.display().to_string()),
     )
 }
 
@@ -406,6 +411,7 @@ pub fn plan_user_install(
     ];
     if !facts.config_exists {
         steps.push(UserStep::Config);
+        steps.push(UserStep::Dir(layout.workspaces.clone()));
     }
     steps.push(UserStep::Plist);
     // An SSH-only login has no GUI domain: the agent lives in the
@@ -759,15 +765,17 @@ mod tests {
     }
 
     #[test]
-    fn the_user_config_parses_and_names_no_root() {
-        let text = user_default_config(&alice());
+    fn the_user_config_parses_and_names_the_workspaces_in_its_state() {
+        let l = alice();
+        let text = user_default_config(&l);
         let config: crate::config::RuntimeConfig = toml::from_str(&text).expect("parses");
-        assert!(config.workspace_roots.is_empty());
-        assert!(config.path.is_none());
-        assert!(
-            text.contains("# workspace_roots = [\"/Users/alice/Code\"]"),
-            "{text}"
+        assert_eq!(
+            l.workspaces,
+            Path::new("/Users/alice/Library/Application Support/StormRuntime/state/workspaces")
         );
+        assert_eq!(config.workspace_roots, std::slice::from_ref(&l.workspaces));
+        assert!(config.path.is_none());
+        assert!(text.contains("\"/Users/alice/Code\"]"), "{text}");
     }
 
     fn facts() -> UserFacts {
@@ -793,6 +801,7 @@ mod tests {
                 UserStep::Dir(l.agents.clone()),
                 UserStep::Binary,
                 UserStep::Config,
+                UserStep::Dir(l.workspaces.clone()),
                 UserStep::Plist,
                 UserStep::Load {
                     domain: "gui/501".into()
@@ -808,8 +817,10 @@ mod tests {
             gui_session: false,
             ..facts()
         };
-        let (steps, _) = plan_user_install(&alice(), &f).unwrap();
+        let l = alice();
+        let (steps, _) = plan_user_install(&l, &f).unwrap();
         assert!(!steps.contains(&UserStep::Config));
+        assert!(!steps.contains(&UserStep::Dir(l.workspaces.clone())));
         assert_eq!(
             steps.last(),
             Some(&UserStep::Load {

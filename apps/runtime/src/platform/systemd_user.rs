@@ -51,7 +51,7 @@ pub fn layout(env: impl Fn(&str) -> Option<OsString>) -> Result<Layout, String> 
         bin: unix_join(&home, ".local/bin/storm-runtime"),
         unit: unix_join(&units, UNIT_NAME),
         wants: unix_join(&units, &format!("default.target.wants/{UNIT_NAME}")),
-        workspaces: unix_join(&host.state, "workspaces"),
+        workspaces: paths::user_workspaces(Os::Linux, &host.state),
         state: host.state,
         config: host.config,
     })
@@ -210,21 +210,6 @@ pub fn plan_uninstall(layout: &Layout, existing_unit: Option<&str>) -> Uninstall
         remove_binary: ran_copy,
         disable_linger: existing_unit.is_some_and(linger_ours),
     }
-}
-
-/// What `--purge` removes from the state directory: every entry but one
-/// that is, or holds, a workspace root. Workspaces are never removed.
-pub fn purge_targets(layout: &Layout, entries: &[PathBuf], roots: &[PathBuf]) -> Vec<PathBuf> {
-    entries
-        .iter()
-        .filter(|e| {
-            !roots
-                .iter()
-                .chain(std::iter::once(&layout.workspaces))
-                .any(|r| r.starts_with(e))
-        })
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]
@@ -393,24 +378,6 @@ mod tests {
                 remove_binary: false,
                 disable_linger: false
             }
-        );
-    }
-
-    #[test]
-    fn a_purge_keeps_every_workspace() {
-        let l = alice();
-        let s = |p: &str| l.state.join(p);
-        let entries = [
-            s("host.json"),
-            s("identity"),
-            s("workspaces"),
-            s("agents"),
-            s("mine"),
-        ];
-        let roots = [s("mine/src")];
-        assert_eq!(
-            purge_targets(&l, &entries, &roots),
-            [s("host.json"), s("identity"), s("agents")]
         );
     }
 }

@@ -91,7 +91,7 @@ setup() {
   [ "$RT_BIN" = "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" ]
   [ "$RT_STATE" = "$HOME/Library/Application Support/StormRuntime/state" ]
   [ "$RT_CONFIG" = "$HOME/Library/Application Support/StormRuntime/runtime.toml" ]
-  [ -z "$RT_WORKSPACES" ]
+  [ "$RT_WORKSPACES" = "$HOME/Library/Application Support/StormRuntime/state/workspaces" ]
   [ "$WS_SUDO" = 0 ]
 }
 

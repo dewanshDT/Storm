@@ -18,13 +18,16 @@
     that runs the host while you are logged on, your own state in
     %LOCALAPPDATA%\StormRuntime), then enrollment. No administrator; run it in a
     PowerShell that is not elevated (decisions 151 E3, E5).
+  - Either way, optionally a first workspace (a folder name or a git URL): in
+    %LOCALAPPDATA%\StormRuntime\state\workspaces as you, in
+    %ProgramData%\StormRuntime\workspaces for the service.
   - Runtime with -Service: `storm-runtime install` (the StormRuntime service, as
     administrator), then enrollment: straight from the server on this machine,
     or by pasting the app's enrollment string at a hidden prompt. It never
-    reaches a command line, the screen or a log. Optionally a first workspace (a
-    folder name or a git URL). It is also the service with -Server (the host
-    must not run as the account that holds your notes), from an elevated
-    PowerShell, and where the StormRuntime service is installed already.
+    reaches a command line, the screen or a log. It is also the service with
+    -Server (the host must not run as the account that holds your notes), from
+    an elevated PowerShell, and where the StormRuntime service is installed
+    already.
   - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
     PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
     enrollment, no administrator.
@@ -235,6 +238,7 @@ if ($Server) {
 if ($Runtime -and $User) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install --user (a logon task as $env:USERNAME, no administrator)"
     Say "  enroll   : paste the enrollment string from the app (hidden)"
+    if ($Workspace) { Say "  workspace: $Workspace, in $(Join-Path $runtimeState 'workspaces')" }
 } elseif ($Runtime) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service: $serviceWhy) [administrator]"
     Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
@@ -382,27 +386,27 @@ if ($Runtime) {
         if ($LASTEXITCODE -ne 0) { Fail 'enrollment failed' }
     }
 
+    # A host as you has its own root too, <state>\workspaces (decision 151).
+    $root = Join-Path $env:ProgramData 'StormRuntime\workspaces'
+    if ($User) { $root = Join-Path $runtimeState 'workspaces' }
+    $hasOne = @(Get-ChildItem -Directory $root -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }).Count -gt 0
+    if (-not $Workspace -and -not $hasOne -and -not $Yes) {
+        $Workspace = Read-Host 'A first workspace: a folder name, or a git URL to clone (Enter skips)'
+    }
+    if ($Workspace) {
+        if ($Workspace -match '^(https?://|git@|ssh://)') {
+            $env:GIT_TERMINAL_PROMPT = '0'
+            git -C $root clone $Workspace
+            if ($LASTEXITCODE -ne 0) { Say "warning: could not clone $Workspace (does it need a login?)" }
+        } elseif ($Workspace -match '^[A-Za-z0-9._ -]+$' -and -not $Workspace.StartsWith('.')) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $root $Workspace) | Out-Null
+            Say "Workspace: $(Join-Path $root $Workspace)"
+        } else {
+            Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
+        }
+    }
     if ($User) {
-        if ($Workspace) { Say "warning: -Workspace is for the service's workspace root; skipped" }
-        Say "Name the folders agents may work in (workspace_roots) in $(Join-Path $env:LOCALAPPDATA 'StormRuntime\runtime.toml')."
-    } else {
-        $root = Join-Path $env:ProgramData 'StormRuntime\workspaces'
-        $hasOne = @(Get-ChildItem -Directory $root -ErrorAction SilentlyContinue | Where-Object { -not $_.Name.StartsWith('.') }).Count -gt 0
-        if (-not $Workspace -and -not $hasOne -and -not $Yes) {
-            $Workspace = Read-Host 'A first workspace: a folder name, or a git URL to clone (Enter skips)'
-        }
-        if ($Workspace) {
-            if ($Workspace -match '^(https?://|git@|ssh://)') {
-                $env:GIT_TERMINAL_PROMPT = '0'
-                git -C $root clone $Workspace
-                if ($LASTEXITCODE -ne 0) { Say "warning: could not clone $Workspace (does it need a login?)" }
-            } elseif ($Workspace -match '^[A-Za-z0-9._ -]+$' -and -not $Workspace.StartsWith('.')) {
-                New-Item -ItemType Directory -Force -Path (Join-Path $root $Workspace) | Out-Null
-                Say "Workspace: $(Join-Path $root $Workspace)"
-            } else {
-                Say "warning: $Workspace is neither a folder name nor a git URL; skipped"
-            }
-        }
+        Say "Workspaces are the folders in $root. To add other roots: workspace_roots in $(Join-Path $env:LOCALAPPDATA 'StormRuntime\runtime.toml')."
     }
 }
 

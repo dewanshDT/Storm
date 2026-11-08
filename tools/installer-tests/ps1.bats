@@ -75,3 +75,8 @@ shape() { code | sed -n '/^if (\$Runtime -and -not \$User -and -not \$Service) {
   shape | grep -A1 'elseif (\$admin) {' | grep -q '\$Service = \$true'
   code | grep -q "Fail '-User with -Server would run agents as the account that holds your notes"
 }
+
+@test "install.ps1: -Workspace makes the folder in the host's own root as you too" {
+  code | grep -qF "if (\$User) { \$root = Join-Path \$runtimeState 'workspaces' }"
+  ! code | grep -q "Workspace is for the service"
+}

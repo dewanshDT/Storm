@@ -167,7 +167,7 @@ case "$name" in
       install)
         if [ "${2:-}" = --user ] && macos; then
           place "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime"
-          mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Application Support/StormRuntime/state"
+          mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Application Support/StormRuntime/state/workspaces"
           : >"$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
           echo "Installed the Runtime Host as you (LaunchAgent)."
           exit 0

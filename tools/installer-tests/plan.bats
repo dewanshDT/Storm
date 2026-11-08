@@ -175,7 +175,8 @@ dry() {
   [[ "$output" == *"./storm-runtime install --user"* ]]
   [[ "$output" == *"| $bin enroll"* ]]
   [[ "$output" == *"$bin check"* ]]
-  [[ "$output" == *"Set workspace_roots in $HOME/Library/Application Support/StormRuntime/runtime.toml"* ]]
+  [[ "$output" == *"make a folder in $HOME/Library/Application Support/StormRuntime/state/workspaces"* ]]
+  [[ "$output" != *"Set workspace_roots"* ]]
   [[ "$output" == *"the logins you already have"* ]]
   [[ "$output" != *"LaunchDaemon"* ]]
   [[ "$output" != *"_stormruntime"* ]]
@@ -183,6 +184,14 @@ dry() {
   run assert_sudo_marks_consistent "$output"
   [ "$status" -eq 0 ]
   [ ! -s "$FAKE_LOG" ]
+}
+
+@test "macos runtime --user --workspace: made in the host's own workspaces, as you" {
+  use_macos
+  dry --runtime --enroll-from-stdin --user --workspace app
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"mkdir '$HOME/Library/Application Support/StormRuntime/state/workspaces/app'"* ]]
+  [ -z "$(plan_steps "$output" | grep sudo)" ]
 }
 
 @test "macos runtime --user: a CLI in your home is the host's" {
