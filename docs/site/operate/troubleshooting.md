@@ -20,6 +20,7 @@ relays. On Linux the log is `journalctl -u storm-server -f`.
 | A Runtime Host never comes online | `storm-runtime check` on the host proves the whole path; see the per-platform tables in [Runtime Hosts](/docs/agents/hosts/). |
 | `storm-runtime check` or `enroll` says **permission denied**, or `enroll` refuses root | Run it as the host's own account, with the command the message prints (on Linux `sudo -u storm-runtime storm-runtime check`); see [Runtime Hosts](/docs/agents/hosts/). **Not enrolled** and **revoked** mean what they say: enroll it. |
 | `claude` or `opencode` shows as **not installed** | The CLI must be reachable by the host's own account, not just yours ([Runtime Hosts](/docs/agents/hosts/)). |
+| A host you run as yourself does not find a CLI your terminal finds | It reads your login shell's `PATH` at start; its log says `login shell: nothing imported` with the reason when it could not. Fix your shell profile, or set `path = [...]` in your `runtime.toml` ([Running a host as yourself](/docs/agents/hosts/#running-a-host-as-yourself)). |
 | An integration says **Needs sign-in** | The service stopped accepting Storm's credential; sign in again from a Storm app. |
 | An AI app's MCP calls fail with a `storm_error` | The message names the reason — usually MCP is off in **Settings › AI access**, the key was revoked, or the server is unreachable. |
 | Forgot the password | `storm-server passwd` on the server ([Pair a device](/docs/install/pair/#a-forgotten-password)). |

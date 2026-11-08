@@ -14,6 +14,11 @@ scrollback_bytes = 4194304
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
+# A host you run as yourself (not the service) uses your login shell's PATH
+# when `path` is omitted, and gives every session these variables from it
+# too (decision 151). An older host refuses this key.
+# import_env = ["HOMEBREW_PREFIX"]
+
 # A session gets your integrations beside the MCP servers its agent loads by
 # itself: the ones you added on this host, its plugins', a project's (under
 # the agent's own prompts). "storm-only" gives sessions Storm's servers alone

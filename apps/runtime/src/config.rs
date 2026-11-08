@@ -74,6 +74,14 @@ pub struct RuntimeConfig {
     /// And every child's on this host together (default 20 GiB).
     #[serde(default)]
     pub children_max: Option<u64>,
+    /// Variables a host run as a person (not the service) also reads from
+    /// their login shell and gives every session (decision 151 N7).
+    #[serde(default)]
+    pub import_env: Vec<String>,
+    /// Set at start on a host that is not the service: what its login shell
+    /// had ([`crate::login_env::for_host`]).
+    #[serde(skip)]
+    pub person: Option<crate::login_env::LoginEnv>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -159,6 +167,8 @@ impl Default for RuntimeConfig {
             isolation_host_ports: Vec::new(),
             child_workspace_max: None,
             children_max: None,
+            import_env: Vec::new(),
+            person: None,
         }
     }
 }
@@ -208,7 +218,19 @@ impl RuntimeConfig {
         config.check_roots()?;
         config.check_host_ports()?;
         config.check_child_caps()?;
+        config.check_import_env()?;
         Ok(config)
+    }
+
+    pub fn check_import_env(&self) -> Result<()> {
+        if let Some(bad) = self
+            .import_env
+            .iter()
+            .find(|n| !crate::login_env::importable(n))
+        {
+            bail!("import_env: `{bad}` is not a variable name (PATH is always imported)");
+        }
+        Ok(())
     }
 
     /// The helper's rule (`net::host_ports`), so a list it would refuse
@@ -302,27 +324,38 @@ impl RuntimeConfig {
     }
 
     /// The one `PATH` availability resolves against and sessions run with
-    /// (AM38): `path` when set, else the platform's default. `None` keeps
-    /// the inherited one.
+    /// (AM38): `path` when set, else the login shell's on a host run as a
+    /// person (151 N7), else the platform's default. `None` keeps the
+    /// inherited one.
     pub fn search_path(&self) -> Result<Option<OsString>> {
         match &self.path {
             Some(dirs) => Ok(Some(
                 std::env::join_paths(dirs).context("`path` in runtime.toml")?,
             )),
-            None => Ok(crate::platform::default_path()),
+            None => Ok(self
+                .person
+                .as_ref()
+                .and_then(|p| p.path.clone())
+                .or_else(crate::platform::default_path)),
         }
     }
 
     /// [`Self::search_path`] with `managed` (the folder of the agents Storm
-    /// installed, decision 133-2) first, so a session finds Storm's copy
-    /// before any other.
+    /// installed, decision 133-2): first on the service, so a session finds
+    /// Storm's copy before any other; last on a host run as a person, so
+    /// their own CLI wins and Storm's is the fallback (151 Q-P5).
     pub fn search_path_with(&self, managed: &Path) -> Result<OsString> {
         let rest = match self.search_path()? {
             Some(path) => Some(path),
             None => std::env::var_os("PATH"),
         };
-        let mut dirs = vec![managed.to_path_buf()];
-        dirs.extend(rest.iter().flat_map(std::env::split_paths));
+        let rest = rest.iter().flat_map(std::env::split_paths);
+        let managed = std::iter::once(managed.to_path_buf());
+        let dirs: Vec<PathBuf> = if self.person.is_some() {
+            rest.chain(managed).collect()
+        } else {
+            managed.chain(rest).collect()
+        };
         std::env::join_paths(dirs).context("the host's search path")
     }
 
@@ -362,7 +395,13 @@ impl RuntimeConfig {
         path: Option<OsString>,
         isolation: Option<crate::isolation::Link>,
     ) -> Result<Vec<Arc<dyn Provider>>> {
+        let imported: Vec<(OsString, OsString)> = self
+            .person
+            .as_ref()
+            .map(|p| p.vars.clone())
+            .unwrap_or_default();
         let on_path = |p: CliProvider| {
+            let p = p.with_env(imported.clone());
             let p = match &path {
                 Some(path) => p.with_path(path.clone()),
                 None => p,
@@ -396,7 +435,9 @@ impl RuntimeConfig {
                     };
                     let base = on_path(base);
                     Arc::new(match &entry.env_file {
-                        Some(path) => base.with_env(read_env_file(path)?),
+                        Some(path) => {
+                            base.with_env(imported.iter().cloned().chain(read_env_file(path)?))
+                        }
                         None => base,
                     })
                 }
@@ -1081,6 +1122,46 @@ mod tests {
                 PathBuf::from("/bin")
             ]
         );
+    }
+
+    #[test]
+    fn a_person_s_path_is_config_then_login_shell_then_default_with_storm_s_copy_last() {
+        let login = crate::login_env::LoginEnv {
+            path: Some(std::env::join_paths(["/opt/homebrew/bin", "/usr/bin"]).unwrap()),
+            vars: Vec::new(),
+        };
+        let managed = Path::new("/state/agents/managed/bin");
+        let dirs = |c: &RuntimeConfig| -> Vec<PathBuf> {
+            std::env::split_paths(&c.search_path_with(managed).unwrap()).collect()
+        };
+        let mut c = RuntimeConfig {
+            person: Some(login.clone()),
+            ..RuntimeConfig::default()
+        };
+        assert_eq!(
+            dirs(&c),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/bin"),
+                managed.to_path_buf()
+            ]
+        );
+        c.path = Some(vec![PathBuf::from("/bin")]);
+        assert_eq!(dirs(&c), [PathBuf::from("/bin"), managed.to_path_buf()]);
+        c.path = None;
+        c.person = Some(crate::login_env::LoginEnv::default());
+        assert_eq!(c.search_path().unwrap(), crate::platform::default_path());
+        assert_eq!(dirs(&c).last().map(PathBuf::as_path), Some(managed));
+    }
+
+    #[test]
+    fn import_env_names_only_variables() {
+        let ok: RuntimeConfig = toml::from_str("import_env = [\"HOMEBREW_PREFIX\"]").unwrap();
+        assert!(ok.check_import_env().is_ok());
+        for bad in ["PATH", "A-B", ""] {
+            let c: RuntimeConfig = toml::from_str(&format!("import_env = [{bad:?}]")).unwrap();
+            assert!(c.check_import_env().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

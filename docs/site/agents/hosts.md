@@ -85,9 +85,10 @@ and whether you or Storm installed it, and can **Install**, **Update** and
 macOS host. No sudo and no terminal:
 
 - The host installs into its own folder, `agents/managed` under its state
-  directory, which comes first on its search path. A CLI you installed
-  yourself keeps working, and Storm only ever updates or removes its own
-  copies.
+  directory. On the service it comes first on the search path; on a host
+  you run as yourself it comes last, so a CLI on your own `PATH` wins and
+  Storm's copy is the fallback. A CLI you installed yourself keeps working,
+  and Storm only ever updates or removes its own copies.
 - The host downloads from each vendor's own release channel and checks the
   checksum the vendor publishes; a download that does not match is never
   installed. Cursor publishes no checksum, and its row says so.
@@ -618,6 +619,19 @@ a flag wins over both.
 - **Nothing else of yours is ended.** The account sweep is the service's
   alone. Instead, when a host starts after a crash, it ends only the
   processes that carry the tag of a session it was running.
+- **It finds your CLIs as your terminal does.** Once at start, `serve`
+  runs your login shell (`$SHELL -l -c`, at most 5 seconds) and uses the
+  `PATH` it prints, so a host a LaunchAgent starts finds Homebrew's
+  `claude`. A `path = [...]` in your `runtime.toml` still wins; with no
+  answer (no `SHELL`, a timeout, an error) the platform's default is kept,
+  and the log says which. Under a `systemd --user` unit nothing is read:
+  the environment is already your user manager's. On Windows nothing is
+  read either: Task Scheduler gives the host your own environment.
+- **`import_env = ["NAME", ...]`** in your `runtime.toml` also reads those
+  variables from your login shell and gives them to every session; a
+  provider's env file still wins. An older host refuses a `runtime.toml`
+  with `import_env` (an unknown key stops it at start), so upgrade the host
+  before you add it.
 - **A state directory nested too deep is refused at start.** The host's
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
