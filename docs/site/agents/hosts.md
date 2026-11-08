@@ -113,6 +113,10 @@ agent_updates = "manual"  # installs from the app, but no automatic updates
 
 ## Linux
 
+The `.deb` below runs the host as its own `storm-runtime` service account.
+To run it as yourself instead, with no root and on any distribution with
+systemd, see [On Linux, as yourself](#on-linux-as-yourself).
+
 ```sh
 sudo apt install storm-runtime
 # Workspaces are the directories under /var/lib/storm-runtime/workspaces.
@@ -648,6 +652,61 @@ a flag wins over both.
 - **A state directory nested too deep is refused at start.** The host's
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
+
+### On Linux, as yourself
+
+`storm-runtime install --user` installs the host as a `systemd --user` unit
+that runs as you, with no root, from the `.deb`'s binary or from the
+`storm-runtime-<version>-x86_64-linux.tar.gz` release tarball (for
+distributions without the `.deb`):
+
+```sh
+tar -xzf storm-runtime-<version>-x86_64-linux.tar.gz
+./storm-runtime install --user
+# In the app: Settings › Hosts & default agent › Enroll a host. Paste the string here:
+~/.local/bin/storm-runtime enroll
+systemctl --user start storm-runtime
+~/.local/bin/storm-runtime check
+```
+
+Or let the installer do all of it: `--user` with `--runtime`, which is also
+what it does on a distribution with no `.deb`:
+
+```sh
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime --user
+```
+
+`install --user`:
+
+- copies the binary to `~/.local/bin/storm-runtime` (one a package put in
+  place, owned by root, runs where it is instead), writes
+  `~/.config/systemd/user/storm-runtime.service` and enables it, and writes a
+  `runtime.toml` if you have none, whose workspace root is
+  `~/.local/state/storm-runtime/workspaces`. It starts the host only if it is
+  enrolled already, and restarts a running one, so re-running it with a newer
+  binary upgrades.
+- turns on **linger** (`loginctl enable-linger`), so your user manager, and
+  with it the host, starts at boot without you logging in. Where that needs
+  an administrator (polkit asks for one over ssh, and some distributions have
+  no polkit), it prints the one command for them to run,
+  `sudo loginctl enable-linger <you>`; Storm never runs sudo. Without linger
+  the host runs while you are logged in. `--no-linger` leaves linger alone.
+- writes a unit with **none of the service's sandbox**: no `User=`,
+  `ProtectHome` or `RestrictNamespaces`. The host and its agents run as you,
+  the way your terminal does, so an agent's own sandbox is not blocked by
+  the unit; Storm does not configure one. It keeps
+  `RestartPreventExitStatus=3`, so a revoked host stays stopped. Change it
+  with `systemctl --user edit storm-runtime`: a re-run rewrites the unit
+  itself.
+
+The agent CLIs are yours: log them in as you, once (`claude`, then `/login`;
+`opencode auth login`), and the host finds them on your login shell's `PATH`.
+
+`storm-runtime uninstall --user` stops and disables the unit and removes it,
+the copy in `~/.local/bin`, and linger if install turned it on (or prints
+`sudo loginctl disable-linger <you>` if that needs an administrator). It
+leaves no file outside your home. Your state and config stay unless you add
+`--purge`; workspaces stay either way.
 
 The rule below still holds: never run it as an account that can read the
 vaults.

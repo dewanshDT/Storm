@@ -507,3 +507,79 @@ fn the_host_and_the_helper_drop_the_same_refreshable_logins() {
         storm_runtime::credential_paths::REFRESHABLE_ENV
     );
 }
+
+// ---- a host you run as yourself (decision 151 E1) -----------------------
+
+const USER_UNIT: &str = "deploy/storm-runtime-user.service";
+
+fn user_unit() -> String {
+    use storm_runtime::platform::systemd_user;
+    let layout = systemd_user::layout(|name| match name {
+        "HOME" => Some("/home/alice".into()),
+        _ => None,
+    })
+    .unwrap();
+    systemd_user::render_unit(&layout.bin, &layout, false).unwrap()
+}
+
+#[test]
+fn the_user_unit_is_the_one_the_binary_writes() {
+    assert_eq!(
+        repo_file(USER_UNIT),
+        storm_runtime::platform::systemd_user::TEMPLATE
+    );
+}
+
+/// The user unit runs as whoever's manager starts it, in their home, with
+/// none of the service's sandbox: an agent's own sandbox needs the user
+/// namespaces `RestrictNamespaces` forbids.
+#[test]
+fn the_user_unit_runs_as_you_without_the_services_sandbox() {
+    let unit = user_unit();
+    for key in [
+        "User",
+        "Group",
+        "DynamicUser",
+        "Environment",
+        "StateDirectory",
+        "ProtectHome",
+        "ProtectSystem",
+        "RestrictNamespaces",
+        "NoNewPrivileges",
+        "PrivateTmp",
+        "PrivateDevices",
+        "MemoryDenyWriteExecute",
+    ] {
+        assert_eq!(unit_value(&unit, key), None, "{key}");
+    }
+    assert_eq!(
+        unit_value(&unit, "WantedBy").as_deref(),
+        Some("default.target")
+    );
+    assert_eq!(
+        unit_value(&unit, "RestartPreventExitStatus").as_deref(),
+        Some("3")
+    );
+    let exec = unit_value(&unit, "ExecStart").unwrap();
+    assert!(
+        exec.starts_with("/home/alice/.local/bin/storm-runtime serve --state "),
+        "{exec}"
+    );
+    // AM37's sweep is the service account's alone.
+    assert!(!exec.contains("--exclusive-account"), "{exec}");
+}
+
+#[test]
+fn the_package_ships_the_service_unit_and_not_the_user_unit() {
+    let cargo = repo_file("apps/runtime/Cargo.toml");
+    assert!(!cargo.contains("storm-runtime-user.service"));
+    let unit = repo_file(UNIT);
+    assert_eq!(
+        unit_value(&unit, "WantedBy").as_deref(),
+        Some("multi-user.target")
+    );
+    assert_eq!(
+        unit_value(&unit, "RestrictNamespaces").as_deref(),
+        Some("true")
+    );
+}

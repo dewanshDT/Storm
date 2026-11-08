@@ -161,6 +161,18 @@ sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```
 
+Or as yourself, with no root, on any Linux with systemd: the
+`storm-runtime-<version>-x86_64-linux.tar.gz` release tarball (or the
+installer's `--runtime --user`) installs a `systemd --user` unit that runs as
+you, and linger starts it at boot without a login:
+
+```sh
+./storm-runtime install --user                   # prints the linger command if it needs an administrator
+~/.local/bin/storm-runtime enroll
+systemctl --user start storm-runtime
+~/.local/bin/storm-runtime uninstall --user      # leaves nothing outside your home
+```
+
 Providers are `claude-code` (default), `opencode`, `codex`, `cursor`,
 `command-code` and `shell`; Cursor and Command Code run as terminals, with no
 notes or integrations yet. Workspaces and limits live in

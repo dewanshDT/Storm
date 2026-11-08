@@ -1,5 +1,8 @@
 # /etc/storm-runtime/runtime.toml: the Storm Runtime Host's configuration
 # (freeze §5.7). Every value here is an operational default, not a limit.
+# A host you run as yourself reads ~/.config/storm-runtime/runtime.toml;
+# `storm-runtime install --user` writes one naming
+# ~/.local/state/storm-runtime/workspaces as its root (decision 151).
 
 # Each subdirectory of a root is a workspace, named by its directory name. A
 # root outside /var/lib/storm-runtime also needs a ReadWritePaths drop-in on
