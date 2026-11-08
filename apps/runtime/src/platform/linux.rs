@@ -144,10 +144,45 @@ mod user {
             .with_context(|| format!("writing {}", path.display()))
     }
 
+    /// What this machine says about a Storm server and this account.
+    fn server_facts(user: &str) -> plan::ServerFacts {
+        use std::os::unix::fs::MetadataExt;
+        let uid = rustix::process::getuid().as_raw();
+        let dropin = std::fs::read_to_string(plan::SERVER_DROPIN).ok();
+        let root = plan::server_data_root(dropin.as_deref());
+        let data_ours = [root.clone(), root.join("state")]
+            .iter()
+            .any(|p| std::fs::metadata(p).is_ok_and(|m| m.uid() == uid));
+        let running_ours = super::account_processes(uid).is_ok_and(|pids| {
+            pids.iter().any(|pid| {
+                std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .is_ok_and(|c| c.trim() == "storm-server")
+            })
+        });
+        let mut gids = vec![rustix::process::getgid().as_raw()];
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            gids.extend(
+                status
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("Groups:"))
+                    .flat_map(|g| g.split_whitespace().filter_map(|n| n.parse::<u32>().ok())),
+            );
+        }
+        let in_server_group = std::fs::read_to_string("/etc/group")
+            .is_ok_and(|g| plan::in_group(&g, plan::SERVER_GROUP, user, &gids));
+        plan::ServerFacts {
+            dropin,
+            data_ours,
+            running_ours,
+            in_server_group,
+        }
+    }
+
     pub fn install(want_linger: bool) -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         let user = refuse_the_service()?;
         let layout = layout()?;
+        let notes = plan::server_notes(&user, &server_facts(&user));
         let exe = std::env::current_exe()
             .and_then(std::fs::canonicalize)
             .context("finding this binary")?;
@@ -225,6 +260,9 @@ mod user {
             ),
             (None, true) => println!("Linger is on: it starts at boot, without a login."),
             (None, false) => {}
+        }
+        for note in &notes {
+            println!("\n{note}\n");
         }
         if active || enrolled {
             println!("Running.");

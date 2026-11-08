@@ -772,6 +772,9 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime
   `RestartPreventExitStatus=3`, so a revoked host stays stopped. Change it
   with `systemctl --user edit storm-runtime`: a re-run rewrites the unit
   itself.
+- warns, without refusing, when a Storm server runs as you or you are in the
+  `storm` group: either way your agents could read the vaults on disk (see
+  [Never share an account with the vaults](#never-share-an-account-with-the-vaults)).
 
 The agent CLIs are yours: log them in as you, once (`claude`, then `/login`;
 `opencode auth login`), and the host finds them on your login shell's `PATH`.
@@ -982,4 +985,6 @@ account. On Linux the server's data belongs to `storm` and its group:
 `storm` group. On a Mac or a Windows PC where you run the Storm server as
 yourself, your account can read the vaults, so a host as yourself could
 too: `install --user` warns there, and you should run the service instead.
-On Linux `install --user` makes no such check.
+On Linux `install --user` warns when the server runs as you (its drop-in's
+`User=`, its data root's owner, or a `storm-server` process of yours) and
+when you are in the `storm` group.

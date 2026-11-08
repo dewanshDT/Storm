@@ -212,6 +212,98 @@ pub fn plan_uninstall(layout: &Layout, existing_unit: Option<&str>) -> Uninstall
     }
 }
 
+/// The drop-in `storm-server up` writes: the account the packaged server
+/// runs as (`User=`) and its data root (`ReadWritePaths=`). World-readable,
+/// unlike `/etc/storm/storm.env`.
+pub const SERVER_DROPIN: &str = "/etc/systemd/system/storm-server.service.d/data-root.conf";
+
+/// The packaged server's data root when no drop-in moved it.
+pub const SERVER_DATA: &str = "/srv/storm";
+
+/// The packaged server's account and group.
+pub const SERVER_GROUP: &str = "storm";
+
+/// The last `key=`'s first word in a systemd unit or drop-in.
+fn unit_value<'a>(unit: &'a str, key: &str) -> Option<&'a str> {
+    unit.lines()
+        .rev()
+        .filter_map(|l| l.trim().strip_prefix(key)?.strip_prefix('='))
+        .find_map(|v| v.split_whitespace().next())
+}
+
+/// The server's data root: the drop-in's first `ReadWritePaths`, else
+/// [`SERVER_DATA`].
+pub fn server_data_root(dropin: Option<&str>) -> PathBuf {
+    dropin
+        .and_then(|d| unit_value(d, "ReadWritePaths"))
+        .unwrap_or(SERVER_DATA)
+        .into()
+}
+
+/// Whether `user`, whose groups are `gids`, is in `group` by `/etc/group`'s
+/// text: its gid among theirs, or their name on its line (a membership
+/// added since they logged in).
+pub fn in_group(group_file: &str, group: &str, user: &str, gids: &[u32]) -> bool {
+    group_file.lines().any(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        f.len() >= 4
+            && f[0] == group
+            && (f[2].parse().is_ok_and(|g: u32| gids.contains(&g))
+                || f[3].split(',').any(|m| m.trim() == user))
+    })
+}
+
+/// What `install --user` found of a Storm server on this machine.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ServerFacts {
+    /// [`SERVER_DROPIN`]'s text, if it is there.
+    pub dropin: Option<String>,
+    /// The server's data root, or its `state`, belongs to this account.
+    pub data_ours: bool,
+    /// A `storm-server` process runs as this account.
+    pub running_ours: bool,
+    /// This account is in [`SERVER_GROUP`].
+    pub in_server_group: bool,
+}
+
+/// What `install --user` warns about before it installs (as on macOS and
+/// Windows, a warning, never a refusal): a Storm server whose data this
+/// account can read, so this host's agents could too.
+pub fn server_notes(user: &str, facts: &ServerFacts) -> Vec<String> {
+    let mut why = Vec::new();
+    if facts.dropin.as_deref().and_then(|d| unit_value(d, "User")) == Some(user) {
+        why.push(format!("{SERVER_DROPIN} runs it as {user}"));
+    }
+    if facts.data_ours {
+        why.push(format!(
+            "{} is yours",
+            server_data_root(facts.dropin.as_deref()).display()
+        ));
+    }
+    if facts.running_ours {
+        why.push(format!("a storm-server process runs as {user}"));
+    }
+    let mut notes = Vec::new();
+    if !why.is_empty() {
+        notes.push(format!(
+            "warning: a Storm server runs as you on this machine ({}), so this host's \
+             agents can read its vaults on disk. To keep them out, run the host as its \
+             own account instead: `sudo apt install storm-runtime`.",
+            why.join("; ")
+        ));
+    }
+    if facts.in_server_group {
+        notes.push(format!(
+            "warning: you are in the `{SERVER_GROUP}` group, which can read the packaged \
+             server's files ({}), so this host's agents can too. Leave it \
+             (`sudo gpasswd -d {user} {SERVER_GROUP}`, then log in again), or run the host \
+             as its own account: `sudo apt install storm-runtime`.",
+            server_data_root(facts.dropin.as_deref()).display()
+        ));
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,5 +471,55 @@ mod tests {
                 disable_linger: false
             }
         );
+    }
+
+    #[test]
+    fn a_server_that_runs_as_you_or_shares_its_group_is_warned_about() {
+        assert!(server_notes("alice", &ServerFacts::default()).is_empty());
+        let packaged = ServerFacts {
+            dropin: Some("[Service]\nUser=storm\nGroup=storm\nReadWritePaths=/srv/storm\n".into()),
+            ..ServerFacts::default()
+        };
+        assert!(server_notes("alice", &packaged).is_empty());
+
+        let mine = ServerFacts {
+            dropin: Some(
+                "[Unit]\nRequiresMountsFor=/home/alice/storm\n[Service]\nUser=alice\n\
+                 Group=alice\nReadWritePaths=/home/alice/storm /nas/vaults\n"
+                    .into(),
+            ),
+            data_ours: true,
+            ..ServerFacts::default()
+        };
+        let notes = server_notes("alice", &mine);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        assert!(notes[0].contains("runs it as alice"), "{notes:?}");
+        assert!(notes[0].contains("/home/alice/storm is yours"), "{notes:?}");
+        assert!(notes[0].contains("can read its vaults"), "{notes:?}");
+
+        let by_hand = ServerFacts {
+            running_ours: true,
+            in_server_group: true,
+            ..ServerFacts::default()
+        };
+        let notes = server_notes("alice", &by_hand);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("a storm-server process runs as alice"));
+        assert!(notes[1].contains("`storm` group"), "{notes:?}");
+        assert!(notes[1].contains("(/srv/storm)"), "{notes:?}");
+        assert!(
+            notes[1].contains("sudo gpasswd -d alice storm"),
+            "{notes:?}"
+        );
+    }
+
+    #[test]
+    fn group_membership_is_by_gid_or_by_name() {
+        let group = "root:x:0:\nstorm:x:991:bob, alice\nstormy:x:992:carol\n";
+        assert!(in_group(group, "storm", "carol", &[1000, 991]));
+        assert!(in_group(group, "storm", "alice", &[1000]));
+        assert!(!in_group(group, "storm", "carol", &[1000, 992]));
+        assert!(!in_group("", "storm", "alice", &[991]));
+        assert_eq!(server_data_root(None), Path::new("/srv/storm"));
     }
 }
