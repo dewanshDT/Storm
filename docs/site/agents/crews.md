@@ -74,6 +74,12 @@ goes to the session that started it, which decides what to do next: give
 the agent another task, do the step itself, end it or start another. Its
 **Activity** and its list of children show what was refused.
 
+**Known gap: Codex children.** Claude Code and OpenCode tell Storm when
+their own permission prompt opens. Codex has no hook for that. A Codex
+agent that a session started can stop at its own prompt, and to the session
+that started it, it looks idle; nothing shows **Needs you**. Its terminal
+still shows the prompt, so open it from the crew and answer it there.
+
 Collapsing a crew, or the whole CREWS section, is remembered on each device
 separately. Everything else about a crew is kept on your server, so your
 other devices show a change within about 15 seconds.
