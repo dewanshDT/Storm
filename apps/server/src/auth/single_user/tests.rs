@@ -277,7 +277,7 @@ pub(crate) fn v5_fixture(survivor_hash: &str) -> Fixture {
     for (id, purpose, by, consumed) in pairings {
         conn.execute(
             "INSERT INTO pairing_sessions (id, nonce_hash, purpose, peer_ip, created_by, created, expires, consumed, consumed_by, attempts)
-             VALUES (?1, ?2, ?3, NULL, ?4, ?5, '2026-12-01T00:00:00Z', ?6, NULL, 0)",
+             VALUES (?1, ?2, ?3, NULL, ?4, ?5, '2099-12-01T00:00:00Z', ?6, NULL, 0)",
             params![id, id.as_bytes(), purpose, by, NOW, consumed],
         )
         .unwrap();
@@ -310,7 +310,7 @@ pub(crate) fn v5_fixture(survivor_hash: &str) -> Fixture {
     for (id, user, device, revoked) in sessions {
         conn.execute(
             "INSERT INTO sessions (id, user_id, device_id, access_hash, refresh_hash, previous_refresh_hash, created, expires, refresh_expires, last_used, revoked, revoked_reason)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, '2026-11-08T12:00:00Z', '2027-04-08T12:00:00Z', NULL, ?7, NULL)",
+             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, '2099-01-01T12:00:00Z', '2099-06-01T12:00:00Z', NULL, ?7, NULL)",
             params![id, user, device, crate::auth::token::hash(&access_token(id)), crate::auth::token::hash(&refresh_token(id)), NOW, revoked],
         )
         .unwrap();
@@ -350,7 +350,7 @@ pub(crate) fn v5_fixture(survivor_hash: &str) -> Fixture {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO host_tokens (id, host_id, token_hash, created, expires, revoked) VALUES (?1, ?2, ?3, ?4, '2027-01-01T00:00:00Z', NULL)",
+            "INSERT INTO host_tokens (id, host_id, token_hash, created, expires, revoked) VALUES (?1, ?2, ?3, ?4, '2099-01-01T00:00:00Z', NULL)",
             params![format!("htk_{id}"), id, format!("tok-{id}").as_bytes(), NOW],
         )
         .unwrap();
