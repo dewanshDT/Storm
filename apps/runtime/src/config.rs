@@ -1055,7 +1055,7 @@ mod tests {
     #[test]
     fn a_person_s_path_is_config_then_login_shell_then_default_with_storm_s_copy_last() {
         let login = crate::login_env::LoginEnv {
-            path: Some("/opt/homebrew/bin:/usr/bin".into()),
+            path: Some(std::env::join_paths(["/opt/homebrew/bin", "/usr/bin"]).unwrap()),
             vars: Vec::new(),
         };
         let managed = Path::new("/state/agents/managed/bin");
