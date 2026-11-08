@@ -253,12 +253,16 @@ class SpawnSwitch {
     required this.enabled,
     this.refused,
     this.launchedOn = false,
+    this.childrenWrite = false,
   });
 
   final bool enabled;
 
   /// Launched with the switch on (141e): only such a session turns it on.
   final bool launchedOn;
+
+  /// Its children write to its write vault (151m).
+  final bool childrenWrite;
 
   /// What turning it on would be refused with now (134-2's codes), or null.
   final String? refused;
@@ -267,6 +271,7 @@ class SpawnSwitch {
     enabled: j['enabled'] == true,
     refused: j['refused'] as String?,
     launchedOn: j['launched_on'] == true,
+    childrenWrite: j['children_write'] == true,
   );
 }
 

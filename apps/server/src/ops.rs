@@ -5870,6 +5870,7 @@ async fn switch_to_auto(
         crew: None,
         role: None,
         spawn,
+        children_write: false,
         model: None,
         permission_mode: None,
         switch_mode: Some(crate::agent::permission::AUTO.into()),

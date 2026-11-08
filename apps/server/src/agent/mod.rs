@@ -87,6 +87,8 @@ pub struct SpawnView {
     pub enabled: bool,
     /// Launched with the switch on (141e): only such a session turns it on.
     pub launched_on: bool,
+    /// Its children write to its write vault (151m).
+    pub children_write: bool,
     /// What turning it on would be refused with now (134-2's codes); absent
     /// when it would turn on.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -680,6 +682,11 @@ pub struct Launch {
     /// adapter and C0 holds.
     #[serde(default)]
     pub spawn: bool,
+    /// Its children write to its write vault (151m). Refused
+    /// `children_write_unavailable` without `spawn` and a write vault. A
+    /// resume keeps its predecessor's.
+    #[serde(default)]
+    pub children_write: bool,
     /// The model the agent starts on (145b): checked for its agent, else
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
@@ -1675,6 +1682,7 @@ impl AgentManager {
         Ok(Some(SpawnView {
             enabled,
             launched_on: store.spawn_launched(&r.id)?,
+            children_write: store.children_write(&r.id)?,
             refused,
         }))
     }
@@ -2171,6 +2179,16 @@ impl AgentManager {
         if spawn && !may_spawn {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
+        let write_vault_id = meta.write_vault_id.clone().filter(|_| reads_storm);
+        let children_write = match resume.as_ref() {
+            Some((old, _)) => {
+                self.store.lock().unwrap().children_write(old)? && spawn && write_vault_id.is_some()
+            }
+            None => req.children_write,
+        };
+        if children_write && (!spawn || write_vault_id.is_none()) {
+            return Err(AgentError::Conflict("children_write_unavailable".into()));
+        }
         let model = match resume.as_ref() {
             Some((old, _)) => self
                 .store
@@ -2229,7 +2247,7 @@ impl AgentManager {
                 context: meta.context,
                 // A session that cannot reach Storm has nothing to write with,
                 // and cannot read a role note (138g).
-                write_vault_id: meta.write_vault_id.filter(|_| reads_storm),
+                write_vault_id,
                 role: meta.role.filter(|_| reads_storm),
                 model: model.clone(),
                 permission_mode: permission_mode.clone(),
@@ -2245,6 +2263,7 @@ impl AgentManager {
             if spawn {
                 store.record_spawn_launch(
                     &record.id,
+                    children_write,
                     meta.device.as_deref(),
                     &record.created_at,
                 )?;
@@ -3354,6 +3373,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                children_write: false,
                 model: None,
                 permission_mode: None,
                 switch_mode: None,
@@ -3380,6 +3400,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                children_write: false,
                 model: None,
                 permission_mode: None,
                 switch_mode: None,
@@ -4055,6 +4076,7 @@ mod tests {
                     crew: None,
                     role: None,
                     spawn: false,
+                    children_write: false,
                     model: None,
                     permission_mode: None,
                     switch_mode: None,
@@ -4271,6 +4293,7 @@ mod tests {
                 crew: None,
                 role: None,
                 spawn: false,
+                children_write: false,
                 model: None,
                 permission_mode: None,
                 switch_mode: None,

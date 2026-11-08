@@ -54,6 +54,10 @@ all running**. They can't be moved on their own; where a move would be,
 they say "moves with the agent that started it". Moving the session that
 started them, or making a crew from it, takes them along.
 
+Agents a session started are read only unless you ticked **The agents it
+starts can write to {vault}** when you launched it; then they write to that
+vault and no other. The session's **About** says which.
+
 Agents a session started never ask you anything. They run without
 permission prompts, inside their own copy of the workspace, and whatever
 their permissions don't cover is refused rather than asked. Each refusal
