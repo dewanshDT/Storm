@@ -395,6 +395,14 @@ jobs:
           channel: stable
           flutter-version: 3.44.8
           cache: true
+      # package:sqlite3's build hook downloads its prebuilt library from GitHub
+      # releases on every cold build; a failed download there reads as a hash
+      # mismatch. The hook re-checks the hash of a cached copy before using it.
+      - uses: actions/cache@v4
+        with:
+          path: apps/client/.dart_tool/hooks_runner/shared/sqlite3
+          key: client-sqlite3-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.lock') }}
+          restore-keys: client-sqlite3-${{ runner.os }}-
       - run: flutter pub get
       - run: dart format --set-exit-if-changed lib test test_live
       - run: flutter analyze
@@ -418,6 +426,11 @@ jobs:
           channel: stable
           flutter-version: 3.44.8
           cache: true
+      - uses: actions/cache@v4
+        with:
+          path: apps/client/.dart_tool/hooks_runner/shared/sqlite3
+          key: client-sqlite3-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.lock') }}
+          restore-keys: client-sqlite3-${{ runner.os }}-
       - run: flutter pub get
       - run: flutter build windows --release
 
@@ -440,6 +453,11 @@ jobs:
           channel: stable
           flutter-version: 3.44.8
           cache: true
+      - uses: actions/cache@v4
+        with:
+          path: apps/client/.dart_tool/hooks_runner/shared/sqlite3
+          key: client-sqlite3-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.lock') }}
+          restore-keys: client-sqlite3-${{ runner.os }}-
       - run: flutter pub get
       - run: flutter build linux --release
       - run: STORM_MAX_GLIBC=2.35 tool/package_linux.sh 0.0.0 dist
@@ -460,6 +478,11 @@ jobs:
           channel: stable
           flutter-version: 3.44.8
           cache: true
+      - uses: actions/cache@v4
+        with:
+          path: apps/client/.dart_tool/hooks_runner/shared/sqlite3
+          key: client-sqlite3-${{ runner.os }}-${{ hashFiles('apps/client/pubspec.lock') }}
+          restore-keys: client-sqlite3-${{ runner.os }}-
       - run: flutter pub get
         working-directory: apps/client
       # `make test-live` starts the server, runs both integration suites and
