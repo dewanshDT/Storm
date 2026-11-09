@@ -470,18 +470,17 @@ String enrollFootnote(HostPlatform platform, EnrollShape shape) => switch ((
         'folders in /var/lib/storm-runtime/workspaces.',
   (HostPlatform.macos, EnrollShape.you) =>
     'launchd starts it once it is enrolled (the LaunchAgent '
-        'dev.storm.runtime), as you, while you are logged in. Name the '
-        'folders agents may work in (workspace_roots) in '
-        '~/Library/Application Support/StormRuntime/runtime.toml.',
+        'dev.storm.runtime), as you, while you are logged in. Workspaces '
+        'are the folders in '
+        '~/Library/Application Support/StormRuntime/state/workspaces.',
   (HostPlatform.macos, EnrollShape.service) =>
     'launchd starts it by itself once it is enrolled (the LaunchDaemon '
         'dev.storm.runtime), as the dedicated _stormruntime account. '
         'Workspaces are the folders in /Library/StormRuntime/workspaces.',
   (HostPlatform.windows, EnrollShape.you) =>
     'Run them in PowerShell, not as administrator. Enrolling starts a '
-        'logon task that runs it as you while you are logged on. Name the '
-        'folders agents may work in (workspace_roots) in '
-        '%LOCALAPPDATA%\\StormRuntime\\runtime.toml.',
+        'logon task that runs it as you while you are logged on. Workspaces '
+        'are the folders in %LOCALAPPDATA%\\StormRuntime\\state\\workspaces.',
   (HostPlatform.windows, EnrollShape.service) =>
     'Run them in PowerShell as administrator. Enrolling starts the '
         'StormRuntime service, as the virtual account NT SERVICE\\StormRuntime. '

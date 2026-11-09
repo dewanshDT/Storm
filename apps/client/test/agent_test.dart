@@ -928,6 +928,16 @@ void main() {
         enrollFootnote(HostPlatform.macos, EnrollShape.you),
         contains('LaunchAgent'),
       );
+      for (final (platform, root) in [
+        (HostPlatform.linux, '~/.local/state/storm-runtime/workspaces'),
+        (
+          HostPlatform.macos,
+          '~/Library/Application Support/StormRuntime/state/workspaces',
+        ),
+        (HostPlatform.windows, r'%LOCALAPPDATA%\StormRuntime\state\workspaces'),
+      ]) {
+        expect(enrollFootnote(platform, EnrollShape.you), contains(root));
+      }
     });
 
     test('each platform\'s steps are its own, with one enroll step', () {

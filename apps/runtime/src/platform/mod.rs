@@ -326,6 +326,43 @@ pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
     os::uninstall(options)
 }
 
+/// `uninstall --user --purge` on every platform: removes `state` but for
+/// [`paths::purge_targets`]' keepers (`workspaces` and the roots `config`
+/// names), then `config`.
+pub fn purge_user_state(
+    state: &std::path::Path,
+    config: &std::path::Path,
+    workspaces: &std::path::Path,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut keep = std::fs::read_to_string(config)
+        .ok()
+        .and_then(|t| toml::from_str::<crate::config::RuntimeConfig>(&t).ok())
+        .map(|c| c.workspace_roots)
+        .unwrap_or_default();
+    keep.push(workspaces.to_path_buf());
+    let entries: Vec<std::path::PathBuf> = match std::fs::read_dir(state) {
+        Ok(dir) => dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", state.display())),
+    };
+    for path in paths::purge_targets(&entries, &keep) {
+        let gone = if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        gone.with_context(|| format!("removing {}", path.display()))?;
+    }
+    let _ = std::fs::remove_dir(state);
+    match std::fs::remove_file(config) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", config.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// Opens `path` to append the host's log to, keeping one previous file past
 /// 10 MiB.
 pub fn open_log(path: &std::path::Path) -> io::Result<std::fs::File> {
@@ -385,6 +422,36 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "export PATH=/mine\n"
         );
+    }
+
+    #[test]
+    fn a_user_purge_keeps_the_workspaces_and_every_named_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let config = dir.path().join("runtime.toml");
+        let workspaces = state.join("workspaces");
+        for d in ["workspaces/app", "agents/codex", "mine/src", "identity"] {
+            std::fs::create_dir_all(state.join(d)).unwrap();
+        }
+        std::fs::write(state.join("host.json"), "{}").unwrap();
+        let mine = state.join("mine/src");
+        std::fs::write(
+            &config,
+            format!(
+                "workspace_roots = [{}]\n",
+                toml::Value::String(mine.display().to_string())
+            ),
+        )
+        .unwrap();
+        purge_user_state(&state, &config, &workspaces).unwrap();
+        assert!(workspaces.join("app").is_dir());
+        assert!(mine.is_dir());
+        for gone in ["agents", "identity", "host.json"] {
+            assert!(!state.join(gone).exists(), "{gone}");
+        }
+        assert!(!config.exists());
+        let nothing = dir.path().join("none");
+        purge_user_state(&nothing, &nothing.join("runtime.toml"), &nothing).unwrap();
     }
 
     /// F3: a login zsh — whose system profile may reorder PATH, as macOS's

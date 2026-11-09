@@ -17,7 +17,8 @@ It is the same `storm-runtime` on every platform, and it runs one of two
 ways:
 
 - **As yourself.** `storm-runtime install --user`, and the installer's
-  default, has your own service manager run it, with no root or
+  default (except beside the server on a Mac or Windows PC, where the
+  server runs as you), has your own service manager run it, with no root or
   administrator. Its agents run as you: they
   use your CLIs, your logins and your folders, and they can do whatever you
   can do. Storm adds no sandbox of its own; an agent's own permission prompts
@@ -369,7 +370,11 @@ Or run it **as yourself, as a LaunchAgent**: see
 your own CLIs, logins and folders, and stops when you log out.
 
 **Install.** The installer's `--runtime --service` installs and enrolls
-it this way. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
+it this way, and so does `--server --runtime` (or `--everything`) with no
+flag, or `--runtime` on a Mac where the server is installed already: the
+server on a Mac runs as you, so the host beside it is this account, and
+the installer refuses `--user` there. A host you already run as yourself
+keeps running that way, and the installer warns. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
 needs Rust and takes a couple of minutes):
 
 ```sh
@@ -665,14 +670,18 @@ paths of your own, which you own:
 | macOS | `~/Library/Application Support/StormRuntime/state` | `~/Library/Application Support/StormRuntime/runtime.toml` |
 | Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
 
-`install --user` writes that `runtime.toml` once, if you have none, and the
-platforms differ in the workspace root it names:
+`install --user` writes that `runtime.toml` once, if you have none. On every
+platform it names one workspace root, `workspaces` in the state directory,
+and creates it:
 
 | | Workspace root in a new `runtime.toml` | Log |
 |---|---|---|
 | Linux | `~/.local/state/storm-runtime/workspaces` | `journalctl --user -u storm-runtime` |
-| macOS | none: you add `workspace_roots` | `~/Library/Logs/StormRuntime/storm-runtime.log` |
-| Windows | none: you add `workspace_roots` | `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log` |
+| macOS | `~/Library/Application Support/StormRuntime/state/workspaces` | `~/Library/Logs/StormRuntime/storm-runtime.log` |
+| Windows | `%LOCALAPPDATA%\StormRuntime\state\workspaces` | `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log` |
+
+Add other roots to `workspace_roots` beside it, then restart the host.
+`uninstall --user --purge` never removes a workspace root.
 
 So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
 host as you. `storm-runtime install --user` has your own service manager do
@@ -717,7 +726,10 @@ a flag wins over both.
   "ask before every Storm tool", are the service's only. `codex_home =
   "storm"` in `runtime.toml` keeps Storm's own home under the state
   directory instead. On Windows that is still the default, since cmd.exe
-  cannot pass those options to npm's `codex.cmd`.
+  cannot pass those options to npm's `codex.cmd`. After a host moves to your
+  own home (`codex_home = "own"`), the Codex conversations started in Storm's
+  (`agents/codex` under the state directory) can no longer be resumed:
+  start new ones. Storm does not migrate them.
 - **A state directory nested too deep is refused at start.** The host's
   socket lives at `run/mcp.sock` inside it, and a Unix socket's path is at
   most 107 bytes on Linux and 103 on macOS; pass a shorter `--state`.
@@ -768,9 +780,17 @@ curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime
   `RestartPreventExitStatus=3`, so a revoked host stays stopped. Change it
   with `systemctl --user edit storm-runtime`: a re-run rewrites the unit
   itself.
+- warns, without refusing, when a Storm server runs as you or you are in the
+  `storm` group: either way your agents could read the vaults on disk (see
+  [Never share an account with the vaults](#never-share-an-account-with-the-vaults)).
 
 The agent CLIs are yours: log them in as you, once (`claude`, then `/login`;
 `opencode auth login`), and the host finds them on your login shell's `PATH`.
+
+**After `apt upgrade`**, when your unit runs the package's
+`/usr/bin/storm-runtime`: the upgrade replaces the binary but does not
+restart a user unit, so the host keeps running the old one until you run
+`systemctl --user restart storm-runtime`.
 
 `storm-runtime uninstall --user` stops and disables the unit and removes it,
 the copy in `~/.local/bin`, and linger if install turned it on (or prints
@@ -791,7 +811,8 @@ launchctl print gui/$(id -u)/dev.storm.runtime                          # state 
 
 It:
 - copies the binary to `~/Library/Application Support/StormRuntime/bin`;
-- writes `runtime.toml` there if there is none, naming no workspace root;
+- writes `runtime.toml` there if there is none, naming
+  `state/workspaces` there as the workspace root, and creates it;
 - writes `~/Library/LaunchAgents/dev.storm.runtime.plist`, which runs
   `serve` with `--state` and `--config` set to your paths, and loads it.
 
@@ -800,11 +821,14 @@ exists: enrolling starts it, a crash restarts it, and a revoked host stays
 stopped. **Logging out stops it**; your next login starts it again. The log
 is `~/Library/Logs/StormRuntime/storm-runtime.log`.
 
-- **Workspaces are the folders you name.** Add a root, then restart the
-  host:
+- **Workspaces are the folders in `state/workspaces`**, and in any other
+  root you add. Add one, then restart the host:
 
   ```toml
-  workspace_roots = ["/Users/you/Code"]
+  workspace_roots = [
+    "/Users/you/Library/Application Support/StormRuntime/state/workspaces",
+    "/Users/you/Code",
+  ]
   ```
 
   ```sh
@@ -819,7 +843,9 @@ is `~/Library/Logs/StormRuntime/storm-runtime.log`.
   Keychain, works; no token file is needed.
 - **Never install it on a Mac where a Storm server runs as you.** An agent
   could then read the vaults on disk; `install --user` warns when it finds
-  one. Use the LaunchDaemon there.
+  one, and the installer refuses `--user` with `--server` or beside an
+  installed server (there, `--runtime` installs the LaunchDaemon). Use the
+  LaunchDaemon there.
 - **Upgrade** by running the new binary's `install --user`, which replaces
   the copy and restarts the host. **Uninstall** with
   `"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" uninstall --user`;
@@ -864,11 +890,14 @@ it asks, with as you first):
 
 It:
 - copies the binary to `%LOCALAPPDATA%\StormRuntime\bin`;
-- writes `runtime.toml` there if there is none, naming no workspace root;
+- writes `runtime.toml` there if there is none, naming
+  `state\workspaces` there as the workspace root, and creates it;
 - registers the task: at your logon, as you, only while you are logged on
   (`InteractiveToken`), never elevated, never stopped for its age, restarted
   if it fails. It runs `serve` with `--state`, `--config` and `--log-file`
-  set to your paths, inside `conhost --headless`, so no console window opens;
+  set to your paths, inside `conhost --headless`, so no console window opens
+  (`--headless` is not documented by Microsoft; were a later Windows to drop
+  it, the host would run in a visible console window);
 - leaves the task off until you enroll. Enrolling turns it on and starts the
   host; from then on it starts at each logon.
 
@@ -877,11 +906,15 @@ Job Object goes with it); they show as `failed (host_restart)` when your next
 sign-in starts it again. The log is
 `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log`.
 
-- **Workspaces are the folders you name.** A root may be in your profile.
-  Add one, then restart the host:
+- **Workspaces are the folders in `state\workspaces`**, and in any other
+  root you add. A root may be in your profile. Add one, then restart the
+  host:
 
   ```toml
-  workspace_roots = ['C:\Users\you\Code']
+  workspace_roots = [
+    'C:\Users\you\AppData\Local\StormRuntime\state\workspaces',
+    'C:\Users\you\Code',
+  ]
   ```
 
   ```powershell
@@ -917,9 +950,9 @@ old one. Both can run on one machine while you switch.
    as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Hosts** as
    a second host, *"Runs as"* your account. Both take the machine's name
    unless you pass `enroll --name`, so rename one there to tell them apart.
-2. **Give it your workspaces.** On a Mac or a Windows PC, add your folders to
-   `workspace_roots`; on Linux, a new `runtime.toml` already names
-   `~/.local/state/storm-runtime/workspaces`. The service's workspaces stay
+2. **Give it your workspaces.** A new `runtime.toml` names `workspaces` in
+   its state directory on every platform; add your own folders to
+   `workspace_roots` if you want them too. The service's workspaces stay
    where they are and still belong to its account: clone or copy the
    projects you want into your own root.
 3. **Log your agent CLIs in as yourself**, if they are not already. The
@@ -969,4 +1002,6 @@ account. On Linux the server's data belongs to `storm` and its group:
 `storm` group. On a Mac or a Windows PC where you run the Storm server as
 yourself, your account can read the vaults, so a host as yourself could
 too: `install --user` warns there, and you should run the service instead.
-On Linux `install --user` makes no such check.
+On Linux `install --user` warns when the server runs as you (its drop-in's
+`User=`, its data root's owner, or a `storm-server` process of yours) and
+when you are in the `storm` group.

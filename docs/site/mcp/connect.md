@@ -53,6 +53,14 @@ user PATH, without administrator.
 Apps started from a desktop (Claude Desktop on macOS in particular) may not
 see `/usr/local/bin` on their PATH; give `"command"` the full path then.
 
+**On a computer with a Runtime Host you run as yourself**, the installer
+copies nothing: AI apps run that host's own `storm-runtime`, and the
+`"command"` is its full path, since a desktop app's PATH rarely includes
+where it lives: `~/.local/bin/storm-runtime` on Linux,
+`~/Library/Application Support/StormRuntime/bin/storm-runtime` on a Mac,
+`%LOCALAPPDATA%\StormRuntime\bin\storm-runtime.exe` on Windows. The
+installer prints it. A host installed as the service is unchanged.
+
 ## The plain HTTP entry
 
 On your home network, an MCP client can also talk to `/mcp` directly, with no

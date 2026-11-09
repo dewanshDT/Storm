@@ -53,7 +53,7 @@ POLL_SLEEP=2
 HEALTH_TRIES=15
 
 # Defaults until parse_args and ui_init set them properly.
-OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 OPT_SERVICE=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
+OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 OPT_SERVICE=0 RT_SHAPE_ASKED=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
 WORK_DIR="" LOG_FILE=/dev/null STTY_SAVED="" SPIN_PID=""
 FW_KIND=none FW_TARGETS="" FW_CONSENT="" FW_PUBLIC_ONLY=0 FW_RECORD="" FW_UFW_CONF=""
 
@@ -81,11 +81,13 @@ Components:
   --user               run the Runtime Host as you, with no root: the default for
                        a new host. Linux: a systemd --user unit (the only way
                        where there is no .deb). macOS: a LaunchAgent, which runs
-                       while you're logged in. Either uses your own CLIs and logins
+                       while you're logged in. Either uses your own CLIs and logins.
+                       Not with --server on a Mac, where the server runs as you
   --service            run the Runtime Host as its own account instead, a system
                        service (Linux: the storm-runtime .deb; macOS: the
-                       _stormruntime LaunchDaemon). Needs sudo. A host already
-                       installed keeps the way it runs without either flag
+                       _stormruntime LaunchDaemon). Needs sudo. The default on a
+                       Mac with --server. A host already installed keeps the way
+                       it runs without either flag
   --app                the desktop app (macOS; Linux: the apt package, or in your home)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
 
@@ -130,7 +132,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
-  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0
+  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0 RT_SHAPE_ASKED=0
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -386,7 +388,9 @@ set_paths() {
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
       # The host as you (decisions 151 E2, E5): the default, unless asked
-      # for the LaunchDaemon or that is what is installed.
+      # for the LaunchDaemon, that is what is installed, or the server is
+      # here or being installed too: it runs as you, and a host as you would
+      # share its account with the vaults.
       if [ "${OPT_SERVICE:-0}" = 1 ]; then
         RT_SHAPE_WHY=flag svc=1
       elif [ "${OPT_USER:-0}" = 1 ]; then
@@ -395,6 +399,8 @@ set_paths() {
         RT_SHAPE_WHY=installed svc=1
       elif [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ]; then
         RT_SHAPE_WHY=installed
+      elif rt_with_server || rt_server_here; then
+        RT_SHAPE_WHY=server svc=1
       else
         RT_SHAPE_WHY=default
       fi
@@ -404,7 +410,7 @@ set_paths() {
         RT_BIN="$RT_ROOT/bin/storm-runtime"
         RT_STATE="$RT_ROOT/state"
         RT_CONFIG="$RT_ROOT/runtime.toml"
-        RT_WORKSPACES=""
+        RT_WORKSPACES="$RT_STATE/workspaces"
       fi
       ;;
     *)
@@ -462,6 +468,30 @@ set_paths() {
   # MCP only: a plain copy where a GUI app's PATH and a shell's both look.
   MCP_BIN="$root/usr/local/bin/storm-runtime"
   LOG_PATH=$LOG_FILE
+}
+
+# Whether the server is being installed with the runtime: the components
+# chosen, else the flags.
+rt_with_server() {
+  case " ${SEL:-$OPT_COMPONENTS} " in *" server "*) return 0 ;; esac
+  return 1
+}
+
+# A Storm server installed on this Mac, which runs as you: its binary, its
+# record or its LaunchAgent.
+rt_server_here() {
+  [ "$OS" = macos ] || return 1
+  [ -x "$SRV_INSTALLED_BIN" ] || [ -f "$SRV_RECORD" ] || [ -f "$HOME/Library/LaunchAgents/dev.storm.server.plist" ]
+}
+
+# On a Mac the server runs as you, so --user beside it, installed now or
+# already, would run agents as the account that holds the vaults (decision
+# 151). Windows refuses -User with -Server the same way; on Linux the server
+# is a system service.
+rt_shape_refused() {
+  [ "$OS" = macos ] && [ "${OPT_USER:-0}" = 1 ] && in_sel runtime || return 1
+  { in_sel server || rt_server_here; } || return 1
+  arg_error "--user with --server on a Mac would run agents as the account that holds your notes (the server runs as you): install the Runtime Host as its own account (drop --user)"
 }
 
 # The storm-runtime .deb's service, installed here (under ROOT in tests).
@@ -2140,6 +2170,11 @@ runtime_plan() {
     plan_note "Runtime: this $MACHINE runs it as its own account ($RT_ACCOUNT); it stays that way."
   elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = root ]; then
     plan_note "Runtime: the installer runs as root, so the host is the service ($RT_ACCOUNT). To run it as you, run the installer as yourself, without sudo."
+  elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = server ]; then
+    plan_note "Runtime: the server runs as you on this Mac, so the host runs as its own account ($RT_ACCOUNT): never as the account that holds your notes."
+  fi
+  if [ "$OS" = macos ] && [ "$RT_USER" = 1 ] && [ "$RT_SHAPE_WHY" = installed ] && { in_sel server || rt_server_here; }; then
+    plan_note "Runtime: this Mac runs the host as you, and the server runs as you too, so its agents can read your vaults on disk. To keep them out, move the host to its own account: https://storm.dewansh.space/docs/agents/hosts/#moving-a-host-to-another-account"
   fi
   if [ "$mode" != keep ]; then
     case "$OS" in
@@ -2192,11 +2227,7 @@ runtime_plan() {
     plan_add spin "$(rt_sudo)" "Check the runtime reaches its server" "$(rt_as_display) check" runtime_verify
   fi
   # Sessions run in a workspace; a fresh host has none.
-  if [ "$RT_USER" = 1 ] && [ "$OS" = macos ]; then
-    if [ "$mode" = install ] || [ -n "$OPT_WORKSPACE" ]; then
-      plan_note "Runtime: it works in the folders you name. Set workspace_roots in $RT_CONFIG, then: launchctl kickstart -k gui/$MY_UID/dev.storm.runtime"
-    fi
-  elif [ -n "$OPT_WORKSPACE" ]; then
+  if [ -n "$OPT_WORKSPACE" ]; then
     plan_add spin "$WS_SUDO" "Add the workspace $(ws_name "$OPT_WORKSPACE"), unless the runtime has one" \
       "$(ws_display "$OPT_WORKSPACE")" runtime_workspace "$OPT_WORKSPACE"
   elif [ "$INTERACTIVE" = 1 ]; then
@@ -2210,10 +2241,11 @@ runtime_plan() {
 
 # ---- the first workspace
 #
-# A workspace is a folder in $RT_WORKSPACES. On macOS the operator has
-# inherited rights there (storm-runtime install --operator), so it is made as
-# them, with their git credentials; on Linux the folder is the runtime
-# account's (0750), so it is made as that account.
+# A workspace is a folder in $RT_WORKSPACES. A host run as you has its own
+# (<state>/workspaces, on every platform), made as you. On macOS the service's
+# operator has inherited rights there (storm-runtime install --operator), so
+# it is made as them, with their git credentials; on Linux the service's
+# folder is the runtime account's (0750), so it is made as that account.
 
 ws_is_url() {
   case "$1" in
@@ -2539,9 +2571,10 @@ mcp_detect() {
   return 0
 }
 
-# On Linux the Runtime Host's package already puts storm-runtime on PATH.
+# On Linux the Runtime Host's package already puts storm-runtime on PATH; a
+# host you run (either platform) has its own copy at $RT_BIN.
 mcp_via_runtime() {
-  [ "$OS" = linux ] || return 1
+  [ "$OS" = linux ] || [ "$RT_USER" = 1 ] || return 1
   if in_sel runtime; then
     [ "$(comp_mode runtime)" != uninstall ]
     return
@@ -2549,11 +2582,26 @@ mcp_via_runtime() {
   [ "$RT_INSTALLED" = 1 ]
 }
 
+# What an AI app runs for mcp-connect. A host you run is in your home
+# (~/.local/bin, ~/Library/Application Support/StormRuntime/bin), which a GUI
+# app's PATH may not include, so it is named by its full path.
+mcp_command() {
+  if [ "$MCP_INSTALLED" = 1 ]; then
+    printf '%s' "$MCP_BIN"
+  elif [ "$RT_USER" = 1 ] && mcp_via_runtime; then
+    printf '%s' "$RT_BIN"
+  else
+    printf 'storm-runtime'
+  fi
+}
+
 mcp_status_line() {
   if [ "$MCP_LINKED" = 1 ]; then
     printf '%s is a link (Homebrew?), left alone' "$MCP_BIN"
   elif [ "$MCP_INSTALLED" = 1 ]; then
     printf 'installed%s %s %s' "${MCP_VERSION:+ v$MCP_VERSION}" "$G_DOT" "$MCP_BIN"
+  elif [ "$RT_USER" = 1 ] && [ "$RT_INSTALLED" = 1 ]; then
+    printf "the Runtime Host's, at %s" "$RT_BIN"
   elif [ "$OS" = linux ] && [ "$RT_INSTALLED" = 1 ]; then
     printf 'storm-runtime is on PATH (the Runtime Host)'
   else
@@ -2573,7 +2621,11 @@ mcp_plan() {
     return 0
   fi
   if [ "$MCP_INSTALLED" != 1 ] && mcp_via_runtime; then
-    plan_note "MCP: the Runtime Host's storm-runtime is on PATH already; AI apps run its mcp-connect."
+    if [ "$RT_USER" = 1 ]; then
+      plan_note "MCP: AI apps run the Runtime Host's own storm-runtime. In an app's MCP config, the command is its full path, $(mcp_command): an app's PATH may not include $(dirname "$RT_BIN")."
+    else
+      plan_note "MCP: the Runtime Host's storm-runtime is on PATH already; AI apps run its mcp-connect."
+    fi
     return 0
   fi
   if [ "$mode" != keep ]; then
@@ -3440,10 +3492,42 @@ ask_questions() {
   choose_enroll_action
 }
 
+# The paths again, after the components changed what the host's shape is.
+rt_reshape() {
+  local lf=$LOG_FILE
+  set_paths
+  LOG_FILE=$lf
+  detect_all
+  availability_all
+}
+
 # A new host where it can run either way: ask, as you first (decision 151 E5).
+# On a Mac with the server, here or chosen, it is the service and nothing is
+# asked; a menu answer of "as you" gives way to it if the server is chosen
+# later.
 choose_runtime_shape() {
   local lf=$LOG_FILE you svc
-  [ "$INTERACTIVE" = 1 ] && [ "$RT_SHAPE_WHY" = default ] && in_sel runtime || return 0
+  [ "$INTERACTIVE" = 1 ] && in_sel runtime || return 0
+  if [ "$OS" = macos ]; then
+    if [ "$RT_SHAPE_ASKED" = 1 ] && [ "${OPT_USER:-0}" = 1 ] && { in_sel server || rt_server_here; }; then
+      OPT_USER=0 RT_SHAPE_ASKED=0
+      rt_reshape
+      return 0
+    fi
+    case "$RT_SHAPE_WHY" in
+      default)
+        if in_sel server; then
+          rt_reshape
+          return 0
+        fi
+        ;;
+      server)
+        { in_sel server || rt_server_here; } && return 0
+        rt_reshape
+        ;;
+    esac
+  fi
+  [ "$RT_SHAPE_WHY" = default ] || return 0
   if [ "$OS" = macos ]; then
     you="a LaunchAgent: your CLIs and logins, while you're logged in; no sudo"
     svc="_stormruntime, a LaunchDaemon that runs without a login; needs sudo"
@@ -3453,6 +3537,7 @@ choose_runtime_shape() {
   fi
   ui_menu "How should the Runtime Host run?" "As you ($ME)|$you" "As its own account|$svc" || UI_INDEX=1
   if [ "$UI_INDEX" = 2 ]; then OPT_SERVICE=1; else OPT_USER=1; fi
+  RT_SHAPE_ASKED=1
   set_paths
   LOG_FILE=$lf
   detect_all
@@ -3620,6 +3705,7 @@ flow_install() {
   fi
   while :; do
     choose_runtime_shape
+    if rt_shape_refused; then return 2; fi
     filter_selection
     if [ -z "$SEL" ]; then
       ui_fail "Nothing selected can be installed on this $MACHINE."
@@ -3793,7 +3879,7 @@ summary_screen() {
   if [ "$RT_INSTALLED" = 1 ]; then
     if [ "$RT_USER" = 1 ]; then
       if [ "$OS" = macos ]; then
-        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: the roots in $RT_CONFIG"
+        ui_info "The Runtime Host runs as you (LaunchAgent dev.storm.runtime, while you're logged in); workspaces: $RT_WORKSPACES"
       else
         ui_info "The Runtime Host runs as $ME (systemd --user storm-runtime); workspaces: $RT_WORKSPACES"
         if [ "$(loginctl show-user "$ME" --property=Linger --value 2>/dev/null)" != yes ]; then
@@ -3807,9 +3893,12 @@ summary_screen() {
       ui_info "The Runtime Host runs as $RT_ACCOUNT (systemd storm-runtime); workspaces: $RT_WORKSPACES"
     fi
   fi
-  if in_sel mcp && [ "$MCP_INSTALLED" = 1 ]; then
-    ui_info "AI apps here can run $MCP_BIN mcp-connect. In the Storm app, Settings ›"
+  if in_sel mcp && { [ "$MCP_INSTALLED" = 1 ] || { [ "$RT_USER" = 1 ] && mcp_via_runtime; }; }; then
+    ui_info "AI apps here can run $(mcp_command) mcp-connect. In the Storm app, Settings ›"
     ui_info "Devices & access › New key shows the line to paste into the app's MCP config."
+    if [ "$MCP_INSTALLED" != 1 ]; then
+      ui_info "Use that full path as the command: an app's PATH may not include $(dirname "$RT_BIN")."
+    fi
   fi
   i=1
   while [ "$i" -le "$PLAN_N" ]; do

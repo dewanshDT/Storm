@@ -144,10 +144,45 @@ mod user {
             .with_context(|| format!("writing {}", path.display()))
     }
 
+    /// What this machine says about a Storm server and this account.
+    fn server_facts(user: &str) -> plan::ServerFacts {
+        use std::os::unix::fs::MetadataExt;
+        let uid = rustix::process::getuid().as_raw();
+        let dropin = std::fs::read_to_string(plan::SERVER_DROPIN).ok();
+        let root = plan::server_data_root(dropin.as_deref());
+        let data_ours = [root.clone(), root.join("state")]
+            .iter()
+            .any(|p| std::fs::metadata(p).is_ok_and(|m| m.uid() == uid));
+        let running_ours = super::account_processes(uid).is_ok_and(|pids| {
+            pids.iter().any(|pid| {
+                std::fs::read_to_string(format!("/proc/{pid}/comm"))
+                    .is_ok_and(|c| c.trim() == "storm-server")
+            })
+        });
+        let mut gids = vec![rustix::process::getgid().as_raw()];
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            gids.extend(
+                status
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("Groups:"))
+                    .flat_map(|g| g.split_whitespace().filter_map(|n| n.parse::<u32>().ok())),
+            );
+        }
+        let in_server_group = std::fs::read_to_string("/etc/group")
+            .is_ok_and(|g| plan::in_group(&g, plan::SERVER_GROUP, user, &gids));
+        plan::ServerFacts {
+            dropin,
+            data_ours,
+            running_ours,
+            in_server_group,
+        }
+    }
+
     pub fn install(want_linger: bool) -> Result<()> {
         use std::os::unix::fs::MetadataExt;
         let user = refuse_the_service()?;
         let layout = layout()?;
+        let notes = plan::server_notes(&user, &server_facts(&user));
         let exe = std::env::current_exe()
             .and_then(std::fs::canonicalize)
             .context("finding this binary")?;
@@ -226,6 +261,9 @@ mod user {
             (None, true) => println!("Linger is on: it starts at boot, without a login."),
             (None, false) => {}
         }
+        for note in &notes {
+            println!("\n{note}\n");
+        }
         if active || enrolled {
             println!("Running.");
         } else {
@@ -287,32 +325,7 @@ mod user {
     }
 
     fn purge_state(layout: &Layout) -> Result<()> {
-        let roots = std::fs::read_to_string(&layout.config)
-            .ok()
-            .and_then(|t| toml::from_str::<crate::config::RuntimeConfig>(&t).ok())
-            .map(|c| c.workspace_roots)
-            .unwrap_or_default();
-        let entries: Vec<PathBuf> = match std::fs::read_dir(&layout.state) {
-            Ok(dir) => dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", layout.state.display())),
-        };
-        for path in plan::purge_targets(layout, &entries, &roots) {
-            let gone = if path.is_dir() && !path.is_symlink() {
-                std::fs::remove_dir_all(&path)
-            } else {
-                std::fs::remove_file(&path)
-            };
-            gone.with_context(|| format!("removing {}", path.display()))?;
-        }
-        let _ = std::fs::remove_dir(&layout.state);
-        match std::fs::remove_file(&layout.config) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| format!("removing {}", layout.config.display()));
-            }
-        }
+        super::super::purge_user_state(&layout.state, &layout.config, &layout.workspaces)?;
         if let Some(dir) = layout.config.parent() {
             let _ = std::fs::remove_dir(dir);
         }
