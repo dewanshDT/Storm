@@ -53,7 +53,7 @@ POLL_SLEEP=2
 HEALTH_TRIES=15
 
 # Defaults until parse_args and ui_init set them properly.
-OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
+OPT_YES=0 OPT_DRY_RUN=0 OPT_USER=0 OPT_SERVICE=0 INTERACTIVE=0 RAW_KEYS=0 UI_IN=0 UI_FD=2
 WORK_DIR="" LOG_FILE=/dev/null STTY_SAVED="" SPIN_PID=""
 FW_KIND=none FW_TARGETS="" FW_CONSENT="" FW_PUBLIC_ONLY=0 FW_RECORD="" FW_UFW_CONF=""
 
@@ -78,10 +78,14 @@ Components:
   --mcp                MCP only: storm-runtime on PATH so AI apps here can reach
                        your Storm (mcp-connect); no host, no service
   --agents             Claude Code / OpenCode for the Runtime Host
-  --user               run the Runtime Host as you, not as its own account, with
-                       no root. Linux: a systemd --user unit (the only way where
-                       there is no .deb). macOS: a LaunchAgent, which runs while
-                       you're logged in. Either uses your own CLIs and logins
+  --user               run the Runtime Host as you, with no root: the default for
+                       a new host. Linux: a systemd --user unit (the only way
+                       where there is no .deb). macOS: a LaunchAgent, which runs
+                       while you're logged in. Either uses your own CLIs and logins
+  --service            run the Runtime Host as its own account instead, a system
+                       service (Linux: the storm-runtime .deb; macOS: the
+                       _stormruntime LaunchDaemon). Needs sudo. A host already
+                       installed keeps the way it runs without either flag
   --app                the desktop app (macOS; Linux: the apt package, or in your home)
   --mobile             phone or tablet: pairing QR, Android APK QR, web address
 
@@ -110,7 +114,7 @@ Commands:
 Examples:
   sh install.sh --yes --server --app --data ~/Storm --port 8484
   sh install.sh --yes --runtime --enroll-from-stdin < enrollment.txt
-  sh install.sh --yes --runtime --user --enroll-from-stdin < enrollment.txt
+  sh install.sh --yes --runtime --service --enroll-from-stdin < enrollment.txt
   sh install.sh --yes --runtime --workspace https://github.com/me/app.git
   sh install.sh --yes --mcp
   sh install.sh --dry-run --everything
@@ -126,7 +130,7 @@ arg_error() {
 args_reset() {
   OPT_YES=0 OPT_DRY_RUN=0 OPT_VERSION="" OPT_DATA="" OPT_PORT="" OPT_ADDR=""
   OPT_ENROLL_STDIN=0 OPT_PASSWORD_STDIN=0 OPT_FROM_DIR="" OPT_COMPONENTS=""
-  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0
+  OPT_WORKSPACE="" OPT_NO_FIREWALL=0 OPT_USER=0 OPT_SERVICE=0
   OPT_HELP=0 SUBCOMMAND=install
 }
 
@@ -245,6 +249,7 @@ parse_args() {
       --password-stdin) OPT_PASSWORD_STDIN=1 ;;
       --no-firewall) OPT_NO_FIREWALL=1 ;;
       --user) OPT_USER=1 ;;
+      --service) OPT_SERVICE=1 ;;
       -h | --help) OPT_HELP=1 ;;
       status | upgrade | uninstall | install) SUBCOMMAND=$1 ;;
       *)
@@ -256,6 +261,10 @@ parse_args() {
   done
   if [ "$OPT_ENROLL_STDIN" = 1 ] && [ "$OPT_PASSWORD_STDIN" = 1 ]; then
     arg_error "--enroll-from-stdin and --password-stdin both read stdin; use one per run"
+    return 2
+  fi
+  if [ "$OPT_USER" = 1 ] && [ "$OPT_SERVICE" = 1 ]; then
+    arg_error "--user and --service are the two ways to run the Runtime Host; pick one"
     return 2
   fi
   return 0
@@ -350,9 +359,9 @@ detect_platform() {
 # Every path the installer touches, per OS. STORM_TEST_SYSROOT (tests only)
 # moves the system paths under a scratch directory.
 set_paths() {
-  local root=""
+  local root="" svc=0
   if [ "${STORM_INSTALL_TEST:-}" = 1 ]; then root=${STORM_TEST_SYSROOT:-}; fi
-  RT_USER=0 RT_UNIT=""
+  RT_USER=0 RT_UNIT="" RT_SHAPE_WHY=""
   ME=$(id -un)
   MY_UID=$(id -u)
   APT_ROOT=${STORM_APT_ROOT:-https://dewanshdt.github.io/Storm}
@@ -376,10 +385,20 @@ set_paths() {
       APP_DIR="$root/Applications"
       AGENT_BIN_DIRS="$root/opt/homebrew/bin $root/usr/local/bin"
       LOG_FILE="$HOME/Library/Logs/Storm/install.log"
-      # The host as you (decision 151 E2): asked for, or already installed
-      # that way and not as the LaunchDaemon.
-      RT_USER=0
-      if [ "${OPT_USER:-0}" = 1 ] || { [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ] && [ ! -x "$RT_BIN" ]; }; then
+      # The host as you (decisions 151 E2, E5): the default, unless asked
+      # for the LaunchDaemon or that is what is installed.
+      if [ "${OPT_SERVICE:-0}" = 1 ]; then
+        RT_SHAPE_WHY=flag svc=1
+      elif [ "${OPT_USER:-0}" = 1 ]; then
+        RT_SHAPE_WHY=flag
+      elif [ -x "$RT_BIN" ] || [ -f "$root/Library/LaunchDaemons/dev.storm.runtime.plist" ]; then
+        RT_SHAPE_WHY=installed svc=1
+      elif [ -f "$HOME/Library/LaunchAgents/dev.storm.runtime.plist" ]; then
+        RT_SHAPE_WHY=installed
+      else
+        RT_SHAPE_WHY=default
+      fi
+      if [ "$svc" = 0 ]; then
         RT_USER=1 RT_ACCOUNT=$ME WS_SUDO=0
         RT_ROOT="$HOME/Library/Application Support/StormRuntime"
         RT_BIN="$RT_ROOT/bin/storm-runtime"
@@ -416,13 +435,40 @@ set_paths() {
       FW_RECORD="$root/etc/storm/lan-firewall"
       LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log"
       RT_UNIT="$(xdg_dir "${XDG_CONFIG_HOME:-}" "$HOME/.config")/systemd/user/storm-runtime.service"
-      # No .deb, or asked, or installed that way already (decision 151 E1).
-      if [ "$OPT_USER" = 1 ] || [ "$DEBIAN_LIKE" != 1 ] || [ -f "$RT_UNIT" ]; then rt_user_paths; fi
+      # As you unless asked for the service, the service is what's installed,
+      # or there's no you to run as (root). No .deb: as you, always
+      # (decision 151 E1, E5).
+      if [ "${OPT_SERVICE:-0}" = 1 ]; then
+        RT_SHAPE_WHY=flag
+      elif [ "${OPT_USER:-0}" = 1 ]; then
+        RT_SHAPE_WHY=flag
+        rt_user_paths
+      elif [ "$DEBIAN_LIKE" != 1 ]; then
+        RT_SHAPE_WHY=only
+        rt_user_paths
+      elif rt_service_installed "$root"; then
+        RT_SHAPE_WHY=installed
+      elif [ -f "$RT_UNIT" ]; then
+        RT_SHAPE_WHY=installed
+        rt_user_paths
+      elif [ "$MY_UID" = 0 ]; then
+        RT_SHAPE_WHY=root
+      else
+        RT_SHAPE_WHY=default
+        rt_user_paths
+      fi
       ;;
   esac
   # MCP only: a plain copy where a GUI app's PATH and a shell's both look.
   MCP_BIN="$root/usr/local/bin/storm-runtime"
   LOG_PATH=$LOG_FILE
+}
+
+# The storm-runtime .deb's service, installed here (under ROOT in tests).
+rt_service_installed() {
+  [ -f "$1/lib/systemd/system/storm-runtime.service" ] ||
+    [ -f "$1/usr/lib/systemd/system/storm-runtime.service" ] ||
+    [ -f "$1/var/lib/dpkg/info/storm-runtime.list" ]
 }
 
 # xdg_dir VALUE DEFAULT: an XDG base directory; a relative one is ignored.
@@ -2088,6 +2134,13 @@ runtime_plan() {
     esac
     return 0
   fi
+  if [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = default ] && [ "$RT_USER" = 1 ]; then
+    plan_note "Runtime: it runs as $ME, the default for a new host. To run it as its own account (a system service, with sudo) instead, re-run with --service."
+  elif [ "$RT_SHAPE_WHY" = installed ] && [ "$RT_USER" != 1 ]; then
+    plan_note "Runtime: this $MACHINE runs it as its own account ($RT_ACCOUNT); it stays that way."
+  elif [ "$mode" = install ] && [ "$RT_SHAPE_WHY" = root ]; then
+    plan_note "Runtime: the installer runs as root, so the host is the service ($RT_ACCOUNT). To run it as you, run the installer as yourself, without sudo."
+  fi
   if [ "$mode" != keep ]; then
     case "$OS" in
       linux)
@@ -3387,6 +3440,25 @@ ask_questions() {
   choose_enroll_action
 }
 
+# A new host where it can run either way: ask, as you first (decision 151 E5).
+choose_runtime_shape() {
+  local lf=$LOG_FILE you svc
+  [ "$INTERACTIVE" = 1 ] && [ "$RT_SHAPE_WHY" = default ] && in_sel runtime || return 0
+  if [ "$OS" = macos ]; then
+    you="a LaunchAgent: your CLIs and logins, while you're logged in; no sudo"
+    svc="_stormruntime, a LaunchDaemon that runs without a login; needs sudo"
+  else
+    you="systemd --user: your CLIs and logins; no sudo"
+    svc="storm-runtime, a system service (the .deb); needs sudo"
+  fi
+  ui_menu "How should the Runtime Host run?" "As you ($ME)|$you" "As its own account|$svc" || UI_INDEX=1
+  if [ "$UI_INDEX" = 2 ]; then OPT_SERVICE=1; else OPT_USER=1; fi
+  set_paths
+  LOG_FILE=$lf
+  detect_all
+  availability_all
+}
+
 # Drop what can't be installed here, and say why.
 filter_selection() {
   local c out=""
@@ -3547,6 +3619,7 @@ flow_install() {
     return 2
   fi
   while :; do
+    choose_runtime_shape
     filter_selection
     if [ -z "$SEL" ]; then
       ui_fail "Nothing selected can be installed on this $MACHINE."

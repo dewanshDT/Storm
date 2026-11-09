@@ -51,3 +51,27 @@ code() { grep -v '^[[:space:]]*#' "$PS1"; }
   code | grep -q 'CloseMainWindow()'
   ! code | grep -Eiq 'Stop-Process|taskkill|\.Kill\('
 }
+
+# Decision 151 E5: the shape of a new Runtime Host, read from the script.
+shape() { code | sed -n '/^if (\$Runtime -and -not \$User -and -not \$Service) {$/,/^}$/p'; }
+
+@test "install.ps1: a new Runtime Host runs as you; -Service is one switch away" {
+  code | grep -q '\[switch\]\$Service,'
+  code | grep -q "if (\$User -and \$Service) { Fail '-User and -Service are the two ways"
+  [ -n "$(shape)" ]
+  # The last word, with -Yes and nothing else deciding, is as you.
+  shape | grep -B1 -A2 '^    } else {$' | grep -q '^        \$User = \$true$'
+  shape | grep -q "Say '  2) as the StormRuntime service; needs PowerShell as administrator'"
+}
+
+@test "install.ps1: an installed StormRuntime service is kept, before any other rule" {
+  code | grep -q "Get-Service -Name StormRuntime -ErrorAction SilentlyContinue"
+  [ "$(shape | grep -m1 -E '^\s+(\} elseif|if) \(' | tr -d ' ')" = "if(\$serviceHost){" ]
+  shape | grep -A1 'if (\$serviceHost) {' | grep -q '\$Service = \$true'
+}
+
+@test "install.ps1: -Server and an elevated shell keep the service, as E3 requires" {
+  shape | grep -A1 'elseif (\$Server) {' | grep -q '\$Service = \$true'
+  shape | grep -A1 'elseif (\$admin) {' | grep -q '\$Service = \$true'
+  code | grep -q "Fail '-User with -Server would run agents as the account that holds your notes"
+}

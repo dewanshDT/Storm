@@ -95,8 +95,9 @@ setup() {
   ! grep -q 'sudo .*has-account' "$FAKE_LOG"
 }
 
-@test "agents: CLIs where the host can run them, and ones it can't" {
+@test "agents: CLIs where the service host can run them, and ones it can't" {
   use_macos
+  OPT_SERVICE=1
   platform
   mkdir -p "$STORM_TEST_SYSROOT/opt/homebrew/bin" "$HOME/.local/bin"
   cp "$FAKE_DIR/tools/opencode" "$STORM_TEST_SYSROOT/opt/homebrew/bin/opencode"

@@ -14,14 +14,17 @@
     command is printed), and a pairing code for your first device when the
     server has no account yet. Remote access goes through a relay and needs no
     rule at all (decision 119).
-  - Runtime: `storm-runtime install` (the StormRuntime service, as administrator),
-    then enrollment: straight from the server on this machine, or by pasting the
-    app's enrollment string at a hidden prompt. It never reaches a command line,
-    the screen or a log. Optionally a first workspace (a folder name or a git URL).
-  - Runtime with -User: `storm-runtime install --user` as you (a logon task that
-    runs the host while you are logged on, your own state in
+  - Runtime, by default: `storm-runtime install --user` as you (a logon task
+    that runs the host while you are logged on, your own state in
     %LOCALAPPDATA%\StormRuntime), then enrollment. No administrator; run it in a
-    PowerShell that is not elevated (decision 151 E3).
+    PowerShell that is not elevated (decisions 151 E3, E5).
+  - Runtime with -Service: `storm-runtime install` (the StormRuntime service, as
+    administrator), then enrollment: straight from the server on this machine,
+    or by pasting the app's enrollment string at a hidden prompt. It never
+    reaches a command line, the screen or a log. Optionally a first workspace (a
+    folder name or a git URL). It is also the service with -Server (the host
+    must not run as the account that holds your notes), from an elevated
+    PowerShell, and where the StormRuntime service is installed already.
   - MCP only: storm-runtime.exe in %LOCALAPPDATA%\Programs\Storm, on your user
     PATH, so an AI app here can run `storm-runtime mcp-connect`. No service, no
     enrollment, no administrator.
@@ -40,11 +43,15 @@
 .PARAMETER Server
   Install the server.
 .PARAMETER Runtime
-  Install the Runtime Host. Needs an elevated PowerShell.
+  Install the Runtime Host: as you, unless -Service, -Server, an elevated
+  PowerShell or an installed StormRuntime service says otherwise.
 .PARAMETER User
-  With -Runtime: install the Runtime Host as you, a logon task, not as the
-  StormRuntime service. No administrator. Not with -Server: the host's agents
-  would run as the account that holds your notes.
+  Install the Runtime Host as you, a logon task, not as the StormRuntime
+  service. No administrator. Not with -Server: the host's agents would run as
+  the account that holds your notes.
+.PARAMETER Service
+  Install the Runtime Host as the StormRuntime service instead. Needs an
+  elevated PowerShell.
 .PARAMETER Mcp
   MCP only: put storm-runtime on your PATH for AI apps. No service.
 .PARAMETER App
@@ -73,6 +80,7 @@ param(
     [switch]$Server,
     [switch]$Runtime,
     [switch]$User,
+    [switch]$Service,
     [switch]$Mcp,
     [switch]$App,
     [switch]$RemoveApp,
@@ -142,7 +150,8 @@ if ($RemoveApp) {
 
 # --- what to install -----------------------------------------------------------
 
-if ($User) { $Runtime = $true }
+if ($User -and $Service) { Fail '-User and -Service are the two ways to run the Runtime Host: pick one' }
+if ($User -or $Service) { $Runtime = $true }
 
 if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
     if ($Yes) { Fail 'with -Yes, say what to install: -Server, -Runtime, -Mcp, -App' }
@@ -166,6 +175,34 @@ if (-not $Server -and -not $Runtime -and -not $Mcp -and -not $App) {
 }
 
 $admin = Test-Admin
+# Decision 151 E5: a new host runs as you; a host installed as the service
+# stays the service, so an upgrade changes nothing.
+$serviceBin = Join-Path $env:ProgramFiles 'StormRuntime\storm-runtime.exe'
+$serviceHost = [bool](Get-Service -Name StormRuntime -ErrorAction SilentlyContinue) -or (Test-Path $serviceBin)
+$userHost = Test-Path (Join-Path $env:LOCALAPPDATA 'StormRuntime\bin\storm-runtime.exe')
+$serviceWhy = '-Service'
+if ($Runtime -and -not $User -and -not $Service) {
+    if ($serviceHost) {
+        $Service = $true; $serviceWhy = 'the StormRuntime service installed here'
+    } elseif ($userHost) {
+        $User = $true
+    } elseif ($Server) {
+        $Service = $true; $serviceWhy = '-Server'
+    } elseif ($admin) {
+        $Service = $true; $serviceWhy = 'an elevated PowerShell'
+    } elseif (-not $Yes) {
+        Say 'How should the Runtime Host run?'
+        Say "  1) as you ($env:USERNAME): a logon task with your CLIs and logins; no administrator"
+        Say '  2) as the StormRuntime service; needs PowerShell as administrator'
+        switch (Ask 'Choose' '1') {
+            '1' { $User = $true }
+            '2' { $Service = $true }
+            default { Fail 'choose 1 or 2' }
+        }
+    } else {
+        $User = $true
+    }
+}
 if ($User -and $Server) {
     Fail '-User with -Server would run agents as the account that holds your notes: install the Runtime Host as its own service (drop -User)'
 }
@@ -173,7 +210,7 @@ if ($User -and $admin) {
     Fail '-User installs the Runtime Host as you: run this in a PowerShell that is not elevated'
 }
 if ($Runtime -and -not $User -and -not $admin) {
-    Fail 'the Runtime Host installs a Windows service: run this in PowerShell as administrator (or add -User to run it as you)'
+    Fail "the Runtime Host runs as the StormRuntime service here ($serviceWhy): run this in PowerShell as administrator"
 }
 
 if (-not $Version -and -not $FromDir) {
@@ -199,7 +236,7 @@ if ($Runtime -and $User) {
     Say "  runtime  : $RuntimeZip, checked; storm-runtime install --user (a logon task as $env:USERNAME, no administrator)"
     Say "  enroll   : paste the enrollment string from the app (hidden)"
 } elseif ($Runtime) {
-    Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service) [administrator]"
+    Say "  runtime  : $RuntimeZip, checked; storm-runtime install (the StormRuntime service: $serviceWhy) [administrator]"
     Say "  enroll   : $(if ($Server) { 'with the server on this machine' } else { 'paste the enrollment string from the app (hidden)' })"
     if ($Workspace) { Say "  workspace: $Workspace" }
 }

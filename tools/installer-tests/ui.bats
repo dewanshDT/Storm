@@ -104,14 +104,17 @@ typed() {
   [ -n "$REAL_PYTHON" ] || skip "no python3 for the pty driver"
   make_assets 0.6.0
   unset STORM_TTY NO_COLOR
-  # Custom… (four downs), tick server and runtime, keep the three defaults,
-  # Install, then "Set a password here" for the account.
+  # Custom… (four downs), tick server and runtime, the runtime as its own
+  # account (one down), keep the three defaults, Install, then "Set a
+  # password here" for the account.
   run env TERM=xterm-256color "$REAL_PYTHON" "$BATS_TEST_DIRNAME/pty_drive.py" \
-    '\x1b[B' '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' '\r' '\r' '\r' '\r' 'j' '\r' 'scratch\r' -- \
+    '\x1b[B' '\x1b[B' '\x1b[B' '\x1b[B' '\r' ' ' 'j' ' ' '\r' 'j' '\r' '\r' '\r' '\r' '\r' 'j' '\r' 'scratch\r' -- \
     bash -c 'source "$1"; POLL_SLEEP=0; HEALTH_TRIES=2; storm_main --from-dir "$2"' _ "$INSTALLER" "$ASSETS"
   [[ "$output" == *"EXIT=0"* ]]
   [[ "$output" == *"› Custom…"* ]]
   [[ "$output" == *"› [x] Storm server"* ]]
+  [[ "$output" == *"How should the Runtime Host run?"* ]]
+  [[ "$output" == *"› As its own account"* ]]
   [[ "$output" == *"› Set a password here"* ]]
   [[ "$output" == *"Summary"* ]]
   [ -f "$STORM_TEST_SYSROOT/var/lib/storm-runtime/host.json" ]
