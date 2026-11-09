@@ -163,6 +163,48 @@ dry() {
   [ "$status" -eq 0 ]
 }
 
+@test "macos runtime --user: a LaunchAgent as you, enrolled and checked without sudo" {
+  use_macos
+  dry --runtime --agents --enroll-from-stdin --user
+  [ "$status" -eq 0 ]
+  descs=$(plan_descs "$output")
+  bin="'$HOME/Library/Application Support/StormRuntime/bin/storm-runtime'"
+  [[ "$descs" == *"Install the Runtime Host as a LaunchAgent running as tester"* ]]
+  [[ "$output" == *"./storm-runtime install --user"* ]]
+  [[ "$output" == *"| $bin enroll"* ]]
+  [[ "$output" == *"$bin check"* ]]
+  [[ "$output" == *"Set workspace_roots in $HOME/Library/Application Support/StormRuntime/runtime.toml"* ]]
+  [[ "$output" == *"the logins you already have"* ]]
+  [[ "$output" != *"LaunchDaemon"* ]]
+  [[ "$output" != *"_stormruntime"* ]]
+  [ -z "$(plan_steps "$output" | grep sudo)" ]
+  run assert_sudo_marks_consistent "$output"
+  [ "$status" -eq 0 ]
+  [ ! -s "$FAKE_LOG" ]
+}
+
+@test "macos runtime --user: a CLI in your home is the host's" {
+  use_macos
+  mkdir -p "$HOME/.local/bin"
+  cp "$FAKE_DIR/tools/claude" "$HOME/.local/bin/claude"
+  dry --runtime --agents --enroll-from-stdin --user
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"Install Claude Code"* ]]
+  [[ "$output" != *"can't run"* ]]
+}
+
+@test "macos uninstall of a host installed as you: its own uninstall --user, no sudo" {
+  use_macos
+  install_fake macos-runtime-user
+  run storm_main --dry-run --from-dir "$ASSETS" uninstall --runtime
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Remove the Runtime Host's LaunchAgent and binary"* ]]
+  [[ "$output" == *"'$HOME/Library/Application Support/StormRuntime/bin/storm-runtime' uninstall --user"* ]]
+  [ -z "$(plan_steps "$output" | grep sudo)" ]
+  run assert_sudo_marks_consistent "$output"
+  [ "$status" -eq 0 ]
+}
+
 @test "macos on a release without the server tarball: unavailable, with the reason" {
   use_macos
   make_assets 0.5.0 runtime-tar app-zip apk

@@ -25,7 +25,7 @@ setup() {
   [ "$DEBIAN_LIKE" = 1 ]
 }
 
-@test "fedora: the server and runtime are unavailable, with a pointer to the binaries" {
+@test "fedora: the server is unavailable, with a pointer to the binaries" {
   os_release fedora
   platform
   [ "$DEBIAN_LIKE" = 0 ]
@@ -82,6 +82,30 @@ setup() {
   [ "$LOG_FILE" = "$HOME/Library/Logs/Storm/install.log" ]
 }
 
+@test "macOS paths for the host as you (--user): your own, the same as storm-runtime's" {
+  use_macos
+  OPT_USER=1 platform
+  [ "$RT_USER" = 1 ]
+  [ "$RT_ACCOUNT" = tester ]
+  [ "$RT_BIN" = "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" ]
+  [ "$RT_STATE" = "$HOME/Library/Application Support/StormRuntime/state" ]
+  [ "$RT_CONFIG" = "$HOME/Library/Application Support/StormRuntime/runtime.toml" ]
+  [ -z "$RT_WORKSPACES" ]
+  [ "$WS_SUDO" = 0 ]
+}
+
+@test "macOS: a host installed as you is found without --user; the LaunchDaemon wins" {
+  use_macos
+  install_fake macos-runtime-user
+  platform
+  [ "$RT_USER" = 1 ]
+  [ "$RT_BIN" = "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" ]
+  install_fake macos-runtime
+  platform
+  [ "$RT_USER" = 0 ]
+  [ "$RT_ACCOUNT" = _stormruntime ]
+}
+
 @test "linux paths, and the log under XDG_STATE_HOME" {
   platform
   [ "$RT_ACCOUNT" = storm-runtime ]
@@ -95,8 +119,9 @@ setup() {
 
 @test "without the test flag the sysroot is ignored" {
   STORM_INSTALL_TEST=0 platform
-  [ "$RT_STATE" = /var/lib/storm-runtime ]
   [ "$DEFAULT_DATA" = /srv/storm ]
+  # This machine's own os-release decides; elsewhere the runtime is the user's.
+  if [ "$DEBIAN_LIKE" = 1 ]; then [ "$RT_STATE" = /var/lib/storm-runtime ]; fi
 }
 
 @test "the LAN address: ip route on Linux, ipconfig on macOS" {

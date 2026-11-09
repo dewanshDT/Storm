@@ -58,6 +58,11 @@ enum Command {
         /// service account, and never as root.
         #[arg(long)]
         exclusive_account: bool,
+        /// Append the log to this file instead of standard output, keeping
+        /// one previous file past 10 MiB. Windows' logon task passes it: its
+        /// console has no window.
+        #[arg(long)]
+        log_file: Option<PathBuf>,
     },
     /// The agent's stdio MCP server for one gateway connection. Started by
     /// the agent CLI from the session's MCP config, never by hand: it reads
@@ -135,12 +140,25 @@ enum Command {
     /// LaunchDaemon, which runs the host once it is enrolled. Windows (in an
     /// elevated shell): creates `C:\ProgramData\StormRuntime` and the
     /// `StormRuntime` service, which enrolling starts. Re-run it to upgrade.
-    /// On Linux the package does this.
+    /// On Linux the package does this, and `--user` runs the host as you.
     Install {
         /// Who shares the workspace root with the host. Defaults to the user
         /// who ran sudo.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "user")]
         operator: Option<String>,
+        /// Install the host as yourself instead, with no root. Linux: copy
+        /// this binary to `~/.local/bin`, write
+        /// `~/.config/systemd/user/storm-runtime.service` and enable it, and
+        /// turn on linger so it starts at boot without a login (or print the
+        /// one command an administrator runs for that). macOS: a LaunchAgent
+        /// in `~/Library/LaunchAgents`, with your own state, which runs while
+        /// you are logged in. Windows: a logon task, with your own state,
+        /// which runs while you are logged on, without elevation.
+        #[arg(long, conflicts_with = "operator")]
+        user: bool,
+        /// Linux, with `--user`: leave linger as it is.
+        #[arg(long, requires = "user")]
+        no_linger: bool,
     },
     /// Remove the system service `install` set up, as root (elevated on
     /// Windows). Workspaces are always kept.
@@ -148,6 +166,10 @@ enum Command {
         /// Also remove the host's identity, state, logs, config and account.
         #[arg(long)]
         purge: bool,
+        /// Remove what `install --user` set up, as yourself. On Linux and
+        /// macOS it leaves no file outside your home.
+        #[arg(long)]
+        user: bool,
     },
     /// Check this host's enrollment: verify the server, prove the key, and
     /// ask the server who it thinks this host is.
@@ -269,6 +291,8 @@ async fn main() -> Result<()> {
             .await?;
             if cfg!(windows) && storm_runtime::platform::is_service_state(&state) {
                 start_the_service();
+            } else if cfg!(windows) {
+                start_the_user_task(&state);
             }
             Ok(())
         }
@@ -278,13 +302,22 @@ async fn main() -> Result<()> {
             state,
             config,
             exclusive_account,
+            log_file,
         } => {
-            tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| "info".into()),
-                )
-                .init();
+            let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into());
+            match &log_file {
+                Some(path) => {
+                    let log = storm_runtime::platform::open_log(path)
+                        .with_context(|| format!("opening {}", path.display()))?;
+                    tracing_subscriber::fmt()
+                        .with_env_filter(filter)
+                        .with_ansi(false)
+                        .with_writer(std::sync::Mutex::new(log))
+                        .init();
+                }
+                None => tracing_subscriber::fmt().with_env_filter(filter).init(),
+            }
             if exclusive_account {
                 storm_runtime::platform::check_exclusive_account().map_err(anyhow::Error::msg)?;
             }
@@ -302,7 +335,11 @@ async fn main() -> Result<()> {
                     )
                 }
             };
-            match storm_runtime::serve::run(&state, &config, exclusive_account, stop).await? {
+            let outcome = storm_runtime::serve::run(&state, &config, exclusive_account, stop).await;
+            if let Err(e) | Ok(storm_runtime::serve::Outcome::Failed(e)) = &outcome {
+                tracing::error!(error = %format!("{e:#}"), "the host stopped");
+            }
+            match outcome? {
                 storm_runtime::serve::Outcome::Stopped => Ok(()),
                 // A refused key is final: exit with a status the unit is told
                 // not to restart on, rather than looping against a server
@@ -311,11 +348,20 @@ async fn main() -> Result<()> {
                 | storm_runtime::serve::Outcome::Failed(_) => std::process::exit(3),
             }
         }
-        Command::Install { operator } => {
-            storm_runtime::platform::install(&storm_runtime::platform::InstallOptions { operator })
-        }
-        Command::Uninstall { purge } => {
-            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions { purge })
+        Command::Install {
+            operator,
+            user,
+            no_linger,
+        } => storm_runtime::platform::install(&storm_runtime::platform::InstallOptions {
+            operator,
+            user,
+            no_linger,
+        }),
+        Command::Uninstall { purge, user } => {
+            storm_runtime::platform::uninstall(&storm_runtime::platform::UninstallOptions {
+                purge,
+                user,
+            })
         }
         Command::Check { state } => {
             let state = state_or_default(state)?;
@@ -387,6 +433,25 @@ fn start_the_service() {
              Start it from an elevated shell: Start-Service StormRuntime"
         ),
     }
+}
+
+/// After enrolling as yourself: the logon task `install --user` registered
+/// runs from now on (decision 151 E3).
+fn start_the_user_task(state: &std::path::Path) {
+    #[cfg(windows)]
+    match storm_runtime::platform::start_user_task(state) {
+        Ok(true) => {
+            println!("Started the host's logon task; it starts each time you log on from now on.")
+        }
+        Ok(false) => {}
+        Err(e) => println!(
+            "Enrolled, but the logon task did not start: {e:#}\n\
+             Start it yourself: schtasks /run /tn \"{}\"",
+            storm_runtime::platform::wintask::TASK
+        ),
+    }
+    #[cfg(not(windows))]
+    let _ = state;
 }
 
 fn state_or_default(state: Option<PathBuf>) -> Result<PathBuf> {

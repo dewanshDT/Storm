@@ -1,0 +1,26 @@
+# Storm Runtime Host, run as you by your systemd user manager (decision 151).
+#
+# `storm-runtime install --user` writes this to
+# ~/.config/systemd/user/storm-runtime.service with ExecStart filled in, and
+# rewrites it when re-run: put changes in `systemctl --user edit storm-runtime`.
+#
+# None of the system unit's sandboxing (deploy/storm-runtime.service): the
+# host and its agents run as you, the way your terminal does, so an agent's
+# own sandbox can use user namespaces. tests/packaging.rs keeps it this way.
+
+[Unit]
+Description=Storm Runtime Host (as you)
+Documentation=https://storm.dewansh.space/docs/agents/hosts/
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+ExecStart=@EXEC_START@
+Restart=on-failure
+RestartSec=3
+# Exit 3 is the server refusing this host's key: it was revoked.
+RestartPreventExitStatus=3
+
+[Install]
+WantedBy=default.target

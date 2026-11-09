@@ -1,5 +1,8 @@
 # /etc/storm-runtime/runtime.toml: the Storm Runtime Host's configuration
 # (freeze §5.7). Every value here is an operational default, not a limit.
+# A host you run as yourself reads ~/.config/storm-runtime/runtime.toml;
+# `storm-runtime install --user` writes one naming
+# ~/.local/state/storm-runtime/workspaces as its root (decision 151).
 
 # Each subdirectory of a root is a workspace, named by its directory name. A
 # root outside /var/lib/storm-runtime also needs a ReadWritePaths drop-in on
@@ -14,11 +17,23 @@ scrollback_bytes = 4194304
 # the storm-runtime account can reach (ProtectHome hides /home).
 # path = ["/usr/local/bin", "/usr/bin", "/bin"]
 
+# A host you run as yourself (not the service) uses your login shell's PATH
+# when `path` is omitted, and gives every session these variables from it
+# too (decision 151). An older host refuses this key.
+# import_env = ["HOMEBREW_PREFIX"]
+
 # A session gets your integrations beside the MCP servers its agent loads by
 # itself: the ones you added on this host, its plugins', a project's (under
 # the agent's own prompts). "storm-only" gives sessions Storm's servers alone
 # (decision 132).
 # agent_mcp = "own"
+
+# Which CODEX_HOME Codex sessions run in (decision 151 N3): "own" is the
+# account's ($CODEX_HOME, else ~/.codex), which Storm never writes, passing
+# its session settings as -c options; "storm" is <state>/agents/codex.
+# Omitted: "own" on a host you run as yourself, "storm" for the service,
+# with isolation on, and on Windows.
+# codex_home = "storm"
 
 # Agent CLIs from the app (decision 133): Settings › Agents may install,
 # update and remove Claude Code, OpenCode, Codex, Cursor and Command Code on

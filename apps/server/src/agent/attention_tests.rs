@@ -18,6 +18,8 @@ fn hello() -> Hello {
         "mcp_bridge": true,
         "identity": {"state": "verified", "mechanism": "so_peerpidfd", "reason": null},
         "isolation": {"state": "verified", "mechanism": "systemd_units", "reason": null},
+        "execution": {"account": "storm-runtime", "isolation": "per-session"},
+        "child_workspaces": true,
     }))
     .unwrap()
 }

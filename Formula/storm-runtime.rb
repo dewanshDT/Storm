@@ -23,9 +23,31 @@ class StormRuntime < Formula
     system "cargo", "install", *std_cargo_args(path: "apps/runtime")
   end
 
+  # `brew services start storm-runtime`: the host as you, a LaunchAgent with
+  # your own state (decision 151 E2), as `storm-runtime install --user` does.
+  # Never with sudo, which would run it as root on the service's state.
+  service do
+    run [opt_bin/"storm-runtime", "serve"]
+    run_type :immediate
+    # Not after a clean or refused exit: unenrolled and revoked hosts stay down.
+    keep_alive crashed: true
+    process_type :standard
+    environment_variables LANG: "en_US.UTF-8"
+    log_path var/"log/storm-runtime.log"
+    error_log_path var/"log/storm-runtime.log"
+  end
+
   def caveats
     <<~EOS
-      storm-runtime runs as a LaunchDaemon under its own hidden account,
+      To run the host as yourself, in your own session (your logins, your
+      Keychain, your folders; it stops when you log out), enroll it, then
+      start it with brew:
+        #{opt_bin}/storm-runtime enroll
+        brew services start storm-runtime
+      Never `sudo brew services`. `storm-runtime install --user` does the same
+      without brew; use one or the other.
+
+      Or run it as a LaunchDaemon under its own hidden account,
       _stormruntime, never as you. Install the service (copies this binary to
       /Library/StormRuntime/bin, creates the account and the plist):
         sudo #{opt_bin}/storm-runtime install

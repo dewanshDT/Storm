@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/crew_widgets.dart';
 import 'package:storm/agent/spawn_widgets.dart';
+import 'package:storm/agent/spawn_work.dart';
 import 'package:storm/router.dart';
 
 import 'agent_fakes.dart';
@@ -245,6 +246,50 @@ void main() {
           await disposeShell(t, c);
         },
       );
+    }
+
+    for (final size in [wide, phone]) {
+      testWidgets('151 N6: a child in its parent\'s workspace says so and has '
+          'no Work at ${size.width.toInt()}px', (t) async {
+        final agents = FakeAgentServer(
+          hosts: [agentHost()],
+          crews: [agentCrew('crw_1')],
+          sessions: [
+            inCrew(spawnSession('ags_p', name: 'gateway-impl'), 'crw_1', 0),
+            inCrew(
+              spawnSession(
+                'ags_c',
+                name: 'test-gateway',
+                parent: 'ags_p',
+                depth: 1,
+                ownWorkspace: false,
+                cwd: '/w/storm/crates/core',
+              ),
+              'crw_1',
+              0,
+            ),
+          ],
+        );
+        FakeSpawning(agents);
+        final c = await open(t, agents, size: size);
+        final row = find.byKey(const Key('session-ags_c'));
+        expect(
+          find.descendant(
+            of: row,
+            matching: find.text('↳ from gateway-impl · in storm'),
+          ),
+          findsOneWidget,
+        );
+        expect(find.textContaining('own copy'), findsNothing);
+        c
+            .read(routerProvider)
+            .go(Routes.agentSession('ags_c', tab: SessionTab.work.name));
+        await t.pumpAndSettle();
+        expect(find.text('Work'), findsNothing);
+        expect(find.text('WORK'), findsNothing);
+        expect(find.byType(ChildWorkPanel), findsNothing);
+        await disposeShell(t, c);
+      });
     }
 
     testWidgets('on the crew page its sub-line names its own copy, not '

@@ -66,11 +66,13 @@ jobs:
               - apps/runtime/**
               - tools/www-facts/**
               - deploy/storm-runtime.service
+              - deploy/storm-runtime-user.service
               - deploy/storm-runtime-isolation.*
               - deploy/runtime.toml.example
             installer:
               - deploy/install.sh
               - deploy/storm-backup.sh
+              - deploy/runtime-tarball.sh
               - tools/installer-tests/**
             client:
               - *vectors

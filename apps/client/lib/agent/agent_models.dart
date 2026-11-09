@@ -161,9 +161,11 @@ class AgentHost {
 
   bool get online => status == 'online';
 
-  /// C0 as its view says (134r, 141e): identity and isolation verified.
+  /// C0 as its view says (151 N6): the host says who it runs as, and one
+  /// set to isolate has its isolation verified. Identity is not a gate.
   bool get offersSpawning =>
-      identityState == 'verified' && isolationState == 'verified';
+      execution != null &&
+      (execution!.isolation == 'off' || isolationState == 'verified');
 
   bool get receivesClaudeLogin =>
       providerCredentials.contains('claude_subscription_token');
@@ -605,7 +607,6 @@ class AgentSession {
     this.launchRole,
     this.model,
     this.permissionMode,
-    this.modeRequest,
     this.deleteRequest,
   }) : name = name ?? workspace;
 
@@ -691,13 +692,9 @@ class AgentSession {
   /// own default.
   final String? model;
 
-  /// `accept_edits` or `auto` as the person chose at launch, or inherited
-  /// (decision 146b); null for the agent's own.
+  /// The mode the person chose at launch, or inherited (decisions 146b,
+  /// 151 N5); null for the agent's own.
   final String? permissionMode;
-
-  /// Its agent's request for auto (decision 147c), while it waits for the
-  /// person or once approved; null otherwise.
-  final ModeRequest? modeRequest;
 
   /// Its agent's deletion waiting for the person (decision 149); null
   /// otherwise.
@@ -730,6 +727,11 @@ class AgentSession {
 
   bool get isShell => provider == 'shell';
 
+  /// A child given its own workspace, `children/<id>` (137-1). Any other
+  /// child runs in a workspace of its host's, beside its parent (151 N6),
+  /// and has no work apart to review.
+  bool get hasOwnWorkspace => spawn.isChild && workspace == 'children/$id';
+
   /// The handoff's status words (§3.2); why it ended is [endDetail].
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
@@ -753,6 +755,8 @@ class AgentSession {
       'credential_unavailable' => 'no credential this host may use',
       // Decision 136j: the host's isolation was not verified.
       'isolation_unavailable' => 'isolation unavailable on this host',
+      // 151 N6: the directory it was to start in is gone.
+      'cwd_gone' => 'working directory no longer exists',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',
@@ -844,7 +848,6 @@ class AgentSession {
     launchRole: launchRole,
     model: model,
     permissionMode: permissionMode,
-    modeRequest: modeRequest,
     deleteRequest: deleteRequest,
   );
 
@@ -908,9 +911,6 @@ class AgentSession {
         : RoleRef.fromJson(_map(j['launch_role'])!),
     model: j['model'] as String?,
     permissionMode: permissionModeOf(j['permission_mode']),
-    modeRequest: _map(j['mode_request']) == null
-        ? null
-        : ModeRequest.fromJson(_map(j['mode_request'])!),
     deleteRequest: _map(j['delete_request']) == null
         ? null
         : DeleteRequest.fromJson(_map(j['delete_request'])!),
@@ -981,72 +981,48 @@ class DeleteRequest {
   );
 }
 
-/// An agent's request for auto (decision 147c). The reason is the agent's
-/// own words: shown as data, never acted on.
-class ModeRequest {
-  const ModeRequest({
-    required this.id,
-    required this.mode,
-    required this.reason,
-    required this.expiresAt,
-    required this.state,
-    this.switchedTo,
-    this.switchFailed = false,
-  });
-
-  final String id;
-  final String mode;
-  final String reason;
-  final DateTime? expiresAt;
-
-  /// `pending`, `approved`, `denied` or `expired`.
-  final String state;
-
-  /// The session the approved switch resumed into.
-  final String? switchedTo;
-  final bool switchFailed;
-
-  bool get pending => state == 'pending';
-  bool get approved => state == 'approved';
-
-  factory ModeRequest.fromJson(Map<String, dynamic> j) => ModeRequest(
-    id: j['id'] as String,
-    mode: j['mode'] as String? ?? 'auto',
-    reason: j['reason'] as String? ?? '',
-    expiresAt: DateTime.tryParse(j['expires_at'] as String? ?? ''),
-    state: j['state'] as String? ?? 'pending',
-    switchedTo: j['switched_to'] as String?,
-    switchFailed: j['switch_failed'] == true,
-  );
-}
-
-/// The permission modes each agent offers at launch (decision 146b), the
-/// agent's own first. There is never a bypass.
+/// The permission modes each agent offers at launch (decisions 146b and
+/// 151 N5), the agent's own settings first. Each is passed to the agent as
+/// its own flag; the default passes nothing.
 const kPermissionModes = {
-  'claude-code': ['default', 'accept_edits', 'auto'],
+  'claude-code': [
+    'default',
+    'accept_edits',
+    'plan',
+    'auto',
+    'dont_ask',
+    'bypass',
+  ],
   'opencode': ['default', 'accept_edits'],
 };
 
 List<String> permissionModesOf(String? provider) =>
     kPermissionModes[provider] ?? const ['default'];
 
+const _knownModes = {'accept_edits', 'plan', 'auto', 'dont_ask', 'bypass'};
+
 /// Only a mode Storm knows; anything else reads as the agent's own.
 String? permissionModeOf(Object? v) =>
-    v == 'accept_edits' || v == 'auto' ? v as String : null;
+    _knownModes.contains(v) ? v as String : null;
 
 /// "accept edits", "auto": a row's word for a mode; null for the default.
 String? permissionModeWord(String? mode) => switch (mode) {
   'accept_edits' => 'accept edits',
+  'plan' => 'plan',
   'auto' => 'auto',
+  'dont_ask' => "don't ask",
+  'bypass' => 'bypass',
   _ => null,
 };
 
-/// The launcher's and About's name for a mode. The one that asks is
-/// Manual, as Claude Code itself now calls it (decision 147a).
+/// The launcher's and About's name for a mode, in plain words.
 String permissionModeLabel(String mode) => switch (mode) {
   'accept_edits' => 'Accept edits',
+  'plan' => 'Plan',
   'auto' => 'Auto',
-  _ => 'Manual (asks)',
+  'dont_ask' => "Don't ask (refuses what isn't allowed)",
+  'bypass' => 'Bypass permissions (never asks)',
+  _ => "The agent's own setting",
 };
 
 /// Everything the launch answer says out loud: the MCP notice, then the

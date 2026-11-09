@@ -36,8 +36,9 @@ use windows_sys::Win32::System::Registry::{
     HKEY_LOCAL_MACHINE, RRF_NOEXPAND, RRF_RT_REG_EXPAND_SZ, RRF_RT_REG_SZ, RegGetValueW,
 };
 use windows_sys::Win32::System::Threading::{
-    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
-    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, TerminateProcess,
+    GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE, QueryFullProcessImageNameW,
+    TerminateProcess,
 };
 
 use super::winsvc::{self, DriveKind, Layout};
@@ -420,6 +421,44 @@ pub fn sweep_account(_grace: Duration) -> (usize, usize) {
         }
     }
     (targets.len(), killed)
+}
+
+/// Terminates every other process of this account running `image`: a host
+/// the logon task started, whose task's end may reach only its console.
+/// Returns how many it ended.
+pub(crate) fn end_processes_of(image: &Path) -> usize {
+    let image = winsvc::normalize(&image.to_string_lossy());
+    let mut ended = 0;
+    for pid in sweep_targets().unwrap_or_default() {
+        // SAFETY: plain calls; the handle is closed by `Handle`.
+        let process = Handle(unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                0,
+                pid,
+            )
+        });
+        if process.0.is_null() {
+            continue;
+        }
+        let mut buf = vec![0u16; 32 * 1024];
+        let mut len = buf.len() as u32;
+        // SAFETY: `buf` holds `len` characters.
+        let named = unsafe {
+            QueryFullProcessImageNameW(process.0, PROCESS_NAME_WIN32, buf.as_mut_ptr(), &mut len)
+        } != 0;
+        if !named {
+            continue;
+        }
+        let path = OsString::from_wide(&buf[..len as usize]);
+        if winsvc::normalize(&path.to_string_lossy()).eq_ignore_ascii_case(&image)
+            // SAFETY: a live handle opened with PROCESS_TERMINATE.
+            && unsafe { TerminateProcess(process.0, 1) } != 0
+        {
+            ended += 1;
+        }
+    }
+    ended
 }
 
 // ---- private files and the pipe's DACL (AM49, AM55) ----------------------

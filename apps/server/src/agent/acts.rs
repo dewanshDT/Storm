@@ -3,8 +3,7 @@
 //! person's standing approval (141e); every check of 134 stays (C0, the
 //! switch, scope, the caps), and every act is recorded and audited.
 //!
-//! Dark: C0 refuses on every host until a host's own report says its
-//! identity and isolation are verified.
+//! C0 refuses on a host too old to say who its processes run as (151 N6).
 
 use super::credential;
 use super::store::SessionRecord;
@@ -15,14 +14,12 @@ use super::{AgentError, AgentManager, AgentResult, Capabilities, now};
 
 /// The agents a host can start a child in besides its parent's own (143a):
 /// installed for the terminal, given Storm's servers there (`mcp: true`,
-/// 130a), and never `shell`; since 148a, only an agent that can run without
-/// ever asking. `(id, kind)`, in the host's order.
+/// 130a), and never `shell`. `(id, kind)`, in the host's order.
 pub fn child_agents(caps: &Capabilities) -> Vec<(String, String)> {
     caps.providers
         .iter()
         .filter(|p| {
             p.id != "shell"
-                && super::permission::unattended(&p.id)
                 && p.available
                 && p.mcp == Some(true)
                 && p.interactions.iter().any(|i| i == "terminal")
@@ -40,18 +37,18 @@ impl AgentManager {
             .with_live(host_id, |caps| HostNow {
                 max_sessions: caps.max_sessions,
                 agents: child_agents(caps),
+                child_workspaces: caps.child_workspaces,
+                workspace_paths: caps.listed_workspace_paths(),
             })
             .unwrap_or_default())
     }
 
     /// What `session_id` may ask a child to run now (143b): its own agent
-    /// first, when it can run as a child (148a), then each other its host's
-    /// live link reports for a child.
+    /// first, then each other its host's live link reports for a child.
     pub fn startable_agents(&self, session_id: &str) -> AgentResult<Vec<String>> {
         let r = self.get(session_id)?;
         let others = self.with_live(&r.host_id, child_agents).unwrap_or_default();
         Ok(std::iter::once(r.provider.clone())
-            .filter(|own| super::permission::unattended(own))
             .chain(
                 others
                     .into_iter()
@@ -222,13 +219,14 @@ impl AgentManager {
         let parent = parent.map(|p| self.get(&p)).transpose()?;
         let start = parent.and_then(|parent| {
             let caps = self.host_live(&child.host_id).capabilities?;
-            let (mcp, model, permission_mode) = {
+            let (mcp, model, permission_mode, cwd) = {
                 let store = self.store.lock().unwrap();
                 let launch = store.launch(&child.id).ok()?;
                 (
                     store.grants_of(&child.id).ok()?,
                     launch.as_ref().and_then(|l| l.model.clone()),
-                    launch.and_then(|l| l.permission_mode),
+                    launch.as_ref().and_then(|l| l.permission_mode.clone()),
+                    launch.and_then(|l| l.cwd),
                 )
             };
             let reads_storm = mcp
@@ -255,6 +253,7 @@ impl AgentManager {
                     spawn: false,
                     resumed_from: None,
                     child_of: Some(parent.id.clone()),
+                    cwd,
                 },
             ))
         });

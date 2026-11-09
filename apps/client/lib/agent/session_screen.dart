@@ -31,7 +31,6 @@ import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
 import 'delete_request.dart';
-import 'mode_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
 import 'session_inspector.dart';
@@ -187,11 +186,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       Padding(
         padding: padding,
         child: DeleteRequestCard(session: s),
-      ),
-    if (s.modeRequest case final r? when (r.pending && !s.ended) || r.approved)
-      Padding(
-        padding: padding,
-        child: ModeRequestCard(session: s),
       ),
     if (_endTree && !s.ended)
       Padding(
@@ -578,7 +572,9 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 session: s,
                 onOpen: (at) => setState(() => _wroteNote = at),
               ),
-      SessionTab.about => SingleChildScrollView(
+      SessionTab.work when s.hasOwnWorkspace => ChildWorkPanel(session: s),
+      // A shared-workspace child has no Work tab (151 N6).
+      SessionTab.about || SessionTab.work => SingleChildScrollView(
         padding: EdgeInsets.symmetric(
           horizontal: t.sp * 2,
           vertical: t.sp * 2.75,
@@ -586,7 +582,6 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: _About(session: s, host: host),
       ),
       SessionTab.requests => ActsPanel(session: s),
-      SessionTab.work => ChildWorkPanel(session: s),
     };
     return ColoredBox(
       color: t.bg,
@@ -615,7 +610,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                       (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
                       (SessionTab.about, 'About'),
                       if (showsActs(s)) (SessionTab.requests, 'Activity'),
-                      if (s.spawn.isChild) (SessionTab.work, 'Work'),
+                      if (s.hasOwnWorkspace) (SessionTab.work, 'Work'),
                     ],
                     selected: tab,
                     onSelected: (next) {
@@ -1582,7 +1577,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             ActsPanel(session: s, sheet: true),
           ],
         ),
-      if (s.spawn.isChild)
+      if (s.hasOwnWorkspace)
         Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [

@@ -17,8 +17,8 @@ import 'spawn_fakes.dart';
 /// events, how many its agent has not read, and where a less-than-certain
 /// signal came from; a child's activity reads "Unknown" until a gated
 /// signal says more, and never as working. Since decision 148 a child's
-/// denials show there and in its parent's Activity, and its prompt is a
-/// fault, never Needs you.
+/// denials show there and in its parent's Activity, and since 151 N5 its
+/// own prompt is an ordinary permission prompt.
 void main() {
   const edge = Size(900, 700);
   const wide = Size(1400, 900);
@@ -73,7 +73,7 @@ void main() {
           2,
           'ags_c',
           'needs_attention',
-          reason: 'unexpected_prompt',
+          reason: 'permission_prompt',
           needsAttention: 'permission_prompt',
           source: 'provider_hook',
           confidence: 'reported',
@@ -141,10 +141,9 @@ void main() {
           findsOneWidget,
         );
         expect(
-          find.text('Unexpected prompt · ${clockAt(DateTime.parse(promptAt))}'),
+          find.text('Permission prompt · ${clockAt(DateTime.parse(promptAt))}'),
           findsOneWidget,
         );
-        expect(find.textContaining('Needs you'), findsNothing);
         expect(
           find.text('Denied Bash ×3 · ${clockAt(DateTime.parse(deniedAt))}'),
           findsOneWidget,
@@ -340,8 +339,8 @@ void main() {
     expect(childEventLabel(event('usage_limit')), 'Out of usage');
     expect(childEventLabel(event('parked')), 'Parked until its next message');
     expect(
-      childEventLabel(event('needs_attention', reason: 'unexpected_prompt')),
-      'Unexpected prompt',
+      childEventLabel(event('needs_attention', reason: 'permission_prompt')),
+      'Permission prompt',
     );
     final denied = ChildEvent.fromJson(
       childEvent('ags_p', 2, 'ags_c', 'denied', tool: 'Write', detail: '/x'),

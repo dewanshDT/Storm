@@ -3,7 +3,8 @@
 //! Root only, and idempotent: every step checks what is there before it acts,
 //! so re-running `install` is how a host is upgraded. Every external command
 //! is called by absolute path, because this runs as root with the invoking
-//! user's `PATH`.
+//! user's `PATH`. `--user` is the exception: the LaunchAgent a person
+//! installs as themselves, without sudo (decision 151 E2).
 
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt, chown};
 use std::path::Path;
@@ -13,7 +14,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::launchd::{
-    LABEL, Layout, NO_LOGIN_SHELL, default_config, git_safe_directory, plist,
+    LABEL, Layout, NO_LOGIN_SHELL, UserFacts, UserLayout, UserStep, default_config,
+    git_safe_directory, plan_user_install, plist, shell_quote, user_default_config, user_plist,
     with_git_safe_directory,
 };
 use super::{InstallOptions, SERVICE_ACCOUNT, UninstallOptions};
@@ -269,6 +271,9 @@ fn install_binary(layout: &Layout) -> Result<()> {
 }
 
 pub fn install(options: &InstallOptions) -> Result<()> {
+    if options.user {
+        return install_user();
+    }
     require_root("install")?;
     let layout = Layout::standard();
     let operator = operator(options)?;
@@ -372,6 +377,9 @@ pub fn install(options: &InstallOptions) -> Result<()> {
 }
 
 pub fn uninstall(options: &UninstallOptions) -> Result<()> {
+    if options.user {
+        return uninstall_user(options.purge);
+    }
     require_root("uninstall")?;
     let layout = Layout::standard();
     if loaded() {
@@ -431,5 +439,187 @@ pub fn uninstall(options: &UninstallOptions) -> Result<()> {
             layout.workspaces.display()
         );
     }
+    Ok(())
+}
+
+fn user_layout() -> Result<UserLayout> {
+    match std::env::var_os("HOME") {
+        Some(h) if !h.is_empty() => Ok(UserLayout::for_home(Path::new(&h))),
+        _ => bail!("HOME is not set"),
+    }
+}
+
+fn user_loaded(domain: &str) -> bool {
+    succeeds(LAUNCHCTL, &["print", &format!("{domain}/{LABEL}")])
+}
+
+/// The domains a LaunchAgent of `uid` can be loaded in.
+fn user_domains(uid: u32) -> [String; 2] {
+    [format!("gui/{uid}"), format!("user/{uid}")]
+}
+
+fn bootout_user(uid: u32) -> Result<()> {
+    for domain in user_domains(uid) {
+        if !user_loaded(&domain) {
+            continue;
+        }
+        // SIGTERM: the host ends its sessions in order (AM37).
+        let _ = run(LAUNCHCTL, &["bootout", &format!("{domain}/{LABEL}")]);
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        while user_loaded(&domain) {
+            if std::time::Instant::now() > deadline {
+                bail!("launchd still has {domain}/{LABEL} 20 s after bootout");
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+    Ok(())
+}
+
+/// Boots the agent out of every domain and into `domain`, so it picks up a
+/// new plist and binary.
+fn load_user(uid: u32, domain: &str, plist: &Path) -> Result<()> {
+    bootout_user(uid)?;
+    let _ = run(LAUNCHCTL, &["enable", &format!("{domain}/{LABEL}")]);
+    let plist = plist.display().to_string();
+    let mut last = None;
+    for _ in 0..20 {
+        match run(LAUNCHCTL, &["bootstrap", domain, &plist]) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(last.unwrap()).context("loading the LaunchAgent")
+}
+
+fn write_user_file(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    let tmp = path.with_extension("storm-tmp");
+    let _ = std::fs::remove_file(&tmp);
+    std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("installing {}", path.display()))?;
+    Ok(())
+}
+
+fn install_user() -> Result<()> {
+    let layout = user_layout()?;
+    let uid = rustix::process::getuid().as_raw();
+    let facts = UserFacts {
+        uid,
+        root: rustix::process::geteuid().is_root(),
+        service_account: super::current_account().as_deref() == Some(SERVICE_ACCOUNT),
+        gui_session: succeeds(LAUNCHCTL, &["print", &format!("gui/{uid}")]),
+        config_exists: layout.config.exists(),
+        brew_service: layout.brew_plist.exists(),
+        daemon_installed: Layout::standard().plist.exists(),
+        server_here: layout
+            .home
+            .join("Library/Application Support/Storm/server.json")
+            .exists(),
+    };
+    let (steps, notes) = plan_user_install(&layout, &facts).map_err(anyhow::Error::msg)?;
+    let mut domain = String::new();
+    for step in steps {
+        match step {
+            UserStep::PrivateDir(dir) => {
+                if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
+                    bail!("{} is a symlink", dir.display());
+                }
+                super::tighten_private_dir(&dir)
+                    .with_context(|| format!("creating {}", dir.display()))?;
+            }
+            UserStep::Dir(dir) => std::fs::create_dir_all(&dir)
+                .with_context(|| format!("creating {}", dir.display()))?,
+            UserStep::Binary => {
+                let exe = std::env::current_exe()
+                    .and_then(|p| p.canonicalize())
+                    .context("finding this binary")?;
+                if layout.bin.canonicalize().ok().as_deref() != Some(exe.as_path()) {
+                    // Read and written, not copied: a copy keeps a download's
+                    // quarantine attribute.
+                    let bytes = std::fs::read(&exe)
+                        .with_context(|| format!("reading {}", exe.display()))?;
+                    write_user_file(&layout.bin, &bytes, 0o755)?;
+                }
+            }
+            UserStep::Config => write_user_file(
+                &layout.config,
+                user_default_config(&layout).as_bytes(),
+                0o600,
+            )?,
+            UserStep::Plist => {
+                write_user_file(&layout.plist, user_plist(&layout).as_bytes(), 0o644)?
+            }
+            UserStep::Load { domain: d } => {
+                load_user(uid, &d, &layout.plist)?;
+                domain = d;
+            }
+        }
+    }
+
+    let bin = shell_quote(&layout.bin.display().to_string());
+    println!("Installed the Storm Runtime Host as you.");
+    println!("  service : {domain}/{LABEL} (a LaunchAgent; it runs while you are logged in)");
+    println!("  plist   : {}", layout.plist.display());
+    println!("  binary  : {}", layout.bin.display());
+    println!("  state   : {}", layout.state.display());
+    println!("  config  : {}", layout.config.display());
+    println!("  logs    : {}", layout.log_file.display());
+    for note in &notes {
+        println!("\n{note}");
+    }
+    if layout.enrolled_marker().exists() {
+        println!("\nThis host is enrolled; launchd restarted it with this binary.");
+    } else {
+        println!("\nNext, enroll it. In the Storm app: Agents > Hosts > Enroll a host, then run:");
+        println!("  {bin} enroll");
+        println!("launchd starts the host as soon as it is enrolled. To see it:");
+        println!("  launchctl print {domain}/{LABEL}");
+    }
+    println!("\nName the folders agents may work in: workspace_roots in");
+    println!("  {}", layout.config.display());
+    println!("then restart the host: launchctl kickstart -k {domain}/{LABEL}");
+    println!("\nThe agents run as you, so the CLIs you use and their logins are the host's:");
+    println!("Claude Code's login in your Keychain works here, and macOS asks you before");
+    println!("an agent reads a protected folder. Logging out stops the host.");
+    Ok(())
+}
+
+fn uninstall_user(purge: bool) -> Result<()> {
+    if rustix::process::geteuid().is_root() {
+        bail!("uninstall --user removes the host you installed as yourself: run it without sudo");
+    }
+    let layout = user_layout()?;
+    bootout_user(rustix::process::getuid().as_raw())?;
+    let remove = |p: &Path| match std::fs::remove_file(p) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", p.display()))
+        }
+        _ => Ok(()),
+    };
+    remove(&layout.plist)?;
+    remove(&layout.bin)?;
+    let _ = std::fs::remove_dir(layout.bin.parent().expect("bin has a parent"));
+    println!("Removed the LaunchAgent and the binary.");
+    if purge {
+        for d in [&layout.state, &layout.logs] {
+            match std::fs::remove_dir_all(d) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e).with_context(|| format!("removing {}", d.display()));
+                }
+                _ => {}
+            }
+        }
+        remove(&layout.config)?;
+        let _ = std::fs::remove_dir(&layout.root);
+        println!("Purged the host's identity, state, logs and config.");
+    } else {
+        println!(
+            "Kept the identity, state, logs and config; \
+             `storm-runtime uninstall --user --purge` removes them."
+        );
+    }
+    println!("Your workspaces were not touched.");
     Ok(())
 }

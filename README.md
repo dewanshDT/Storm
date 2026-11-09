@@ -161,6 +161,18 @@ sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```
 
+Or as yourself, with no root, on any Linux with systemd: the
+`storm-runtime-<version>-x86_64-linux.tar.gz` release tarball (or the
+installer's `--runtime --user`) installs a `systemd --user` unit that runs as
+you, and linger starts it at boot without a login:
+
+```sh
+./storm-runtime install --user                   # prints the linger command if it needs an administrator
+~/.local/bin/storm-runtime enroll
+systemctl --user start storm-runtime
+~/.local/bin/storm-runtime uninstall --user      # leaves nothing outside your home
+```
+
 Providers are `claude-code` (default), `opencode`, `codex`, `cursor`,
 `command-code` and `shell`; Cursor and Command Code run as terminals, with no
 notes or integrations yet. Workspaces and limits live in
@@ -302,8 +314,7 @@ vault's Trash for 30 days. See
 An agent in a Storm session gets the same tools through the MCP Gateway, plus
 `session_context`, with differences. With a write vault, `delete_note` and
 `delete_folder` each wait for the person to Approve in the app, every time.
-A Claude Code session no agent started has `request_permission_mode` to ask
-for Auto. Where
+Where
 spawning is on (above), the session gets `start_agent`, `list_agents`,
 `agent_status`, `list_children`, `wait_agent`, `send_message`, `end_agent`
 and `read_output`, and the agents it starts get `report_result` and

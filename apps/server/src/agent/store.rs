@@ -105,6 +105,9 @@ pub struct LaunchRecord {
     pub model: Option<String>,
     /// Its permission mode (decision 146b); `None` is `default`.
     pub permission_mode: Option<String>,
+    /// The directory it was started in when not its workspace's own (151
+    /// N6): a child's `cwd`, kept for its resume.
+    pub cwd: Option<String>,
 }
 
 /// The note a session was started from, or its launch role. The title is a
@@ -358,6 +361,7 @@ impl Store {
             ("session_launch", "role_title"),
             ("session_launch", "model"),
             ("session_launch", "permission_mode"),
+            ("session_launch", "cwd"),
         ] {
             let has = conn
                 .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
@@ -368,7 +372,6 @@ impl Store {
         }
         spawn::init(&conn)?;
         super::events::init(&conn)?;
-        super::mode::init(&conn)?;
         super::deletes::init(&conn)?;
         conn.execute_batch(
             "-- One-time upgrades, each recorded with what it did and when the
@@ -687,7 +690,7 @@ impl Store {
             .query_row(
                 "SELECT session_id, name, context_vault_id, context_note_id, context_title,
                      write_vault_id, role_vault_id, role_note_id, role_title, model,
-                     permission_mode
+                     permission_mode, cwd
                  FROM session_launch WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -712,6 +715,7 @@ impl Store {
                         role: note(6)?,
                         model: r.get(9)?,
                         permission_mode: r.get(10)?,
+                        cwd: r.get(11)?,
                     })
                 },
             )
@@ -1311,8 +1315,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
              context_title, write_vault_id, created_at, role_vault_id, role_note_id,
-             role_title, model, permission_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             role_title, model, permission_mode, cwd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             l.session_id,
             l.name,
@@ -1325,7 +1329,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
             role_note,
             role_title,
             l.model,
-            l.permission_mode
+            l.permission_mode,
+            l.cwd
         ],
     )?;
     Ok(())
@@ -1945,6 +1950,11 @@ pub mod spawn {
         /// A crew role (138), applied as a launch role is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub role: Option<super::Context>,
+        /// Where it starts on a host without child workspaces (151 N6): a
+        /// directory inside one of the host's listed workspaces. The
+        /// parent's workspace when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cwd: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1984,6 +1994,75 @@ pub mod spawn {
         /// `(id, kind)` of each agent a child may run there other than its
         /// parent's own (143a): installed, with Storm's servers, not `shell`.
         pub agents: Vec<(String, String)>,
+        /// The host makes each child its own workspace (137-1); every other
+        /// host starts a child in a workspace of its own listing.
+        pub child_workspaces: bool,
+        /// `(name, canonical directory)` of each workspace the host lists.
+        pub workspace_paths: Vec<(String, String)>,
+    }
+
+    /// The longest `cwd` a start may name, in bytes.
+    pub const MAX_CWD_BYTES: usize = 4096;
+
+    /// Where a child starts (151 N6): its own workspace on a host that makes
+    /// one, else a listed workspace, in `cwd` when the start named one.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ChildPlace {
+        Own,
+        Shared {
+            workspace: String,
+            cwd: Option<String>,
+        },
+    }
+
+    /// The listed workspace `cwd` lies in, as the host's canonical paths
+    /// say: an absolute path equal to one, or under one with no `.`, `..`
+    /// or empty part. The host checks it again on disk (R3.3). The deepest
+    /// match wins, for overlapping roots.
+    pub fn cwd_workspace(cwd: &str, paths: &[(String, String)]) -> Option<String> {
+        if cwd.is_empty() || cwd.len() > MAX_CWD_BYTES || cwd.chars().any(char::is_control) {
+            return None;
+        }
+        paths
+            .iter()
+            .filter(|(_, path)| !path.is_empty())
+            .filter_map(|(name, path)| {
+                let rest = cwd.strip_prefix(path.as_str())?;
+                if rest.is_empty() {
+                    return Some((name, path.len()));
+                }
+                let rest = rest.strip_prefix(['/', '\\'])?;
+                rest.split(['/', '\\'])
+                    .all(|part| !matches!(part, "" | "." | ".."))
+                    .then_some((name, path.len()))
+            })
+            .max_by_key(|(_, len)| *len)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Where `parent`'s child starts on `host`, or the refusal: a `cwd` on
+    /// a host that makes a child its own workspace is `cwd_not_applicable`,
+    /// and one outside every listed workspace `bad_cwd`.
+    pub fn child_place(
+        parent: &SessionRecord,
+        cwd: Option<&str>,
+        host: &HostNow,
+    ) -> std::result::Result<ChildPlace, &'static str> {
+        match (host.child_workspaces, cwd) {
+            (true, None) => Ok(ChildPlace::Own),
+            (true, Some(_)) => Err("cwd_not_applicable"),
+            (false, None) => Ok(ChildPlace::Shared {
+                workspace: parent.workspace.clone(),
+                cwd: None,
+            }),
+            (false, Some(cwd)) => match cwd_workspace(cwd, &host.workspace_paths) {
+                Some(workspace) => Ok(ChildPlace::Shared {
+                    workspace,
+                    cwd: Some(cwd.to_string()),
+                }),
+                None => Err("bad_cwd"),
+            },
+        }
     }
 
     /// What the host's live link says now: C0's refusal, or what it reports.
@@ -1991,16 +2070,12 @@ pub mod spawn {
 
     /// The child's agent and its kind: the parent's own when the start
     /// names none or names it, else one its host reports it can start a
-    /// child in (143a). `None` is `agent_unavailable`, as is an agent that
-    /// cannot run without asking (148a).
+    /// child in (143a). `None` is `agent_unavailable`.
     pub fn child_agent(
         parent: &SessionRecord,
         named: Option<&str>,
         host: &HostNow,
     ) -> Option<(String, String)> {
-        if !crate::agent::permission::unattended(named.unwrap_or(&parent.provider)) {
-            return None;
-        }
         match named {
             None => Some((parent.provider.clone(), parent.provider_kind.clone())),
             Some(p) if p == parent.provider => {
@@ -2155,7 +2230,15 @@ pub mod spawn {
                 ..StartPayload::default()
             };
             let agent = (parent.provider.clone(), parent.provider_kind.clone());
-            let mut child = spawn_child(&tx, &parent, agent, &payload, write_vault, &now)?;
+            let mut child = spawn_child(
+                &tx,
+                &parent,
+                agent,
+                &payload,
+                &ChildPlace::Own,
+                write_vault,
+                &now,
+            )?;
             child.status = "running".into();
             tx.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?1",
@@ -2779,11 +2862,15 @@ pub mod spawn {
             {
                 return Ok(Err(Refusal::because("name_taken")));
             }
+            let place = match child_place(&r, payload.cwd.as_deref(), &live) {
+                Ok(place) => place,
+                Err(reason) => return Ok(Err(Refusal::because(reason))),
+            };
             if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
             let writes = children_write(&tx, &r.id)?;
-            let child = spawn_child(&tx, &r, agent, payload, writes, now)?;
+            let child = spawn_child(&tx, &r, agent, payload, &place, writes, now)?;
             insert_act(
                 &tx,
                 act,
@@ -3127,6 +3214,12 @@ pub mod spawn {
         format!("children/{child}")
     }
 
+    /// Whether a child was given its own workspace (137-1), which only a
+    /// host that makes one does; every other child shares one (151 N6).
+    pub fn has_own_workspace(r: &SessionRecord) -> bool {
+        r.workspace == child_workspace(&r.id)
+    }
+
     /// Whether a session was launched with its children's writes ticked
     /// (151m); no spawn launch row is no.
     fn children_write(conn: &Connection, session_id: &str) -> Result<bool> {
@@ -3145,20 +3238,26 @@ pub mod spawn {
     /// parent's write vault only when `write_vault` (its launch ticked it,
     /// 151m) and the parent launched with one it may write; nothing wider.
     /// Spawn is off: a child has no switch row. Its workspace
-    /// is its own (137-1), its agent `agent` (143a), its name the one asked
-    /// for or one made from the task, unique among its live siblings, and
-    /// its model and role the start's (145b).
+    /// is its own (137-1) or the one `place` names (151 N6), its agent
+    /// `agent` (143a), its name the one asked for or one made from the
+    /// task, unique among its live siblings, and its model and role the
+    /// start's (145b).
     fn spawn_child(
         conn: &Connection,
         parent: &SessionRecord,
         (provider, provider_kind): (String, String),
         payload: &StartPayload,
+        place: &ChildPlace,
         write_vault: bool,
         now: &str,
     ) -> Result<SessionRecord> {
         let id = crate::auth::identity::random_id("ags_");
+        let (workspace, cwd) = match place {
+            ChildPlace::Own => (child_workspace(&id), None),
+            ChildPlace::Shared { workspace, cwd } => (workspace.clone(), cwd.clone()),
+        };
         let child = SessionRecord {
-            workspace: child_workspace(&id),
+            workspace,
             id,
             owner_user_id: parent.owner_user_id.clone(),
             host_id: parent.host_id.clone(),
@@ -3247,6 +3346,7 @@ pub mod spawn {
                 role: role.clone(),
                 model: payload.model.clone(),
                 permission_mode: payload.permission_mode.clone(),
+                cwd,
             },
             now,
         )?;

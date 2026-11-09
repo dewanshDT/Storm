@@ -50,6 +50,13 @@ pub struct RuntimeConfig {
     /// integrations (decision 132), or gets Storm's alone.
     #[serde(default)]
     pub agent_mcp: AgentMcp,
+    /// Which `CODEX_HOME` a Codex session runs in (decision 151 N3): the
+    /// account's own (`$CODEX_HOME`, else `~/.codex`), which Storm never
+    /// writes, or Storm's, `<state>/agents/codex`. Omitted: the account's own
+    /// for a host a person runs as themselves, Storm's for the service, with
+    /// isolation on, and on Windows.
+    #[serde(default)]
+    pub codex_home: Option<CodexHome>,
     /// Whether the app may install, update and remove agent CLIs on this
     /// host (decision 133). `"off"` is for an operator who pins CLIs by hand.
     #[serde(default)]
@@ -74,6 +81,14 @@ pub struct RuntimeConfig {
     /// And every child's on this host together (default 20 GiB).
     #[serde(default)]
     pub children_max: Option<u64>,
+    /// Variables a host run as a person (not the service) also reads from
+    /// their login shell and gives every session (decision 151 N7).
+    #[serde(default)]
+    pub import_env: Vec<String>,
+    /// Set at start on a host that is not the service: what its login shell
+    /// had ([`crate::login_env::for_host`]).
+    #[serde(skip)]
+    pub person: Option<crate::login_env::LoginEnv>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -107,6 +122,13 @@ pub enum AgentMcp {
     #[default]
     Own,
     StormOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodexHome {
+    Own,
+    Storm,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -153,12 +175,15 @@ impl Default for RuntimeConfig {
             forbidden_roots: default_forbidden(),
             plugin_mcp: PluginMcp::default(),
             agent_mcp: AgentMcp::default(),
+            codex_home: None,
             agent_install: AgentInstall::default(),
             agent_updates: AgentUpdates::default(),
             isolation: Isolation::default(),
             isolation_host_ports: Vec::new(),
             child_workspace_max: None,
             children_max: None,
+            import_env: Vec::new(),
+            person: None,
         }
     }
 }
@@ -208,7 +233,41 @@ impl RuntimeConfig {
         config.check_roots()?;
         config.check_host_ports()?;
         config.check_child_caps()?;
+        config.check_import_env()?;
+        config.check_codex_home()?;
         Ok(config)
+    }
+
+    pub fn check_import_env(&self) -> Result<()> {
+        if let Some(bad) = self
+            .import_env
+            .iter()
+            .find(|n| !crate::login_env::importable(n))
+        {
+            bail!("import_env: `{bad}` is not a variable name (PATH is always imported)");
+        }
+        Ok(())
+    }
+
+    /// An isolated session's home is a snapshot of Storm's Codex home
+    /// (136-4), so the account's own cannot be one.
+    pub fn check_codex_home(&self) -> Result<()> {
+        if self.isolated() && self.codex_home == Some(CodexHome::Own) {
+            bail!("codex_home = \"own\" cannot be used with isolation on");
+        }
+        Ok(())
+    }
+
+    /// The Codex home this host's sessions run in, for a host that acts for
+    /// the service (`service`) or not.
+    pub fn codex_home_for(&self, service: bool) -> CodexHome {
+        match self.codex_home {
+            Some(home) => home,
+            // Windows runs npm's `codex.cmd`, and cmd.exe cannot carry the
+            // `-c` overrides the account's own home needs.
+            None if service || self.isolated() || cfg!(windows) => CodexHome::Storm,
+            None => CodexHome::Own,
+        }
     }
 
     /// The helper's rule (`net::host_ports`), so a list it would refuse
@@ -302,27 +361,38 @@ impl RuntimeConfig {
     }
 
     /// The one `PATH` availability resolves against and sessions run with
-    /// (AM38): `path` when set, else the platform's default. `None` keeps
-    /// the inherited one.
+    /// (AM38): `path` when set, else the login shell's on a host run as a
+    /// person (151 N7), else the platform's default. `None` keeps the
+    /// inherited one.
     pub fn search_path(&self) -> Result<Option<OsString>> {
         match &self.path {
             Some(dirs) => Ok(Some(
                 std::env::join_paths(dirs).context("`path` in runtime.toml")?,
             )),
-            None => Ok(crate::platform::default_path()),
+            None => Ok(self
+                .person
+                .as_ref()
+                .and_then(|p| p.path.clone())
+                .or_else(crate::platform::default_path)),
         }
     }
 
     /// [`Self::search_path`] with `managed` (the folder of the agents Storm
-    /// installed, decision 133-2) first, so a session finds Storm's copy
-    /// before any other.
+    /// installed, decision 133-2): first on the service, so a session finds
+    /// Storm's copy before any other; last on a host run as a person, so
+    /// their own CLI wins and Storm's is the fallback (151 Q-P5).
     pub fn search_path_with(&self, managed: &Path) -> Result<OsString> {
         let rest = match self.search_path()? {
             Some(path) => Some(path),
             None => std::env::var_os("PATH"),
         };
-        let mut dirs = vec![managed.to_path_buf()];
-        dirs.extend(rest.iter().flat_map(std::env::split_paths));
+        let rest = rest.iter().flat_map(std::env::split_paths);
+        let managed = std::iter::once(managed.to_path_buf());
+        let dirs: Vec<PathBuf> = if self.person.is_some() {
+            rest.chain(managed).collect()
+        } else {
+            managed.chain(rest).collect()
+        };
         std::env::join_paths(dirs).context("the host's search path")
     }
 
@@ -362,7 +432,13 @@ impl RuntimeConfig {
         path: Option<OsString>,
         isolation: Option<crate::isolation::Link>,
     ) -> Result<Vec<Arc<dyn Provider>>> {
+        let imported: Vec<(OsString, OsString)> = self
+            .person
+            .as_ref()
+            .map(|p| p.vars.clone())
+            .unwrap_or_default();
         let on_path = |p: CliProvider| {
+            let p = p.with_env(imported.clone());
             let p = match &path {
                 Some(path) => p.with_path(path.clone()),
                 None => p,
@@ -396,7 +472,9 @@ impl RuntimeConfig {
                     };
                     let base = on_path(base);
                     Arc::new(match &entry.env_file {
-                        Some(path) => base.with_env(read_env_file(path)?),
+                        Some(path) => {
+                            base.with_env(imported.iter().cloned().chain(read_env_file(path)?))
+                        }
                         None => base,
                     })
                 }
@@ -569,6 +647,40 @@ fn git_init(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Why a start's `cwd` was refused (151 N6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CwdRefusal {
+    /// Nothing is there now.
+    Gone,
+    /// Not absolute, not canonical, not a directory, or outside every root.
+    Outside,
+}
+
+/// A start's `cwd` as the directory it names (R3.3): absolute, already
+/// canonical (no link, `.` or `..` resolved away), a directory, and inside
+/// one of `roots` as they resolve now.
+pub fn resolve_cwd(roots: &[PathBuf], cwd: &str) -> Result<PathBuf, CwdRefusal> {
+    let path = Path::new(cwd);
+    if cwd.contains('\0') || !path.is_absolute() {
+        return Err(CwdRefusal::Outside);
+    }
+    let real = match path.canonicalize() {
+        Ok(real) => real,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(CwdRefusal::Gone),
+        Err(_) => return Err(CwdRefusal::Outside),
+    };
+    if real.as_os_str() != path.as_os_str() || !real.is_dir() {
+        return Err(CwdRefusal::Outside);
+    }
+    if !canonical_roots(roots)
+        .iter()
+        .any(|root| real.starts_with(root))
+    {
+        return Err(CwdRefusal::Outside);
+    }
+    Ok(real)
+}
+
 fn canonical_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     roots.iter().filter_map(|r| r.canonicalize().ok()).collect()
 }
@@ -585,6 +697,44 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    /// 151 N6 (R3.3): a start's `cwd` is an absolute, canonical directory
+    /// inside a root as it resolves now; one that is not there is `Gone`.
+    #[test]
+    #[cfg(unix)]
+    fn a_cwd_is_canonical_and_inside_a_root() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("w/sub")).unwrap();
+        std::fs::write(real.join("w/file"), "").unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), real.join("w/out")).unwrap();
+        std::os::unix::fs::symlink(real.join("w/sub"), real.join("w/alias")).unwrap();
+        let roots = vec![root.path().to_path_buf()];
+        let at = |p: &str| real.join(p).display().to_string();
+
+        assert_eq!(resolve_cwd(&roots, &at("w/sub")), Ok(real.join("w/sub")));
+        assert_eq!(resolve_cwd(&roots, &at("w")), Ok(real.join("w")));
+        for bad in [
+            at("w/out"),
+            at("w/alias"),
+            at("w/sub/../sub"),
+            at("w/./sub"),
+            at("w/sub/"),
+            at("w/file"),
+            outside.path().canonicalize().unwrap().display().to_string(),
+            "w/sub".into(),
+            format!("{}\0", at("w/sub")),
+        ] {
+            assert_eq!(
+                resolve_cwd(&roots, &bad),
+                Err(CwdRefusal::Outside),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(resolve_cwd(&roots, &at("w/gone")), Err(CwdRefusal::Gone));
+        assert_eq!(resolve_cwd(&[], &at("w/sub")), Err(CwdRefusal::Outside));
+    }
 
     /// 141c: a new workspace is one plain name, made in the first root
     /// only, never over anything that exists in any root.
@@ -1012,11 +1162,74 @@ mod tests {
     }
 
     #[test]
+    fn a_person_s_path_is_config_then_login_shell_then_default_with_storm_s_copy_last() {
+        let login = crate::login_env::LoginEnv {
+            path: Some(std::env::join_paths(["/opt/homebrew/bin", "/usr/bin"]).unwrap()),
+            vars: Vec::new(),
+        };
+        let managed = Path::new("/state/agents/managed/bin");
+        let dirs = |c: &RuntimeConfig| -> Vec<PathBuf> {
+            std::env::split_paths(&c.search_path_with(managed).unwrap()).collect()
+        };
+        let mut c = RuntimeConfig {
+            person: Some(login.clone()),
+            ..RuntimeConfig::default()
+        };
+        assert_eq!(
+            dirs(&c),
+            [
+                PathBuf::from("/opt/homebrew/bin"),
+                PathBuf::from("/usr/bin"),
+                managed.to_path_buf()
+            ]
+        );
+        c.path = Some(vec![PathBuf::from("/bin")]);
+        assert_eq!(dirs(&c), [PathBuf::from("/bin"), managed.to_path_buf()]);
+        c.path = None;
+        c.person = Some(crate::login_env::LoginEnv::default());
+        assert_eq!(c.search_path().unwrap(), crate::platform::default_path());
+        assert_eq!(dirs(&c).last().map(PathBuf::as_path), Some(managed));
+    }
+
+    #[test]
+    fn import_env_names_only_variables() {
+        let ok: RuntimeConfig = toml::from_str("import_env = [\"HOMEBREW_PREFIX\"]").unwrap();
+        assert!(ok.check_import_env().is_ok());
+        for bad in ["PATH", "A-B", ""] {
+            let c: RuntimeConfig = toml::from_str(&format!("import_env = [{bad:?}]")).unwrap();
+            assert!(c.check_import_env().is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn agent_mcp_defaults_to_the_agents_own() {
         assert_eq!(RuntimeConfig::default().agent_mcp, AgentMcp::Own);
         let only: RuntimeConfig = toml::from_str("agent_mcp = \"storm-only\"").unwrap();
         assert_eq!(only.agent_mcp, AgentMcp::StormOnly);
         assert!(toml::from_str::<RuntimeConfig>("agent_mcp = \"strict\"").is_err());
+    }
+
+    #[test]
+    fn codex_home_is_the_accounts_own_only_for_a_person() {
+        let none = RuntimeConfig::default();
+        assert_eq!(none.codex_home_for(true), CodexHome::Storm);
+        let person = if cfg!(windows) {
+            CodexHome::Storm
+        } else {
+            CodexHome::Own
+        };
+        assert_eq!(none.codex_home_for(false), person);
+        let isolated: RuntimeConfig = toml::from_str("isolation = \"per-session\"").unwrap();
+        assert_eq!(isolated.codex_home_for(false), CodexHome::Storm);
+        let storm: RuntimeConfig = toml::from_str("codex_home = \"storm\"").unwrap();
+        assert_eq!(storm.codex_home_for(false), CodexHome::Storm);
+        let own: RuntimeConfig = toml::from_str("codex_home = \"own\"").unwrap();
+        assert_eq!(own.codex_home_for(true), CodexHome::Own);
+        assert!(own.check_codex_home().is_ok());
+        let both: RuntimeConfig =
+            toml::from_str("codex_home = \"own\"\nisolation = \"per-session\"").unwrap();
+        assert!(both.check_codex_home().is_err());
+        assert!(toml::from_str::<RuntimeConfig>("codex_home = \"mine\"").is_err());
     }
 
     #[test]
