@@ -66,10 +66,22 @@ you chose a Runtime Host in the installer, it is enrolled already. Otherwise
 install `storm-runtime` on that machine, open **Settings › Hosts & default
 agent › Enroll a host**, and give the host the one-time string it shows.
 
+A host runs one of two ways ([Runtime Hosts](/docs/agents/hosts/#two-ways-to-run-it)):
+
+- **As yourself**, with no root or administrator: the installer's
+  `--runtime` (`-Runtime` on Windows) does this by default, or run
+  `storm-runtime install --user`. Its agents run as you, with your own
+  CLIs, logins and folders, and can do whatever you can. Storm does not
+  isolate them from you.
+- **As a service**, under the host's own account: the installer's
+  `--runtime --service` (`-Runtime -Service`). Log the agent CLIs in once
+  on the host, as that account.
+
+**Settings › Hosts** shows which account each host runs as.
+
 Then press **Start session** on a note, or **New session** in Agents. A
-session runs Claude Code, OpenCode or a shell in a workspace on the host, and
-you can drive its terminal from any of your devices. Log the agent CLIs in
-once on the host, as the Runtime Host's own account.
+session runs Claude Code, OpenCode, Codex or a shell in a workspace on the
+host, and you can drive its terminal from any of your devices.
 
 ## 5. Connect an AI app (optional)
 

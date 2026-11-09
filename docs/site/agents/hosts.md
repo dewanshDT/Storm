@@ -11,9 +11,61 @@ the server, so the server needs no route to it, and it holds no notes.
 [installer](/docs/install/server/); it installs the host and enrolls it with
 your server. The rest of this page is the by-hand route and the details.
 
-It is the same `storm-runtime` on every platform. Each platform
-runs it under the platform's own service manager, as a dedicated account that
-exists for nothing else:
+## Two ways to run it
+
+It is the same `storm-runtime` on every platform, and it runs one of two
+ways:
+
+- **As yourself.** `storm-runtime install --user`, and the installer's
+  default, has your own service manager run it, with no root or
+  administrator. Its agents run as you: they
+  use your CLIs, your logins and your folders, and they can do whatever you
+  can do. Storm adds no sandbox of its own; an agent's own permission prompts
+  and sandbox apply as you set them up. See
+  [Running a host as yourself](#running-a-host-as-yourself).
+- **As a service.** The platform's service manager runs it as a dedicated
+  account that exists for nothing else. Its agents run as that account, with
+  its own logins and the workspace root below. The installer's `--service`
+  (`-Service` on Windows) installs it. See [Linux](#linux),
+  [macOS](#macos) and [Windows](#windows).
+
+| | As yourself | As a service |
+|---|---|---|
+| Linux | `systemd --user` unit, starts at boot with linger | systemd `storm-runtime.service`, from the `.deb` |
+| macOS | LaunchAgent, runs while you are logged in | LaunchDaemon, starts at boot |
+| Windows | logon task, runs while you are logged on | Windows Service `StormRuntime`, starts with Windows |
+| Root or administrator | not needed | needed to install it |
+| Agents run as | you | the host's own account |
+| Agent CLIs and logins | yours | the account's, logged in once for it |
+
+**Runs as.** Every host tells the server which account it runs as. Its row in
+**Settings › Hosts**, and the launcher under **Host**, says so: *"Runs as
+storm-runtime"* for the Linux service, or *"Runs as"* and your own account
+name for a host you run as yourself. A host set to isolate sessions adds
+*"· each session isolated"*. A runtime too old to say, or one that can't name
+its account, shows *"Runs as an unknown account"*. When a session starts,
+Storm keeps the account, isolation and identity the host had then, and the
+session's Details shows them under **Ran as**, whatever the host says later.
+A session from before Storm kept this shows *"Not recorded"*. This is status
+only: Storm reads no agent setting to report it and changes none.
+
+An agent that starts another agent (agent spawning) needs a host that says
+which account it runs as. On a host with isolation `off` the new agent is an
+ordinary session of that account, started in the parent's workspace, or in a
+folder the parent names that is already canonical (no links, `.` or `..`)
+and inside one of `workspace_roots`; anything else is refused. Storm makes
+no copy, worktree or sandbox for it, and resuming it is refused once that
+folder is gone (*"working directory no longer exists"*). On a host that
+isolates sessions it works differently; see
+[Linux](#linux).
+
+To move a host from the service to yourself, or back, see
+[Moving a host to another account](#moving-a-host-to-another-account).
+
+## As a service
+
+Each platform runs the service under its own service manager, as a dedicated
+account that exists for nothing else:
 
 | | Linux | macOS | Windows |
 |---|---|---|---|
@@ -26,16 +78,20 @@ exists for nothing else:
 | Workspaces | `/var/lib/storm-runtime/workspaces` | `/Library/StormRuntime/workspaces` | `C:\ProgramData\StormRuntime\workspaces` |
 | Logs | `journalctl -u storm-runtime` | `/Library/Logs/StormRuntime/storm-runtime.log` | `C:\ProgramData\StormRuntime\logs\storm-runtime.log` |
 
-On every platform:
+For the service, on every platform:
 - **The account is its own.** It is never in the server's group, `admin` or
   `staff`, so on a shared machine it cannot read the vaults or
   `state/auth.db`.
+- **The service passes `--exclusive-account`**, so at start and after
+  shutdown the host also ends any other process left running under its
+  account.
+
+For every host, as yourself or as a service:
 - **The enrollment string is read from a prompt or stdin, never from an
   argument**, so `ps` never shows it.
 - **Stopping the host ends every session and everything the sessions
-  spawned.** The service passes `--exclusive-account`, so at start and after
-  shutdown the host also ends any other process left running under its
-  account. Those sessions show as `failed (host_restart)` when it comes back.
+  spawned.** Those sessions show as `failed (host_restart)` when it comes
+  back.
 - **A revoked host ends its sessions, renames `host.json` to
   `host.json.revoked` and exits 3, and stays stopped.** Enroll it again to
   bring it back; no `--force` is needed.
@@ -75,7 +131,8 @@ an `identity_mismatch` event on the session it named.
 
 **Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
 default agent › Enroll a host**, then paste the one-time string at the host's
-`enroll` prompt.
+`enroll` prompt. For the platform you pick, the sheet lists two sets of
+commands: **As you** first, then **As its own account**.
 
 ## Installing agents from the app
 
@@ -113,9 +170,10 @@ agent_updates = "manual"  # installs from the app, but no automatic updates
 
 ## Linux
 
-The `.deb` below runs the host as its own `storm-runtime` service account.
-To run it as yourself instead, with no root and on any distribution with
-systemd, see [As yourself on Linux](#as-yourself-on-linux).
+The `.deb` below runs the host as its own `storm-runtime` service account;
+`install.sh --runtime --service` installs it this way. To run it as
+yourself instead, with no root and on any distribution with systemd, see
+[As yourself on Linux](#as-yourself-on-linux).
 
 ```sh
 sudo apt install storm-runtime
@@ -258,26 +316,6 @@ set to isolate that has no helper to ask (its socket is not there because
 packaged state directory) reports `unavailable: no_helper` at once rather
 than waiting on a self-test.
 
-Every host also reports **which account it runs as** and the isolation it is
-set to (`off` or `per-session`). Every host row in **Settings › Hosts**, and
-the launcher under **Host**, says *"Runs as storm-runtime"* (the account's
-name), with *"· each session isolated"* added on a host set to
-`per-session`. A runtime too old to say, or one that can't name its account,
-shows *"Runs as an unknown account"*. When a session starts running, Storm
-keeps that account and the host's isolation and identity as they were then,
-and the session's Details shows them under **Ran as**, not what the host
-says later. A session from before Storm kept this shows *"Not recorded"*.
-This is status only: Storm reads no agent setting to report it and changes
-none.
-
-An agent that starts another agent (agent spawning) needs a host that says
-which account it runs as. On a host with isolation `off` the new agent is an
-ordinary session of that account, started in the parent's workspace, or in a
-folder the parent names that is already canonical (no links, `.` or `..`)
-and inside one of `workspace_roots`; anything else is refused. Storm makes
-no copy, worktree or sandbox for it, and resuming it is refused once that
-folder is gone (*"working directory no longer exists"*).
-
 On an isolated host, an agent that starts another agent gives the new one
 **a workspace of its own**, made under the
 new session's user, in `/var/lib/storm-runtime-isolation/children/`, never
@@ -330,8 +368,9 @@ Or run it **as yourself, as a LaunchAgent**: see
 [As yourself on a Mac](#as-yourself-on-a-mac). That one needs no `sudo`, uses
 your own CLIs, logins and folders, and stops when you log out.
 
-**Install.** With Homebrew (this repository is the tap; it builds from the
-release tag, so it needs Rust and takes a couple of minutes):
+**Install.** The installer's `--runtime --service` installs and enrolls
+it this way. By hand, with Homebrew (this repository is the tap; it builds from the release tag, so it
+needs Rust and takes a couple of minutes):
 
 ```sh
 brew tap dewanshdt/storm https://github.com/dewanshDT/Storm
@@ -542,10 +581,12 @@ Or run it **as yourself, from a logon task**: see
 administrator, uses your own CLIs, logins and folders, and stops when you sign
 out.
 
-**Install.** In PowerShell **as administrator**, either the installer:
+**Install.** In PowerShell **as administrator**, either the installer
+(elevated, `-Runtime` installs the service; `-Runtime -Service` says so
+outright):
 
 ```powershell
-irm https://dewanshdt.github.io/Storm/install.ps1 | iex
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -Service
 ```
 
 or the release zip by hand (it is not code-signed, so SmartScreen may warn):
@@ -557,8 +598,8 @@ Expand-Archive -Force $env:TEMP\storm-runtime.zip $env:TEMP\storm-runtime
 ```
 
 `install` is idempotent; re-running a newer binary's `install` upgrades. It:
-- creates the layout in the table above, each directory with a **protected**
-  DACL (nothing inherited from `C:\ProgramData`, where every user may create
+- creates the layout in the table above, each directory with a DACL that
+  inherits nothing from `C:\ProgramData` (where every user may create
   files): SYSTEM and Administrators, plus the account where it needs it;
 - shares the workspace root with you (`--operator` names someone else): you
   and the account can both modify everything either creates there;
@@ -613,16 +654,25 @@ checkout, clone or move it into the workspace root.
 
 ## Running a host as yourself
 
-`--state` and `--config` are optional for `enroll`, `check` and `serve`. Run
-as the service account (or as root, or elevated on Windows) they mean the
-service's paths in the tables above. Run as anyone else, they mean paths of
-your own, which you own:
+`--state` is optional for `enroll`, `check` and `serve`, and `--config` for
+`serve`. Run as the service account (or as root, or elevated on Windows) they
+mean the service's paths in the tables above. Run as anyone else, they mean
+paths of your own, which you own:
 
 | | State | Config |
 |---|---|---|
 | Linux | `$XDG_STATE_HOME/storm-runtime` (`~/.local/state/storm-runtime`) | `$XDG_CONFIG_HOME/storm-runtime/runtime.toml` (`~/.config/storm-runtime/runtime.toml`) |
 | macOS | `~/Library/Application Support/StormRuntime/state` | `~/Library/Application Support/StormRuntime/runtime.toml` |
 | Windows | `%LOCALAPPDATA%\StormRuntime\state` | `%LOCALAPPDATA%\StormRuntime\runtime.toml` |
+
+`install --user` writes that `runtime.toml` once, if you have none, and the
+platforms differ in the workspace root it names:
+
+| | Workspace root in a new `runtime.toml` | Log |
+|---|---|---|
+| Linux | `~/.local/state/storm-runtime/workspaces` | `journalctl --user -u storm-runtime` |
+| macOS | none: you add `workspace_roots` | `~/Library/Logs/StormRuntime/storm-runtime.log` |
+| Windows | none: you add `workspace_roots` | `%LOCALAPPDATA%\StormRuntime\logs\storm-runtime.log` |
 
 So `storm-runtime enroll`, then `storm-runtime serve`, with no flags, runs a
 host as you. `storm-runtime install --user` has your own service manager do
@@ -632,6 +682,12 @@ the `serve`: [systemd --user on Linux](#as-yourself-on-linux), a
 `STORM_RUNTIME_STATE` and `STORM_RUNTIME_CONFIG` still work, and
 a flag wins over both.
 
+- **Its agents are you.** They can read and change what you can, use your
+  SSH keys, tokens and logins, and run what you can run, `sudo` and
+  `docker` included if your account may. Storm does not isolate them from
+  you or from each other. What an agent asks before doing is its own
+  harness's setting: its permission mode, its rules and its own sandbox, as
+  you set them up. See [Security model](/docs/operate/security/#agents-run-as-the-hosts-account).
 - **A workspace root may be in your home.** The service's refusals of homes,
   volumes, profiles and shares (AM39, AM54) apply only to the service. A
   root that overlaps a Storm data root is refused to every host.
@@ -682,11 +738,12 @@ systemctl --user start storm-runtime
 ~/.local/bin/storm-runtime check
 ```
 
-Or let the installer do all of it: `--user` with `--runtime`, which is also
-what it does on a distribution with no `.deb`:
+Or let the installer do all of it: `--runtime`, which installs the host as
+you by default (and always, on a distribution with no `.deb`);
+`--service` installs the `.deb` service instead:
 
 ```sh
-curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime --user
+curl -fsSL https://dewanshdt.github.io/Storm/install.sh | sh -s -- --runtime
 ```
 
 `install --user`:
@@ -796,10 +853,13 @@ an elevated shell is the service's.
 Get-ScheduledTask 'Storm Runtime Host' | Get-ScheduledTaskInfo      # LastTaskResult 267009 = running
 ```
 
-Or with the installer, in a PowerShell that is not elevated:
+Or with the installer, in a PowerShell that is not elevated, where
+`-Runtime` installs the logon task as you (`-Service`, `-Server` or an
+elevated shell installs the `StormRuntime` service instead; without `-Yes`
+it asks, with as you first):
 
 ```powershell
-& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime -User
+& ([scriptblock]::Create((irm https://dewanshdt.github.io/Storm/install.ps1))) -Runtime
 ```
 
 It:
@@ -844,6 +904,51 @@ sign-in starts it again. The log is
 The rule below still holds: never run it as an account that can read the
 vaults.
 
+## Moving a host to another account
+
+A host's enrollment belongs to its state directory, and the service and a
+host you run as yourself each have their own. So a host does not move from
+one account to another: you enroll a new one as yourself, then revoke the
+old one. Both can run on one machine while you switch.
+
+1. **Install and enroll the new host as yourself**, with the steps for your
+   platform: [Linux](#as-yourself-on-linux), [Mac](#as-yourself-on-a-mac) or
+   [Windows](#as-yourself-on-windows). The installer keeps a host installed
+   as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Hosts** as
+   a second host, *"Runs as"* your account. Both take the machine's name
+   unless you pass `enroll --name`, so rename one there to tell them apart.
+2. **Give it your workspaces.** On a Mac or a Windows PC, add your folders to
+   `workspace_roots`; on Linux, a new `runtime.toml` already names
+   `~/.local/state/storm-runtime/workspaces`. The service's workspaces stay
+   where they are and still belong to its account: clone or copy the
+   projects you want into your own root.
+3. **Log your agent CLIs in as yourself**, if they are not already. The
+   service account's logins stay with it.
+4. **Revoke the old host** from its row in **Settings › Hosts**. Its running
+   sessions end and show as failed, *"host revoked"*; it stops, and stays
+   stopped.
+5. **Remove the old service**:
+   - **Linux:** `sudo systemctl disable --now storm-runtime`. Keep the
+     package if your own unit runs its `/usr/bin/storm-runtime`;
+     `sudo apt remove storm-runtime` would remove that binary too.
+   - **macOS:** `sudo /Library/StormRuntime/bin/storm-runtime uninstall`
+     (`--purge` also removes its state, logs, config and account).
+   - **Windows**, as administrator:
+     `& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" uninstall`
+     (`--purge` also removes its identity, state, logs and config).
+
+   Workspaces are kept either way.
+
+**Old sessions stay as history.** They are listed under **ENDED** with what
+they wrote, and their **Ran as** still names the service account (or reads
+*"Not recorded"* for one from before Storm kept it). They can't
+be resumed: a resume runs on its session's own host, and that host is
+revoked.
+
+Moving the other way, from yourself to the service, is the same: install
+and enroll the service, revoke the host you ran, then
+`storm-runtime uninstall --user`.
+
 ## Never share an account with the vaults
 
 **Never run a Runtime Host under the server's account, or under any account
@@ -857,3 +962,11 @@ offered to edit a note's file directly from a read-only session. Filesystem
 permissions are the only boundary there. On a shared machine, check it with
 `sudo -u storm-runtime ls /srv/storm` (on a Mac, `sudo -u _stormruntime ls`
 the vault root), which must be refused.
+
+**A host you run as yourself is you,** so this rule is about your own
+account. On Linux the server's data belongs to `storm` and its group:
+`ls /srv/storm`, as yourself, must be refused, and you must never join the
+`storm` group. On a Mac or a Windows PC where you run the Storm server as
+yourself, your account can read the vaults, so a host as yourself could
+too: `install --user` warns there, and you should run the service instead.
+On Linux `install --user` makes no such check.
