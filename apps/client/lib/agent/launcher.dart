@@ -98,7 +98,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   RoleNote? _role;
 
   /// "Allow this session to start agents" (141e): off by default.
-  bool _spawn = false;
+  // On by default (operator, 2026-11-10); the person can still untick it.
+  bool _spawn = true;
+
+  /// Its children write to its write vault (151m): off by default.
+  bool _childrenWrite = false;
 
   /// The model (decision 145b): empty is the agent's own default.
   final _model = TextEditingController();
@@ -242,6 +246,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             ? null
             : (vaultId: _role!.vaultId, noteId: _role!.noteId),
         spawn: _spawn && _spawnable,
+        childrenWrite:
+            _childrenWrite &&
+            _spawn &&
+            _spawnable &&
+            writes &&
+            writeVault != null,
         model: modelHint(_provider) == null ? null : _model.text.trim(),
         permissionMode: _permissionMode,
       );
@@ -278,6 +288,34 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       (_host?.offersSpawning ?? false) &&
       kSpawnProviders.contains(_provider) &&
       _reachesStorm;
+
+  Widget _toggle(
+    Key key,
+    String text,
+    bool value,
+    ValueChanged<bool> onChanged,
+  ) {
+    final t = context.tokens;
+    return Row(
+      children: [
+        Semantics(
+          label: text,
+          child: StormToggle(key: key, value: value, onChanged: onChanged),
+        ),
+        SizedBox(width: t.sp * 1.25),
+        Expanded(
+          child: Text(
+            text,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.codeSize,
+              color: t.text,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
 
   /// The chosen mode while the agent offers it, else its own.
   String get _permissionMode =>
@@ -370,6 +408,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       else ...[
         _Field(
           label: 'Host',
+          under: host == null
+              ? null
+              : _Under(
+                  key: const Key('launcher-host-execution'),
+                  text: host.executionLine,
+                ),
           child: _Select<String>(
             key: const Key('launcher-host'),
             label: 'Host',
@@ -564,28 +608,22 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               text:
                   'Its starts, messages and ends act at once and show in About.',
             ),
-            child: Row(
-              children: [
-                Semantics(
-                  label: 'Allow this session to start agents',
-                  child: StormToggle(
-                    key: const Key('launcher-spawn'),
-                    value: _spawn,
-                    onChanged: (v) => setState(() => _spawn = v),
-                  ),
-                ),
-                SizedBox(width: t.sp * 1.25),
-                Expanded(
-                  child: Text(
-                    'Allow this session to start agents',
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: t.text,
-                    ),
-                  ),
-                ),
-              ],
+            child: _toggle(
+              const Key('launcher-spawn'),
+              'Allow this session to start agents',
+              _spawn,
+              (v) => setState(() => _spawn = v),
+            ),
+          ),
+        if (_spawnable && _spawn && writes)
+          _Field(
+            label: '',
+            child: _toggle(
+              const Key('launcher-children-write'),
+              'The agents it starts can write to '
+              '${vaults.where((v) => v.id == writeVault).firstOrNull?.name ?? 'its vault'}',
+              _childrenWrite,
+              (v) => setState(() => _childrenWrite = v),
             ),
           ),
       ],

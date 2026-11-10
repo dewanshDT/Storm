@@ -121,6 +121,33 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
     if (mounted) await _load();
   }
 
+  Future<void> _limits(AgentHost host) async {
+    final changed = await showDialog<bool>(
+      context: context,
+      builder: (_) => HostLimitsDialog(
+        host: host,
+        onSave: (children, tree, sessions) async {
+          final api = agentApi(ref);
+          if (api == null) return 'Sign in first.';
+          try {
+            await api.setHostLimits(
+              host.id,
+              maxChildren: children,
+              maxTree: tree,
+              maxSessions: sessions,
+            );
+            return null;
+          } catch (e) {
+            return hostLimitsRefusal(e);
+          } finally {
+            api.dispose();
+          }
+        },
+      ),
+    );
+    if (changed == true && mounted) await _load();
+  }
+
   Future<void> _setDefault(String id) async {
     await _with((api) => api.setDefaultProvider(id));
     if (mounted) setState(() => _defaultProvider = id);
@@ -145,6 +172,7 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
               host: host,
               onRename: () => _rename(host),
               onRevoke: () => _revoke(host),
+              onLimits: () => _limits(host),
             ),
         SettingsButtonRow(
           child: StormButton.primary(
@@ -157,7 +185,11 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
         Text.rich(
           TextSpan(
             children: [
-              const TextSpan(text: 'Enrolling shows a one-time string. Run '),
+              const TextSpan(
+                text:
+                    'Enrolling shows a one-time string and the commands to '
+                    'run on the machine. Paste the string when ',
+              ),
               TextSpan(
                 text: 'storm-runtime enroll',
                 style: TextStyle(
@@ -165,7 +197,7 @@ class _HostsScreenState extends ConsumerState<HostsScreen> {
                   color: t.text2,
                 ),
               ),
-              const TextSpan(text: ' on the machine and paste it.'),
+              const TextSpan(text: ' asks for it.'),
             ],
           ),
           style: TextStyle(
@@ -222,11 +254,13 @@ class _HostTile extends StatelessWidget {
     required this.host,
     required this.onRename,
     required this.onRevoke,
+    required this.onLimits,
   });
 
   final AgentHost host;
   final VoidCallback onRename;
   final VoidCallback onRevoke;
+  final VoidCallback onLimits;
 
   @override
   Widget build(BuildContext context) {
@@ -245,6 +279,12 @@ class _HostTile extends StatelessWidget {
         : host.providers
               .map((p) => p.available ? p.label : '${p.label} (not installed)')
               .join(', ');
+    // The execution line already says a working sandbox isolates.
+    final isolation =
+        host.execution?.perSession == true &&
+            host.isolationLabel == kIsolationVerified
+        ? null
+        : host.isolationLabel;
     // Freeze §12.2: V1 has no egress policy of its own, and says so.
     return Opacity(
       opacity: revoked ? 0.55 : 1,
@@ -261,13 +301,21 @@ class _HostTile extends StatelessWidget {
         label: host.name,
         sub:
             '$state · $agents · network: host policy'
+            '\n${host.executionLine}'
             '${host.identityUnverified && !revoked ? '\n$kIdentityNotVerified' : ''}'
-            '${host.isolationLabel != null && !revoked ? '\n${host.isolationLabel}' : ''}',
+            '${isolation != null && !revoked ? '\n$isolation' : ''}'
+            '${host.limits != null && !revoked ? '\n${hostLimitsLine(host.limits!)}' : ''}',
         monoSub: true,
         trailing: revoked
             ? null
             : RowActions(
                 children: [
+                  if (host.limits != null)
+                    TextAction(
+                      key: Key('limits-host-${host.id}'),
+                      label: 'Limits',
+                      onTap: onLimits,
+                    ),
                   TextAction(
                     key: Key('rename-host-${host.id}'),
                     label: 'Rename',
@@ -349,12 +397,31 @@ class EnrollStep {
   final bool pastesString;
 }
 
-/// What to run on a host of [platform], and nothing of the others': Linux is
-/// the `.deb` and systemd (decision 77e), macOS is Homebrew and a launchd
-/// LaunchDaemon (D14, AM35), Windows is the release zip and a Windows Service
-/// (D16, AM50).
-List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
-  HostPlatform.linux => const [
+/// How the host runs: as the person who installs it, with their own CLIs and
+/// logins (decision 151), or as its own account, a system service. The sheet
+/// lists them in this order: as you is the default for a new host (151 E5).
+enum EnrollShape { you, service }
+
+/// What to run on a host of [platform] for [shape], and nothing of the
+/// others'. As you: the installer on Linux (`install --user`, systemd
+/// --user; there is no fixed tarball URL), `install --user` from Homebrew's
+/// binary on macOS (a LaunchAgent) and from the release zip on Windows (a
+/// logon task). As its own account: the `.deb` and systemd (decision 77e),
+/// Homebrew and a launchd LaunchDaemon (D14, AM35), the release zip and a
+/// Windows Service (D16, AM50).
+List<EnrollStep> enrollSteps(
+  HostPlatform platform,
+  EnrollShape shape,
+) => switch ((platform, shape)) {
+  (HostPlatform.linux, EnrollShape.you) => const [
+    EnrollStep(
+      'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
+      'sh -s -- --yes --runtime --user',
+    ),
+    EnrollStep('~/.local/bin/storm-runtime enroll', pastesString: true),
+    EnrollStep('systemctl --user enable --now storm-runtime'),
+  ],
+  (HostPlatform.linux, EnrollShape.service) => const [
     EnrollStep('sudo apt install storm-runtime'),
     EnrollStep(
       'sudo -u storm-runtime storm-runtime enroll',
@@ -362,7 +429,17 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
     ),
     EnrollStep('sudo systemctl enable --now storm-runtime'),
   ],
-  HostPlatform.macos => const [
+  (HostPlatform.macos, EnrollShape.you) => const [
+    EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
+    EnrollStep('brew install storm-runtime'),
+    EnrollStep('"\$(brew --prefix)/bin/storm-runtime" install --user'),
+    EnrollStep(
+      '"\$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" '
+      'enroll',
+      pastesString: true,
+    ),
+  ],
+  (HostPlatform.macos, EnrollShape.service) => const [
     EnrollStep('brew tap dewanshdt/storm https://github.com/dewanshDT/Storm'),
     EnrollStep('brew install storm-runtime'),
     // The full path: `sudo` need not search Homebrew's prefix.
@@ -374,14 +451,22 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
       pastesString: true,
     ),
   ],
+  // In a PowerShell that is not elevated. `install --user` copies the binary
+  // into %LOCALAPPDATA%; enrolling starts the logon task.
+  (HostPlatform.windows, EnrollShape.you) => const [
+    EnrollStep(_windowsDownload),
+    EnrollStep(
+      '& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install --user',
+    ),
+    EnrollStep(
+      '& "\$env:LOCALAPPDATA\\StormRuntime\\bin\\storm-runtime.exe" enroll',
+      pastesString: true,
+    ),
+  ],
   // In an elevated PowerShell. `install` copies the binary into Program
   // Files, so `enroll` runs from there; enrolling starts the service.
-  HostPlatform.windows => const [
-    EnrollStep(
-      'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
-      'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
-      'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime',
-    ),
+  (HostPlatform.windows, EnrollShape.service) => const [
+    EnrollStep(_windowsDownload),
     EnrollStep('& "\$env:TEMP\\storm-runtime\\storm-runtime.exe" install'),
     EnrollStep(
       '& "\$env:ProgramFiles\\StormRuntime\\storm-runtime.exe" enroll',
@@ -390,16 +475,50 @@ List<EnrollStep> enrollSteps(HostPlatform platform) => switch (platform) {
   ],
 };
 
+const _windowsDownload =
+    'Invoke-WebRequest https://github.com/dewanshDT/Storm/releases/latest/download/'
+    'storm-runtime-windows-x86_64.zip -OutFile \$env:TEMP\\storm-runtime.zip; '
+    'Expand-Archive -Force \$env:TEMP\\storm-runtime.zip \$env:TEMP\\storm-runtime';
+
+/// A shape's heading and what it means, in a line.
+(String, String) enrollShapeTitle(EnrollShape shape) => switch (shape) {
+  EnrollShape.you => (
+    'As you',
+    'Your own CLIs and logins, no administrator. The default.',
+  ),
+  EnrollShape.service => (
+    'As its own account',
+    'A system service with its own files, set up as administrator.',
+  ),
+};
+
 /// Where the host runs and keeps its workspaces, in a line.
-String enrollFootnote(HostPlatform platform) => switch (platform) {
-  HostPlatform.linux =>
+String enrollFootnote(HostPlatform platform, EnrollShape shape) => switch ((
+  platform,
+  shape,
+)) {
+  (HostPlatform.linux, EnrollShape.you) =>
+    'It runs as you under your systemd user manager. The installer turns '
+        'on linger so it starts at boot, or prints the one command an '
+        'administrator runs for that. Workspaces are the folders in '
+        '~/.local/state/storm-runtime/workspaces.',
+  (HostPlatform.linux, EnrollShape.service) =>
     'It runs under systemd as the storm-runtime account. Workspaces are the '
         'folders in /var/lib/storm-runtime/workspaces.',
-  HostPlatform.macos =>
+  (HostPlatform.macos, EnrollShape.you) =>
+    'launchd starts it once it is enrolled (the LaunchAgent '
+        'dev.storm.runtime), as you, while you are logged in. Workspaces '
+        'are the folders in '
+        '~/Library/Application Support/StormRuntime/state/workspaces.',
+  (HostPlatform.macos, EnrollShape.service) =>
     'launchd starts it by itself once it is enrolled (the LaunchDaemon '
         'dev.storm.runtime), as the dedicated _stormruntime account. '
         'Workspaces are the folders in /Library/StormRuntime/workspaces.',
-  HostPlatform.windows =>
+  (HostPlatform.windows, EnrollShape.you) =>
+    'Run them in PowerShell, not as administrator. Enrolling starts a '
+        'logon task that runs it as you while you are logged on. Workspaces '
+        'are the folders in %LOCALAPPDATA%\\StormRuntime\\state\\workspaces.',
+  (HostPlatform.windows, EnrollShape.service) =>
     'Run them in PowerShell as administrator. Enrolling starts the '
         'StormRuntime service, as the virtual account NT SERVICE\\StormRuntime. '
         'Workspaces are the folders in C:\\ProgramData\\StormRuntime\\workspaces.',
@@ -432,8 +551,8 @@ class _EnrollDialogState extends State<_EnrollDialog> {
   bool _revealed = false;
   HostPlatform _platform = defaultHostPlatform();
 
-  /// The command whose copy button last succeeded, by index.
-  int? _copiedCommand;
+  /// The command whose copy button last succeeded, as `<shape>-<index>`.
+  String? _copiedCommand;
 
   @override
   Widget build(BuildContext context) {
@@ -443,7 +562,6 @@ class _EnrollDialogState extends State<_EnrollDialog> {
         ? 'soon'
         : '${until.hour.toString().padLeft(2, '0')}:'
               '${until.minute.toString().padLeft(2, '0')}';
-    final steps = enrollSteps(_platform);
     final mono = TextStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: t.labelSize,
@@ -476,42 +594,10 @@ class _EnrollDialogState extends State<_EnrollDialog> {
               ),
               SizedBox(height: t.sp * 1.5),
               Text(
-                'On the host, run these in order, and paste this string when '
-                'enroll asks for it. It works once, until $when.',
+                'On the host, run one of these sets in order, and paste this '
+                'string when enroll asks for it. It works once, until $when.',
               ),
               SizedBox(height: t.sp),
-              for (final (i, step) in steps.indexed) ...[
-                Container(
-                  key: Key('enroll-command-$i'),
-                  padding: EdgeInsets.only(left: t.sp),
-                  decoration: box,
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: SelectableText(step.command, style: mono),
-                      ),
-                      IconButton(
-                        key: Key('copy-command-$i'),
-                        tooltip: 'Copy',
-                        iconSize: 16,
-                        icon: Icon(
-                          _copiedCommand == i
-                              ? LucideIcons.check
-                              : LucideIcons.copy,
-                        ),
-                        onPressed: () async {
-                          final ok = await copyToClipboard(step.command);
-                          if (mounted) {
-                            setState(() => _copiedCommand = ok ? i : null);
-                          }
-                        },
-                      ),
-                    ],
-                  ),
-                ),
-                SizedBox(height: t.sp * 0.5),
-              ],
-              SizedBox(height: t.sp * 0.5),
               Container(
                 padding: EdgeInsets.only(left: t.sp),
                 decoration: box,
@@ -538,12 +624,62 @@ class _EnrollDialogState extends State<_EnrollDialog> {
                   ],
                 ),
               ),
-              SizedBox(height: t.sp),
-              Text(
-                enrollFootnote(_platform),
-                key: const Key('enroll-footnote'),
-                style: TextStyle(fontSize: t.labelSize, color: t.text3),
-              ),
+              for (final shape in EnrollShape.values) ...[
+                SizedBox(height: t.sp * 1.5),
+                Text(
+                  enrollShapeTitle(shape).$1,
+                  key: Key('enroll-shape-${shape.name}'),
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                Text(
+                  enrollShapeTitle(shape).$2,
+                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                ),
+                SizedBox(height: t.sp * 0.5),
+                for (final (i, step) in enrollSteps(
+                  _platform,
+                  shape,
+                ).indexed) ...[
+                  Container(
+                    key: Key('enroll-${shape.name}-command-$i'),
+                    padding: EdgeInsets.only(left: t.sp),
+                    decoration: box,
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: SelectableText(step.command, style: mono),
+                        ),
+                        IconButton(
+                          key: Key('copy-${shape.name}-command-$i'),
+                          tooltip: 'Copy',
+                          iconSize: 16,
+                          icon: Icon(
+                            _copiedCommand == '${shape.name}-$i'
+                                ? LucideIcons.check
+                                : LucideIcons.copy,
+                          ),
+                          onPressed: () async {
+                            final ok = await copyToClipboard(step.command);
+                            if (mounted) {
+                              setState(
+                                () => _copiedCommand = ok
+                                    ? '${shape.name}-$i'
+                                    : null,
+                              );
+                            }
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  SizedBox(height: t.sp * 0.5),
+                ],
+                Text(
+                  enrollFootnote(_platform, shape),
+                  key: Key('enroll-footnote-${shape.name}'),
+                  style: TextStyle(fontSize: t.labelSize, color: t.text3),
+                ),
+              ],
               SizedBox(height: t.sp * 0.5),
               Text(
                 'Close this and the string is gone. Issue a new one if you need '
@@ -566,6 +702,210 @@ class _EnrollDialogState extends State<_EnrollDialog> {
         FilledButton(
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Done'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Why a change to a host's Limits was refused, in words.
+String hostLimitsRefusal(Object e) => switch (e is AgentRefusal
+    ? e.code
+    : null) {
+  'limit_out_of_range' =>
+    'Agents per session is 1 to 10, agents per tree 1 to 24, and concurrent '
+        'sessions at least 1.',
+  'tree_below_session' =>
+    'Agents per tree must be at least agents per session.',
+  'owner_only' => 'Only the host’s owner can change its limits.',
+  _ => describeFailure(e),
+};
+
+/// A host's Limits (decision 152): how many agents a session and a tree run
+/// at once, and an optional lower cap on its concurrent sessions. Lowering
+/// one ends nothing; it refuses new starts. Owner only, like this screen.
+class HostLimitsDialog extends StatefulWidget {
+  const HostLimitsDialog({super.key, required this.host, required this.onSave});
+
+  final AgentHost host;
+
+  /// Answers why it was refused, or null once saved.
+  final Future<String?> Function(int children, int tree, int? sessions) onSave;
+
+  @override
+  State<HostLimitsDialog> createState() => _HostLimitsDialogState();
+}
+
+class _HostLimitsDialogState extends State<HostLimitsDialog> {
+  late final HostLimits _was = widget.host.limits ?? const HostLimits();
+  late int _children = _was.maxChildren;
+  late int _tree = _was.maxTree;
+  late final _sessions = TextEditingController(
+    text: _was.maxSessions?.toString() ?? '',
+  );
+  String? _error;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _sessions.dispose();
+    super.dispose();
+  }
+
+  String get _hostOwn {
+    final n = _was.hostMaxSessions;
+    if (n == null) return 'The host’s own';
+    return n == 0 ? 'The host’s own (no limit)' : 'The host’s own ($n)';
+  }
+
+  Future<void> _save() async {
+    final text = _sessions.text.trim();
+    final sessions = text.isEmpty ? null : int.tryParse(text);
+    if (text.isNotEmpty && sessions == null) {
+      setState(() => _error = 'Concurrent sessions is a whole number.');
+      return;
+    }
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final refused = await widget.onSave(_children, _tree, sessions);
+    if (!mounted) return;
+    if (refused == null) {
+      Navigator.of(context).pop(true);
+    } else {
+      setState(() {
+        _saving = false;
+        _error = refused;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final muted = TextStyle(fontSize: t.labelSize, color: t.text3);
+    return AlertDialog(
+      key: const Key('host-limits'),
+      title: Text('Limits for ${widget.host.name}'),
+      content: SizedBox(
+        width: 420,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _LimitStepper(
+              id: 'children',
+              label: 'Agents per session',
+              value: _children,
+              max: _was.hardMaxChildren,
+              onChanged: (v) => setState(() => _children = v),
+            ),
+            _LimitStepper(
+              id: 'tree',
+              label: 'Agents per tree',
+              value: _tree,
+              max: _was.hardMaxTree,
+              onChanged: (v) => setState(() => _tree = v),
+            ),
+            SizedBox(height: t.sp),
+            TextField(
+              key: const Key('limit-sessions'),
+              controller: _sessions,
+              keyboardType: TextInputType.number,
+              decoration: InputDecoration(
+                labelText: 'Concurrent sessions',
+                hintText: _hostOwn,
+                helperText: 'Blank is the host’s own. It can only be lowered.',
+              ),
+            ),
+            if (_was.overrideIneffective) ...[
+              SizedBox(height: t.sp * 0.5),
+              Text(
+                'Above the host’s own, so the host’s '
+                '${_was.effectiveMaxSessions} is in force.',
+                key: const Key('limit-sessions-ineffective'),
+                style: muted,
+              ),
+            ],
+            SizedBox(height: t.sp * 1.5),
+            Text(
+              'Depth: ${depthLine(_was.depth)}',
+              key: const Key('limit-depth'),
+            ),
+            SizedBox(height: t.sp),
+            Text(
+              'Lowering a limit ends nothing that is running; it refuses new '
+              'starts.',
+              style: muted,
+            ),
+            if (_error != null) ...[
+              SizedBox(height: t.sp),
+              Text(
+                _error!,
+                key: const Key('limits-error'),
+                style: TextStyle(color: t.danger),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('save-limits'),
+          onPressed: _saving ? null : _save,
+          child: const Text('Save'),
+        ),
+      ],
+    );
+  }
+}
+
+class _LimitStepper extends StatelessWidget {
+  const _LimitStepper({
+    required this.id,
+    required this.label,
+    required this.value,
+    required this.max,
+    required this.onChanged,
+  });
+
+  final String id;
+  final String label;
+  final int value;
+  final int max;
+  final ValueChanged<int> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(child: Text(label)),
+        IconButton(
+          key: Key('limit-$id-less'),
+          tooltip: 'Fewer',
+          iconSize: 16,
+          icon: const Icon(LucideIcons.minus),
+          onPressed: value > 1 ? () => onChanged(value - 1) : null,
+        ),
+        SizedBox(
+          width: 32,
+          child: Text(
+            '$value',
+            key: Key('limit-$id'),
+            textAlign: TextAlign.center,
+          ),
+        ),
+        IconButton(
+          key: Key('limit-$id-more'),
+          tooltip: 'More',
+          iconSize: 16,
+          icon: const Icon(LucideIcons.plus),
+          onPressed: value < max ? () => onChanged(value + 1) : null,
         ),
       ],
     );

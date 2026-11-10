@@ -801,8 +801,22 @@ use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
 
+/// A sandbox host whose self-test passed.
 fn isolated() -> serde_json::Value {
+    let mut caps = isolated_only();
+    caps["execution"] = serde_json::json!({"account": "storm-runtime", "isolation": "per-session"});
+    caps["child_workspaces"] = serde_json::json!(true);
+    caps
+}
+
+/// Isolation verified, from a host too old to say who it runs as.
+fn isolated_only() -> serde_json::Value {
     serde_json::json!({"isolation": {"state": "verified", "mechanism": "systemd_units", "reason": null}})
+}
+
+/// A host with isolation off (151 N6).
+fn off() -> serde_json::Value {
+    serde_json::json!({"execution": {"account": "dewansh", "isolation": "off"}})
 }
 
 fn hello(identity: Option<&str>) -> Hello {
@@ -832,10 +846,17 @@ fn hello_with(identity: Option<&str>, extra: serde_json::Value) -> Hello {
 }
 
 fn host(identity: Option<&str>) -> (AgentManager, tempdir::TempDir, UnboundedReceiver<Envelope>) {
+    host_with(identity, serde_json::json!({}))
+}
+
+fn host_with(
+    identity: Option<&str>,
+    extra: serde_json::Value,
+) -> (AgentManager, tempdir::TempDir, UnboundedReceiver<Envelope>) {
     let d = tempdir::TempDir::new("storm-spawn-switch").unwrap();
     let m = AgentManager::open(d.path()).unwrap();
     let (_, rx) = m.connect_host("hst_A");
-    m.hello("hst_A", hello(identity)).unwrap();
+    m.hello("hst_A", hello_with(identity, extra)).unwrap();
     (m, d, rx)
 }
 
@@ -901,65 +922,82 @@ fn refusal(m: &AgentManager, id: &str, enabled: bool) -> &'static str {
 
 use tokio::sync::mpsc::UnboundedReceiver;
 
+/// 151 N6, C0 as a matrix: the host's report (too old to say, isolation
+/// off, a sandbox verified or not) by its identity (any) by the switch.
+/// Only a host that says who it runs as opens it, a host set to isolate
+/// only once its isolation is verified, identity never (R1.1), and the
+/// switch is the person's on top of it.
 #[test]
-fn c0_refuses_an_old_host_and_unverified_identity_or_isolation() {
-    // An old host says nothing about identity.
-    let (m, _d, _rx) = host(None);
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
-
-    // A host that says its identity is unavailable.
-    let (m, _d, _rx) = host(Some(
-        r#"{"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"}"#,
-    ));
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
-    for state in ["unsupported", "VERIFIED", ""] {
-        m.inventory(
-            "hst_A",
-            hello(Some(&format!(r#"{{"state": "{state}"}}"#))).capabilities,
-        )
-        .unwrap();
-        assert_eq!(refusal(&m, &s.id, true), "identity_unverified", "{state}");
+fn c0_is_the_hosts_execution_report_never_its_identity() {
+    let unverified = serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"});
+    let hosts = [
+        ("old", serde_json::json!({}), Err("host_too_old")),
+        (
+            "old, claiming isolation",
+            isolated_only(),
+            Err("host_too_old"),
+        ),
+        (
+            "malformed execution",
+            serde_json::json!({"execution": {"account": 3}}),
+            Err("host_too_old"),
+        ),
+        ("isolation off", off(), Ok(())),
+        (
+            "isolation off, isolation label unverified",
+            serde_json::json!({"execution": {"account": null, "isolation": "off"}, "isolation": unverified}),
+            Ok(()),
+        ),
+        ("sandbox", isolated(), Ok(())),
+        (
+            "sandbox, unverified",
+            serde_json::json!({"execution": {"account": "storm-runtime", "isolation": "per-session"},
+                "child_workspaces": true, "isolation": unverified}),
+            Err("isolation_unverified"),
+        ),
+        (
+            "an isolation this server does not know",
+            serde_json::json!({"execution": {"account": "a", "isolation": "per-vm"}}),
+            Err("isolation_unverified"),
+        ),
+    ];
+    let identities = [
+        None,
+        Some(VERIFIED),
+        Some(r#"{"state": "unavailable", "mechanism": "so_peerpidfd", "reason": "ptrace_scope"}"#),
+        Some(r#"{"state": "unsupported"}"#),
+    ];
+    for (name, extra, want) in hosts {
+        for identity in identities {
+            let (m, _d, _rx) = host_with(identity, extra.clone());
+            let case = format!("{name}, identity {identity:?}");
+            assert_eq!(m.spawn_gate("hst_A"), want, "{case}");
+            for switch in [false, true] {
+                let launched = launch_as(&m, "storm", "claude-code", None, switch);
+                match (want, switch) {
+                    (Ok(()), true) => {
+                        let s = launched.unwrap();
+                        assert!(m.spawn_offered(&s.id), "{case}");
+                    }
+                    (Ok(()), false) => {
+                        let s = launched.unwrap();
+                        assert!(!m.spawn_offered(&s.id), "{case}: off by default");
+                        assert_eq!(refusal(&m, &s.id, true), "launched_without_spawn");
+                    }
+                    (Err(_), true) => assert!(
+                        matches!(&launched, Err(AgentError::Conflict(c)) if c == "spawn_unavailable"),
+                        "{case}: {launched:?}"
+                    ),
+                    (Err(code), false) => {
+                        let s = launched.unwrap();
+                        assert_eq!(refusal(&m, &s.id, true), code, "{case}");
+                        assert!(!m.spawn_enabled(&s.id).unwrap(), "a refusal writes nothing");
+                        assert!(!m.spawn_offered(&s.id));
+                    }
+                }
+            }
+        }
     }
-
-    // Verified identity, isolation absent (an old host), or anything but
-    // exactly `verified`.
-    let (m, _d, _rx) = host(Some(VERIFIED));
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &s.id, true), "isolation_unverified");
-    for isolation in [
-        serde_json::json!(null),
-        serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "self_test"}),
-        serde_json::json!({"state": "unavailable", "mechanism": null, "reason": "off"}),
-        serde_json::json!({"state": "unsupported", "mechanism": null, "reason": "windows"}),
-        serde_json::json!({"state": "VERIFIED", "mechanism": "systemd_units"}),
-        serde_json::json!({"state": "isolated", "mechanism": "systemd_units"}),
-        serde_json::json!({"mechanism": "systemd_units"}),
-        serde_json::json!(true),
-    ] {
-        let claims = hello_with(
-            Some(VERIFIED),
-            serde_json::json!({ "isolation": isolation }),
-        );
-        m.inventory("hst_A", claims.capabilities).unwrap();
-        assert_eq!(
-            refusal(&m, &s.id, true),
-            "isolation_unverified",
-            "{isolation}"
-        );
-        assert_eq!(m.spawn_gate("hst_A"), Err("isolation_unverified"));
-    }
-    // Isolation verified without identity is no better.
-    let (m, _d, _rx) = host(None);
-    m.inventory("hst_A", hello_with(None, isolated()).capabilities)
-        .unwrap();
-    assert!(m.host_isolated("hst_A"));
-    assert_eq!(m.spawn_gate("hst_A"), Err("identity_unverified"));
-    let s = start(&m, "storm", "claude-code", None).unwrap();
-    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
-    assert!(!m.spawn_enabled(&s.id).unwrap(), "a refusal writes nothing");
-    assert!(!m.spawn_offered(&s.id));
 }
 
 /// The integration of 134 with 136-5: a host whose `hello` says identity
@@ -975,6 +1013,7 @@ fn a_verified_isolation_report_opens_c0() {
             "max_sessions": 16, "mcp_bridge": true,
             "identity": {"state": "verified", "mechanism": "so_peerpidfd", "reason": null},
             "isolation": {"state": "verified", "mechanism": "systemd_units", "reason": null},
+            "execution": {"account": "storm-runtime", "isolation": "per-session"},
             "sessions": [{"id": "BEFORE", "status": "running"}], "last_cmd_seq": 0}"#
             .replace("BEFORE", &before.id)
             .as_str(),
@@ -989,8 +1028,8 @@ fn a_verified_isolation_report_opens_c0() {
     assert!(m.spawn_offered(&s.id));
 
     // A downgrade in the inventory shuts it at once; a new report reopens it.
-    let down = serde_json::json!({"isolation":
-        {"state": "unavailable", "mechanism": "systemd_units", "reason": "no_passt"}});
+    let mut down = isolated();
+    down["isolation"] = serde_json::json!({"state": "unavailable", "mechanism": "systemd_units", "reason": "no_passt"});
     m.inventory("hst_A", hello_with(Some(VERIFIED), down).capabilities)
         .unwrap();
     assert!(!m.spawn_offered(&s.id));
@@ -1000,9 +1039,9 @@ fn a_verified_isolation_report_opens_c0() {
     assert!(m.spawn_offered(&s.id));
 
     // A new link carries the last report over, but has said nothing yet:
-    // neither half counts.
+    // none of it counts.
     let (_generation, _rx2) = m.connect_host("hst_A");
-    assert_eq!(m.spawn_gate("hst_A"), Err("identity_unverified"));
+    assert_eq!(m.spawn_gate("hst_A"), Err("host_too_old"));
     assert!(!m.spawn_offered(&s.id));
     // Its own inventory counts as its word.
     m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
@@ -1010,32 +1049,42 @@ fn a_verified_isolation_report_opens_c0() {
     assert!(m.spawn_offered(&s.id));
 }
 
+/// C0 on a host with isolation off (151 N6) holds only while its live
+/// link says who it runs as; an identity downgrade changes nothing.
 #[test]
 fn c0_holds_only_while_the_live_link_says_so() {
-    let (m, _d, _rx) = verified_host();
+    let (m, _d, _rx) = host_with(Some(VERIFIED), off());
     let s = start_on(&m, "storm", "claude-code").unwrap();
     assert!(m.spawn_offered(&s.id));
 
-    // An identity downgrade hides the tools at once; the switch stays on.
+    // Identity is disclosure, not a gate (R1.1).
     m.inventory(
         "hst_A",
-        hello(Some(r#"{"state": "unavailable", "reason": "self_test"}"#)).capabilities,
+        hello_with(
+            Some(r#"{"state": "unavailable", "reason": "self_test"}"#),
+            off(),
+        )
+        .capabilities,
     )
     .unwrap();
-    assert!(!m.spawn_offered(&s.id));
-    assert!(m.spawn_enabled(&s.id).unwrap());
-    m.inventory("hst_A", hello_with(Some(VERIFIED), isolated()).capabilities)
-        .unwrap();
     assert!(m.spawn_offered(&s.id));
 
-    // A new link has not said it is isolated.
-    let (generation, _rx2) = m.connect_host("hst_A");
+    // A runtime that stops saying who it runs as hides the tools at once;
+    // the switch stays on.
     m.inventory("hst_A", hello(Some(VERIFIED)).capabilities)
         .unwrap();
     assert!(!m.spawn_offered(&s.id));
+    assert!(m.spawn_enabled(&s.id).unwrap());
+    m.inventory("hst_A", hello_with(None, off()).capabilities)
+        .unwrap();
+    assert!(m.spawn_offered(&s.id));
+
+    // A new link has said nothing yet; then an offline host offers nothing.
+    let (generation, _rx2) = m.connect_host("hst_A");
+    assert!(!m.spawn_offered(&s.id));
     m.disconnect_host("hst_A", generation);
     assert!(!m.spawn_offered(&s.id), "an offline host offers nothing");
-    assert_eq!(refusal(&m, &s.id, true), "identity_unverified");
+    assert_eq!(refusal(&m, &s.id, true), "host_too_old");
     // Revoking never waits for the host.
     assert!(!m.set_spawn(&s.id, false, None).unwrap().unwrap().enabled);
 }

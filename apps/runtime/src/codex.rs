@@ -1,18 +1,29 @@
-//! The Codex adapter (decision 130b, as amended by 132c).
+//! The Codex adapter (decision 130b, as amended by 132c and 151 N3).
 //!
 //! Codex keeps its login and every conversation under `CODEX_HOME`, and
 //! Resume needs a conversation to outlive the session that had it, so a host
-//! has **one Storm-owned home**, `<state>/agents/codex`, not one per session.
-//! What is per session lives beside it:
+//! has **one home**, not one per session: on a host a person runs as
+//! themselves, **the account's own** (`$CODEX_HOME`, else `~/.codex`; 151 N3),
+//! which Storm never writes; on the service, **Storm's**,
+//! `<state>/agents/codex`. What is per session:
 //!
-//! - **MCP servers** in a profile, `storm-<session>.config.toml` (`0600`,
-//!   removed when the session ends), loaded with `-p`. Every server asks
-//!   before each call (`default_tools_approval_mode = "prompt"`, which also
-//!   turns "approve for this session" into a single approval): G2. A profile
-//!   merges into `config.toml` key by key, so a server named like one of the
-//!   account's is written as `storm_<slug>`.
+//! - **MCP servers**: in Storm's home, a profile, `storm-<session>.config.toml`
+//!   (`0600`, removed when the session ends), loaded with `-p`; in the
+//!   account's own, `-c mcp_servers.<name>=…` overrides, the handle and
+//!   socket in the session's environment for the servers that name them
+//!   (`env_vars`). On the service every server asks before each call
+//!   (`default_tools_approval_mode = "prompt"`, which also turns "approve for
+//!   this session" into a single approval): G2. Either merges into
+//!   `config.toml` key by key, so a server named like one of the account's
+//!   is written as `storm_<slug>`.
 //! - Nothing else: the conversation id arrives through Storm's
 //!   `SessionStart` hook, with the session's handle in its environment.
+//!
+//! In the account's own home everything Storm adds below is a `-c` override
+//! instead, the hook and its trust record included (Codex 0.166 loads a
+//! session-flags hook from `/<session-flags>/config.toml`), so `~/.codex` is
+//! byte for byte what the account left there. What follows describes
+//! Storm's home.
 //!
 //! **The account's config is its own** (decision 132): its `mcp_servers`,
 //! profiles, plugins, plugin servers, apps, hooks and folder trust load as
@@ -40,6 +51,7 @@
 //! What that leaves out is named at launch (131a).
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -63,9 +75,43 @@ const HOOK_TIMEOUT: i64 = 10;
 /// too, which a rename-into-place keeps from tearing.
 static CONFIG: Mutex<()> = Mutex::new(());
 
-/// The host's Codex home.
+/// Codex's key for the first `SessionStart` hook given with `-c` (Codex
+/// 0.166's `hooks/list`), which the trust record names.
+const SESSION_FLAGS_HOOK: &str = "/<session-flags>/config.toml:session_start:0:0";
+
+/// Storm's own Codex home.
 pub fn home(state_dir: &Path) -> PathBuf {
     state_dir.join("agents").join("codex")
+}
+
+/// The home a host's Codex sessions run in (decision 151 N3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Home {
+    /// Storm's, [`home`], which Storm writes.
+    Storm(PathBuf),
+    /// The account's own, which Storm only reads.
+    Own(PathBuf),
+}
+
+impl Home {
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Storm(p) | Self::Own(p) => p,
+        }
+    }
+}
+
+/// The account's own Codex home, as Codex finds it: `$CODEX_HOME`, else
+/// `~/.codex`.
+pub fn own_home() -> Result<PathBuf> {
+    let set = |name: &str| std::env::var_os(name).filter(|v| !v.is_empty());
+    if let Some(home) = set(HOME_ENV) {
+        return Ok(home.into());
+    }
+    let home = set("HOME")
+        .or_else(|| set("USERPROFILE").filter(|_| cfg!(windows)))
+        .context("neither CODEX_HOME nor HOME is set")?;
+    Ok(PathBuf::from(home).join(".codex"))
 }
 
 pub fn profile_name(session: &str) -> String {
@@ -127,21 +173,14 @@ pub fn baseline(
     };
     let mut plan = Plan::default();
     if storm_only {
-        let own: Vec<String> = table
-            .get("mcp_servers")
-            .and_then(Value::as_table)
-            .map(|t| t.keys().cloned().collect())
-            .unwrap_or_default();
-        pin_untrusted(&mut table, workspace);
-        sub_table(&mut table, "features").insert("apps".into(), Value::Boolean(false));
-        switch_plugin_servers(&mut table, home, allow_local, &mut plan);
-        for name in &own {
-            match withhold(name) {
-                Some(arg) => extras.args.extend(["-c".into(), arg.into()]),
-                None => tracing::warn!(server = %name, "cannot withhold a server with this name"),
-            }
-        }
-        name_the_rest(&mut plan, &own, home, workspace);
+        storm_only_keys(
+            &mut table,
+            home,
+            workspace,
+            allow_local,
+            &mut extras,
+            &mut plan,
+        );
     }
     crate::fsutil::write_atomic(
         &path,
@@ -155,14 +194,173 @@ pub fn baseline(
     Ok((extras, plan))
 }
 
+/// [`baseline`] for the account's own home (decision 151 N3): the same keys,
+/// hook and `storm-only` switches, every one a `-c` override, so nothing in
+/// `home` is written. `CODEX_HOME` is left as the session inherits it.
+pub fn baseline_own(
+    home: &Path,
+    workspace: &Path,
+    exe: &Path,
+    allow_local: bool,
+    storm_only: bool,
+) -> Result<(LaunchExtras, Plan)> {
+    let path = home.join("config.toml");
+    let account: Table = match std::fs::read_to_string(&path) {
+        Ok(text) => text.parse().unwrap_or_else(|e| {
+            tracing::warn!(path = %path.display(), error = %e, "the account's Codex config does not parse");
+            Table::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Table::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let mut table = account.clone();
+    common_keys(&mut table);
+    let mut extras = LaunchExtras::default();
+    let mut plan = Plan::default();
+    if storm_only {
+        storm_only_keys(
+            &mut table,
+            home,
+            workspace,
+            allow_local,
+            &mut extras,
+            &mut plan,
+        );
+    }
+    let (group, hash) = hook_group(exe);
+    let mut state = Table::new();
+    let mut record = Table::new();
+    record.insert("trusted_hash".into(), hash.into());
+    state.insert(SESSION_FLAGS_HOOK.into(), Value::Table(record));
+    let mut hooks = Table::new();
+    hooks.insert(
+        "SessionStart".into(),
+        Value::Array(vec![Value::Table(group)]),
+    );
+    hooks.insert("state".into(), Value::Table(state));
+    let mut changed = changes(&account, &table);
+    // The account's own hooks stay in its layer; Storm's is the only one in
+    // the session's.
+    changed.insert("hooks".into(), Value::Table(hooks));
+    for (key, value) in &changed {
+        overrides(key, value, &mut extras.args);
+    }
+    Ok((extras, plan))
+}
+
+/// Under `storm-only` (decision 131): the account's servers withheld, every
+/// workspace untrusted, apps off and the plugins' servers switched.
+fn storm_only_keys(
+    table: &mut Table,
+    home: &Path,
+    workspace: &Path,
+    allow_local: bool,
+    extras: &mut LaunchExtras,
+    plan: &mut Plan,
+) {
+    let own: Vec<String> = table
+        .get("mcp_servers")
+        .and_then(Value::as_table)
+        .map(|t| t.keys().cloned().collect())
+        .unwrap_or_default();
+    pin_untrusted(table, workspace);
+    sub_table(table, "features").insert("apps".into(), Value::Boolean(false));
+    switch_plugin_servers(table, home, allow_local, plan);
+    for name in &own {
+        match withhold(name) {
+            Some(arg) => extras.args.extend(["-c".into(), arg.into()]),
+            None => tracing::warn!(server = %name, "cannot withhold a server with this name"),
+        }
+    }
+    name_the_rest(plan, &own, home, workspace);
+}
+
+/// What `after` sets that `before` does not have, tables compared key by
+/// key.
+fn changes(before: &Table, after: &Table) -> Table {
+    let mut out = Table::new();
+    for (key, value) in after {
+        match (before.get(key), value) {
+            (Some(old), new) if old == new => {}
+            (Some(Value::Table(old)), Value::Table(new)) => {
+                let sub = changes(old, new);
+                if !sub.is_empty() {
+                    out.insert(key.clone(), Value::Table(sub));
+                }
+            }
+            _ => {
+                out.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    out
+}
+
+/// `-c path=value` for `value` at `path`, one per leaf while every key
+/// below is a plain dotted-path segment, else the table inline (Codex
+/// merges an inline table into the account's key by key).
+fn overrides(path: &str, value: &Value, out: &mut Vec<OsString>) {
+    match value {
+        Value::Table(t) if !t.is_empty() && t.keys().all(|k| plain(k)) => {
+            for (key, value) in t {
+                overrides(&format!("{path}.{key}"), value, out);
+            }
+        }
+        _ => out.extend(["-c".into(), format!("{path}={}", inline(value)).into()]),
+    }
+}
+
+/// `value` as one line of TOML.
+fn inline(value: &Value) -> String {
+    let join = |items: Vec<String>| items.join(",");
+    match value {
+        Value::String(s) => quote(s),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => format!("{f:?}"),
+        Value::Boolean(b) => b.to_string(),
+        Value::Datetime(d) => d.to_string(),
+        Value::Array(a) => format!("[{}]", join(a.iter().map(inline).collect())),
+        Value::Table(t) => format!(
+            "{{{}}}",
+            join(
+                t.iter()
+                    .map(|(k, v)| {
+                        let k = if plain(k) { k.clone() } else { quote(k) };
+                        format!("{k}={}", inline(v))
+                    })
+                    .collect()
+            )
+        ),
+    }
+}
+
+/// A TOML basic string.
+fn quote(s: &str) -> String {
+    let mut out = String::from('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if c.is_control() => out.push_str(&format!("\\u{:04X}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// A key `-c`'s dotted path can spell.
+fn plain(key: &str) -> bool {
+    !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// `mcp_servers.<name>.enabled=false` for `-c`, or `None` for a name the
 /// dotted path cannot spell.
 fn withhold(name: &str) -> Option<String> {
-    let plain = !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
-    plain.then(|| format!("mcp_servers.{name}.enabled=false"))
+    plain(name).then(|| format!("mcp_servers.{name}.enabled=false"))
 }
 
 /// Undoes what Storm wrote before decision 132: the plugins it turned off
@@ -388,17 +586,7 @@ fn plugin_base(home: &Path, id: &str) -> Option<PathBuf> {
 /// 0.163 starts a resume's hook without ever feeding it, so the hook would
 /// hold the session up to its timeout.
 fn set_hook(table: &mut Table, exe: &Path, config: &Path) {
-    let command = format!("{} harness-session", sh_quote(&exe.display().to_string()));
-    let command_windows = format!("\"{}\" harness-session", exe.display());
-    let mut handler = Table::new();
-    handler.insert("type".into(), "command".into());
-    handler.insert("command".into(), command.clone().into());
-    handler.insert("commandWindows".into(), command_windows.clone().into());
-    handler.insert("timeout".into(), Value::Integer(HOOK_TIMEOUT));
-    let mut group = Table::new();
-    group.insert("matcher".into(), HOOK_MATCHER.into());
-    group.insert("hooks".into(), Value::Array(vec![Value::Table(handler)]));
-
+    let (group, hash) = hook_group(exe);
     let hooks = sub_table(table, "hooks");
     if !matches!(hooks.get("SessionStart"), Some(Value::Array(_))) {
         hooks.insert("SessionStart".into(), Value::Array(Vec::new()));
@@ -411,11 +599,6 @@ fn set_hook(table: &mut Table, exe: &Path, config: &Path) {
     starts.push(Value::Table(group));
     let index = starts.len() - 1;
 
-    let hash = trusted_hash(if cfg!(windows) {
-        &command_windows
-    } else {
-        &command
-    });
     // Codex keys a hook on the path it loaded the file from: as Storm wrote
     // it, or with the home resolved.
     let mut paths = vec![config.to_path_buf()];
@@ -430,6 +613,27 @@ fn set_hook(table: &mut Table, exe: &Path, config: &Path) {
         let key = format!("{}:session_start:{index}:0", path.display());
         sub_table(state, &key).insert("trusted_hash".into(), hash.clone().into());
     }
+}
+
+/// Storm's hook group, and its trust hash with the command this platform
+/// runs.
+fn hook_group(exe: &Path) -> (Table, String) {
+    let command = format!("{} harness-session", sh_quote(&exe.display().to_string()));
+    let command_windows = format!("\"{}\" harness-session", exe.display());
+    let hash = trusted_hash(if cfg!(windows) {
+        &command_windows
+    } else {
+        &command
+    });
+    let mut handler = Table::new();
+    handler.insert("type".into(), "command".into());
+    handler.insert("command".into(), command.into());
+    handler.insert("commandWindows".into(), command_windows.into());
+    handler.insert("timeout".into(), Value::Integer(HOOK_TIMEOUT));
+    let mut group = Table::new();
+    group.insert("matcher".into(), HOOK_MATCHER.into());
+    group.insert("hooks".into(), Value::Array(vec![Value::Table(handler)]));
+    (group, hash)
 }
 
 fn is_storms(group: &Value) -> bool {
@@ -473,35 +677,28 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Writes `session`'s MCP servers into its own profile and returns `-p` for
-/// it. The profile holds the bridge handle and the socket path, never a
-/// credential.
-pub fn write_profile(
-    home: &Path,
-    session: &str,
+/// The session's bridges, keyed as the account's config leaves room for;
+/// each asks before every call when `ask` (G2, the service's).
+fn bridge_servers(
     grants: &[&McpGrant],
-    handle: &str,
-    socket: &Path,
     exe: &Path,
     taken: &HashSet<String>,
-) -> Result<LaunchExtras> {
+    ask: bool,
+    env: (&str, Value),
+) -> Table {
     let mut servers = Table::new();
     for g in grants {
-        let mut env = Table::new();
-        env.insert(crate::mcp::HANDLE_ENV.into(), handle.into());
-        env.insert(
-            crate::mcp::SOCKET_ENV.into(),
-            socket.display().to_string().into(),
-        );
         let mut server = Table::new();
         server.insert("command".into(), exe.display().to_string().into());
         server.insert(
             "args".into(),
             Value::Array(vec!["mcp-bridge".into(), g.slug.clone().into()]),
         );
-        server.insert("env".into(), Value::Table(env));
-        server.insert("default_tools_approval_mode".into(), "prompt".into());
-        // A profile merges into the account's config key by key, so a
+        server.insert(env.0.into(), env.1.clone());
+        if ask {
+            server.insert("default_tools_approval_mode".into(), "prompt".into());
+        }
+        // Storm's servers merge into the account's config key by key, so a
         // same-named server would mix the two.
         let key = if taken.contains(&g.slug) {
             format!("storm_{}", g.slug)
@@ -510,6 +707,30 @@ pub fn write_profile(
         };
         servers.insert(key, Value::Table(server));
     }
+    servers
+}
+
+/// Writes `session`'s MCP servers into its own profile and returns `-p` for
+/// it. The profile holds the bridge handle and the socket path, never a
+/// credential.
+#[allow(clippy::too_many_arguments)]
+pub fn write_profile(
+    home: &Path,
+    session: &str,
+    grants: &[&McpGrant],
+    handle: &str,
+    socket: &Path,
+    exe: &Path,
+    taken: &HashSet<String>,
+    ask: bool,
+) -> Result<LaunchExtras> {
+    let mut env = Table::new();
+    env.insert(crate::mcp::HANDLE_ENV.into(), handle.into());
+    env.insert(
+        crate::mcp::SOCKET_ENV.into(),
+        socket.display().to_string().into(),
+    );
+    let servers = bridge_servers(grants, exe, taken, ask, ("env", Value::Table(env)));
     let mut profile = Table::new();
     profile.insert("mcp_servers".into(), Value::Table(servers));
     private_dir(home)?;
@@ -524,6 +745,34 @@ pub fn write_profile(
         args: vec!["-p".into(), profile_name(session).into()],
         ..Default::default()
     })
+}
+
+/// [`write_profile`] for the account's own home (decision 151 N3): the
+/// servers as `-c` overrides, with the handle and socket in the session's
+/// environment, which Codex hands only to the servers that name them
+/// (`env_vars`), so neither is on a command line.
+pub fn session_servers(
+    grants: &[&McpGrant],
+    handle: &str,
+    socket: &Path,
+    exe: &Path,
+    taken: &HashSet<String>,
+    ask: bool,
+) -> LaunchExtras {
+    let names = Value::Array(vec![
+        crate::mcp::HANDLE_ENV.into(),
+        crate::mcp::SOCKET_ENV.into(),
+    ]);
+    let servers = bridge_servers(grants, exe, taken, ask, ("env_vars", names));
+    let mut extras = LaunchExtras {
+        env: vec![
+            (crate::mcp::HANDLE_ENV.into(), handle.into()),
+            (crate::mcp::SOCKET_ENV.into(), socket.as_os_str().to_owned()),
+        ],
+        ..Default::default()
+    };
+    overrides("mcp_servers", &Value::Table(servers), &mut extras.args);
+    extras
 }
 
 /// A session ended: its profile, and with it its handle, goes.
@@ -819,6 +1068,237 @@ trust_level = "untrusted"
         assert_eq!(t["check_for_update_on_startup"].as_bool(), Some(false));
     }
 
+    /// Every file under `dir`, with its bytes.
+    fn snapshot(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else {
+                    out.push((path.clone(), std::fs::read(&path).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The `-c` overrides as one TOML document, which they must make.
+    fn flags(args: &[OsString]) -> Table {
+        let mut doc = String::new();
+        let mut args = args.iter().map(|a| a.to_str().unwrap());
+        while let Some(flag) = args.next() {
+            assert_eq!(flag, "-c", "only overrides");
+            doc.push_str(args.next().unwrap());
+            doc.push('\n');
+        }
+        doc.parse()
+            .unwrap_or_else(|e| panic!("not TOML: {e}\n{doc}"))
+    }
+
+    /// Decision 151 N3: on the account's own home, `config.toml` and every
+    /// other file are byte for byte as they were; Storm's keys, its hook and
+    /// the hook's trust record are all `-c` overrides.
+    #[test]
+    fn the_accounts_own_home_is_never_written() {
+        let account = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = account.path().join(".codex");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join("config.toml"), ACCOUNT).unwrap();
+        std::fs::write(home.join("auth.json"), r#"{"tokens":{"id_token":"x"}}"#).unwrap();
+        let before = snapshot(account.path());
+        let exe = Path::new("/opt/storm/storm-runtime");
+        let (extras, plan) = baseline_own(&home, ws.path(), exe, true, false).unwrap();
+        let (a, b) = (grant("storm"), grant("mine"));
+        let servers = session_servers(
+            &[&a, &b],
+            "the-handle",
+            Path::new("/run/mcp.sock"),
+            exe,
+            &own_servers(&home),
+            false,
+        );
+        forget(&home, "ags_ONE");
+        assert_eq!(
+            snapshot(account.path()),
+            before,
+            "nothing in the home changed"
+        );
+        assert!(extras.env.is_empty(), "CODEX_HOME is the account's");
+        assert_eq!(plan, Plan::default());
+
+        let t = flags(&extras.args);
+        assert_eq!(t["check_for_update_on_startup"].as_bool(), Some(false));
+        assert_eq!(t["features"]["daemon_auto_start"].as_bool(), Some(false));
+        assert_eq!(t["tui"]["terminal_title"][1].as_str(), Some("thread-name"));
+        for theirs in ["model", "profile", "mcp_servers", "profiles", "projects"] {
+            assert!(t.get(theirs).is_none(), "{theirs} is the account's");
+        }
+        assert!(t["tui"].get("screen_reader_detection_done").is_none());
+        let starts = t["hooks"]["SessionStart"].as_array().unwrap();
+        assert_eq!(
+            starts.len(),
+            1,
+            "only Storm's: the account's stay in its layer"
+        );
+        assert_eq!(starts[0]["matcher"].as_str(), Some(HOOK_MATCHER));
+        let command = "'/opt/storm/storm-runtime' harness-session";
+        assert_eq!(starts[0]["hooks"][0]["command"].as_str(), Some(command));
+        let run = if cfg!(windows) {
+            "\"/opt/storm/storm-runtime\" harness-session"
+        } else {
+            command
+        };
+        let state = t["hooks"]["state"].as_table().unwrap();
+        assert_eq!(state.len(), 1);
+        assert_eq!(
+            state[SESSION_FLAGS_HOOK]["trusted_hash"].as_str(),
+            Some(trusted_hash(run).as_str())
+        );
+
+        let t = flags(&servers.args);
+        let s = t["mcp_servers"].as_table().unwrap();
+        assert_eq!(
+            s.keys().collect::<Vec<_>>(),
+            ["storm", "storm_mine"],
+            "a name the account uses steps aside"
+        );
+        assert_eq!(
+            s["storm"]["command"].as_str(),
+            Some("/opt/storm/storm-runtime")
+        );
+        assert_eq!(s["storm_mine"]["args"][1].as_str(), Some("mine"));
+        let names: Vec<_> = s["storm"]["env_vars"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(names, [crate::mcp::HANDLE_ENV, crate::mcp::SOCKET_ENV]);
+        assert!(s["storm"].get("env").is_none());
+        assert!(s["storm"].get("default_tools_approval_mode").is_none());
+        let line: String = servers
+            .args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !line.contains("the-handle"),
+            "the handle is never an argument"
+        );
+        assert!(
+            servers
+                .env
+                .contains(&(crate::mcp::HANDLE_ENV.into(), "the-handle".into()))
+        );
+        assert!(
+            servers
+                .env
+                .contains(&(crate::mcp::SOCKET_ENV.into(), "/run/mcp.sock".into()))
+        );
+
+        let asked = session_servers(&[&a], "h", Path::new("/s"), exe, &HashSet::new(), true);
+        assert_eq!(
+            flags(&asked.args)["mcp_servers"]["storm"]["default_tools_approval_mode"].as_str(),
+            Some("prompt"),
+            "G2 on the service"
+        );
+    }
+
+    /// A missing home is not made, and a config Codex already set as Storm
+    /// would gets no override for it.
+    #[test]
+    fn an_own_home_is_read_as_it_is() {
+        let account = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = account.path().join(".codex");
+        let (extras, _) = baseline_own(&home, ws.path(), Path::new("/x"), true, false).unwrap();
+        assert!(!home.exists());
+        assert_eq!(
+            flags(&extras.args)["check_for_update_on_startup"].as_bool(),
+            Some(false)
+        );
+
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            home.join("config.toml"),
+            "check_for_update_on_startup = false\n",
+        )
+        .unwrap();
+        let (extras, _) = baseline_own(&home, ws.path(), Path::new("/x"), true, false).unwrap();
+        assert!(
+            flags(&extras.args)
+                .get("check_for_update_on_startup")
+                .is_none()
+        );
+    }
+
+    /// `storm-only` on the account's own home: the same switches as in
+    /// Storm's, as overrides, and the same plan.
+    #[test]
+    fn storm_only_on_an_own_home_is_flags_alone() {
+        let account = tempfile::tempdir().unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let home = account.path().join(".codex");
+        install(
+            &home,
+            "slack@m",
+            &[(
+                ".mcp.json",
+                r#"{"mcpServers":{"local":{"command":"x"},"remote":{"type":"http","url":"https://mcp.slack.com/mcp"}}}"#,
+            )],
+        );
+        std::fs::write(
+            home.join("config.toml"),
+            "[plugins.\"slack@m\"]\nenabled = true\n[mcp_servers.mine]\ncommand = \"/bin/mine\"\n[projects.\"/a\"]\ntrust_level = \"trusted\"\n",
+        )
+        .unwrap();
+        let before = snapshot(account.path());
+        let (extras, plan) = baseline_own(&home, ws.path(), Path::new("/x"), true, true).unwrap();
+        assert_eq!(snapshot(account.path()), before);
+        assert_eq!(extras.args[..2], ["-c", "mcp_servers.mine.enabled=false"]);
+        let t = flags(&extras.args);
+        assert_eq!(t["features"]["apps"].as_bool(), Some(false));
+        assert_eq!(
+            t["projects"][&ws.path().display().to_string()]["trust_level"].as_str(),
+            Some("untrusted")
+        );
+        assert_eq!(
+            t["projects"]["/a"]["trust_level"].as_str(),
+            Some("untrusted")
+        );
+        let servers = &t["plugins"]["slack@m"]["mcp_servers"];
+        assert_eq!(servers["remote"]["enabled"].as_bool(), Some(false));
+        assert_eq!(servers["local"]["enabled"].as_bool(), Some(true));
+        assert!(
+            t["plugins"]["slack@m"].get("enabled").is_none(),
+            "only what Storm changes"
+        );
+        assert_eq!(plan.native, ["local"]);
+        assert!(plan.skipped.iter().any(|s| s.name == "mine"));
+    }
+
+    #[test]
+    fn an_inline_value_reads_back_as_itself() {
+        let mut t = Table::new();
+        t.insert(
+            "a \"key\"".into(),
+            Value::String("C:\\x\\\"y\" \u{7f}\n é".into()),
+        );
+        t.insert(
+            "n".into(),
+            Value::Array(vec![1.into(), 1.5.into(), true.into()]),
+        );
+        let back: Table = format!("v = {}", inline(&Value::Table(t.clone())))
+            .parse()
+            .unwrap();
+        assert_eq!(back["v"], Value::Table(t));
+    }
+
     #[test]
     fn a_profile_holds_only_the_sessions_servers_and_asks_for_each() {
         let state = tempfile::tempdir().unwrap();
@@ -833,6 +1313,7 @@ trust_level = "untrusted"
             Path::new("/run/mcp.sock"),
             Path::new("/opt/storm-runtime"),
             &taken,
+            true,
         )
         .unwrap();
         assert_eq!(extras.args, ["-p", "storm-ags_ONE"]);
@@ -869,8 +1350,16 @@ trust_level = "untrusted"
             Path::new("/s"),
             Path::new("/x"),
             &HashSet::new(),
+            false,
         )
         .unwrap();
+        let t = read(&home.join("storm-ags_TWO.config.toml"));
+        assert!(
+            t["mcp_servers"]["storm"]
+                .get("default_tools_approval_mode")
+                .is_none(),
+            "G2 is the service's"
+        );
         std::fs::write(home.join("config.toml"), "").unwrap();
         forget_all(&home);
         assert!(!home.join("storm-ags_TWO.config.toml").exists());

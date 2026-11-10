@@ -43,8 +43,8 @@ typed() {
 }
 
 @test "interactive enrollment paste: shape checked, piped to enroll" {
-  platform
   install_fake linux-runtime
+  platform
   typed "storm-enroll:v1:PASTED-SECRET-9"
   RT_ENROLL_ACTION=enroll
   LOG_FILE="$BATS_TEST_TMPDIR/install.log"
@@ -89,9 +89,9 @@ typed() {
 }
 
 @test "the local enrollment string is piped, never captured in argv" {
-  platform
   install_fake linux-server
   install_fake linux-runtime
+  platform
   touch "$FAKE_DIR/account"
   DATA_ROOT="$STORM_TEST_SYSROOT/srv/storm" PORT=8484 RT_ENROLL_ACTION=enroll
   runtime_enroll_local

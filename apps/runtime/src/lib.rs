@@ -80,6 +80,7 @@ pub mod identity;
 pub mod install;
 pub mod isolation;
 pub mod isolation_probe;
+pub mod login_env;
 pub mod mcp;
 pub mod mcp_connect;
 pub mod peer_identity;

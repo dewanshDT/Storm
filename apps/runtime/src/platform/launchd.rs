@@ -1,6 +1,7 @@
 //! The macOS service definition (D14, AM33–AM35): the layout under
 //! `/Library/StormRuntime`, the LaunchDaemon plist and the config `install`
-//! writes.
+//! writes; and the LaunchAgent `install --user` writes for a host a person
+//! runs as themselves (decision 151 E2).
 //!
 //! Pure functions, compiled on every platform, so the Linux suite tests the
 //! plist too. Executing them (accounts, modes, `launchctl`) is macOS's
@@ -179,6 +180,252 @@ pub fn plist(layout: &Layout, account: &str) -> String {
     ));
     out.push_str("</dict>\n</plist>\n");
     out
+}
+
+/// Homebrew's label for `brew services start storm-runtime`, which runs the
+/// same host as [`user_plist`] from the same state.
+pub const BREW_LABEL: &str = "homebrew.mxcl.storm-runtime";
+
+/// Where `install --user` puts a host a person runs as themselves, a
+/// LaunchAgent (decision 151 E2). `state` and `config` are N2's per-user
+/// paths, so `enroll` and `check` with no flags find the same host.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserLayout {
+    pub home: PathBuf,
+    pub root: PathBuf,
+    pub bin: PathBuf,
+    pub config: PathBuf,
+    pub state: PathBuf,
+    /// The workspace root a fresh `runtime.toml` names.
+    pub workspaces: PathBuf,
+    pub logs: PathBuf,
+    pub log_file: PathBuf,
+    pub agents: PathBuf,
+    pub plist: PathBuf,
+    pub brew_plist: PathBuf,
+}
+
+impl UserLayout {
+    pub fn for_home(home: &Path) -> Self {
+        let root = home.join("Library/Application Support/StormRuntime");
+        let logs = home.join("Library/Logs/StormRuntime");
+        let agents = home.join("Library/LaunchAgents");
+        let state = root.join("state");
+        Self {
+            home: home.to_path_buf(),
+            bin: root.join("bin/storm-runtime"),
+            config: root.join("runtime.toml"),
+            workspaces: super::paths::user_workspaces(super::paths::Os::Macos, &state),
+            state,
+            log_file: logs.join("storm-runtime.log"),
+            plist: agents.join(format!("{LABEL}.plist")),
+            brew_plist: agents.join(format!("{BREW_LABEL}.plist")),
+            root,
+            logs,
+            agents,
+        }
+    }
+
+    pub fn enrolled_marker(&self) -> PathBuf {
+        self.state.join(crate::identity::HOST_FILE)
+    }
+}
+
+/// The LaunchAgent (decision 151 E2): the host as the person who loaded it,
+/// in their own session, so their login Keychain and their privacy prompts
+/// are theirs. No `UserName`, no account sweep, and no environment beyond
+/// `LANG`: launchd gives an agent the person's `HOME`, `USER` and `SHELL`,
+/// and the host reads `PATH` from their login shell (N7).
+///
+/// `KeepAlive` is `PathState` on `host.json`, as for the LaunchDaemon: an
+/// unenrolled or revoked host is never started, enrolling starts it, and a
+/// crash restarts it. Logging out ends it; the next login starts it again.
+pub fn user_plist(layout: &UserLayout) -> String {
+    let args = [
+        path(&layout.bin),
+        string("serve"),
+        string("--state"),
+        path(&layout.state),
+        string("--config"),
+        path(&layout.config),
+    ];
+    let mut out = String::new();
+    out.push_str(concat!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n",
+        "<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" ",
+        "\"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n",
+        "<!-- Written by `storm-runtime install --user` (decision 151 E2).\n",
+        "     Re-run it rather than editing this file. -->\n",
+        "<plist version=\"1.0\">\n<dict>\n",
+    ));
+    out.push_str(&format!("  <key>Label</key>\n  {}\n", string(LABEL)));
+    out.push_str("  <key>ProgramArguments</key>\n  <array>\n");
+    for a in &args {
+        out.push_str(&format!("    {a}\n"));
+    }
+    out.push_str("  </array>\n");
+    out.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
+    out.push_str(&format!(
+        "    <key>LANG</key>\n    {}\n",
+        string("en_US.UTF-8")
+    ));
+    out.push_str("  </dict>\n");
+    out.push_str(&format!(
+        concat!(
+            "  <key>KeepAlive</key>\n  <dict>\n",
+            "    <key>PathState</key>\n    <dict>\n",
+            "      <key>{}</key>\n      <true/>\n",
+            "    </dict>\n  </dict>\n",
+        ),
+        escape(&layout.enrolled_marker().display().to_string())
+    ));
+    out.push_str("  <key>ThrottleInterval</key>\n  <integer>10</integer>\n");
+    out.push_str("  <key>ExitTimeOut</key>\n  <integer>20</integer>\n");
+    out.push_str("  <key>ProcessType</key>\n  <string>Standard</string>\n");
+    out.push_str(&format!(
+        "  <key>StandardOutPath</key>\n  {}\n",
+        path(&layout.log_file)
+    ));
+    out.push_str(&format!(
+        "  <key>StandardErrorPath</key>\n  {}\n",
+        path(&layout.log_file)
+    ));
+    out.push_str("</dict>\n</plist>\n");
+    out
+}
+
+/// The `runtime.toml` `install --user` writes when there is none, naming
+/// `workspaces` in the state directory, as on every platform.
+pub fn user_default_config(layout: &UserLayout) -> String {
+    format!(
+        r#"# {config}: the configuration of the Storm Runtime Host you run as
+# yourself (decision 151 E2). Every value here is an operational default.
+# Written once by `storm-runtime install --user`, which never overwrites it.
+# After editing it: launchctl kickstart -k gui/$(id -u)/{label}
+
+# Each subdirectory of a root is a workspace, named by its directory name.
+# A root may be in your home; one under ~/Documents, ~/Desktop or
+# ~/Downloads makes macOS ask you first.
+workspace_roots = [{workspaces}]
+# workspace_roots = [{workspaces}, "{home}/Code"]
+
+max_sessions = 8
+scrollback_bytes = 4194304
+
+# The host finds agent CLIs on your login shell's PATH. Set one here to
+# choose it yourself:
+# path = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+"#,
+        config = layout.config.display(),
+        home = layout.home.display(),
+        label = LABEL,
+        workspaces = toml::Value::String(layout.workspaces.display().to_string()),
+    )
+}
+
+/// What `install --user` found before acting.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UserFacts {
+    pub uid: u32,
+    /// Running as root, through `sudo`.
+    pub root: bool,
+    /// Running as the service's own account.
+    pub service_account: bool,
+    /// The person has a login session (`gui/<uid>` exists).
+    pub gui_session: bool,
+    pub config_exists: bool,
+    pub brew_service: bool,
+    pub daemon_installed: bool,
+    /// A Storm server runs as this person (decision 84d's `server.json`).
+    pub server_here: bool,
+}
+
+/// One thing `install --user` does, in order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UserStep {
+    /// A directory only the person can enter.
+    PrivateDir(PathBuf),
+    /// `~/Library/LaunchAgents`, if it is missing.
+    Dir(PathBuf),
+    /// This binary, copied to `bin`.
+    Binary,
+    Config,
+    Plist,
+    /// Boot the job out of `domain` and back in.
+    Load {
+        domain: String,
+    },
+}
+
+/// What `install --user` does on a Mac where it found `facts`, and what it
+/// says first; or why it refuses.
+pub fn plan_user_install(
+    layout: &UserLayout,
+    facts: &UserFacts,
+) -> Result<(Vec<UserStep>, Vec<String>), String> {
+    if facts.root {
+        return Err(
+            "install --user installs the host as you: run it without sudo \
+                    (`sudo storm-runtime install` is the LaunchDaemon)"
+                .into(),
+        );
+    }
+    if facts.service_account {
+        return Err(format!(
+            "install --user runs a host as a person; this is the service's own account \
+             {}: run `sudo storm-runtime install` instead",
+            super::paths::MACOS_ACCOUNT
+        ));
+    }
+    if facts.brew_service {
+        return Err(format!(
+            "`brew services` already runs this host from the same state ({}): use one. \
+             `brew services stop storm-runtime` first, or keep brew's",
+            layout.brew_plist.display()
+        ));
+    }
+    let mut notes = Vec::new();
+    if facts.daemon_installed {
+        notes.push(format!(
+            "The LaunchDaemon is installed too ({}): it is a separate host, as {}, with its \
+             own state. `sudo /Library/StormRuntime/bin/storm-runtime uninstall` removes it.",
+            Layout::standard().plist.display(),
+            super::paths::MACOS_ACCOUNT
+        ));
+    }
+    if facts.server_here {
+        notes.push(
+            "A Storm server runs as you on this Mac, so this host's agents can read its \
+             vaults on disk. To keep them out, run the host as its own account instead: \
+             `sudo storm-runtime install`."
+                .into(),
+        );
+    }
+    let mut steps = vec![
+        UserStep::PrivateDir(layout.root.clone()),
+        UserStep::PrivateDir(layout.bin.parent().expect("bin has a parent").to_path_buf()),
+        UserStep::PrivateDir(layout.state.clone()),
+        UserStep::PrivateDir(layout.logs.clone()),
+        UserStep::Dir(layout.agents.clone()),
+        UserStep::Binary,
+    ];
+    if !facts.config_exists {
+        steps.push(UserStep::Config);
+        steps.push(UserStep::Dir(layout.workspaces.clone()));
+    }
+    steps.push(UserStep::Plist);
+    // An SSH-only login has no GUI domain: the agent lives in the
+    // background one until the next login loads it into the GUI.
+    let domain = if facts.gui_session { "gui" } else { "user" };
+    steps.push(UserStep::Load {
+        domain: format!("{domain}/{}", facts.uid),
+    });
+    Ok((steps, notes))
+}
+
+/// `s` as one word for a POSIX shell: the per-user paths have a space.
+pub fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
 }
 
 /// The `safe.directory` value that lets git work in every workspace,
@@ -419,5 +666,221 @@ mod tests {
         let config: crate::config::RuntimeConfig = toml::from_str(&text).expect("parses");
         assert_eq!(config.workspace_roots, vec![l.workspaces.clone()]);
         assert!(config.path.is_none(), "the default PATH is the platform's");
+    }
+
+    fn alice() -> UserLayout {
+        UserLayout::for_home(Path::new("/Users/alice"))
+    }
+
+    fn args_of(plist: &str) -> Vec<&str> {
+        let a = &plist[plist.find("<key>ProgramArguments</key>").unwrap()..];
+        a[..a.find("</array>").unwrap()]
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix("<string>")?.strip_suffix("</string>"))
+            .collect()
+    }
+
+    #[test]
+    fn the_user_layout_is_n2s_per_user_paths() {
+        let l = alice();
+        let n2 = super::super::paths::resolve(super::super::paths::Os::Macos, false, |n| {
+            (n == "HOME").then(|| "/Users/alice".into())
+        })
+        .unwrap();
+        assert_eq!(l.state, n2.state);
+        assert_eq!(l.config, n2.config);
+        assert_eq!(
+            l.bin,
+            Path::new("/Users/alice/Library/Application Support/StormRuntime/bin/storm-runtime")
+        );
+        assert_eq!(
+            l.plist,
+            Path::new("/Users/alice/Library/LaunchAgents/dev.storm.runtime.plist")
+        );
+        assert_eq!(
+            l.brew_plist,
+            Path::new("/Users/alice/Library/LaunchAgents/homebrew.mxcl.storm-runtime.plist")
+        );
+        assert_eq!(
+            l.log_file,
+            Path::new("/Users/alice/Library/Logs/StormRuntime/storm-runtime.log")
+        );
+    }
+
+    #[test]
+    fn the_launch_agent_runs_serve_on_the_per_user_paths_as_whoever_loads_it() {
+        let p = user_plist(&alice());
+        assert_eq!(
+            value_after(&p, "Label"),
+            "<string>dev.storm.runtime</string>"
+        );
+        // Each path is one argument, space and all: launchd runs no shell.
+        assert_eq!(
+            args_of(&p),
+            [
+                "/Users/alice/Library/Application Support/StormRuntime/bin/storm-runtime",
+                "serve",
+                "--state",
+                "/Users/alice/Library/Application Support/StormRuntime/state",
+                "--config",
+                "/Users/alice/Library/Application Support/StormRuntime/runtime.toml",
+            ]
+        );
+        for absent in [
+            "UserName",
+            "GroupName",
+            "Umask",
+            "--exclusive-account",
+            "HOME",
+            "PATH",
+        ] {
+            assert!(!p.contains(absent), "{absent} in {p}");
+        }
+        assert_eq!(value_after(&p, "LANG"), "<string>en_US.UTF-8</string>");
+        assert_eq!(value_after(&p, "ProcessType"), "<string>Standard</string>");
+        let log = "<string>/Users/alice/Library/Logs/StormRuntime/storm-runtime.log</string>";
+        assert_eq!(value_after(&p, "StandardOutPath"), log);
+        assert_eq!(value_after(&p, "StandardErrorPath"), log);
+    }
+
+    #[test]
+    fn the_launch_agent_runs_exactly_while_the_host_is_enrolled() {
+        let p = user_plist(&alice());
+        assert!(
+            !p.contains("RunAtLoad"),
+            "an unenrolled host must not start"
+        );
+        let keep = &p[p.find("<key>KeepAlive</key>").unwrap()..];
+        let keep = &keep[..keep.find("</dict>\n  </dict>").unwrap()];
+        assert!(
+            keep.contains(
+                "<key>/Users/alice/Library/Application Support/StormRuntime/state/host.json</key>\n      <true/>"
+            ),
+            "{keep}"
+        );
+        assert_eq!(p.matches("<dict>").count(), p.matches("</dict>").count());
+        assert!(p.trim_end().ends_with("</plist>"));
+        let odd = user_plist(&UserLayout::for_home(Path::new("/Users/a&b")));
+        assert!(odd.contains("<string>/Users/a&amp;b/Library/"), "{odd}");
+    }
+
+    #[test]
+    fn the_user_config_parses_and_names_the_workspaces_in_its_state() {
+        let l = alice();
+        let text = user_default_config(&l);
+        let config: crate::config::RuntimeConfig = toml::from_str(&text).expect("parses");
+        assert_eq!(
+            l.workspaces,
+            Path::new("/Users/alice/Library/Application Support/StormRuntime/state/workspaces")
+        );
+        assert_eq!(config.workspace_roots, std::slice::from_ref(&l.workspaces));
+        assert!(config.path.is_none());
+        assert!(text.contains("\"/Users/alice/Code\"]"), "{text}");
+    }
+
+    fn facts() -> UserFacts {
+        UserFacts {
+            uid: 501,
+            gui_session: true,
+            ..UserFacts::default()
+        }
+    }
+
+    #[test]
+    fn a_fresh_user_install_makes_private_dirs_then_loads_into_the_gui_domain() {
+        let l = alice();
+        let (steps, notes) = plan_user_install(&l, &facts()).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(
+            steps,
+            [
+                UserStep::PrivateDir(l.root.clone()),
+                UserStep::PrivateDir(l.root.join("bin")),
+                UserStep::PrivateDir(l.state.clone()),
+                UserStep::PrivateDir(l.logs.clone()),
+                UserStep::Dir(l.agents.clone()),
+                UserStep::Binary,
+                UserStep::Config,
+                UserStep::Dir(l.workspaces.clone()),
+                UserStep::Plist,
+                UserStep::Load {
+                    domain: "gui/501".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_user_reinstall_keeps_the_config_and_without_a_login_uses_the_user_domain() {
+        let f = UserFacts {
+            config_exists: true,
+            gui_session: false,
+            ..facts()
+        };
+        let l = alice();
+        let (steps, _) = plan_user_install(&l, &f).unwrap();
+        assert!(!steps.contains(&UserStep::Config));
+        assert!(!steps.contains(&UserStep::Dir(l.workspaces.clone())));
+        assert_eq!(
+            steps.last(),
+            Some(&UserStep::Load {
+                domain: "user/501".into()
+            })
+        );
+    }
+
+    #[test]
+    fn a_user_install_refuses_sudo_the_service_account_and_brew_services() {
+        let l = alice();
+        let err = plan_user_install(
+            &l,
+            &UserFacts {
+                root: true,
+                ..facts()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("without sudo"), "{err}");
+        let err = plan_user_install(
+            &l,
+            &UserFacts {
+                service_account: true,
+                ..facts()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("_stormruntime"), "{err}");
+        let err = plan_user_install(
+            &l,
+            &UserFacts {
+                brew_service: true,
+                ..facts()
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("brew services stop storm-runtime"), "{err}");
+    }
+
+    #[test]
+    fn a_user_install_beside_the_daemon_or_a_server_says_so() {
+        let f = UserFacts {
+            daemon_installed: true,
+            server_here: true,
+            ..facts()
+        };
+        let (steps, notes) = plan_user_install(&alice(), &f).unwrap();
+        assert!(steps.contains(&UserStep::Plist));
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        assert!(notes[0].contains("separate host"), "{notes:?}");
+        assert!(notes[1].contains("can read its vaults"), "{notes:?}");
+    }
+
+    #[test]
+    fn a_path_with_a_space_or_a_quote_is_one_shell_word() {
+        assert_eq!(
+            shell_quote("/Users/a/Library/Application Support/x"),
+            "'/Users/a/Library/Application Support/x'"
+        );
+        assert_eq!(shell_quote("it's"), r"'it'\''s'");
     }
 }

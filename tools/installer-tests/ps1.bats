@@ -51,3 +51,39 @@ code() { grep -v '^[[:space:]]*#' "$PS1"; }
   code | grep -q 'CloseMainWindow()'
   ! code | grep -Eiq 'Stop-Process|taskkill|\.Kill\('
 }
+
+# Decision 151 E5: the shape of a new Runtime Host, read from the script.
+shape() { code | sed -n '/^if (\$Runtime -and -not \$User -and -not \$Service) {$/,/^}$/p'; }
+
+@test "install.ps1: a new Runtime Host runs as you; -Service is one switch away" {
+  code | grep -q '\[switch\]\$Service,'
+  code | grep -q "if (\$User -and \$Service) { Fail '-User and -Service are the two ways"
+  [ -n "$(shape)" ]
+  # The last word, with -Yes and nothing else deciding, is as you.
+  shape | grep -B1 -A2 '^    } else {$' | grep -q '^        \$User = \$true$'
+  shape | grep -q "Say '  2) as the StormRuntime service; needs PowerShell as administrator'"
+}
+
+@test "install.ps1: an installed StormRuntime service is kept, before any other rule" {
+  code | grep -q "Get-Service -Name StormRuntime -ErrorAction SilentlyContinue"
+  [ "$(shape | grep -m1 -E '^\s+(\} elseif|if) \(' | tr -d ' ')" = "if(\$serviceHost){" ]
+  shape | grep -A1 'if (\$serviceHost) {' | grep -q '\$Service = \$true'
+}
+
+@test "install.ps1: -Server and an elevated shell keep the service, as E3 requires" {
+  shape | grep -A1 'elseif (\$Server) {' | grep -q '\$Service = \$true'
+  shape | grep -A1 'elseif (\$admin) {' | grep -q '\$Service = \$true'
+  code | grep -q "Fail '-User with -Server would run agents as the account that holds your notes"
+}
+
+@test "install.ps1: -Workspace makes the folder in the host's own root as you too" {
+  code | grep -qF "if (\$User) { \$root = Join-Path \$runtimeState 'workspaces' }"
+  ! code | grep -q "Workspace is for the service"
+}
+
+@test "install.ps1: with a host you run, MCP is that host's exe by its full path" {
+  code | grep -qF "\$userRuntimeBin = Join-Path \$env:LOCALAPPDATA 'StormRuntime\\bin\\storm-runtime.exe'"
+  code | grep -qF "\$mcpViaHost = \$Mcp -and ((\$Runtime -and \$User) -or (-not \$Runtime -and \$userHost))"
+  code | grep -qF 'the command is its full path: $userRuntimeBin'
+  code | grep -qF "storm-runtime.exe into \$mcpDir, on your PATH"
+}

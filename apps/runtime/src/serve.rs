@@ -40,8 +40,13 @@ pub async fn run(
         exclusive_account,
         "starting"
     );
+    crate::platform::ipc::check_path(&crate::mcp::socket_path(state))
+        .map_err(anyhow::Error::msg)?;
     crate::platform::prepare_home();
-    let config = crate::config::RuntimeConfig::load(config)?;
+    let mut config = crate::config::RuntimeConfig::load(config)?;
+    if !crate::platform::is_service_context() {
+        config.person = Some(crate::login_env::for_host(&config.import_env));
+    }
     let host = crate::host::Host::new(state, config)?;
     host.log_inventory();
     if exclusive_account {

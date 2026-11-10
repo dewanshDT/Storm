@@ -55,6 +55,10 @@ pub struct Profile {
     /// Always passed. Never a flag that skips the agent's own permission
     /// prompts (Q6).
     pub args: &'static [&'static str],
+    /// Passed after `args` only on the service account
+    /// ([`crate::platform::is_service_context`]); a person's own host leaves
+    /// these to the agent's own settings (decision 151 N3).
+    pub service_args: &'static [&'static str],
     pub mcp: Option<Mcp>,
     /// `None` for an agent with no Storm MCP: the prompt names a Storm tool.
     pub prompt: Option<Prompt>,
@@ -72,9 +76,8 @@ pub const BUILT_IN: [Profile; 6] = [
     Profile {
         id: "claude-code",
         command: "claude",
-        // Gate Q6 found the operator's own CLI settings starting it in
-        // another mode, so the mode is always passed.
-        args: &["--permission-mode", "default"],
+        args: &[],
+        service_args: &[],
         mcp: Some(Mcp::ClaudeCode),
         prompt: Some(Prompt::Positional),
         resume: Some(IdShape::Uuid),
@@ -84,6 +87,7 @@ pub const BUILT_IN: [Profile; 6] = [
         id: "opencode",
         command: "opencode",
         args: &[],
+        service_args: &[],
         mcp: Some(Mcp::OpenCode),
         prompt: Some(Prompt::Flag("--prompt")),
         resume: Some(IdShape::OpenCode),
@@ -93,14 +97,14 @@ pub const BUILT_IN: [Profile; 6] = [
         id: "codex",
         command: "codex",
         // A session owns its process: 0.163 otherwise attaches to a shared
-        // daemon, which holds a conversation's writer lock. No Codex
-        // sandbox: it needs user namespaces, which the Runtime Host's unit
-        // forbids (`RestrictNamespaces=true`), and the host's account is the
-        // boundary for every agent (130c). Approvals stay on, and gateway
-        // tools always ask (`codex.rs`). Storm's hook carries its own trust
-        // record, so no hook runs unreviewed (132c-1).
-        args: &[
-            "--no-daemon",
+        // daemon, which holds a conversation's writer lock. Storm's hook
+        // carries its own trust record, so no hook runs unreviewed (132c-1).
+        args: &["--no-daemon"],
+        // On the service only, no Codex sandbox: it needs user namespaces,
+        // which the Runtime Host's unit forbids (`RestrictNamespaces=true`),
+        // and the host's account is the boundary for every agent (130c).
+        // Approvals stay on, and gateway tools always ask (`codex.rs`).
+        service_args: &[
             "--sandbox",
             "danger-full-access",
             "--ask-for-approval",
@@ -118,6 +122,7 @@ pub const BUILT_IN: [Profile; 6] = [
         // first choice also enables the repository's MCP servers. `--trust`
         // trusts the folder and leaves those servers waiting for approval.
         args: &["--trust"],
+        service_args: &[],
         // No grants until a real-account gate (G-C1) shows Storm's servers
         // reaching a session through `cursor.rs` (130d, 132d).
         mcp: None,
@@ -129,12 +134,8 @@ pub const BUILT_IN: [Profile; 6] = [
         id: "command-code",
         // Not `cmd`, which is cmd.exe on Windows.
         command: "command-code",
-        args: &[
-            "--no-auto-update",
-            "--skip-onboarding",
-            "--permission-mode",
-            "standard",
-        ],
+        args: &["--no-auto-update", "--skip-onboarding"],
+        service_args: &[],
         // No grants until a real-account gate (G-CC1) shows Storm's servers
         // reaching a session through `command_code.rs` (130e, 132d).
         mcp: None,
@@ -147,6 +148,7 @@ pub const BUILT_IN: [Profile; 6] = [
         // Replaced by the platform's own shell; see `CliProvider::shell`.
         command: "",
         args: &[],
+        service_args: &[],
         mcp: None,
         prompt: None,
         resume: None,
@@ -218,36 +220,26 @@ pub fn model_args(provider: &str, model: &str) -> Result<Vec<String>, String> {
 pub struct PermissionLaunch {
     pub args: Vec<String>,
     pub opencode_permission: Vec<(String, String)>,
-    /// Auto is out of Claude Code's Shift+Tab cycle (147c): every mode but
-    /// `auto` itself.
-    pub auto_off: bool,
-    /// A child's baseline in Claude Code's `permissions.allow` (148a).
-    pub allow: Vec<String>,
-    /// OpenCode: Storm's layer turns every ask into a deny (148a).
-    pub deny_asks: bool,
 }
 
-/// A permission mode as `provider` takes it (146b, 147a), by
+/// A permission mode as `provider` takes it, by
 /// `docs/agent-permission-mode-vectors.json`'s rule, which the server applies
-/// too. Claude Code always gets a flag, since its own default became auto
-/// (2.1.312): `default` is `--permission-mode default`, the mode that asks,
-/// a spelling every Claude Code takes (2.1.312 calls it Manual and takes
-/// `manual` too; an older one knows only `default`), so no version check is
-/// needed. `accept_edits` is `acceptEdits`, `auto` is `auto`; every mode but
-/// auto takes auto out of the cycle. OpenCode takes `edit: allow` for
-/// `accept_edits`; anything else, and every bypass, is refused, so the start
-/// fails rather than fall back.
+/// too (151 N5). `default` passes nothing, so the agent's own config
+/// decides; any other mode is the agent's own flag, passed only because the
+/// person chose it, a child's because its parent runs it. Anything else is
+/// refused, so the start fails rather than fall back.
 pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
     let flag = |value: &str| PermissionLaunch {
         args: vec!["--permission-mode".into(), value.into()],
-        auto_off: value != "auto",
         ..Default::default()
     };
     match (provider, mode) {
-        ("claude-code", "default") => Ok(flag("default")),
         (_, "default") => Ok(PermissionLaunch::default()),
         ("claude-code", "accept_edits") => Ok(flag("acceptEdits")),
+        ("claude-code", "plan") => Ok(flag("plan")),
         ("claude-code", "auto") => Ok(flag("auto")),
+        ("claude-code", "dont_ask") => Ok(flag("dontAsk")),
+        ("claude-code", "bypass") => Ok(flag("bypassPermissions")),
         ("opencode", "accept_edits") => Ok(PermissionLaunch {
             opencode_permission: vec![("edit".into(), "allow".into())],
             ..Default::default()
@@ -255,49 +247,6 @@ pub fn permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, S
         _ => Err(format!(
             "{:?} is not a permission mode Storm gives {provider}",
             mode.chars().take(40).collect::<String>()
-        )),
-    }
-}
-
-/// What a child is allowed outright in Claude Code `dontAsk` (148a): edits
-/// and reads inside its own workspace, and commands. Its workspace, user and
-/// namespace are already its own (136, 137), and nothing reaches the
-/// person's workspace until they Apply it.
-pub const CHILD_BASELINE: [&str; 3] = ["Edit(./**)", "Read(./**)", "Bash"];
-
-/// Whether Claude Code's auto mode can fall back to asking the person.
-/// G-148 found it does (2.1.312: after repeated classifier blocks the call
-/// goes to the CLI's own prompt), and no documented setting turns that into
-/// a denial (`autoMode` takes only classifier rules), so a child never runs
-/// in auto.
-pub const AUTO_CAN_ASK: bool = true;
-
-/// A child's mode as `provider` takes it (148a): never a prompt, whatever its
-/// parent's mode. Claude Code runs `dontAsk` with [`CHILD_BASELINE`], for an
-/// auto parent too: G-148 found auto falls back to asking after repeated
-/// blocks, and no documented setting turns that into a denial. OpenCode
-/// gets `edit` and `bash` allowed and every other ask denied. `mode` is still
-/// checked as [`permission_mode`] checks it; any other agent is refused,
-/// since nothing documented keeps it from asking.
-pub fn child_permission_mode(provider: &str, mode: &str) -> Result<PermissionLaunch, String> {
-    permission_mode(provider, mode)?;
-    match provider {
-        "claude-code" => Ok(PermissionLaunch {
-            args: vec!["--permission-mode".into(), "dontAsk".into()],
-            auto_off: true,
-            allow: CHILD_BASELINE.map(String::from).to_vec(),
-            ..Default::default()
-        }),
-        "opencode" => Ok(PermissionLaunch {
-            opencode_permission: vec![
-                ("bash".into(), "allow".into()),
-                ("edit".into(), "allow".into()),
-            ],
-            deny_asks: true,
-            ..Default::default()
-        }),
-        _ => Err(format!(
-            "{provider} cannot run as a child: nothing documented keeps it from asking"
         )),
     }
 }
@@ -399,12 +348,12 @@ mod tests {
         .unwrap()
     }
 
-    /// 146b (A-146-2): each mode becomes exactly the table's flag or config
-    /// key, as the server's copy of the rule offers it; every other mode,
-    /// bypass included, is refused; and every flag passes the Windows
-    /// batch-file rules unescaped.
+    /// 146b, 151 N5 (A-146-2): each mode becomes exactly the table's flag
+    /// or config key, as the server's copy of the rule offers it; `default`
+    /// passes nothing for every agent; every other mode is refused; and
+    /// every flag passes the Windows batch-file rules unescaped.
     #[test]
-    fn a_146_2_a_mode_is_mapped_exactly_as_the_vectors_say() {
+    fn a_146_2_a_mode_is_passed_through_exactly_as_the_vectors_say() {
         let v = mode_vectors();
         for case in v["accepted"].as_array().unwrap() {
             let (agent, mode) = (
@@ -424,8 +373,6 @@ mod tests {
                 PermissionLaunch {
                     args: args.clone(),
                     opencode_permission: opencode,
-                    auto_off: case["auto_off"].as_bool().unwrap(),
-                    ..Default::default()
                 },
                 "{agent} {mode}"
             );
@@ -439,7 +386,7 @@ mod tests {
             assert!(permission_mode(agent, mode).is_err(), "{agent} {mode:?}");
         }
         for (agent, modes) in v["offered"].as_object().unwrap() {
-            for mode in v["order"].as_array().unwrap() {
+            for mode in v["modes"].as_array().unwrap() {
                 let mode = mode.as_str().unwrap();
                 assert_eq!(
                     permission_mode(agent, mode).is_ok(),
@@ -448,76 +395,46 @@ mod tests {
                 );
             }
         }
-        for agent in ["claude-code", "opencode", "codex"] {
-            for mode in ["accept_edits", "auto"] {
-                if let Ok(l) = permission_mode(agent, mode) {
-                    for a in &l.args {
-                        assert!(!a.contains("bypass") && !a.contains("skip"), "{a}");
-                    }
-                }
-            }
-        }
-    }
-
-    /// 148a (A-148-1, A-148-4): a child's mode is the vectors' no-prompt
-    /// form for every mode its agent offers; Codex and every other agent
-    /// are refused as a child, and nothing reaches bypass.
-    #[test]
-    fn a_148_a_childs_mode_never_asks() {
-        let v = mode_vectors();
-        let child = &v["child"];
-        for case in child["accepted"].as_array().unwrap() {
-            let (agent, mode) = (
-                case["agent"].as_str().unwrap(),
-                case["mode"].as_str().unwrap(),
-            );
-            let strings =
-                |key: &str| -> Vec<String> { serde_json::from_value(case[key].clone()).unwrap() };
-            let got = child_permission_mode(agent, mode).unwrap();
-            assert_eq!(
-                got,
-                PermissionLaunch {
-                    args: strings("args"),
-                    opencode_permission: case["opencode_permission"]
-                        .as_object()
-                        .unwrap()
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.as_str().unwrap().to_string()))
-                        .collect(),
-                    auto_off: case["auto_off"].as_bool().unwrap(),
-                    allow: strings("allow"),
-                    deny_asks: case["deny_asks"].as_bool().unwrap(),
-                },
-                "{agent} {mode}"
-            );
-            crate::platform::wincmd::batch_command_line("cmd.exe", "claude.cmd", &got.args)
-                .unwrap();
-            let text = format!("{got:?}");
-            assert!(!text.contains("bypass") && !text.contains("skip"), "{text}");
-        }
-        for case in child["refused"].as_array().unwrap() {
-            let (agent, mode) = (
-                case["agent"].as_str().unwrap(),
-                case["mode"].as_str().unwrap(),
-            );
-            assert!(
-                child_permission_mode(agent, mode).is_err(),
-                "{agent} {mode:?}"
-            );
-        }
-        let unattended: Vec<&str> = child["unattended"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|a| a.as_str().unwrap())
-            .collect();
         for p in BUILT_IN {
             assert_eq!(
-                child_permission_mode(p.id, "default").is_ok(),
-                unattended.contains(&p.id),
+                permission_mode(p.id, "default"),
+                Ok(PermissionLaunch::default()),
                 "{}",
                 p.id
             );
+            assert!(
+                !p.args.iter().any(|a| a.contains("permission-mode")),
+                "{} pins a mode",
+                p.id
+            );
+        }
+    }
+
+    /// 151 N5 (Q-P1): a child takes its parent's mode through the same
+    /// mapping as any session, so what reaches its agent is exactly the
+    /// parent's flag; an isolated (sandbox) child's is the same, since the
+    /// mapping knows nothing of the host. No no-prompt form is left.
+    #[test]
+    fn a_child_takes_its_parents_mode() {
+        let v = mode_vectors();
+        for case in v["inherit"].as_array().unwrap() {
+            let (parent, agent, child) = (
+                case["parent"].as_str().unwrap(),
+                case["agent"].as_str().unwrap(),
+                case["child"].as_str().unwrap(),
+            );
+            let got = permission_mode(agent, child).unwrap();
+            if child == parent {
+                assert_eq!(Ok(got.clone()), permission_mode(agent, parent), "{case}");
+            } else {
+                assert_eq!(child, "default", "{case}");
+                assert_eq!(got, PermissionLaunch::default(), "{case}");
+            }
+            let text = format!("{got:?}");
+            assert!(!text.contains("dontAsk") || parent == "dont_ask", "{text}");
+        }
+        for p in BUILT_IN {
+            assert!(permission_mode(p.id, "default").is_ok(), "{}", p.id);
         }
     }
 
@@ -530,11 +447,12 @@ mod tests {
         }
     }
 
-    // Q6: a built-in never starts an agent with its permission prompts off.
+    // Q6: a built-in never starts an agent with its permission prompts off;
+    // a bypass comes only from the person's own launch choice.
     #[test]
     fn no_built_in_skips_permissions() {
         for p in BUILT_IN {
-            for a in p.args {
+            for a in p.args.iter().chain(p.service_args) {
                 for bad in [
                     "dangerously-skip",
                     "--yolo",

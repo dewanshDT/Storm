@@ -121,14 +121,15 @@ impl AgentManager {
         let Some(caps) = self.host_live(&r.host_id).capabilities else {
             return Ok(false);
         };
-        let (parent, mcp, model, permission_mode) = {
+        let (parent, mcp, model, permission_mode, cwd) = {
             let store = self.store.lock().unwrap();
             let launch = store.launch(session_id)?;
             (
                 store.lineage(session_id)?.parent_session,
                 store.grants_of(session_id)?,
                 launch.as_ref().and_then(|l| l.model.clone()),
-                launch.and_then(|l| l.permission_mode),
+                launch.as_ref().and_then(|l| l.permission_mode.clone()),
+                launch.and_then(|l| l.cwd),
             )
         };
         let parent = parent.map(|p| self.get(&p)).transpose()?;
@@ -166,6 +167,7 @@ impl AgentManager {
             // Its own kept conversation: the same session, resumed.
             resumed_from: Some(r.id.clone()),
             child_of: Some(parent.id.clone()),
+            cwd,
         };
         self.live
             .lock()

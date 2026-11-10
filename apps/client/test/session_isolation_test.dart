@@ -23,11 +23,17 @@ void main() {
     'reason': reason,
   };
 
-  Map<String, dynamic> host(String id, Map<String, dynamic>? isolation) => {
+  Map<String, dynamic> host(
+    String id,
+    Map<String, dynamic>? isolation, {
+    Map<String, dynamic>? execution,
+    String identity = 'verified',
+  }) => {
     'id': id,
     'name': id,
     'status': 'online',
     'egress': 'host',
+    'execution': ?execution,
     'capabilities': {
       'providers': [
         {'id': 'shell', 'kind': 'cli', 'available': true},
@@ -35,29 +41,34 @@ void main() {
       'workspaces': ['storm'],
       'max_sessions': 8,
     },
-    'identity': {'state': 'verified', 'mechanism': 'so_peerpidfd'},
+    'identity': {'state': identity, 'mechanism': 'so_peerpidfd'},
     'isolation': ?isolation,
   };
 
-  AgentSession session(Map<String, dynamic>? isolation) =>
-      AgentSession.fromJson({
-        'id': 'ags_1',
-        'host_id': 'hst_1',
-        'workspace': 'storm',
-        'provider': 'claude-code',
-        'status': 'running',
-        'isolation': ?isolation,
-      });
+  AgentSession session(
+    Map<String, dynamic>? isolation, {
+    Map<String, dynamic>? ranAs,
+  }) => AgentSession.fromJson({
+    'id': 'ags_1',
+    'host_id': 'hst_1',
+    'workspace': 'storm',
+    'provider': 'claude-code',
+    'status': 'running',
+    'isolation': ?isolation,
+    'ran_as': ?ranAs,
+  });
 
-  List<String> about(AgentSession s) => [
+  List<String> rows(AgentSession s, String label) => [
     for (final r in aboutRows(
       s,
       host: 'h',
       writeVault: null,
       integrations: null,
     ))
-      if (r.$1 == 'Isolation') r.$2,
+      if (r.$1 == label) r.$2,
   ];
+
+  List<String> about(AgentSession s) => rows(s, 'Isolation');
 
   test('off, an older host or server, and macOS or Windows say nothing', () {
     expect(about(session(isolation('unavailable', 'off'))), isEmpty);
@@ -67,7 +78,8 @@ void main() {
   });
 
   test('a verified host says so; any other state with it on refuses', () {
-    expect(about(session(isolation('verified'))), ['$kIsolationVerified.']);
+    // Ran as says it, from the snapshot.
+    expect(about(session(isolation('verified'))), isEmpty);
     for (final (reason, why) in [
       ('pending', 'self-test running'),
       ('self_test', 'self-test failed'),
@@ -85,6 +97,35 @@ void main() {
     expect(s.withLive(session(null)).isolationLabel, isNotNull);
   });
 
+  test('Ran as reads the snapshot, and an older session is Not recorded', () {
+    Map<String, dynamic> ranAs(String? account, String state) => {
+      'account': account,
+      'isolation': isolation(state, state == 'verified' ? null : 'off'),
+      'identity': {'state': 'verified'},
+    };
+    String ranAsOf(AgentSession s) => rows(s, 'Ran as').single;
+    expect(
+      ranAsOf(session(null, ranAs: ranAs('dewansh', 'unavailable'))),
+      'dewansh',
+    );
+    expect(
+      ranAsOf(session(null, ranAs: ranAs(null, 'unavailable'))),
+      'An unknown account',
+    );
+    // The snapshot wins over what the session's host says now.
+    expect(
+      ranAsOf(
+        session(
+          isolation('unavailable', 'off'),
+          ranAs: ranAs('storm-runtime', 'verified'),
+        ),
+      ),
+      'Its own session user (isolated) · the host runs as storm-runtime',
+    );
+    expect(ranAsOf(session(isolation('verified'))), 'Not recorded');
+    expect(ranAsOf(session(null)), 'Not recorded');
+  });
+
   test('a start refused for it says why', () {
     final s = AgentSession.fromJson({
       'id': 'ags_1',
@@ -97,21 +138,14 @@ void main() {
     expect(s.endDetail, 'isolation unavailable on this host');
   });
 
-  testWidgets('the host row says what isolation is, only when it is on', (
-    tester,
+  Future<void> pumpHosts(
+    WidgetTester tester,
+    List<Map<String, dynamic>> hosts,
   ) async {
     SharedPreferences.setMockInitialValues({});
     final client = MockClient((req) async {
       if (req.url.path == '/v1/agent/hosts') {
-        return http.Response(
-          jsonEncode([
-            host('hst_off', isolation('unavailable', 'off')),
-            host('hst_ok', isolation('verified')),
-            host('hst_down', isolation('unavailable', 'self_test')),
-            host('hst_old', null),
-          ]),
-          200,
-        );
+        return http.Response(jsonEncode(hosts), 200);
       }
       if (req.url.path == '/v1/config/agent') {
         return http.Response('{"default_provider":"shell"}', 200);
@@ -142,15 +176,91 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    const line = 'online now · Shell · network: host policy';
-    expect(find.text(line), findsNWidgets(2));
-    expect(find.text('$line\n$kIsolationVerified'), findsOneWidget);
+  }
+
+  const line = 'online now · Shell · network: host policy';
+
+  testWidgets('the host row says what isolation is, only when it is on', (
+    tester,
+  ) async {
+    await pumpHosts(tester, [
+      host('hst_off', isolation('unavailable', 'off')),
+      host('hst_ok', isolation('verified')),
+      host('hst_down', isolation('unavailable', 'self_test')),
+      host('hst_old', null),
+    ]);
+    expect(find.text('$line\n$kRunsAsUnknown'), findsNWidgets(2));
+    expect(
+      find.text('$line\n$kRunsAsUnknown\n$kIsolationVerified'),
+      findsOneWidget,
+    );
     expect(
       find.text(
-        '$line\nSession isolation unavailable (self-test failed) — new '
-        'sessions are refused',
+        '$line\n$kRunsAsUnknown\nSession isolation unavailable (self-test '
+        'failed) — new sessions are refused',
       ),
       findsOneWidget,
     );
+  });
+
+  // Decision 151q: every row says who its host runs as, and identity only
+  // as a fix-it line when it is not verified.
+  final userRun = {'account': 'dewansh', 'isolation': 'off'};
+  final service = {'account': 'storm-runtime', 'isolation': 'off'};
+  final sandbox = {'account': 'storm-runtime', 'isolation': 'per-session'};
+
+  testWidgets('every host row says who it runs as', (tester) async {
+    await pumpHosts(tester, [
+      host('hst_me', isolation('unavailable', 'off'), execution: userRun),
+      host('hst_svc', isolation('unavailable', 'off'), execution: service),
+      host('hst_box', isolation('verified'), execution: sandbox),
+      host(
+        'hst_nameless',
+        null,
+        execution: {'account': null, 'isolation': 'off'},
+      ),
+      host('hst_old', null, identity: 'unavailable'),
+    ]);
+    expect(find.text('$line\nRuns as dewansh'), findsOneWidget);
+    expect(find.text('$line\nRuns as storm-runtime'), findsOneWidget);
+    expect(
+      find.text('$line\nRuns as storm-runtime · each session isolated'),
+      findsOneWidget,
+    );
+    expect(find.text('$line\n$kRunsAsUnknown'), findsOneWidget);
+    expect(
+      find.text('$line\n$kRunsAsUnknown\n$kIdentityNotVerified'),
+      findsOneWidget,
+    );
+    expect(find.textContaining(kIdentityNotVerified), findsOneWidget);
+  });
+
+  testWidgets('no non-sandbox host is called isolated, trusted, secure or '
+      'protected', (tester) async {
+    await pumpHosts(tester, [
+      host('hst_me', isolation('unavailable', 'off'), execution: userRun),
+      host('hst_svc', isolation('unavailable', 'off'), execution: service),
+      host('hst_old', null),
+      host('hst_unverified', null, execution: userRun, identity: 'unsupported'),
+    ]);
+    final forbidden = RegExp(
+      r'isolated|trusted|secure|protected',
+      caseSensitive: false,
+    );
+    final said = [
+      for (final w in tester.widgetList<Text>(find.byType(Text)))
+        w.data ?? w.textSpan?.toPlainText() ?? '',
+    ];
+    expect(said.where((x) => x.contains('\nRuns as ')), hasLength(4));
+    expect(said.where(forbidden.hasMatch), isEmpty);
+    for (final r in [
+      ranAsLine(null),
+      ranAsLine(const RanAs(account: 'dewansh')),
+      ranAsLine(const RanAs(isolationState: 'unavailable')),
+      executionLineFor(const HostExecution(account: 'dewansh')),
+      executionLineFor(null),
+    ]) {
+      expect(forbidden.hasMatch(r), isFalse, reason: r);
+    }
   });
 }

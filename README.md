@@ -80,7 +80,11 @@ It shows its plan (every `sudo` step included) before changing anything, and
 re-running it is how you upgrade, check status, pair a device, enroll a
 runtime or uninstall (your notes are always kept). Scripted:
 `sh install.sh --yes --server --app`, `--runtime`, `--everything`,
-`--dry-run`; `sh install.sh --help` lists the rest. **MCP only** (`--mcp`)
+`--dry-run`; `sh install.sh --help` lists the rest. `--runtime` installs
+the Runtime Host as you (below); add `--service` for its own account
+instead. On a Mac, where the server runs as you, `--server --runtime` and
+`--everything` install the host as its own account. A host already
+installed as the service stays one. **MCP only** (`--mcp`)
 puts just `storm-runtime` on a laptop's PATH for an AI app's `mcp-connect`
 (below).
 
@@ -148,9 +152,22 @@ are on [Releases](https://github.com/dewanshDT/Storm/releases) and the
 ### Runtime Hosts (optional)
 
 `storm-runtime` runs agents on a machine for one Storm Server — the server's
-own box, or another. It is a separate package in the same apt repository, the
-server needs no inbound route to it, and it can read no vault: its own account
-is never in the server's group.
+own box, or another. The server needs no inbound route to it. It runs one of
+two ways, on Linux, macOS and Windows:
+
+- **As yourself** (`storm-runtime install --user`, and the installer's
+  default), with no root: a `systemd --user` unit on Linux, a LaunchAgent on
+  a Mac, a logon task on Windows. Its agents run as you, with your CLIs,
+  logins and folders, and can do whatever you can.
+- **As a service** (the installer's `--service`, `-Service` on Windows),
+  under its own account, which is never in the server's group, so it can
+  read no vault. Its agents run as that account.
+
+Storm coordinates agents; it does not isolate a session from the account it
+runs as. What an agent asks before acting is its own harness's setting.
+**Settings › Hosts** says which account each host runs as.
+
+The service on Linux is a separate package in the same apt repository:
 
 ```sh
 sudo apt install storm-runtime
@@ -161,17 +178,33 @@ sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
 ```
 
+Or as yourself, on any Linux with systemd, from the
+`storm-runtime-<version>-x86_64-linux.tar.gz` release tarball (or the
+installer's `--runtime`); linger starts it at boot without a login:
+
+```sh
+./storm-runtime install --user                   # prints the linger command if it needs an administrator
+~/.local/bin/storm-runtime enroll
+systemctl --user start storm-runtime
+~/.local/bin/storm-runtime uninstall --user      # leaves nothing outside your home
+```
+
+macOS and Windows, each as a service and as yourself, and moving a host
+from one to the other (enroll the new one, revoke the old one), are in
+[the hosts docs](https://storm.dewansh.space/docs/agents/hosts/).
+
 Providers are `claude-code` (default), `opencode`, `codex`, `cursor`,
 `command-code` and `shell`; Cursor and Command Code run as terminals, with no
-notes or integrations yet. Workspaces and limits live in
+notes or integrations yet. The service's workspaces and limits live in
 `/etc/storm-runtime/runtime.toml`, and a root outside `/var/lib/storm-runtime`
-needs a `ReadWritePaths` drop-in on the unit. Log the agent CLIs in once as
-`storm-runtime` (`claude`, `opencode auth login`; Codex from a Shell session
-on the host, into Storm's own Codex home:
+needs a `ReadWritePaths` drop-in on the unit; a host you run as yourself
+reads `~/.config/storm-runtime/runtime.toml`. Log the service's agent CLIs in
+once as `storm-runtime` (`claude`, `opencode auth login`; Codex from a Shell
+session on the host, into Storm's own Codex home:
 `CODEX_HOME=/var/lib/storm-runtime/agents/codex codex login --device-auth`,
 after a `mkdir -p` of that directory) — the unit's `HOME` is its own, not
-yours. A session gets your integrations beside the MCP servers its agent
-loads by itself: yours, its
+yours. A host you run as yourself uses your own logins. A session gets your
+integrations beside the MCP servers its agent loads by itself: yours, its
 [plugins'](https://storm.dewansh.space/docs/agents/plugins/), a project's
 under the agent's own prompts; `agent_mcp = "storm-only"` in `runtime.toml`
 gives a host Storm's servers alone.
@@ -179,18 +212,26 @@ gives a host Storm's servers alone.
 **Settings › Agents** (beta) installs, updates and removes the agent CLIs on
 a Linux or macOS host, into the host's own folder, checked against each
 vendor's published checksum; `agent_install = "off"` in `runtime.toml` turns
-that off. The launcher picks a model and a permission mode (Manual by
-default; never one that turns the agent's prompts off), and **New
-workspace…** makes a folder on the host. On Linux the host checks that every
-call to a session's Storm tools comes from inside that session.
+that off. The launcher picks a model and a permission mode: the agent's own
+setting by default, or one of the agent's own modes, which Storm passes on
+and adds nothing to. **New workspace…** makes a folder on the host. On Linux
+the host checks that every call to a session's Storm tools comes from inside
+that session.
+
+Agent spawning — a session starting, messaging and ending agents of its own,
+in its crew — is offered on any host that says which account it runs as.
+The launcher's **Allow this session to start agents** is ticked by default
+and only you can turn it on, never a key or an agent.
+Those agents run as the same account, in the session's workspace, under
+their agent's own permissions; a Claude Code or OpenCode prompt shows as
+Needs you (a Codex one does not yet). Each host's **Limits** (Settings ›
+Hosts) cap agents per session (3) and per tree (6), and can lower its
+concurrent sessions; a session's agents can't start their own.
 
 The package also ships `storm-runtime-isolation`, a root helper that runs
 each session as its own system user in its own sandbox and network. It is
 **experimental and disabled**: nothing changes until `sudo
-storm-runtime-isolation on`, and the docs say to leave it off for now. Agent
-spawning — a session starting, messaging and ending agents of its own, which
-never prompt you and send their refusals to it — is offered only on a host
-where that isolation is on and verified, so it is off everywhere by default.
+storm-runtime-isolation on`, and the docs say to leave it off for now.
 Setup and the package's guarantees:
 [`deploy/README.md`](deploy/README.md#runtime-hosts-agent-runtime) and
 [the hosts docs](https://storm.dewansh.space/docs/agents/hosts/). A Runtime
@@ -302,8 +343,7 @@ vault's Trash for 30 days. See
 An agent in a Storm session gets the same tools through the MCP Gateway, plus
 `session_context`, with differences. With a write vault, `delete_note` and
 `delete_folder` each wait for the person to Approve in the app, every time.
-A Claude Code session no agent started has `request_permission_mode` to ask
-for Auto. Where
+Where
 spawning is on (above), the session gets `start_agent`, `list_agents`,
 `agent_status`, `list_children`, `wait_agent`, `send_message`, `end_agent`
 and `read_output`, and the agents it starts get `report_result` and
@@ -341,7 +381,8 @@ M0–M16 and M18–M28 are done; the newest release is on
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
 covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
-Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions
+Runtime, with Runtime Hosts on Linux, macOS and Windows, run as you or as a
+service, and agent sessions
 (Claude Code, Codex, OpenCode) in a terminal you can resume, each keeping
 its own MCP servers beside your integrations, grouped into crews, with the
 agent CLIs installed and updated from the app; agent deletes that wait for
@@ -352,8 +393,9 @@ hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
 testing). The website and its docs are at
 [storm.dewansh.space](https://storm.dewansh.space) (M27). M17 (Markdown read
-mode) is in progress. Per-session isolation and agent spawning are built and
-ship turned off while they are tested on real hosts.
+mode) is in progress. Agent spawning works on every host, with limits per
+host; per-session isolation is built and ships turned off while it is
+tested on real hosts.
 
 Milestone status and the decision log are kept in the maintainer's notes, not
 in this repo. License: [MIT](LICENSE).

@@ -29,8 +29,24 @@ are always kept.
 
 For scripts: `sh install.sh --yes --server --app`, `--runtime`,
 `--everything`, `--dry-run`. `sh install.sh --help` lists the rest. On
-Windows the switches are `-Server`, `-Runtime`, `-Yes`, `-DryRun` and
-`-NoFirewall`.
+Windows the switches are `-Server`, `-Runtime`, `-Service`, `-Yes`,
+`-DryRun` and `-NoFirewall`.
+
+`--runtime` installs the Runtime Host [as you](/docs/agents/hosts/#two-ways-to-run-it):
+a `systemd --user` unit on Linux, a LaunchAgent on a Mac. Add `--service`
+to run it as its own account, a system service, instead. Run as root on
+Debian or Ubuntu, it installs the service; on Arch and anywhere without the
+`.deb`, the host always runs as you. With `--server --runtime` on Linux the
+server is a system service and the host runs as you. On a Mac the server
+runs as you, so `--server --runtime` (and `--everything`), or `--runtime`
+on a Mac where the server is installed already, installs the host as its
+own account, the `_stormruntime` LaunchDaemon, and refuses `--user`:
+a host as you would [share an account with the
+vaults](/docs/agents/hosts/#never-share-an-account-with-the-vaults). On Windows, `-Runtime`
+in a PowerShell that is not elevated installs a logon task as you;
+`-Service`, `-Server` or an elevated PowerShell installs the `StormRuntime`
+service, and without `-Yes` it asks. A host already installed as the
+service keeps running that way when you re-run either installer.
 
 `dewanshdt.github.io/Storm` is Storm's **apt repository**, which also serves
 the installers. It is not this website.

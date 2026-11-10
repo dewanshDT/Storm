@@ -714,9 +714,181 @@ void main() {
       expect(
         find.text(
           'online now · Claude Code (not installed), Shell · '
-          'network: host policy',
+          'network: host policy\n$kRunsAsUnknown',
         ),
         findsOneWidget,
+      );
+    });
+
+    group('a host’s limits (152)', () {
+      Map<String, dynamic> limits({
+        int children = 3,
+        int tree = 6,
+        int? sessions,
+        int effective = 8,
+      }) => {
+        'max_children': children,
+        'max_tree': tree,
+        'max_sessions': sessions,
+        'host_max_sessions': 8,
+        'effective_max_sessions': effective,
+        'depth': 1,
+        'hard_max_children': 10,
+        'hard_max_tree': 24,
+      };
+
+      (MockClient, List<Map<String, dynamic>>) limitsServer() {
+        final puts = <Map<String, dynamic>>[];
+        var current = limits();
+        final client = MockClient((req) async {
+          final path = req.url.path;
+          if (path == '/v1/agent/hosts' && req.method == 'GET') {
+            return http.Response(
+              jsonEncode([
+                {...hosts.first, 'limits': current},
+              ]),
+              200,
+            );
+          }
+          if (path == '/v1/agent/hosts/hst_1/limits' && req.method == 'PUT') {
+            final body = jsonDecode(req.body) as Map<String, dynamic>;
+            puts.add(body);
+            if ((body['max_tree'] as int) < (body['max_children'] as int)) {
+              return http.Response('{"error":"tree_below_session"}', 400);
+            }
+            final s = body['max_sessions'] as int?;
+            current = limits(
+              children: body['max_children'] as int,
+              tree: body['max_tree'] as int,
+              sessions: s,
+              effective: s == null || s > 8 ? 8 : s,
+            );
+            return http.Response(jsonEncode(current), 200);
+          }
+          if (path == '/v1/config/agent') {
+            return http.Response('{"default_provider":"claude-code"}', 200);
+          }
+          return http.Response('{"error":"nope"}', 404);
+        });
+        return (client, puts);
+      }
+
+      testWidgets('the row says them; the section shows the defaults and '
+          'depth read-only', (tester) async {
+        final (client, _) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining(
+            'Limits: 3 agents per session · 6 per tree · 8 sessions at once',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('host-limits')), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-children'))).data,
+          '3',
+        );
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-tree'))).data,
+          '6',
+        );
+        expect(find.text('The host’s own (8)'), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-depth'))).data,
+          'Depth: 1 level (agents can’t start their own agents yet)',
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('host-limits')),
+            matching: find.byType(TextField),
+          ),
+          findsOneWidget,
+          reason: 'depth is not a field',
+        );
+      });
+
+      testWidgets('saving sends them all and the row follows', (tester) async {
+        final (client, puts) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limit-children-less')));
+        await tester.tap(find.byKey(const Key('limit-tree-more')));
+        await tester.enterText(find.byKey(const Key('limit-sessions')), '4');
+        await tester.tap(find.byKey(const Key('save-limits')));
+        await tester.pumpAndSettle();
+        expect(puts, [
+          {'max_children': 2, 'max_tree': 7, 'max_sessions': 4},
+        ]);
+        expect(find.byKey(const Key('host-limits')), findsNothing);
+        expect(
+          find.textContaining(
+            'Limits: 2 agents per session · 7 per tree · 4 sessions at once',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a refusal is shown and the section stays open', (
+        tester,
+      ) async {
+        final (client, puts) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        for (var i = 0; i < 4; i++) {
+          await tester.tap(find.byKey(const Key('limit-children-more')));
+          await tester.pump();
+        }
+        await tester.tap(find.byKey(const Key('save-limits')));
+        await tester.pumpAndSettle();
+        expect(puts.single['max_children'], 7);
+        expect(
+          find.text('Agents per tree must be at least agents per session.'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('host-limits')), findsOneWidget);
+      });
+
+      test('an override above the host’s own is not in force', () {
+        final l = HostLimits.fromJson(limits(sessions: 20));
+        expect(l.overrideIneffective, isTrue);
+        expect(sessionsLimitText(l), '8 sessions at once');
+        expect(
+          HostLimits.fromJson(
+            limits(sessions: 4, effective: 4),
+          ).overrideIneffective,
+          isFalse,
+        );
+        expect(
+          AgentHost.fromJson({...hosts.first}).limits,
+          isNull,
+          reason: 'an older server says none',
+        );
+      });
+    });
+
+    testWidgets('the enroll blurb points at the sheet, not a bare command', (
+      tester,
+    ) async {
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      expect(
+        find.textContaining(
+          'Enrolling shows a one-time string and the commands to run on the '
+          'machine. Paste the string when storm-runtime enroll asks for it.',
+          findRichText: true,
+        ),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('on the machine and paste it', findRichText: true),
+        findsNothing,
       );
     });
 
@@ -765,19 +937,21 @@ void main() {
 
     void expectOnly(HostPlatform shown) {
       for (final platform in HostPlatform.values) {
-        for (final step in enrollSteps(platform)) {
+        for (final shape in EnrollShape.values) {
+          for (final step in enrollSteps(platform, shape)) {
+            expect(
+              inDialog(find.text(step.command)),
+              platform == shown ? findsWidgets : findsNothing,
+              reason: '${step.command} on $shown',
+            );
+          }
           expect(
-            inDialog(find.text(step.command)),
+            find.text(enrollFootnote(platform, shape)),
             platform == shown ? findsOneWidget : findsNothing,
-            reason: '${step.command} on $shown',
+            reason: 'the $shape footnote for $platform, on $shown',
           );
         }
       }
-      expect(
-        find.text(enrollFootnote(shown)),
-        findsOneWidget,
-        reason: 'the footnote for $shown',
-      );
     }
 
     testWidgets('the enroll sheet shows one platform at a time and switches', (
@@ -841,10 +1015,97 @@ void main() {
       }
     });
 
+    // Decision 151 E5: a new host runs as you, so the sheet lists those
+    // commands first and the service's second.
+    testWidgets('the enroll sheet lists as you first, the service second', (
+      tester,
+    ) async {
+      expect(EnrollShape.values, [EnrollShape.you, EnrollShape.service]);
+      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('enroll-host')));
+      await tester.pumpAndSettle();
+      for (final platform in ['Linux', 'macOS', 'Windows']) {
+        await tester.tap(inDialog(find.text(platform)));
+        await tester.pumpAndSettle();
+        double top(String key) => tester.getTopLeft(find.byKey(Key(key))).dy;
+        expect(find.text('As you'), findsOneWidget);
+        expect(find.text('As its own account'), findsOneWidget);
+        expect(
+          top('enroll-shape-you'),
+          lessThan(top('enroll-shape-service')),
+          reason: platform,
+        );
+        expect(
+          top('enroll-footnote-you'),
+          lessThan(top('enroll-shape-service')),
+          reason: '$platform: every as-you line before the service heading',
+        );
+        expect(
+          top('enroll-shape-service'),
+          lessThan(top('enroll-service-command-0')),
+          reason: platform,
+        );
+      }
+    });
+
+    test('the as-you steps need no sudo and no administrator', () {
+      for (final platform in HostPlatform.values) {
+        final you = enrollSteps(platform, EnrollShape.you);
+        for (final step in you) {
+          expect(step.command, isNot(contains('sudo')), reason: step.command);
+          expect(step.command, isNot(contains('ProgramFiles')));
+          expect(step.command, isNot(contains('_stormruntime')));
+          expect(step.command, isNot(contains('apt ')));
+        }
+        expect(you.map((s) => s.command).join('\n'), contains('--user'));
+      }
+      expect(
+        enrollSteps(HostPlatform.linux, EnrollShape.you).first.command,
+        'curl -fsSL https://dewanshdt.github.io/Storm/install.sh | '
+        'sh -s -- --yes --runtime --user',
+      );
+      expect(
+        enrollSteps(HostPlatform.macos, EnrollShape.you).last.command,
+        r'"$HOME/Library/Application Support/StormRuntime/bin/storm-runtime" enroll',
+      );
+      expect(
+        enrollSteps(HostPlatform.windows, EnrollShape.you).last.command,
+        r'& "$env:LOCALAPPDATA\StormRuntime\bin\storm-runtime.exe" enroll',
+      );
+      expect(
+        enrollFootnote(HostPlatform.windows, EnrollShape.you),
+        contains('not as administrator'),
+      );
+      expect(
+        enrollFootnote(HostPlatform.macos, EnrollShape.you),
+        contains('LaunchAgent'),
+      );
+      for (final (platform, root) in [
+        (HostPlatform.linux, '~/.local/state/storm-runtime/workspaces'),
+        (
+          HostPlatform.macos,
+          '~/Library/Application Support/StormRuntime/state/workspaces',
+        ),
+        (HostPlatform.windows, r'%LOCALAPPDATA%\StormRuntime\state\workspaces'),
+      ]) {
+        expect(enrollFootnote(platform, EnrollShape.you), contains(root));
+      }
+    });
+
     test('each platform\'s steps are its own, with one enroll step', () {
-      final linux = enrollSteps(HostPlatform.linux);
-      final mac = enrollSteps(HostPlatform.macos);
-      final windows = enrollSteps(HostPlatform.windows);
+      final linux = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.linux, shape),
+      ];
+      final mac = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.macos, shape),
+      ];
+      final windows = [
+        for (final shape in EnrollShape.values)
+          ...enrollSteps(HostPlatform.windows, shape),
+      ];
       for (final step in linux) {
         expect(step.command, isNot(contains('brew')));
         expect(step.command, isNot(contains('_stormruntime')));
@@ -861,27 +1122,35 @@ void main() {
         expect(step.command, isNot(contains('systemctl')));
         expect(step.command, isNot(contains('/Library/')));
       }
-      for (final steps in [linux, mac, windows]) {
-        final enroll = steps.where((s) => s.pastesString).toList();
-        expect(enroll, hasLength(1));
-        expect(enroll.single.command, contains('storm-runtime'));
-        expect(enroll.single.command, endsWith(' enroll'));
-        // The enrollment string is a secret: never an argument (freeze §5.3).
-        expect(enroll.single.command, isNot(contains('storm-enroll:')));
+      for (final platform in HostPlatform.values) {
+        for (final shape in EnrollShape.values) {
+          final steps = enrollSteps(platform, shape);
+          final enroll = steps.where((s) => s.pastesString).toList();
+          expect(enroll, hasLength(1), reason: '$platform $shape');
+          expect(enroll.single.command, contains('storm-runtime'));
+          expect(enroll.single.command, endsWith(' enroll'));
+          // The enrollment string is a secret: never an argument (freeze §5.3).
+          expect(enroll.single.command, isNot(contains('storm-enroll:')));
+        }
       }
+      final macService = enrollSteps(HostPlatform.macos, EnrollShape.service);
       expect(
-        mac.last.command,
+        macService.last.command,
         'cd / && sudo -u _stormruntime /Library/StormRuntime/bin/storm-runtime enroll',
       );
-      expect(enrollFootnote(HostPlatform.macos), contains('dev.storm.runtime'));
-      // `install` puts the binary in Program Files; enroll runs from there.
       expect(
-        windows.last.command,
+        enrollFootnote(HostPlatform.macos, EnrollShape.service),
+        contains('dev.storm.runtime'),
+      );
+      // `install` puts the binary in Program Files; enroll runs from there.
+      final winService = enrollSteps(HostPlatform.windows, EnrollShape.service);
+      expect(
+        winService.last.command,
         r'& "$env:ProgramFiles\StormRuntime\storm-runtime.exe" enroll',
       );
-      expect(windows[1].command, endsWith(' install'));
+      expect(winService[1].command, endsWith(' install'));
       expect(
-        enrollFootnote(HostPlatform.windows),
+        enrollFootnote(HostPlatform.windows, EnrollShape.service),
         contains(r'NT SERVICE\StormRuntime'),
       );
     });

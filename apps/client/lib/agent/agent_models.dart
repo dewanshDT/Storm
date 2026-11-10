@@ -104,6 +104,8 @@ class AgentHost {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.execution,
+    this.limits,
   });
 
   final String id;
@@ -152,11 +154,23 @@ class AgentHost {
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
 
+  /// Who it runs as (decision 151); null for a host too old to say.
+  final HostExecution? execution;
+
+  /// What its owner set for agents on it (decision 152); null from a server
+  /// that does not say.
+  final HostLimits? limits;
+
+  /// What every host row and the launcher say about who it runs as.
+  String get executionLine => executionLineFor(execution);
+
   bool get online => status == 'online';
 
-  /// C0 as its view says (134r, 141e): identity and isolation verified.
+  /// C0 as its view says (151 N6): the host says who it runs as, and one
+  /// set to isolate has its isolation verified. Identity is not a gate.
   bool get offersSpawning =>
-      identityState == 'verified' && isolationState == 'verified';
+      execution != null &&
+      (execution!.isolation == 'off' || isolationState == 'verified');
 
   bool get receivesClaudeLogin =>
       providerCredentials.contains('claude_subscription_token');
@@ -192,9 +206,113 @@ class AgentHost {
       identityState: _identityState(j),
       isolationState: _isolation(j).$1,
       isolationReason: _isolation(j).$2,
+      execution: _map(j['execution']) == null
+          ? null
+          : HostExecution.fromJson(_map(j['execution'])!),
+      limits: _map(j['limits']) == null
+          ? null
+          : HostLimits.fromJson(_map(j['limits'])!),
     );
   }
 }
+
+/// A host's Limits (decision 152), set by its owner and kept by the server.
+/// Nothing of them reaches the host.
+class HostLimits {
+  const HostLimits({
+    this.maxChildren = 3,
+    this.maxTree = 6,
+    this.maxSessions,
+    this.hostMaxSessions,
+    this.effectiveMaxSessions,
+    this.depth = 1,
+    this.hardMaxChildren = 10,
+    this.hardMaxTree = 24,
+  });
+
+  /// Agents one session runs at a time.
+  final int maxChildren;
+
+  /// Sessions running in one tree, its root included.
+  final int maxTree;
+
+  /// The owner's concurrent-sessions override; null is the host's own.
+  final int? maxSessions;
+
+  /// What the host reports, 0 being no limit; null while it is offline.
+  final int? hostMaxSessions;
+
+  /// What is in force: never more than the host reports. 0 is no limit,
+  /// null while unknown.
+  final int? effectiveMaxSessions;
+
+  final int depth;
+  final int hardMaxChildren;
+  final int hardMaxTree;
+
+  /// An override at or above the host's own changes nothing.
+  bool get overrideIneffective =>
+      maxSessions != null &&
+      effectiveMaxSessions != null &&
+      effectiveMaxSessions! < maxSessions!;
+
+  factory HostLimits.fromJson(Map<String, dynamic> j) => HostLimits(
+    maxChildren: (j['max_children'] as num?)?.toInt() ?? 3,
+    maxTree: (j['max_tree'] as num?)?.toInt() ?? 6,
+    maxSessions: (j['max_sessions'] as num?)?.toInt(),
+    hostMaxSessions: (j['host_max_sessions'] as num?)?.toInt(),
+    effectiveMaxSessions: (j['effective_max_sessions'] as num?)?.toInt(),
+    depth: (j['depth'] as num?)?.toInt() ?? 1,
+    hardMaxChildren: (j['hard_max_children'] as num?)?.toInt() ?? 10,
+    hardMaxTree: (j['hard_max_tree'] as num?)?.toInt() ?? 24,
+  );
+}
+
+/// Depth is not a setting (152e).
+String depthLine(int depth) =>
+    '$depth level${depth == 1 ? '' : 's'} (agents can’t start their own '
+    'agents yet)';
+
+/// Concurrent sessions as a host's views say them.
+String sessionsLimitText(HostLimits l) {
+  final n = l.effectiveMaxSessions;
+  if (n == null) return 'the host’s own number of sessions';
+  if (n == 0) return 'no limit on sessions';
+  return '$n session${n == 1 ? '' : 's'} at once';
+}
+
+/// The host row's line for its Limits.
+String hostLimitsLine(HostLimits l) =>
+    'Limits: ${l.maxChildren} agents per session · ${l.maxTree} per tree · '
+    '${sessionsLimitText(l)}';
+
+/// A host's `execution` (decision 151): the account it runs as, and whether
+/// each session runs as its own user.
+class HostExecution {
+  const HostExecution({this.account, this.isolation});
+
+  /// Null when the host could not name it.
+  final String? account;
+
+  /// `off` or `per-session`.
+  final String? isolation;
+
+  bool get perSession => isolation == 'per-session';
+
+  factory HostExecution.fromJson(Map<String, dynamic> j) => HostExecution(
+    account: j['account'] as String?,
+    isolation: j['isolation'] as String?,
+  );
+}
+
+/// "Runs as storm-runtime": one line, never more than the host said.
+String executionLineFor(HostExecution? e) {
+  final account = e?.account;
+  if (account == null || account.isEmpty) return kRunsAsUnknown;
+  return 'Runs as $account${e!.perSession ? ' · each session isolated' : ''}';
+}
+
+const kRunsAsUnknown = 'Runs as an unknown account';
 
 String? _identityState(Map<String, dynamic> j) {
   final identity = j['identity'];
@@ -229,14 +347,49 @@ String? isolationLabelFor(String? state, String? reason) {
   return 'Session isolation unavailable ($why) — new sessions are refused';
 }
 
+/// Who a session ran as (decision 151), as its host said at its first
+/// `running`: the host's account and its isolation and identity then.
+class RanAs {
+  const RanAs({
+    this.account,
+    this.isolationState,
+    this.isolationReason,
+    this.identityState,
+  });
+
+  /// Null when the host could not name it.
+  final String? account;
+  final String? isolationState;
+  final String? isolationReason;
+  final String? identityState;
+
+  factory RanAs.fromJson(Map<String, dynamic> j) => RanAs(
+    account: j['account'] as String?,
+    isolationState: _isolation(j).$1,
+    isolationReason: _isolation(j).$2,
+    identityState: _identityState(j),
+  );
+}
+
+/// What Details says a session ran as, from its snapshot only.
+String ranAsLine(RanAs? r) {
+  if (r == null) return 'Not recorded';
+  final account = r.account == '' ? null : r.account;
+  if (r.isolationState == 'verified') {
+    return 'Its own session user (isolated)'
+        '${account == null ? '' : ' · the host runs as $account'}';
+  }
+  return account ?? 'An unknown account';
+}
+
 /// A host whose sessions each run as their own user (decision 136j).
 const kIsolationVerified = 'Sessions isolated — each runs as its own user';
 
 /// What Storm says on a host or session whose identity is not verified
 /// (decision 135d).
 const kIdentityNotVerified =
-    'Session identity not verified — sessions on this host can act as each '
-    'other';
+    "Session identity not verified — Storm can't tell which session is "
+    'calling';
 
 /// The agents a host can install from Settings › Agents, in the page's
 /// order (decision 133).
@@ -525,13 +678,13 @@ class AgentSession {
     this.identityState,
     this.isolationState,
     this.isolationReason,
+    this.ranAs,
     this.spawn = SpawnFacts.none,
     this.crew,
     this.role,
     this.launchRole,
     this.model,
     this.permissionMode,
-    this.modeRequest,
     this.deleteRequest,
   }) : name = name ?? workspace;
 
@@ -597,6 +750,10 @@ class AgentSession {
   String? get isolationLabel =>
       isolationLabelFor(isolationState, isolationReason);
 
+  /// Who it ran as from its first `running` (decision 151); null for a
+  /// session from before, or one not yet running: not recorded.
+  final RanAs? ranAs;
+
   /// Its lineage, attention, own workspace and spawn switch (decision 134).
   final SpawnFacts spawn;
 
@@ -613,13 +770,9 @@ class AgentSession {
   /// own default.
   final String? model;
 
-  /// `accept_edits` or `auto` as the person chose at launch, or inherited
-  /// (decision 146b); null for the agent's own.
+  /// The mode the person chose at launch, or inherited (decisions 146b,
+  /// 151 N5); null for the agent's own.
   final String? permissionMode;
-
-  /// Its agent's request for auto (decision 147c), while it waits for the
-  /// person or once approved; null otherwise.
-  final ModeRequest? modeRequest;
 
   /// Its agent's deletion waiting for the person (decision 149); null
   /// otherwise.
@@ -652,6 +805,11 @@ class AgentSession {
 
   bool get isShell => provider == 'shell';
 
+  /// A child given its own workspace, `children/<id>` (137-1). Any other
+  /// child runs in a workspace of its host's, beside its parent (151 N6),
+  /// and has no work apart to review.
+  bool get hasOwnWorkspace => spawn.isChild && workspace == 'children/$id';
+
   /// The handoff's status words (§3.2); why it ended is [endDetail].
   String get statusLabel => switch (status) {
     'creating' || 'starting' => 'Starting',
@@ -675,6 +833,8 @@ class AgentSession {
       'credential_unavailable' => 'no credential this host may use',
       // Decision 136j: the host's isolation was not verified.
       'isolation_unavailable' => 'isolation unavailable on this host',
+      // 151 N6: the directory it was to start in is gone.
+      'cwd_gone' => 'working directory no longer exists',
       'lost' => 'lost',
       'signal' => 'killed (signal ${signal ?? '?'})',
       _ => 'failed to start',
@@ -759,13 +919,13 @@ class AgentSession {
     identityState: identityState,
     isolationState: isolationState,
     isolationReason: isolationReason,
+    ranAs: ranAs,
     spawn: spawn,
     crew: crew == _keep ? this.crew : crew as SessionCrew?,
     role: role == _keep ? this.role : role as RoleRef?,
     launchRole: launchRole,
     model: model,
     permissionMode: permissionMode,
-    modeRequest: modeRequest,
     deleteRequest: deleteRequest,
   );
 
@@ -816,6 +976,9 @@ class AgentSession {
     identityState: _identityState(j),
     isolationState: _isolation(j).$1,
     isolationReason: _isolation(j).$2,
+    ranAs: _map(j['ran_as']) == null
+        ? null
+        : RanAs.fromJson(_map(j['ran_as'])!),
     spawn: SpawnFacts.fromJson(j),
     crew: _map(j['crew']) == null
         ? null
@@ -826,9 +989,6 @@ class AgentSession {
         : RoleRef.fromJson(_map(j['launch_role'])!),
     model: j['model'] as String?,
     permissionMode: permissionModeOf(j['permission_mode']),
-    modeRequest: _map(j['mode_request']) == null
-        ? null
-        : ModeRequest.fromJson(_map(j['mode_request'])!),
     deleteRequest: _map(j['delete_request']) == null
         ? null
         : DeleteRequest.fromJson(_map(j['delete_request'])!),
@@ -899,72 +1059,48 @@ class DeleteRequest {
   );
 }
 
-/// An agent's request for auto (decision 147c). The reason is the agent's
-/// own words: shown as data, never acted on.
-class ModeRequest {
-  const ModeRequest({
-    required this.id,
-    required this.mode,
-    required this.reason,
-    required this.expiresAt,
-    required this.state,
-    this.switchedTo,
-    this.switchFailed = false,
-  });
-
-  final String id;
-  final String mode;
-  final String reason;
-  final DateTime? expiresAt;
-
-  /// `pending`, `approved`, `denied` or `expired`.
-  final String state;
-
-  /// The session the approved switch resumed into.
-  final String? switchedTo;
-  final bool switchFailed;
-
-  bool get pending => state == 'pending';
-  bool get approved => state == 'approved';
-
-  factory ModeRequest.fromJson(Map<String, dynamic> j) => ModeRequest(
-    id: j['id'] as String,
-    mode: j['mode'] as String? ?? 'auto',
-    reason: j['reason'] as String? ?? '',
-    expiresAt: DateTime.tryParse(j['expires_at'] as String? ?? ''),
-    state: j['state'] as String? ?? 'pending',
-    switchedTo: j['switched_to'] as String?,
-    switchFailed: j['switch_failed'] == true,
-  );
-}
-
-/// The permission modes each agent offers at launch (decision 146b), the
-/// agent's own first. There is never a bypass.
+/// The permission modes each agent offers at launch (decisions 146b and
+/// 151 N5), the agent's own settings first. Each is passed to the agent as
+/// its own flag; the default passes nothing.
 const kPermissionModes = {
-  'claude-code': ['default', 'accept_edits', 'auto'],
+  'claude-code': [
+    'default',
+    'accept_edits',
+    'plan',
+    'auto',
+    'dont_ask',
+    'bypass',
+  ],
   'opencode': ['default', 'accept_edits'],
 };
 
 List<String> permissionModesOf(String? provider) =>
     kPermissionModes[provider] ?? const ['default'];
 
+const _knownModes = {'accept_edits', 'plan', 'auto', 'dont_ask', 'bypass'};
+
 /// Only a mode Storm knows; anything else reads as the agent's own.
 String? permissionModeOf(Object? v) =>
-    v == 'accept_edits' || v == 'auto' ? v as String : null;
+    _knownModes.contains(v) ? v as String : null;
 
 /// "accept edits", "auto": a row's word for a mode; null for the default.
 String? permissionModeWord(String? mode) => switch (mode) {
   'accept_edits' => 'accept edits',
+  'plan' => 'plan',
   'auto' => 'auto',
+  'dont_ask' => "don't ask",
+  'bypass' => 'bypass',
   _ => null,
 };
 
-/// The launcher's and About's name for a mode. The one that asks is
-/// Manual, as Claude Code itself now calls it (decision 147a).
+/// The launcher's and About's name for a mode, in plain words.
 String permissionModeLabel(String mode) => switch (mode) {
   'accept_edits' => 'Accept edits',
+  'plan' => 'Plan',
   'auto' => 'Auto',
-  _ => 'Manual (asks)',
+  'dont_ask' => "Don't ask (refuses what isn't allowed)",
+  'bypass' => 'Bypass permissions (never asks)',
+  _ => "The agent's own setting",
 };
 
 /// Everything the launch answer says out loud: the MCP notice, then the

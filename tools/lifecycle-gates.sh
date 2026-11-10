@@ -1,13 +1,12 @@
 #!/bin/sh
 # The real-CLI gates of decisions 144 to 149 (G-144-S, G-144-W, G-145-R,
-# G-145-W, G-145-O; G-146-A, G-146-M, G-146-P; G-147; G-148; G-149), for Claude Code and
+# G-145-W, G-145-O; G-146-A, G-146-M, G-146-P; G-148; G-149), for Claude Code and
 # OpenCode, as the operator runs them on VM 113 before any list is switched
-# on. `make gate-lifecycle` runs this. The G-146, G-147 and G-148 gates need
+# on. `make gate-lifecycle` runs this. The G-146 and G-148 gates need
 # the stand-in model (it calls the tools that ask) and show as SKIP with
 # REAL=1; in G-146-P the test plays the person at the terminal and answers
-# the prompt, and in G-147 it presses Shift+Tab (`ESC [ Z`) as the person
-# would. G-148 runs a child as the host configures it and shows that no
-# prompt ever appears, and that a denial reaches the agent and the host.
+# the prompt. G-148 shows that a child's denial reaches the agent and the
+# host.
 # G-145-W-child-claude-code wakes a child launched as the host launches one
 # (dontAsk, the child baseline, the compiled lists) with a message, mid-turn
 # and idle, and wants it read and the next round reported (stand-in only).

@@ -4,7 +4,9 @@
 //! calls.
 //!
 //! Elevated only, idempotent, and every tool by absolute path, because it runs
-//! elevated with the invoking user's `PATH`.
+//! elevated with the invoking user's `PATH`. `--user` is the exception: the
+//! logon task ([`super::wintask`]) a person registers as themselves, never
+//! elevated (decision 151 E3).
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -25,6 +27,10 @@ use windows_service::{define_windows_service, service_dispatcher};
 use super::winsvc::{
     ACCOUNT, DISPLAY_NAME, Layout, REVOKED_EXIT, SERVICE_NAME, acl_plan, default_config,
     git_safe_directory, service_environment,
+};
+use super::wintask::{
+    TASK, UserFacts, UserLayout, UserStep, plan_user_install, ps_quote, task_xml,
+    user_default_config,
 };
 use super::{InstallOptions, UninstallOptions};
 
@@ -152,6 +158,9 @@ fn invoking_user() -> Option<String> {
 
 /// `storm-runtime install` (AM50).
 pub fn install(options: &InstallOptions) -> Result<()> {
+    if options.user {
+        return install_user();
+    }
     require_elevation("storm-runtime install")?;
     let layout = layout();
     let operator = options
@@ -293,6 +302,9 @@ fn same_file(a: &Path, b: &Path) -> bool {
 
 /// `storm-runtime uninstall [--purge]`. Workspaces are never deleted.
 pub fn uninstall(options: &UninstallOptions) -> Result<()> {
+    if options.user {
+        return uninstall_user(options.purge);
+    }
     require_elevation("storm-runtime uninstall")?;
     let layout = layout();
     let manager = manager(ServiceManagerAccess::CONNECT)?;
@@ -351,6 +363,229 @@ pub fn enable_and_start() -> Result<()> {
     Ok(())
 }
 
+// ---- the host as the person (decision 151 E3) ------------------------------
+
+fn user_layout() -> Result<UserLayout> {
+    let var = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .with_context(|| format!("{name} is not set"))
+    };
+    Ok(UserLayout::for_profile(
+        &var("LOCALAPPDATA")?,
+        &var("USERPROFILE")?,
+    ))
+}
+
+fn schtasks(args: &[&str]) -> Result<std::process::Output> {
+    Command::new(system32("schtasks.exe"))
+        .args(args)
+        .output()
+        .context("running schtasks")
+}
+
+fn schtasks_checked(args: &[&str]) -> Result<()> {
+    let out = schtasks(args)?;
+    if !out.status.success() {
+        bail!(
+            "schtasks {}: {}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout).trim(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+fn task_registered() -> bool {
+    schtasks(&["/query", "/tn", TASK]).is_ok_and(|o| o.status.success())
+}
+
+/// Registers the task from `definition`, written as UTF-16 (what
+/// `schtasks /xml` reads reliably).
+fn register_task(definition: &str, scratch: &Path) -> Result<()> {
+    let mut bytes = vec![0xFF, 0xFE];
+    for unit in definition.encode_utf16() {
+        bytes.extend(unit.to_le_bytes());
+    }
+    std::fs::write(scratch, bytes).with_context(|| format!("writing {}", scratch.display()))?;
+    let result = schtasks_checked(&[
+        "/create",
+        "/tn",
+        TASK,
+        "/xml",
+        &scratch.to_string_lossy(),
+        "/f",
+    ]);
+    let _ = std::fs::remove_file(scratch);
+    result
+}
+
+/// `schtasks /end` returns before the host has exited, and Windows cannot
+/// replace a running binary or delete an open one.
+fn retry_while_held<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(e),
+            Err(e) if Instant::now() >= deadline => return Err(e),
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
+/// Ends the task and the host it ran. `schtasks /end` stops the process the
+/// task started, `conhost`, and a host outliving it would hold its binary.
+fn end_user_host(layout: &UserLayout) {
+    if task_registered() {
+        let _ = schtasks(&["/end", "/tn", TASK]);
+    }
+    if super::windows::end_processes_of(Path::new(&layout.bin)) > 0 {
+        std::thread::sleep(Duration::from_millis(500));
+    }
+}
+
+fn install_user() -> Result<()> {
+    let layout = user_layout()?;
+    let account = super::current_account();
+    let facts = UserFacts {
+        elevated: super::windows::is_elevated(),
+        service_account: account
+            .as_deref()
+            .is_some_and(|a| a.eq_ignore_ascii_case(ACCOUNT)),
+        user: account,
+        config_exists: Path::new(&layout.config).exists(),
+        enrolled: Path::new(&layout.enrolled_marker()).exists(),
+        service_installed: Path::new(&self::layout().bin).exists(),
+        server_here: Path::new(&layout.server_record).exists(),
+    };
+    let (steps, notes) = plan_user_install(&layout, &facts).map_err(anyhow::Error::msg)?;
+    let mut user = String::new();
+    for step in steps {
+        match step {
+            UserStep::PrivateDir(dir) => super::tighten_private_dir(Path::new(&dir))
+                .with_context(|| format!("creating {dir}"))?,
+            UserStep::EndTask => end_user_host(&layout),
+            UserStep::Binary => {
+                let me = std::env::current_exe().context("finding this binary")?;
+                if !same_file(&me, Path::new(&layout.bin)) {
+                    retry_while_held(|| std::fs::copy(&me, &layout.bin))
+                        .with_context(|| format!("copying to {}", layout.bin))?;
+                }
+            }
+            UserStep::Config => std::fs::write(&layout.config, user_default_config(&layout))
+                .with_context(|| format!("writing {}", layout.config))?,
+            UserStep::Register { user: u } => {
+                let conhost = system32("conhost.exe");
+                register_task(
+                    &task_xml(&layout, &u, &conhost.to_string_lossy()),
+                    Path::new(&layout.scratch()),
+                )?;
+                user = u;
+            }
+            UserStep::Disable => schtasks_checked(&["/change", "/tn", TASK, "/disable"])?,
+            UserStep::Run => {
+                schtasks_checked(&["/change", "/tn", TASK, "/enable"])?;
+                schtasks_checked(&["/run", "/tn", TASK])?;
+            }
+        }
+    }
+
+    let bin = format!("& {}", ps_quote(&layout.bin));
+    println!("Installed the Storm Runtime Host as you.");
+    println!("  task    : {TASK} (at logon, as {user}; it runs while you are logged on)");
+    println!("  binary  : {}", layout.bin);
+    println!("  state   : {}", layout.state);
+    println!("  config  : {}", layout.config);
+    println!("  log     : {}", layout.log_file);
+    for note in &notes {
+        println!("\n{note}");
+    }
+    if facts.enrolled {
+        println!("\nThis host is enrolled; the task restarted it with this binary.");
+    } else {
+        println!(
+            "\nNext, enroll it. In the Storm app: Settings > Hosts > Enroll a host, then run:"
+        );
+        println!("  {bin} enroll");
+        println!("Enrolling turns the task on and starts the host; it starts at each logon.");
+    }
+    println!("\nWorkspaces are the folders in {}.", layout.workspaces);
+    println!("To add other roots: workspace_roots in");
+    println!("  {}", layout.config);
+    println!("then restart the host: schtasks /end /tn \"{TASK}\"; schtasks /run /tn \"{TASK}\"");
+    println!("\nThe agents run as you, so the CLIs you use and their logins are the host's.");
+    println!("Signing out stops the host; the next sign-in starts it again.");
+    Ok(())
+}
+
+fn uninstall_user(purge: bool) -> Result<()> {
+    if super::windows::is_elevated() {
+        bail!(
+            "uninstall --user removes the host you installed as yourself: run it in a \
+             PowerShell that is not elevated"
+        );
+    }
+    let layout = user_layout()?;
+    end_user_host(&layout);
+    if task_registered() {
+        schtasks_checked(&["/delete", "/tn", TASK, "/f"])?;
+        println!("Removed the {TASK} task.");
+    }
+    let me = std::env::current_exe().ok();
+    let held = |dir: &str| match std::fs::remove_dir_all(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    };
+    if me
+        .as_deref()
+        .is_some_and(|me| same_file(me, Path::new(&layout.bin)))
+    {
+        // Windows cannot delete a running binary; it goes when this exits.
+        println!("Remove {} once this command has finished.", layout.bin_dir);
+    } else {
+        retry_while_held(|| held(&layout.bin_dir))
+            .with_context(|| format!("removing {}", layout.bin_dir))?;
+    }
+    if purge {
+        retry_while_held(|| held(&layout.logs))
+            .with_context(|| format!("removing {}", layout.logs))?;
+        super::purge_user_state(
+            Path::new(&layout.state),
+            Path::new(&layout.config),
+            Path::new(&layout.workspaces),
+        )?;
+        let _ = std::fs::remove_dir(&layout.root);
+        println!("Purged the host's identity, state, logs and config.");
+    } else {
+        println!(
+            "Kept the identity, state, logs and config; \
+             `storm-runtime uninstall --user --purge` removes them."
+        );
+    }
+    println!("Your workspaces were not touched.");
+    Ok(())
+}
+
+/// After enrolling `state` as a person (decision 151 E3): if it is the
+/// logon task's, the task is turned on and started. `Ok(false)` when no task
+/// runs that state.
+pub fn start_user_task(state: &Path) -> Result<bool> {
+    let layout = user_layout()?;
+    let ours = super::winsvc::normalize(&state.to_string_lossy())
+        .eq_ignore_ascii_case(&super::winsvc::normalize(&layout.state));
+    if !ours || !task_registered() {
+        return Ok(false);
+    }
+    schtasks_checked(&["/change", "/tn", TASK, "/enable"])?;
+    // A host already running holds the old enrollment; restart it.
+    end_user_host(&layout);
+    schtasks_checked(&["/run", "/tn", TASK])?;
+    Ok(true)
+}
+
 // ---- the service itself ----------------------------------------------------
 
 define_windows_service!(ffi_service_main, service_entry);
@@ -368,22 +603,9 @@ fn service_entry(_arguments: Vec<OsString>) {
     }
 }
 
-/// Opens the log, keeping one previous file past 10 MiB.
-fn open_log(layout: &Layout) -> Option<std::fs::File> {
-    let path = Path::new(&layout.log_file);
-    if std::fs::metadata(path).is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
-        let _ = std::fs::rename(path, path.with_extension("log.old"));
-    }
-    std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .ok()
-}
-
 fn run_service() -> Result<()> {
     let layout = layout();
-    if let Some(log) = open_log(&layout) {
+    if let Ok(log) = super::open_log(Path::new(&layout.log_file)) {
         let _ = tracing_subscriber::fmt()
             .with_env_filter(
                 tracing_subscriber::EnvFilter::try_from_default_env()

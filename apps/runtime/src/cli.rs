@@ -124,13 +124,20 @@ impl CliProvider {
     /// A built-in agent as its profile launches it (decision 130). `shell`
     /// is the platform's own shell instead.
     pub fn built_in(profile: &crate::profile::Profile) -> Self {
+        Self::built_in_as(profile, crate::platform::is_service_context())
+    }
+
+    /// As [`Self::built_in`], with the profile's service-only arguments when
+    /// `service` (decision 151 N3).
+    pub fn built_in_as(profile: &crate::profile::Profile, service: bool) -> Self {
         if profile.id == "shell" {
             return Self::shell();
         }
+        let service_args = if service { profile.service_args } else { &[] };
         Self::new(
             id(profile.id),
             profile.command,
-            profile.args.iter().copied(),
+            profile.args.iter().chain(service_args).copied(),
         )
     }
 
@@ -493,5 +500,34 @@ impl ProviderSession for CliSession {
 
     fn status(&self) -> SessionStatus {
         self.terminal.shared.status()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decision 151 N3: Codex's sandbox and approval pins are the
+    /// service's; a person's own host leaves them to Codex's settings.
+    #[test]
+    fn codexs_pins_are_the_services_alone() {
+        let codex = crate::profile::get("codex").unwrap();
+        let service = CliProvider::built_in_as(codex, true);
+        assert_eq!(
+            service.args,
+            [
+                "--no-daemon",
+                "--sandbox",
+                "danger-full-access",
+                "--ask-for-approval",
+                "on-request"
+            ]
+        );
+        assert_eq!(CliProvider::built_in_as(codex, false).args, ["--no-daemon"]);
+        let claude = crate::profile::get("claude-code").unwrap();
+        assert_eq!(
+            CliProvider::built_in_as(claude, false).args,
+            CliProvider::built_in_as(claude, true).args
+        );
     }
 }

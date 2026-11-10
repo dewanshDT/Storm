@@ -16,8 +16,9 @@ mod posix;
 use posix as shared;
 #[cfg(unix)]
 pub use posix::{
-    account_name, check_exclusive_account, exclusive_account_allowed, host_name, session_members,
-    sweep_account, sweep_targets, tagged_processes,
+    account_name, check_enroll, check_exclusive_account, current_account, enroll_refusal,
+    exclusive_account_allowed, host_name, session_members, sweep_account, sweep_targets,
+    tagged_processes,
 };
 #[cfg(unix)]
 pub(crate) use posix::{wait_readable, wait_writable};
@@ -50,13 +51,16 @@ pub use windows::{
     sweep_targets,
 };
 #[cfg(windows)]
-pub use windows_service::{enable_and_start, service_main};
+pub use windows_service::{enable_and_start, service_main, start_user_task};
 
 pub mod ipc;
 pub mod launchd;
+pub mod paths;
 pub mod peer;
+pub mod systemd_user;
 pub mod wincmd;
 pub mod winsvc;
+pub mod wintask;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("storm-runtime runs on Linux, macOS and Windows (D14, D16)");
@@ -74,6 +78,63 @@ pub const DEFAULT_CONFIG: &str = os::DEFAULT_CONFIG;
 
 /// The dedicated account the packaged service runs as (77e, AM34, AM49).
 pub const SERVICE_ACCOUNT: &str = os::SERVICE_ACCOUNT;
+
+/// Whether this process acts for the packaged service (decision 151 N2):
+/// it runs as [`SERVICE_ACCOUNT`], or as an administrator (root, or elevated
+/// on Windows). Such a process defaults to the service's paths and keeps the
+/// service's workspace-root rules; anyone else is a person running a host as
+/// themselves.
+pub fn is_service_context() -> bool {
+    #[cfg(unix)]
+    let admin = rustix::process::geteuid().is_root();
+    #[cfg(windows)]
+    let admin = windows::is_elevated();
+    paths::is_service(paths::OS, current_account().as_deref(), admin)
+}
+
+/// The state directory and `runtime.toml` `enroll`, `check` and `serve` use
+/// when given none: the service's for [`is_service_context`], else the
+/// person's own (Linux: XDG state and config; macOS: Application Support;
+/// Windows: `%LOCALAPPDATA%`).
+pub fn host_paths() -> Result<paths::HostPaths, String> {
+    paths::resolve(paths::OS, is_service_context(), |name| {
+        std::env::var_os(name)
+    })
+}
+
+/// Whether `state` is the packaged service's state directory, which only
+/// its account (and, on Windows, administrators) can read.
+pub fn is_service_state(state: &std::path::Path) -> bool {
+    state == std::path::Path::new(DEFAULT_STATE)
+}
+
+/// How a person runs `storm-runtime <sub>` against the service's state:
+/// as its account on Linux and macOS, elevated on Windows.
+pub fn service_command(sub: &str) -> String {
+    let command = format!("{} {sub}", os::SERVICE_COMMAND);
+    if cfg!(windows) {
+        format!("`{command}` in PowerShell as administrator")
+    } else {
+        format!("`{command}`")
+    }
+}
+
+/// What to do when `state` cannot be read or written by this account: run
+/// `storm-runtime <sub>` as the account that owns it.
+pub fn state_access_hint(state: &std::path::Path, sub: &str) -> String {
+    if is_service_state(state) {
+        format!(
+            "{} belongs to the service account {SERVICE_ACCOUNT}: run {}.",
+            state.display(),
+            service_command(sub)
+        )
+    } else {
+        format!(
+            "Run storm-runtime as the account that owns {}.",
+            state.display()
+        )
+    }
+}
 
 /// The environment variable that marks every process a session started:
 /// `STORM_RUNTIME_SESSION=<session id>`. Children inherit it, so it follows
@@ -98,8 +159,8 @@ pub fn user_state_dir() -> Option<std::path::PathBuf> {
     os::user_state_dir()
 }
 
-/// Locations no workspace root may be in or contain, whatever
-/// `runtime.toml` says (AM39). macOS: every person's home (and with it
+/// Locations no workspace root of the service ([`is_service_context`]) may
+/// be in or contain, whatever `runtime.toml` says (AM39). macOS: every person's home (and with it
 /// `~/Documents`, `~/Desktop`, `~/Downloads`, iCloud Drive), removable and
 /// network volumes, autofs mounts, and the data volume's own spelling of
 /// all of these. A LaunchDaemon cannot answer the privacy prompts guarding
@@ -108,8 +169,8 @@ pub fn user_state_dir() -> Option<std::path::PathBuf> {
 /// machine, so [`refused_root`] decides.
 pub const PROTECTED_ROOTS: &[&str] = os::PROTECTED_ROOTS;
 
-/// Why `root` (canonical) may not be a workspace root on this machine, beyond
-/// [`PROTECTED_ROOTS`], or `None`. Windows: profiles, network shares and
+/// Why `root` (canonical) may not be a workspace root of the service on this
+/// machine, beyond [`PROTECTED_ROOTS`], or `None`. Windows: profiles, network shares and
 /// removable drives (AM54). Elsewhere: always `None`.
 pub fn refused_root(root: &std::path::Path) -> Option<String> {
     shared::refused_root(root)
@@ -232,6 +293,12 @@ pub struct InstallOptions {
     /// Who the workspace root is shared with. Defaults to `$SUDO_USER`; on
     /// Windows, the user who opened the elevated shell.
     pub operator: Option<String>,
+    /// The host as the person running `install`, not as the service, with
+    /// no root (decision 151): a `systemd --user` unit on Linux (E1), a
+    /// LaunchAgent on macOS (E2), a logon task on Windows (E3).
+    pub user: bool,
+    /// Linux, with `user`: leave linger as it is.
+    pub no_linger: bool,
 }
 
 /// `storm-runtime uninstall` (AM35).
@@ -240,19 +307,72 @@ pub struct UninstallOptions {
     /// Also remove the identity, state, logs, config and the account.
     /// Workspaces are never removed.
     pub purge: bool,
+    /// Remove what `install --user` set up.
+    pub user: bool,
 }
 
 /// Installs this binary as the platform's system service. macOS: the
 /// `_stormruntime` account, `/Library/StormRuntime` and the LaunchDaemon.
 /// Windows: `C:\ProgramData\StormRuntime` and the `StormRuntime` service
 /// (AM50). Linux: the `.deb` does this, so it refuses with a pointer to it.
+/// `user` installs the host as the person instead, per platform.
 pub fn install(options: &InstallOptions) -> anyhow::Result<()> {
     os::install(options)
 }
 
-/// Removes the system service `install` set up.
+/// Removes the system service `install` set up, or with `user` what
+/// `install --user` did.
 pub fn uninstall(options: &UninstallOptions) -> anyhow::Result<()> {
     os::uninstall(options)
+}
+
+/// `uninstall --user --purge` on every platform: removes `state` but for
+/// [`paths::purge_targets`]' keepers (`workspaces` and the roots `config`
+/// names), then `config`.
+pub fn purge_user_state(
+    state: &std::path::Path,
+    config: &std::path::Path,
+    workspaces: &std::path::Path,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let mut keep = std::fs::read_to_string(config)
+        .ok()
+        .and_then(|t| toml::from_str::<crate::config::RuntimeConfig>(&t).ok())
+        .map(|c| c.workspace_roots)
+        .unwrap_or_default();
+    keep.push(workspaces.to_path_buf());
+    let entries: Vec<std::path::PathBuf> = match std::fs::read_dir(state) {
+        Ok(dir) => dir.filter_map(|e| e.ok().map(|e| e.path())).collect(),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", state.display())),
+    };
+    for path in paths::purge_targets(&entries, &keep) {
+        let gone = if path.is_dir() && !path.is_symlink() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        gone.with_context(|| format!("removing {}", path.display()))?;
+    }
+    let _ = std::fs::remove_dir(state);
+    match std::fs::remove_file(config) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => {
+            Err(e).with_context(|| format!("removing {}", config.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Opens `path` to append the host's log to, keeping one previous file past
+/// 10 MiB.
+pub fn open_log(path: &std::path::Path) -> io::Result<std::fs::File> {
+    if std::fs::metadata(path).is_ok_and(|m| m.len() > 10 * 1024 * 1024) {
+        let _ = std::fs::rename(path, path.with_extension("log.old"));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
 }
 
 /// Asserts `path` is private: exactly `mode` on Unix (A2), AM49's DACL on
@@ -302,6 +422,36 @@ mod tests {
             std::fs::read_to_string(&path).unwrap(),
             "export PATH=/mine\n"
         );
+    }
+
+    #[test]
+    fn a_user_purge_keeps_the_workspaces_and_every_named_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        let config = dir.path().join("runtime.toml");
+        let workspaces = state.join("workspaces");
+        for d in ["workspaces/app", "agents/codex", "mine/src", "identity"] {
+            std::fs::create_dir_all(state.join(d)).unwrap();
+        }
+        std::fs::write(state.join("host.json"), "{}").unwrap();
+        let mine = state.join("mine/src");
+        std::fs::write(
+            &config,
+            format!(
+                "workspace_roots = [{}]\n",
+                toml::Value::String(mine.display().to_string())
+            ),
+        )
+        .unwrap();
+        purge_user_state(&state, &config, &workspaces).unwrap();
+        assert!(workspaces.join("app").is_dir());
+        assert!(mine.is_dir());
+        for gone in ["agents", "identity", "host.json"] {
+            assert!(!state.join(gone).exists(), "{gone}");
+        }
+        assert!(!config.exists());
+        let nothing = dir.path().join("none");
+        purge_user_state(&nothing, &nothing.join("runtime.toml"), &nothing).unwrap();
     }
 
     /// F3: a login zsh — whose system profile may reorder PATH, as macOS's

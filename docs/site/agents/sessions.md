@@ -20,11 +20,13 @@ launcher asks for:
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
 | **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's row shows it. |
-| **Permission mode** | How much the agent may do without asking you: **Manual** (the agent asks; the default), **Accept edits** (file edits go ahead without a prompt; shell commands still ask) or **Auto** (the agent's own safety check decides routine calls, shell commands included). Claude Code offers all three, OpenCode Manual and Accept edits; other agents always ask. There is never an option that turns the agent's prompts off. Agents the session starts get the same mode or a stricter one, and never ask you: what their mode doesn't cover is refused, and the session that started them hears about it. The session's row and About show it, and a resume keeps it. |
+| **Permission mode** | Which of the agent's own permission modes it starts in. **The agent's own setting** (the default) passes nothing, so whatever you set up for that agent applies. Claude Code also offers **Accept edits**, **Plan**, **Auto**, **Don't ask** (it refuses whatever its rules don't allow, without asking) and **Bypass permissions** (it never asks); OpenCode offers **Accept edits**. Storm passes the one you pick to the agent as its own setting and adds nothing of its own. Agents the session starts run in the same mode, or in their own setting when their agent doesn't have it. The session's row and About show it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
 | **Role** | A role note from your Kit the agent reads at launch, as a [role](/docs/agents/crews/#roles). Off for an agent that can't read Storm notes. |
+| **Agents** | **Allow this session to start agents**, on by default (untick it to launch without): the session may start, message and end agents of its own, which run in its [crew](/docs/agents/crews/) with it. Offered for Claude Code, OpenCode and Codex on any host that says which account it runs as; a host too old to say, or one set to isolate sessions whose isolation isn't working, doesn't offer it. No key, API call or agent can turn it on: only you, here or in the session's About. |
+| **Agents' writes** | Shown only with **Agents** on and a **Can write to** vault chosen, and off by default: **The agents it starts can write to {vault}**. Off, they are read only. On, they write only to that vault, never another. About shows which. |
 
 Any number of sessions can work in one workspace. The launcher marks a
 workspace another session is working in; they see each other's changes as
@@ -63,15 +65,18 @@ Beside the terminal, **Context**, **Wrote** and **About** show the note it
 started from, the notes it has written, and how it was launched. A note an
 agent wrote says so on its version line, linking back to the session.
 
-## Switching to Auto
+About's **Ran as** row is the account the session ran as, kept from when it
+started running, so it stays as it was if the host changes later. On an
+isolated host it reads *"Its own session user (isolated)"*, with the host's
+account after it. A session from before Storm kept this reads *"Not
+recorded"*; one whose host couldn't name its account reads *"An unknown
+account"*.
 
-Unless you launched a Claude Code session in **Auto**, Auto is not among the
-modes Shift+Tab cycles through. The agent can ask for it: a card on the
-session shows its reason, word for word, with **Approve Auto** and **Deny**,
-and expires after 10 minutes. Approving restarts the session in Auto with
-its conversation kept, and takes you to it. An agent another agent started
-can ask only while that agent is in Auto, and a session with agents of its
-own running can't ask until they end.
+## Switching modes
+
+Switch modes in the terminal, as you would outside Storm: in Claude Code,
+Shift+Tab cycles through the modes its own settings allow (the touch key
+bar has **⇧Tab**). Storm doesn't add or remove any.
 
 ### Deletes wait for you
 

@@ -19,11 +19,15 @@ Map<String, dynamic> agentHost({
   Map<String, bool> mcp = const {},
   String? isolation,
   String? identity,
+  Map<String, dynamic>? execution,
+  Map<String, dynamic>? limits,
 }) => {
   'id': id,
   'name': name,
   'status': status,
   'egress': 'host',
+  'execution': ?execution,
+  'limits': ?limits,
   if (identity != null) 'identity': {'state': identity},
   if (isolation != null)
     'isolation': {'state': isolation, 'mechanism': 'systemd_units'},

@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""macOS Runtime Host acceptance, on a real Mac: AC-M1–AC-M9 (decision 83).
+"""macOS Runtime Host acceptance, on a real Mac: AC-M1–AC-M9 (decision 83),
+and G-133-6 (decision 133: Claude Code and OpenCode installed, run, updated
+and removed by the host itself, from the vendors' real channels).
 
 The vault's *Agent Runtime/macOS Runtime Host* (D14) defines the criteria.
 This drives them against the **installed** host: the real `storm-runtime
@@ -29,10 +31,18 @@ Environment:
 What it cannot automate is reported `MANUAL`, never `PASS`: a real Claude
 Code or OpenCode login and prompt, the Mac → phone handoff, and a reboot.
 Exits non-zero on any FAIL.
+
+With `--user` it runs the host as the runner's own user instead (decision
+151 E2): `storm-runtime install --user`, a LaunchAgent in
+`~/Library/LaunchAgents`, enrolled and run without sudo, a workspace root
+under `~/Code`, and `uninstall --user --purge`. Logging out, a Keychain
+login and a privacy prompt need a person, and are `MANUAL`.
 """
 
 import base64
+import hashlib
 import http.client
+import io
 import json
 import os
 import pwd
@@ -45,6 +55,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import zipfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, "..", "..", "server", "tests"))
@@ -382,6 +393,28 @@ class Owner:
     def end(self, sid):
         return call("POST", f"/v1/agent/sessions/{sid}/end", auth=self.auth)[0]
 
+    def refresh(self, host_id):
+        """Asking for a host's workspaces makes it re-report its inventory."""
+        call("GET", f"/v1/agent/hosts/{host_id}/workspaces", auth=self.auth, timeout=20)
+
+    def agent(self, host_id, agent):
+        h = self.host(host_id) or {}
+        return next((p for p in (h.get("capabilities") or {}).get("providers", []) if p["id"] == agent), {})
+
+    def agent_job(self, host_id, agent, op, timeout=660):
+        """`(status, job)`: the POST's answer when it was refused, else the
+        finished job, polled to its end."""
+        status, job = call("POST", f"/v1/agent/hosts/{host_id}/agents/{agent}", {"op": op}, auth=self.auth)
+        if status != 202:
+            return status, job
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            _, job = call("GET", f"/v1/agent/hosts/{host_id}/agents/jobs/{job['id']}", auth=self.auth)
+            if job.get("state") in ("done", "failed"):
+                return status, job
+            time.sleep(1)
+        return status, job
+
     def enrollment(self):
         status, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=self.auth)
         if status != 200:
@@ -438,6 +471,173 @@ def stub_providers():
         if rc == 0:
             made.append(path)
     return prefix, made, real
+
+
+MANAGED = f"{STATE}/agents/managed"
+G1336 = (("claude-code", "claude"), ("opencode", "opencode"))
+installed = {}  # agent -> version, for the report
+releases = {}  # agent -> the binary bin/<command> points at
+
+
+def move(src, dst):
+    if sh(["mv", src, dst])[0] != 0:
+        sh(["mv", src, dst], sudo=True)
+
+
+def sha256_of(path):
+    rc, out = sh(["shasum", "-a", "256", path], sudo=True)
+    return out.split()[0] if rc == 0 and out else None
+
+
+def fetch(url, timeout=60):
+    req = urllib.request.Request(url, headers={"user-agent": "storm-macos-acceptance"})
+    for attempt in (1, 2):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read()
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+            if attempt == 2:
+                raise
+            print(f"  RETRY  fetching {url}: {e}", flush=True)
+
+
+def published_digest(agent, version, binary):
+    """The vendor's own word for the bytes `binary` should hold, fetched here
+    independently of the host: Claude Code's manifest SHA-256 for this
+    platform; for OpenCode, the GitHub asset's digest, checked against the
+    asset, and the hash of the binary inside it."""
+    arch = "arm64" if os.uname().machine == "arm64" else "x64"
+    if agent == "claude-code":
+        base = f"https://downloads.claude.ai/claude-code-releases/{version}"
+        manifest = json.loads(fetch(f"{base}/manifest.json"))
+        return manifest["platforms"][f"darwin-{arch}"]["checksum"], None
+    name = f"opencode-darwin-{arch}.zip"
+    release = json.loads(fetch(f"https://api.github.com/repos/anomalyco/opencode/releases/tags/v{version}"))
+    digest = next(a["digest"] for a in release["assets"] if a["name"] == name).removeprefix("sha256:")
+    data = fetch(f"https://github.com/anomalyco/opencode/releases/download/v{version}/{name}", timeout=300)
+    asset_ok = hashlib.sha256(data).hexdigest() == digest
+    inner = hashlib.sha256(zipfile.ZipFile(io.BytesIO(data)).read(binary)).hexdigest()
+    return inner, asset_ok
+
+
+def g_133_6(owner, host_id, stubs):
+    """Decision 133's install, through the server's routes, as the app
+    drives it: on this Mac, as _stormruntime under launchd, against the
+    vendors' real channels. The app offers Install only for an agent that
+    resolves nowhere, so AC-M3's stubs are moved aside first; they come back
+    before the sessions, where the managed binary must still win."""
+    aside = [(s, s + ".g1336") for s in stubs]
+    try:
+        for s, off in aside:
+            move(s, off)
+        owner.refresh(host_id)
+        for agent, _ in G1336:
+            cap = try_wait(lambda: (lambda c: c if c.get("available") is False else None)(owner.agent(host_id, agent)),
+                           timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"{agent} resolves nowhere, and Install is offered",
+                  cap.get("available") is False and cap.get("installable") is True and "source" not in cap, cap)
+
+        for agent, command in G1336:
+            status, job = owner.agent_job(host_id, agent, "install")
+            if job.get("error") in ("download_failed", "timeout"):
+                print(f"  RETRY  [G-133-6] {agent} install failed {job.get('error')}; once more", flush=True)
+                status, job = owner.agent_job(host_id, agent, "install")
+            version = job.get("version")
+            ok = check("G-133-6", f"{agent} installs ({version or job.get('error')})",
+                       status == 202 and job.get("state") == "done" and version, (status, job))
+            if not ok:
+                continue
+            installed[agent] = version
+            link = f"{MANAGED}/bin/{command}"
+            rc, target = sh(["readlink", link], sudo=True)
+            target = target.strip()
+            release = os.path.basename(os.path.dirname(target))
+            releases[agent] = target
+            check("G-133-6", f"bin/{command} is Storm's, in its release folder",
+                  rc == 0 and target.startswith(f"{MANAGED}/{agent}/") and release == version, (rc, target))
+            # sudo keeps the operator's HOME on macOS; OpenCode writes under it.
+            rc, out = sh(["env", f"HOME={HOME}", link, "--version"], user=ACCOUNT, timeout=30)
+            check("G-133-6", f"the managed {command} answers --version as _stormruntime", rc == 0 and version in out, out)
+            try:
+                want, asset_ok = published_digest(agent, release, command)
+            except Exception as e:
+                want, asset_ok = None, e
+            got = sha256_of(target)
+            if agent == "claude-code":
+                check("G-133-6", "its bytes are the manifest's SHA-256", want and got == want, (got, want))
+            else:
+                check("G-133-6", "the GitHub asset matches its published digest", asset_ok is True, asset_ok)
+                check("G-133-6", "and the installed binary is that asset's", want and got == want, (got, want))
+            owner.refresh(host_id)
+            cap = try_wait(lambda: (lambda c: c if c.get("source") == "storm" and c.get("version") else None)(
+                owner.agent(host_id, agent)), timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"the host reports {agent} {version}, source storm",
+                  cap.get("available") is True and cap.get("source") == "storm" and cap.get("version") == version, cap)
+
+        for s, off in aside:
+            move(off, s)
+        aside = []
+        owner.refresh(host_id)
+        for agent, command in G1336:
+            if agent not in installed:
+                continue
+            cap = owner.agent(host_id, agent)
+            check("G-133-6", f"with the stub back on PATH, {agent} still resolves to Storm's (bin/ first)",
+                  cap.get("source") == "storm", cap)
+            sid = owner.launch(host_id, agent)
+            exe = releases[agent]
+            running = try_wait(lambda: exe in sh(["lsof", "-a", "-u", ACCOUNT, "-d", "txt", "-Fn"], sudo=True)[1],
+                               timeout=20)
+            check("G-133-6", f"a {agent} session starts and execs the managed binary", running,
+                  sh(["ps", "-axo", "user=,pid=,comm=", "-U", ACCOUNT])[1][-400:])
+            s = owner.stream(sid)
+            try:
+                text, _ = s.until(lambda e, d, t: len(t.strip()) > 0)
+            except Exception as e:
+                text = repr(e)
+            finally:
+                s.close()
+            check("G-133-6", f"the {agent} session draws its own screen, not the stub's",
+                  text.strip() and "STUB=" not in text, text[-300:])
+            check("G-133-6", "and is still running", owner.session(sid).get("status") == "running", owner.session(sid))
+            owner.end(sid)
+            wait(lambda: owner.session(sid).get("status") == "stopped", "stopped", timeout=20)
+
+        for agent, command in G1336:
+            if agent not in installed:
+                continue
+            listing = lambda: sh(["sh", "-c", f"ls -i '{MANAGED}/{agent}'; readlink '{MANAGED}/bin/{command}'"], sudo=True)[1]
+            before = listing()
+            status, job = owner.agent_job(host_id, agent, "update")
+            if job.get("error") in ("download_failed", "timeout"):
+                print(f"  RETRY  [G-133-6] {agent} update failed {job.get('error')}; once more", flush=True)
+                status, job = owner.agent_job(host_id, agent, "update")
+            check("G-133-6", f"{agent} update on the latest is done with the same version",
+                  status == 202 and job.get("state") == "done" and job.get("version") == installed[agent], (status, job))
+            check("G-133-6", "and changed nothing", listing() == before, (before, listing()))
+
+            status, job = owner.agent_job(host_id, agent, "remove")
+            check("G-133-6", f"{agent} remove is done", status == 202 and job.get("state") == "done", (status, job))
+            gone = sh(["sh", "-c", f"test -e '{MANAGED}/bin/{command}' || test -L '{MANAGED}/bin/{command}' "
+                       f"|| test -e '{MANAGED}/{agent}'"], sudo=True)[0] != 0
+            check("G-133-6", "and leaves nothing of it under agents/managed", gone,
+                  sh(["ls", "-la", MANAGED, f"{MANAGED}/bin"], sudo=True)[1])
+            owner.refresh(host_id)
+            cap = try_wait(lambda: (lambda c: c if c.get("source") != "storm" else None)(owner.agent(host_id, agent)),
+                           timeout=30) or owner.agent(host_id, agent)
+            check("G-133-6", f"the host no longer reports {agent} as Storm's", cap.get("source") != "storm", cap)
+            status, job = owner.agent_job(host_id, agent, "remove")
+            refused = (status == 409 and (job or {}).get("error") == "not_managed") or \
+                      (status == 202 and job.get("state") == "failed" and job.get("error") == "not_managed")
+            check("G-133-6", f"a second {agent} remove is not_managed", refused, (status, job))
+        # The host's own `claude plugin list` (131) may still be running.
+        stray = lambda: [p for p in account_processes() if p[0] != daemon_pid()]
+        check("G-133-6", "nothing the agents started is left running", try_wait(lambda: not stray(), timeout=20), stray())
+        rc, out = sh(["sh", "-c", f"ls -A '{HOME}/.local/bin' 2>/dev/null"], sudo=True)
+        check("G-133-6", "no agent installed itself into the account's ~/.local/bin", not out.strip(), out)
+    finally:
+        for s, off in aside:
+            move(off, s)
 
 
 def main():
@@ -560,7 +760,7 @@ def main():
             # Storm's managed agents first (decision 133-2), then AM38's.
             check("M3", "its PATH is Storm's agents, then AM38's",
                   env.get("ENV_PATH") == f"{STATE}/agents/managed/bin:{AM38_PATH}", env.get("ENV_PATH"))
-            check("M3", "claude-code is started in default permission mode", "--permission-mode default" in env.get("ARGS", ""), env)
+            check("M3", "claude-code is started with no permission flag (151 N5)", "--permission-mode" not in env.get("ARGS", ""), env)
             check("M3", "the agent runs as _stormruntime", f"ID={ACCOUNT}" in text, text[-300:])
         else:
             manual("M3", "a non-shell session's environment", "a real `claude` is installed; checked with the shell only")
@@ -741,6 +941,10 @@ def main():
         check("M7", "the host comes back with the original config",
               try_wait(lambda: owner.online(host_id), timeout=60) is not None, launchd())
 
+        # -------------------------------------------------------------- G-133-6
+        print("\n=== G-133-6: agent install on a macOS host ===")
+        g_133_6(owner, host_id, stubs)
+
         # ---------------------------------------------------------------- AC-M8
         print("\n=== AC-M8: secrets ===")
         _, host_log = sh(["cat", LOG], sudo=True)
@@ -826,20 +1030,208 @@ def main():
     report()
 
 
+# --- the host as the runner's own user (decision 151 E2) ----------------------
+
+U_HOME = OPERATOR_HOME
+U_ROOT = f"{U_HOME}/Library/Application Support/StormRuntime"
+U_BIN = f"{U_ROOT}/bin/storm-runtime"
+U_STATE = f"{U_ROOT}/state"
+U_CONFIG = f"{U_ROOT}/runtime.toml"
+U_LOG = f"{U_HOME}/Library/Logs/StormRuntime/storm-runtime.log"
+U_PLIST = f"{U_HOME}/Library/LaunchAgents/{LABEL}.plist"
+U_WS_ROOT = f"{U_HOME}/Code/storm-accept-{os.getpid()}"
+
+
+def user_domain():
+    gui = f"gui/{os.getuid()}"
+    return gui if sh(["launchctl", "print", gui])[0] == 0 else f"user/{os.getuid()}"
+
+
+def user_launchd(domain):
+    """`launchd()`, for the agent in the runner's own domain: no sudo."""
+    rc, out = sh(["launchctl", "print", f"{domain}/{LABEL}"])
+    if rc != 0:
+        return None
+    props = {}
+    for line in out.splitlines():
+        m = re.match(r"^\t([a-z][a-z ]*?) = (.*)$", line)
+        if m and m.group(1) not in props:
+            props[m.group(1)] = m.group(2).strip()
+    return props
+
+
+def user_pid(domain):
+    pid = (user_launchd(domain) or {}).get("pid")
+    return int(pid) if pid and pid.isdigit() else None
+
+
+def own_stat(path):
+    rc, out = sh(["stat", "-f", "%Lp %Su", path])
+    return tuple(out.split()) if rc == 0 else None
+
+
+def main_user():
+    if sys.platform != "darwin":
+        sys.exit("macos_acceptance.py runs on macOS only")
+    if os.getuid() == 0:
+        sys.exit("--user runs as a person, not root")
+    if os.path.exists(U_PLIST) or os.path.exists(U_ROOT):
+        if os.environ.get("STORM_ACCEPT_REPLACE") != "1":
+            sys.exit(f"a host is already installed as you ({U_PLIST}); set STORM_ACCEPT_REPLACE=1 to remove it first")
+        sh([RUNTIME_BIN, "uninstall", "--user", "--purge"])
+    make_work()
+    server = None
+    stubs = []
+    domain = user_domain()
+    service = f"{domain}/{LABEL}"
+    try:
+        server = start_server()
+        bearer, _, _ = storm_auth.sign_in(BASE, log_path=SERVER_LOG)
+        owner = Owner(bearer)
+
+        print(f"\n=== U1: install --user ({domain}) ===")
+        had_daemon_root = os.path.exists(ROOT)
+        rc, out = sh([RUNTIME_BIN, "install", "--user"], timeout=120)
+        check("U1", "storm-runtime install --user succeeds without sudo", rc == 0, out)
+        check("U1", "it says how to enroll, the path quoted for its space", f"'{U_BIN}' enroll" in out, out)
+        for path, mode in [(U_PLIST, "644"), (U_BIN, "755"), (U_CONFIG, "600"), (U_ROOT, "700"), (U_STATE, "700")]:
+            got = own_stat(path)
+            check("U1", f"{path} is {mode} {OPERATOR}", got == (mode, OPERATOR), got)
+        check("U1", "nothing under /Library/StormRuntime", os.path.exists(ROOT) == had_daemon_root)
+        rc, out = sh(["plutil", "-lint", U_PLIST])
+        check("U1", "the plist is valid", rc == 0, out)
+        rc, out = sh(["plutil", "-convert", "json", "-o", "-", U_PLIST])
+        plist = json.loads(out) if rc == 0 else {}
+        check("U1", "it runs serve on the per-user paths, each one argument",
+              plist.get("ProgramArguments") == [U_BIN, "serve", "--state", U_STATE, "--config", U_CONFIG],
+              plist.get("ProgramArguments"))
+        check("U1", "no UserName: it runs as whoever loads it", "UserName" not in plist, plist)
+        check("U1", "KeepAlive is PathState on host.json",
+              plist.get("KeepAlive") == {"PathState": {f"{U_STATE}/host.json": True}}, plist.get("KeepAlive"))
+        check("U1", "it logs under ~/Library/Logs", plist.get("StandardErrorPath") == U_LOG, plist)
+        props = user_launchd(domain)
+        check("U1", f"launchd has it loaded in {domain}", props is not None)
+        check("U1", "and not running before enrollment",
+              props is not None and props.get("state") != "running" and not props.get("pid"), props)
+        rc, out = sh([RUNTIME_BIN, "install", "--user"], timeout=120)
+        check("U1", "install --user again is an idempotent upgrade", rc == 0, out)
+
+        os.makedirs(os.path.join(U_WS_ROOT, WS))
+        with open(U_CONFIG) as f:
+            original = f.read()
+        with open(U_CONFIG, "w") as f:
+            f.write(f'workspace_roots = ["{U_WS_ROOT}"]\n' + original)
+        _, stubs, real = stub_providers()
+
+        print("\n=== U2: enroll as yourself ===")
+        enrollment = owner.enrollment()
+        p = subprocess.run([U_BIN, "enroll", "--name", "mac-accept-user"], input=enrollment + "\n",
+                           capture_output=True, text=True, cwd=U_HOME, timeout=60)
+        check("U2", "enroll as yourself, no flags, no sudo", p.returncode == 0, p.stdout + p.stderr)
+        m = re.search(r"\((hst_[0-9A-Z]{26})\)", p.stdout)
+        host_id = m.group(1) if m else None
+        host = try_wait(lambda: owner.online(host_id), timeout=60)
+        check("U2", "launchd starts it with no further command, and it is online", host is not None,
+              (user_launchd(domain), owner.host(host_id)))
+        check("U2", f"launchctl print {service} reports it running",
+              (user_launchd(domain) or {}).get("state") == "running", user_launchd(domain))
+        pid = user_pid(domain)
+        rc, out = sh(["ps", "-o", "user=,command=", "-p", str(pid)]) if pid else (1, "")
+        check("U2", "it runs as you", out.split()[:1] == [OPERATOR], out)
+        check("U2", "without the account sweep", "--exclusive-account" not in out, out)
+        rc, out = sh([U_BIN, "check"], cwd=U_HOME)
+        check("U2", "storm-runtime check, as you, proves the whole path", rc == 0 and "OK" in out, out)
+        log = open(U_LOG).read() if os.path.exists(U_LOG) else ""
+        check("U2", "it read your login shell's PATH (N7)", "login shell: imported its PATH" in log, log[-500:])
+
+        print("\n=== U3: a session as you, in a root under ~/Code ===")
+        caps = (host or {}).get("capabilities") or {}
+        check("U3", "the host reports the workspace under ~/Code", WS in caps.get("workspaces", []), caps.get("workspaces"))
+        avail = {p["id"]: p.get("available") for p in caps.get("providers", [])}
+        check("U3", "claude-code is available", avail.get("claude-code") is True or "claude" not in real and not stubs, avail)
+        sid = owner.launch(host_id, "shell")
+        out = owner.run(sid, 'printf "ID=%s HOME=%s\\n" "$(id -un)" "$HOME"')
+        check("U3", "the session runs as you, with your HOME", f"ID={OPERATOR}" in out and f"HOME={U_HOME}" in out, out[-300:])
+        out = owner.run(sid, "pwd")
+        check("U3", "its working directory is the workspace under ~/Code", f"{U_WS_ROOT}/{WS}" in out, out[-200:])
+        out = owner.run(sid, 'printf "P=%s\\n" "$PATH"')
+        check("U3", "its PATH has Homebrew's", "/opt/homebrew/bin" in out or not os.path.isdir("/opt/homebrew"), out[-300:])
+        out = owner.run(sid, "echo agent-wrote > agent.txt; printf 'W%s\\n' $?")
+        agent_file = os.path.join(U_WS_ROOT, WS, "agent.txt")
+        check("U3", "the agent writes in its workspace, as you", re.search(r"W0\b", out) is not None
+              and own_stat(agent_file) is not None and own_stat(agent_file)[1] == OPERATOR, out[-200:])
+        owner.end(sid)
+
+        print("\n=== U4: lifecycle ===")
+        before = user_pid(domain)
+        sh(["launchctl", "kill", "TERM", service])
+        back = try_wait(lambda: (user_pid(domain) or before) != before and owner.online(host_id), timeout=60)
+        check("U4", "launchctl kill TERM: launchd restarts the enrolled host", back is not None, user_launchd(domain))
+        manual("U4", "logging out stops the host, and logging in starts it", "needs a person at the Mac")
+        manual("U4", "a Keychain-backed Claude Code login works in a session", "needs a person signed in to Claude Code")
+        manual("U4", "a workspace under ~/Documents asks first, and you answer", "TCC prompts need a person")
+        manual("U4", "brew services start storm-runtime runs the same host", "the formula builds the release tag, not this commit")
+
+        print("\n=== U5: revocation ===")
+        status, _ = call("DELETE", f"/v1/agent/hosts/{host_id}", auth=owner.auth)
+        check("U5", "the owner revokes the host", status == 204, status)
+        stopped = try_wait(lambda: (lambda p: p if p.get("state") != "running" and not p.get("pid") else None)(
+            user_launchd(domain) or {}), timeout=90)
+        check("U5", "the host stops", stopped is not None, user_launchd(domain))
+        check("U5", "and exited 3", (user_launchd(domain) or {}).get("last exit code", "").startswith("3"), user_launchd(domain))
+        time.sleep(30)
+        check("U5", "launchd does not restart it (30 s)", (user_launchd(domain) or {}).get("state") != "running",
+              user_launchd(domain))
+
+        print("\n=== U1: uninstall --user ===")
+        if os.path.isdir(ARTIFACTS) and os.path.exists(U_LOG):
+            shutil.copy(U_LOG, os.path.join(ARTIFACTS, "storm-runtime-user.log"))
+        rc, out = sh([U_BIN, "uninstall", "--user", "--purge"], timeout=120)
+        check("U1", "uninstall --user --purge succeeds without sudo", rc == 0, out)
+        check("U1", "the job is gone", user_launchd(domain) is None)
+        check("U1", "the plist, binary and state are gone",
+              not os.path.exists(U_PLIST) and not os.path.exists(U_BIN) and not os.path.exists(U_STATE))
+        check("U1", "the workspace is kept", os.path.exists(agent_file))
+    except Exception as e:
+        check("--", "the harness ran to completion", False, f"{type(e).__name__}: {e}")
+    finally:
+        for path in stubs:
+            if sh(["rm", "-f", path])[0] != 0:
+                sh(["rm", "-f", path], sudo=True)
+        if os.path.exists(U_PLIST) or os.path.exists(U_ROOT):
+            if os.path.isdir(ARTIFACTS):
+                if os.path.exists(U_LOG):
+                    shutil.copy(U_LOG, os.path.join(ARTIFACTS, "storm-runtime-user.log"))
+                sh(["sh", "-c", f"launchctl print {service} > '{ARTIFACTS}/launchctl-print-user.txt' 2>&1"])
+            for b in (U_BIN, RUNTIME_BIN):
+                if os.path.exists(b) and sh([b, "uninstall", "--user", "--purge"])[0] == 0:
+                    break
+        if os.environ.get("STORM_ACCEPT_CLEANUP") == "1":
+            shutil.rmtree(U_WS_ROOT, ignore_errors=True)
+        if server and server.poll() is None:
+            server.kill()
+        if ARTIFACTS != WORK and os.path.isdir(ARTIFACTS):
+            shutil.copy(SERVER_LOG, os.path.join(ARTIFACTS, "server.log"))
+
+    report()
+
+
 def report():
     print("\n" + "=" * 78)
-    print(f"{'AC':<5}{'result':<8}criterion")
+    print(f"{'AC':<9}{'result':<8}criterion")
     print("-" * 78)
     for ac, name, status, detail in results:
-        print(f"{ac:<5}{status:<8}{name}")
+        print(f"{ac:<9}{status:<8}{name}")
         if status == "FAIL" and detail:
-            print(f"{'':<13}{detail}")
+            print(f"{'':<17}{detail}")
     counts = {s: sum(1 for r in results if r[2] == s) for s in ("PASS", "FAIL", "MANUAL")}
     print("-" * 78)
     print(f"{counts['PASS']} passed, {counts['FAIL']} failed, {counts['MANUAL']} manual")
+    for agent, version in installed.items():
+        print(f"G-133-6 installed {agent} {version}")
     print(f"logs: {SERVER_LOG}" + (f" (copied to {ARTIFACTS})" if ARTIFACTS != WORK else ""))
     sys.exit(1 if counts["FAIL"] else 0)
 
 
 if __name__ == "__main__":
-    main()
+    main_user() if "--user" in sys.argv[1:] else main()

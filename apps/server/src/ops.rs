@@ -1793,9 +1793,14 @@ pub struct HostView {
     /// Its session isolation (decision 136j), online or not, by the same
     /// rule. `None` for a host not heard from since 136-5.
     pub isolation: Option<crate::agent::Isolation>,
+    /// Who its processes run as (decision 151), online or not. `None` for a
+    /// host that has not said.
+    pub execution: Option<crate::agent::Execution>,
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
+    /// What its owner set for agents on it (decision 152).
+    pub limits: HostLimitsView,
 }
 
 fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
@@ -1827,14 +1832,186 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
                 None
             }),
     };
+    let execution = state.agent.host_execution(&host.id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, host = host.id, "could not read a host's execution");
+        None
+    });
+    let limits = limits_view(state, &host.id, live.capabilities.as_ref());
     HostView {
         host,
         status,
         capabilities: live.capabilities,
         identity,
         isolation,
+        execution,
         egress: "host",
+        limits,
     }
+}
+
+// ---- Agent spawning: a host's Limits (decision 152) -------------------------
+//
+// Set on the session tier by the owner alone: no `stk_` key, host credential
+// or agent changes them. Nothing is written to the host or to any harness
+// (152h).
+
+pub const EVENT_HOST_LIMITS_CHANGED: &str = "host_limits_changed";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostLimitsView {
+    pub max_children: i64,
+    pub max_tree: i64,
+    /// The owner's override, `None` for the host's own.
+    pub max_sessions: Option<i64>,
+    /// What the host reports, 0 being no limit; `None` while it is offline.
+    pub host_max_sessions: Option<u32>,
+    /// What is in force, never more than the host reports (152d); 0 is no
+    /// limit, `None` while neither is known.
+    pub effective_max_sessions: Option<u32>,
+    /// Fixed (152e).
+    pub depth: i64,
+    pub hard_max_children: i64,
+    pub hard_max_tree: i64,
+}
+
+fn limits_view(
+    state: &Shared,
+    host_id: &str,
+    caps: Option<&crate::agent::Capabilities>,
+) -> HostLimitsView {
+    use crate::agent::store::spawn::{BUILT_DEPTH, HARD_MAX_CHILDREN, HARD_MAX_TREE, MAX_DEPTH};
+    let limits = state.agent.host_limits(host_id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, host = host_id, "could not read a host's limits");
+        Default::default()
+    });
+    let reported = caps.map(|c| c.max_sessions);
+    HostLimitsView {
+        max_children: limits.max_children,
+        max_tree: limits.max_tree,
+        max_sessions: limits.max_sessions,
+        host_max_sessions: reported,
+        effective_max_sessions: match reported {
+            Some(host) => Some(limits.effective_sessions(host)),
+            None => limits.max_sessions.map(|_| limits.effective_sessions(0)),
+        },
+        depth: MAX_DEPTH.min(BUILT_DEPTH),
+        hard_max_children: HARD_MAX_CHILDREN,
+        hard_max_tree: HARD_MAX_TREE,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetHostLimits {
+    pub max_children: i64,
+    pub max_tree: i64,
+    /// Absent or null: the host's own.
+    #[serde(default)]
+    pub max_sessions: Option<i64>,
+}
+
+async fn owners_host(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    live: bool,
+) -> ApiResult<String> {
+    let owner = crews_owner(actor)?.to_string();
+    let auth_db = state.auth_db.lock().await;
+    match auth_db.host_by_id(host_id).map_err(internal)? {
+        Some(h) if !(live && h.is_revoked()) => Ok(owner),
+        _ => Err(not_found("no such host")),
+    }
+}
+
+/// `GET /v1/agent/hosts/{id}/limits`.
+pub async fn get_host_limits(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+) -> ApiResult<HostLimitsView> {
+    owners_host(state, actor, host_id, false).await?;
+    let caps = state.agent.host_live(host_id).capabilities;
+    Ok(limits_view(state, host_id, caps.as_ref()))
+}
+
+/// `PUT /v1/agent/hosts/{id}/limits`: all of them at once. A change is
+/// audited old → new; lowering one only refuses new starts (152f).
+pub async fn set_host_limits(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    host_id: &str,
+    req: SetHostLimits,
+) -> ApiResult<HostLimitsView> {
+    use crate::agent::store::spawn::{HARD_MAX_CHILDREN, HARD_MAX_TREE, HostLimits};
+    let owner = owners_host(state, actor, host_id, true).await?;
+    if !(1..=HARD_MAX_CHILDREN).contains(&req.max_children)
+        || !(1..=HARD_MAX_TREE).contains(&req.max_tree)
+        || req
+            .max_sessions
+            .is_some_and(|n| !(1..=i64::from(u32::MAX)).contains(&n))
+    {
+        return Err(bad_request("limit_out_of_range"));
+    }
+    if req.max_tree < req.max_children {
+        return Err(bad_request("tree_below_session"));
+    }
+    let new = HostLimits {
+        max_children: req.max_children,
+        max_tree: req.max_tree,
+        max_sessions: req.max_sessions,
+    };
+    let old = state
+        .agent
+        .set_host_limits(host_id, &new, &owner)
+        .map_err(internal)?;
+    if old != new {
+        let detail = serde_json::json!({"host_id": host_id, "old": old, "new": new});
+        state
+            .auth_db
+            .lock()
+            .await
+            .record_event(
+                EVENT_HOST_LIMITS_CHANGED,
+                Some(&owner),
+                device,
+                &crate::index::now_rfc3339(),
+                &detail.to_string(),
+            )
+            .map_err(internal)?;
+    }
+    let caps = state.agent.host_live(host_id).capabilities;
+    Ok(limits_view(state, host_id, caps.as_ref()))
+}
+
+/// The limit a start hit, named with its value (152f).
+fn limit_message(state: &Shared, host_id: &str, cap: Option<&str>) -> String {
+    let limits = state.agent.host_limits(host_id).unwrap_or_default();
+    let reached = match cap {
+        Some("depth") => return "Agents you start cannot start agents of their own.".into(),
+        Some("children") => format!(
+            "Your host's limit of {} running agents per session is reached",
+            limits.max_children
+        ),
+        Some("tree") => format!(
+            "Your host's limit of {} running sessions in a tree, yours included, is reached",
+            limits.max_tree
+        ),
+        Some("max_sessions") => {
+            let reported = state
+                .agent
+                .host_live(host_id)
+                .capabilities
+                .map_or(0, |c| c.max_sessions);
+            format!(
+                "Your host's limit of {} concurrent sessions is reached",
+                limits.effective_sessions(reported)
+            )
+        }
+        _ => "A limit is reached".into(),
+    };
+    format!("{reached}: end children you are done with (end_agent) before starting another.")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2087,13 +2264,22 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
             "the host is offline".into(),
         )
     })?;
-    let counts = state.agent.live_counts(host_id).map_err(agent_error)?;
+    // By canonical directory (137-2), else by name; a path never matches a name.
+    let paths = &caps.workspace_paths;
+    let dir = |name: &str| match paths.get(name) {
+        Some(path) => (true, path.clone()),
+        None => (false, name.to_string()),
+    };
+    let mut counts = std::collections::HashMap::new();
+    for (name, n) in state.agent.live_counts(host_id).map_err(agent_error)? {
+        *counts.entry(dir(&name)).or_insert(0) += n;
+    }
     Ok(caps
         .workspaces
-        .into_iter()
+        .iter()
         .map(|name| WorkspaceView {
-            live_sessions: counts.get(&name).copied().unwrap_or(0),
-            name,
+            live_sessions: counts.get(&dir(name)).copied().unwrap_or(0),
+            name: name.clone(),
         })
         .collect())
 }
@@ -2835,9 +3021,10 @@ pub struct ListAgents {
 /// `list_agents`: what the calling parent may start, and how close it is to
 /// its caps.
 pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents> {
-    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_TREE};
+    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_DEPTH};
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.get(&caller).map_err(agent_error)?;
+    let host_limits = state.agent.host_limits(&r.host_id).map_err(internal)?;
     let roles = role_catalog(state, &r.owner_user_id)
         .await
         .into_iter()
@@ -2868,8 +3055,8 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
         roles,
         limits: SpawnLimits {
             depth: MAX_DEPTH.min(BUILT_DEPTH),
-            children: MAX_CHILDREN,
-            tree: MAX_TREE,
+            children: host_limits.max_children,
+            tree: host_limits.max_tree,
         },
     })
 }
@@ -2977,6 +3164,9 @@ pub struct StartAgent {
     /// For a foreground start, seconds to wait at most, capped as
     /// `wait_agent` is.
     pub timeout: Option<u64>,
+    /// Where it starts on a host without child workspaces (151 N6); the
+    /// caller's workspace when absent.
+    pub cwd: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3058,9 +3248,9 @@ async fn audit_permission_mode(
     );
 }
 
-/// A child's permission mode (146b): the one asked for, never looser than
-/// its parent's and offered by its agent; else its parent's, or the nearest
-/// stricter one its agent offers. `None` is `default`.
+/// A child's permission mode (146b, 151 N5): its parent's or `default`, as
+/// asked and offered by its agent; when none is asked, its parent's if its
+/// agent offers it, else `default`. `None` is `default`.
 fn child_permission_mode(
     state: &Shared,
     parent: &str,
@@ -3078,27 +3268,28 @@ fn child_permission_mode(
     let mode = match asked.map(str::trim) {
         None | Some("") => permission::inherit(agent, &parents),
         Some(m) => {
-            let Some(rank) = permission::rank(m) else {
+            let Some(known) = permission::MODES.iter().find(|k| **k == m) else {
                 return Err((
                     "permission_mode_unavailable",
                     format!(
                         "{:?} is not a permission mode: there are {}.",
                         m.chars().take(40).collect::<String>(),
-                        permission::ORDER.join(", ")
+                        permission::MODES.join(", ")
                     ),
                 ));
             };
-            if rank > permission::rank(&parents).unwrap_or(0) {
+            if *known != permission::DEFAULT && *known != parents {
                 return Err((
                     "permission_mode_wider",
                     format!(
-                        "A child's permission mode is never looser than yours ({parents}): \
-                         leave permission_mode out, or choose a stricter one."
+                        "A child runs your permission mode ({parents}) or default, which \
+                         leaves its agent's own settings: leave permission_mode out, or pass \
+                         one of those."
                     ),
                 ));
             }
             permission::check(agent, m).map_err(|s| ("permission_mode_unavailable", s))?;
-            permission::ORDER[rank]
+            *known
         }
     };
     Ok(permission::stored(mode))
@@ -3127,21 +3318,15 @@ fn agent_unavailable(state: &Shared, caller: &str, agent: &str) -> ApiResult<Str
         startable
     };
     let shown: String = agent.chars().take(64).collect();
-    Ok(if agent == "codex" {
-        format!(
-            "{} The agents it can start here (pass one as agent): {startable}.",
-            crate::agent::permission::not_unattended(agent)
-        )
-    } else {
-        format!(
-            "Storm cannot start {shown:?} on this host for a child. The agents it can start here (pass one as agent): {startable}."
-        )
-    })
+    Ok(format!(
+        "Storm cannot start {shown:?} on this host for a child. The agents it can start here (pass one as agent): {startable}."
+    ))
 }
 
 /// `start_agent {task, name?, agent?, model?, role?, background?,
-/// context_note?}` (134-5, 145b): starts a child at once on the caller's
-/// host, in its own workspace, running the caller's agent or another its
+/// context_note?, cwd?}` (134-5, 145b, 151 N6): starts a child at once on
+/// the caller's host, in its own workspace where the host makes one, else
+/// in the caller's or in `cwd`, running the caller's agent or another its
 /// host can start (143a), on `model` (checked for that agent), with no more
 /// than the caller's grants (134e). In the background (the default) it
 /// answers at once; `background: false` waits for its first result within
@@ -3299,6 +3484,7 @@ pub async fn start_agent(
         model: model.clone(),
         permission_mode: permission_mode.clone(),
         role,
+        cwd: req.cwd.filter(|c| !c.is_empty()),
     };
     let child = match state
         .agent
@@ -3320,8 +3506,14 @@ pub async fn start_agent(
                     "One of your live children already has that name: continue it with send_message, or choose another name."
                         .into(),
                 ),
-                "limit" => Some(
-                    "End children you are done with (end_agent) before starting another.".into(),
+                "limit" => Some(limit_message(state, &parent.host_id, refusal.cap)),
+                "bad_cwd" => Some(
+                    "cwd must be an absolute directory inside one of your host's workspaces, written as is: no '.', '..' or trailing separator."
+                        .into(),
+                ),
+                "cwd_not_applicable" => Some(
+                    "This host starts each agent in its own copy of your workspace: start it without cwd."
+                        .into(),
                 ),
                 _ => None,
             };
@@ -3913,6 +4105,8 @@ async fn checked_child(
     let early = match &session {
         Some(_) if parent.is_none() => Some("lineage_mismatch"),
         Some(r) if r.host_id != host_id => Some("wrong_host"),
+        // 151 N6: a child that ran in a shared workspace has no work apart.
+        Some(r) if !crate::agent::store::spawn::has_own_workspace(r) => Some("not_applicable"),
         Some(r) if !r.is_ended() => Some("child_live"),
         _ => None,
     };
@@ -4339,6 +4533,9 @@ pub struct SessionView {
     /// made it: the mode and the commit a clone starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_workspace: Option<crate::agent::ChildWorkspace>,
+    /// Who it ran as from its first `running` (decision 151); `null` for a
+    /// session from before, which Details calls not recorded.
+    pub ran_as: Option<crate::agent::RanAs>,
     /// Whether it waits for a person (134p): `approval`, `permission_prompt`,
     /// `usage_limit` (144b) or `blocked`. Beside `activity`, never a status,
     /// never from idle.
@@ -4367,10 +4564,10 @@ pub struct SessionView {
     /// Its permission mode (146b), absent for `default`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
-    /// Its agent's request for auto (147c) while it waits, or once approved
-    /// (with where the switch went); absent otherwise.
+    /// The directory it started in when not its workspace's own (151 N6);
+    /// absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub mode_request: Option<crate::agent::mode::ModeRequest>,
+    pub cwd: Option<String>,
     /// Its agent's deletion waiting for the person (149c), shown under its
     /// Needs you; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4405,10 +4602,16 @@ fn session_view(
         .agent
         .host_label(HostLabel::Identity, &session.host_id)
         .map_err(internal)?;
-    let isolation = state
-        .agent
-        .host_label(HostLabel::Isolation, &session.host_id)
-        .map_err(internal)?;
+    let ran_as = state.agent.ran_as_of(&session.id).map_err(internal)?;
+    // A session that has run keeps the isolation it ran under (151); its
+    // identity stays the host's live word, since a downgrade binds its calls.
+    let isolation = match &ran_as {
+        Some(ran) => Some(ran.isolation.clone()),
+        None => state
+            .agent
+            .host_label(HostLabel::Isolation, &session.host_id)
+            .map_err(internal)?,
+    };
     let child_workspace = state
         .agent
         .child_workspace_of(&session.id)
@@ -4446,7 +4649,7 @@ fn session_view(
             title: None,
         });
     // A session launched before names existed is called by its workspace.
-    let (name, context, write_vault_id, launch_role, model, permission_mode) = match launch {
+    let (name, context, write_vault_id, launch_role, model, permission_mode, cwd) = match launch {
         Some(l) => (
             l.name,
             l.context,
@@ -4454,10 +4657,18 @@ fn session_view(
             l.role,
             l.model,
             l.permission_mode,
+            l.cwd,
         ),
-        None => (session.workspace.clone(), None, None, None, None, None),
+        None => (
+            session.workspace.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
     };
-    let mode_request = shown_mode_request(state, &session.id)?;
     let delete_request = state
         .agent
         .pending_delete_of(&session.id)
@@ -4482,6 +4693,7 @@ fn session_view(
         lineage,
         isolation,
         child_workspace,
+        ran_as,
         needs_attention,
         child_activity,
         pending_events,
@@ -4490,21 +4702,9 @@ fn session_view(
         launch_role,
         model,
         permission_mode,
-        mode_request,
+        cwd,
         delete_request,
     })
-}
-
-/// The request a session's view carries: one waiting, or one approved.
-fn shown_mode_request(
-    state: &Shared,
-    session_id: &str,
-) -> ApiResult<Option<crate::agent::mode::ModeRequest>> {
-    Ok(state
-        .agent
-        .mode_request_of(session_id)
-        .map_err(agent_error)?
-        .filter(|r| r.pending() || r.state == crate::agent::mode::APPROVED))
 }
 
 /// Names each view's role by its note's title now, so a rename follows and a
@@ -4656,27 +4856,12 @@ pub async fn launch_session(
     // Every non-disabled connection of the owner scoped to this host, plus
     // `storm` (spec §6, G-D9, decision 121). Snapshotted here; the manager
     // drops them for `shell` and for a host that cannot bridge.
-    // An approved switch (147c) is the same session in another mode: it
-    // keeps the connections it had, never one added since.
-    let kept = match (&req.switch_mode, &req.resume_of) {
-        (Some(_), Some(old)) => Some(
-            state
-                .agent
-                .grants_of(old)
-                .map_err(internal)?
-                .into_iter()
-                .map(|g| g.id)
-                .collect::<std::collections::HashSet<_>>(),
-        ),
-        _ => None,
-    };
     let (connections, mut origins) = {
         let store = gateway_store(state);
         let mut out = Vec::new();
         let mut origins = std::collections::HashMap::new();
         for c in store.connections_of(actor.user_id()).map_err(internal)? {
             if c.status != status::DISABLED
-                && kept.as_ref().is_none_or(|k| k.contains(&c.id))
                 && store.in_host_scope(&c.id, &req.host_id).map_err(internal)?
             {
                 if let Some((plugin, server)) = store.plugin_origin(&c.id).map_err(internal)? {
@@ -4828,6 +5013,7 @@ pub async fn launch_session(
         },
         isolation,
         child_workspace: None,
+        ran_as: None,
         needs_attention: None,
         child_activity: None,
         pending_events: None,
@@ -4836,7 +5022,7 @@ pub async fn launch_session(
         launch_role: launch.role,
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),
-        mode_request: None,
+        cwd: launch.cwd.clone(),
         delete_request: None,
     }];
     name_roles(state, &mut view).await?;
@@ -5506,378 +5692,6 @@ pub async fn set_session_role(
         .map_err(agent_error)
 }
 
-// ---- decision 147c: an agent asks for auto, the person decides -------------
-
-/// A request for auto made, with the reason's length, never its text.
-pub const EVENT_PERMISSION_MODE_REQUEST: &str = "permission_mode_request";
-/// The person's answer, or its expiry.
-pub const EVENT_PERMISSION_MODE_DECISION: &str = "permission_mode_decision";
-/// The approved switch: the session it left and the one it resumed into.
-pub const EVENT_PERMISSION_MODE_SWITCH: &str = "permission_mode_switch";
-
-/// How long the approved tool call has to reach the agent before its
-/// session is stopped for the switch.
-pub const SWITCH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-/// How long the switch waits for the session to stop, or a child to park.
-const SWITCH_STOP_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
-
-const APPROVED_SENTENCE: &str = "The person approved auto mode. Storm now restarts this \
-    session in auto with its conversation kept: end your turn here and do nothing else. The \
-    person continues the conversation in the restarted session, where auto lets you run routine \
-    commands without asking, each checked by Claude Code's own safety classifier.";
-const DENIED_SENTENCE: &str = "The person denied auto mode. Carry on in your current mode: \
-    ask for each action as before, and do not ask for auto again unless the person says so.";
-const EXPIRED_SENTENCE: &str = "Nobody answered within 10 minutes, so the request expired. \
-    Carry on in your current mode.";
-const PENDING_SENTENCE: &str = "The person has not answered yet. Call request_permission_mode \
-    again with the same mode to keep waiting; it shows the same card, never a second one.";
-
-#[derive(Debug, Clone, Serialize)]
-pub struct ModeRequestAnswer {
-    /// `pending`, `approved`, `denied`, `expired`, `already` or `refused`.
-    pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub request: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-    /// A refusal's code: `permission_mode_unavailable`,
-    /// `permission_mode_wider`, `live_children` or `session_not_live`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub reason: Option<&'static str>,
-    pub message: String,
-}
-
-impl ModeRequestAnswer {
-    fn refused(reason: &'static str, message: impl Into<String>) -> Self {
-        Self {
-            status: "refused",
-            request: None,
-            expires_at: None,
-            reason: Some(reason),
-            message: message.into(),
-        }
-    }
-
-    fn of(r: &crate::agent::mode::ModeRequest) -> Self {
-        use crate::agent::mode;
-        let (status, message) = match r.state.as_str() {
-            mode::APPROVED => ("approved", APPROVED_SENTENCE),
-            mode::DENIED => ("denied", DENIED_SENTENCE),
-            mode::EXPIRED => ("expired", EXPIRED_SENTENCE),
-            _ => ("pending", PENDING_SENTENCE),
-        };
-        Self {
-            status,
-            request: Some(r.id.clone()),
-            expires_at: Some(r.expires_at.clone()),
-            reason: None,
-            message: message.into(),
-        }
-    }
-}
-
-async fn audit_mode(
-    state: &Shared,
-    kind: &str,
-    owner: &str,
-    device: Option<&str>,
-    detail: serde_json::Value,
-) {
-    let _ = state.auth_db.lock().await.record_event(
-        kind,
-        Some(owner),
-        device,
-        &crate::index::now_rfc3339(),
-        &detail.to_string(),
-    );
-}
-
-/// `request_permission_mode {mode, reason}` (147c): only a Claude Code
-/// session, only for `auto`, and a child only while its parent is in auto.
-/// Makes one card (a repeat while it waits shows the same one), then waits
-/// up to the agent's wait cap for the person.
-pub async fn request_permission_mode(
-    state: &Shared,
-    actor: &Actor,
-    mode: &str,
-    reason: &str,
-) -> ApiResult<ModeRequestAnswer> {
-    use crate::agent::mode::Refusal;
-    let Actor::Agent { session_id, .. } = actor else {
-        return Err(ApiError(
-            axum::http::StatusCode::FORBIDDEN,
-            "only an agent session asks for a permission mode".into(),
-        ));
-    };
-    let session = state.agent.get(session_id).map_err(agent_error)?;
-    let made = match state
-        .agent
-        .request_mode(session_id, mode, reason)
-        .map_err(agent_error)?
-    {
-        Ok(made) => made,
-        Err(refusal) => {
-            let answer = match refusal {
-                Refusal::Unavailable(why) => {
-                    ModeRequestAnswer::refused("permission_mode_unavailable", why)
-                }
-                Refusal::LiveChildren => ModeRequestAnswer::refused(
-                    "live_children",
-                    "Switching restarts this session, which the agents you started would not \
-                     survive: end them first, then ask again.",
-                ),
-                Refusal::NotLive => {
-                    ModeRequestAnswer::refused("session_not_live", "This session is not running.")
-                }
-                Refusal::AlreadyAuto => ModeRequestAnswer {
-                    status: "already",
-                    request: None,
-                    expires_at: None,
-                    reason: None,
-                    message: "This session is already in auto mode.".into(),
-                },
-            };
-            if answer.status == "refused" {
-                audit_mode(
-                    state,
-                    EVENT_PERMISSION_MODE_REQUEST,
-                    &session.owner_user_id,
-                    None,
-                    serde_json::json!({
-                        "session_id": session.id,
-                        "refused": answer.reason,
-                    }),
-                )
-                .await;
-            }
-            return Ok(answer);
-        }
-    };
-    let (request, new) = made;
-    if new {
-        audit_mode(
-            state,
-            EVENT_PERMISSION_MODE_REQUEST,
-            &session.owner_user_id,
-            None,
-            serde_json::json!({
-                "session_id": session.id,
-                "request_id": request.id,
-                "permission_mode": request.mode,
-                "reason_bytes": request.reason.len(),
-            }),
-        )
-        .await;
-    }
-    let bound = crate::agent::scope::wait_cap(&session.provider);
-    let waited = state
-        .agent
-        .wait_mode(&request.id, bound)
-        .await
-        .map_err(agent_error)?;
-    if waited.state == crate::agent::mode::EXPIRED {
-        audit_expired(state, &session.owner_user_id, &waited).await;
-    }
-    Ok(ModeRequestAnswer::of(&waited))
-}
-
-async fn audit_expired(state: &Shared, owner: &str, r: &crate::agent::mode::ModeRequest) {
-    audit_mode(
-        state,
-        EVENT_PERMISSION_MODE_DECISION,
-        owner,
-        None,
-        serde_json::json!({
-            "session_id": r.session_id,
-            "request_id": r.id,
-            "outcome": r.state,
-        }),
-    )
-    .await;
-}
-
-/// `POST /v1/agent/sessions/{id}/mode-requests/{request}`'s body.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DecideMode {
-    /// `approve` or `deny`.
-    pub decision: String,
-}
-
-/// The person's answer to a request for auto (147c), on the session tier
-/// only. Approval switches the session in the background
-/// ([`switch_to_auto`]); the request's `switched_to` names where it went.
-pub async fn decide_mode_request(
-    state: &Shared,
-    actor: &Actor,
-    device: Option<&str>,
-    session_id: &str,
-    request_id: &str,
-    req: DecideMode,
-) -> ApiResult<crate::agent::mode::ModeRequest> {
-    let (owner, _) = owners_session(state, actor, session_id)?;
-    let approve = match req.decision.as_str() {
-        "approve" => true,
-        "deny" => false,
-        _ => return Err(bad_request("decision is approve or deny")),
-    };
-    let decided = match state
-        .agent
-        .decide_mode(session_id, request_id, approve, device)
-    {
-        Ok(d) => d,
-        Err(crate::agent::AgentError::Conflict(code)) if code == "request_expired" => {
-            if let Ok(Some(r)) = state.agent.mode_request(request_id) {
-                audit_expired(state, &owner, &r).await;
-            }
-            return Err(conflict(code));
-        }
-        Err(e) => return Err(agent_error(e)),
-    };
-    audit_mode(
-        state,
-        EVENT_PERMISSION_MODE_DECISION,
-        &owner,
-        device,
-        serde_json::json!({
-            "session_id": session_id,
-            "request_id": request_id,
-            "outcome": decided.state,
-        }),
-    )
-    .await;
-    if approve {
-        let (state, actor) = (state.clone(), actor.clone());
-        let (device, id) = (device.map(str::to_string), request_id.to_string());
-        let session = session_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(SWITCH_GRACE).await;
-            let to = switch_to_auto(&state, &actor, device.as_deref(), &session).await;
-            if let Err(e) = &to {
-                tracing::warn!(session = %session, error = %e.1, "the switch to auto failed");
-            }
-            let to = to.ok();
-            let _ = state.agent.record_switch(&id, to.as_deref());
-            audit_mode(
-                &state,
-                EVENT_PERMISSION_MODE_SWITCH,
-                &owner,
-                device.as_deref(),
-                serde_json::json!({
-                    "session_id": session,
-                    "request_id": id,
-                    "permission_mode": crate::agent::permission::AUTO,
-                    "mechanism": "resume",
-                    "switched_to": to,
-                }),
-            )
-            .await;
-        });
-    }
-    Ok(decided)
-}
-
-/// Waits until `session_id` is ended, or parked when `parked` is accepted.
-async fn stopped(state: &Shared, session_id: &str, parked: bool) -> bool {
-    let deadline = std::time::Instant::now() + SWITCH_STOP_WAIT;
-    let mut changed = state.agent.watch(session_id);
-    loop {
-        changed.borrow_and_update();
-        match state.agent.get(session_id) {
-            Ok(r) if r.is_ended() || (parked && r.status == "parked") => return true,
-            Ok(_) => {}
-            Err(_) => return false,
-        }
-        let left = deadline.saturating_duration_since(std::time::Instant::now());
-        if left.is_zero() {
-            return false;
-        }
-        let _ = tokio::time::timeout(
-            left.min(std::time::Duration::from_millis(500)),
-            changed.changed(),
-        )
-        .await;
-    }
-}
-
-/// The approved switch (147c). G-147 found Claude Code does not re-read its
-/// `--settings` while running, so auto is reached by a restart that keeps
-/// the conversation: a top-level session is stopped and resumed in auto as
-/// a new session (decision 89's Resume, the mode replaced); a child is
-/// parked and resumed as itself with its stored mode now auto (145e).
-/// Returns the session that runs in auto.
-async fn switch_to_auto(
-    state: &Shared,
-    actor: &Actor,
-    device: Option<&str>,
-    session_id: &str,
-) -> ApiResult<String> {
-    let r = state.agent.get(session_id).map_err(agent_error)?;
-    let child = state
-        .agent
-        .lineage(session_id)
-        .map_err(agent_error)?
-        .parent_session
-        .is_some();
-    if child {
-        state
-            .agent
-            .set_mode_for_switch(session_id)
-            .map_err(agent_error)?;
-        state
-            .agent
-            .park_for_switch(session_id)
-            .map_err(agent_error)?;
-        if !stopped(state, session_id, true).await {
-            return Err(conflict("the session did not stop for the switch"));
-        }
-        let deliverable = deliverable_credential(state, &r.host_id);
-        if !state
-            .agent
-            .resume_parked(session_id, deliverable)
-            .map_err(agent_error)?
-        {
-            return Err(conflict("the session could not be resumed"));
-        }
-        if let Ok(r) = state.agent.get(session_id) {
-            audit_permission_mode(state, &r, crate::agent::permission::AUTO, None).await;
-        }
-        return Ok(session_id.to_string());
-    }
-    let spawn = state.agent.spawn_carried(session_id);
-    if !r.is_ended() {
-        state
-            .agent
-            .end_by_person(session_id, None, false)
-            .map_err(agent_error)?;
-    }
-    if !stopped(state, session_id, false).await {
-        return Err(conflict("the session did not stop for the switch"));
-    }
-    let launch = crate::agent::Launch {
-        host_id: r.host_id.clone(),
-        workspace: r.workspace.clone(),
-        provider: Some(r.provider.clone()),
-        interaction: r.interaction.clone(),
-        terminal: crate::agent::TerminalSize {
-            cols: r.cols,
-            rows: r.rows,
-        },
-        context: None,
-        write_vault_id: None,
-        allow_vault_writes: false,
-        resume_of: Some(session_id.to_string()),
-        crew: None,
-        role: None,
-        spawn,
-        model: None,
-        permission_mode: None,
-        switch_mode: Some(crate::agent::permission::AUTO.into()),
-    };
-    let launched = launch_session(state, actor, device, launch).await?;
-    Ok(launched.session.session.id)
-}
-
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {
     state.agent.input(id, bytes).map_err(agent_error)
 }
@@ -6014,41 +5828,17 @@ pub fn runtime_output(
         .map_err(agent_error)
 }
 
-/// A child stopped on its CLI's own prompt (148b): its no-prompt mode
-/// failed. Audited with codes only; the person is shown nothing.
-pub const EVENT_SPAWN_UNEXPECTED_PROMPT: &str = "spawn_unexpected_prompt";
-
-/// A child's session record while a permission prompt shows on it.
-fn child_at_prompt(state: &Shared, session: &str) -> Option<crate::agent::store::SessionRecord> {
-    let r = state.agent.get(session).ok()?;
-    state.agent.lineage(session).ok()?.parent_session.as_ref()?;
-    let attention = state.agent.needs_attention(&r).ok()??;
-    (attention == crate::agent::attention::PERMISSION_PROMPT).then_some(r)
-}
-
 pub async fn runtime_status(
     state: &Shared,
     host_id: &str,
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
-    let prompt_before = child_at_prompt(state, session).is_some();
     state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
     sweep_gateway_sessions(state);
-    if !prompt_before && let Some(r) = child_at_prompt(state, session) {
-        record_spawn_event(
-            state,
-            EVENT_SPAWN_UNEXPECTED_PROMPT,
-            Some(&r.owner_user_id),
-            None,
-            &serde_json::json!({"session_id": session, "host_id": host_id,
-                "reason": crate::agent::attention::UNEXPECTED_PROMPT}),
-        )
-        .await;
-    }
     Ok(())
 }
 
@@ -7127,12 +6917,12 @@ struct Authorized {
     spawned: bool,
     /// The session was launched with spawning on and a person turned it off.
     spawn_off: bool,
-    /// The session's agent is Claude Code, so it may ask for auto (147c),
-    /// and it is not a child, which never asks (148).
-    mode_request: bool,
     /// The delete tools are offered (149a): vault writes, and not a child,
     /// which never asks the person (149d).
     deletes: bool,
+    /// The host makes each child its own workspace (137-1), as its live
+    /// link says: what `start_agent`'s description tells the agent.
+    child_workspaces: bool,
 }
 
 impl Authorized {
@@ -7147,7 +6937,6 @@ impl Authorized {
                     && (self.deletes || !crate::mcp::DELETE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
-                    && (self.mode_request || !crate::mcp::MODE_TOOLS.contains(&name))
             }
         }
     }
@@ -7292,8 +7081,12 @@ async fn authorize_call(
         spawn: state.agent.spawn_offered(session_id),
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
-        mode_request: session.provider == "claude-code" && top_level,
         deletes: vault_writes && top_level,
+        child_workspaces: state
+            .agent
+            .host_live(host_id)
+            .capabilities
+            .is_some_and(|c| c.child_workspaces),
     })
 }
 
@@ -7522,6 +7315,11 @@ async fn run_call(
         }
         // The agent sees only what it may call (G-D16, G-D5).
         tools.retain(|t| authorized.may_call(t.get("name").and_then(|n| n.as_str()).unwrap_or("")));
+        if authorized.connection.is_none() {
+            for tool in tools.iter_mut() {
+                crate::mcp::describe_for_host(tool, authorized.child_workspaces);
+            }
+        }
     }
     Ok(result)
 }

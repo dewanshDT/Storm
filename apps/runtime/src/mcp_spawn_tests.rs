@@ -326,7 +326,7 @@ fn the_allowed_tools_are_the_servers() {
 }
 
 /// The read tools a top-level session allows are every server tool that is
-/// not a write, a spawn, a child's or a mode tool.
+/// not a write, a spawn or a child's tool.
 #[test]
 fn the_read_tools_are_every_server_tool_that_only_reads() {
     let src = std::fs::read_to_string(
@@ -344,7 +344,7 @@ fn the_read_tools_are_every_server_tool_that_only_reads() {
             .map(str::to_string)
             .collect()
     };
-    let not_reads: Vec<String> = ["WRITE_TOOLS", "SPAWN_TOOLS", "SPAWNED_TOOLS", "MODE_TOOLS"]
+    let not_reads: Vec<String> = ["WRITE_TOOLS", "SPAWN_TOOLS", "SPAWNED_TOOLS"]
         .iter()
         .flat_map(|n| list(n))
         .collect();
@@ -423,59 +423,31 @@ fn a_146_2_opencodes_accept_edits_is_storms_edit_allow() {
     assert_eq!(claude, LaunchExtras::default());
 }
 
-/// A-148-1 for OpenCode: a child's layer turns every ask into a deny (the
-/// connections' own, Storm's settings', the account's at the top level and
-/// per agent, kept under their keys, and OpenCode's defaults), and then
-/// allows its Storm tools, `edit` and `bash` under keys that follow every
-/// deny. A config Storm cannot read fails the start. A plain session's
-/// layer is unchanged.
+/// 151 N5 for OpenCode: a child's layer denies nothing. The account's own
+/// asks stay asks, its mode's keys are as any session's, and only its Storm
+/// tools are allowed, under keys that follow the account's.
 #[test]
-fn a_148_1_an_opencode_childs_asks_are_denies() {
+fn an_opencode_childs_own_asks_stay_asks() {
     let t = tempfile::tempdir().unwrap();
-    let mode = crate::profile::child_permission_mode("opencode", "default").unwrap();
-    let layer = StormLayer::new(true, false, mode.opencode_permission).denying_asks();
+    let mode = crate::profile::permission_mode("opencode", "accept_edits").unwrap();
+    let layer = StormLayer::new(true, false, mode.opencode_permission);
     let account = r#"{
       // the account's own rules
-      "permission": {"webfetch": "ask", "edit": "ask", "read": {"*": "allow", "*.secret": "ask"},},
-      "agent": {"build": {"permission": {"task": "ask"}}},
+      "permission": {"webfetch": "ask"},
     }"#;
     let config = opencode_with(&t.path().join("c"), &layer, account, false);
     let permission = config["permission"].as_object().unwrap();
-    assert_eq!(permission["storm_*"], "deny");
-    assert_eq!(permission["github_*"], "deny");
-    assert_eq!(permission["webfetch"], "deny");
-    assert_eq!(permission["edit"], "deny");
-    assert_eq!(permission["bash"], "deny", "Storm's own setting's ask");
-    assert_eq!(permission["edit*"], "allow");
-    assert_eq!(permission["bash*"], "allow");
-    for key in ["doom_loop", "question", "plan_enter"] {
-        assert_eq!(permission[key], "deny", "{key}");
-    }
-    assert_eq!(permission["external_directory"], json!({"*": "deny"}));
-    assert_eq!(
-        permission["read"],
-        json!({"*.env": "deny", "*.env.*": "deny", "*.env.example": "allow", "*.secret": "deny"})
-    );
-    assert_eq!(config["agent"]["build"]["permission"]["task"], "deny");
-    assert_eq!(config["agent"]["build"]["permission"]["*"], "allow");
+    assert_eq!(permission["storm_*"], "ask");
+    assert_eq!(permission["edit"], "allow");
     for tool in CHILD_ALLOWED_TOOLS {
         assert_eq!(permission[&format!("storm_{tool}")], "allow", "{tool}");
     }
-    assert!(!config.to_string().contains("\"ask\""), "{config}");
-    let keys: Vec<&String> = permission.keys().collect();
-    let at = |k: &str| keys.iter().position(|x| *x == k).unwrap();
-    assert!(at("edit*") > at("edit") && at("bash*") > at("bash"));
-    assert!(at("storm_report_result") > at("storm_*"));
-
-    let unreadable = std::panic::catch_unwind(|| {
-        opencode_with(&t.path().join("u"), &layer, "{ not json", false)
-    });
-    assert!(
-        unreadable.is_err(),
-        "a config Storm cannot read fails the start"
+    assert_eq!(
+        permission["bash"], "ask",
+        "Storm's own setting's, as before"
     );
-
-    let plain = opencode_with(&t.path().join("p"), &StormLayer::default(), account, false);
-    assert_eq!(plain["permission"]["storm_*"], "ask");
-    assert!(plain["permission"].get("doom_loop").is_none());
+    for key in ["webfetch", "doom_loop", "question", "external_directory"] {
+        assert!(permission.get(key).is_none(), "{key}: {config}");
+    }
+    assert!(!config.to_string().contains("\"deny\""), "{config}");
 }

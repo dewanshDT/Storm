@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::store::SessionRecord;
 use super::store::spawn::{
-    Lineage, MAX_DETAILS_BYTES, MAX_SUMMARY_BYTES, MAX_TREE, RESULT_OUTCOMES, SpawnResult,
+    HARD_MAX_TREE, Lineage, MAX_DETAILS_BYTES, MAX_SUMMARY_BYTES, RESULT_OUTCOMES, SpawnResult,
 };
 use super::{AgentError, AgentManager, AgentResult, now};
 
@@ -30,7 +30,7 @@ pub fn wait_bound(provider: &str, requested: Option<Duration>) -> Duration {
 }
 
 /// At most one tree's worth of sessions per wait.
-pub const MAX_WAIT_IDS: usize = MAX_TREE as usize;
+pub const MAX_WAIT_IDS: usize = HARD_MAX_TREE as usize;
 
 /// Whether a session counts as done for a wait: it ended, or it reported
 /// for the round it is in (145). Idle is never done (134h).
@@ -269,13 +269,10 @@ impl AgentManager {
                 .insert(&test_record(owner, host, parent, "completed"))
                 .unwrap();
         }
+        let mut record = test_record(owner, host, child, status);
+        record.workspace = super::store::spawn::child_workspace(child);
         store
-            .insert_spawned(
-                &test_record(owner, host, child, status),
-                parent,
-                "a task",
-                &now(),
-            )
+            .insert_spawned(&record, parent, "a task", &now())
             .unwrap();
     }
 
@@ -287,6 +284,14 @@ impl AgentManager {
             .unwrap()
             .insert(&test_record(owner, host, id, status))
             .unwrap();
+    }
+
+    /// Test-only: a running top-level session `id` on `host` in `workspace`.
+    #[cfg(test)]
+    pub fn session_in_for_tests(&self, owner: &str, host: &str, id: &str, workspace: &str) {
+        let mut record = test_record(owner, host, id, "running");
+        record.workspace = workspace.into();
+        self.store.lock().unwrap().insert(&record).unwrap();
     }
 
     /// Test-only: the switch's row written as a person's enable writes it,

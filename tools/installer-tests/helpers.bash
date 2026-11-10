@@ -45,7 +45,7 @@ setup_world() {
   done
   export PATH="$FAKE_DIR/bin:$FAKE_DIR/installed:$t/sysbin"
   export HOME="$t/home"
-  unset XDG_STATE_HOME XDG_DATA_HOME
+  unset XDG_STATE_HOME XDG_DATA_HOME XDG_CONFIG_HOME
   export STORM_INSTALL_TEST=1
   export STORM_TEST_SYSROOT="$t/sysroot"
   export STORM_TEST_OS_RELEASE="$t/os-release"
@@ -72,6 +72,7 @@ os_release() {
     debian) printf 'ID=debian\nPRETTY_NAME="Debian GNU/Linux 12"\n' ;;
     mint) printf 'ID=linuxmint\nID_LIKE="ubuntu debian"\nPRETTY_NAME="Linux Mint 22"\n' ;;
     fedora) printf 'ID=fedora\nPRETTY_NAME="Fedora Linux 40"\n' ;;
+    arch) printf 'ID=arch\nPRETTY_NAME="Arch Linux"\n' ;;
   esac >"$STORM_TEST_OS_RELEASE"
 }
 
@@ -120,12 +121,14 @@ make_assets() {
     echo "readme" >"$stage/$d/README-macos.txt"
   done
   local names="$*"
-  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux app-zip apk server-deb runtime-deb app-deb app-tar"
+  [ -n "$names" ] || names="server-tar runtime-tar runtime-linux runtime-linux-tar app-zip apk server-deb runtime-deb app-deb app-tar"
   for n in $names; do
     case "$n" in
       server-tar) tar -C "$stage/server" -czf "$ASSETS/storm-server-$v-macos-universal.tar.gz" . ;;
       runtime-tar) tar -C "$stage/runtime" -czf "$ASSETS/storm-runtime-$v-macos-universal.tar.gz" . ;;
       runtime-linux) cp "$FAKE_DIR/tools/storm-runtime" "$ASSETS/storm-runtime-$v-x86_64-linux" ;;
+      # The layout deploy/runtime-tarball.sh writes.
+      runtime-linux-tar) tar -C "$stage/runtime" -czf "$ASSETS/storm-runtime-$v-x86_64-linux.tar.gz" storm-runtime LICENSE ;;
       app-zip) echo "zip" >"$ASSETS/Storm-$v-macos-arm64.zip" ;;
       apk) echo "apk" >"$ASSETS/storm-$v.apk" ;;
       server-deb) echo "deb" >"$ASSETS/storm-server_$v-1_amd64.deb" ;;
@@ -150,7 +153,11 @@ make_assets() {
 install_fake() {
   case "$1" in
     linux-server) cp "$FAKE_DIR/tools/storm-server" "$FAKE_DIR/installed/storm-server" ;;
-    linux-runtime) cp "$FAKE_DIR/tools/storm-runtime" "$FAKE_DIR/installed/storm-runtime" ;;
+    linux-runtime)
+      cp "$FAKE_DIR/tools/storm-runtime" "$FAKE_DIR/installed/storm-runtime"
+      mkdir -p "$STORM_TEST_SYSROOT/lib/systemd/system"
+      : >"$STORM_TEST_SYSROOT/lib/systemd/system/storm-runtime.service"
+      ;;
     macos-server)
       mkdir -p "$HOME/Library/Application Support/Storm/bin" "$HOME/Library/LaunchAgents" "$HOME/${2:-Storm}/state"
       cp "$FAKE_DIR/tools/storm-server" "$HOME/Library/Application Support/Storm/bin/storm-server"
@@ -162,6 +169,11 @@ install_fake() {
     macos-runtime)
       mkdir -p "$STORM_TEST_SYSROOT/Library/StormRuntime/bin" "$STORM_TEST_SYSROOT/Library/StormRuntime/state"
       cp "$FAKE_DIR/tools/storm-runtime" "$STORM_TEST_SYSROOT/Library/StormRuntime/bin/storm-runtime"
+      ;;
+    macos-runtime-user)
+      mkdir -p "$HOME/Library/Application Support/StormRuntime/bin" "$HOME/Library/LaunchAgents"
+      cp "$FAKE_DIR/tools/storm-runtime" "$HOME/Library/Application Support/StormRuntime/bin/storm-runtime"
+      : >"$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
       ;;
     macos-app) mkdir -p "$STORM_TEST_SYSROOT/Applications/Storm.app/Contents" ;;
   esac

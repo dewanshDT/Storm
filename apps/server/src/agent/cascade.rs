@@ -287,6 +287,7 @@ impl AgentManager {
             for m in &members {
                 if store.lineage(m)?.parent_session.is_some()
                     && let Some(r) = store.get(m)?
+                    && super::store::spawn::has_own_workspace(&r)
                 {
                     children.push((m.clone(), r.host_id));
                 }

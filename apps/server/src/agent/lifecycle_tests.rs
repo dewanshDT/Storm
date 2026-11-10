@@ -94,11 +94,19 @@ fn fixture() -> Fixture {
 
 impl Fixture {
     fn launch(&self, write_vault: Option<&str>) -> String {
-        let launch: Launch = serde_json::from_value(serde_json::json!({
+        self.launch_body(write_vault, serde_json::json!({}))
+    }
+
+    /// A spawning launch with `extra` in its body.
+    fn launch_body(&self, write_vault: Option<&str>, extra: serde_json::Value) -> String {
+        let mut body = serde_json::json!({
             "host_id": "hst_A", "workspace": "storm", "provider": "claude-code",
             "terminal": {"cols": 80, "rows": 24}, "spawn": true,
-        }))
-        .unwrap();
+        });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let launch: Launch = serde_json::from_value(body).unwrap();
         let grant = McpGrant {
             id: "storm".into(),
             slug: "storm".into(),
@@ -375,11 +383,11 @@ fn a_145_8_a_reported_idle_child_parks_and_a_message_resumes_it() {
 
 #[test]
 fn a_145_8_parked_children_free_the_live_cap_and_count_toward_their_own() {
-    use super::store::spawn::MAX_CHILDREN;
+    use super::store::spawn::DEFAULT_CHILDREN;
     let f = fixture();
     f.m.gate_signals_for_tests(HOOKS);
     let p = f.launch(None);
-    let children: Vec<String> = (0..MAX_CHILDREN)
+    let children: Vec<String> = (0..DEFAULT_CHILDREN)
         .map(|n| f.child(&p, &format!("task {n}")))
         .collect();
     let fourth = StartPayload {
@@ -807,11 +815,13 @@ fn a_144_12_a_145_11_the_scan_finds_a_planted_write() {
 // ---- Phase 1 follow-up: the write vault ----------------------------------------
 
 #[test]
-fn a_child_inherits_its_parents_write_vault_only_when_it_launched_with_one() {
+fn a_child_inherits_its_parents_write_vault_only_when_ticked_at_launch() {
     let f = fixture();
-    let writer = f.launch(Some("vlt_W"));
+    let ticked = f.launch_body(Some("vlt_W"), serde_json::json!({"children_write": true}));
+    let unticked = f.launch(Some("vlt_W"));
     let reader = f.launch(None);
-    let w = f.child(&writer, "write the notes");
+    let w = f.child(&ticked, "write the notes");
+    let u = f.child(&unticked, "write the notes");
     let r = f.child(&reader, "read the notes");
     let store = f.m.store.lock().unwrap();
     assert_eq!(
@@ -822,10 +832,44 @@ fn a_child_inherits_its_parents_write_vault_only_when_it_launched_with_one() {
         store.grant(&w, "storm").unwrap(),
         Some(("storm".to_string(), true))
     );
-    assert_eq!(store.launch(&r).unwrap().unwrap().write_vault_id, None);
-    assert_eq!(
-        store.grant(&r, "storm").unwrap(),
-        Some(("storm".to_string(), false)),
-        "nothing wider than the parent's"
-    );
+    for (child, why) in [(&u, "not ticked"), (&r, "nothing wider than the parent's")] {
+        assert_eq!(
+            store.launch(child).unwrap().unwrap().write_vault_id,
+            None,
+            "{why}"
+        );
+        assert_eq!(
+            store.grant(child, "storm").unwrap(),
+            Some(("storm".to_string(), false)),
+            "{why}"
+        );
+    }
+}
+
+/// 151m: a resume keeps its predecessor's tick, whatever it asks for.
+#[test]
+fn a_resume_keeps_its_predecessors_children_write() {
+    let f = fixture();
+    for (ticked, asked, conversation) in [
+        (true, false, "1f1c2a3e-0b7d-4c55-9e1a-5d2f3b4c6a70"),
+        (false, true, "2e2d3b4f-1c8e-4d66-8f2b-6e3a4c5d7b81"),
+    ] {
+        let old = f.launch_body(Some("vlt_W"), serde_json::json!({"children_write": ticked}));
+        f.report(
+            &old,
+            serde_json::json!({"status": "running", "harness_session": conversation}),
+        );
+        f.report(&old, serde_json::json!({"status": "completed"}));
+        let resumed = f.launch_body(
+            Some("vlt_W"),
+            serde_json::json!({"resume_of": old, "children_write": asked}),
+        );
+        assert_eq!(
+            f.m.store.lock().unwrap().children_write(&resumed).unwrap(),
+            ticked
+        );
+        let child = f.child(&resumed, "write the notes");
+        let wrote = f.m.launch_of(&child).unwrap().unwrap().write_vault_id;
+        assert_eq!(wrote.is_some(), ticked, "{wrote:?}");
+    }
 }

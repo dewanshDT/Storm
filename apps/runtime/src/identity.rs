@@ -13,7 +13,7 @@
 //! to redact it.
 
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -226,7 +226,15 @@ impl HostKey {
 
     pub fn load(state_dir: &Path, key_id: &str) -> Result<Self> {
         let path = Self::path(state_dir, key_id);
-        let raw = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let raw = fs::read(&path).map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound => anyhow::anyhow!(
+                "{} is missing: host.json names a key that is not there. Enroll this \
+                 host again with {}.",
+                path.display(),
+                command_for(state_dir, "enroll --force")
+            ),
+            _ => unreadable(state_dir, &path, e, "check"),
+        })?;
         let seed: [u8; 32] = raw
             .try_into()
             .map_err(|_| anyhow::anyhow!("{} is not a 32-byte key", path.display()))?;
@@ -234,6 +242,31 @@ impl HostKey {
             key_id: key_id.into(),
             signing: SigningKey::from_bytes(&seed),
         })
+    }
+}
+
+/// `path` in `state_dir` could not be read by `storm-runtime <sub>`.
+/// Permission denied says so, with the account to run as, rather than
+/// passing for a missing enrollment.
+pub fn unreadable(state_dir: &Path, path: &Path, e: io::Error, sub: &str) -> anyhow::Error {
+    if e.kind() == io::ErrorKind::PermissionDenied {
+        anyhow::anyhow!(
+            "cannot read {}: permission denied. {}",
+            path.display(),
+            crate::platform::state_access_hint(state_dir, sub)
+        )
+    } else {
+        anyhow::Error::new(e).context(format!("reading {}", path.display()))
+    }
+}
+
+/// `storm-runtime <sub>` for `state_dir`, as its account when it is the
+/// service's.
+fn command_for(state_dir: &Path, sub: &str) -> String {
+    if crate::platform::is_service_state(state_dir) {
+        crate::platform::service_command(sub)
+    } else {
+        format!("`storm-runtime {sub} --state {}`", state_dir.display())
     }
 }
 
@@ -255,20 +288,37 @@ impl HostConfig {
 
     pub fn load(state_dir: &Path) -> Result<Self> {
         let path = Self::path(state_dir);
-        if !path.exists() && state_dir.join(REVOKED_FILE).exists() {
+        let exists =
+            Self::exists(state_dir).map_err(|e| unreadable(state_dir, &path, e, "check"))?;
+        if !exists {
+            let revoked = state_dir.join(REVOKED_FILE);
+            if fs::symlink_metadata(&revoked).is_ok() {
+                anyhow::bail!(
+                    "this host is not enrolled: the server revoked it ({} holds the old \
+                     enrollment). Enroll it again with {}.",
+                    revoked.display(),
+                    command_for(state_dir, "enroll")
+                );
+            }
             anyhow::bail!(
-                "this host is not enrolled: the server revoked it ({} holds the old \
-                 enrollment). Enroll it again with `storm-runtime enroll`.",
-                state_dir.join(REVOKED_FILE).display()
+                "this host is not enrolled: there is no {}. Enroll it with {}.",
+                path.display(),
+                command_for(state_dir, "enroll")
             );
         }
-        let text = fs::read_to_string(&path).with_context(|| {
-            format!(
-                "reading {} — has this host been enrolled? (storm-runtime enroll)",
-                path.display()
-            )
-        })?;
+        let text =
+            fs::read_to_string(&path).map_err(|e| unreadable(state_dir, &path, e, "check"))?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
+    }
+
+    /// Whether `host.json` is there. An error, never `false`, when this
+    /// account cannot look: that is not the same as unenrolled.
+    pub fn exists(state_dir: &Path) -> io::Result<bool> {
+        match fs::symlink_metadata(Self::path(state_dir)) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     /// Written atomically (temp file, then rename), `0600`.
@@ -445,6 +495,111 @@ mod tests {
         assert_eq!(kept, config, "the old enrollment is kept beside it");
         let err = format!("{:#}", HostConfig::load(dir.path()).unwrap_err());
         assert!(err.contains("revoked"), "{err}");
+        assert!(!err.contains("sudo"), "not the service's state: {err}");
+    }
+
+    fn sample() -> HostConfig {
+        HostConfig {
+            server_url: "http://127.0.0.1:1".into(),
+            server_id: "srv_X".into(),
+            server_pubkey: "k".into(),
+            host_id: "hst_X".into(),
+            key_id: "key_X".into(),
+        }
+    }
+
+    #[test]
+    fn a_missing_enrollment_is_unenrolled_and_names_its_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", HostConfig::load(dir.path()).unwrap_err());
+        assert!(err.contains("not enrolled"), "{err}");
+        assert!(!err.contains("revoked"), "{err}");
+        assert!(
+            err.contains(&format!("--state {}", dir.path().display())),
+            "{err}"
+        );
+        assert!(!err.contains("sudo"), "not the service's state: {err}");
+
+        sample().save(dir.path()).unwrap();
+        let err = format!("{:#}", HostKey::load(dir.path(), "key_X").unwrap_err());
+        assert!(err.contains("is missing"), "{err}");
+        assert!(err.contains("enroll --force"), "{err}");
+    }
+
+    /// Root reads anything, so these say nothing when the suite runs as it.
+    #[cfg(unix)]
+    fn running_as_root() -> bool {
+        rustix::process::geteuid().is_root()
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_state_dir_is_permission_denied_not_unenrolled() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        fs::create_dir(&state).unwrap();
+        sample().save(&state).unwrap();
+        chmod(&state, 0o000);
+        let config = HostConfig::load(&state);
+        let exists = HostConfig::exists(&state);
+        chmod(&state, 0o700);
+        let err = format!("{:#}", config.unwrap_err());
+        assert!(err.contains("permission denied"), "{err}");
+        assert!(!err.contains("not enrolled"), "{err}");
+        assert!(!err.contains("sudo"), "not the service's state: {err}");
+        assert!(exists.is_err(), "unknown is not absent");
+
+        let key = HostKey::generate();
+        key.save(&state).unwrap();
+        chmod(&state.join(IDENTITY_DIR), 0o000);
+        let loaded = HostKey::load(&state, &key.key_id);
+        chmod(&state.join(IDENTITY_DIR), 0o700);
+        let err = format!("{:#}", loaded.unwrap_err());
+        assert!(err.contains("permission denied"), "{err}");
+        assert!(!err.contains("missing"), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_host_json_beside_a_revoked_one_is_permission_denied() {
+        if running_as_root() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        sample().save(dir.path()).unwrap();
+        fs::copy(HostConfig::path(dir.path()), dir.path().join(REVOKED_FILE)).unwrap();
+        chmod(&HostConfig::path(dir.path()), 0o000);
+        let err = format!("{:#}", HostConfig::load(dir.path()).unwrap_err());
+        assert!(err.contains("permission denied"), "{err}");
+        assert!(!err.contains("revoked"), "{err}");
+        assert!(!err.contains("not enrolled"), "{err}");
+    }
+
+    #[test]
+    fn only_the_service_state_dir_is_told_to_switch_account() {
+        let default = Path::new(crate::platform::DEFAULT_STATE);
+        let service = crate::platform::state_access_hint(default, "check");
+        assert!(
+            service.contains(crate::platform::SERVICE_ACCOUNT),
+            "{service}"
+        );
+        assert_eq!(service.contains("sudo -u "), cfg!(unix), "{service}");
+        assert_eq!(
+            command_for(default, "enroll").contains("sudo -u "),
+            cfg!(unix)
+        );
+        let other = crate::platform::state_access_hint(Path::new("/srv/host"), "check");
+        assert!(!other.contains("sudo"), "{other}");
+        assert!(other.contains("/srv/host"), "{other}");
     }
 
     /// B-5: re-enrolling keeps the revoked enrollment and its key, under

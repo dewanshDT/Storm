@@ -708,7 +708,7 @@ fn a_144_10_each_event_says_its_source_and_confidence() {
         ),
         (
             events::NEEDS_ATTENTION,
-            Some(crate::agent::attention::UNEXPECTED_PROMPT),
+            Some(PERMISSION_PROMPT),
             events::PROVIDER_HOOK,
             "reported"
         )

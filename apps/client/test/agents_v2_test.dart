@@ -295,6 +295,8 @@ void main() {
       expect(inField('launcher-context', 'Design'), findsOneWidget);
       expect(agents.launches, isEmpty);
 
+      await tester.ensureVisible(find.byKey(const Key('launch')));
+      await tester.pump();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       final body = agents.launches.single;
@@ -354,10 +356,25 @@ void main() {
       expect(body['resume_of'], 'ags_done');
       expect(body['host_id'], 'hst_1');
       expect(body['provider'], 'claude-code');
+      expect(body.containsKey('spawn'), isFalse, reason: 'launched without it');
       expect(where(c).path, '/agents/s/ags_new1');
       // The conversation is listed once, under its latest session.
       expect(find.byKey(const Key('session-ags_done')), findsNothing);
       expect(find.byKey(const Key('session-ags_new1')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Resume keeps the switch it was launched with', (tester) async {
+      final launchedOn = withConversation()
+        ..['spawn'] = {'enabled': true, 'launched_on': true};
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [launchedOn],
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
+      await tester.tap(find.byKey(const Key('resume-session')));
+      await tester.pumpAndSettle();
+      expect(agents.launches.single['spawn'], true);
       await disposeShell(tester, c);
     });
 
@@ -523,6 +540,8 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('launcher-context')), findsOneWidget);
     expect(inField('launcher-write-vault', 'Primary'), findsOneWidget);
+    await tester.ensureVisible(find.byKey(const Key('launch')));
+    await tester.pump();
     await tester.tap(find.byKey(const Key('launch')));
     await tester.pumpAndSettle();
     expect(agents.launches.single['context'], {
@@ -576,6 +595,8 @@ void main() {
         expect(inField('launcher-write-vault', 'Work'), findsOneWidget);
         expect(find.text('The agent reads the note through Storm.'), findsOne);
 
+        await tester.ensureVisible(find.byKey(const Key('launch')));
+        await tester.pump();
         await tester.tap(find.byKey(const Key('launch')));
         await tester.pumpAndSettle();
         final body = agents.launches.single;
@@ -734,6 +755,8 @@ void main() {
       await launchFrom(tester);
 
       agents.refuseLaunch = (409, 'workspace_held');
+      await tester.ensureVisible(find.byKey(const Key('launch')));
+      await tester.pump();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       expect(
@@ -743,6 +766,8 @@ void main() {
       expect(find.text('workspace_held'), findsNothing);
 
       agents.refuseLaunch = (409, 'something_new');
+      await tester.ensureVisible(find.byKey(const Key('launch')));
+      await tester.pump();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       expect(find.text("Couldn't launch: something_new"), findsOneWidget);

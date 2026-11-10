@@ -105,6 +105,9 @@ pub struct LaunchRecord {
     pub model: Option<String>,
     /// Its permission mode (decision 146b); `None` is `default`.
     pub permission_mode: Option<String>,
+    /// The directory it was started in when not its workspace's own (151
+    /// N6): a child's `cwd`, kept for its resume.
+    pub cwd: Option<String>,
 }
 
 /// The note a session was started from, or its launch role. The title is a
@@ -318,6 +321,27 @@ impl Store {
                  mechanism   TEXT,
                  reason      TEXT,
                  reported_at TEXT NOT NULL
+             );
+             -- Who each host's processes run as, as it last said (decision
+             -- 151), for its views while it is away.
+             CREATE TABLE IF NOT EXISTS host_execution (
+                 host_id     TEXT PRIMARY KEY,
+                 account     TEXT,
+                 isolation   TEXT NOT NULL,
+                 reported_at TEXT NOT NULL
+             );
+             -- Who a session ran as, from its host at its first `running`
+             -- (decision 151); never replaced.
+             CREATE TABLE IF NOT EXISTS session_ran_as (
+                 session_id          TEXT PRIMARY KEY,
+                 account             TEXT,
+                 isolation_state     TEXT NOT NULL,
+                 isolation_mechanism TEXT,
+                 isolation_reason    TEXT,
+                 identity_state      TEXT NOT NULL,
+                 identity_mechanism  TEXT,
+                 identity_reason     TEXT,
+                 recorded_at         TEXT NOT NULL
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -337,6 +361,7 @@ impl Store {
             ("session_launch", "role_title"),
             ("session_launch", "model"),
             ("session_launch", "permission_mode"),
+            ("session_launch", "cwd"),
         ] {
             let has = conn
                 .prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")?
@@ -347,7 +372,6 @@ impl Store {
         }
         spawn::init(&conn)?;
         super::events::init(&conn)?;
-        super::mode::init(&conn)?;
         super::deletes::init(&conn)?;
         conn.execute_batch(
             "-- One-time upgrades, each recorded with what it did and when the
@@ -666,7 +690,7 @@ impl Store {
             .query_row(
                 "SELECT session_id, name, context_vault_id, context_note_id, context_title,
                      write_vault_id, role_vault_id, role_note_id, role_title, model,
-                     permission_mode
+                     permission_mode, cwd
                  FROM session_launch WHERE session_id = ?1",
                 params![session_id],
                 |r| {
@@ -691,6 +715,7 @@ impl Store {
                         role: note(6)?,
                         model: r.get(9)?,
                         permission_mode: r.get(10)?,
+                        cwd: r.get(11)?,
                     })
                 },
             )
@@ -1097,6 +1122,105 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn host_execution(&self, host_id: &str) -> Result<Option<super::Execution>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(super::Execution {
+                        account: r.get(0)?,
+                        isolation: r.get(1)?,
+                    })
+                },
+            )
+            .optional()?)
+    }
+
+    /// `None` forgets it: a host that stopped saying is an old host again.
+    pub fn set_host_execution(
+        &self,
+        host_id: &str,
+        execution: Option<&super::Execution>,
+        now: &str,
+    ) -> Result<()> {
+        match execution {
+            Some(e) => self.conn.execute(
+                "INSERT INTO host_execution (host_id, account, isolation, reported_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT (host_id) DO UPDATE SET account = excluded.account,
+                     isolation = excluded.isolation, reported_at = excluded.reported_at",
+                params![host_id, e.account, e.isolation, now],
+            )?,
+            None => self.conn.execute(
+                "DELETE FROM host_execution WHERE host_id = ?1",
+                params![host_id],
+            )?,
+        };
+        Ok(())
+    }
+
+    /// A session's first snapshot; never replaced.
+    pub fn record_ran_as(&self, session_id: &str, ran: &super::RanAs, now: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO session_ran_as
+                 (session_id, account, isolation_state, isolation_mechanism, isolation_reason,
+                  identity_state, identity_mechanism, identity_reason, recorded_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                session_id,
+                ran.account,
+                ran.isolation.state,
+                ran.isolation.mechanism,
+                ran.isolation.reason,
+                ran.identity.state,
+                ran.identity.mechanism,
+                ran.identity.reason,
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Test-only: a session from before 151, with no snapshot.
+    #[cfg(test)]
+    pub fn forget_ran_as_for_tests(&self, session_id: &str) {
+        self.conn
+            .execute(
+                "DELETE FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+            )
+            .unwrap();
+    }
+
+    pub fn ran_as(&self, session_id: &str) -> Result<Option<super::RanAs>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT account, isolation_state, isolation_mechanism, isolation_reason,
+                        identity_state, identity_mechanism, identity_reason
+                 FROM session_ran_as WHERE session_id = ?1",
+                params![session_id],
+                |r| {
+                    Ok(super::RanAs {
+                        account: r.get(0)?,
+                        isolation: super::Identity {
+                            state: r.get(1)?,
+                            mechanism: r.get(2)?,
+                            reason: r.get(3)?,
+                        },
+                        identity: super::Identity {
+                            state: r.get(4)?,
+                            mechanism: r.get(5)?,
+                            reason: r.get(6)?,
+                        },
+                    })
+                },
+            )
+            .optional()?)
+    }
 }
 
 fn label_table(kind: super::HostLabel) -> &'static str {
@@ -1191,8 +1315,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
     conn.execute(
         "INSERT INTO session_launch (session_id, name, context_vault_id, context_note_id,
              context_title, write_vault_id, created_at, role_vault_id, role_note_id,
-             role_title, model, permission_mode)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             role_title, model, permission_mode, cwd)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         params![
             l.session_id,
             l.name,
@@ -1205,7 +1329,8 @@ fn insert_launch(conn: &Connection, l: &LaunchRecord, now: &str) -> Result<()> {
             role_note,
             role_title,
             l.model,
-            l.permission_mode
+            l.permission_mode,
+            l.cwd
         ],
     )?;
     Ok(())
@@ -1544,6 +1669,17 @@ pub mod spawn {
                  created_at TEXT NOT NULL
              );
 
+             -- 152a: a host's Limits, set only by its owner. No row is the
+             -- defaults.
+             CREATE TABLE IF NOT EXISTS host_limits (
+                 host_id      TEXT PRIMARY KEY,
+                 max_children INTEGER NOT NULL,
+                 max_tree     INTEGER NOT NULL,
+                 max_sessions INTEGER,
+                 updated      TEXT NOT NULL,
+                 updated_by   TEXT
+             );
+
              -- 134-5: a child's own workspace as its host made it (137-1):
              -- the mode, and for a clone the commit it starts from.
              CREATE TABLE IF NOT EXISTS session_child_workspace (
@@ -1671,6 +1807,18 @@ pub mod spawn {
                 [],
             )?;
         }
+        // 151m: a launch from before the tick is unticked.
+        let has_children_write = conn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('session_spawn_launch') WHERE name = 'children_write'",
+            )?
+            .exists([])?;
+        if !has_children_write {
+            conn.execute(
+                "ALTER TABLE session_spawn_launch ADD COLUMN children_write INTEGER NOT NULL DEFAULT 0",
+                [],
+            )?;
+        }
         // 145a: nothing waits for a person any more. What an older server
         // left waiting expires, and its messages with it.
         let now = crate::index::now_rfc3339();
@@ -1770,8 +1918,61 @@ pub mod spawn {
     /// (`wrong_parent`) and 137 does not say how one would read it; until a
     /// decision does, a child starts none. Lower than C4's, never higher.
     pub const BUILT_DEPTH: i64 = 1;
-    pub const MAX_CHILDREN: i64 = 3;
-    pub const MAX_TREE: i64 = 6;
+
+    /// 152b, 152c: a host's Limits when its owner set none, and the most
+    /// they may be set to. Anything sized by them is sized by the ceiling.
+    pub const DEFAULT_CHILDREN: i64 = 3;
+    pub const HARD_MAX_CHILDREN: i64 = 10;
+    pub const DEFAULT_TREE: i64 = 6;
+    pub const HARD_MAX_TREE: i64 = 24;
+
+    /// A host's Limits (152a), as its owner set them. `max_sessions` only
+    /// lowers what the host reports (152d); `None` is the host's own.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HostLimits {
+        pub max_children: i64,
+        pub max_tree: i64,
+        pub max_sessions: Option<i64>,
+    }
+
+    impl Default for HostLimits {
+        fn default() -> Self {
+            Self {
+                max_children: DEFAULT_CHILDREN,
+                max_tree: DEFAULT_TREE,
+                max_sessions: None,
+            }
+        }
+    }
+
+    impl HostLimits {
+        /// The concurrent sessions in force on a host reporting `host`, 0
+        /// being no limit: the lower of the two, never more than the host's.
+        pub fn effective_sessions(&self, host: u32) -> u32 {
+            let Some(over) = self.max_sessions else {
+                return host;
+            };
+            let over = u32::try_from(over).unwrap_or(u32::MAX);
+            if host == 0 { over } else { over.min(host) }
+        }
+    }
+
+    pub(super) fn limits_of(conn: &Connection, host_id: &str) -> Result<HostLimits> {
+        Ok(conn
+            .query_row(
+                "SELECT max_children, max_tree, max_sessions FROM host_limits WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(HostLimits {
+                        max_children: r.get(0)?,
+                        max_tree: r.get(1)?,
+                        max_sessions: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
 
     /// 134j: at most this many unacknowledged messages (`queued`,
     /// `delivered`) in one inbox. A parent's messages may take all but one:
@@ -1813,6 +2014,11 @@ pub mod spawn {
         /// A crew role (138), applied as a launch role is.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pub role: Option<super::Context>,
+        /// Where it starts on a host without child workspaces (151 N6): a
+        /// directory inside one of the host's listed workspaces. The
+        /// parent's workspace when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pub cwd: Option<String>,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1852,6 +2058,75 @@ pub mod spawn {
         /// `(id, kind)` of each agent a child may run there other than its
         /// parent's own (143a): installed, with Storm's servers, not `shell`.
         pub agents: Vec<(String, String)>,
+        /// The host makes each child its own workspace (137-1); every other
+        /// host starts a child in a workspace of its own listing.
+        pub child_workspaces: bool,
+        /// `(name, canonical directory)` of each workspace the host lists.
+        pub workspace_paths: Vec<(String, String)>,
+    }
+
+    /// The longest `cwd` a start may name, in bytes.
+    pub const MAX_CWD_BYTES: usize = 4096;
+
+    /// Where a child starts (151 N6): its own workspace on a host that makes
+    /// one, else a listed workspace, in `cwd` when the start named one.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum ChildPlace {
+        Own,
+        Shared {
+            workspace: String,
+            cwd: Option<String>,
+        },
+    }
+
+    /// The listed workspace `cwd` lies in, as the host's canonical paths
+    /// say: an absolute path equal to one, or under one with no `.`, `..`
+    /// or empty part. The host checks it again on disk (R3.3). The deepest
+    /// match wins, for overlapping roots.
+    pub fn cwd_workspace(cwd: &str, paths: &[(String, String)]) -> Option<String> {
+        if cwd.is_empty() || cwd.len() > MAX_CWD_BYTES || cwd.chars().any(char::is_control) {
+            return None;
+        }
+        paths
+            .iter()
+            .filter(|(_, path)| !path.is_empty())
+            .filter_map(|(name, path)| {
+                let rest = cwd.strip_prefix(path.as_str())?;
+                if rest.is_empty() {
+                    return Some((name, path.len()));
+                }
+                let rest = rest.strip_prefix(['/', '\\'])?;
+                rest.split(['/', '\\'])
+                    .all(|part| !matches!(part, "" | "." | ".."))
+                    .then_some((name, path.len()))
+            })
+            .max_by_key(|(_, len)| *len)
+            .map(|(name, _)| name.clone())
+    }
+
+    /// Where `parent`'s child starts on `host`, or the refusal: a `cwd` on
+    /// a host that makes a child its own workspace is `cwd_not_applicable`,
+    /// and one outside every listed workspace `bad_cwd`.
+    pub fn child_place(
+        parent: &SessionRecord,
+        cwd: Option<&str>,
+        host: &HostNow,
+    ) -> std::result::Result<ChildPlace, &'static str> {
+        match (host.child_workspaces, cwd) {
+            (true, None) => Ok(ChildPlace::Own),
+            (true, Some(_)) => Err("cwd_not_applicable"),
+            (false, None) => Ok(ChildPlace::Shared {
+                workspace: parent.workspace.clone(),
+                cwd: None,
+            }),
+            (false, Some(cwd)) => match cwd_workspace(cwd, &host.workspace_paths) {
+                Some(workspace) => Ok(ChildPlace::Shared {
+                    workspace,
+                    cwd: Some(cwd.to_string()),
+                }),
+                None => Err("bad_cwd"),
+            },
+        }
     }
 
     /// What the host's live link says now: C0's refusal, or what it reports.
@@ -1859,16 +2134,12 @@ pub mod spawn {
 
     /// The child's agent and its kind: the parent's own when the start
     /// names none or names it, else one its host reports it can start a
-    /// child in (143a). `None` is `agent_unavailable`, as is an agent that
-    /// cannot run without asking (148a).
+    /// child in (143a). `None` is `agent_unavailable`.
     pub fn child_agent(
         parent: &SessionRecord,
         named: Option<&str>,
         host: &HostNow,
     ) -> Option<(String, String)> {
-        if !crate::agent::permission::unattended(named.unwrap_or(&parent.provider)) {
-            return None;
-        }
         match named {
             None => Some((parent.provider.clone(), parent.provider_kind.clone())),
             Some(p) if p == parent.provider => {
@@ -1996,6 +2267,49 @@ pub mod spawn {
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         }
 
+        pub fn host_limits(&self, host_id: &str) -> Result<HostLimits> {
+            limits_of(&self.conn, host_id)
+        }
+
+        /// Replaces a host's Limits, answering what they were. Checked by
+        /// the caller; a running session is never touched (152f).
+        pub fn set_host_limits(
+            &mut self,
+            host_id: &str,
+            limits: &HostLimits,
+            by: &str,
+            now: &str,
+        ) -> Result<HostLimits> {
+            let tx = self.conn.transaction()?;
+            let was = limits_of(&tx, host_id)?;
+            tx.execute(
+                "INSERT INTO host_limits
+                     (host_id, max_children, max_tree, max_sessions, updated, updated_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (host_id) DO UPDATE SET max_children = excluded.max_children,
+                     max_tree = excluded.max_tree, max_sessions = excluded.max_sessions,
+                     updated = excluded.updated, updated_by = excluded.updated_by",
+                params![
+                    host_id,
+                    limits.max_children,
+                    limits.max_tree,
+                    limits.max_sessions,
+                    now,
+                    by
+                ],
+            )?;
+            tx.commit()?;
+            Ok(was)
+        }
+
+        pub fn forget_host_limits(&self, host_id: &str) -> Result<()> {
+            self.conn.execute(
+                "DELETE FROM host_limits WHERE host_id = ?1",
+                params![host_id],
+            )?;
+            Ok(())
+        }
+
         /// The cap a start by `requester` would hit now, counted as P-2
         /// counts it. Advisory: creation counts again (P-6).
         pub fn start_cap(
@@ -2023,7 +2337,15 @@ pub mod spawn {
                 ..StartPayload::default()
             };
             let agent = (parent.provider.clone(), parent.provider_kind.clone());
-            let mut child = spawn_child(&tx, &parent, agent, &payload, write_vault, &now)?;
+            let mut child = spawn_child(
+                &tx,
+                &parent,
+                agent,
+                &payload,
+                &ChildPlace::Own,
+                write_vault,
+                &now,
+            )?;
             child.status = "running".into();
             tx.execute(
                 "UPDATE sessions SET status = 'running' WHERE id = ?1",
@@ -2091,20 +2413,27 @@ pub mod spawn {
                 .optional()?)
         }
 
-        /// Records a launch with the switch on (141e) and turns it on, before
+        /// Records a launch with the switch on (141e), and whether its
+        /// children write to its write vault (151m), and turns it on, before
         /// the host is sent `start`.
         pub fn record_spawn_launch(
             &mut self,
             session_id: &str,
+            children_write: bool,
             device: Option<&str>,
             now: &str,
         ) -> Result<()> {
             self.conn.execute(
-                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at) VALUES (?1, ?2)",
-                params![session_id, now],
+                "INSERT OR IGNORE INTO session_spawn_launch (session_id, created_at, children_write)
+                 VALUES (?1, ?2, ?3)",
+                params![session_id, now, children_write],
             )?;
             self.set_spawn(session_id, true, device, now)?;
             Ok(())
+        }
+
+        pub fn children_write(&self, session_id: &str) -> Result<bool> {
+            children_write(&self.conn, session_id)
         }
 
         pub fn spawn_launched(&self, session_id: &str) -> Result<bool> {
@@ -2640,10 +2969,15 @@ pub mod spawn {
             {
                 return Ok(Err(Refusal::because("name_taken")));
             }
+            let place = match child_place(&r, payload.cwd.as_deref(), &live) {
+                Ok(place) => place,
+                Err(reason) => return Ok(Err(Refusal::because(reason))),
+            };
             if let Some(cap) = over_cap(&tx, &r, live.max_sessions)? {
                 return Ok(Err(Refusal::limit(cap)));
             }
-            let child = spawn_child(&tx, &r, agent, payload, true, now)?;
+            let writes = children_write(&tx, &r.id)?;
+            let child = spawn_child(&tx, &r, agent, payload, &place, writes, now)?;
             insert_act(
                 &tx,
                 act,
@@ -2864,15 +3198,18 @@ pub mod spawn {
             params![r.id],
             |row| row.get(0),
         )?;
-        if children + 1 > MAX_CHILDREN {
+        // A child runs on its parent's host, so the tree is that host's.
+        let limits = limits_of(conn, &r.host_id)?;
+        if children + 1 > limits.max_children {
             return Ok(Some("children"));
         }
         let root = &lineage.root_session;
         let root_live = get_in(conn, root)?.is_some_and(|s| !s.is_ended());
         let tree_live = root_live as i64 + descendants_of(conn, root, true)?.len() as i64;
-        if tree_live + 1 > MAX_TREE {
+        if tree_live + 1 > limits.max_tree {
             return Ok(Some("tree"));
         }
+        let max_sessions = limits.effective_sessions(max_sessions);
         if max_sessions > 0 {
             let live: i64 = conn.query_row(
                 &format!(
@@ -2987,24 +3324,50 @@ pub mod spawn {
         format!("children/{child}")
     }
 
+    /// Whether a child was given its own workspace (137-1), which only a
+    /// host that makes one does; every other child shares one (151 N6).
+    pub fn has_own_workspace(r: &SessionRecord) -> bool {
+        r.workspace == child_workspace(&r.id)
+    }
+
+    /// Whether a session was launched with its children's writes ticked
+    /// (151m); no spawn launch row is no.
+    fn children_write(conn: &Connection, session_id: &str) -> Result<bool> {
+        Ok(conn
+            .query_row(
+                "SELECT children_write FROM session_spawn_launch WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
     /// A start's act: the child's record, lineage and task (L-1), narrowed
     /// to the parent's grants as they are now (134e, AP-7), with the
-    /// parent's write vault when `write_vault` and the parent launched with
-    /// one it may write (145a: a start inherits it; nothing wider). Spawn is off: a child has no switch row. Its workspace
-    /// is its own (137-1), its agent `agent` (143a), its name the one asked
-    /// for or one made from the task, unique among its live siblings, and
-    /// its model and role the start's (145b).
+    /// parent's write vault only when `write_vault` (its launch ticked it,
+    /// 151m) and the parent launched with one it may write; nothing wider.
+    /// Spawn is off: a child has no switch row. Its workspace
+    /// is its own (137-1) or the one `place` names (151 N6), its agent
+    /// `agent` (143a), its name the one asked for or one made from the
+    /// task, unique among its live siblings, and its model and role the
+    /// start's (145b).
     fn spawn_child(
         conn: &Connection,
         parent: &SessionRecord,
         (provider, provider_kind): (String, String),
         payload: &StartPayload,
+        place: &ChildPlace,
         write_vault: bool,
         now: &str,
     ) -> Result<SessionRecord> {
         let id = crate::auth::identity::random_id("ags_");
+        let (workspace, cwd) = match place {
+            ChildPlace::Own => (child_workspace(&id), None),
+            ChildPlace::Shared { workspace, cwd } => (workspace.clone(), cwd.clone()),
+        };
         let child = SessionRecord {
-            workspace: child_workspace(&id),
+            workspace,
             id,
             owner_user_id: parent.owner_user_id.clone(),
             host_id: parent.host_id.clone(),
@@ -3093,6 +3456,7 @@ pub mod spawn {
                 role: role.clone(),
                 model: payload.model.clone(),
                 permission_mode: payload.permission_mode.clone(),
+                cwd,
             },
             now,
         )?;
@@ -3214,6 +3578,7 @@ pub mod spawn {
             "session_spawn_asks",
             "session_spawn_launch",
             "session_child_workspace",
+            "session_ran_as",
             "session_task",
             "session_result",
             "session_round",

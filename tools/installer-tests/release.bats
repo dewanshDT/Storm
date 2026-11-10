@@ -142,6 +142,7 @@ mac_release() {
 @test "linux --from-dir: a deb missing from checksums.txt is unavailable" {
   make_assets 0.6.0 server-deb
   echo deb >"$ASSETS/storm-runtime_0.6.0-1_amd64.deb"
+  OPT_SERVICE=1
   platform
   OPT_FROM_DIR=$ASSETS
   WORK_DIR="$BATS_TEST_TMPDIR/work"

@@ -7,6 +7,8 @@ name: Installer end to end
 # enrolled to it with no app and no visible secret, a re-run that changes
 # nothing, a dry run that changes nothing, and no secret in the log.
 # The runners are disposable, which is why this may install system services.
+# The *-user jobs (decision 151 E1) run the Runtime Host as an ordinary user
+# under systemd --user, from the tarball, on Ubuntu and in an Arch container.
 
 on:
   workflow_dispatch:
@@ -17,6 +19,10 @@ on:
       - deploy/install.sh
       - tools/installer-tests/**
       - apps/server/src/install*.rs
+      - apps/runtime/src/platform/linux.rs
+      - apps/runtime/src/platform/systemd_user.rs
+      - deploy/runtime-tarball.sh
+      - deploy/storm-runtime-user.service
       - .github/workflows/installer-e2e.yml
 
 permissions:
@@ -68,10 +74,13 @@ jobs:
           sudo ufw allow 22/tcp
           sudo ufw --force enable
           sudo ufw status verbose
+      # The runtime as its own account: --service, since decision 151 E5 made
+      # the host run as you by default. The re-runs below pass no flag, and
+      # keep the service because it is installed.
       - name: Install everything (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |
-            sh deploy/install.sh --yes --everything --version "v$CI_VERSION" \
+            sh deploy/install.sh --yes --everything --service --version "v$CI_VERSION" \
               --from-dir dist --password-stdin --port 8484 --workspace scratch
       - name: Check — server, account, runtime enrolled
         run: |
@@ -107,12 +116,16 @@ jobs:
           curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:8484/v1/health
       - name: Re-run changes nothing (AC-I4)
         run: |
-          set -eux
+          set -euxo pipefail
           pid=$(systemctl show -p MainPID --value storm-server)
           rt=$(systemctl show -p MainPID --value storm-runtime)
-          sh deploy/install.sh --yes --everything --version "v$CI_VERSION" --from-dir dist
+          sh deploy/install.sh --yes --everything --version "v$CI_VERSION" --from-dir dist 2>&1 | tee rerun.txt
           test "$pid" = "$(systemctl show -p MainPID --value storm-server)"
           test "$rt" = "$(systemctl show -p MainPID --value storm-runtime)"
+          # Decision 151 E5: an installed service host stays the service.
+          grep -F 'runs it as its own account (storm-runtime); it stays that way' rerun.txt
+          test ! -e "$HOME/.config/systemd/user/storm-runtime.service"
+          test ! -e "$HOME/.local/bin/storm-runtime"
       - name: Dry run changes nothing (AC-I5)
         run: |
           set -eux
@@ -141,6 +154,293 @@ jobs:
         run: |
           cat "${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log" || true
           sudo journalctl -u storm-server -u storm-runtime --no-pager | tail -100 || true
+
+  # Decision 151 E1: the Runtime Host as the runner's own account, under its
+  # systemd user manager, beside a packaged server. No storm-runtime package,
+  # account or system unit, and uninstall leaves no file outside the home.
+  linux-user:
+    name: installer e2e (Ubuntu, runtime as you)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build the server .deb and the runtime tarball
+        run: |
+          set -eux
+          mkdir -p dist apps/server/packaging/web
+          echo '<!doctype html><title>Storm</title>ci web' > apps/server/packaging/web/index.html
+          (cd apps/server &&
+            sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml &&
+            cargo build --release && cargo deb --no-build && cp target/debian/*.deb ../../dist/)
+          (cd apps/runtime &&
+            sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml && cargo build --release)
+          sh deploy/runtime-tarball.sh apps/runtime/target/release/storm-runtime "$CI_VERSION" dist
+          (cd dist && sha256sum * > checksums.txt && cat checksums.txt)
+      # A runner has no login session, so nothing starts its user manager;
+      # a person's ssh or desktop login does that. Linger is left to install.
+      - name: Start the runner's user manager
+        run: |
+          set -eux
+          uid=$(id -u)
+          sudo systemctl start "user@$uid.service"
+          for _ in $(seq 30); do [ -S "/run/user/$uid/systemd/private" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          loginctl show-user "$USER" --property=Linger | tee linger-before.txt
+      - name: Install the server, and the runtime as you (non-interactive)
+        run: |
+          set -o pipefail
+          printf '%s\n' "$CI_PASSWORD" |
+            sh deploy/install.sh --yes --server --runtime --user --version "v$CI_VERSION" \
+              --from-dir dist --password-stdin --port 8484 --workspace scratch 2>&1 | tee install.txt
+      - name: Check — a user unit, active, enrolled, running as the runner
+        run: |
+          set -eux
+          unit="$HOME/.config/systemd/user/storm-runtime.service"
+          test -f "$unit"
+          ! grep -E '^(User|ProtectHome|RestrictNamespaces)=' "$unit"
+          grep -qx 'WantedBy=default.target' "$unit"
+          systemctl --user is-active storm-runtime
+          systemctl --user is-enabled storm-runtime
+          systemctl --user show -p ExecStart storm-runtime | grep -F "$HOME/.local/bin/storm-runtime serve --state $HOME/.local/state/storm-runtime"
+          pid=$(systemctl --user show -p MainPID --value storm-runtime)
+          test "$(ps -o user= -p "$pid")" = "$USER"
+          test -f "$HOME/.local/state/storm-runtime/host.json"
+          "$HOME/.local/bin/storm-runtime" check | tee check.txt
+          grep -q '^OK:' check.txt
+          test -d "$HOME/.local/state/storm-runtime/workspaces/scratch"
+          # Nothing of the service install.
+          ! dpkg -s storm-runtime
+          ! id storm-runtime
+          test ! -e /var/lib/storm-runtime
+          test ! -e /etc/storm-runtime
+          test ! -e /usr/bin/storm-runtime
+          ! systemctl cat storm-runtime.service
+      - name: Check — the server sees the host run as the runner
+        run: |
+          set -eu
+          base=http://127.0.0.1:8484
+          pair=$(curl -fsS -X POST -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\",\"device_name\":\"ci\"}" "$base/v1/pairings/password")
+          device="StormDevice $(jq -r .device_id <<<"$pair"):$(jq -r .device_secret <<<"$pair")"
+          token=$(curl -fsS -X POST -H "Authorization: $device" -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\"}" "$base/v1/auth/login" | jq -r .access_token)
+          for _ in $(seq 30); do
+            curl -fsS -H "Authorization: Bearer $token" "$base/v1/agent/hosts" > hosts.json
+            [ "$(jq -r '[.[] | select(.status == "online")][0].execution.account // empty' hosts.json)" = "$USER" ] && break
+            sleep 2
+          done
+          jq '[.[] | {name, status, execution}]' hosts.json
+          test "$(jq -r '[.[] | select(.status == "online")][0].execution.account' hosts.json)" = "$USER"
+      - name: Check — linger, turned on by install or printed for an administrator
+        run: |
+          set -eux
+          unit="$HOME/.config/systemd/user/storm-runtime.service"
+          # A runner may linger already; install then leaves it as it found it.
+          if grep -q 'Linger=yes' linger-before.txt; then
+            test -z "$(grep '^# Linger:' "$unit")"
+          elif [ "$(loginctl show-user "$USER" --property=Linger --value)" = yes ]; then
+            grep -q '^# Linger: turned on by `storm-runtime install --user`' "$unit"
+          else
+            grep -F "sudo loginctl enable-linger $USER" install.txt
+          fi
+      - name: Re-run changes nothing (AC-I4)
+        run: |
+          set -eux
+          rt=$(systemctl --user show -p MainPID --value storm-runtime)
+          sh deploy/install.sh --yes --server --runtime --user --version "v$CI_VERSION" --from-dir dist
+          test "$rt" = "$(systemctl --user show -p MainPID --value storm-runtime)"
+      - name: Uninstall leaves no file outside the home
+        run: |
+          set -eux
+          sh deploy/install.sh --yes uninstall --runtime
+          ! systemctl --user is-active storm-runtime
+          test ! -e "$HOME/.config/systemd/user/storm-runtime.service"
+          test ! -e "$HOME/.config/systemd/user/default.target.wants/storm-runtime.service"
+          test ! -e "$HOME/.local/bin/storm-runtime"
+          # Workspaces stay; so do state and config without --purge.
+          test -d "$HOME/.local/state/storm-runtime/workspaces/scratch"
+          test ! -e /var/lib/storm-runtime
+          test ! -e /etc/storm-runtime
+          ! systemctl cat storm-runtime.service
+          # A linger install turned on, uninstall turned off.
+          if ! grep -q 'Linger=yes' linger-before.txt; then
+            test ! -e "/var/lib/systemd/linger/$USER"
+          fi
+      - name: Logs
+        if: always()
+        run: |
+          cat "${XDG_STATE_HOME:-$HOME/.local/state}/storm/install.log" || true
+          journalctl --user -u storm-runtime --no-pager | tail -100 || true
+
+  # The same, on a distribution without the .deb: Arch, in a container
+  # booted with systemd so it has logind and user managers. The server runs
+  # on the runner; the container shares its network.
+  arch-user:
+    name: installer e2e (Arch container, runtime as you)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ARCH_USER: alice
+      ARCH_UID: 1000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            apps/server
+            apps/runtime
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deb
+      - name: Build the server .deb and the runtime tarball
+        run: |
+          set -eux
+          mkdir -p dist apps/server/packaging/web
+          echo '<!doctype html><title>Storm</title>ci web' > apps/server/packaging/web/index.html
+          (cd apps/server &&
+            sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml &&
+            cargo build --release && cargo deb --no-build && cp target/debian/*.deb ../../dist/)
+          (cd apps/runtime &&
+            sed -i "s/^version = .*/version = \"$CI_VERSION\"/" Cargo.toml && cargo build --release)
+          sh deploy/runtime-tarball.sh apps/runtime/target/release/storm-runtime "$CI_VERSION" dist
+          (cd dist && sha256sum * > checksums.txt && cat checksums.txt)
+      - name: Install the server on the runner
+        run: |
+          printf '%s\n' "$CI_PASSWORD" |
+            sh deploy/install.sh --yes --server --version "v$CI_VERSION" --from-dir dist \
+              --password-stdin --port 8484
+          curl -fsS http://127.0.0.1:8484/v1/health
+      - name: Boot an Arch container with systemd, and a user who never logs in
+        run: |
+          set -eux
+          docker run -d --name storm-arch --privileged --cgroupns=private --network host \
+            --tmpfs /run --tmpfs /run/lock -e container=docker \
+            -v "$PWD:/src:ro" archlinux:latest /usr/lib/systemd/systemd
+          for _ in $(seq 60); do
+            docker exec storm-arch systemctl is-system-running 2>/dev/null | grep -Eq 'running|degraded' && break
+            sleep 2
+          done
+          docker exec storm-arch systemctl is-system-running || true
+          docker exec storm-arch cat /etc/os-release
+          docker exec storm-arch useradd -m -u "$ARCH_UID" "$ARCH_USER"
+          # What a login would do: start the user manager, without linger.
+          docker exec storm-arch systemctl start "user@$ARCH_UID.service"
+          docker exec storm-arch loginctl show-user "$ARCH_USER" --property=Linger
+      - name: Install the runtime as alice (no root, no sudo)
+        run: |
+          set -eux -o pipefail
+          state=$(sudo sed -n 's/^STORM_STATE=//p' /etc/storm/storm.env)
+          owner=$(sudo stat -c %U "$state")
+          sudo -u "$owner" storm-server host-enrollment --state "$state" --url http://127.0.0.1:8484 |
+            docker exec -i -u "$ARCH_USER" -w "/home/$ARCH_USER" \
+              -e HOME="/home/$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" \
+              storm-arch sh /src/deploy/install.sh --yes --runtime --version "v$CI_VERSION" \
+              --from-dir /src/dist --enroll-from-stdin --workspace scratch 2>&1 | tee install.txt
+      - name: Check — active under systemctl --user, enrolled, as alice
+        run: |
+          set -eux
+          as_alice() {
+            docker exec -u "$ARCH_USER" -e HOME="/home/$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch "$@"
+          }
+          as_alice systemctl --user is-active storm-runtime
+          as_alice systemctl --user is-enabled storm-runtime
+          pid=$(as_alice systemctl --user show -p MainPID --value storm-runtime)
+          test "$(docker exec storm-arch ps -o user= -p "$pid")" = "$ARCH_USER"
+          as_alice "/home/$ARCH_USER/.local/bin/storm-runtime" check | tee check.txt
+          grep -q '^OK:' check.txt
+          as_alice test -d "/home/$ARCH_USER/.local/state/storm-runtime/workspaces/scratch"
+          ! docker exec storm-arch id storm-runtime
+          docker exec storm-arch test ! -e /var/lib/storm-runtime
+          ! docker exec storm-arch systemctl cat storm-runtime.service
+      - name: Check — the server sees the host run as alice
+        run: |
+          set -eu
+          base=http://127.0.0.1:8484
+          pair=$(curl -fsS -X POST -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\",\"device_name\":\"ci-$RANDOM\"}" "$base/v1/pairings/password")
+          device="StormDevice $(jq -r .device_id <<<"$pair"):$(jq -r .device_secret <<<"$pair")"
+          token=$(curl -fsS -X POST -H "Authorization: $device" -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\"}" "$base/v1/auth/login" | jq -r .access_token)
+          for _ in $(seq 45); do
+            curl -fsS -H "Authorization: Bearer $token" "$base/v1/agent/hosts" > hosts.json
+            [ "$(jq -r '[.[] | select(.status == "online")][0].execution.account // empty' hosts.json)" = "$ARCH_USER" ] && break
+            sleep 2
+          done
+          jq '[.[] | {name, status, execution}]' hosts.json
+          test "$(jq -r '[.[] | select(.status == "online")][0].execution.account' hosts.json)" = "$ARCH_USER"
+      # Without polkit alice may not turn on her own linger, so install printed
+      # the one command; root runs it here, as an administrator would.
+      - name: Linger, by the printed command
+        run: |
+          set -eux
+          if [ "$(docker exec storm-arch loginctl show-user "$ARCH_USER" --property=Linger --value)" != yes ]; then
+            grep -F "sudo loginctl enable-linger $ARCH_USER" install.txt
+            docker exec storm-arch loginctl enable-linger "$ARCH_USER"
+          fi
+          docker exec storm-arch test -e "/var/lib/systemd/linger/$ARCH_USER"
+      - name: Reboot without a login — the host comes back by itself
+        run: |
+          set -eux
+          docker restart storm-arch
+          for _ in $(seq 60); do
+            docker exec storm-arch systemctl is-active --quiet "user@$ARCH_UID.service" &&
+              docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
+                systemctl --user is-active --quiet storm-runtime && break
+            sleep 2
+          done
+          docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
+            systemctl --user is-active storm-runtime
+          # Lingering, logind (systemd 256+) gives the user manager a session
+          # of class manager; any other session would be a login.
+          docker exec storm-arch loginctl list-sessions --no-legend
+          for s in $(docker exec storm-arch loginctl list-sessions --no-legend | awk '{print $1}'); do
+            class=$(docker exec storm-arch loginctl show-session "$s" -p Class --value)
+            case "$class" in manager | manager-early) ;; *) exit 1 ;; esac
+          done
+      - name: Check — online again after the reboot
+        run: |
+          set -eu
+          base=http://127.0.0.1:8484
+          pair=$(curl -fsS -X POST -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\",\"device_name\":\"ci-$RANDOM\"}" "$base/v1/pairings/password")
+          device="StormDevice $(jq -r .device_id <<<"$pair"):$(jq -r .device_secret <<<"$pair")"
+          token=$(curl -fsS -X POST -H "Authorization: $device" -H 'content-type: application/json' \
+            -d "{\"password\":\"$CI_PASSWORD\"}" "$base/v1/auth/login" | jq -r .access_token)
+          for _ in $(seq 45); do
+            curl -fsS -H "Authorization: Bearer $token" "$base/v1/agent/hosts" > hosts.json
+            [ "$(jq -r '[.[] | select(.status == "online")][0].execution.account // empty' hosts.json)" = "$ARCH_USER" ] && break
+            sleep 2
+          done
+          jq '[.[] | {name, status, execution}]' hosts.json
+          test "$(jq -r '[.[] | select(.status == "online")][0].execution.account' hosts.json)" = "$ARCH_USER"
+      - name: Uninstall leaves no Storm file outside alice's home
+        run: |
+          set -eux
+          docker exec -u "$ARCH_USER" -w "/home/$ARCH_USER" -e HOME="/home/$ARCH_USER" \
+            -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch sh /src/deploy/install.sh --yes uninstall --runtime
+          docker exec storm-arch test ! -e "/home/$ARCH_USER/.config/systemd/user/storm-runtime.service"
+          docker exec storm-arch test ! -e "/home/$ARCH_USER/.local/bin/storm-runtime"
+          docker exec storm-arch find / -xdev \( -path /home -o -path /src -o -path /proc -o -path /sys -o -path /tmp \) -prune \
+            -o -name '*storm-runtime*' -print > leftovers.txt
+          cat leftovers.txt
+          test ! -s leftovers.txt
+      - name: Logs
+        if: always()
+        run: |
+          docker exec storm-arch sh -c "cat /home/$ARCH_USER/.local/state/storm/install.log" || true
+          docker exec -u "$ARCH_USER" -e XDG_RUNTIME_DIR="/run/user/$ARCH_UID" storm-arch \
+            journalctl --user -u storm-runtime --no-pager | tail -100 || true
+          docker exec storm-arch journalctl --no-pager | tail -60 || true
 
   macos:
     name: installer e2e (macOS)
@@ -173,10 +473,12 @@ jobs:
           printf '<plist version="1.0"><dict/></plist>\n' > app/Storm.app/Contents/Info.plist
           (cd app && ditto -c -k --keepParent Storm.app "../dist/Storm-$CI_VERSION-macos-arm64.zip")
           (cd dist && shasum -a 256 * > checksums.txt && cat checksums.txt)
+      # The LaunchDaemon: with --server it is the default on a Mac (decision
+      # 151), which --service also asks for.
       - name: Install everything but the agent CLIs (non-interactive)
         run: |
           printf '%s\n' "$CI_PASSWORD" |
-            sh deploy/install.sh --yes --server --runtime --app --mobile \
+            sh deploy/install.sh --yes --server --runtime --service --app --mobile \
               --version "v$CI_VERSION" --from-dir dist --password-stdin --port 8484 \
               --workspace scratch
       - name: Check — LaunchAgent server as the user, runtime enrolled, app
@@ -197,10 +499,14 @@ jobs:
           test -d /Applications/Storm.app || test -d "$HOME/Applications/Storm.app"
       - name: Re-run changes nothing (AC-I4)
         run: |
-          set -eux
+          set -euxo pipefail
           pid=$(pgrep -f "storm-server serve")
-          sh deploy/install.sh --yes --server --runtime --app --mobile --version "v$CI_VERSION" --from-dir dist
+          sh deploy/install.sh --yes --server --runtime --app --mobile --version "v$CI_VERSION" --from-dir dist 2>&1 | tee rerun.txt
           test "$pid" = "$(pgrep -f "storm-server serve")"
+          # Decision 151 E5: the installed LaunchDaemon stays, with no flag.
+          grep -F 'runs it as its own account (_stormruntime); it stays that way' rerun.txt
+          test ! -e "$HOME/Library/LaunchAgents/dev.storm.runtime.plist"
+          sudo launchctl print system/dev.storm.runtime | grep -E 'state = running'
       - name: No secret on record
         run: |
           set -eu

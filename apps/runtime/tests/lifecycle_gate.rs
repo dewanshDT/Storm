@@ -26,8 +26,8 @@
 //!   OpenCode's plugin `client.session.promptAsync`), and the model then
 //!   receives exactly Storm's fixed sentence (a parent's for 144, a
 //!   child's for 145). Positive control: without the wake it stays idle.
-//!   **G-145-W-child-claude-code** runs a child as Storm launches one
-//!   (`dontAsk`, the child baseline, the host's own lists): a message that
+//!   **G-145-W-child-claude-code** runs a child as Storm launches one in
+//!   the person's `dontAsk` (the host's own lists): a message that
 //!   arrives mid-turn and one that arrives once it is idle each wake it, and
 //!   it reads the message and reports the next round.
 //! - **G-146-A-claude-code**: a child's Storm tools allowed in Storm's
@@ -38,20 +38,13 @@
 //!   with no prompt over an account whose own mode asks, OpenCode's
 //!   `edit: allow` in Storm's layer over the account's `edit: ask`.
 //!   Positive control: the account's mode alone asks.
-//! - **G-147-claude-code**: Storm's manual flag starts in Manual and an edit
-//!   prompts; Storm's `disableAutoMode` keeps auto out of the Shift+Tab
-//!   cycle while the test plays the person (positive control: without it,
-//!   auto is reached); and whether an edit to the `--settings` file while
-//!   the CLI runs is picked up (positive control: the user settings are).
-//! - **G-148-<provider>**: a child never asks (148a/b): Claude Code in
-//!   `dontAsk` with the child baseline, OpenCode with Storm's layer turning
-//!   every ask into a deny, each run a command inside the baseline (it runs)
-//!   and outside it (it is denied), with no prompt ever; the denial reaches
-//!   the agent (its tool result) and the host (`harness-denied`). Positive
-//!   control: the same outside call in a parent's manual mode prompts. For
-//!   Claude Code also whether auto falls back to asking after repeated
-//!   blocks, which `profile::AUTO_CAN_ASK` records, and which hook auto's
-//!   denials run.
+//! - **G-148-<provider>**: a child's denials reach its host (148b): Claude
+//!   Code in the person's `dontAsk`, OpenCode under the account's own deny
+//!   rules, each run a command inside the workspace (it runs) and an edit
+//!   outside it (it is denied), with no prompt; the denial reaches the agent
+//!   (its tool result) and the host (`harness-denied`). Positive control:
+//!   the same outside edit in manual mode prompts. For Claude Code also that
+//!   auto's denials run `PermissionDenied`.
 //! - **G-149-<provider>**: a top-level session's Storm reads and deletes
 //!   are pre-allowed (149b): with the host's layer in Storm's `--settings`
 //!   or OpenCode config, `list_vaults`, `search`, `get_note`, `delete_note`
@@ -689,34 +682,6 @@ impl Agent {
         String::from_utf8_lossy(&raw).contains(text)
     }
 
-    /// How much the terminal has shown so far.
-    fn shown(&self) -> usize {
-        std::fs::metadata(&self.screen).map_or(0, |m| m.len() as usize)
-    }
-
-    /// The permission mode Claude Code's footer last said after `from`.
-    fn mode_since(&self, from: usize) -> Option<&'static str> {
-        let raw = std::fs::read(&self.screen).unwrap_or_default();
-        let text = plain(&String::from_utf8_lossy(&raw[from.min(raw.len())..])).to_lowercase();
-        MODES
-            .iter()
-            .filter_map(|(word, mode)| text.rfind(word).map(|at| (at, *mode)))
-            .max_by_key(|(at, _)| *at)
-            .map(|(_, mode)| mode)
-    }
-
-    /// Plays the person: Shift+Tab `n` times, the footer's mode after each.
-    fn cycle(&mut self, n: usize) -> Vec<&'static str> {
-        (0..n)
-            .map(|_| {
-                let at = self.shown();
-                self.keys("\x1b[Z");
-                std::thread::sleep(Duration::from_millis(1500));
-                self.mode_since(at).unwrap_or("?")
-            })
-            .collect()
-    }
-
     /// The end of what the terminal showed, without escape sequences.
     fn tail(&self) -> String {
         let raw = std::fs::read(&self.screen).unwrap_or_default();
@@ -725,14 +690,6 @@ impl Agent {
         out[out.floor_char_boundary(start)..].to_string()
     }
 }
-
-/// Claude Code's footer word for each mode it cycles through.
-const MODES: [(&str, &str); 4] = [
-    ("manual mode on", "manual"),
-    ("accept edits on", "acceptEdits"),
-    ("plan mode on", "plan"),
-    ("auto mode on", "auto"),
-];
 
 /// Terminal output without escape sequences.
 fn plain(text: &str) -> String {
@@ -849,8 +806,7 @@ struct Session {
     ws: PathBuf,
     /// The stand-in Storm MCP server's log of tool calls, when it has one.
     mcp_log: Option<PathBuf>,
-    /// Claude Code's: Storm's `--settings` file and its throwaway home.
-    settings: Option<PathBuf>,
+    /// Claude Code's throwaway home.
     home: Option<PathBuf>,
     _dirs: Vec<tempfile::TempDir>,
 }
@@ -937,6 +893,11 @@ for line in sys.stdin:
     sys.stdout.flush()
 "#;
 
+/// A person's own `dontAsk` launch, as the gates that need an agent which
+/// never stops on a prompt run it, and the rules that person allows.
+const DONT_ASK: [&str; 2] = ["--permission-mode", "dontAsk"];
+const DONT_ASK_ALLOW: [&str; 3] = ["Edit(./**)", "Read(./**)", "Bash"];
+
 /// How a gate's Claude Code is launched beyond Storm's hooks: extra flags
 /// (a permission mode), Storm's allows in its `--settings` (146a), and the
 /// stand-in Storm server.
@@ -944,8 +905,6 @@ for line in sys.stdin:
 struct ClaudeOpts {
     args: Vec<String>,
     allow: Vec<String>,
-    /// Storm's `permissions.disableAutoMode` in its `--settings` (147c).
-    auto_off: bool,
     storm_mcp: bool,
     /// The account's own `permissions.defaultMode` (its user settings).
     /// Claude Code 2.1.312's own default is `auto`; `manual` is what asks.
@@ -991,7 +950,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
     let home = tempfile::tempdir().unwrap();
     let socket = state.path().join("mcp.sock");
     let host = FakeHost::listen(&socket);
-    let (extras, _) = storm_runtime::harness::launch_with(
+    let (extras, _) = storm_runtime::harness::launch(
         "claude-code",
         &state.path().join("session"),
         "h_gate",
@@ -1000,10 +959,7 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         None,
         None,
         &opts.hooks.unwrap_or_else(Hooks::all),
-        storm_runtime::harness::Permissions {
-            allow: &opts.allow,
-            auto_off: opts.auto_off,
-        },
+        &opts.allow,
     )
     .unwrap();
     let wakes = opts.hooks.is_none_or(|h| h.wake);
@@ -1096,7 +1052,6 @@ fn claude_with(opts: ClaudeOpts) -> Session {
         model,
         ws: ws.path().canonicalize().unwrap(),
         mcp_log,
-        settings: Some(state.path().join("session").join("claude-settings.json")),
         home: Some(home.path().to_path_buf()),
         _dirs: vec![ws, state, home],
     }
@@ -1229,7 +1184,6 @@ fn opencode_with(opts: OpencodeOpts) -> Session {
         model,
         ws: ws.path().canonicalize().unwrap(),
         mcp_log,
-        settings: None,
         home: None,
         _dirs: vec![ws, state],
     }
@@ -1457,9 +1411,9 @@ fn child_words_shapes(provider: &str, anthropic: bool) {
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
         let mut allow = allow;
-        allow.extend(storm_runtime::profile::CHILD_BASELINE.map(String::from));
+        allow.extend(DONT_ASK_ALLOW.map(String::from));
         let s = claude_with(ClaudeOpts {
-            args: vec!["--permission-mode".into(), "dontAsk".into()],
+            args: DONT_ASK.map(String::from).into(),
             allow,
             storm_mcp: true,
             ..Default::default()
@@ -1673,9 +1627,9 @@ fn g_144_w_claude_code() {
     wake("claude-code", "events");
 }
 
-/// G-145-W-child-claude-code: a child as Storm launches one (`dontAsk`
-/// with the child baseline, and only the hooks the host's own lists give a
-/// child) is woken by a message. A message that arrives while its first
+/// G-145-W-child-claude-code: a child as Storm launches one in the
+/// person's `dontAsk` (with [`DONT_ASK_ALLOW`], and only the hooks the
+/// host's own lists give a child) is woken by a message. A message that arrives while its first
 /// turn still runs, after its `read_messages` came back empty, reaches the
 /// model in that turn (Claude Code adds the waker armed by
 /// `UserPromptSubmit` to the turn's next request); once idle, the next
@@ -1693,17 +1647,15 @@ fn g_145_w_child_claude_code() {
         return;
     }
     let mut c = Checks::new(gate);
-    let child = storm_runtime::profile::child_permission_mode("claude-code", "default").unwrap();
     let mut allow: Vec<String> = storm_runtime::mcp::CHILD_ALLOWED_TOOLS
         .iter()
         .map(|t| format!("mcp__storm__{t}"))
         .collect();
-    allow.extend(child.allow.iter().cloned());
+    allow.extend(DONT_ASK_ALLOW.map(String::from));
     allow.push("mcp__storm__gate_pause".into());
     let mut s = claude_with(ClaudeOpts {
-        args: child.args.clone(),
+        args: DONT_ASK.map(String::from).into(),
         allow,
-        auto_off: child.auto_off,
         storm_mcp: true,
         hooks: Some(storm_runtime::harness::Gates::COMPILED.hooks("claude-code", true)),
         ..Default::default()
@@ -1905,13 +1857,13 @@ fn g_146_m_claude_code() {
             || asked(s, at, if written { 3 } else { 30 });
         (written, asked, file)
     };
-    // 147a: `default` is the CLI's asking mode by name, never no flag.
+    // 151 N5: `default` passes nothing; the account's own mode decides.
     c.check(
-        "default is --permission-mode default (147a)",
+        "default passes no flag (151 N5)",
         storm_runtime::profile::permission_mode("claude-code", "default")
             .unwrap()
             .args
-            == ["--permission-mode", "default"],
+            .is_empty(),
     );
     let mut own = claude();
     let (written, prompted, _) = edit(&mut own);
@@ -2130,157 +2082,6 @@ fn g_146_p_opencode() {
     prompt_flag("opencode");
 }
 
-/// G-147-claude-code (decision 147): on the real CLI,
-/// - 147a: Storm's `default` is `--permission-mode default`, which starts in
-///   Manual over the CLI's own default (auto) and makes an edit prompt;
-///   `manual`, the newer spelling, is the same mode. Positive control: with
-///   no flag and no account mode the CLI starts in auto.
-/// - 147c: with Storm's `permissions.disableAutoMode` in its `--settings`,
-///   the person's Shift+Tab (the test plays the person) never reaches auto
-///   and cycles manual, accept edits and plan. Positive control: without
-///   it, auto is reached. An auto launch, which gets no such setting, keeps
-///   auto in the cycle.
-/// - Reload: whether an edit to the `--settings` file while the CLI runs is
-///   picked up (taking the setting out puts auto back in the cycle). It
-///   must match `harness::SETTINGS_FLAG_RELOADS`, which Storm's switch is
-///   built on. Positive control: an edit to the account's own user
-///   settings is picked up (adding the setting takes auto out).
-#[test]
-fn g_147_claude_code() {
-    let gate = "G-147-claude-code";
-    if !enabled(gate) {
-        return;
-    }
-    if real() {
-        eprintln!("{gate} SKIP (it needs the stand-in model and a throwaway home)");
-        return;
-    }
-    let mut c = Checks::new(gate);
-    let manual = storm_runtime::profile::permission_mode("claude-code", "default").unwrap();
-    c.check(
-        "default is --permission-mode default, with auto out of the cycle",
-        manual.args == ["--permission-mode", "default"] && manual.auto_off,
-    );
-    let auto = storm_runtime::profile::permission_mode("claude-code", "auto").unwrap();
-    c.check(
-        "auto is --permission-mode auto, with auto kept in the cycle",
-        auto.args == ["--permission-mode", "auto"] && !auto.auto_off,
-    );
-
-    // Positive control: the CLI's own default, no flag, no setting.
-    let mut own = claude();
-    let starts = own.agent.mode_since(0);
-    let seen = own.agent.cycle(5);
-    c.check(
-        &format!("control: with no flag it starts in auto ({starts:?}), and Shift+Tab reaches auto ({seen:?})"),
-        starts == Some("auto") && seen.contains(&"auto"),
-    );
-    drop(own);
-
-    // Storm's manual session, as the host launches it.
-    let mut s = claude_with(ClaudeOpts {
-        args: manual.args.clone(),
-        auto_off: true,
-        ..Default::default()
-    });
-    let starts = s.agent.mode_since(0);
-    c.check(
-        &format!("--permission-mode default starts in Manual ({starts:?})"),
-        starts == Some("manual"),
-    );
-    let file = s.ws.join("gate-147.txt");
-    let at = Instant::now();
-    s.agent.prompt(&format!("WRITE:{}", file.display()));
-    let prompted = asked(&s, at, 60);
-    c.check(
-        &format!(
-            "an edit prompts in Manual (prompted {prompted}, written {})",
-            file.exists()
-        ),
-        prompted && !file.exists(),
-    );
-    s.agent.keys("\x1b");
-    std::thread::sleep(Duration::from_secs(2));
-    let seen = s.agent.cycle(8);
-    c.check(
-        &format!("with disableAutoMode, Shift+Tab never reaches auto ({seen:?})"),
-        !seen.contains(&"auto")
-            && ["manual", "acceptEdits", "plan"]
-                .iter()
-                .all(|m| seen.contains(m)),
-    );
-
-    // Reload: Storm's file loses the setting while the CLI runs.
-    let path = s.settings.clone().unwrap();
-    let mut settings: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    settings["permissions"]
-        .as_object_mut()
-        .unwrap()
-        .remove("disableAutoMode");
-    std::fs::write(&path, settings.to_string()).unwrap();
-    std::thread::sleep(Duration::from_secs(12));
-    let seen = s.agent.cycle(6);
-    let reloads = seen.contains(&"auto");
-    eprintln!("  finding: an edit to the --settings file while running is picked up: {reloads}");
-    c.check(
-        &format!(
-            "the --settings file is re-read while running: {reloads} ({seen:?}), as \
-             SETTINGS_FLAG_RELOADS ({}) says",
-            storm_runtime::harness::SETTINGS_FLAG_RELOADS
-        ),
-        reloads == storm_runtime::harness::SETTINGS_FLAG_RELOADS,
-    );
-    drop(s);
-
-    // Control for the reload: the account's own user settings are watched.
-    let mut watched = claude_with(ClaudeOpts {
-        args: manual.args.clone(),
-        ..Default::default()
-    });
-    let before = watched.agent.cycle(5);
-    let dir = watched.home.clone().unwrap().join(".claude");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(
-        dir.join("settings.json"),
-        json!({"permissions": {"disableAutoMode": "disable"}}).to_string(),
-    )
-    .unwrap();
-    std::thread::sleep(Duration::from_secs(12));
-    let after = watched.agent.cycle(6);
-    c.check(
-        &format!(
-            "control: an edit to the user settings is picked up (auto before {before:?}, none after {after:?})"
-        ),
-        before.contains(&"auto") && !after.contains(&"auto"),
-    );
-    drop(watched);
-
-    // An auto launch keeps auto in the cycle; the newer spelling is manual.
-    let mut a = claude_with(ClaudeOpts {
-        args: auto.args.clone(),
-        auto_off: auto.auto_off,
-        ..Default::default()
-    });
-    let starts = a.agent.mode_since(0);
-    let seen = a.agent.cycle(5);
-    c.check(
-        &format!("an auto launch starts in auto ({starts:?}) and keeps it in the cycle ({seen:?})"),
-        starts == Some("auto") && seen.contains(&"auto"),
-    );
-    drop(a);
-    let m = claude_with(ClaudeOpts {
-        args: vec!["--permission-mode".into(), "manual".into()],
-        auto_off: true,
-        ..Default::default()
-    });
-    let starts = m.agent.mode_since(0);
-    c.check(
-        &format!("--permission-mode manual is the same mode ({starts:?})"),
-        starts == Some("manual"),
-    );
-    c.finish(&m.agent);
-}
-
 fn no_prompt(s: &Session, at: Instant) -> bool {
     !s.host
         .attention(at)
@@ -2288,17 +2089,14 @@ fn no_prompt(s: &Session, at: Instant) -> bool {
         .any(|k| k == "permission_prompt")
 }
 
-/// G-148-claude-code (decision 148a/b): a child as the host launches it,
-/// whatever its parent's mode: `--permission-mode dontAsk` with Storm's
-/// child tools and the baseline (edits and reads in its workspace,
-/// commands) allowed, and the denial hooks. An edit and a command inside
-/// the baseline run, the command's output reaching the agent; an edit
-/// outside its workspace and a note write are
-/// denied, with no prompt ever, the denial in the agent's tool result and
-/// at the host. Positive control: the same edit in a parent's manual mode
-/// prompts. Finding: whether auto falls back to asking after repeated
-/// blocks (`profile::AUTO_CAN_ASK`), and that auto's denials run
-/// `PermissionDenied`.
+/// G-148-claude-code (148b, 151 N5): a child's denials reach its host. The
+/// child runs as a person who chose `dontAsk` would launch it, with Storm's
+/// child tools and [`DONT_ASK_ALLOW`] allowed, and the denial hooks. An
+/// edit and a command inside its workspace run, the command's output
+/// reaching the agent; an edit outside its workspace and a note write are
+/// denied, with no prompt, the denial in the agent's tool result and at the
+/// host. Positive control: the same edit in the account's manual mode
+/// prompts. Finding: auto's denials run `PermissionDenied`.
 #[test]
 fn g_148_claude_code() {
     let gate = "G-148-claude-code";
@@ -2310,25 +2108,11 @@ fn g_148_claude_code() {
         return;
     }
     let mut c = Checks::new(gate);
-    let modes: Vec<_> = ["default", "accept_edits", "auto"]
-        .iter()
-        .map(|m| storm_runtime::profile::child_permission_mode("claude-code", m).unwrap())
-        .collect();
-    let child = modes[0].clone();
-    c.check(
-        "every parent's mode gives the child dontAsk with the baseline, auto's too",
-        child.args == ["--permission-mode", "dontAsk"]
-            && child.auto_off
-            && modes.iter().all(|m| *m == child)
-            && storm_runtime::profile::AUTO_CAN_ASK,
-    );
     let outside = tempfile::tempdir().unwrap();
 
     // Positive control: a parent in manual is asked for the same edit.
-    let manual = storm_runtime::profile::permission_mode("claude-code", "default").unwrap();
     let mut parent = claude_with(ClaudeOpts {
-        args: manual.args.clone(),
-        auto_off: true,
+        account_mode: Some("manual"),
         ..Default::default()
     });
     let file = outside.path().join("parent.txt");
@@ -2344,11 +2128,10 @@ fn g_148_claude_code() {
         .iter()
         .map(|t| format!("mcp__storm__{t}"))
         .collect();
-    allow.extend(child.allow.iter().cloned());
+    allow.extend(DONT_ASK_ALLOW.map(String::from));
     let mut s = claude_with(ClaudeOpts {
-        args: child.args.clone(),
+        args: DONT_ASK.map(String::from).into(),
         allow,
-        auto_off: true,
         storm_mcp: true,
         ..Default::default()
     });
@@ -2468,31 +2251,16 @@ fn g_148_claude_code() {
         ..Default::default()
     });
     let started = Instant::now();
-    let mut prompted = false;
     for n in 0..5 {
         let at = Instant::now();
         a.agent
             .prompt(&format!("BASH:curl -s http://127.0.0.1:9/{n}"));
         if asked(&a, at, 40) {
-            prompted = true;
             break;
         }
         idle_since(&a, at, 30);
     }
     let denials = a.host.denied(started);
-    eprintln!(
-        "  finding: auto falls back to asking after repeated blocks: {prompted} \
-         (PermissionDenied reported {} denials first)",
-        denials.len()
-    );
-    c.check(
-        &format!(
-            "auto falls back to asking: {prompted}, as AUTO_CAN_ASK ({}) says, so a child \
-             never runs in auto",
-            storm_runtime::profile::AUTO_CAN_ASK
-        ),
-        prompted == storm_runtime::profile::AUTO_CAN_ASK,
-    );
     c.check(
         &format!("auto's denials run PermissionDenied ({denials:?})"),
         !denials.is_empty() && denials.iter().all(|d| d["tool"] == "Bash"),
@@ -2500,13 +2268,13 @@ fn g_148_claude_code() {
     c.finish(&a.agent);
 }
 
-/// G-148-opencode (decision 148a/b): a child as the host configures it,
-/// over an account whose own rules ask: Storm's layer turns every ask into
-/// a deny and allows `edit` and `bash`. An edit and a command inside the
-/// workspace run; an edit outside it is denied with no prompt ever, the
-/// denial in the agent's tool result and at the host (the tool part that
-/// failed on a deny rule). Positive control: the same edit under the
-/// account's rules alone prompts.
+/// G-148-opencode (148b, 151 N5): a child's denials reach its host. The
+/// child runs under the account's own rules, which allow `edit` and `bash`
+/// and deny paths outside the workspace; Storm's layer only allows its
+/// child tools. An edit and a command inside the workspace run; an edit
+/// outside it is denied with no prompt, the denial in the agent's tool
+/// result and at the host (the tool part that failed on a deny rule).
+/// Positive control: the same edit under rules that ask prompts.
 #[test]
 fn g_148_opencode() {
     let gate = "G-148-opencode";
@@ -2534,9 +2302,8 @@ fn g_148_opencode() {
     );
     drop(control);
 
-    let mode = storm_runtime::profile::child_permission_mode("opencode", "default").unwrap();
-    let layer =
-        storm_runtime::mcp::StormLayer::new(true, false, mode.opencode_permission).denying_asks();
+    let account = json!({"edit": "allow", "bash": "allow", "external_directory": {"*": "deny"}});
+    let layer = storm_runtime::mcp::StormLayer::new(true, false, Vec::new());
     let dir = tempfile::tempdir().unwrap();
     let account_file = json!({"permission": account}).to_string();
     let extras = storm_runtime::mcp::write_provider_config(
@@ -2643,10 +2410,9 @@ fn g_149_claude_code() {
         return;
     }
     let mut c = Checks::new(gate);
-    let manual: Vec<String> = ["--permission-mode", "default"].map(String::from).into();
+    let manual: Vec<String> = Vec::new();
     let mut control = claude_with(ClaudeOpts {
         args: manual.clone(),
-        auto_off: true,
         storm_mcp: true,
         account_mode: Some("manual"),
         ..Default::default()
@@ -2660,7 +2426,6 @@ fn g_149_claude_code() {
     drop(control);
     let mut control = claude_with(ClaudeOpts {
         args: manual.clone(),
-        auto_off: true,
         storm_mcp: true,
         account_mode: Some("manual"),
         ..Default::default()
@@ -2674,16 +2439,14 @@ fn g_149_claude_code() {
     drop(control);
 
     let layer = storm_runtime::mcp::StormLayer::new(false, false, Vec::new())
-        .asking_for_modes()
         .reading()
         .deleting();
     let auto: Vec<String> = ["--permission-mode", "auto"].map(String::from).into();
     let mut last = None;
-    for (mode, args, auto_off) in [("manual", manual, true), ("auto", auto, false)] {
+    for (mode, args) in [("manual", manual), ("auto", auto)] {
         let mut s = claude_with(ClaudeOpts {
             args,
             allow: layer.claude_allow(),
-            auto_off,
             storm_mcp: true,
             account_mode: Some("manual"),
             ..Default::default()

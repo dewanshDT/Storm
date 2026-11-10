@@ -14,6 +14,7 @@ class SpawnFacts {
     this.depth = 0,
     this.needsAttention,
     this.childWorkspace,
+    this.cwd,
     this.switchState,
     this.childActivity,
     this.pendingEvents,
@@ -46,6 +47,9 @@ class SpawnFacts {
   /// A child's own workspace, once its host has made it.
   final ChildWorkspace? childWorkspace;
 
+  /// The directory a child started in when its host named one (151 N6).
+  final String? cwd;
+
   /// The spawn switch, only where its host could offer spawning now or it is
   /// already on. Null everywhere else, and the client then shows none of it.
   final SpawnSwitch? switchState;
@@ -64,6 +68,7 @@ class SpawnFacts {
       childWorkspace: ws is Map<String, dynamic>
           ? ChildWorkspace.fromJson(ws)
           : null,
+      cwd: j['cwd'] as String?,
       switchState: sw is Map<String, dynamic> ? SpawnSwitch.fromJson(sw) : null,
       childActivity: j['child_activity'] as String?,
       pendingEvents: (j['pending_events'] as num?)?.toInt(),
@@ -181,9 +186,8 @@ class ChildEvent {
 /// "Started", "Reported: succeeded": an event as a person reads it.
 String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
-  'needs_approval' => 'Asked for approval',
   // A child never asks (148a): a prompt there is a fault its parent hears.
-  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Unexpected prompt',
+  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Permission prompt',
   'denied' => deniedLabel(e),
   'idle_timeout' => 'Idle for 10 minutes',
   'usage_limit' => 'Out of usage',
@@ -253,12 +257,16 @@ class SpawnSwitch {
     required this.enabled,
     this.refused,
     this.launchedOn = false,
+    this.childrenWrite = false,
   });
 
   final bool enabled;
 
   /// Launched with the switch on (141e): only such a session turns it on.
   final bool launchedOn;
+
+  /// Its children write to its write vault (151m).
+  final bool childrenWrite;
 
   /// What turning it on would be refused with now (134-2's codes), or null.
   final String? refused;
@@ -267,6 +275,7 @@ class SpawnSwitch {
     enabled: j['enabled'] == true,
     refused: j['refused'] as String?,
     launchedOn: j['launched_on'] == true,
+    childrenWrite: j['children_write'] == true,
   );
 }
 
@@ -507,11 +516,11 @@ String shortCommit(String? commit) =>
     commit == null ? '' : commit.substring(0, commit.length.clamp(0, 7));
 
 /// What a session waiting for a person shows beside its activity (134p).
-/// A permission prompt shows nothing: only a child reports one, and a child
-/// never asks the person (decision 148).
 String? attentionLabel(String? kind) => switch (kind) {
   // Decision 149c: a deletion waits for the person's Approve.
   'delete_approval' => 'Needs you',
+  // 151 N5: a child's own prompt waits for the person, in its terminal.
+  'permission_prompt' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,
@@ -520,8 +529,9 @@ String? attentionLabel(String? kind) => switch (kind) {
 /// Why the spawn switch would not turn on, as specific as the server is
 /// (138p point 9).
 String spawnRefusalText(String code, String agent) => switch (code) {
+  'host_too_old' => kHostTooOldToSpawn,
   'identity_unverified' => "This host's session identity isn't verified",
-  'isolation_unverified' => "This host doesn't isolate sessions",
+  'isolation_unverified' => "This host's session isolation isn't working",
   'workspace_held' => 'Another session is working in this workspace',
   'provider_cannot_spawn' => "$agent can't start agents",
   'launched_without_spawn' => kSpawnAtLaunch,
@@ -532,6 +542,11 @@ String spawnRefusalText(String code, String agent) => switch (code) {
 /// What a child shows where a crew move would be offered (145i): it is in
 /// its root's crew, and goes where that goes.
 const kMovesWithParent = 'moves with the agent that started it';
+
+/// Why an old host offers no spawning (151 N6): it can't say who its
+/// sessions run as.
+const kHostTooOldToSpawn =
+    'Update storm-runtime on this host to let agents start agents';
 
 /// The agents that can start agents (134-2).
 const kSpawnProviders = {'claude-code', 'opencode', 'codex'};
@@ -544,9 +559,9 @@ const kSpawnAtLaunch =
 /// The cap a request hit, in the decision's words (C4).
 String capText(String? cap) => switch (cap) {
   'depth' => 'children can’t start agents yet',
-  'children' => '3 live children',
-  'tree' => '6 live sessions in a tree',
-  'max_sessions' => 'the host’s session limit',
+  'children' => 'the host’s agents-per-session limit',
+  'tree' => 'the host’s agents-per-tree limit',
+  'max_sessions' => 'the host’s concurrent-sessions limit',
   'inbox' => 'the child’s inbox is full',
   _ => cap ?? 'a limit',
 };
@@ -558,8 +573,10 @@ String requestRefusalText(String? reason, String? cap) => switch (reason) {
   'revoked' => 'starting agents was turned off for this session',
   'requester_ended' => 'the asking session ended',
   'target_gone' => 'the session it named is gone or has ended',
+  'host_too_old' => 'the host’s storm-runtime is too old to start agents',
   'identity_unverified' => 'the host’s session identity isn’t verified',
-  'isolation_unverified' => 'the host doesn’t isolate sessions',
+  'isolation_unverified' => 'the host’s session isolation isn’t working',
+  'bad_cwd' => 'the directory it named isn’t inside a workspace',
   'agent_unavailable' => 'the host can’t start that agent for a child',
   null => 'refused',
   _ => reason.replaceAll('_', ' '),

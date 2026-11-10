@@ -12,9 +12,9 @@ import 'agent_fakes.dart';
 import 'shell_harness.dart';
 import 'spawn_fakes.dart';
 
-/// Decision 146 in the client: the launcher's Permission mode (146b), the
-/// mode on a session's row and in About; and since decision 148 no Needs
-/// you for a child, which never asks the person.
+/// Decision 146 in the client: the launcher's Permission mode (146b), every
+/// mode the agent takes passed through (151 N5), the mode on a session's
+/// row and in About; and a child's own prompt as Needs you.
 void main() {
   const wide = Size(1400, 900);
   const phone = Size(899, 900);
@@ -61,7 +61,10 @@ void main() {
   group('Permission mode (146b)', () {
     for (final (label, mode) in [
       ('Accept edits', 'accept_edits'),
+      ('Plan', 'plan'),
       ('Auto', 'auto'),
+      ("Don't ask (refuses what isn't allowed)", 'dont_ask'),
+      ('Bypass permissions (never asks)', 'bypass'),
     ]) {
       testWidgets('A-146-2: the launcher sends $mode', (t) async {
         final agents = server();
@@ -85,19 +88,16 @@ void main() {
     });
 
     testWidgets(
-      'A-146-2: only the agent’s own modes are offered, and never a bypass',
+      'A-146-2: only the agent’s own modes are offered, bypass among them',
       (t) async {
         final agents = server();
         final c = await launcher(t, agents);
         await t.tap(find.byKey(const Key('launcher-permission-mode')));
         await t.pumpAndSettle();
-        expect(find.text('Manual (asks)'), findsWidgets);
+        expect(find.text("The agent's own setting"), findsWidgets);
         expect(find.text('Accept edits'), findsOneWidget);
         expect(find.text('Auto'), findsOneWidget);
-        expect(
-          find.textContaining(RegExp('bypass|skip', caseSensitive: false)),
-          findsNothing,
-        );
+        expect(find.text('Bypass permissions (never asks)'), findsOneWidget);
         await t.tap(find.text('Auto').last);
         await t.pumpAndSettle();
 
@@ -126,17 +126,21 @@ void main() {
       },
     );
 
-    test('A-146-2: the modes per agent mirror the server, with no bypass', () {
+    test('A-146-2: the modes per agent mirror the server', () {
       expect(permissionModesOf('claude-code'), [
         'default',
         'accept_edits',
+        'plan',
         'auto',
+        'dont_ask',
+        'bypass',
       ]);
       expect(permissionModesOf('opencode'), ['default', 'accept_edits']);
       for (final other in ['codex', 'shell', 'cursor', null]) {
         expect(permissionModesOf(other), ['default'], reason: '$other');
       }
       expect(permissionModeOf('bypassPermissions'), isNull);
+      expect(permissionModeOf('bypass'), 'bypass');
       expect(permissionModeOf('accept_edits'), 'accept_edits');
       expect(
         AgentSession.fromJson(
@@ -177,7 +181,7 @@ void main() {
     });
   });
 
-  group('children never ask (148)', () {
+  group('a child\'s own prompt (151 N5)', () {
     Map<String, dynamic> inCrew(Map<String, dynamic> s) => {
       ...s,
       'crew': {'id': 'crw_1', 'order': 0},
@@ -195,16 +199,16 @@ void main() {
       return crew ? [inCrew(parent), inCrew(child)] : [parent, child];
     }
 
-    test('A-148-3: a permission prompt has no label', () {
-      expect(attentionLabel('permission_prompt'), isNull);
+    test('151 N5: a permission prompt is Needs you', () {
+      expect(attentionLabel('permission_prompt'), 'Needs you');
       expect(attentionLabel('blocked'), 'Blocked');
       expect(attentionLabel('usage_limit'), 'Out of usage');
     });
 
     for (final size in [wide, phone]) {
       testWidgets(
-        'A-148-3: a child at an unexpected prompt shows no Needs you on '
-        'itself, its parent or its crew at ${size.width.toInt()}px',
+        '151 N5: a child at its own prompt shows Needs you, and Storm types '
+        'nothing into it, at ${size.width.toInt()}px',
         (t) async {
           final agents = FakeAgentServer(
             hosts: [agentHost()],
@@ -213,11 +217,9 @@ void main() {
           );
           final spawning = FakeSpawning(agents);
           final c = await open(t, agents, size: size);
-          expect(find.text('Needs you'), findsNothing);
-          expect(find.byKey(const Key('needs-you-ags_c')), findsNothing);
           expect(
             find.byKey(const Key('attention-permission_prompt')),
-            findsNothing,
+            findsWidgets,
           );
           expect(spawning.terminalWrites, 0);
           await disposeShell(t, c);
