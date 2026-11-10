@@ -219,11 +219,14 @@ the host checks that every call to a session's Storm tools comes from inside
 that session.
 
 Agent spawning — a session starting, messaging and ending agents of its own,
-in its crew — is off until you allow it for a session at launch, and is
-offered on any host that says which account it runs as. Those agents run as
-the same account, in the session's workspace, under their agent's own
-permissions; a Claude Code or OpenCode prompt shows as Needs you (a Codex
-one does not yet).
+in its crew — is offered on any host that says which account it runs as.
+The launcher's **Allow this session to start agents** is ticked by default
+and only you can turn it on, never a key or an agent.
+Those agents run as the same account, in the session's workspace, under
+their agent's own permissions; a Claude Code or OpenCode prompt shows as
+Needs you (a Codex one does not yet). Each host's **Limits** (Settings ›
+Hosts) cap agents per session (3) and per tree (6), and can lower its
+concurrent sessions; a session's agents can't start their own.
 
 The package also ships `storm-runtime-isolation`, a root helper that runs
 each session as its own system user in its own sandbox and network. It is
@@ -378,7 +381,8 @@ M0–M16 and M18–M28 are done; the newest release is on
 [GitHub Releases](https://github.com/dewanshDT/Storm/releases/latest). That
 covers auth (pairing by QR or, on your network, by password; sessions; MCP
 keys — the shared token is gone) and a single account (decision 82); the Agent
-Runtime, with Runtime Hosts on Linux, macOS and Windows and agent sessions
+Runtime, with Runtime Hosts on Linux, macOS and Windows, run as you or as a
+service, and agent sessions
 (Claude Code, Codex, OpenCode) in a terminal you can resume, each keeping
 its own MCP servers beside your integrations, grouped into crews, with the
 agent CLIs installed and updated from the app; agent deletes that wait for
@@ -389,8 +393,9 @@ hosts you tick; the desktop app on macOS, Windows and Linux; Storm v2's activity
 relay, which you can run yourself (a Cloudflare Worker relay is deployed for
 testing). The website and its docs are at
 [storm.dewansh.space](https://storm.dewansh.space) (M27). M17 (Markdown read
-mode) is in progress. Per-session isolation and agent spawning are built and
-ship turned off while they are tested on real hosts.
+mode) is in progress. Agent spawning works on every host, with limits per
+host; per-session isolation is built and ships turned off while it is
+tested on real hosts.
 
 Milestone status and the decision log are kept in the maintainer's notes, not
 in this repo. License: [MIT](LICENSE).
