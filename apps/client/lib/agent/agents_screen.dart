@@ -180,6 +180,7 @@ Future<AgentSession?> resumeAgentSession(
       cols: s.cols,
       rows: s.rows,
       resumeOf: s.id,
+      spawn: !s.spawn.isChild && (s.spawn.switchState?.launchedOn ?? false),
     );
     if (!context.mounted) return launched;
     final notice = launched.launchNotice;
