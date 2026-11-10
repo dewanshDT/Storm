@@ -354,22 +354,28 @@ mod tests {
         let bin = t.path().join("agent");
         let left = t.path().join("left");
         // As the acceptance stub does: print, leave a HUP-ignoring child, and
-        // hang until the deadline.
+        // hang until the deadline. The child names itself by rename, so the
+        // file is either absent or whole.
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\necho 1.0.0\n(trap '' HUP; exec sleep 600) & echo $! > '{}'\nexec sleep 600\n",
+                "#!/bin/sh\necho 1.0.0\nsh -c 'trap \"\" HUP; echo $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"; exec sleep 600' _ '{}' &\nexec sleep 600\n",
                 left.display()
             ),
         )
         .unwrap();
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(run_version(&bin, None), None, "it timed out");
-        let pid: i32 = std::fs::read_to_string(&left)
-            .unwrap()
-            .trim()
-            .parse()
-            .unwrap();
+        // On a starved runner the deadline can pass before the stub's child
+        // exists, which proves nothing either way, so probe again.
+        let mut pid = None;
+        for _ in 0..5 {
+            assert_eq!(run_version(&bin, None), None, "it timed out");
+            if let Ok(s) = std::fs::read_to_string(&left) {
+                pid = Some(s.trim().parse::<i32>().unwrap());
+                break;
+            }
+        }
+        let pid = pid.expect("the stub never started its child before the deadline");
         let alive = || {
             rustix::process::test_kill_process(rustix::process::Pid::from_raw(pid).unwrap()).is_ok()
         };
