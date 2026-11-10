@@ -559,9 +559,9 @@ const kSpawnAtLaunch =
 /// The cap a request hit, in the decision's words (C4).
 String capText(String? cap) => switch (cap) {
   'depth' => 'children can’t start agents yet',
-  'children' => '3 live children',
-  'tree' => '6 live sessions in a tree',
-  'max_sessions' => 'the host’s session limit',
+  'children' => 'the host’s agents-per-session limit',
+  'tree' => 'the host’s agents-per-tree limit',
+  'max_sessions' => 'the host’s concurrent-sessions limit',
   'inbox' => 'the child’s inbox is full',
   _ => cap ?? 'a limit',
 };

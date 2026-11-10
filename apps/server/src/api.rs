@@ -501,6 +501,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
         )
+        // A host's Limits (decision 152): owner only, in ops.
+        .route(
+            "/v1/agent/hosts/{id}/limits",
+            get(agent_host_limits).put(agent_set_host_limits),
+        )
         // Making one (decision 141c) is owner only, in ops.
         .route(
             "/v1/agent/hosts/{id}/workspaces",
@@ -1625,6 +1630,29 @@ async fn agent_rename_host(
 ) -> ApiResult<Json<crate::ops::HostView>> {
     Ok(Json(
         crate::ops::rename_host(&state, &actor, &id, &body.name).await?,
+    ))
+}
+
+async fn agent_host_limits(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<crate::ops::HostLimitsView>> {
+    Ok(Json(
+        crate::ops::get_host_limits(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_set_host_limits(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::SetHostLimits>,
+) -> ApiResult<Json<crate::ops::HostLimitsView>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::set_host_limits(&state, &actor, device, &id, req).await?,
     ))
 }
 
@@ -16845,6 +16873,236 @@ pub(crate) mod tests {
         }
         // The person's own switch still works, at launch.
         assert!(f.launch_on("claude-code").await["spawn"]["enabled"] == true);
+    }
+
+    /// 152a, 152g: a host's Limits are the signed-in owner's. Read and set
+    /// on the session tier, ranges checked, each change audited old → new,
+    /// and the host's view and list_agents say them.
+    #[tokio::test]
+    async fn a_hosts_limits_are_the_owners_and_each_change_is_audited() {
+        let dir = tempdir::TempDir::new("storm-152-limits").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent_on("claude-code", false).await;
+        let path = format!("/v1/agent/hosts/{}/limits", f.host_id);
+        let (status, view) = f.ask(get_with_auth(&path, &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            view,
+            serde_json::json!({"max_children": 3, "max_tree": 6, "max_sessions": null,
+                "host_max_sessions": 8, "effective_max_sessions": 8, "depth": 1,
+                "hard_max_children": 10, "hard_max_tree": 24})
+        );
+        let limits_events = || async {
+            f.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind == crate::ops::EVENT_HOST_LIMITS_CHANGED)
+                .map(|(_, d)| serde_json::from_str::<serde_json::Value>(&d).unwrap())
+                .collect::<Vec<_>>()
+        };
+        for (body, code) in [
+            (
+                serde_json::json!({"max_children": 0, "max_tree": 6}),
+                "limit_out_of_range",
+            ),
+            (
+                serde_json::json!({"max_children": 11, "max_tree": 24}),
+                "limit_out_of_range",
+            ),
+            (
+                serde_json::json!({"max_children": 3, "max_tree": 25}),
+                "limit_out_of_range",
+            ),
+            (
+                serde_json::json!({"max_children": 3, "max_tree": 6, "max_sessions": 0}),
+                "limit_out_of_range",
+            ),
+            (
+                serde_json::json!({"max_children": 4, "max_tree": 3}),
+                "tree_below_session",
+            ),
+        ] {
+            let (status, refused) = f
+                .ask(put_json_with_auth(&path, body.clone(), &f.owner_bearer))
+                .await;
+            assert_eq!(
+                (status, refused["error"].as_str()),
+                (StatusCode::BAD_REQUEST, Some(code)),
+                "{body}"
+            );
+        }
+        assert!(
+            limits_events().await.is_empty(),
+            "a refusal changes nothing"
+        );
+
+        let set = serde_json::json!({"max_children": 2, "max_tree": 4, "max_sessions": 20});
+        let (status, view) = f
+            .ask(put_json_with_auth(&path, set.clone(), &f.owner_bearer))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            (
+                &view["max_sessions"],
+                &view["host_max_sessions"],
+                &view["effective_max_sessions"]
+            ),
+            (
+                &serde_json::json!(20),
+                &serde_json::json!(8),
+                &serde_json::json!(8)
+            ),
+            "an override above the host's is accepted and not in force"
+        );
+        let (_, again) = f.ask(put_json_with_auth(&path, set, &f.owner_bearer)).await;
+        assert_eq!(again, view);
+        assert_eq!(
+            limits_events().await,
+            vec![serde_json::json!({"host_id": f.host_id,
+                "old": {"max_children": 3, "max_tree": 6, "max_sessions": null},
+                "new": {"max_children": 2, "max_tree": 4, "max_sessions": 20}})],
+            "one change, one event"
+        );
+        let (_, hosts) = f
+            .ask(get_with_auth("/v1/agent/hosts", &f.owner_bearer))
+            .await;
+        let host = hosts
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|h| h["id"] == f.host_id.as_str())
+            .unwrap();
+        assert_eq!(host["limits"], view);
+        let listed = structured(&f.tool(&parent, "list_agents", serde_json::json!({})).await);
+        assert_eq!(
+            listed["limits"],
+            serde_json::json!({"depth": 1, "children": 2, "tree": 4})
+        );
+
+        // No key and no host credential reaches the route; the op refuses
+        // every actor but a signed-in session.
+        let (_, key) = f
+            .ask(post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "a key"}),
+                &f.owner_bearer,
+            ))
+            .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = f
+                .ask(put_json_with_auth(
+                    &path,
+                    serde_json::json!({"max_children": 10, "max_tree": 24}),
+                    bearer,
+                ))
+                .await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            let (status, _) = f.ask(get_with_auth(&path, bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        for actor in [
+            Actor::Agent {
+                session_id: parent.clone(),
+                host_id: f.host_id.clone(),
+                user_id: f.owner.clone(),
+                write_vault: None,
+            },
+            Actor::Key {
+                key_id: "key_X".into(),
+                user_id: f.owner.clone(),
+            },
+        ] {
+            let refused = crate::ops::set_host_limits(
+                &f.state,
+                &actor,
+                None,
+                &f.host_id,
+                crate::ops::SetHostLimits {
+                    max_children: 10,
+                    max_tree: 24,
+                    max_sessions: None,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(
+                (refused.0, refused.1.as_str()),
+                (StatusCode::FORBIDDEN, "owner_only")
+            );
+            let refused = crate::ops::get_host_limits(&f.state, &actor, &f.host_id)
+                .await
+                .unwrap_err();
+            assert_eq!(refused.0, StatusCode::FORBIDDEN);
+        }
+        assert_eq!(limits_events().await.len(), 1);
+        let (status, _) = f
+            .ask(get_with_auth(
+                "/v1/agent/hosts/hst_nope/limits",
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// 152a, 152f: a start past a host's Limits is refused naming the limit
+    /// and its value, and no Storm tool an agent is offered changes them.
+    #[tokio::test]
+    async fn no_agent_tool_changes_a_hosts_limits() {
+        let dir = tempdir::TempDir::new("storm-152-tools").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent_on("claude-code", false).await;
+        let path = format!("/v1/agent/hosts/{}/limits", f.host_id);
+        let (status, _) = f
+            .ask(put_json_with_auth(
+                &path,
+                serde_json::json!({"max_children": 1, "max_tree": 2}),
+                &f.owner_bearer,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let started = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "one"}))
+                .await,
+        );
+        assert_eq!(started["state"], "started", "{started}");
+        let refused = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "two"}))
+                .await,
+        );
+        assert_eq!(
+            (&refused["reason"], &refused["cap"]),
+            (&serde_json::json!("limit"), &serde_json::json!("children")),
+            "{refused}"
+        );
+        assert!(
+            refused["message"]
+                .as_str()
+                .unwrap()
+                .contains("limit of 1 running agents per session"),
+            "{refused}"
+        );
+        let before = f.state.agent.host_limits(&f.host_id).unwrap();
+        let args = serde_json::json!({"max_children": 10, "max_tree": 24, "max_sessions": 99,
+            "children": 10, "tree": 24, "limits": {"children": 10}, "host_id": f.host_id,
+            "id": f.host_id, "task": "raise your limits", "vault": "v", "note_id": "n"});
+        let tools = f.storm_tools(&parent).await;
+        assert!(tools.iter().any(|t| t == "start_agent"), "{tools:?}");
+        for tool in &tools {
+            assert!(!tool.contains("limit"), "{tool}");
+            if tool != "start_agent" {
+                f.tool(&parent, tool, args.clone()).await;
+            }
+        }
+        assert_eq!(f.state.agent.host_limits(&f.host_id).unwrap(), before);
+        let mcp = include_str!("mcp.rs");
+        for name in ["set_host_limits", "host_limits", "SetHostLimits"] {
+            assert!(!mcp.contains(name), "mcp.rs names {name}");
+        }
     }
 
     /// Decision 143 through the real tools, with 145a: a Claude Code parent

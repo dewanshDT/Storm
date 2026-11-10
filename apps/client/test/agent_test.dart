@@ -720,6 +720,159 @@ void main() {
       );
     });
 
+    group('a host’s limits (152)', () {
+      Map<String, dynamic> limits({
+        int children = 3,
+        int tree = 6,
+        int? sessions,
+        int effective = 8,
+      }) => {
+        'max_children': children,
+        'max_tree': tree,
+        'max_sessions': sessions,
+        'host_max_sessions': 8,
+        'effective_max_sessions': effective,
+        'depth': 1,
+        'hard_max_children': 10,
+        'hard_max_tree': 24,
+      };
+
+      (MockClient, List<Map<String, dynamic>>) limitsServer() {
+        final puts = <Map<String, dynamic>>[];
+        var current = limits();
+        final client = MockClient((req) async {
+          final path = req.url.path;
+          if (path == '/v1/agent/hosts' && req.method == 'GET') {
+            return http.Response(
+              jsonEncode([
+                {...hosts.first, 'limits': current},
+              ]),
+              200,
+            );
+          }
+          if (path == '/v1/agent/hosts/hst_1/limits' && req.method == 'PUT') {
+            final body = jsonDecode(req.body) as Map<String, dynamic>;
+            puts.add(body);
+            if ((body['max_tree'] as int) < (body['max_children'] as int)) {
+              return http.Response('{"error":"tree_below_session"}', 400);
+            }
+            final s = body['max_sessions'] as int?;
+            current = limits(
+              children: body['max_children'] as int,
+              tree: body['max_tree'] as int,
+              sessions: s,
+              effective: s == null || s > 8 ? 8 : s,
+            );
+            return http.Response(jsonEncode(current), 200);
+          }
+          if (path == '/v1/config/agent') {
+            return http.Response('{"default_provider":"claude-code"}', 200);
+          }
+          return http.Response('{"error":"nope"}', 404);
+        });
+        return (client, puts);
+      }
+
+      testWidgets('the row says them; the section shows the defaults and '
+          'depth read-only', (tester) async {
+        final (client, _) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        expect(
+          find.textContaining(
+            'Limits: 3 agents per session · 6 per tree · 8 sessions at once',
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('host-limits')), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-children'))).data,
+          '3',
+        );
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-tree'))).data,
+          '6',
+        );
+        expect(find.text('The host’s own (8)'), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-depth'))).data,
+          'Depth: 1 level (agents can’t start their own agents yet)',
+        );
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('host-limits')),
+            matching: find.byType(TextField),
+          ),
+          findsOneWidget,
+          reason: 'depth is not a field',
+        );
+      });
+
+      testWidgets('saving sends them all and the row follows', (tester) async {
+        final (client, puts) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limit-children-less')));
+        await tester.tap(find.byKey(const Key('limit-tree-more')));
+        await tester.enterText(find.byKey(const Key('limit-sessions')), '4');
+        await tester.tap(find.byKey(const Key('save-limits')));
+        await tester.pumpAndSettle();
+        expect(puts, [
+          {'max_children': 2, 'max_tree': 7, 'max_sessions': 4},
+        ]);
+        expect(find.byKey(const Key('host-limits')), findsNothing);
+        expect(
+          find.textContaining(
+            'Limits: 2 agents per session · 7 per tree · 4 sessions at once',
+          ),
+          findsOneWidget,
+        );
+      });
+
+      testWidgets('a refusal is shown and the section stays open', (
+        tester,
+      ) async {
+        final (client, puts) = limitsServer();
+        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpAndSettle();
+        for (var i = 0; i < 4; i++) {
+          await tester.tap(find.byKey(const Key('limit-children-more')));
+          await tester.pump();
+        }
+        await tester.tap(find.byKey(const Key('save-limits')));
+        await tester.pumpAndSettle();
+        expect(puts.single['max_children'], 7);
+        expect(
+          find.text('Agents per tree must be at least agents per session.'),
+          findsOneWidget,
+        );
+        expect(find.byKey(const Key('host-limits')), findsOneWidget);
+      });
+
+      test('an override above the host’s own is not in force', () {
+        final l = HostLimits.fromJson(limits(sessions: 20));
+        expect(l.overrideIneffective, isTrue);
+        expect(sessionsLimitText(l), '8 sessions at once');
+        expect(
+          HostLimits.fromJson(
+            limits(sessions: 4, effective: 4),
+          ).overrideIneffective,
+          isFalse,
+        );
+        expect(
+          AgentHost.fromJson({...hosts.first}).limits,
+          isNull,
+          reason: 'an older server says none',
+        );
+      });
+    });
+
     testWidgets('the enroll blurb points at the sheet, not a bare command', (
       tester,
     ) async {

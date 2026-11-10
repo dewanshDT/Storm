@@ -135,6 +135,25 @@ default agent › Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt. For the platform you pick, the sheet lists two sets of
 commands: **As you** first, then **As its own account**.
 
+## Limits
+
+Each host has **Limits**, which you set from **Settings › Hosts & default
+agent › Limits** on its row. Storm keeps them on your server; nothing is
+written to the host, its `runtime.toml` or any agent's settings.
+
+| Limit | Default | Range | What it counts |
+|---|---|---|---|
+| **Agents per session** | 3 | 1–10 | Agents one session has running at a time |
+| **Agents per tree** | 6 | 1–24 | Sessions running in one tree: the session you started and every agent under it. At least agents per session |
+| **Concurrent sessions** | the host's own | 1 or more | Sessions running on the host. It can only lower the host's `max_sessions`: a number above it is kept, and the host's number stays in force |
+| **Depth** | 1 level | not adjustable | Agents a session starts can't start their own agents yet |
+
+Lowering a limit ends and pauses nothing: what is running keeps running,
+and only new starts are refused, each naming the limit it hit. Raising one
+applies to the next start. Only you can change them, signed in on a paired
+device: no MCP key, host credential or agent can. Every change is recorded
+on your server, with the old and new values.
+
 ## Installing agents from the app
 
 **Settings › Agents** (beta) lists every agent on every host, with its version

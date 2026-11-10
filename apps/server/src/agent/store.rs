@@ -1669,6 +1669,17 @@ pub mod spawn {
                  created_at TEXT NOT NULL
              );
 
+             -- 152a: a host's Limits, set only by its owner. No row is the
+             -- defaults.
+             CREATE TABLE IF NOT EXISTS host_limits (
+                 host_id      TEXT PRIMARY KEY,
+                 max_children INTEGER NOT NULL,
+                 max_tree     INTEGER NOT NULL,
+                 max_sessions INTEGER,
+                 updated      TEXT NOT NULL,
+                 updated_by   TEXT
+             );
+
              -- 134-5: a child's own workspace as its host made it (137-1):
              -- the mode, and for a clone the commit it starts from.
              CREATE TABLE IF NOT EXISTS session_child_workspace (
@@ -1907,8 +1918,61 @@ pub mod spawn {
     /// (`wrong_parent`) and 137 does not say how one would read it; until a
     /// decision does, a child starts none. Lower than C4's, never higher.
     pub const BUILT_DEPTH: i64 = 1;
-    pub const MAX_CHILDREN: i64 = 3;
-    pub const MAX_TREE: i64 = 6;
+
+    /// 152b, 152c: a host's Limits when its owner set none, and the most
+    /// they may be set to. Anything sized by them is sized by the ceiling.
+    pub const DEFAULT_CHILDREN: i64 = 3;
+    pub const HARD_MAX_CHILDREN: i64 = 10;
+    pub const DEFAULT_TREE: i64 = 6;
+    pub const HARD_MAX_TREE: i64 = 24;
+
+    /// A host's Limits (152a), as its owner set them. `max_sessions` only
+    /// lowers what the host reports (152d); `None` is the host's own.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    pub struct HostLimits {
+        pub max_children: i64,
+        pub max_tree: i64,
+        pub max_sessions: Option<i64>,
+    }
+
+    impl Default for HostLimits {
+        fn default() -> Self {
+            Self {
+                max_children: DEFAULT_CHILDREN,
+                max_tree: DEFAULT_TREE,
+                max_sessions: None,
+            }
+        }
+    }
+
+    impl HostLimits {
+        /// The concurrent sessions in force on a host reporting `host`, 0
+        /// being no limit: the lower of the two, never more than the host's.
+        pub fn effective_sessions(&self, host: u32) -> u32 {
+            let Some(over) = self.max_sessions else {
+                return host;
+            };
+            let over = u32::try_from(over).unwrap_or(u32::MAX);
+            if host == 0 { over } else { over.min(host) }
+        }
+    }
+
+    pub(super) fn limits_of(conn: &Connection, host_id: &str) -> Result<HostLimits> {
+        Ok(conn
+            .query_row(
+                "SELECT max_children, max_tree, max_sessions FROM host_limits WHERE host_id = ?1",
+                params![host_id],
+                |r| {
+                    Ok(HostLimits {
+                        max_children: r.get(0)?,
+                        max_tree: r.get(1)?,
+                        max_sessions: r.get(2)?,
+                    })
+                },
+            )
+            .optional()?
+            .unwrap_or_default())
+    }
 
     /// 134j: at most this many unacknowledged messages (`queued`,
     /// `delivered`) in one inbox. A parent's messages may take all but one:
@@ -2201,6 +2265,49 @@ pub mod spawn {
             ))?;
             let rows = stmt.query_map(params![parent], from_row)?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
+        }
+
+        pub fn host_limits(&self, host_id: &str) -> Result<HostLimits> {
+            limits_of(&self.conn, host_id)
+        }
+
+        /// Replaces a host's Limits, answering what they were. Checked by
+        /// the caller; a running session is never touched (152f).
+        pub fn set_host_limits(
+            &mut self,
+            host_id: &str,
+            limits: &HostLimits,
+            by: &str,
+            now: &str,
+        ) -> Result<HostLimits> {
+            let tx = self.conn.transaction()?;
+            let was = limits_of(&tx, host_id)?;
+            tx.execute(
+                "INSERT INTO host_limits
+                     (host_id, max_children, max_tree, max_sessions, updated, updated_by)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT (host_id) DO UPDATE SET max_children = excluded.max_children,
+                     max_tree = excluded.max_tree, max_sessions = excluded.max_sessions,
+                     updated = excluded.updated, updated_by = excluded.updated_by",
+                params![
+                    host_id,
+                    limits.max_children,
+                    limits.max_tree,
+                    limits.max_sessions,
+                    now,
+                    by
+                ],
+            )?;
+            tx.commit()?;
+            Ok(was)
+        }
+
+        pub fn forget_host_limits(&self, host_id: &str) -> Result<()> {
+            self.conn.execute(
+                "DELETE FROM host_limits WHERE host_id = ?1",
+                params![host_id],
+            )?;
+            Ok(())
         }
 
         /// The cap a start by `requester` would hit now, counted as P-2
@@ -3091,15 +3198,18 @@ pub mod spawn {
             params![r.id],
             |row| row.get(0),
         )?;
-        if children + 1 > MAX_CHILDREN {
+        // A child runs on its parent's host, so the tree is that host's.
+        let limits = limits_of(conn, &r.host_id)?;
+        if children + 1 > limits.max_children {
             return Ok(Some("children"));
         }
         let root = &lineage.root_session;
         let root_live = get_in(conn, root)?.is_some_and(|s| !s.is_ended());
         let tree_live = root_live as i64 + descendants_of(conn, root, true)?.len() as i64;
-        if tree_live + 1 > MAX_TREE {
+        if tree_live + 1 > limits.max_tree {
             return Ok(Some("tree"));
         }
+        let max_sessions = limits.effective_sessions(max_sessions);
         if max_sessions > 0 {
             let live: i64 = conn.query_row(
                 &format!(
