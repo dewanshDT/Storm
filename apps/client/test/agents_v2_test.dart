@@ -356,10 +356,25 @@ void main() {
       expect(body['resume_of'], 'ags_done');
       expect(body['host_id'], 'hst_1');
       expect(body['provider'], 'claude-code');
+      expect(body.containsKey('spawn'), isFalse, reason: 'launched without it');
       expect(where(c).path, '/agents/s/ags_new1');
       // The conversation is listed once, under its latest session.
       expect(find.byKey(const Key('session-ags_done')), findsNothing);
       expect(find.byKey(const Key('session-ags_new1')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Resume keeps the switch it was launched with', (tester) async {
+      final launchedOn = withConversation()
+        ..['spawn'] = {'enabled': true, 'launched_on': true};
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [launchedOn],
+      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
+      await tester.tap(find.byKey(const Key('resume-session')));
+      await tester.pumpAndSettle();
+      expect(agents.launches.single['spawn'], true);
       await disposeShell(tester, c);
     });
 

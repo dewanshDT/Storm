@@ -98,7 +98,8 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   RoleNote? _role;
 
   /// "Allow this session to start agents" (141e): off by default.
-  bool _spawn = false;
+  // On by default (operator, 2026-11-10); the person can still untick it.
+  bool _spawn = true;
 
   /// Its children write to its write vault (151m): off by default.
   bool _childrenWrite = false;

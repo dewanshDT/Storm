@@ -319,7 +319,7 @@ void main() {
       execution: {'account': 'storm-runtime', 'isolation': mode},
     );
 
-    testWidgets('off by default, sent only when turned on', (t) async {
+    testWidgets('on by default, not sent when turned off', (t) async {
       final agents = server(host: c0());
       final c = await launcher(t, agents);
       expect(find.byKey(const Key('launcher-spawn')), findsOneWidget);
@@ -331,7 +331,7 @@ void main() {
       );
       await t.tap(find.byKey(const Key('launch')));
       await t.pumpAndSettle();
-      expect(agents.launches.single.containsKey('spawn'), isFalse);
+      expect(agents.launches.single['spawn'], true);
       await disposeShell(t, c);
 
       final again = server(host: c0());
@@ -340,7 +340,7 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launch')));
       await t.pumpAndSettle();
-      expect(again.launches.single['spawn'], true);
+      expect(again.launches.single.containsKey('spawn'), isFalse);
       await disposeShell(t, c2);
     });
 
@@ -349,10 +349,11 @@ void main() {
       final agents = server(host: c0());
       final c = await launcher(t, agents);
       const tick = Key('launcher-children-write');
-      expect(find.byKey(tick), findsNothing);
-      await t.tap(find.byKey(const Key('launcher-spawn')));
-      await t.pumpAndSettle();
-      expect(find.byKey(tick), findsOneWidget);
+      expect(
+        find.byKey(tick),
+        findsOneWidget,
+        reason: 'spawn is on by default',
+      );
       await t.tap(find.byKey(const Key('launcher-writes')));
       await t.pumpAndSettle();
       expect(find.byKey(tick), findsNothing, reason: 'read only');
@@ -366,8 +367,6 @@ void main() {
 
       final again = server(host: c0());
       final c2 = await launcher(t, again);
-      await t.tap(find.byKey(const Key('launcher-spawn')));
-      await t.pumpAndSettle();
       await t.tap(find.byKey(tick));
       await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launch')));
@@ -379,8 +378,6 @@ void main() {
 
       final off = server(host: c0());
       final c3 = await launcher(t, off);
-      await t.tap(find.byKey(const Key('launcher-spawn')));
-      await t.pumpAndSettle();
       await t.tap(find.byKey(tick));
       await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launcher-spawn')));
@@ -415,8 +412,6 @@ void main() {
       }
       final agents = server(host: c0());
       final c = await launcher(t, agents);
-      await t.tap(find.byKey(const Key('launcher-spawn')));
-      await t.pumpAndSettle();
       for (final other in ['Shell', 'Cursor']) {
         await pick(t, 'launcher-agent', find.text(other).last);
         expect(
