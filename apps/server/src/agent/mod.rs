@@ -1594,6 +1594,25 @@ impl AgentManager {
         self.store.lock().unwrap().host_execution(host_id)
     }
 
+    /// A host's Limits (152a): what its owner set, else the defaults.
+    pub fn host_limits(&self, host_id: &str) -> Result<store::spawn::HostLimits> {
+        self.store.lock().unwrap().host_limits(host_id)
+    }
+
+    /// Answers the Limits replaced. New starts are counted against them at
+    /// once; nothing running is ended or parked (152f).
+    pub fn set_host_limits(
+        &self,
+        host_id: &str,
+        limits: &store::spawn::HostLimits,
+        by: &str,
+    ) -> Result<store::spawn::HostLimits> {
+        self.store
+            .lock()
+            .unwrap()
+            .set_host_limits(host_id, limits, by, &now())
+    }
+
     pub fn ran_as_of(&self, session_id: &str) -> Result<Option<RanAs>> {
         self.store.lock().unwrap().ran_as(session_id)
     }
@@ -2193,15 +2212,17 @@ impl AgentManager {
             )));
         }
         // A parked child has no process (145e).
-        let live_on_host = self
-            .store
-            .lock()
-            .unwrap()
-            .for_host(&req.host_id)?
-            .iter()
-            .filter(|r| !r.is_ended() && r.status != "parked")
-            .count();
-        if caps.max_sessions > 0 && live_on_host >= caps.max_sessions as usize {
+        let (live_on_host, max_sessions) = {
+            let store = self.store.lock().unwrap();
+            let live = store
+                .for_host(&req.host_id)?
+                .iter()
+                .filter(|r| !r.is_ended() && r.status != "parked")
+                .count();
+            let limits = store.host_limits(&req.host_id)?;
+            (live, limits.effective_sessions(caps.max_sessions))
+        };
+        if max_sessions > 0 && live_on_host >= max_sessions as usize {
             return Err(AgentError::TooManySessions);
         }
 
@@ -3156,6 +3177,7 @@ impl AgentManager {
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
+        self.store.lock().unwrap().forget_host_limits(host_id)?;
         self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::store::SessionRecord;
 use super::store::spawn::{
-    Lineage, MAX_DETAILS_BYTES, MAX_SUMMARY_BYTES, MAX_TREE, RESULT_OUTCOMES, SpawnResult,
+    HARD_MAX_TREE, Lineage, MAX_DETAILS_BYTES, MAX_SUMMARY_BYTES, RESULT_OUTCOMES, SpawnResult,
 };
 use super::{AgentError, AgentManager, AgentResult, now};
 
@@ -30,7 +30,7 @@ pub fn wait_bound(provider: &str, requested: Option<Duration>) -> Duration {
 }
 
 /// At most one tree's worth of sessions per wait.
-pub const MAX_WAIT_IDS: usize = MAX_TREE as usize;
+pub const MAX_WAIT_IDS: usize = HARD_MAX_TREE as usize;
 
 /// Whether a session counts as done for a wait: it ended, or it reported
 /// for the round it is in (145). Idle is never done (134h).

@@ -1799,6 +1799,8 @@ pub struct HostView {
     /// Sessions inherit the host's network policy in V1 (freeze §12.2); the
     /// client shows it, so the record says it.
     pub egress: &'static str,
+    /// What its owner set for agents on it (decision 152).
+    pub limits: HostLimitsView,
 }
 
 fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
@@ -1834,6 +1836,7 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
         tracing::warn!(error = %e, host = host.id, "could not read a host's execution");
         None
     });
+    let limits = limits_view(state, &host.id, live.capabilities.as_ref());
     HostView {
         host,
         status,
@@ -1842,7 +1845,173 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
         isolation,
         execution,
         egress: "host",
+        limits,
     }
+}
+
+// ---- Agent spawning: a host's Limits (decision 152) -------------------------
+//
+// Set on the session tier by the owner alone: no `stk_` key, host credential
+// or agent changes them. Nothing is written to the host or to any harness
+// (152h).
+
+pub const EVENT_HOST_LIMITS_CHANGED: &str = "host_limits_changed";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HostLimitsView {
+    pub max_children: i64,
+    pub max_tree: i64,
+    /// The owner's override, `None` for the host's own.
+    pub max_sessions: Option<i64>,
+    /// What the host reports, 0 being no limit; `None` while it is offline.
+    pub host_max_sessions: Option<u32>,
+    /// What is in force, never more than the host reports (152d); 0 is no
+    /// limit, `None` while neither is known.
+    pub effective_max_sessions: Option<u32>,
+    /// Fixed (152e).
+    pub depth: i64,
+    pub hard_max_children: i64,
+    pub hard_max_tree: i64,
+}
+
+fn limits_view(
+    state: &Shared,
+    host_id: &str,
+    caps: Option<&crate::agent::Capabilities>,
+) -> HostLimitsView {
+    use crate::agent::store::spawn::{BUILT_DEPTH, HARD_MAX_CHILDREN, HARD_MAX_TREE, MAX_DEPTH};
+    let limits = state.agent.host_limits(host_id).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, host = host_id, "could not read a host's limits");
+        Default::default()
+    });
+    let reported = caps.map(|c| c.max_sessions);
+    HostLimitsView {
+        max_children: limits.max_children,
+        max_tree: limits.max_tree,
+        max_sessions: limits.max_sessions,
+        host_max_sessions: reported,
+        effective_max_sessions: match reported {
+            Some(host) => Some(limits.effective_sessions(host)),
+            None => limits.max_sessions.map(|_| limits.effective_sessions(0)),
+        },
+        depth: MAX_DEPTH.min(BUILT_DEPTH),
+        hard_max_children: HARD_MAX_CHILDREN,
+        hard_max_tree: HARD_MAX_TREE,
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SetHostLimits {
+    pub max_children: i64,
+    pub max_tree: i64,
+    /// Absent or null: the host's own.
+    #[serde(default)]
+    pub max_sessions: Option<i64>,
+}
+
+async fn owners_host(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    live: bool,
+) -> ApiResult<String> {
+    let owner = crews_owner(actor)?.to_string();
+    let auth_db = state.auth_db.lock().await;
+    match auth_db.host_by_id(host_id).map_err(internal)? {
+        Some(h) if !(live && h.is_revoked()) => Ok(owner),
+        _ => Err(not_found("no such host")),
+    }
+}
+
+/// `GET /v1/agent/hosts/{id}/limits`.
+pub async fn get_host_limits(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+) -> ApiResult<HostLimitsView> {
+    owners_host(state, actor, host_id, false).await?;
+    let caps = state.agent.host_live(host_id).capabilities;
+    Ok(limits_view(state, host_id, caps.as_ref()))
+}
+
+/// `PUT /v1/agent/hosts/{id}/limits`: all of them at once. A change is
+/// audited old → new; lowering one only refuses new starts (152f).
+pub async fn set_host_limits(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    host_id: &str,
+    req: SetHostLimits,
+) -> ApiResult<HostLimitsView> {
+    use crate::agent::store::spawn::{HARD_MAX_CHILDREN, HARD_MAX_TREE, HostLimits};
+    let owner = owners_host(state, actor, host_id, true).await?;
+    if !(1..=HARD_MAX_CHILDREN).contains(&req.max_children)
+        || !(1..=HARD_MAX_TREE).contains(&req.max_tree)
+        || req
+            .max_sessions
+            .is_some_and(|n| !(1..=i64::from(u32::MAX)).contains(&n))
+    {
+        return Err(bad_request("limit_out_of_range"));
+    }
+    if req.max_tree < req.max_children {
+        return Err(bad_request("tree_below_session"));
+    }
+    let new = HostLimits {
+        max_children: req.max_children,
+        max_tree: req.max_tree,
+        max_sessions: req.max_sessions,
+    };
+    let old = state
+        .agent
+        .set_host_limits(host_id, &new, &owner)
+        .map_err(internal)?;
+    if old != new {
+        let detail = serde_json::json!({"host_id": host_id, "old": old, "new": new});
+        state
+            .auth_db
+            .lock()
+            .await
+            .record_event(
+                EVENT_HOST_LIMITS_CHANGED,
+                Some(&owner),
+                device,
+                &crate::index::now_rfc3339(),
+                &detail.to_string(),
+            )
+            .map_err(internal)?;
+    }
+    let caps = state.agent.host_live(host_id).capabilities;
+    Ok(limits_view(state, host_id, caps.as_ref()))
+}
+
+/// The limit a start hit, named with its value (152f).
+fn limit_message(state: &Shared, host_id: &str, cap: Option<&str>) -> String {
+    let limits = state.agent.host_limits(host_id).unwrap_or_default();
+    let reached = match cap {
+        Some("depth") => return "Agents you start cannot start agents of their own.".into(),
+        Some("children") => format!(
+            "Your host's limit of {} running agents per session is reached",
+            limits.max_children
+        ),
+        Some("tree") => format!(
+            "Your host's limit of {} running sessions in a tree, yours included, is reached",
+            limits.max_tree
+        ),
+        Some("max_sessions") => {
+            let reported = state
+                .agent
+                .host_live(host_id)
+                .capabilities
+                .map_or(0, |c| c.max_sessions);
+            format!(
+                "Your host's limit of {} concurrent sessions is reached",
+                limits.effective_sessions(reported)
+            )
+        }
+        _ => "A limit is reached".into(),
+    };
+    format!("{reached}: end children you are done with (end_agent) before starting another.")
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2852,9 +3021,10 @@ pub struct ListAgents {
 /// `list_agents`: what the calling parent may start, and how close it is to
 /// its caps.
 pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents> {
-    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_CHILDREN, MAX_DEPTH, MAX_TREE};
+    use crate::agent::store::spawn::{BUILT_DEPTH, MAX_DEPTH};
     let caller = spawning_caller(state, actor)?;
     let r = state.agent.get(&caller).map_err(agent_error)?;
+    let host_limits = state.agent.host_limits(&r.host_id).map_err(internal)?;
     let roles = role_catalog(state, &r.owner_user_id)
         .await
         .into_iter()
@@ -2885,8 +3055,8 @@ pub async fn list_agents(state: &Shared, actor: &Actor) -> ApiResult<ListAgents>
         roles,
         limits: SpawnLimits {
             depth: MAX_DEPTH.min(BUILT_DEPTH),
-            children: MAX_CHILDREN,
-            tree: MAX_TREE,
+            children: host_limits.max_children,
+            tree: host_limits.max_tree,
         },
     })
 }
@@ -3336,9 +3506,7 @@ pub async fn start_agent(
                     "One of your live children already has that name: continue it with send_message, or choose another name."
                         .into(),
                 ),
-                "limit" => Some(
-                    "End children you are done with (end_agent) before starting another.".into(),
-                ),
+                "limit" => Some(limit_message(state, &parent.host_id, refusal.cap)),
                 "bad_cwd" => Some(
                     "cwd must be an absolute directory inside one of your host's workspaces, written as is: no '.', '..' or trailing separator."
                         .into(),

@@ -74,6 +74,14 @@ goes to the session that started it, which decides what to do next: give
 the agent another task, do the step itself, end it or start another. Its
 **Activity** and its list of children show what was refused.
 
+**How many it may start** is set per host, in its
+[Limits](/docs/agents/hosts/#limits): by default a session runs at most 3
+agents of its own at a time, and a tree of agents (the session that started
+them included) at most 6. Agents it started can't start agents of their own
+yet. An agent that has ended no longer counts, so the session ends the ones
+it is done with. A start past a limit is refused and names the limit; the
+session's **About** says the limits it runs under.
+
 **Known gap: Codex children.** Claude Code and OpenCode tell Storm when
 their own permission prompt opens. Codex has no hook for that. A Codex
 agent that a session started can stop at its own prompt, and to the session

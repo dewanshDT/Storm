@@ -158,6 +158,36 @@ class AgentApi {
     );
   }
 
+  String _limitsOf(String hostId) =>
+      '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/limits';
+
+  /// A host's Limits (decision 152).
+  Future<HostLimits> hostLimits(String hostId) async => HostLimits.fromJson(
+    _decode(await _client.get(_uri(_limitsOf(hostId)), headers: _headers))
+        as Map<String, dynamic>,
+  );
+
+  /// Replaces them all; a null [maxSessions] is the host's own.
+  Future<HostLimits> setHostLimits(
+    String hostId, {
+    required int maxChildren,
+    required int maxTree,
+    int? maxSessions,
+  }) async => HostLimits.fromJson(
+    _decode(
+          await _client.put(
+            _uri(_limitsOf(hostId)),
+            headers: _headers,
+            body: jsonEncode({
+              'max_children': maxChildren,
+              'max_tree': maxTree,
+              'max_sessions': maxSessions,
+            }),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
   Future<List<AgentWorkspace>> workspaces(String hostId) async {
     final json = _decode(
       await _client.get(

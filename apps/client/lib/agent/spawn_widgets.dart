@@ -872,8 +872,17 @@ List<(String, String)> spawnAboutRows(AgentSession s, AgentOverview? o) {
             ? 'Write to the same vault as this session.'
             : 'Read only. They write to no vault.',
       ),
+    if (s.spawn.switchState case final sw? when sw.launchedOn)
+      if (o?.hosts.where((h) => h.id == s.hostId).firstOrNull?.limits
+          case final l?)
+        ('Limits', spawnLimitsText(l)),
   ];
 }
+
+/// About's Limits row (152g): the host's, as its owner set them.
+String spawnLimitsText(HostLimits l) =>
+    '${l.maxChildren} agents at a time, ${l.maxTree} running in its tree '
+    '(itself included). Depth: ${depthLine(l.depth)}.';
 
 /// About's children, with End all children while any runs (C5).
 class SpawnChildrenSection extends ConsumerStatefulWidget {

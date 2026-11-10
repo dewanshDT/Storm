@@ -105,6 +105,7 @@ class AgentHost {
     this.isolationState,
     this.isolationReason,
     this.execution,
+    this.limits,
   });
 
   final String id;
@@ -156,6 +157,10 @@ class AgentHost {
   /// Who it runs as (decision 151); null for a host too old to say.
   final HostExecution? execution;
 
+  /// What its owner set for agents on it (decision 152); null from a server
+  /// that does not say.
+  final HostLimits? limits;
+
   /// What every host row and the launcher say about who it runs as.
   String get executionLine => executionLineFor(execution);
 
@@ -204,9 +209,82 @@ class AgentHost {
       execution: _map(j['execution']) == null
           ? null
           : HostExecution.fromJson(_map(j['execution'])!),
+      limits: _map(j['limits']) == null
+          ? null
+          : HostLimits.fromJson(_map(j['limits'])!),
     );
   }
 }
+
+/// A host's Limits (decision 152), set by its owner and kept by the server.
+/// Nothing of them reaches the host.
+class HostLimits {
+  const HostLimits({
+    this.maxChildren = 3,
+    this.maxTree = 6,
+    this.maxSessions,
+    this.hostMaxSessions,
+    this.effectiveMaxSessions,
+    this.depth = 1,
+    this.hardMaxChildren = 10,
+    this.hardMaxTree = 24,
+  });
+
+  /// Agents one session runs at a time.
+  final int maxChildren;
+
+  /// Sessions running in one tree, its root included.
+  final int maxTree;
+
+  /// The owner's concurrent-sessions override; null is the host's own.
+  final int? maxSessions;
+
+  /// What the host reports, 0 being no limit; null while it is offline.
+  final int? hostMaxSessions;
+
+  /// What is in force: never more than the host reports. 0 is no limit,
+  /// null while unknown.
+  final int? effectiveMaxSessions;
+
+  final int depth;
+  final int hardMaxChildren;
+  final int hardMaxTree;
+
+  /// An override at or above the host's own changes nothing.
+  bool get overrideIneffective =>
+      maxSessions != null &&
+      effectiveMaxSessions != null &&
+      effectiveMaxSessions! < maxSessions!;
+
+  factory HostLimits.fromJson(Map<String, dynamic> j) => HostLimits(
+    maxChildren: (j['max_children'] as num?)?.toInt() ?? 3,
+    maxTree: (j['max_tree'] as num?)?.toInt() ?? 6,
+    maxSessions: (j['max_sessions'] as num?)?.toInt(),
+    hostMaxSessions: (j['host_max_sessions'] as num?)?.toInt(),
+    effectiveMaxSessions: (j['effective_max_sessions'] as num?)?.toInt(),
+    depth: (j['depth'] as num?)?.toInt() ?? 1,
+    hardMaxChildren: (j['hard_max_children'] as num?)?.toInt() ?? 10,
+    hardMaxTree: (j['hard_max_tree'] as num?)?.toInt() ?? 24,
+  );
+}
+
+/// Depth is not a setting (152e).
+String depthLine(int depth) =>
+    '$depth level${depth == 1 ? '' : 's'} (agents can’t start their own '
+    'agents yet)';
+
+/// Concurrent sessions as a host's views say them.
+String sessionsLimitText(HostLimits l) {
+  final n = l.effectiveMaxSessions;
+  if (n == null) return 'the host’s own number of sessions';
+  if (n == 0) return 'no limit on sessions';
+  return '$n session${n == 1 ? '' : 's'} at once';
+}
+
+/// The host row's line for its Limits.
+String hostLimitsLine(HostLimits l) =>
+    'Limits: ${l.maxChildren} agents per session · ${l.maxTree} per tree · '
+    '${sessionsLimitText(l)}';
 
 /// A host's `execution` (decision 151): the account it runs as, and whether
 /// each session runs as its own user.

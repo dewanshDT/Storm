@@ -313,6 +313,38 @@ void main() {
       await disposeShell(tester, c);
     });
 
+    testWidgets('152g: About says the host’s limits, depth read-only', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [
+          agentHost(
+            limits: {
+              'max_children': 2,
+              'max_tree': 5,
+              'max_sessions': null,
+              'host_max_sessions': 8,
+              'effective_max_sessions': 8,
+              'depth': 1,
+            },
+          ),
+        ],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': true, 'launched_on': true}),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await about(tester, agents, 'ags_p');
+      expect(
+        find.text(
+          '2 agents at a time, 5 running in its tree (itself included). '
+          'Depth: 1 level (agents can’t start their own agents yet).',
+        ),
+        findsOneWidget,
+      );
+      await disposeShell(tester, c);
+    });
+
     testWidgets('141e: not in the session header', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
@@ -1084,7 +1116,7 @@ void main() {
   test('the outcome words and reasons', () {
     expect(
       requestRefusalText('limit', 'tree'),
-      'limit: 6 live sessions in a tree',
+      'limit: the host’s agents-per-tree limit',
     );
     expect(
       requestRefusalText('isolation_unverified', null),

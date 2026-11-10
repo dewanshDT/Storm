@@ -10,7 +10,9 @@ use rand::Rng;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 use super::store::SessionRecord;
-use super::store::spawn::{HostNow, MAX_CHILDREN, MAX_TREE, Refusal, Request, StartPayload};
+use super::store::spawn::{
+    DEFAULT_CHILDREN, DEFAULT_TREE, HostLimits, HostNow, Refusal, Request, StartPayload,
+};
 use super::{AgentManager, Command, Envelope, Hello, Launch, LaunchMeta, McpGrant};
 
 const VERIFIED: &str = r#"{"state": "verified", "mechanism": "so_peerpidfd", "reason": null}"#;
@@ -506,6 +508,150 @@ fn a_145_2_each_cap_refuses_at_its_boundary_and_names_itself() {
     assert_eq!(f.start(&p.id), Err(limit("max_sessions")));
 }
 
+fn set_limits(f: &Fixture, children: i64, tree: i64, sessions: Option<i64>) -> HostLimits {
+    f.m.set_host_limits(
+        "hst_A",
+        &HostLimits {
+            max_children: children,
+            max_tree: tree,
+            max_sessions: sessions,
+        },
+        "usr_A",
+    )
+    .unwrap()
+}
+
+/// 152b, 152c: with no row a host has today's caps.
+#[test]
+fn a_host_without_limits_has_the_defaults() {
+    let f = fixture(16);
+    assert_eq!(
+        f.m.host_limits("hst_A").unwrap(),
+        HostLimits {
+            max_children: 3,
+            max_tree: 6,
+            max_sessions: None
+        }
+    );
+    let p = f.parent();
+    for _ in 0..DEFAULT_CHILDREN {
+        f.start(&p.id).unwrap();
+    }
+    assert_eq!(f.start(&p.id), Err(limit("children")));
+}
+
+/// 152b, 152c: a host's own Limits refuse the start past each, and only on
+/// that host.
+#[test]
+fn a_hosts_limits_refuse_the_start_past_them() {
+    let f = fixture(16);
+    let was = set_limits(&f, 1, 6, None);
+    assert_eq!(was, HostLimits::default());
+    let p = f.parent();
+    f.start(&p.id).unwrap();
+    assert_eq!(f.start(&p.id), Err(limit("children")));
+
+    let f = fixture(16);
+    set_limits(&f, 5, 3, None);
+    f.m.set_host_limits(
+        "hst_B",
+        &HostLimits {
+            max_children: 1,
+            max_tree: 1,
+            max_sessions: Some(1),
+        },
+        "usr_A",
+    )
+    .unwrap();
+    let p = f.parent();
+    f.start(&p.id).unwrap();
+    f.start(&p.id).unwrap();
+    assert_eq!(
+        f.start(&p.id),
+        Err(limit("tree")),
+        "three, the root included"
+    );
+    let other_tree = f.parent_in("other");
+    assert!(f.start(&other_tree).is_ok(), "another tree is not counted");
+}
+
+/// 152f: lowering ends and parks nothing, and refuses only new starts;
+/// raising is at once.
+#[test]
+fn lowering_a_limit_leaves_running_children_alone() {
+    let mut f = fixture(16);
+    let p = f.parent();
+    let kids: Vec<String> = (0..3).map(|_| f.start(&p.id).unwrap().id).collect();
+    for k in &kids {
+        f.report(k, "running");
+    }
+    while f.link.try_recv().is_ok() {}
+    set_limits(&f, 1, 2, None);
+    assert!(
+        f.link.try_recv().is_err(),
+        "the host is told nothing (152h)"
+    );
+    for k in &kids {
+        assert_eq!(f.m.get(k).unwrap().status, "running", "{k}");
+    }
+    assert_eq!(f.start(&p.id), Err(limit("children")));
+    set_limits(&f, 5, 10, None);
+    assert!(f.start(&p.id).is_ok());
+}
+
+/// 152d: the override only lowers what the host reports, for a person's
+/// launch as for a start.
+#[test]
+fn the_sessions_override_only_lowers_the_hosts_own() {
+    let lim = |over| HostLimits {
+        max_sessions: over,
+        ..HostLimits::default()
+    };
+    assert_eq!(lim(Some(10)).effective_sessions(4), 4);
+    assert_eq!(lim(Some(2)).effective_sessions(4), 2);
+    assert_eq!(lim(None).effective_sessions(4), 4);
+    assert_eq!(lim(Some(2)).effective_sessions(0), 2, "lower than no limit");
+    assert_eq!(lim(None).effective_sessions(0), 0);
+
+    let f = fixture(4);
+    set_limits(&f, 3, 6, Some(2));
+    let p = f.parent();
+    f.start(&p.id).unwrap();
+    assert_eq!(f.start(&p.id), Err(limit("max_sessions")));
+    assert!(matches!(
+        f.try_launch("other", None, false, false),
+        Err(super::AgentError::TooManySessions)
+    ));
+
+    let f = fixture(3);
+    set_limits(&f, 3, 6, Some(10));
+    let p = f.parent();
+    f.start(&p.id).unwrap();
+    f.start(&p.id).unwrap();
+    assert_eq!(
+        f.start(&p.id),
+        Err(limit("max_sessions")),
+        "the host's 3, not 10"
+    );
+}
+
+/// 152a: a revoked host keeps no Limits.
+#[test]
+fn revoking_a_host_clears_its_limits() {
+    let f = fixture(16);
+    set_limits(&f, 1, 1, Some(1));
+    f.m.revoke_host("hst_A").unwrap();
+    assert_eq!(f.m.host_limits("hst_A").unwrap(), HostLimits::default());
+    let rows: i64 =
+        f.m.store
+            .lock()
+            .unwrap()
+            .conn
+            .query_row("SELECT COUNT(*) FROM host_limits", [], |r| r.get(0))
+            .unwrap();
+    assert_eq!(rows, 0);
+}
+
 /// AP-1: concurrent starts at each cap's boundary take exactly the free
 /// slots; the rest are refused, naming the cap.
 #[test]
@@ -522,7 +668,7 @@ fn ap1_concurrent_starts_take_exactly_the_free_slots() {
                     vec![p.id; RACERS]
                 },
                 16,
-                MAX_CHILDREN - 1,
+                DEFAULT_CHILDREN - 1,
                 "children",
             ),
             (
@@ -537,7 +683,7 @@ fn ap1_concurrent_starts_take_exactly_the_free_slots() {
                     vec![p.id; RACERS]
                 },
                 16,
-                MAX_TREE - 5,
+                DEFAULT_TREE - 5,
                 "tree",
             ),
             (

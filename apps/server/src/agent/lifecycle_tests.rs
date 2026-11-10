@@ -383,11 +383,11 @@ fn a_145_8_a_reported_idle_child_parks_and_a_message_resumes_it() {
 
 #[test]
 fn a_145_8_parked_children_free_the_live_cap_and_count_toward_their_own() {
-    use super::store::spawn::MAX_CHILDREN;
+    use super::store::spawn::DEFAULT_CHILDREN;
     let f = fixture();
     f.m.gate_signals_for_tests(HOOKS);
     let p = f.launch(None);
-    let children: Vec<String> = (0..MAX_CHILDREN)
+    let children: Vec<String> = (0..DEFAULT_CHILDREN)
         .map(|n| f.child(&p, &format!("task {n}")))
         .collect();
     let fourth = StartPayload {
