@@ -501,6 +501,9 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
         )
+        // A revoked host's Remove and Re-enroll (decision 153): owner only.
+        .route("/v1/agent/hosts/{id}/remove", post(agent_remove_host))
+        .route("/v1/agent/hosts/{id}/reenroll", post(agent_reenroll_host))
         // A host's Limits (decision 152): owner only, in ops.
         .route(
             "/v1/agent/hosts/{id}/limits",
@@ -1615,6 +1618,26 @@ async fn agent_issue_enrollment(
     Ok(Json(
         crate::ops::issue_host_enrollment(&state, &actor, &body.server_url).await?,
     ))
+}
+
+async fn agent_reenroll_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<IssueEnrollmentRequest>,
+) -> ApiResult<Json<crate::ops::IssuedEnrollment>> {
+    Ok(Json(
+        crate::ops::reenroll_host(&state, &actor, &id, &body.server_url).await?,
+    ))
+}
+
+async fn agent_remove_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::remove_host(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -6840,7 +6863,6 @@ pub(crate) mod tests {
 
     /// Enrolls a host through the real routes and returns `(host_id, token)`.
     async fn enroll_a_host(app: &Router, owner_bearer: &str) -> (String, String) {
-        use ed25519_dalek::Signer;
         let (status, body) = send(
             app,
             post_json_with_auth(
@@ -6851,20 +6873,33 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let enrollment = body["enrollment"].as_str().unwrap().to_string();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let (status, body) = redeem(app, body["enrollment"].as_str().unwrap(), &key).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let host_id = body["host_id"].as_str().unwrap().to_string();
+        let token = host_token(app, body["server_id"].as_str().unwrap(), &host_id, &key).await;
+        (host_id, token)
+    }
+
+    /// Redeems an enrollment string as `storm-runtime enroll` does, under the
+    /// name `build-vm`.
+    async fn redeem(
+        app: &Router,
+        enrollment: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> (StatusCode, serde_json::Value) {
+        use ed25519_dalek::Signer;
         // Parsed from the right, as decision 77b specifies: the URL has colons.
         let mut parts = enrollment.rsplitn(4, ':');
         let token = parts.next().unwrap().to_string();
         let _pubkey = parts.next().unwrap();
         let server_id = parts.next().unwrap().to_string();
-
-        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let token_id = crate::auth::hosts::enrollment_token_id(&token).unwrap();
         let sig = data_encoding::BASE64URL_NOPAD.encode(
             &key.sign(&crate::auth::hosts::enroll_message(&server_id, &token_id))
                 .to_bytes(),
         );
-        let (status, body) = send(
+        send(
             app,
             post_json(
                 "/v1/runtime/enroll",
@@ -6877,10 +6912,17 @@ pub(crate) mod tests {
                 }),
             ),
         )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let host_id = body["host_id"].as_str().unwrap().to_string();
+        .await
+    }
 
+    /// Proves `key` for `host_id` and returns the host token.
+    async fn host_token(
+        app: &Router,
+        server_id: &str,
+        host_id: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> String {
+        use ed25519_dalek::Signer;
         let (status, body) = send(
             app,
             post_json(
@@ -6893,7 +6935,7 @@ pub(crate) mod tests {
         let nonce = body["nonce"].as_str().unwrap().to_string();
         let sig = data_encoding::BASE64URL_NOPAD.encode(
             &key.sign(&crate::auth::hosts::connect_message(
-                &server_id, &host_id, &nonce,
+                server_id, host_id, &nonce,
             ))
             .to_bytes(),
         );
@@ -6906,7 +6948,7 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        (host_id, body["token"].as_str().unwrap().to_string())
+        body["token"].as_str().unwrap().to_string()
     }
 
     #[tokio::test]
@@ -6977,12 +7019,252 @@ pub(crate) mod tests {
             ),
             patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &key),
             delete_with_auth(&path, &key),
+            post_json_with_auth(&format!("{path}/remove"), serde_json::json!({}), &key),
+            post_json_with_auth(
+                &format!("{path}/reenroll"),
+                serde_json::json!({"server_url": "http://x"}),
+                &key,
+            ),
         ];
         for request in requests {
             let uri = request.uri().to_string();
             let (status, _) = send(&app, request).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn only_a_revoked_host_is_removed_and_its_ended_sessions_keep_its_name() {
+        let dir = tempdir::TempDir::new("storm-hosts-remove").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host_id, _) = enroll_a_host(&app, &owner_bearer).await;
+        let _link = online_host(&state, &host_id, false);
+        let (status, launched) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "host_id": host_id, "workspace": "storm", "provider": "shell",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{launched}");
+        assert_eq!(launched["host_name"], "build-vm");
+        let session = launched["id"].as_str().unwrap().to_string();
+
+        let remove = format!("/v1/agent/hosts/{host_id}/remove");
+        let (status, body) = send(
+            &app,
+            post_json_with_auth(&remove, serde_json::json!({}), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "revoke first");
+        assert_eq!(body["error"], "host_not_revoked");
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/hosts/hst_01ARZ3NDEKTSV4RRFFQ69G5FAV/remove",
+                serde_json::json!({}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("/v1/agent/hosts/{host_id}"), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(&remove, serde_json::json!({}), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &owner_bearer)).await;
+        assert_eq!(hosts, serde_json::json!([]));
+        let (status, view) = send(
+            &app,
+            get_with_auth(&format!("/v1/agent/sessions/{session}"), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            (
+                &view["host_id"],
+                &view["host_name"],
+                &view["status"],
+                &view["end_reason"]
+            ),
+            (
+                &serde_json::json!(host_id),
+                &serde_json::json!("build-vm"),
+                &serde_json::json!("failed"),
+                &serde_json::json!("host_revoked")
+            )
+        );
+        let (_, list) = send(&app, get_with_auth("/v1/agent/sessions", &owner_bearer)).await;
+        assert_eq!(list[0]["host_name"], "build-vm", "{list}");
+        // What joins a host by id treats a removed one as gone.
+        for path in [
+            format!("/v1/agent/hosts/{host_id}/limits"),
+            format!("/v1/agent/hosts/{host_id}/children"),
+        ] {
+            let (status, _) = send(&app, get_with_auth(&path, &owner_bearer)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "host_id": host_id, "workspace": "storm", "provider": "shell",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("/v1/agent/hosts/{host_id}/reenroll"),
+                serde_json::json!({"server_url": "http://127.0.0.1:8484"}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a removed host is not re-enrolled"
+        );
+        let removed = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, d)| k == "host_removed" && d.contains(&host_id))
+            .count();
+        assert_eq!(removed, 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_host_reenrolls_under_its_id_name_and_limits() {
+        let dir = tempdir::TempDir::new("storm-hosts-reenroll").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host_id, old_token) = enroll_a_host(&app, &owner_bearer).await;
+        let path = format!("/v1/agent/hosts/{host_id}");
+        send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"name": "mac-mini"}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                &format!("{path}/limits"),
+                serde_json::json!({"max_children": 2, "max_tree": 3}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let reenroll = format!("{path}/reenroll");
+        let body = serde_json::json!({"server_url": "http://127.0.0.1:8484/"});
+        let (status, refused) = send(
+            &app,
+            post_json_with_auth(&reenroll, body.clone(), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refused["error"], "host_not_revoked");
+
+        send(&app, delete_with_auth(&path, &owner_bearer)).await;
+        let (status, issued) =
+            send(&app, post_json_with_auth(&reenroll, body, &owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let enrollment = issued["enrollment"].as_str().unwrap();
+        assert!(
+            enrollment.starts_with("storm-enroll:v1:http://127.0.0.1:8484:"),
+            "{enrollment}"
+        );
+        assert!(issued["expires"].is_string());
+
+        let fresh = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let (status, enrolled) = redeem(&app, enrollment, &fresh).await;
+        assert_eq!(status, StatusCode::OK, "{enrolled}");
+        assert_eq!(enrolled["host_id"], host_id);
+        assert_eq!(enrolled["name"], "mac-mini", "the host keeps its name");
+        let server_id = enrolled["server_id"].as_str().unwrap();
+        let token = host_token(&app, server_id, &host_id, &fresh).await;
+        let (status, _) = send(
+            &app,
+            get_with_auth("/v1/runtime/whoami", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app,
+            get_with_auth("/v1/runtime/whoami", &format!("Bearer {old_token}")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the old credential stays dead"
+        );
+
+        let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &owner_bearer)).await;
+        assert_eq!(hosts.as_array().unwrap().len(), 1, "{hosts}");
+        assert_eq!(
+            (
+                &hosts[0]["id"],
+                &hosts[0]["name"],
+                &hosts[0]["status"],
+                &hosts[0]["revoked"]
+            ),
+            (
+                &serde_json::json!(host_id),
+                &serde_json::json!("mac-mini"),
+                &serde_json::json!("offline"),
+                &serde_json::Value::Null
+            )
+        );
+        assert_eq!(
+            (
+                &hosts[0]["limits"]["max_children"],
+                &hosts[0]["limits"]["max_tree"]
+            ),
+            (&serde_json::json!(2), &serde_json::json!(3))
+        );
+        let (status, _) = redeem(&app, enrollment, &fresh).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "single use");
+        let events = security_events(&state).await;
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "host_enrollment_issued" && d.contains(&host_id))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "host_reenrolled" && d.contains(&host_id))
+        );
     }
 
     // ---- MCP Gateway: integrations (decision 81c) ------------------------

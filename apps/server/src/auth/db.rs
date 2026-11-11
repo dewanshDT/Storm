@@ -420,6 +420,22 @@ impl AuthDb {
             self.conn
                 .execute_batch("ALTER TABLE client_devices ADD COLUMN paired_by TEXT;")?;
         }
+        // The revoked host a re-enrollment gives a new key to (decision 153);
+        // NULL is a new host.
+        if !self.column_exists("host_enrollments", "host_id")? {
+            self.conn
+                .execute_batch("ALTER TABLE host_enrollments ADD COLUMN host_id TEXT;")?;
+        }
+        // A removed host's name (decision 153), so the ended sessions that
+        // name it by id still say what it was called. Here rather than in the
+        // batch, so the pre-v6 snapshot is still of the v5 database.
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS removed_hosts (
+                 id         TEXT PRIMARY KEY,
+                 name       TEXT NOT NULL,
+                 removed_at TEXT NOT NULL
+             );",
+        )?;
         Ok(())
     }
 

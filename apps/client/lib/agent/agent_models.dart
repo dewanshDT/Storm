@@ -650,6 +650,7 @@ class AgentSession {
   AgentSession({
     required this.id,
     required this.hostId,
+    this.hostName,
     required this.workspace,
     required this.provider,
     required this.status,
@@ -690,6 +691,10 @@ class AgentSession {
 
   final String id;
   final String hostId;
+
+  /// Its host's name as the server last knew it, kept after the host is
+  /// removed (decision 153).
+  final String? hostName;
   final String workspace;
   final String provider;
 
@@ -889,6 +894,7 @@ class AgentSession {
   }) => AgentSession(
     id: id,
     hostId: hostId,
+    hostName: hostName,
     workspace: workspace,
     provider: provider,
     status: status ?? this.status,
@@ -932,6 +938,7 @@ class AgentSession {
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
     hostId: j['host_id'] as String,
+    hostName: j['host_name'] as String?,
     workspace: j['workspace'] as String,
     provider: j['provider'] as String,
     status: j['status'] as String,

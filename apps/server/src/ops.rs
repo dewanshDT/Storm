@@ -2033,15 +2033,66 @@ pub async fn issue_host_enrollment(
     let (enrollment, token) =
         crate::auth::hosts::issue_enrollment(&mut auth_db, actor.user_id(), &now)
             .map_err(internal)?;
-    Ok(IssuedEnrollment {
+    Ok(issued_enrollment(state, server_url, enrollment, &token))
+}
+
+fn issued_enrollment(
+    state: &Shared,
+    server_url: &str,
+    enrollment: crate::auth::hosts::Enrollment,
+    token: &str,
+) -> IssuedEnrollment {
+    IssuedEnrollment {
         enrollment: crate::auth::hosts::enrollment_string(
             server_url.trim_end_matches('/'),
             &state.identity.server_id,
             &state.identity.public_key_b64(),
-            &token,
+            token,
         ),
         expires: enrollment.expires,
-    })
+    }
+}
+
+fn host_admin_refusal(refusal: crate::auth::hosts::AdminRefusal) -> ApiError {
+    match refusal {
+        crate::auth::hosts::AdminRefusal::NoSuchHost => not_found("no such host"),
+        crate::auth::hosts::AdminRefusal::NotRevoked => conflict("host_not_revoked"),
+    }
+}
+
+/// `POST /v1/agent/hosts/{id}/reenroll` (decision 153): an enrollment for a
+/// revoked host, in the shape a new one has. `storm-runtime enroll` redeems
+/// it as it would any other; the host comes back under its id, name and
+/// Limits, with the new key.
+pub async fn reenroll_host(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    server_url: &str,
+) -> ApiResult<IssuedEnrollment> {
+    crews_owner(actor)?;
+    crate::auth::hosts::validate_server_url(server_url).map_err(bad_request)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (enrollment, token) =
+        crate::auth::hosts::issue_reenrollment(&mut auth_db, actor.user_id(), host_id, &now)
+            .map_err(internal)?
+            .map_err(host_admin_refusal)?;
+    Ok(issued_enrollment(state, server_url, enrollment, &token))
+}
+
+/// `POST /v1/agent/hosts/{id}/remove` (decision 153): a revoked host leaves
+/// the list. Its ended sessions stay readable and keep its name.
+pub async fn remove_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
+    crews_owner(actor)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
+        .map_err(internal)?
+        .map_err(host_admin_refusal)?;
+    drop(auth_db);
+    state.agent.forget_host(host_id).map_err(internal)?;
+    Ok(())
 }
 
 pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
@@ -2123,6 +2174,8 @@ fn host_refusal(
 pub struct EnrolledHost {
     pub host_id: String,
     pub server_id: String,
+    /// The name it is listed under: a re-enrolled host keeps its own.
+    pub name: String,
 }
 
 pub struct EnrollHost<'a> {
@@ -2151,6 +2204,7 @@ pub async fn enroll_host(
         Ok(host) => Ok(EnrolledHost {
             host_id: host.id,
             server_id: state.identity.server_id.clone(),
+            name: host.name,
         }),
         Err(e) => Err(host_refusal(&auth_db, e, None, remote, &now)),
     }
@@ -4505,6 +4559,9 @@ pub struct SessionView {
     #[serde(flatten)]
     pub session: crate::agent::store::SessionRecord,
     pub name: String,
+    /// Its host's name, kept after the host is removed (decision 153);
+    /// `None` only for a host this server never knew.
+    pub host_name: Option<String>,
     pub context: Option<crate::agent::store::Context>,
     pub write_vault_id: Option<String>,
     pub wrote_count: i64,
@@ -4681,6 +4738,7 @@ fn session_view(
     Ok(SessionView {
         session,
         name,
+        host_name: None,
         context,
         write_vault_id,
         wrote_count,
@@ -4710,6 +4768,10 @@ fn session_view(
 /// Names each view's role by its note's title now, so a rename follows and a
 /// deleted note reads as `None`.
 async fn name_roles(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
+    let hosts = state.auth_db.lock().await.host_names().map_err(internal)?;
+    for view in views.iter_mut() {
+        view.host_name = hosts.get(&view.session.host_id).cloned();
+    }
     for view in views.iter_mut() {
         let Some(role) = view.role.as_mut() else {
             continue;
@@ -4997,6 +5059,7 @@ pub async fn launch_session(
     let mut view = [SessionView {
         session,
         name: launch.name,
+        host_name: None,
         context: launch.context,
         write_vault_id: launch.write_vault_id.clone(),
         wrote_count: 0,

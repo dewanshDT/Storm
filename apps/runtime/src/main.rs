@@ -282,8 +282,8 @@ async fn main() -> Result<()> {
             let name = name.unwrap_or_else(storm_runtime::platform::host_name);
             // Said before host.json exists: writing it may start the host,
             // whose account sweep would end this process (AM35, AM37).
-            storm_runtime::client::enroll(&state, &enrollment, &name, force, |config| {
-                println!("Enrolled as {} ({}).", name, config.host_id);
+            storm_runtime::client::enroll(&state, &enrollment, &name, force, |config, listed| {
+                println!("Enrolled as {} ({}).", listed, config.host_id);
                 println!("  server : {} ({})", config.server_url, config.server_id);
                 println!("  state  : {}", state.display());
                 let _ = std::io::Write::flush(&mut std::io::stdout());
