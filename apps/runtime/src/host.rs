@@ -84,6 +84,8 @@ const START_DEADLINE: Duration = if cfg!(test) {
 };
 
 /// A command from the server (freeze §11.5).
+// One lives per message, briefly: boxing `Start` would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
@@ -136,6 +138,10 @@ pub enum Command {
         /// canonical and inside a root here; never on an isolated host.
         #[serde(default)]
         cwd: Option<String>,
+        /// A Shell's line to type once it is ready, without Enter (153-S3).
+        /// Written to the PTY as input; never argv or the environment.
+        #[serde(default)]
+        typed_input: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -389,6 +395,22 @@ impl Events {
 pub(crate) struct Leader {
     process: crate::platform::peer::Process,
     user: Option<u32>,
+}
+
+/// Types a Shell's line once it is ready (153-S3), through the session's
+/// own writer, so it is ordered with what the person types. No Enter.
+async fn type_when_ready(s: Arc<HostSession>, text: String) {
+    let events = s.events.clone();
+    let ended = events.clone();
+    if crate::typed::ready(
+        move || events.ring.lock().unwrap().end(),
+        move || ended.ended.lock().unwrap().is_some(),
+    )
+    .await
+    {
+        tracing::info!(session = %s.id, bytes = text.len(), "typing the launch's line");
+        let _ = s.input.send(text.into_bytes());
+    }
 }
 
 impl SessionEvents for Events {
@@ -734,6 +756,9 @@ impl Host {
             // It makes a workspace a person names (`workspace.create`,
             // decision 141c).
             "workspace_create": true,
+            // It types a Shell's `typed_input` once the shell is ready
+            // (153-S3).
+            "typed_input": true,
             // The providers whose sessions it can resume (decision 89). A
             // host without this would start a resume as a new conversation.
             "resume": self
@@ -1584,6 +1609,7 @@ impl Host {
                 resumed_from,
                 child_of,
                 cwd,
+                typed_input,
             } => {
                 self.start(
                     session,
@@ -1597,7 +1623,7 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
-                    (permission_mode, spawn, cwd),
+                    (permission_mode, spawn, cwd, typed_input),
                 )
                 .await
             }
@@ -1763,7 +1789,12 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
-        (permission_mode, spawn, cwd): (Option<String>, bool, Option<String>),
+        (permission_mode, spawn, cwd, typed_input): (
+            Option<String>,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
     ) {
         if !self.start_wanted(&id).await {
             tracing::warn!(session = %id, "Storm no longer wants this start: dropped");
@@ -1778,6 +1809,13 @@ impl Host {
         };
         if interaction.as_deref().is_some_and(|i| i != "terminal") {
             refuse("unsupported interaction");
+            return self.post_start_failure(&id).await;
+        }
+        let typed_input = typed_input.filter(|t| !t.is_empty());
+        if let Some(text) = &typed_input
+            && (provider_id != crate::typed::PROVIDER || !crate::typed::allowed(text))
+        {
+            refuse("typed input is one line for a Shell");
             return self.post_start_failure(&id).await;
         }
         if self.sessions.lock().unwrap().len() >= self.config.max_sessions as usize {
@@ -2252,6 +2290,9 @@ impl Host {
             took_ms = begun.elapsed().as_millis() as u64,
             "session started"
         );
+        if let Some(text) = typed_input {
+            tokio::spawn(type_when_ready(host_session.clone(), text));
+        }
         tokio::spawn(self.clone().upload(host_session));
         // What arrived while it started, in order. The lock is held
         // throughout, so a newer command waits for these rather than
@@ -3815,6 +3856,7 @@ mod tests {
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -3864,6 +3906,152 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err}").contains("not an image"), "{err}");
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A host whose `shell` is `/bin/sh -c script`, and a start for it.
+    #[cfg(target_os = "linux")]
+    async fn shell_host(script: &str) -> (Arc<Host>, tempfile::TempDir, tempfile::TempDir) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, _seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n",
+            roots.path().display().to_string(),
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, state, roots)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn typed_start(session: &str, provider: &str, typed_input: &str) -> Command {
+        Command::Start {
+            session: session.into(),
+            workspace: "w".into(),
+            provider: provider.into(),
+            interaction: Some("terminal".into()),
+            terminal: Size { cols: 80, rows: 24 },
+            mcp: Vec::new(),
+            context: false,
+            resume: None,
+            provider_credential: None,
+            model: None,
+            permission_mode: None,
+            spawn: false,
+            resumed_from: None,
+            child_of: None,
+            cwd: None,
+            typed_input: Some(typed_input.into()),
+        }
+    }
+
+    /// 153-S3: a Shell's line is typed into its terminal after the shell's
+    /// first output has gone quiet, with no Enter after it, and it is in
+    /// neither the argv nor the environment of the session's processes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_shells_line_is_typed_once_it_is_ready_and_never_run() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        // Echo stays on until the prompt: a line typed too early would be
+        // echoed before it.
+        let script = format!(
+            "echo $$ > {o}/pid; sleep 0.5; stty raw -echo; printf 'ready> '; \
+             timeout --foreground 2 cat > {o}/typed; touch {o}/done; sleep 1000; :"
+        );
+        let (host, _state, _roots) = shell_host(&script).await;
+        let line = "claude auth login # 153-S3-MARKER";
+        host.clone()
+            .handle(typed_start("ags_TYPED", "shell", line))
+            .await;
+        let s = host.session("ags_TYPED").expect("the shell started");
+        wait_for("the shell to read its line", || {
+            out.path().join("done").exists()
+        })
+        .await;
+        assert_eq!(
+            std::fs::read(out.path().join("typed")).unwrap(),
+            line.as_bytes(),
+            "exactly the line, and no Enter after it"
+        );
+        let shown = match s.events.ring.lock().unwrap().read(0, 1 << 20) {
+            crate::scrollback::Read::Data { bytes, .. } => {
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(shown.contains("ready> "), "{shown:?}");
+        assert!(
+            !shown.contains("153-S3-MARKER"),
+            "typed before the prompt: {shown:?}"
+        );
+
+        let pid = std::fs::read_to_string(out.path().join("pid")).unwrap();
+        let pid = pid.trim();
+        let children = || {
+            std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default()
+        };
+        wait_for("the leader's sleep", || !children().trim().is_empty()).await;
+        let children = children();
+        let pids: Vec<&str> = std::iter::once(pid)
+            .chain(children.split_whitespace())
+            .collect();
+        for p in pids {
+            for what in ["cmdline", "environ"] {
+                let bytes = std::fs::read(format!("/proc/{p}/{what}")).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains("153-S3-MARKER"),
+                    "the line is in {p}'s {what}"
+                );
+            }
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 153-S3: the host checks the line again. One for any other provider,
+    /// or with a newline in it, fails the start and nothing runs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_line_for_an_agent_or_with_a_newline_fails_the_start() {
+        let (host, _state, _roots) = shell_host("exec sleep 1000").await;
+        for (session, provider, line) in [
+            ("ags_NEWLINE", "shell", "ls\n"),
+            ("ags_CR", "shell", "ls\r"),
+            ("ags_ESC", "shell", "\u{1b}[201~ls"),
+            ("ags_LONG", "shell", &"a".repeat(1025)),
+            ("ags_AGENT", "claude-code", "claude auth login"),
+        ] {
+            host.clone()
+                .handle(typed_start(session, provider, line))
+                .await;
+            assert!(host.session(session).is_none(), "{session} started");
+        }
+        host.clone()
+            .handle(typed_start("ags_OK", "shell", "ls"))
+            .await;
+        assert!(host.session("ags_OK").is_some());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn the_host_says_it_types() {
+        let (host, ..) = test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        assert_eq!(host.capabilities()["typed_input"], true);
     }
 
     /// A host whose `claude-code` and `opencode` are `/bin/sh` running
@@ -3951,6 +4139,7 @@ mod tests {
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 
@@ -5515,6 +5704,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
 
@@ -5613,6 +5803,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -6978,6 +7169,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 
@@ -7304,6 +7496,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 

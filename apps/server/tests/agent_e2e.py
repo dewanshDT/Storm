@@ -502,6 +502,35 @@ args = ["-i"]
         rec = session(owner, sid3)
         check("exiting completes it with the exit code", (rec["status"], rec["exit_code"]) == ("completed", 7), rec)
 
+        print("\n=== a Shell with a command typed in (153-S3) ===")
+        check("the host says it types", caps.get("typed_input") is True, caps)
+        check("the server names no sign-in for the Shell",
+              all(p.get("login_command") is None for p in caps["providers"]), caps)
+        ran = os.path.join(WORKSPACES, "site", "typed-ran")
+        line = f"touch {ran} # 153-S3"
+        body = {"host_id": host_id, "workspace": "site", "terminal": {"cols": 120, "rows": 24}}
+        status, refused = call("POST", "/v1/agent/sessions", {**body, "provider": "fake", "typed_input": line}, auth=owner)
+        check("typed input is for a Shell only", status == 400
+              and refused["error"].startswith("typed_input_shell_only"), (status, refused))
+        status, refused = call("POST", "/v1/agent/sessions", {**body, "provider": "shell", "typed_input": line + "\n"}, auth=owner)
+        check("a newline is refused", status == 400
+              and refused["error"].startswith("typed_input_invalid"), (status, refused))
+        status, rec = call("POST", "/v1/agent/sessions", {**body, "provider": "shell", "typed_input": line}, auth=owner)
+        check("a Shell launches with it", status == 200, rec)
+        sid4 = rec["id"]
+        running(owner, sid4)
+        s = Stream(f"/v1/agent/sessions/{sid4}/terminal/stream?offset=0", owner)
+        text, _, _ = s.until(lambda e, i, d, t: "# 153-S3" in t)
+        check("the line is typed in where the person sees it", line in text, text)
+        time.sleep(1.5)
+        check("and nothing runs it", not os.path.exists(ran))
+        write(owner, sid4, "\r")
+        wait(lambda: os.path.exists(ran), "the typed line to run on Enter")
+        check("the person's Enter runs it", os.path.exists(ran))
+        write(owner, sid4, "exit\r")
+        s.until(lambda e, i, d, t: e == "status" and json.loads(d)["status"] == "completed")
+        s.close()
+
         print("\n=== fallback and the default provider (AC-F7) ===")
         status, rec = launch(owner, host_id, provider="claude-code")
         fb = rec.get("provider_fallback")

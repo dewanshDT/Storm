@@ -1837,10 +1837,14 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
         None
     });
     let limits = limits_view(state, &host.id, live.capabilities.as_ref());
+    let mut capabilities = live.capabilities;
+    for p in capabilities.iter_mut().flat_map(|c| c.providers.iter_mut()) {
+        p.login_command = crate::agent::typed::login_command(&p.id);
+    }
     HostView {
         host,
         status,
-        capabilities: live.capabilities,
+        capabilities,
         identity,
         isolation,
         execution,

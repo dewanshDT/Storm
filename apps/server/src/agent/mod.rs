@@ -33,6 +33,7 @@ pub mod round;
 pub mod said;
 pub mod scope;
 pub mod store;
+pub mod typed;
 pub mod wake;
 
 #[cfg(test)]
@@ -160,6 +161,11 @@ pub enum Command {
         /// otherwise, so the session starts in `workspace`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// A Shell's typed-in line (153-S3): written to its terminal once it
+        /// is ready, without Enter. Data for the PTY, never argv or the
+        /// environment. Sent only to a host that says `typed_input`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        typed_input: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -371,6 +377,10 @@ pub struct Capabilities {
     /// (decision 151). An old host does not say; a malformed one is `None`.
     #[serde(default, deserialize_with = "execution_or_none")]
     pub execution: Option<Execution>,
+    /// The host types a Shell's `typed_input` (153-S3). An old host does
+    /// not, and such a launch is refused `host_cannot_type`.
+    #[serde(default)]
+    pub typed_input: bool,
 }
 
 impl Capabilities {
@@ -597,6 +607,10 @@ pub struct ProviderCap {
     /// The newest version the host can install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
+    /// The agent's sign-in command (153-S3), the server's own: never read
+    /// from a host. Null for an agent without one.
+    #[serde(default, skip_deserializing)]
+    pub login_command: Option<&'static str>,
 }
 
 /// One session in a host's `hello`.
@@ -763,6 +777,11 @@ pub struct Launch {
     /// `default` passes nothing. A resume keeps its predecessor's.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// A line typed into a new Shell once it is ready, never followed by
+    /// Enter (153-S3): the Sign in fix. Shell only, one line of at most
+    /// [`typed::MAX_BYTES`]; a host that cannot type it refuses the launch.
+    #[serde(default)]
+    pub typed_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2197,6 +2216,16 @@ impl AgentManager {
                 "a terminal has at least one cell".into(),
             ));
         }
+        let typed_input = req.typed_input.clone().filter(|t| !t.is_empty());
+        if let Some(text) = &typed_input {
+            if req.provider.as_deref() != Some(typed::PROVIDER) || req.resume_of.is_some() {
+                return Err(AgentError::BadRequest(
+                    "typed_input_shell_only: only a new Shell starts with a command typed in"
+                        .into(),
+                ));
+            }
+            typed::check(text).map_err(AgentError::BadRequest)?;
+        }
         let caps = {
             let live = self.live.lock().unwrap();
             let link = live
@@ -2224,6 +2253,13 @@ impl AgentManager {
         };
         if max_sessions > 0 && live_on_host >= max_sessions as usize {
             return Err(AgentError::TooManySessions);
+        }
+        if typed_input.is_some() && !caps.typed_input {
+            return Err(AgentError::Conflict(
+                "host_cannot_type: this host's runtime can't type a command in — update \
+                 storm-runtime"
+                    .into(),
+            ));
         }
 
         let resume = match &req.resume_of {
@@ -2256,6 +2292,12 @@ impl AgentManager {
         };
         let (provider, fallback) = match offered(&requested) {
             Some(p) => (p, None),
+            // Typed into a Shell or into nothing, never into an agent.
+            None if typed_input.is_some() => {
+                return Err(AgentError::Conflict(
+                    "shell_unavailable: the host offers no Shell".into(),
+                ));
+            }
             // A conversation reopens in its own agent or not at all.
             None if resume.is_some() => {
                 return Err(AgentError::Conflict(format!(
@@ -2507,6 +2549,7 @@ impl AgentManager {
                 spawn,
                 child_of: None,
                 cwd,
+                typed_input,
             },
         );
         let mut record = record;
@@ -3452,6 +3495,7 @@ mod tests {
                     install_blocked: None,
                     checksum_verified: None,
                     latest: None,
+                    login_command: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -3473,6 +3517,7 @@ mod tests {
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
             execution: None,
+            typed_input: false,
         }
     }
 
@@ -3541,6 +3586,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             meta,
             grants,
@@ -3567,6 +3613,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -4242,6 +4289,7 @@ mod tests {
                     children_write: false,
                     model: None,
                     permission_mode: None,
+                    typed_input: None,
                 },
                 meta,
                 offered(),
@@ -4458,6 +4506,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -5195,6 +5244,7 @@ mod tests {
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             },
         };
         let start = |provider_credential| start_with(provider_credential, None);
@@ -5263,6 +5313,8 @@ mod tests {
         );
         let mut expected = new;
         expected["mcp"] = serde_json::Value::Null;
+        // The server's own (153-S3), filled in for the hosts list only.
+        expected["login_command"] = serde_json::Value::Null;
         assert_eq!(serde_json::to_value(&cap).unwrap(), expected);
 
         let blocked: ProviderCap = serde_json::from_value(serde_json::json!({
@@ -5642,6 +5694,7 @@ mod tests {
                 install_blocked: blocked.map(Into::into),
                 checksum_verified: None,
                 latest: None,
+                login_command: None,
             }
         };
         c.providers[0].source = Some("storm".into());

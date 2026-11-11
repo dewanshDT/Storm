@@ -250,6 +250,7 @@ class AgentApi {
     bool childrenWrite = false,
     String? model,
     String? permissionMode,
+    String? typedInput,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -283,6 +284,9 @@ class AgentApi {
               // Absent is the agent's own (decision 146b).
               if (permissionMode != null && permissionMode != 'default')
                 'permission_mode': permissionMode,
+              // A Shell only (153-S3): typed in once it is ready, never run.
+              if (typedInput != null && typedInput.isNotEmpty)
+                'typed_input': typedInput,
             }),
           ),
         )
