@@ -1,9 +1,7 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
-#ifdef GDK_WINDOWING_X11
-#include <gdk/gdkx.h>
-#endif
+#include <string.h>
 
 #include "flutter/generated_plugin_registrant.h"
 #include "storm_clipboard.h"
@@ -36,6 +34,39 @@ static void set_window_icon(GtkWindow* window) {
   }
 }
 
+// The storm/window channel: decorationLayout answers with the desktop's
+// gtk-decoration-layout, e.g. "appmenu:minimize,maximize,close", so the
+// caption buttons Storm draws follow its side and order.
+static void window_method_cb(FlMethodChannel* channel, FlMethodCall* call,
+                             gpointer user_data) {
+  g_autoptr(FlMethodResponse) response = nullptr;
+  if (strcmp(fl_method_call_get_name(call), "decorationLayout") == 0) {
+    g_autofree gchar* layout = nullptr;
+    g_object_get(gtk_settings_get_default(), "gtk-decoration-layout", &layout,
+                 nullptr);
+    g_autoptr(FlValue) result = fl_value_new_string(layout ? layout : "");
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+  } else {
+    response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
+  }
+  g_autoptr(GError) error = nullptr;
+  if (!fl_method_call_respond(call, response, &error)) {
+    g_warning("storm/window: %s", error->message);
+  }
+}
+
+static void attach_window_channel(FlView* view) {
+  FlEngine* engine = fl_view_get_engine(view);
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  FlMethodChannel* channel = fl_method_channel_new(
+      fl_engine_get_binary_messenger(engine), "storm/window",
+      FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(channel, window_method_cb, nullptr,
+                                            nullptr);
+  g_object_set_data_full(G_OBJECT(view), "storm-window", channel,
+                         g_object_unref);
+}
+
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
@@ -52,30 +83,10 @@ static void my_application_activate(GApplication* application) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
-  // Use a header bar when running in GNOME as this is the common style used
-  // by applications and is the setup most users will be using (e.g. Ubuntu
-  // desktop).
-  // If running on X and not using GNOME then just use a traditional title bar
-  // in case the window manager does more exotic layout, e.g. tiling.
-  // If running on Wayland assume the header bar will work (may need changing
-  // if future cases occur).
-  gboolean use_header_bar = TRUE;
-#ifdef GDK_WINDOWING_X11
-  GdkScreen* screen = gtk_window_get_screen(window);
-  if (GDK_IS_X11_SCREEN(screen)) {
-    const gchar* wm_name = gdk_x11_screen_get_window_manager_name(screen);
-    if (g_strcmp0(wm_name, "GNOME Shell") != 0) {
-      use_header_bar = FALSE;
-    }
-  }
-#endif
-  if (use_header_bar) {
-    GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
-    gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "Storm");
-    gtk_header_bar_set_show_close_button(header_bar, TRUE);
-    gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
-  }
+  // Storm draws its own title bar (decision 153d). An empty, unshown
+  // titlebar widget keeps GTK's client-side frame, so the window still has
+  // its shadow and resizes from its edges, with no header bar drawn.
+  gtk_window_set_titlebar(window, gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0));
   gtk_window_set_title(window, "Storm");
   set_window_icon(window);
 
@@ -107,6 +118,7 @@ static void my_application_activate(GApplication* application) {
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
   storm_clipboard_attach(view);
+  attach_window_channel(view);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

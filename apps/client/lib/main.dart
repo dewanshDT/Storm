@@ -8,13 +8,16 @@ import 'package:flutter_web_plugins/url_strategy.dart';
 import 'agent/oauth_links.dart';
 import 'router.dart';
 import 'state/app_state.dart';
+import 'ui/shell/window_buttons.dart' show initWindowChrome;
 import 'ui/theme.dart';
 import 'ui/tokens.dart';
 
-void main() {
+Future<void> main() async {
   // Clean URLs on the web, so a link to a note looks like a path rather than
   // a fragment. No effect on any other platform.
   usePathUrlStrategy();
+  WidgetsFlutterBinding.ensureInitialized();
+  await initWindowChrome();
   runApp(const ProviderScope(child: StormApp()));
 }
 
