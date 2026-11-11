@@ -19,6 +19,9 @@ class SpawnFacts {
     this.childActivity,
     this.pendingEvents,
     this.recentEvents = const [],
+    this.attention,
+    this.workToTake,
+    this.unappliedCommits,
   });
 
   static const none = SpawnFacts();
@@ -44,6 +47,19 @@ class SpawnFacts {
   /// A child's latest events, oldest first (144a).
   final List<ChildEvent> recentEvents;
 
+  /// [needsAttention] with its reason (153a); null when there is none, or
+  /// from an older server.
+  final Attention? attention;
+
+  /// An ended child's work not yet applied or deleted (153d). Null on a
+  /// session that is not a child with its own workspace, or from an older
+  /// server.
+  final bool? workToTake;
+
+  /// A clone's commits still to apply, as the last review counted them;
+  /// null before any review or for a scratch child (153d).
+  final int? unappliedCommits;
+
   /// A child's own workspace, once its host has made it.
   final ChildWorkspace? childWorkspace;
 
@@ -60,6 +76,8 @@ class SpawnFacts {
     final ws = j['child_workspace'];
     final sw = j['spawn'];
     final attention = j['needs_attention'];
+    final reason = j['attention'];
+    final take = j['work_to_take'];
     return SpawnFacts(
       parentSession: j['parent_session'] as String?,
       rootSession: j['root_session'] as String?,
@@ -76,9 +94,87 @@ class SpawnFacts {
         for (final e in j['recent_events'] as List? ?? const [])
           if (e is Map<String, dynamic>) ChildEvent.fromJson(e),
       ],
+      attention: reason is Map<String, dynamic>
+          ? Attention.tryParse(reason)
+          : null,
+      workToTake: take is bool ? take : null,
+      unappliedCommits: j['unapplied_commits'] is num
+          ? (j['unapplied_commits'] as num).toInt()
+          : null,
     );
   }
 }
+
+/// Why a session waits for the person (153a). Everything but [kind] may be
+/// missing; [detail] is the agent's own words, shown as data.
+class Attention {
+  const Attention({
+    required this.kind,
+    this.since,
+    this.detail,
+    this.blockedOn,
+    this.resetsAt,
+  });
+
+  /// `permission_prompt`, `usage_limit`, `blocked` or `delete_approval`.
+  final String kind;
+  final DateTime? since;
+  final String? detail;
+
+  /// The session it waits on; no server names one yet.
+  final String? blockedOn;
+
+  /// When a usage limit lifts; no server knows yet.
+  final DateTime? resetsAt;
+
+  static Attention? tryParse(Map<String, dynamic> j) {
+    final kind = j['kind'];
+    if (kind is! String || kind.isEmpty) return null;
+    return Attention(
+      kind: kind,
+      since: _time(j['since']),
+      detail: j['detail'] is String ? j['detail'] as String : null,
+      blockedOn: j['blocked_on'] is String ? j['blocked_on'] as String : null,
+      resetsAt: _time(j['resets_at']),
+    );
+  }
+}
+
+/// One thing waiting for the person to decide (153b), oldest first on its
+/// session. Only `delete_request` today; a kind this client does not know
+/// is kept, so it can still count it.
+class PendingDecision {
+  const PendingDecision({
+    required this.kind,
+    required this.id,
+    this.createdAt,
+    this.expiresAt,
+  });
+
+  final String kind;
+  final String id;
+  final DateTime? createdAt;
+  final DateTime? expiresAt;
+
+  static PendingDecision? tryParse(Object? j) {
+    if (j is! Map) return null;
+    final kind = j['kind'];
+    final id = j['id'];
+    if (kind is! String || id is! String) return null;
+    return PendingDecision(
+      kind: kind,
+      id: id,
+      createdAt: _time(j['created_at']),
+      expiresAt: _time(j['expires_at']),
+    );
+  }
+
+  static List<PendingDecision> listOf(Object? j) => [
+    for (final d in j is List ? j : const []) ?PendingDecision.tryParse(d),
+  ];
+}
+
+DateTime? _time(Object? v) => v is String ? DateTime.tryParse(v) : null;
 
 /// One change of a child's, as its parent's queue holds it (144a): codes
 /// only, never the child's own text.

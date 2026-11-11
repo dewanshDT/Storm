@@ -398,17 +398,32 @@ pub(super) fn needs_attention_in(
             _ => {}
         }
     }
-    let blocked = conn
+    Ok(blocked_result_in(conn, r)?.map(|_| BLOCKED))
+}
+
+/// The summary and time of `r`'s result for its current round, when its
+/// outcome is `blocked`.
+pub(super) fn blocked_result_in(
+    conn: &Connection,
+    r: &SessionRecord,
+) -> Result<Option<(String, String)>> {
+    Ok(conn
         .query_row(
-            "SELECT outcome FROM session_result WHERE session_id = ?1
+            "SELECT outcome, summary, reported_at FROM session_result WHERE session_id = ?1
                AND round >= COALESCE(
                    (SELECT round FROM session_round WHERE session_id = ?1), 1)",
             params![r.id],
-            |row| row.get::<_, String>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
         )
         .optional()?
-        .is_some_and(|o| o == BLOCKED);
-    Ok(blocked.then_some(BLOCKED))
+        .filter(|(outcome, ..)| outcome == BLOCKED)
+        .map(|(_, summary, at)| (summary, at)))
 }
 
 fn state_in(conn: &Connection, r: &SessionRecord, live: &LiveSignals) -> Result<EventState> {
