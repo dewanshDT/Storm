@@ -15,6 +15,7 @@ import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart';
 import 'package:storm/agent/oauth_links.dart';
+import 'package:storm/ui/controls.dart';
 import 'package:storm/ui/theme.dart';
 
 /// MCP Gateway, client side (decision 81h).
@@ -860,9 +861,20 @@ void main() {
       ],
       child: MaterialApp(
         theme: StormTheme.light(),
-        home: Scaffold(body: NewSessionLauncher(hosts: hosts)),
+        home: Scaffold(
+          body: SingleChildScrollView(child: NewSessionLauncher(hosts: hosts)),
+        ),
       ),
     );
+
+    Future<void> more(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('launcher-more')));
+      await tester.pumpAndSettle();
+    }
+
+    bool writable(WidgetTester tester) => tester
+        .widget<StormToggle>(find.byKey(const Key('launcher-writes')))
+        .enabled;
 
     testWidgets('an agent is told it can use your integrations', (
       tester,
@@ -870,10 +882,13 @@ void main() {
       final (client, seen) = agentServer();
       await tester.pumpWidget(launcher(client));
       await tester.pumpAndSettle();
+      await more(tester);
       expect(
         find.textContaining('This session can use your integrations'),
         findsOneWidget,
       );
+      await tester.ensureVisible(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       final launch = seen.firstWhere((r) => r.method == 'POST');
@@ -899,6 +914,9 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
+      expect(find.text('Uses 2 integrations'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('launcher-chip-integrations')));
+      await tester.pumpAndSettle();
       expect(
         find.textContaining('your integrations (GitHub, Linear)'),
         findsOneWidget,
@@ -906,37 +924,59 @@ void main() {
       expect(find.textContaining('Notion'), findsNothing);
     });
 
-    testWidgets('a shell gets no write field and no integrations (G-D9)', (
+    testWidgets('a shell can write nothing and has no integrations (G-D9)', (
       tester,
     ) async {
       final (client, _) = agentServer();
       await tester.pumpWidget(launcher(client));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('launcher-writes')), findsOneWidget);
+      await more(tester);
+      expect(find.byKey(const Key('launcher-writes-reason')), findsNothing);
+      await tester.ensureVisible(find.byKey(const Key('launcher-agent')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('launcher-agent')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Shell').last);
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('launcher-writes')), findsNothing);
+      expect(writable(tester), isFalse);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('launcher-writes-reason')),
+          matching: find.text("Shell can't reach Storm"),
+        ),
+        findsOneWidget,
+      );
       expect(find.textContaining('A shell has no access'), findsOneWidget);
       expect(find.textContaining('can use your integrations'), findsNothing);
     });
 
-    testWidgets('an agent the host cannot confine gets no write field and '
+    testWidgets('an agent the host cannot confine can write nothing and '
         'says why (decision 130a)', (tester) async {
       final (client, seen) = agentServer();
       await tester.pumpWidget(launcher(client));
+      await tester.pumpAndSettle();
+      await more(tester);
+      await tester.ensureVisible(find.byKey(const Key('launcher-agent')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('launcher-agent')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Cursor').last);
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('launcher-writes')), findsNothing);
+      expect(writable(tester), isFalse);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('launcher-writes-reason')),
+          matching: find.text("Cursor can't reach Storm"),
+        ),
+        findsOneWidget,
+      );
       expect(
         find.textContaining('Cursor runs without access to your vaults'),
         findsOneWidget,
       );
       expect(find.textContaining('can use your integrations'), findsNothing);
+      await tester.ensureVisible(find.byKey(const Key('launch')));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('launch')));
       await tester.pumpAndSettle();
       final launch =

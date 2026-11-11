@@ -41,10 +41,20 @@ void main() {
     final c = await open(t, agents);
     await t.tap(find.byKey(const Key('new-session')));
     await t.pumpAndSettle();
+    await t.tap(find.byKey(const Key('launcher-more')));
+    await t.pumpAndSettle();
     return c;
   }
 
+  Future<void> launch(WidgetTester t) async {
+    await t.ensureVisible(find.byKey(const Key('launch')));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const Key('launch')));
+  }
+
   Future<void> pick(WidgetTester t, String field, Finder item) async {
+    await t.ensureVisible(find.byKey(Key(field)));
+    await t.pumpAndSettle();
     await t.tap(find.byKey(Key(field)));
     await t.pumpAndSettle();
     await t.tap(item);
@@ -70,7 +80,7 @@ void main() {
         final agents = server();
         final c = await launcher(t, agents);
         await pick(t, 'launcher-permission-mode', find.text(label).last);
-        await t.tap(find.byKey(const Key('launch')));
+        await launch(t);
         await t.pumpAndSettle();
         expect(agents.launches.single['permission_mode'], mode);
         await disposeShell(t, c);
@@ -81,7 +91,7 @@ void main() {
       final agents = server();
       final c = await launcher(t, agents);
       expect(find.byKey(const Key('launcher-permission-mode')), findsOneWidget);
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('permission_mode'), isFalse);
       await disposeShell(t, c);
@@ -92,6 +102,10 @@ void main() {
       (t) async {
         final agents = server();
         final c = await launcher(t, agents);
+        await t.ensureVisible(
+          find.byKey(const Key('launcher-permission-mode')),
+        );
+        await t.pumpAndSettle();
         await t.tap(find.byKey(const Key('launcher-permission-mode')));
         await t.pumpAndSettle();
         expect(find.text("The agent's own setting"), findsWidgets);
@@ -103,6 +117,10 @@ void main() {
 
         // OpenCode offers no Auto: the choice falls back to the default.
         await pick(t, 'launcher-agent', find.text('OpenCode').last);
+        await t.ensureVisible(
+          find.byKey(const Key('launcher-permission-mode')),
+        );
+        await t.pumpAndSettle();
         await t.tap(find.byKey(const Key('launcher-permission-mode')));
         await t.pumpAndSettle();
         expect(find.text('Accept edits'), findsOneWidget);
@@ -110,16 +128,31 @@ void main() {
         await t.tapAt(Offset.zero);
         await t.pumpAndSettle();
 
+        // An agent with one mode keeps the row, disabled, with why.
         for (final other in ['Codex', 'Shell']) {
           await pick(t, 'launcher-agent', find.text(other).last);
           expect(
             find.byKey(const Key('launcher-permission-mode')),
-            findsNothing,
+            findsOneWidget,
             reason: other,
           );
+          expect(
+            find.text(
+              '$other has only its own setting. Claude Code and OpenCode '
+              'only.',
+            ),
+            findsOneWidget,
+          );
+          await t.ensureVisible(
+            find.byKey(const Key('launcher-permission-mode')),
+          );
+          await t.pumpAndSettle();
+          await t.tap(find.byKey(const Key('launcher-permission-mode')));
+          await t.pumpAndSettle();
+          expect(find.text('Accept edits'), findsNothing, reason: other);
         }
         await pick(t, 'launcher-agent', find.text('OpenCode').last);
-        await t.tap(find.byKey(const Key('launch')));
+        await launch(t);
         await t.pumpAndSettle();
         expect(agents.launches.single.containsKey('permission_mode'), isFalse);
         await disposeShell(t, c);

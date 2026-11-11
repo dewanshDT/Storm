@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/router.dart';
+import 'package:storm/ui/controls.dart';
 
 import 'agent_fakes.dart';
 import 'fake_server.dart';
@@ -52,6 +53,17 @@ void main() {
     defaultProvider: defaultProvider,
   );
 
+  Future<void> launch(WidgetTester t) async {
+    await t.ensureVisible(find.byKey(const Key('launch')));
+    await t.pumpAndSettle();
+    await t.tap(find.byKey(const Key('launch')));
+  }
+
+  Future<void> more(WidgetTester t) async {
+    await t.tap(find.byKey(const Key('launcher-more')));
+    await t.pumpAndSettle();
+  }
+
   Future<ProviderContainer> launcher(
     WidgetTester t,
     FakeAgentServer agents,
@@ -63,6 +75,7 @@ void main() {
     await t.pumpAndSettle();
     await t.tap(find.byKey(const Key('new-session')));
     await t.pumpAndSettle();
+    await more(t);
     return c;
   }
 
@@ -79,12 +92,11 @@ void main() {
   double top(WidgetTester t, String key) =>
       t.getTopLeft(find.byKey(Key(key))).dy;
 
-  testWidgets('every select has a chevron; Crew and Role come after Can '
-      'write to, both None', (t) async {
+  testWidgets('every select has a chevron; Crew and Role come after Write '
+      'to, both None', (t) async {
     final c = await launcher(t, server());
     for (final key in [
-      'launcher-host',
-      'launcher-workspace',
+      'launcher-where',
       'launcher-agent',
       'launcher-permission-mode',
       'launcher-write-vault',
@@ -100,15 +112,15 @@ void main() {
         reason: key,
       );
     }
-    expect(find.byKey(const Key('select-chevron')), findsNWidgets(7));
+    expect(find.byKey(const Key('select-chevron')), findsNWidgets(6));
     expect(top(t, 'launcher-write-vault'), lessThan(top(t, 'launcher-crew')));
     expect(top(t, 'launcher-crew'), lessThan(top(t, 'launcher-role')));
     expect(inField('launcher-crew', 'None'), findsOneWidget);
-    expect(inField('launcher-role', 'None'), findsOneWidget);
+    expect(inField('launcher-role', 'None · a plain agent'), findsOneWidget);
     await disposeShell(t, c);
   });
 
-  testWidgets('the Host field says who the host runs as (151q)', (t) async {
+  testWidgets('Where says who the host runs as (151q)', (t) async {
     final c = await launcher(
       t,
       server(
@@ -117,10 +129,14 @@ void main() {
         ),
       ),
     );
+    // ags_1 is working in the workspace, and the same line says so.
     expect(
       find.descendant(
-        of: find.byKey(const Key('launcher-host-execution')),
-        matching: find.text('Runs as storm-runtime · each session isolated'),
+        of: find.byKey(const Key('launcher-row-where')),
+        matching: find.text(
+          'Runs as storm-runtime · each session isolated · another session '
+          'is working here',
+        ),
       ),
       findsOneWidget,
     );
@@ -129,8 +145,10 @@ void main() {
     final old = await launcher(t, server());
     expect(
       find.descendant(
-        of: find.byKey(const Key('launcher-host-execution')),
-        matching: find.text(kRunsAsUnknown),
+        of: find.byKey(const Key('launcher-row-where')),
+        matching: find.text(
+          '$kRunsAsUnknown · another session is working here',
+        ),
       ),
       findsOneWidget,
     );
@@ -171,7 +189,7 @@ void main() {
       findsNothing,
     );
 
-    await t.tap(find.byKey(const Key('launch')));
+    await launch(t);
     await t.pumpAndSettle();
     final body = agents.launches.single;
     expect(body['role'], {'vault_id': 'v-kit', 'note_id': 'k_rev'});
@@ -194,7 +212,7 @@ void main() {
       expect(find.byKey(const Key('role-menu')), findsNothing);
       // Crew still works for it.
       expect(find.byKey(const Key('launcher-crew')), findsOneWidget);
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('role'), isFalse);
       await disposeShell(t, c);
@@ -244,6 +262,7 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('run-again')));
       await t.pumpAndSettle();
+      await more(t);
       return c;
     }
 
@@ -261,7 +280,7 @@ void main() {
       expect(t.getTopLeft(made).dy, lessThan(t.getTopLeft(existing).dy));
       await t.tap(made);
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single['crew'], {'new_name': 'Design'});
       await disposeShell(t, c);
@@ -271,7 +290,7 @@ void main() {
       final agents = server(sessions: [ended()]);
       final c = await runAgain(t, agents);
       await pick(t, 'launcher-crew', find.text('Gateway release').last);
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single['crew'], {'id': 'crw_1'});
       await disposeShell(t, c);
@@ -298,7 +317,7 @@ void main() {
       expect(find.byKey(const Key('role-k_rev')), findsNothing);
       await t.tapAt(const Offset(10, 10));
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('crew'), isFalse);
       expect(agents.launches.single.containsKey('role'), isFalse);
@@ -306,7 +325,12 @@ void main() {
     });
   });
 
-  group('"Allow this session to start agents" (141e)', () {
+  group('"Start agents" (141e)', () {
+    bool spawnLive(WidgetTester t) {
+      final s = t.widget<StormToggle>(find.byKey(const Key('launcher-spawn')));
+      return s.enabled && s.onChanged != null;
+    }
+
     Map<String, dynamic> c0({
       String identity = 'verified',
       String isolation = 'verified',
@@ -329,7 +353,7 @@ void main() {
         ),
         findsOneWidget,
       );
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single['spawn'], true);
       await disposeShell(t, c);
@@ -338,28 +362,26 @@ void main() {
       final c2 = await launcher(t, again);
       await t.tap(find.byKey(const Key('launcher-spawn')));
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(again.launches.single.containsKey('spawn'), isFalse);
       await disposeShell(t, c2);
     });
 
-    testWidgets('151m: children writing shows only with spawn on and a '
+    testWidgets('151m: children writing is live only with spawn on and a '
         'write vault, off by default, and is sent', (t) async {
       final agents = server(host: c0());
       final c = await launcher(t, agents);
       const tick = Key('launcher-children-write');
-      expect(
-        find.byKey(tick),
-        findsOneWidget,
-        reason: 'spawn is on by default',
-      );
+      bool live() => t.widget<StormToggle>(find.byKey(tick)).enabled;
+      expect(live(), isTrue, reason: 'spawn is on by default');
       await t.tap(find.byKey(const Key('launcher-writes')));
       await t.pumpAndSettle();
-      expect(find.byKey(tick), findsNothing, reason: 'read only');
+      expect(live(), isFalse, reason: 'read only');
+      expect(find.text('Turn on Write to first'), findsOneWidget);
       await t.tap(find.byKey(const Key('launcher-writes')));
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single['spawn'], true);
       expect(agents.launches.single.containsKey('children_write'), isFalse);
@@ -369,7 +391,7 @@ void main() {
       final c2 = await launcher(t, again);
       await t.tap(find.byKey(tick));
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       final sent = again.launches.single;
       expect((sent['spawn'], sent['children_write']), (true, true));
@@ -382,7 +404,7 @@ void main() {
       await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launcher-spawn')));
       await t.pumpAndSettle();
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(off.launches.single.containsKey('children_write'), isFalse);
       await disposeShell(t, c3);
@@ -398,7 +420,8 @@ void main() {
         c0(isolation: 'unavailable'),
       ]) {
         final c = await launcher(t, server(host: host));
-        expect(find.byKey(const Key('launcher-spawn')), findsNothing);
+        expect(spawnLive(t), isFalse);
+        expect(find.byKey(const Key('launcher-spawn-reason')), findsOneWidget);
         await disposeShell(t, c);
       }
       // Identity is not a gate, and a host with isolation off offers it.
@@ -407,20 +430,21 @@ void main() {
         c0(isolation: 'unavailable', mode: 'off'),
       ]) {
         final c = await launcher(t, server(host: host));
-        expect(find.byKey(const Key('launcher-spawn')), findsOneWidget);
+        expect(spawnLive(t), isTrue);
         await disposeShell(t, c);
       }
       final agents = server(host: c0());
       final c = await launcher(t, agents);
       for (final other in ['Shell', 'Cursor']) {
         await pick(t, 'launcher-agent', find.text(other).last);
+        expect(spawnLive(t), isFalse, reason: other);
         expect(
           find.byKey(const Key('launcher-spawn')),
-          findsNothing,
-          reason: other,
+          findsOneWidget,
+          reason: 'the row stays, disabled',
         );
       }
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('spawn'), isFalse);
       await disposeShell(t, c);
@@ -435,12 +459,9 @@ void main() {
       final agents = server(host: three());
       final c = await launcher(t, agents);
       expect(find.byKey(const Key('launcher-model')), findsOneWidget);
-      expect(
-        find.text('haiku, sonnet, opus or a full id like claude-sonnet-4-5'),
-        findsOneWidget,
-      );
+      expect(find.text('or a full id like claude-sonnet-4-5'), findsOneWidget);
       await t.enterText(find.byKey(const Key('launcher-model')), '  haiku ');
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single['model'], 'haiku');
       await disposeShell(t, c);
@@ -459,9 +480,13 @@ void main() {
       await pick(t, 'launcher-agent', find.text('Codex').last);
       expect(find.text('a model id, e.g. gpt-5-codex'), findsOneWidget);
       await pick(t, 'launcher-agent', find.text('Shell').last);
-      expect(find.byKey(const Key('launcher-model')), findsNothing);
+      expect(
+        t.widget<TextField>(find.byKey(const Key('launcher-model'))).enabled,
+        isFalse,
+      );
+      expect(find.text('Shell has no model'), findsOneWidget);
       await pick(t, 'launcher-agent', find.text('Codex').last);
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(agents.launches.single.containsKey('model'), isFalse);
       await disposeShell(t, c);
@@ -478,7 +503,7 @@ void main() {
         );
       final c = await launcher(t, agents);
       await t.enterText(find.byKey(const Key('launcher-model')), 'gpt-4o');
-      await t.tap(find.byKey(const Key('launch')));
+      await launch(t);
       await t.pumpAndSettle();
       expect(
         find.text(

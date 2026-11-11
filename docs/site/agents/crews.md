@@ -29,8 +29,9 @@ workspaces can share a crew. Crews are listed under **CREWS**, above
   the sessions not in it.
 - **On a phone**, long-press a session and choose **New crew…**, or
   long-press a crew for **Add sessions…**.
-- **When you launch** from a note, the launcher's **Crew** row offers
-  **New crew: {the note's title}**, or any crew you already have.
+- **When you launch** from a note, the launcher's **Crew** row, under
+  **More**, offers **New crew: {the note's title}**, or any crew you
+  already have.
 
 **Moving sessions:**
 
@@ -138,7 +139,7 @@ that uses it; a deleted role note leaves its tag struck through.
 
 A role note can tell the agent how to behave, "write nothing in the vault"
 for example. That is advice to the agent, not a rule: what a session may
-write is still the **Can write to** you chose at launch. The launcher says so
+write is still the **Write to** you chose at launch. The launcher says so
 under Role when you grant a write vault.
 
 ### Agents that can't read roles

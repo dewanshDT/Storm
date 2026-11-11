@@ -1164,13 +1164,19 @@ void main() {
       await tester.pumpWidget(
         app(
           Scaffold(
-            body: NewSessionLauncher(
-              hosts: hosts.map((h) => AgentHost.fromJson(h)).toList(),
+            body: SingleChildScrollView(
+              child: NewSessionLauncher(
+                hosts: hosts.map((h) => AgentHost.fromJson(h)).toList(),
+              ),
             ),
           ),
           server(),
         ),
       );
+      await tester.pumpAndSettle();
+      // The chip says it; tapping it opens More at the whole sentence.
+      expect(find.text('Network: build-vm’s policy'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('launcher-chip-network')));
       await tester.pumpAndSettle();
       expect(
         find.textContaining('Network: inherits build-vm’s policy'),
@@ -1182,6 +1188,8 @@ void main() {
         find.descendant(of: agent, matching: find.text('Shell')),
         findsOneWidget,
       );
+      await tester.ensureVisible(agent);
+      await tester.pumpAndSettle();
       await tester.tap(agent);
       await tester.pumpAndSettle();
       await tester.tap(find.text('Claude Code (not installed)'));

@@ -53,6 +53,17 @@ void main() {
     return c;
   }
 
+  Future<void> more(WidgetTester tester) async {
+    await tester.tap(find.byKey(const Key('launcher-more')));
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> tapLaunch(WidgetTester tester) async {
+    await tester.ensureVisible(find.byKey(const Key('launch')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('launch')));
+  }
+
   Finder inField(String key, String text) =>
       find.descendant(of: find.byKey(Key(key)), matching: find.text(text));
 
@@ -303,16 +314,15 @@ void main() {
       await tester.tap(find.byKey(const Key('run-again')));
       await tester.pumpAndSettle();
 
-      expect(inField('launcher-host', 'build-vm · online'), findsOneWidget);
-      expect(inField('launcher-workspace', 'site'), findsOneWidget);
+      expect(inField('launcher-where', 'site on build-vm'), findsOneWidget);
       expect(inField('launcher-agent', 'OpenCode'), findsOneWidget);
-      expect(inField('launcher-write-vault', 'Work'), findsOneWidget);
+      expect(inField('launcher-chip-writes', 'Writes to Work'), findsOneWidget);
       expect(inField('launcher-context', 'Design'), findsOneWidget);
       expect(agents.launches, isEmpty);
 
       await tester.ensureVisible(find.byKey(const Key('launch')));
       await tester.pump();
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       final body = agents.launches.single;
       expect(body['host_id'], 'hst_1');
@@ -339,7 +349,7 @@ void main() {
       final c = await open(tester, agents, at: Routes.agentSession('ags_done'));
       await tester.tap(find.byKey(const Key('run-again')));
       await tester.pumpAndSettle();
-      expect(inField('launcher-host', 'codebox · online'), findsOneWidget);
+      expect(inField('launcher-where', 'site on codebox'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -561,7 +571,10 @@ void main() {
     await tester.tap(find.byKey(const Key('start-session')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('launcher-context')), findsOneWidget);
-    expect(inField('launcher-write-vault', 'Primary'), findsOneWidget);
+    expect(
+      inField('launcher-chip-writes', 'Writes to Primary'),
+      findsOneWidget,
+    );
     await tester.ensureVisible(find.byKey(const Key('launch')));
     await tester.pump();
     await tester.tap(find.byKey(const Key('launch')));
@@ -608,14 +621,15 @@ void main() {
         final c = await open(tester, agents);
         await launchFrom(tester, note: (vaultId: 'v-work', noteId: 'w1'));
 
-        expect(inField('launcher-host', 'codebox · online'), findsOneWidget);
-        expect(inField('launcher-workspace', 'notes'), findsOneWidget);
+        expect(inField('launcher-where', 'notes on codebox'), findsOneWidget);
         expect(
           inField('launcher-agent', 'Claude Code · default'),
           findsOneWidget,
         );
-        expect(inField('launcher-write-vault', 'Work'), findsOneWidget);
-        expect(find.text('The agent reads the note through Storm.'), findsOne);
+        expect(
+          inField('launcher-chip-writes', 'Writes to Work'),
+          findsOneWidget,
+        );
 
         await tester.ensureVisible(find.byKey(const Key('launch')));
         await tester.pump();
@@ -657,7 +671,7 @@ void main() {
       await tester.tap(find.byKey(const Key('launcher-workspaces-retry')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('launcher-no-workspaces')), findsNothing);
-      expect(inField('launcher-workspace', 'scratch'), findsOneWidget);
+      expect(inField('launcher-where', 'scratch on macbook'), findsOneWidget);
       await disposeShell(tester, c);
     });
 
@@ -669,10 +683,19 @@ void main() {
       await launchFrom(tester);
 
       Future<void> ask(String name) async {
-        await tester.tap(find.byKey(const Key('launcher-workspace')));
+        await tester.tap(find.byKey(const Key('launcher-where')));
         await tester.pumpAndSettle();
-        await tester.tap(find.text('New workspace…').last);
+        await tester.tap(find.byKey(const Key('where-new-hst_1')));
         await tester.pumpAndSettle();
+        // Inline under Where: never a dialog over the launcher (153-5).
+        expect(find.byType(AlertDialog), findsNothing);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('launcher-row-where')),
+            matching: find.byKey(const Key('new-workspace-name')),
+          ),
+          findsOneWidget,
+        );
         await tester.enterText(
           find.byKey(const Key('new-workspace-name')),
           name,
@@ -680,7 +703,7 @@ void main() {
         await tester.pump();
       }
 
-      // A name already taken: said as a sentence, and the dialog stays.
+      // A name already taken: said as a sentence, and the field stays.
       agents.refuseNewWorkspace = (409, 'exists');
       await ask('storm');
       expect(
@@ -711,9 +734,13 @@ void main() {
         {'name': 'storm', 'git': true},
         {'name': 'demo', 'git': false},
       ]);
-      expect(inField('launcher-workspace', 'demo'), findsOneWidget);
+      expect(inField('launcher-where', 'demo on build-vm'), findsOneWidget);
+      expect(
+        find.byKey(const Key('launcher-new-workspace-form')),
+        findsNothing,
+      );
 
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(agents.launches.single['workspace'], 'demo');
       await disposeShell(tester, c);
@@ -728,13 +755,14 @@ void main() {
       final agents = FakeAgentServer(hosts: [agentHost()]);
       final c = await open(tester, agents);
       await launchFrom(tester);
+      await more(tester);
       await tester.enterText(find.byKey(const Key('launcher-model')), 'haiku');
       await tester.tap(find.byKey(const Key('launcher-writes')));
       await tester.pumpAndSettle();
       expect(find.text('Read only'), findsOneWidget);
 
       agents.refuseLaunch = (503, 'the host is offline');
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(find.text('The host is offline.'), findsOneWidget);
       expect(agents.launches, hasLength(1));
@@ -756,7 +784,7 @@ void main() {
       );
       expect(find.text('Read only'), findsOneWidget);
 
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(agents.launches, hasLength(2));
       expect(agents.launches.last['model'], 'haiku');
@@ -779,7 +807,7 @@ void main() {
       agents.refuseLaunch = (409, 'workspace_held');
       await tester.ensureVisible(find.byKey(const Key('launch')));
       await tester.pump();
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(
         find.text('Another session is working in this workspace.'),
@@ -790,7 +818,7 @@ void main() {
       agents.refuseLaunch = (409, 'something_new');
       await tester.ensureVisible(find.byKey(const Key('launch')));
       await tester.pump();
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(find.text("Couldn't launch: something_new"), findsOneWidget);
       await disposeShell(tester, c);
@@ -807,12 +835,17 @@ void main() {
       await tester.tap(find.byKey(const Key('new-session')));
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('launcher-context')), findsNothing);
+      expect(
+        inField('launcher-chip-writes', 'Writes to Primary'),
+        findsOneWidget,
+      );
+      await more(tester);
       expect(inField('launcher-write-vault', 'Primary'), findsOneWidget);
 
       await tester.tap(find.byKey(const Key('launcher-writes')));
       await tester.pumpAndSettle();
       expect(find.text('Read only'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(agents.launches.single.containsKey('write_vault_id'), isFalse);
       expect(agents.launches.single.containsKey('context'), isFalse);
@@ -830,18 +863,27 @@ void main() {
       final c = await open(tester, agents);
       await tester.tap(find.byKey(const Key('new-session')));
       await tester.pumpAndSettle();
+      // The chip is muted; tapping it says why instead of opening More.
+      await tester.tap(find.byKey(const Key('launcher-chip-writes')));
+      await tester.pumpAndSettle();
+      expect(
+        inField('launcher-chip-reason', 'Off in Settings › AI access'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('launcher-writes')), findsNothing);
+      await more(tester);
       expect(find.text('Off in Settings › AI access'), findsOneWidget);
       expect(find.byKey(const Key('launcher-write-vault')), findsNothing);
       await tester.tap(find.byKey(const Key('launcher-writes')));
       await tester.pumpAndSettle();
       expect(find.text('Off in Settings › AI access'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('launch')));
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(agents.launches.single.containsKey('write_vault_id'), isFalse);
       await disposeShell(tester, c);
     });
 
-    testWidgets('a shell has no write field, and never sends a vault', (
+    testWidgets('a shell\'s write field is disabled, and never sends a vault', (
       tester,
     ) async {
       final agents = FakeAgentServer(
@@ -853,8 +895,18 @@ void main() {
       await tester.tap(find.byKey(const Key('new-session')));
       await tester.pumpAndSettle();
       expect(inField('launcher-agent', 'Shell · default'), findsOneWidget);
-      expect(find.byKey(const Key('launcher-writes')), findsNothing);
-      await tester.tap(find.byKey(const Key('launch')));
+      await more(tester);
+      expect(
+        tester
+            .widget<StormToggle>(find.byKey(const Key('launcher-writes')))
+            .enabled,
+        isFalse,
+      );
+      expect(
+        inField('launcher-writes-reason', "Shell can't reach Storm"),
+        findsOneWidget,
+      );
+      await tapLaunch(tester);
       await tester.pumpAndSettle();
       expect(agents.launches.single.containsKey('write_vault_id'), isFalse);
       expect(where(c).queryParameters['tab'], 'about');
@@ -876,7 +928,7 @@ void main() {
         tester.getSize(find.byKey(const Key('launch'))).width,
         lessThan(200),
       );
-      final box = tester.getRect(find.byKey(const Key('launcher-host')));
+      final box = tester.getRect(find.byKey(const Key('launcher-where')));
       expect(box.center.dx, closeTo(wide.width / 2 + 48, 120));
       await disposeShell(tester, c);
 
@@ -884,6 +936,11 @@ void main() {
       await tester.tap(find.byKey(const Key('new-session-pill')));
       await tester.pumpAndSettle();
       expect(find.byType(BottomSheet), findsOneWidget);
+      // The same three fields and chips; Launch takes the sheet's width.
+      expect(
+        tester.getSize(find.byKey(const Key('launch'))).width,
+        greaterThan(phone.width * 0.8),
+      );
       await disposeShell(tester, c);
     });
   });

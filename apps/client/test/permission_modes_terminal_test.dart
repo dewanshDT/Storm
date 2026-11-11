@@ -85,6 +85,8 @@ void main() {
         await t.pumpAndSettle();
         await t.tap(find.byKey(const Key('new-session')));
         await t.pumpAndSettle();
+        await t.tap(find.byKey(const Key('launcher-more')));
+        await t.pumpAndSettle();
         expect(
           find.descendant(
             of: find.byKey(const Key('launcher-permission-mode')),
@@ -94,6 +96,8 @@ void main() {
         );
         expect(permissionModesOf('claude-code').first, 'default');
         expect(permissionModeLabel('default'), "The agent's own setting");
+        await t.ensureVisible(find.byKey(const Key('launch')));
+        await t.pumpAndSettle();
         await t.tap(find.byKey(const Key('launch')));
         await t.pumpAndSettle();
         expect(agents.launches.single.containsKey('permission_mode'), isFalse);
