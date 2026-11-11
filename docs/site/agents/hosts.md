@@ -46,7 +46,7 @@ name for a host you run as yourself. A host set to isolate sessions adds
 *"· each session isolated"*. A runtime too old to say, or one that can't name
 its account, shows *"Runs as an unknown account"*. When a session starts,
 Storm keeps the account, isolation and identity the host had then, and the
-session's Details shows them under **Ran as**, whatever the host says later.
+session's About shows them under **Ran as**, whatever the host says later.
 A session from before Storm kept this shows *"Not recorded"*. This is status
 only: Storm reads no agent setting to report it and changes none.
 
@@ -123,8 +123,7 @@ agent.
 A host that is not `verified` — macOS, Windows, a Linux host missing a
 precondition, or a runtime too old to say — shows *"Session identity not
 verified — Storm can't tell which session is calling"* as an extra line on
-its row in **Settings › Hosts** and in each of its sessions' Details. A
-verified host shows no identity line. That is a
+its row in **Settings › Hosts**. A verified host shows no identity line. That is a
 disclosure, not a restriction: every tool keeps working there. Each of an
 agent's calls to Storm or an integration is audited as `verified` or
 `unverified`, and a connection the host refused is recorded on the server as
@@ -329,7 +328,7 @@ the first, connect to its sockets and local ports, and write where agents
 live. The host reports `isolation: verified` only when every attempt is
 refused; until then, or if the helper stops answering or `pasta` goes
 missing later, it reports `unavailable` with the reason, the app says so on
-the host row and in each session's Details, and **new sessions fail with
+the host row, and **new sessions fail with
 "isolation unavailable on this host"** while running ones carry on. A host
 set to isolate that has no helper to ask (its socket is not there because
 `storm-runtime-isolation on` was not run, or the host does not use the

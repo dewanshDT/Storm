@@ -128,7 +128,7 @@ void main() {
       expect(find.text('Primary / Projects / Storm'), findsOneWidget);
       expect(find.text('Open in Notes ›'), findsOneWidget);
 
-      await tester.tap(find.text('Wrote 0'));
+      await tester.tap(find.byKey(const Key('inspector-rail-wrote')));
       await tester.pumpAndSettle();
       expect(where(c).queryParameters['tab'], 'wrote');
       expect(
@@ -138,7 +138,7 @@ void main() {
         findsOneWidget,
       );
 
-      await tester.tap(find.byKey(const Key('panel-tab-SessionTab.context')));
+      await tester.tap(find.byKey(const Key('inspector-rail-context')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('open-in-notes')));
       await tester.pumpAndSettle();
@@ -165,30 +165,40 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('About says what the session may touch', (tester) async {
+    testWidgets('About keeps who and what the session is, and nothing it '
+        'used to repeat (153j)', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
-        sessions: [
-          agentSession('ags_1', writeVaultId: 'v-work'),
-          agentSession('ags_sh', provider: 'shell', name: 'storm-2'),
-        ],
+        sessions: [agentSession('ags_1', writeVaultId: 'v-work')],
       );
       final c = await open(
         tester,
         agents,
         at: Routes.agentSession('ags_1', tab: 'about'),
       );
-      expect(find.text('storm on build-vm'), findsOneWidget);
+      final about = find.byKey(const Key('session-about'));
+      List<String> labels() => [
+        for (final w in tester.widgetList<Text>(
+          find.descendant(of: about, matching: find.byType(Text)),
+        ))
+          if (RegExp(r'^[A-Z][A-Z ]+$').hasMatch(w.data ?? '')) w.data!,
+      ];
+      expect(labels(), ['CREW', 'ROLE', 'RAN AS', 'STARTED BY']);
+      for (final gone in [
+        'Never deletes',
+        'Reads all vaults',
+        'Inherits build-vm’s policy',
+        'storm on build-vm',
+      ]) {
+        expect(
+          find.descendant(of: about, matching: find.textContaining(gone)),
+          findsNothing,
+          reason: gone,
+        );
+      }
       expect(
-        find.text('Reads all vaults. Writes to Work. Never deletes.'),
-        findsOneWidget,
-      );
-      expect(find.text('Inherits build-vm’s policy'), findsOneWidget);
-      c.read(routerProvider).go(Routes.agentSession('ags_sh', tab: 'about'));
-      await tester.pumpAndSettle();
-      expect(
-        find.text('None. Shell sessions have no Storm access.'),
-        findsOneWidget,
+        tester.widget<Text>(find.byKey(const Key('about-started-by'))).data,
+        startsWith('You, '),
       );
       await disposeShell(tester, c);
     });
@@ -250,7 +260,7 @@ void main() {
       );
       await tester.tap(find.byKey(const Key('session-header')));
       await tester.pumpAndSettle();
-      expect(find.text('AGENT'), findsOneWidget);
+      expect(find.text('STARTED BY'), findsOneWidget);
       // Below Crew and Role (138-5), so it may need scrolling to.
       await tester.ensureVisible(find.byKey(const Key('end-session')));
       await tester.pumpAndSettle();
@@ -523,7 +533,14 @@ void main() {
     expect(agents.count('GET', writes), 2);
     expect(find.text('Plan'), findsOneWidget);
     expect(find.text('new'), findsOneWidget);
-    expect(find.text('Wrote 2'), findsOneWidget);
+    // The rail's Wrote count follows.
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('inspector-badge-wrote')),
+        matching: find.text('2'),
+      ),
+      findsOneWidget,
+    );
     // A kit script is a file under its path, never a note link.
     expect(find.text('tool.sh'), findsOneWidget);
     expect(find.text('Primary / scripts'), findsOneWidget);

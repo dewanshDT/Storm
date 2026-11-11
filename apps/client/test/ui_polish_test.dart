@@ -61,7 +61,12 @@ void main() {
       );
       expect(header.left, closeTo(terminal.left, 1));
       expect(header.right, closeTo(inspector.right, 1));
-      expect(inspector.width, closeTo(kInspectorWidth + 1, 1));
+      // The rail, a hairline either side, and the panel (153i).
+      expect(
+        inspector.width,
+        closeTo(kInspectorRailWidth + kInspectorWidth + 2, 1),
+      );
+      expect(rect(tester, 'inspector-panel').width, kInspectorWidth);
       // The actions sit at the workspace's far edge, past the terminal.
       expect(
         rect(tester, 'inspector-toggle').left,
@@ -77,12 +82,14 @@ void main() {
       final open = terminalWidth(tester);
       await tester.tap(find.byKey(const Key('inspector-close')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('session-inspector')), findsNothing);
+      // The rail stays (153i).
+      expect(find.byKey(const Key('inspector-panel')), findsNothing);
+      expect(find.byKey(const Key('inspector-rail')), findsOneWidget);
       expect(terminalWidth(tester), greaterThan(open + kInspectorWidth - 2));
 
       await tester.tap(find.byKey(const Key('inspector-toggle')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('session-inspector')), findsOneWidget);
+      expect(find.byKey(const Key('inspector-panel')), findsOneWidget);
       expect(terminalWidth(tester), closeTo(open, 1));
       await disposeShell(tester, c);
     });
@@ -92,16 +99,10 @@ void main() {
       final handle = find.byKey(const Key('inspector-resize'));
       await tester.drag(handle, const Offset(-400, 0));
       await tester.pumpAndSettle();
-      expect(
-        rect(tester, 'session-inspector').width,
-        closeTo(kInspectorMaxWidth + 1, 1),
-      );
+      expect(rect(tester, 'inspector-panel').width, kInspectorMaxWidth);
       await tester.drag(handle, const Offset(600, 0));
       await tester.pumpAndSettle();
-      expect(
-        rect(tester, 'session-inspector').width,
-        closeTo(kInspectorMinWidth + 1, 1),
-      );
+      expect(rect(tester, 'inspector-panel').width, kInspectorMinWidth);
       expect(terminalWidth(tester), greaterThan(kSessionMinWidth));
       await disposeShell(tester, c);
     });
@@ -134,7 +135,8 @@ void main() {
       tester,
     ) async {
       final c = await session(tester, size: const Size(1100, 800));
-      expect(find.byKey(const Key('session-inspector')), findsNothing);
+      expect(find.byKey(const Key('inspector-panel')), findsNothing);
+      expect(find.byKey(const Key('inspector-rail')), findsOneWidget);
       expect(find.byKey(const Key('inspector-toggle')), findsOneWidget);
       await disposeShell(tester, c);
     });
@@ -240,7 +242,7 @@ void main() {
       expect(full.maxLines, isNull);
       expect(find.byKey(const Key('details-context')), findsOneWidget);
       expect(find.text('WROTE'), findsOneWidget);
-      expect(find.text('AGENT'), findsOneWidget);
+      expect(find.text('STARTED BY'), findsOneWidget);
       expect(find.byKey(const Key('end-session')), findsOneWidget);
       await disposeShell(tester, c);
     });

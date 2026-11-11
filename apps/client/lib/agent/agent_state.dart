@@ -431,13 +431,16 @@ final agentNoteProvider = FutureProvider.autoDispose
       }
     });
 
-/// The panel tabs of a session (`?tab=`).
-enum SessionTab { context, wrote, about, requests, work }
+/// The inspector tabs of a session (`?tab=`), in the rail's order (153i).
+enum SessionTab { context, wrote, agents, about, work }
 
-SessionTab sessionTabOf(String? raw) => SessionTab.values.firstWhere(
-  (t) => t.name == raw,
-  orElse: () => SessionTab.context,
-);
+/// `requests` was the Activity tab before the Agents tab took it in (153i).
+SessionTab sessionTabOf(String? raw) => raw == 'requests'
+    ? SessionTab.agents
+    : SessionTab.values.firstWhere(
+        (t) => t.name == raw,
+        orElse: () => SessionTab.context,
+      );
 
 /// Shows a session. A route, so it is linkable, remembered for launch and
 /// backed out of like any other place (plan §6.1).

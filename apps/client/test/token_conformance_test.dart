@@ -42,6 +42,9 @@ void main() {
   const decisionFiles = [
     'lib/agent/delete_request.dart',
     'lib/agent/session_screen.dart',
+    // The inspector's rail and its Agents tab (153i).
+    'lib/agent/session_inspector.dart',
+    'lib/agent/session_agents.dart',
   ];
   files.addAll(decisionFiles.map(File.new));
 
@@ -80,7 +83,8 @@ void main() {
     );
   });
 
-  test('the Agents sidebar and the decision strip are scanned too', () {
+  test('the Agents sidebar, the decision strip and the inspector are '
+      'scanned too', () {
     for (final path in [...sidebarFiles, ...decisionFiles]) {
       expect(File(path).existsSync(), isTrue, reason: path);
     }

@@ -59,12 +59,7 @@ void main() {
   });
 
   List<String> rows(AgentSession s, String label) => [
-    for (final r in aboutRows(
-      s,
-      host: 'h',
-      writeVault: null,
-      integrations: null,
-    ))
+    for (final r in aboutRows(s))
       if (r.$1 == label) r.$2,
   ];
 
@@ -77,20 +72,12 @@ void main() {
     expect(about(session(null)), isEmpty);
   });
 
-  test('a verified host says so; any other state with it on refuses', () {
-    // Ran as says it, from the snapshot.
+  test('About has no Isolation row; the session keeps its label (153j)', () {
     expect(about(session(isolation('verified'))), isEmpty);
-    for (final (reason, why) in [
-      ('pending', 'self-test running'),
-      ('self_test', 'self-test failed'),
-      ('no_passt', 'pasta missing'),
-      ('helper', 'helper not answering'),
-      ('no_helper', 'no isolation helper'),
-      ('unrecognised', 'unrecognised'),
-    ]) {
-      expect(about(session(isolation('unavailable', reason))), [
-        'Session isolation unavailable ($why) — new sessions are refused.',
-      ], reason: reason);
+    for (final reason in ['pending', 'self_test', 'no_passt', 'helper']) {
+      final s = session(isolation('unavailable', reason));
+      expect(about(s), isEmpty, reason: reason);
+      expect(s.isolationLabel, isNotNull, reason: reason);
     }
     // The label survives the live record merging in.
     final s = session(isolation('unavailable', 'no_passt'));

@@ -154,7 +154,7 @@ void main() {
       );
     });
 
-    testWidgets('the mode shows on the row and in About', (t) async {
+    testWidgets('the mode shows in the header, not About', (t) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
@@ -175,8 +175,12 @@ void main() {
         await t.tap(find.byKey(const Key('inspector-toggle')));
         await t.pumpAndSettle();
       }
-      expect(find.text('PERMISSION MODE'), findsOneWidget);
-      expect(find.text('Accept edits'), findsOneWidget);
+      // In the header's meta line; About no longer repeats it (153j).
+      expect(
+        t.widget<Text>(find.byKey(const Key('session-meta'))).data,
+        contains('accept edits'),
+      );
+      expect(find.text('PERMISSION MODE'), findsNothing);
       await disposeShell(t, c);
     });
   });

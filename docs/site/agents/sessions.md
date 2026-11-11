@@ -20,14 +20,14 @@ launcher asks for:
 | **Host** | Which Runtime Host runs it. |
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
-| **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's About shows it. |
-| **Permission mode** | Which of the agent's own permission modes it starts in. **The agent's own setting** (the default) passes nothing, so whatever you set up for that agent applies. Claude Code also offers **Accept edits**, **Plan**, **Auto**, **Don't ask** (it refuses whatever its rules don't allow, without asking) and **Bypass permissions** (it never asks); OpenCode offers **Accept edits**. Storm passes the one you pick to the agent as its own setting and adds nothing of its own. Agents the session starts run in the same mode, or in their own setting when their agent doesn't have it. The session's row and About show it, and a resume keeps it. |
+| **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's header shows it. |
+| **Permission mode** | Which of the agent's own permission modes it starts in. **The agent's own setting** (the default) passes nothing, so whatever you set up for that agent applies. Claude Code also offers **Accept edits**, **Plan**, **Auto**, **Don't ask** (it refuses whatever its rules don't allow, without asking) and **Bypass permissions** (it never asks); OpenCode offers **Accept edits**. Storm passes the one you pick to the agent as its own setting and adds nothing of its own. Agents the session starts run in the same mode, or in their own setting when their agent doesn't have it. The session's header shows it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
 | **Crew** | A [crew](/docs/agents/crews/) to list the session in, a new one named after the context note, or none. |
 | **Role** | A role note from your Kit the agent reads at launch, as a [role](/docs/agents/crews/#roles). Off for an agent that can't read Storm notes. |
-| **Agents** | **Allow this session to start agents**, on by default (untick it to launch without): the session may start, message and end agents of its own, which run in its [crew](/docs/agents/crews/) with it. Offered for Claude Code, OpenCode and Codex on any host that says which account it runs as; a host too old to say, or one set to isolate sessions whose isolation isn't working, doesn't offer it. No key, API call or agent can turn it on: only you, here or in the session's About. |
-| **Agents' writes** | Shown only with **Agents** on and a **Can write to** vault chosen, and off by default: **The agents it starts can write to {vault}**. Off, they are read only. On, they write only to that vault, never another. About shows which. |
+| **Agents** | **Allow this session to start agents**, on by default (untick it to launch without): the session may start, message and end agents of its own, which run in its [crew](/docs/agents/crews/) with it. Offered for Claude Code, OpenCode and Codex on any host that says which account it runs as; a host too old to say, or one set to isolate sessions whose isolation isn't working, doesn't offer it. No key, API call or agent can turn it on: only you, here, from the session header's **Starts agents ▾**, or in its About. |
+| **Agents' writes** | Shown only with **Agents** on and a **Can write to** vault chosen, and off by default: **The agents it starts can write to {vault}**. Off, they are read only. On, they write only to that vault, never another. About's **Starts agents** says which. |
 
 Any number of sessions can work in one workspace. The launcher marks a
 workspace another session is working in; they see each other's changes as
@@ -89,9 +89,34 @@ device.
   keyboard.
 - **Settings › Terminal** sets the text size, line spacing and padding.
 
-Beside the terminal, **Context**, **Wrote** and **About** show the note it
-started from, the notes it has written, and how it was launched. A note an
-agent wrote says so on its version line, linking back to the session.
+Under the terminal, a line says how to leave it: *Tab and Shift+Tab go to
+the agent · Esc, then Tab, leaves the terminal* (⇧Tab on a Mac).
+
+Beside the terminal, at desktop width, an icon rail opens the session's
+inspector: **Context** (the note it started from), **Wrote** (the notes it
+has written, with their count on the icon), **Agents** (for a session that
+can start agents or has), **About**, and **Work** for an agent with a
+workspace of its own. Each icon names itself when you point at it. Clicking
+the open tab's icon closes the panel, as does **×** or the header's details
+button; the rail stays, so the terminal takes the room and the counts stay
+in sight. Drag the panel's left edge to resize it. On a phone, tap the
+session's name for the same details in a sheet. A note an agent wrote says
+so on its version line, linking back to the session.
+
+**About** says who and what the session is: its **Crew** (with **Move to
+crew**), its **Role** (with **Change label**), whether it **Starts agents**
+and within what limits, who it **Ran as**, and who **Started** it. A plugin
+server the host left out is one line there, with **Fix in Integrations ›**.
+The agent, workspace, model and mode are on the header's second line, and a
+host's identity and isolation on its row in **Settings › Hosts**.
+
+**Agents** lists the agents the session started, each with its state in a
+word (**Needs you**, **Running**, **Parked** or **Ended**), why, and **Open**
+(or **Work** when an ended one has commits to apply), then **End all of
+them…**, which asks under the header before it ends any. Below, **What it
+sent them** is every start, message and end the session's agent sent, oldest
+first, with the exact text it sent, and under each one that began a round
+what the round took (*round 2 · 14s · 12.3k in*) where the agent counted it.
 
 About's **Ran as** row is the account the session ran as, kept from when it
 started running, so it stays as it was if the host changes later. On an
@@ -166,7 +191,7 @@ a fresh session with the same choices; **Dismiss** clears it from the list.
   repository's `.codex/` settings.
 - A host with `agent_mcp = "storm-only"` gives sessions Storm's servers
   alone. When such a session starts, the agent shows what Storm left out and
-  why, and the session's **Details** list it too.
+  why, and the session's **About** says so in one line.
 - **Cursor and Command Code run as terminals only:** no notes, no
   integrations, no write vault, and no Resume yet, until Storm has checked
   its integrations in each with a signed-in account. Their own MCP servers

@@ -48,27 +48,20 @@ void main() {
         'identity': ?identity,
       });
 
-  List<String> about(AgentSession s) => [
-    for (final r in aboutRows(
-      s,
-      host: 'h',
-      writeVault: null,
-      integrations: null,
-    ))
-      if (r.$1 == 'Identity') r.$2,
-  ];
+  List<String> about(AgentSession s) => [for (final r in aboutRows(s)) r.$1];
 
-  test('only a verified session, or one from an older server, has no row', () {
-    const label =
-        "Session identity not verified — Storm can't tell which session is "
-        'calling.';
-    expect(about(session(identity('unavailable', 'old_host'))), [label]);
-    expect(about(session(identity('unsupported', 'windows'))), [label]);
-    expect(about(session(identity('unavailable', 'ptrace_scope'))), [label]);
-    expect(about(session(identity('verified'))), isEmpty);
-    expect(about(session(null)), isEmpty);
+  test('About has no Identity row: the host row says it (153j)', () {
+    for (final s in [
+      session(identity('unavailable', 'old_host')),
+      session(identity('unsupported', 'windows')),
+      session(identity('verified')),
+      session(null),
+    ]) {
+      expect(about(s), ['Ran as', 'Started by']);
+    }
     // The label survives the live record merging in.
     final s = session(identity('unsupported', 'windows'));
+    expect(s.identityUnverified, isTrue);
     expect(s.withLive(session(null)).identityUnverified, isTrue);
   });
 
