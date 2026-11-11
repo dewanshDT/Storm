@@ -7,7 +7,7 @@ import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/client_version.dart';
 import '../../state/health.dart';
-import '../shell/activity_rail.dart' show healthColor;
+import '../shell/app_bar.dart' show healthColor;
 import '../tokens.dart';
 import 'connection_page.dart' show serverAddress;
 import 'settings_widgets.dart';

@@ -8,6 +8,7 @@ import '../../router.dart';
 import '../breakpoints.dart';
 import '../panels.dart' show MonoTag;
 import '../shell/storm_scaffold.dart';
+import '../shell/app_bar.dart' show pageTopInset;
 import '../tokens.dart';
 
 /// A page's frame: the 680 column beside the navigation at desk width; on a
@@ -88,7 +89,7 @@ class SettingsPage extends StatelessWidget {
       child: ListView(
         padding: EdgeInsets.fromLTRB(
           t.sp * 5,
-          t.sp * 3.5,
+          pageTopInset(t),
           t.sp * 5,
           t.sp * 7.5,
         ),

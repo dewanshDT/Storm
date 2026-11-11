@@ -21,6 +21,7 @@ import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
 import 'ui/search_screen.dart';
 import 'ui/settings/settings_shell.dart';
+import 'ui/shell/app_bar.dart' show WindowFrame;
 import 'ui/shell/app_shell.dart';
 import 'ui/shell/notes_home.dart';
 import 'ui/shell/vault_shell.dart';
@@ -217,14 +218,28 @@ final routerProvider = Provider<GoRouter>((ref) {
       return Routes.pairing;
     },
     routes: [
-      GoRoute(path: Routes.starting, builder: (_, _) => const StartingScreen()),
-      GoRoute(path: Routes.pairing, builder: (_, _) => const PairingScreen()),
-      GoRoute(path: Routes.login, builder: (_, _) => const LoginScreen()),
+      // Outside the shell, a desktop window still gets the bar's frame: the
+      // OS draws none (decision 153d).
+      GoRoute(
+        path: Routes.starting,
+        builder: (_, _) => const WindowFrame(child: StartingScreen()),
+      ),
+      GoRoute(
+        path: Routes.pairing,
+        builder: (_, _) => const WindowFrame(child: PairingScreen()),
+      ),
+      GoRoute(
+        path: Routes.login,
+        builder: (_, _) => const WindowFrame(child: LoginScreen()),
+      ),
       GoRoute(
         path: Routes.addDevice,
-        builder: (_, _) => const AddDeviceScreen(),
+        builder: (_, _) => const WindowFrame(child: AddDeviceScreen()),
       ),
-      GoRoute(path: Routes.gallery, builder: (_, _) => const GalleryScreen()),
+      GoRoute(
+        path: Routes.gallery,
+        builder: (_, _) => const WindowFrame(child: GalleryScreen()),
+      ),
       ShellRoute(
         builder: (_, state, child) =>
             _shell(AppShell(location: state.uri.toString(), child: child)),

@@ -236,7 +236,7 @@ void main() {
                     .widget<Container>(
                       find
                           .descendant(
-                            of: find.byKey(const Key('rail-status')),
+                            of: find.byKey(const Key('bar-status')),
                             matching: find.byType(Container),
                           )
                           .last,
@@ -262,7 +262,7 @@ void main() {
       await pumpShell(tester, c, size: wide);
       expect(dotColor(tester), StormTokens.from(StormPreset.stormDark).danger);
 
-      await tester.tap(find.byKey(const Key('rail-status')));
+      await tester.tap(find.byKey(const Key('bar-status')));
       await tester.pumpAndSettle();
       expect(find.text('GitHub needs you to sign in again'), findsOneWidget);
       final sync = c.read(healthRowsProvider).first;

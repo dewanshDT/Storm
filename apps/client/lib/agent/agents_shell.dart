@@ -4,9 +4,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
+import '../keyboard/storm_activators.dart' show stormHasKeyboard;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/shell/sidebar_frame.dart';
+import '../ui/shell/app_bar.dart' show sidebarTopInset;
 import '../ui/states.dart' show SkeletonRows;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
@@ -48,16 +50,22 @@ class AgentsShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (!context.isExpanded) return child;
-    return Scaffold(
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          AgentsSidebar(
-            selected: sessionIdOf(location),
-            selectedCrew: crewIdOf(location),
-          ),
-          Expanded(child: PaneSemantics(child: child)),
-        ],
+    // Focus so the app bar's ⌘[ / ⌘] work before anything is clicked, as
+    // VaultShell's does for the Notes chords.
+    return Focus(
+      autofocus: stormHasKeyboard,
+      skipTraversal: true,
+      child: Scaffold(
+        body: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            AgentsSidebar(
+              selected: sessionIdOf(location),
+              selectedCrew: crewIdOf(location),
+            ),
+            Expanded(child: PaneSemantics(child: child)),
+          ],
+        ),
       ),
     );
   }
@@ -282,7 +290,7 @@ class AgentsSidebar extends ConsumerWidget {
           Padding(
             padding: EdgeInsets.fromLTRB(
               t.sp * 1.5,
-              t.sp * 2,
+              sidebarTopInset(t),
               t.sp * 1.5,
               t.sp,
             ),

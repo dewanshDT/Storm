@@ -7,6 +7,8 @@ import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'controls.dart';
 import 'shell/storm_scaffold.dart';
+import 'breakpoints.dart';
+import 'shell/app_bar.dart' show pageTopInset;
 import 'shell/vault_gate.dart';
 import 'states.dart';
 import 'tokens.dart';
@@ -96,7 +98,7 @@ class TrashView extends ConsumerWidget {
     return ListView(
       padding: EdgeInsets.fromLTRB(
         StormChrome.contentInset(context),
-        t.sp * 2,
+        context.isExpanded ? pageTopInset(t) : t.sp * 2,
         StormChrome.contentInset(context),
         StormChrome.navClearance(context),
       ),

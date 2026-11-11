@@ -6,9 +6,13 @@ import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/nav_memory.dart';
+import '../../keyboard/storm_nav_shortcuts.dart';
 import '../breakpoints.dart';
 import 'activity_rail.dart';
+import 'app_bar.dart';
+import 'nav_history.dart';
 import 'sidebar_frame.dart';
+import 'window_buttons.dart';
 
 /// Where system back goes once nothing is left to pop, or null to leave the
 /// app (decision Q2): a note goes to its folder, a folder to its parent,
@@ -94,8 +98,9 @@ class LogicalBack extends ConsumerWidget {
   }
 }
 
-/// Every signed-in location: the rail beside it at desk width, the phone's
-/// corner bubbles (drawn by each screen's chrome) below it.
+/// Every signed-in location: the app bar over the rail and the pane at desk
+/// width (decision 153), the phone's corner bubbles (drawn by each screen's
+/// chrome) below it.
 class AppShell extends ConsumerStatefulWidget {
   const AppShell({super.key, required this.location, required this.child});
 
@@ -122,7 +127,9 @@ class _AppShellState extends ConsumerState<AppShell> {
   void _remember() {
     final location = widget.location;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) ref.read(navMemoryProvider.notifier).visit(location);
+      if (!mounted) return;
+      ref.read(navMemoryProvider.notifier).visit(location);
+      ref.read(navHistoryProvider.notifier).visit(location);
     });
   }
 
@@ -142,13 +149,16 @@ class _AppShellState extends ConsumerState<AppShell> {
       onBackButtonPressed: _back,
       child: widget.child,
     );
-    // Outermost on both sides of the breakpoint, so crossing it keeps the
-    // watch (decision 149c).
-    return DeleteRequestWatcher(
-      child: !context.isExpanded
-          ? child
-          : Scaffold(
-              body: Row(
+    final wide = context.isExpanded;
+    final Widget body;
+    if (wide) {
+      body = Scaffold(
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const StormAppBar(),
+            Expanded(
+              child: Row(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   ActivityRail(
@@ -158,6 +168,24 @@ class _AppShellState extends ConsumerState<AppShell> {
                 ],
               ),
             ),
+          ],
+        ),
+      );
+    } else if (windowChrome != WindowChrome.none) {
+      // A narrow desktop window keeps the phone layout, and still needs a
+      // frame to move and close it by.
+      body = WindowFrame(child: child);
+    } else {
+      body = child;
+    }
+    // Outermost on both sides of the breakpoint, so crossing it keeps the
+    // watch (decision 149c).
+    return DeleteRequestWatcher(
+      child: StormNavShortcuts(
+        onBack: () => goBack(context, ref),
+        onForward: () => goForward(context, ref),
+        child: body,
+      ),
     );
   }
 }

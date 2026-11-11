@@ -280,14 +280,14 @@ void main() {
   });
 
   group('the rail foot', () {
-    testWidgets('status and Settings share one square on the rail axis', (
+    testWidgets('Settings alone, on the rail axis; the status is in the bar', (
       tester,
     ) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: wide);
       c.read(routerProvider).go(Routes.browse(primary));
       await tester.pumpAndSettle();
-      final status = rect(tester, 'rail-status');
+      expect(find.byKey(const Key('rail-status')), findsNothing);
       final settings = tester.getRect(
         find.descendant(
           of: find.byKey(const Key('rail-settings')),
@@ -295,11 +295,7 @@ void main() {
         ),
       );
       final notes = rect(tester, 'rail-notes');
-      expect(status.size, settings.size);
-      expect(status.width, status.height);
-      expect(status.center.dx, closeTo(notes.center.dx, 0.5));
       expect(settings.center.dx, closeTo(notes.center.dx, 0.5));
-      expect(settings.top - status.bottom, closeTo(8, 0.5));
       expect(900 - settings.bottom, closeTo(8, 0.5));
       await disposeShell(tester, c);
     });
