@@ -24,7 +24,12 @@ void main() {
   const edge = Size(900, 900);
   const wide = Size(1400, 900);
 
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded (153e); these read its rows, so it is open here.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   Future<ProviderContainer> open(
     WidgetTester tester,

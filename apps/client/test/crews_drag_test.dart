@@ -26,7 +26,12 @@ void main() {
   const phone = Size(411, 900);
 
   setUpAll(loadRealFonts);
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded (153e); these read its rows, so it is open here.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   /// Gateway release: two running members and an ended one; Relay hardening
   /// with one; three loose sessions, two running and one ended.

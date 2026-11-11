@@ -22,7 +22,12 @@ void main() {
   const wide = Size(1400, 900);
   const primary = FakeServer.primaryVault;
 
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded (153e); these read its rows, so it is open here.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   Uri where(ProviderContainer c) => c.read(routerProvider).state.uri;
 

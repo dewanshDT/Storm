@@ -71,8 +71,9 @@ Sessions waiting for you, blocked, failed in the last hour or on an offline
 host move to the top of their crew or section, and crews with one move up
 too; everything else keeps your order. Nothing moves while the pointer is
 over the sidebar. A spawned tree moves as one, and its parent's chevron
-folds it to a line such as "2 agents · 1 needs you". **ENDED** folds to its
-count, with **Dismiss all**.
+folds it to a line such as "2 agents · 1 needs you". **ENDED** starts folded
+to its count, with **Dismiss all**; open it and it stays open on that
+device.
 
 ## The terminal
 

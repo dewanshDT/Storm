@@ -11,7 +11,7 @@ class CrewPrefs {
     this.section = false,
     this.crews = const {},
     this.trees = const {},
-    this.ended = false,
+    this.ended = true,
   });
 
   /// The CREWS section is folded to "CREWS · n".
@@ -23,7 +23,8 @@ class CrewPrefs {
   /// Folded trees, by their parent's id: the parent's row rolls them up.
   final Set<String> trees;
 
-  /// The sidebar's ENDED is folded to its count and Dismiss all.
+  /// The sidebar's ENDED is folded to its count and Dismiss all: folded
+  /// until the person opens it (§2: "ENDED stays collapsed").
   final bool ended;
 
   bool collapsed(String crewId) => crews.contains(crewId);
@@ -51,7 +52,7 @@ class CrewPrefs {
     section: prefs.getBool(_kSection) ?? false,
     crews: {...?prefs.getStringList(_kCrews)},
     trees: {...?prefs.getStringList(_kTrees)},
-    ended: prefs.getBool(_kEnded) ?? false,
+    ended: prefs.getBool(_kEnded) ?? true,
   );
 
   Future<void> write(SharedPreferences prefs) async {

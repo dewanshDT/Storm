@@ -25,7 +25,12 @@ import 'shell_harness.dart';
 void main() {
   const wide = Size(1400, 900);
 
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded; most tests here read its rows, so it is open.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   String ago(Duration d) =>
       DateTime.now().toUtc().subtract(d).toIso8601String();
@@ -495,7 +500,9 @@ void main() {
       await disposeShell(t, c);
     });
 
-    testWidgets('ENDED folds to its count, with Dismiss all', (t) async {
+    testWidgets('ENDED starts folded to its count, with Dismiss all; '
+        'opened, it stays open on this device', (t) async {
+      SharedPreferences.setMockInitialValues({});
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
@@ -504,11 +511,20 @@ void main() {
           session('ags_e2', status: 'stopped'),
         ],
       );
-      final c = await open(t, agents);
-      await t.tap(find.byKey(const Key('ended-toggle')));
-      await t.pumpAndSettle();
+      var c = await open(t, agents);
       expect(find.text('ENDED · 2'), findsOneWidget);
       expect(row('ags_e1'), findsNothing);
+      expect(find.byKey(const Key('ended-dismiss-all')), findsOneWidget);
+
+      await t.tap(find.byKey(const Key('ended-toggle')));
+      await t.pumpAndSettle();
+      expect(row('ags_e1'), findsOneWidget);
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getBool('storm.agents.collapsed.ended'), isFalse);
+      await disposeShell(t, c);
+      c = await open(t, agents);
+      expect(row('ags_e1'), findsOneWidget, reason: 'kept open');
+
       await t.tap(find.byKey(const Key('ended-dismiss-all')));
       await t.pumpAndSettle();
       expect(agents.session('ags_e1'), isNull);
