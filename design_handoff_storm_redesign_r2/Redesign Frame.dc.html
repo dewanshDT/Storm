@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Newsreader:wght@400;600&display=swap" rel="stylesheet">
+<style>body{margin:0}*{box-sizing:border-box}@keyframes stormPulse{0%,100%{opacity:1}50%{opacity:.3}}</style>
+</helmet>
+<div style="{{ rootStyle }}">
+<sc-if value="{{ desk }}" hint-placeholder-val="{{ true }}">
+<div style="position:absolute;inset:0;display:flex;flex-direction:column"><sc-if value="{{ appBar }}" hint-placeholder-val="{{ false }}"><div style="height:44px;flex:none;display:flex;align-items:center;gap:14px;padding:2px 16px 0 20px;background:var(--bg);border-bottom:1px solid var(--border);position:relative;box-sizing:border-box"><div style="display:flex;gap:8px"><span style="width:12px;height:12px;border-radius:999px;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:999px;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:999px;background:#28c840"></span></div><span style="padding-left:18px;color:var(--text3);font-size:15px">‹</span><span style="color:var(--text3);font-size:15px;opacity:.5">›</span><div style="position:absolute;left:50%;transform:translateX(-50%);width:420px;display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:var(--rControl);background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:13px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><span style="flex:1">Search notes, jump to a session…</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px">⌘K</span></div><span style="flex:1"></span><span style="width:9px;height:9px;border-radius:999px;background:var(--green)"></span></div></sc-if><div style="flex:1;min-height:0;display:flex;position:relative">
+  <div style="width:56px;flex:none;background:var(--bg);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:{{ railPad }};gap:8px">
+    <div style="{{ railNotes }}"><svg width="20" height="22" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v1h-1zM7 1h1v1h-1zM0 2h1v1h-1zM8 2h1v1h-1zM0 3h1v1h-1zM2 3h4v1h-4zM9 3h1v1h-1zM0 4h1v1h-1zM9 4h1v1h-1zM0 5h1v1h-1zM2 5h6v1h-6zM9 5h1v1h-1zM0 6h1v1h-1zM9 6h1v1h-1zM0 7h1v1h-1zM2 7h6v1h-6zM9 7h1v1h-1zM0 8h1v1h-1zM9 8h1v1h-1zM0 9h1v1h-1zM9 9h1v1h-1zM1 10h8v1h-8z"></path></svg></div>
+    <div style="{{ railAgents }}"><sc-if value="{{ railCount }}" hint-placeholder-val="{{ false }}"><span style="position:absolute;top:-4px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:999px;background:var(--danger);color:var(--onAccent);font-family:'IBM Plex Mono',monospace;font-size:10.5px;font-weight:500;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg)">2</span></sc-if><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg></div>
+    <div style="flex:1"></div>
+    <sc-if value="{{ notAppBar }}" hint-placeholder-val="{{ true }}"><div style="width:40px;height:32px;display:flex;align-items:center;justify-content:center"><div style="width:9px;height:9px;border-radius:999px;background:var(--green)"></div></div></sc-if>
+    <div style="{{ railSettings }}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg></div>
+  </div>
+
+  <div style="width:277px;flex:none;background:var(--surface);border-right:1px solid var(--border);display:flex;flex-direction:column;min-height:0;position:relative">
+    <div style="{{ sideScroll }}">
+      <sc-for list="{{ side }}" as="e" hint-placeholder-count="10">
+        <sc-if value="{{ e.isHead }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:8px;padding:6px 6px 6px 12px;min-height:32px"><span style="flex:1;font-size:14px;font-weight:600;color:var(--text)">{{ e.l }}</span><sc-if value="{{ e.plus }}" hint-placeholder-val="{{ false }}"><span title="New session (⇧⌘N)" style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);background:var(--accentSoft);color:var(--accent)"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg></span></sc-if></div></sc-if>
+        <sc-if value="{{ e.isVault }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:10px;padding:6px 10px 10px"><div style="width:30px;height:30px;border-radius:8px;background:oklch(0.70 0.10 135);color:oklch(0.22 0.03 135);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;font-size:14px;font-weight:500">P</div><div style="display:flex;flex-direction:column"><span style="font-size:14px;font-weight:600;color:var(--text)">personal</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">synced 2m ago</span></div></div></sc-if>
+        <sc-if value="{{ e.isBtn }}" hint-placeholder-val="{{ false }}"><div style="margin:0 4px 4px;display:flex;align-items:center;justify-content:center;padding:9px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">{{ e.l }}</div></sc-if>
+        <sc-if value="{{ e.isNav }}" hint-placeholder-val="{{ false }}"><div style="{{ e.style }}"><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.l }}</span><sc-if value="{{ e.hasTag }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;color:var(--text3);border:1px solid var(--border);border-radius:5px;padding:0 4px">{{ e.tag }}</span></sc-if></div></sc-if>
+        <sc-if value="{{ e.isLabel }}" hint-placeholder-val="{{ false }}"><div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:12px 12px 6px">{{ e.l }}</div></sc-if>
+        <sc-if value="{{ e.isCrew }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:8px;padding:7px 8px"><span style="width:12px;color:var(--text3);font-size:10px">▾</span><span style="width:10px;height:10px;border-radius:3px;background:oklch(0.70 0.10 135)"></span><span style="flex:1;font-size:13px;font-weight:500;color:var(--text)">{{ e.l }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ e.count }}</span></div></sc-if>
+        <sc-if value="{{ e.isRow }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ e.outer }}"><div style="{{ e.inner }}">
+            <div style="position:relative;width:32px;height:32px;flex:none"><div style="{{ e.markStyle }}">{{ e.glyph }}</div><sc-if value="{{ e.hasBadge }}" hint-placeholder-val="{{ false }}"><div style="{{ e.badgeStyle }}"></div></sc-if></div>
+            <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+              <div style="display:flex;align-items:center;gap:6px;min-width:0"><span style="{{ e.nameStyle }}">{{ e.name }}</span><sc-if value="{{ e.hasRole }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1000 auto;min-width:5ch;max-width:15ch;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:16px;color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.role }}</span></sc-if><sc-if value="{{ e.hasAttn }}" hint-placeholder-val="{{ false }}"><span style="{{ e.attnStyle }}">{{ e.attn }}</span></sc-if></div>
+              <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ e.sub }}</span>
+            </div>
+          </div></div>
+        </sc-if>
+      </sc-for>
+    </div>
+    <sc-if value="{{ selBar }}" hint-placeholder-val="{{ false }}">
+      <div style="margin:0 8px 10px;display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border);box-shadow:var(--shadow)"><span style="flex:1;font-size:12.5px;color:var(--text)">2 selected</span><span style="font-size:12.5px;font-weight:500;color:var(--onAccent);background:var(--accent);padding:4px 9px;border-radius:7px">Make crew</span><span style="font-size:12.5px;color:var(--text2)">Move to…</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">Esc</span></div>
+    </sc-if>
+    <sc-if value="{{ notesFooter }}" hint-placeholder-val="{{ false }}">
+      <div style="border-top:1px solid var(--border);padding:10px 12px;display:flex;gap:6px"><div style="flex:1;display:flex;align-items:center;justify-content:center;padding:8px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">＋ New note</div><div style="width:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);border:1px solid var(--border);color:var(--text2);font-size:13px">▭</div><div style="width:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);border:1px solid var(--border);color:var(--text2);font-family:'IBM Plex Mono',monospace;font-size:14px">#</div></div>
+    </sc-if>
+  </div>
+
+  <div style="flex:1;min-width:0;position:relative;background:var(--bg)">
+    <sc-if value="{{ mSession }}" hint-placeholder-val="{{ true }}">
+      <div style="position:absolute;inset:0;display:flex;flex-direction:column;min-height:0">
+        <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px">
+          <div style="display:flex;align-items:center;gap:10px;min-width:0">
+            <span style="font-size:16px;font-weight:600;color:var(--text)">{{ ss.name }}</span>
+            <span style="{{ ss.chip }}"><span style="{{ ss.dot }}"></span>{{ ss.status }}</span>
+            <sc-if value="{{ ss.hasCrew }}" hint-placeholder-val="{{ false }}"><span style="flex:none;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--rControl);padding:1px 8px"><span style="width:9px;height:9px;border-radius:3px;background:oklch(0.70 0.10 135)"></span>Gateway release</span></sc-if>
+            <sc-if value="{{ ss.hasRole }}" hint-placeholder-val="{{ false }}"><span style="flex:none;white-space:nowrap;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:16px;color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:0 5px">{{ ss.role }}</span></sc-if>
+            <sc-if value="{{ ss.hasParent }}" hint-placeholder-val="{{ false }}"><span style="flex:none;white-space:nowrap;font-size:12px;color:var(--accent)">↳ started by gateway-impl ›</span></sc-if>
+            <sc-if value="{{ spawnChip }}" hint-placeholder-val="{{ false }}"><span style="flex:none;white-space:nowrap;display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--text2);border:1px solid var(--border);border-radius:var(--rControl);padding:1px 8px"><span style="width:6px;height:6px;border-radius:999px;background:var(--accent)"></span>Starts agents ▾</span></sc-if>
+            <span style="flex:1"></span>
+            <span style="display:flex;padding:6px;border-radius:var(--rControl);color:var(--text2);background:var(--surface2)"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="3" width="18" height="18" rx="2"></rect><path d="M15 3v18"></path></svg></span>
+            <span style="font-size:12.8px;color:var(--text2);padding:5px 10px;border:1px solid var(--border);border-radius:var(--rControl)">End</span>
+          </div>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text3)">{{ ss.meta }}</span>
+        </div>
+        <sc-for list="{{ stack }}" as="k" hint-placeholder-count="0">
+          <div style="{{ k.style }}">
+            <div style="display:flex;align-items:center;gap:10px">
+              <sc-if value="{{ k.hasKey }}" hint-placeholder-val="{{ false }}"><span style="{{ k.keyStyle }}">{{ k.key }}</span></sc-if>
+              <span style="flex:1;font-size:13.5px;color:var(--text);line-height:1.45">{{ k.title }}</span>
+              <sc-for list="{{ k.btns }}" as="a" hint-placeholder-count="1"><span style="{{ a.style }}">{{ a.l }}</span></sc-for>
+            </div>
+            <sc-for list="{{ k.groups }}" as="g" hint-placeholder-count="0"><div style="display:flex;gap:10px;align-items:baseline"><span style="width:{{ stripLabelW }};flex:none;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ g.k }}</span><span style="font-size:13px;color:var(--text)">{{ g.v }}</span></div></sc-for>
+            <sc-if value="{{ k.hasTick }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;gap:8px"><span style="width:16px;height:16px;border-radius:4px;border:1.5px solid var(--text3)"></span><span style="flex:1;font-size:13px;color:var(--text2)">{{ k.tick }}</span><span style="font-size:13px;color:var(--text2);padding:5px 8px">Cancel</span><span style="font-size:13px;color:var(--onAccent);background:var(--danger);padding:6px 10px;border-radius:var(--rControl)">{{ k.confirm }}</span></div></sc-if>
+          </div>
+        </sc-for>
+        <div style="flex:1;min-height:0;display:flex">
+          <div style="flex:1;min-width:0;overflow:hidden;padding:16px 20px;font-family:'IBM Plex Mono',monospace;font-size:13px;line-height:1.7;background:var(--bg)">
+            <sc-for list="{{ ss.lines }}" as="l" hint-placeholder-count="4"><div style="{{ l.style }}">{{ l.t }}</div></sc-for>
+            <div style="color:var(--text)">› <span style="display:inline-block;width:8px;height:15px;background:var(--text2);vertical-align:-2px"></span></div>
+            <sc-if value="{{ termHint }}" hint-placeholder-val="{{ false }}"><div style="margin-top:18px;font-family:'IBM Plex Sans',sans-serif;font-size:12px;color:var(--text3)">Tab and ⇧Tab go to the agent · Esc, then Tab, leaves the terminal</div></sc-if>
+          </div>
+          <sc-if value="{{ hasInsp }}" hint-placeholder-val="{{ true }}">
+            <div style="{{ inspOuter }}"><sc-if value="{{ iRail }}" hint-placeholder-val="{{ false }}"><div style="width:48px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;align-items:center;gap:6px;padding:10px 0;background:var(--bg)"><sc-for list="{{ railTabs }}" as="t" hint-placeholder-count="4"><div title="{{ t.l }}" style="{{ t.style }}"><sc-if value="{{ t.is_ctx }}" hint-placeholder-val="{{ false }}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"></path><path d="M14 3v5h5"></path></svg></sc-if><sc-if value="{{ t.is_wrote }}" hint-placeholder-val="{{ false }}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"></path></svg></sc-if><sc-if value="{{ t.is_agents }}" hint-placeholder-val="{{ false }}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.5"></circle><circle cx="18" cy="12" r="2.5"></circle><circle cx="6" cy="18" r="2.5"></circle><path d="M8.5 6h3a3 3 0 0 1 3 3v0M8.5 18h3a3 3 0 0 0 3-3v0"></path></svg></sc-if><sc-if value="{{ t.is_about }}" hint-placeholder-val="{{ false }}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v5"></path><path d="M12 8h.01"></path></svg></sc-if><sc-if value="{{ t.is_work }}" hint-placeholder-val="{{ false }}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="5" r="2"></circle><circle cx="6" cy="19" r="2"></circle><circle cx="18" cy="8" r="2"></circle><path d="M6 7v10"></path><path d="M18 10a6 6 0 0 1-6 6H6"></path></svg></sc-if><sc-if value="{{ t.hasCount }}" hint-placeholder-val="{{ false }}"><span style="{{ t.countStyle }}">{{ t.count }}</span></sc-if></div></sc-for></div></sc-if><sc-if value="{{ panelOpen }}" hint-placeholder-val="{{ true }}"><div style="{{ inspPanel }}">
+              <sc-if value="{{ iRail }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-items:center;padding:13px 16px;border-bottom:1px solid var(--border)"><span style="flex:1;font-size:13px;font-weight:600;color:var(--text)">{{ panelTitle }}</span><span style="color:var(--text3);font-size:15px">×</span></div></sc-if><sc-if value="{{ notIRail }}" hint-placeholder-val="{{ true }}"><div style="display:flex;align-items:center;gap:1px;padding:10px 10px;border-bottom:1px solid var(--border)">
+                <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4"><span style="{{ t.style }}">{{ t.l }}</span></sc-for>
+                <span style="flex:1"></span><span style="color:var(--text3);font-size:15px;padding:2px 3px">×</span>
+              </div></sc-if>
+              <div style="flex:1;min-height:0;overflow:hidden;padding:16px">
+                <dc-import name="Storm Blocks" blocks="{{ insp }}" hint-size="100%,400px"></dc-import>
+              </div></div></sc-if>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </sc-if>
+    <sc-if value="{{ mAh }}" hint-placeholder-val="{{ false }}"><div style="position:absolute;inset:0;overflow:hidden"><dc-import name="Agents Hosts Page" state="{{ ahState }}" hint-size="100%,100%"></dc-import></div></sc-if>
+    <sc-if value="{{ mPage }}" hint-placeholder-val="{{ false }}">
+      <div style="position:absolute;inset:0;overflow:hidden">
+        <div style="{{ pagePad }}">
+          <div style="display:flex;align-items:center;gap:10px"><span style="font-size:25px;font-weight:600;color:var(--text);white-space:nowrap;line-height:1.2">{{ pg.title }}</span><sc-if value="{{ pg.beta }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--text3);border:1px solid var(--border);border-radius:5px;padding:0 5px">Beta</span></sc-if><span style="flex:1"></span><sc-if value="{{ pg.hasAction }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--danger);padding:6px 12px;border:1px solid var(--border);border-radius:var(--rControl)">{{ pg.action }}</span></sc-if></div>
+          <sc-if value="{{ pg.hasIntro }}" hint-placeholder-val="{{ false }}"><div style="font-size:14px;color:var(--text2);line-height:1.5;margin-top:-6px">{{ pg.intro }}</div></sc-if>
+          <dc-import name="Storm Blocks" blocks="{{ pg.blocks }}" hint-size="100%,500px"></dc-import>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{ dlg }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.45);z-index:49"></div>
+    <div style="{{ dlgStyle }}">
+      <div style="font-size:18px;font-weight:600;color:var(--text);line-height:1.3">{{ dl.title }}</div>
+      <dc-import name="Storm Blocks" blocks="{{ dl.blocks }}" hint-size="100%,300px"></dc-import>
+    </div>
+  </sc-if>
+</div></div>
+</sc-if>
+
+<sc-if value="{{ phone }}" hint-placeholder-val="{{ false }}">
+<div style="position:absolute;inset:0">
+  <sc-if value="{{ pSession }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;display:flex;flex-direction:column">
+      <div style="height:84px;flex:none;padding:20px 76px 0"><div style="height:44px;display:flex;flex-direction:column;justify-content:center;align-items:center;gap:2px;min-width:0"><div style="display:flex;align-items:center;gap:6px"><span style="width:7px;height:7px;border-radius:999px;background:var(--accent)"></span><span style="font-size:15px;font-weight:600;color:var(--text)">gateway-impl</span><span style="color:var(--text3);font-size:11px">▾</span></div><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis">Running · Claude Code · Gateway spec · wrote 1</span></div></div>
+      <div style="{{ pCardStyle }}"><span style="{{ pCardKey }}">NEEDS YOU</span><span style="flex:1;font-size:13px;color:var(--text)">Delete Gateway notes draft.md?</span><span style="font-size:13px;color:var(--accent)">Review</span></div>
+      <div style="flex:1;overflow:hidden;padding:12px 16px;font-family:'IBM Plex Mono',monospace;font-size:12px;line-height:1.7;background:var(--surface);border-top:1px solid var(--border)">
+        <sc-for list="{{ ss.lines }}" as="l" hint-placeholder-count="4"><div style="{{ l.style }}">{{ l.t }}</div></sc-for>
+      </div>
+      <div style="display:flex;gap:6px;padding:8px 10px 26px;background:var(--surface2);border-top:1px solid var(--border);font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)"><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">Esc</span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">Tab</span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface);color:var(--accent)">⇧Tab</span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">Ctrl</span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">←</span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">→</span><span style="flex:1"></span><span style="padding:8px 9px;border-radius:var(--rControl);background:var(--surface)">Paste</span></div>
+    </div>
+  </sc-if>
+  <sc-if value="{{ pList }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;overflow:hidden;padding:80px 20px 40px;display:flex;flex-direction:column">
+      <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:8px">{{ pTitle }}</div>
+      <dc-import name="Storm Blocks" phone="{{ true }}" blocks="{{ pBlocks }}" hint-size="100%,600px"></dc-import>
+    </div>
+  </sc-if>
+  <div style="position:absolute;top:20px;left:20px;z-index:20;width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m15 18-6-6 6-6"></path></svg></div>
+  <div style="position:absolute;top:20px;right:20px;z-index:20;width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round"><path d="M20 7h-9"></path><path d="M14 17H5"></path><circle cx="17" cy="17" r="3"></circle><circle cx="7" cy="7" r="3"></circle></svg></div>
+  <sc-if value="{{ pSheet }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.4);z-index:44"></div>
+    <div style="position:absolute;left:0;right:0;bottom:0;max-height:88%;overflow:hidden;background:var(--surface);border-top:1px solid var(--border);border-radius:var(--rCard) var(--rCard) 0 0;padding:10px 20px 28px;z-index:45;display:flex;flex-direction:column;gap:8px">
+      <div style="align-self:center;width:36px;height:4px;border-radius:2px;background:var(--border);margin-bottom:4px"></div>
+      <dc-import name="Storm Blocks" phone="{{ true }}" blocks="{{ sheet }}" hint-size="100%,500px"></dc-import>
+    </div>
+  </sc-if>
+  <sc-if value="{{ pDlg }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;inset:0;background:rgba(0,0,0,.45);z-index:49"></div>
+    <div style="position:absolute;left:16px;right:16px;top:70px;bottom:40px;overflow:hidden;background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:var(--shadow);padding:20px;display:flex;flex-direction:column;gap:12px;z-index:50">
+      <div style="font-size:18px;font-weight:600;color:var(--text);line-height:1.3">{{ dl.title }}</div>
+      <dc-import name="Storm Blocks" phone="{{ true }}" blocks="{{ dl.blocks }}" hint-size="100%,500px"></dc-import>
+    </div>
+  </sc-if>
+</div>
+</sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:1280,&quot;height&quot;:800},&quot;scene&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;session-about&quot;,&quot;session-activity&quot;,&quot;session-work&quot;,&quot;end-tree&quot;,&quot;launcher&quot;,&quot;delete-modal&quot;,&quot;trash&quot;,&quot;trash-empty&quot;,&quot;settings-agents&quot;,&quot;settings-agents-nohosts&quot;,&quot;settings-hosts&quot;,&quot;hosts-limits&quot;,&quot;hosts-enroll&quot;,&quot;settings-ai&quot;,&quot;p-session&quot;,&quot;p-details&quot;,&quot;p-delete&quot;,&quot;p-vault-root&quot;],&quot;default&quot;:&quot;session-about&quot;,&quot;tsType&quot;:&quot;string&quot;},&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;,&quot;earth&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const PRESETS = {
+  dark: { dark: true, bgL: 22, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 35 },
+  light: { dark: false, bgL: 92, hue: 55, chroma: 8, accentH: 293, accentC: 0.15, accentL: 68, rCard: 16, rControl: 10, shadow: 20 },
+  earth: { dark: false, bgL: 84, hue: 62, chroma: 22, accentH: 55, accentC: 0.06, accentL: 45, rCard: 2, rControl: 10, shadow: 16 }
+};
+function tokens(p) {
+  const dir = p.dark ? 1 : -1, b = p.bgL / 100;
+  const n = (l) => `oklch(${l.toFixed(3)} ${(p.chroma / 1000).toFixed(3)} ${p.hue})`;
+  const aL = p.dark ? p.accentL / 100 : Math.min(0.40, p.accentL / 100);
+  const v = { '--bg': n(b), '--surface': n(b + dir * 0.05), '--surface2': n(b + dir * 0.09), '--border': n(b + dir * 0.14), '--text': n(p.dark ? 0.95 : 0.18), '--text2': n(p.dark ? 0.74 : 0.34), '--text3': n(p.dark ? 0.66 : 0.40),
+    '--accent': `oklch(${aL} ${p.accentC} ${p.accentH})`, '--accentSoft': `oklch(${(b + dir * 0.08).toFixed(3)} ${(p.accentC / 3).toFixed(3)} ${p.accentH})`, '--onAccent': aL > 0.6 ? `oklch(0.16 0.03 ${p.accentH})` : '#ffffff',
+    '--amber': `oklch(${p.dark ? 0.78 : 0.55} 0.14 75)`, '--green': `oklch(${p.dark ? 0.74 : 0.42} 0.13 148)`, '--danger': `oklch(${p.dark ? 0.70 : 0.45} 0.17 25)`,
+    '--rCard': p.rCard + 'px', '--rControl': p.rControl + 'px', '--shadow': `0 ${Math.round(p.shadow / 3)}px ${Math.round(p.shadow * 1.2)}px -8px rgba(0,0,0,${(p.shadow / 100).toFixed(2)})` };
+  return Object.entries(v).map(([k, x]) => `${k}:${x}`).join(';');
+}
+const mono = "font-family:'IBM Plex Mono',monospace";
+const SESS = [
+  { name: 'gateway-impl', a: 'C', st: 'working', role: 'storm coder', sub: 'build-vm · storm · opus · accept edits · 40m', crew: true },
+  { name: 'test-gateway', a: 'C', st: 'working', child: true, attn: 'Needs you', sub: '↳ from gateway-impl · own copy of storm', crew: true },
+  { name: 'bench-check', a: 'C', st: 'parked', child: true, sub: '↳ from gateway-impl · scratch beside storm', crew: true },
+  { name: 'review-gateway', a: 'O', st: 'idle', role: 'storm reviewer', sub: 'build-vm · storm · plan · 12m', crew: true },
+  { name: 'docs-pass', a: 'X', st: 'working', attn: 'Out of usage', sub: 'pi-lab · site · gpt-5 · 1h' },
+  { name: 'spike-sync', a: 'C', st: 'idle', attn: 'Blocked', sub: 'build-vm · storm · sonnet · 2h' },
+  { name: 'lint-fix', a: 'C', st: 'failed', sub: 'mac-mini · storm · failed', ended: true }
+];
+const LINES = ['$ claude --permission-mode acceptEdits', '› read personal/projects/storm/Gateway spec', '› started test-gateway: "Write tests for token refresh…"', '› started bench-check: "Benchmark relay throughput…"', '› asked to delete projects/storm/Gateway notes draft.md', '  waiting for your answer…'];
+const k = (key, v, link) => ({ t: 'kv', k: key, v, link });
+const SET_NAV = [['This device'], ['Terminal'], ['Devices & access'], ['STORM'], ['Vaults'], ['AI access'], ['Integrations', 'Beta'], ['Claude login', 'Beta'], ['Hosts & default agent'], ['Agents', 'Beta'], ['Storage'], ['Connection'], ['Advanced'], [''], ['About & health']];
+const R_SUB = { 'gateway-impl': 'storm · 40m', 'test-gateway': 'permission prompt · 3m', 'bench-check': 'parked until its next message', 'review-gateway': 'storm · 12m', 'docs-pass': 'out of usage · resets 15:00', 'spike-sync': 'blocked · waiting on schema-diff', 'lint-fix': 'failed · host restarted' };
+const SET_NAV_R = [['This device'], ['Terminal'], ['Devices & access'], ['STORM'], ['Vaults'], ['AI access'], ['Agents & hosts'], ['Integrations'], ['Claude login'], ['Storage'], ['Connection'], ['Advanced'], [''], ['About & health']];
+const SC = {
+  'r-session-agents': { r: true, rail: 'agents', main: 'session', tab: 'Agents 3', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], stack: ['decDelete'] },
+  'r-session-rail-closed': { r: true, rail: 'agents', main: 'session', tab: 'Agents 3', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], closed: true },
+  'r-session-about': { r: true, rail: 'agents', main: 'session', tab: 'About', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], inspKey: 'AboutR' },
+  'r-end-tree': { r: true, rail: 'agents', main: 'session', tab: 'Agents 3', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], stack: ['decEndTree'] },
+  'r-launcher': { r: true, rail: 'agents', main: 'session', tab: 'Agents 3', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], dlg: 'rLauncher' },
+  'r-launcher-more': { r: true, rail: 'agents', main: 'session', tab: 'Agents 3', tabs: ['Context', 'Wrote 1', 'Agents 3', 'About'], dlg: 'rLauncherMore', h: 1000 },
+  'r-trash': { r: true, rail: 'notes', main: 'page', page: 'rTrash' },
+  'r-vaults': { r: true, rail: 'settings', navR: true, main: 'page', page: 'rVaults', nav: 'Vaults' },
+  'r-agents-hosts': { r: true, rail: 'settings', navR: true, main: 'ah', ah: 'grid', nav: 'Agents & hosts' },
+  'r-agents-hosts-cell': { r: true, rail: 'settings', navR: true, main: 'ah', ah: 'cell', nav: 'Agents & hosts' },
+  'r-agents-hosts-empty': { r: true, rail: 'settings', navR: true, main: 'ah', ah: 'empty', nav: 'Agents & hosts' },
+  'r-integrations': { r: true, rail: 'settings', navR: true, main: 'page', page: 'rIntegrations', nav: 'Integrations' },
+  'r-ai': { r: true, rail: 'settings', navR: true, main: 'page', page: 'rAi', nav: 'AI access' },
+  'rp-session': { r: true, phone: true, pmode: 'session' },
+  'rp-decision': { r: true, phone: true, pmode: 'session', sheet: true, sheetKey: 'DecisionP' },
+  'rp-launcher': { r: true, phone: true, pmode: 'session', dlg: 'rLauncher' },
+  'session-about': { rail: 'agents', main: 'session', tab: 'About', stack: ['needs'] },
+  'session-activity': { rail: 'agents', main: 'session', tab: 'Activity', sel: true },
+  'session-work': { rail: 'agents', main: 'session', tab: 'Work', child: true },
+  'end-tree': { rail: 'agents', main: 'session', tab: 'About', stack: ['endTree'], hideInsp: true },
+  'launcher': { rail: 'agents', main: 'session', tab: 'About', dlg: 'launcher', h: 1120 },
+  'delete-modal': { rail: 'agents', main: 'session', tab: 'About', stack: ['needs'], dlg: 'delete' },
+  'trash': { rail: 'notes', main: 'page', page: 'trash' },
+  'trash-empty': { rail: 'notes', main: 'page', page: 'trashEmpty' },
+  'settings-agents': { rail: 'settings', main: 'page', page: 'agents', nav: 'Agents', h: 960 },
+  'settings-agents-nohosts': { rail: 'settings', main: 'page', page: 'agentsNoHosts', nav: 'Agents' },
+  'settings-hosts': { rail: 'settings', main: 'page', page: 'hosts', nav: 'Hosts & default agent' },
+  'hosts-limits': { rail: 'settings', main: 'page', page: 'hosts', nav: 'Hosts & default agent', dlg: 'limits' },
+  'hosts-enroll': { rail: 'settings', main: 'page', page: 'hosts', nav: 'Hosts & default agent', dlg: 'enroll', h: 900 },
+  'settings-ai': { rail: 'settings', main: 'page', page: 'ai', nav: 'AI access' },
+  'p-session': { phone: true, pmode: 'session' },
+  'p-details': { phone: true, pmode: 'session', sheet: true },
+  'p-delete': { phone: true, pmode: 'session', dlg: 'delete' },
+  'p-vault-root': { phone: true, pmode: 'list', list: 'vault' }
+};
+
+class Component extends DCLogic {
+  renderVals() {
+    const sc = SC[this.props.scene] || SC['session-about'];
+    const theme = this.props.theme || 'dark', phone = !!sc.phone;
+    const w = phone ? 390 : 1280, h = phone ? 844 : (sc.h || 800) + (sc.r ? 44 : 0);
+    const rail = (on) => `position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accentSoft)' : 'transparent'}`;
+    const navStyle = (on) => `display:flex;align-items:center;gap:8px;padding:7px 12px;border-radius:var(--rControl);font-size:13px;color:${on ? 'var(--text)' : 'var(--text2)'};background:${on ? 'var(--surface2)' : 'transparent'}`;
+    const BADGE = { working: 'var(--accent)', failed: 'var(--danger)', starting: 'var(--text3)', unknown: 'var(--amber)' };
+    const row = (s, i) => {
+      const selName = sc.child ? 'test-gateway' : 'gateway-impl', sel = s.name === selName && !sc.sel;
+      const multi = sc.sel && (s.name === 'docs-pass' || s.name === 'spike-sync');
+      return { isRow: true, name: s.name, glyph: s.a, sub: s.sub, hasRole: !!s.role, role: s.role, hasAttn: !!s.attn && !sc.r, attn: s.attn, ...(sc.r ? { sub: R_SUB[s.name] || s.sub } : {}),
+        attnStyle: `flex:none;white-space:nowrap;${mono};font-size:10.5px;line-height:16px;color:${s.attn === 'Needs you' ? 'var(--danger)' : 'var(--amber)'};border:1px solid ${s.attn === 'Needs you' ? 'var(--danger)' : 'var(--amber)'};border-radius:999px;padding:0 6px`,
+        markStyle: `width:32px;height:32px;border-radius:var(--rControl);background:var(--surface2);display:flex;align-items:center;justify-content:center;${mono};font-size:13px;font-weight:500;color:${s.a === 'C' ? '#D97757' : 'var(--text)'};opacity:${s.ended ? 0.5 : 1}`,
+        hasBadge: !!BADGE[s.st] && !(sc.r && s.attn === 'Out of usage'), badgeStyle: `position:absolute;right:-3px;bottom:-3px;width:11px;height:11px;border-radius:999px;border:2px solid ${sel || multi ? 'var(--surface2)' : 'var(--surface)'};background:${BADGE[s.st]};${s.st === 'working' ? 'animation:stormPulse 1.6s ease-in-out infinite' : ''}`,
+        nameStyle: `flex:0 1 auto;min-width:0;font-size:13px;color:${s.ended || s.st === 'parked' || (sc.r && s.attn === 'Out of usage') ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+        outer: s.crew ? 'margin-left:13px;padding-left:6px;border-left:1px solid var(--border)' : '',
+        inner: `display:flex;align-items:center;gap:10px;padding:6px 8px;border-radius:${s.child ? 0 : 'var(--rControl)'};${s.child ? 'margin-left:10px;padding-left:10px;border-left:1px dashed var(--text3);' : ''}background:${sel || multi ? (multi ? 'var(--accentSoft)' : 'var(--surface2)') : 'transparent'};${sc.r && s.attn === 'Needs you' ? 'box-shadow:inset 0 0 0 1px var(--danger);background:color-mix(in oklch, var(--danger) 9%, transparent);' : ''}` };
+    };
+    let side = [];
+    if (sc.rail === 'agents') {
+      side = [...(sc.r ? [{ isHead: true, l: 'Agents', plus: true }] : [{ isHead: true, l: 'Agents' }, { isBtn: true, l: '＋ New session' }, { isNav: true, l: 'Overview', style: navStyle(false) }]), { isLabel: true, l: 'Crews' }, { isCrew: true, l: 'Gateway release', count: '3 running' },
+        ...SESS.filter(s => s.crew).map(row), { isLabel: true, l: 'Running' }, ...(sc.r ? [...SESS.filter(s => !s.crew && !s.ended)].sort((x, y) => ({ Blocked: 1, 'Out of usage': 3 }[x.attn] ?? 4) - ({ Blocked: 1, 'Out of usage': 3 }[y.attn] ?? 4)) : SESS.filter(s => !s.crew && !s.ended)).map(row), { isLabel: true, l: 'Ended' }, ...SESS.filter(s => s.ended).map(row)];
+    } else if (sc.rail === 'notes') {
+      side = [{ isVault: true }, ...(sc.r ? [] : [{ isNav: true, l: 'Search personal   ⌘K', style: navStyle(false) + ';border:1px solid var(--border);background:var(--surface2);color:var(--text3);margin:0 4px 6px' }]), { isLabel: true, l: 'Recent' },
+        ...['Gateway spec', 'BOARD', 'Sprint notes'].map(l => ({ isNav: true, l, style: navStyle(false) })), { isLabel: true, l: 'Folders' },
+        ...['▸ daily', '▾ projects', '    ▸ storm', '▸ reading'].map(l => ({ isNav: true, l: l.trim(), style: navStyle(false) + (l.startsWith(' ') ? ';padding-left:30px' : '') })), { isLabel: true, l: '' }, { isNav: true, l: '🗑  Trash', tag: '4', hasTag: true, style: navStyle(true) }];
+    } else {
+      side = [{ isHead: true, l: 'Settings' }, ...(sc.navR ? SET_NAV_R : SET_NAV).map(([l, tag]) => l === 'STORM' ? { isLabel: true, l } : l === '' ? { isLabel: true, l: '' } : { isNav: true, l, tag, hasTag: !!tag, style: navStyle(l === sc.nav) })];
+    }
+    side = side.map(e => ({ plus: false, isHead: false, isVault: false, isBtn: false, isNav: false, isLabel: false, isCrew: false, isRow: false, hasTag: false, ...e }));
+
+    const child = !!sc.child;
+    const ss = { name: child ? 'test-gateway' : 'gateway-impl', status: child ? 'Running' : 'Running', role: 'storm coder', hasRole: !child, hasCrew: true, hasParent: child,
+      chip: `display:inline-flex;align-items:center;gap:6px;${mono};font-size:11px;color:var(--accent);border:1px solid var(--border);border-radius:999px;padding:2px 9px`, dot: 'width:7px;height:7px;border-radius:999px;background:var(--accent)',
+      meta: child ? 'Claude Code · opus · own copy of storm on build-vm · started 3m ago' : 'Claude Code · opus · accept edits · storm on build-vm · started 40m ago',
+      lines: (child ? ['$ claude', '› task from gateway-impl: write tests for token refresh', '› working in its own copy of storm', '› cargo test -p gateway: 14 passed', '› committed 2 changes'] : LINES).map(t => ({ t, style: `white-space:pre-wrap;color:${t.startsWith('$') ? 'var(--text)' : /started|asked/.test(t) ? 'var(--accent)' : 'var(--text2)'}` })) };
+    const STACK = {
+      needs: { key: 'NEEDS YOU', hasKey: true, title: 'gateway-impl asks: Delete Gateway notes draft.md?', btns: [{ l: 'Review', style: 'font-size:13px;font-weight:500;color:var(--accent)' }], style: 'margin:10px 16px 0;padding:10px 14px;border-radius:var(--rControl);border:1px solid var(--amber);display:flex;flex-direction:column;gap:8px' },
+      endTree: { title: 'End gateway-impl? Its children end with it.', btns: [], groups: [{ k: 'Running', v: 'test-gateway · bench-check' }, { k: 'Already ended', v: 'spike-notes' }], hasTick: true, tick: 'Let children report first (waits 30 s)', confirm: 'End 3 sessions', style: 'margin:10px 16px 0;padding:12px 14px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border);display:flex;flex-direction:column;gap:8px' }
+    };
+    const btnS = (k) => k === 'primary' ? 'font-size:13px;font-weight:500;color:var(--onAccent);background:var(--accent);padding:6px 12px;border-radius:var(--rControl)' : k === 'ghost' ? 'font-size:13px;color:var(--text);padding:5px 11px;border:1px solid var(--border);border-radius:var(--rControl)' : 'font-size:13px;color:var(--text2);padding:6px 6px';
+    const strip = (tone) => `padding:10px 20px 12px;border-bottom:1px solid var(--border);background:${tone ? 'color-mix(in oklch, var(--danger) 8%, var(--bg))' : 'var(--surface)'};display:flex;flex-direction:column;gap:7px`;
+    STACK.decDelete = { key: 'NEEDS YOU · 1 OF 2', hasKey: true, title: 'gateway-impl wants to delete Gateway notes draft.md', btns: [{ l: 'Later', style: btnS() }, { l: 'Decline', style: btnS('ghost') }, { l: 'Move to Trash', style: btnS('primary') }], groups: [{ k: 'Claude Code says', v: '"Superseded by Gateway spec; everything in it is now in the spec."' }, { k: 'What', v: 'projects/storm/Gateway notes draft.md · 4.2 KB · modified 2h ago' }, { k: 'If you approve', v: 'It moves to personal’s Trash and is kept for 30 days.' }], style: strip(true) };
+    STACK.decEndTree = { key: 'CONFIRM', hasKey: true, title: 'End gateway-impl and the 2 agents it started?', btns: [], groups: [{ k: 'Running', v: 'test-gateway · bench-check' }, { k: 'Already ended', v: 'spike-notes (2 commits not applied stay in its Work tab until you dismiss it)' }], hasTick: true, tick: 'Let them report first (waits 30 s)', confirm: 'End 3 sessions', style: strip(false) };
+    const stack = (sc.stack || []).map(x => ({ hasKey: false, groups: [], hasTick: false, tick: '', confirm: '', btns: [], ...STACK[x], keyStyle: `${sc.r ? 'width:148px;flex:none;' : ''}font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;color:${!sc.r ? 'var(--amber)' : x === 'decDelete' ? 'var(--danger)' : 'var(--text3)'}` }));
+    const TABS = sc.tabs ? (child ? [...sc.tabs, 'Work'] : sc.tabs) : child ? ['Context', 'Wrote 0', 'About', 'Activity', 'Work'] : ['Context', 'Wrote 1', 'About', 'Activity'];
+    const tabs = TABS.map(l => ({ l, style: `padding:5px 8px;border-radius:var(--rControl);font-size:12.5px;${l === sc.tab ? 'font-weight:600;color:var(--accent);background:var(--accentSoft)' : 'color:var(--text3)'}` }));
+    const INSP = {
+      About: [k('Crew', 'Gateway release', 'Move to crew ▾'), k('Role', 'storm coder · the agent read this note at launch', 'Change label ▾'),
+        { t: 'label', text: 'Starting agents' }, { t: 'field', kind: 'toggle', on: true, label: '', value: 'On · it starts, messages and ends its own agents' },
+        { t: 'label', text: 'Children' },
+        { t: 'row', title: 'test-gateway', tag: 'Working', tone: 'accent', sub: '2 unread events', sub2: 'Round 2 · 14s · 12.3k in · 456 out' }, { t: 'event', text: '⚠ permission prompt' },
+        { t: 'row', title: 'bench-check', tag: 'Idle', tone: 'text3', sub: 'Parked until its next message', sub2: 'Round 1 · 41s · 8.1k in · 1.2k out' },
+        { t: 'link', text: 'End all children…', danger: true },
+        k('Limits', '3 agents per session · 6 per tree · 4 sessions at once'), k('Ran as', 'Runs as dewansh · each session isolated'), k('Started by', 'You, from Gateway spec'),
+        { t: 'label', text: 'Plugin servers' }, { t: 'text', text: 'sentry' }, { t: 'note', text: 'Not loaded: figma (needs its address)' }, { t: 'link', text: 'Add to Integrations' }],
+      Activity: [{ t: 'note', text: 'What gateway-impl did with its agents, exactly as it sent it.' },
+        { t: 'row', title: 'START test-gateway', titleMono: true, sub: '14:02', quote: 'Write tests for token refresh in gateway/oauth.rs. Run cargo test -p gateway and report failures.' },
+        { t: 'row', title: 'START bench-check', titleMono: true, sub: '14:05', quote: 'Benchmark relay throughput on build-vm and write the numbers to scratch.' },
+        { t: 'row', title: 'MESSAGE test-gateway', titleMono: true, sub: '14:11', quote: 'Also cover the expired-token path.' },
+        { t: 'row', title: 'END spike-notes', titleMono: true, sub: '14:20' },
+        { t: 'row', title: 'test-gateway was denied', titleMono: true, sub: '14:14', sub2: 'Its permission prompt for Bash(rm -rf target) was declined in its terminal.' }],
+      Work: [{ t: 'label', text: 'Commits' }, { t: 'row', title: 'a41c9e2 Add token refresh tests', titleMono: true, subMono: false, sub: '2m ago' }, { t: 'row', title: '7d02b11 Share test fixtures', titleMono: true, sub: '5m ago' },
+        { t: 'label', text: 'Files' }, { t: 'row', title: 'gateway/tests/refresh.rs', titleMono: true, sub: '+142' }, { t: 'row', title: 'gateway/tests/common.rs', titleMono: true, sub: '+31 −4' },
+        { t: 'label', text: 'Diff' }, { t: 'mono', text: '+ #[tokio::test]\n+ async fn refresh_rotates_token() {\n+     let gw = Gateway::test().await;' },
+        { t: 'buttons', align: 'flex-start', items: [{ l: 'Apply as storm/test-gateway', k: 'primary' }] }, { t: 'link', text: 'Delete its workspace…', danger: true }]
+    };
+    INSP['Agents 3'] = [{ t: 'label', text: 'Started by this session' },
+      { t: 'row', title: 'test-gateway', tag: 'Needs you', tone: 'danger', sub: 'permission prompt · 3m', actions: [{ l: 'Open' }] },
+      { t: 'row', title: 'bench-check', tag: 'Parked', tone: 'text3', sub: 'until its next message', actions: [{ l: 'Open' }] },
+      { t: 'row', title: 'spike-notes', tag: 'Ended', tone: 'text3', sub: '2 commits to apply', actions: [{ l: 'Work' }] },
+      { t: 'link', text: 'End all of them…', danger: true }, { t: 'divider' },
+      { t: 'label', text: 'What it sent them' },
+      { t: 'row', title: 'START test-gateway', titleMono: true, sub: '14:02', quote: 'Write tests for token refresh in gateway/oauth.rs.' },
+      { t: 'row', title: 'MESSAGE test-gateway', titleMono: true, sub: '14:11', quote: 'Also cover the expired-token path.' },
+      { t: 'row', title: 'END spike-notes', titleMono: true, sub: '14:20' }];
+    INSP.AboutR = [k('Crew', 'Gateway release', 'Move to crew ▾'), k('Role', 'storm coder · read at launch', 'Change label ▾'),
+      k('Starts agents', 'On. It starts, messages and ends its own agents, up to 3 at once and 6 in its tree.', 'Turn off · Change limits in Agents & hosts ›'),
+      k('Ran as', 'Runs as dewansh · each session isolated'), k('Started by', 'You, from Gateway spec, 40 min ago'),
+      { t: 'note', text: 'figma isn’t loaded: it needs its address.' }, { t: 'link', text: 'Fix in Integrations ›' }];
+    INSP.DecisionP = [{ t: 'title', text: 'gateway-impl wants to delete Gateway notes draft.md' }, { t: 'label', text: 'Claude Code says' }, { t: 'mono', text: 'Superseded by Gateway spec; everything in it is now in the spec.' }, { t: 'label', text: 'What' }, { t: 'row', title: 'projects/storm/Gateway notes draft.md', titleMono: true, sub: '4.2 KB · modified 2h ago' }, { t: 'note', text: 'If you approve, it moves to personal’s Trash and is kept for 30 days.' }, { t: 'buttons', items: [{ l: 'Later' }, { l: 'Decline', k: 'ghost' }, { l: 'Move to Trash', k: 'primary' }] }];
+    const insp = INSP[sc.inspKey || sc.tab] || [];
+
+    const PAGES = {
+      trash: { title: 'Trash', action: 'Empty trash', blocks: [{ t: 'label', text: 'Keep deleted items for' }, { t: 'chips', items: [{ l: '7 days' }, { l: '30 days', on: true }, { l: '90 days' }, { l: 'Never delete' }] },
+        { t: 'card', title: 'Gateway notes draft.md', sub: 'projects/storm', sub2: 'Deleted 3h ago by an agent (gateway-impl)', quote: '"Superseded by Gateway spec; everything in it is now in the spec."', actions: [{ l: 'Restore', k: 'soft' }, { l: 'Delete forever', k: 'danger' }] },
+        { t: 'card', title: 'old-ideas', sub: 'reading/old-ideas', sub2: 'Deleted 1d ago by you · 12 notes', actions: [{ l: 'Restore', k: 'soft' }, { l: 'Delete forever', k: 'danger' }] },
+        { t: 'card', title: 'scratch.md', sub: 'daily', sub2: 'Deleted 2d ago by an MCP key (laptop-claude)', actions: [{ l: 'Restore', k: 'soft' }, { l: 'Delete forever', k: 'danger' }] },
+        { t: 'card', title: 'todo.md', sub: '', sub2: 'Deleted 5d ago outside Storm', actions: [{ l: 'Restore', k: 'soft' }, { l: 'Delete forever', k: 'danger' }] }] },
+      trashEmpty: { title: 'Trash', blocks: [{ t: 'label', text: 'Keep deleted items for' }, { t: 'chips', items: [{ l: '7 days' }, { l: '30 days', on: true }, { l: '90 days' }, { l: 'Never delete' }] }, { t: 'title', text: 'Trash is empty' }, { t: 'divider' }, { t: 'note', text: 'Error state, same page: "Could not load the trash" with Try again.' }] },
+      agents: { title: 'Agents', beta: true, intro: 'The agent CLIs on your hosts. Install and update them here, then sign in to each from a Shell session on its host.', blocks: [
+        { t: 'label', text: 'Claude Code' }, { t: 'link', text: 'Signs in with Settings › Claude login ›' },
+        { t: 'row', title: 'build-vm', sub: '2.0.31 · installed by Storm · up to date', actions: ['Remove'] }, { t: 'row', title: 'pi-lab', sub: 'Not installed', actions: [{ l: 'Install' }] }, { t: 'row', title: 'mac-mini', sub: 'offline' },
+        { t: 'label', text: 'OpenCode' }, { t: 'note', text: 'Sign in from a Shell session on the host: opencode auth login' },
+        { t: 'row', title: 'build-vm', sub: '0.15.2 · your own install', actions: ['Remove'] }, { t: 'row', title: 'pi-lab', sub: '0.15.0 · installed by Storm', actions: [{ l: 'Update to 0.16.0' }] },
+        { t: 'label', text: 'Codex' }, { t: 'row', title: 'build-vm', sub: 'Downloading…' }, { t: 'row', title: 'pi-lab', sub: 'Needs a newer Node.js on this host (22 or later)' },
+        { t: 'label', text: 'Cursor' }, { t: 'row', title: 'build-vm', sub: 'Not installed', actions: [{ l: 'Install' }] },
+        { t: 'label', text: 'Command Code' }, { t: 'row', title: 'build-vm', sub: 'Not installed', actions: [{ l: 'Install' }] }] },
+      agentsNoHosts: { title: 'Agents', beta: true, intro: 'The agent CLIs on your hosts. Install and update them here, then sign in to each from a Shell session on its host.', blocks: ['Claude Code', 'OpenCode', 'Codex', 'Cursor', 'Command Code'].flatMap(a => [{ t: 'label', text: a }, { t: 'note', text: 'No hosts are enrolled. Enroll one in Hosts & default agent.' }]) },
+      hosts: { title: 'Hosts & default agent', intro: 'The machines agents run on.', blocks: [
+        { t: 'row', dot: 'text2', title: 'build-vm', sub: 'Online · Claude Code, OpenCode, Codex, Shell', sub2: 'Runs as dewansh · each session isolated · Limits: 3 agents per session · 6 per tree · 4 sessions at once', actions: ['Rename', 'Revoke', 'Limits'] },
+        { t: 'row', dot: 'text2', title: 'pi-lab', sub: 'Online · OpenCode, Codex, Shell', sub2: 'Runs as storm-runtime · Limits: 3 agents per session · 6 per tree · 2 sessions at once', actions: ['Rename', 'Revoke', 'Limits'] },
+        { t: 'row', dot: 'text3', title: 'mac-mini', sub: 'Offline · last seen 9 days ago', sub2: 'Runs as an unknown account', actions: ['Rename', 'Revoke'] },
+        { t: 'row', dot: 'text3', title: 'mac-mini', sub: 'Revoked · 12 Oct', sub2: 'Duplicate record from an earlier enrollment. There is no Remove.', actions: [] },
+        { t: 'buttons', align: 'flex-start', items: [{ l: '＋ Enroll a host', k: 'primary' }] }, { t: 'label', text: 'Default agent' }, { t: 'chips', items: [{ l: 'Claude Code', on: true }, { l: 'OpenCode' }, { l: 'Codex' }, { l: 'Shell' }] }] },
+      ai: { title: 'AI access', intro: 'What AI apps outside Storm, and agents inside it, can do with your notes.', blocks: [
+        { t: 'label', text: 'AI apps outside Storm' }, { t: 'field', kind: 'toggle', on: true, label: '', value: 'Let AI apps read your notes' }, { t: 'field', kind: 'toggle', on: false, label: '', value: 'Let them create, edit and delete', sub: 'Storm has no trash. A deleted note is gone.' },
+        { t: 'label', text: 'Storm agents' }, { t: 'field', kind: 'toggle', on: true, label: '', value: 'Allow writes when chosen at launch', sub: 'You pick one vault per session. Agents never delete notes.' }] }
+    };
+    const retention = { t: 'field', label: 'Trash keeps', value: '30 days' };
+    PAGES.rTrash = { title: 'Trash · personal', intro: 'Deleted notes stay here for 30 days, then they’re gone for good. Change how long in Settings › Vaults.', blocks: [
+      { t: 'row', title: '2 selected', subMono: false, sub: '', actions: [{ l: 'Restore', k: 'soft' }, { l: 'Delete forever…', k: 'danger' }] },
+      { t: 'card', title: '☑  Gateway notes draft.md', sub: 'projects/storm · 27 days left', sub2: 'Deleted 3h ago by an agent (gateway-impl), with your approval', quote: '"Superseded by Gateway spec; everything in it is now in the spec."', actions: [{ l: 'Restore', k: 'soft' }] },
+      { t: 'card', title: '☑  old-ideas', sub: 'reading/old-ideas · 12 notes · 29 days left', sub2: 'Deleted 1d ago by you', actions: [{ l: 'Restore', k: 'soft' }] },
+      { t: 'card', title: '☐  scratch.md', sub: 'daily · 28 days left', sub2: 'Deleted 2d ago by an access key (laptop-claude)', actions: [{ l: 'Restore', k: 'soft' }] },
+      { t: 'note', text: 'Restoring needs no confirm and can be undone. Deleting forever confirms inline, in the same strip as above.' }] };
+    PAGES.rVaults = { title: 'Vaults', intro: 'Each vault is a folder of Markdown under the storage root.', blocks: [
+      { t: 'row', noLine: true, title: 'personal', sub: '412 notes · /srv/storm/vaults/personal', actions: ['Rename', 'Remove'] }, { ...retention, sub: 'Then deleted for good. 4 items in Trash now.', link: 'Open Trash ›' }, { t: 'divider' },
+      { t: 'row', noLine: true, title: 'work', sub: '88 notes · /srv/storm/vaults/work', actions: ['Rename', 'Remove'] }, { ...retention, value: '90 days' }, { t: 'divider' },
+      { t: 'row', noLine: true, title: 'kit', sub: '23 notes · /srv/storm/vaults/kit', actions: ['Rename', 'Remove'] }, { ...retention, value: 'Never delete' }, { t: 'divider' },
+      { t: 'buttons', align: 'flex-start', items: [{ l: '＋ New vault', k: 'primary' }] }] };
+    const ag = (name, sub, actions = [], tone) => ({ t: 'row', title: name, sub, actions, dot: tone });
+    PAGES.rAgentsHosts = { title: 'Agents & hosts', intro: 'The machines agents run on, and the agent CLIs on each. Sign in to an agent once per host.', blocks: [
+      { t: 'label', text: 'build-vm · online' }, { t: 'note', text: 'Runs as dewansh · each session isolated' },
+      ag('Claude Code', '2.0.31 · up to date · signed in with your synced Claude login', ['Remove']),
+      ag('OpenCode', '0.15.2 · up to date · not signed in', [{ l: 'Sign in…' }]),
+      ag('Codex', 'Installing · verifying download (step 2 of 3)'),
+      ag('Cursor', 'Not installed', [{ l: 'Install' }]),
+      { t: 'field', label: 'Limits', value: '3 per session · 6 per tree · 4 sessions at once', sub: 'Lowering a limit ends nothing that is running; it refuses new starts.' },
+      { t: 'buttons', align: 'flex-start', items: [{ l: 'Rename' }, { l: 'Revoke…', k: 'ghost' }] },
+      { t: 'label', text: 'pi-lab · online' }, { t: 'note', text: 'Runs as storm-runtime' },
+      ag('OpenCode', '0.15.0 · update available', [{ l: 'Update to 0.16.0' }]), ag('Codex', 'Needs a newer Node.js on this host (22 or later)'),
+      { t: 'label', text: 'mac-mini · revoked 12 Oct' }, { t: 'note', text: 'It can’t connect again. Remove it, or re-enroll the machine to replace this record.' },
+      { t: 'buttons', align: 'flex-start', items: [{ l: 'Re-enroll…', k: 'ghost' }, { l: 'Remove', k: 'dangerText' }] }, { t: 'divider' },
+      { t: 'buttons', align: 'flex-start', items: [{ l: '＋ Enroll a host', k: 'primary' }] }, { t: 'label', text: 'Default agent' }, { t: 'chips', items: [{ l: 'Claude Code', on: true }, { l: 'OpenCode' }, { l: 'Codex' }, { l: 'Shell' }] }] };
+    PAGES.rIntegrations = { title: 'Integrations', intro: 'Services your agents can use, such as Linear or GitHub. Connect a service once, here. Every agent session except a shell can then use it.', blocks: [
+      { t: 'label', text: 'Connected' }, { t: 'row', title: 'Storm vaults', sub: 'Built in · read only unless a session may write', subMono: false }, { t: 'row', title: 'Linear', sub: 'Signed in · 14 tools on', subMono: false, actions: ['Choose tools'] }, { t: 'row', title: 'GitHub', tag: 'Needs sign-in', tone: 'danger', sub: 'Token expired 2 days ago', subMono: false, actions: [{ l: 'Sign in again' }] },
+      { t: 'label', text: 'Your plugins use these' }, { t: 'row', title: 'Sentry', sub: 'https://mcp.sentry.dev/mcp · plugin sentry on build-vm', actions: [{ l: 'Connect' }, 'Dismiss'] }, { t: 'row', title: 'Figma', sub: 'needs its address · plugin figma on build-vm, mac-mini', actions: [{ l: 'Connect…' }, 'Dismiss'] },
+      { t: 'buttons', align: 'flex-start', items: [{ l: '＋ Add integration', k: 'primary' }, { l: 'Use your own OAuth app…' }] }] };
+    PAGES.rAi = { title: 'AI access', intro: 'What AI apps outside Storm, and agents inside it, can do with your notes.', blocks: [
+      { t: 'label', text: 'AI apps outside Storm' }, { t: 'field', kind: 'toggle', on: true, label: '', value: 'Let AI apps read your notes' }, { t: 'field', kind: 'toggle', on: false, label: '', value: 'Let them create, edit and delete', sub: 'A deleted note goes to its vault’s Trash.' },
+      { t: 'label', text: 'Storm agents' }, { t: 'field', kind: 'toggle', on: true, label: '', value: 'Allow writes when chosen at launch', sub: 'You pick one vault per session. An agent’s delete always waits for you, then goes to Trash.' }] };
+    const pg0 = PAGES[sc.page] || { blocks: [] };
+    const pg = { ...pg0, hasAction: !!pg0.action, hasIntro: !!pg0.intro, beta: !!pg0.beta };
+
+    const DLG = {
+      launcher: { w: 460, title: 'New session', blocks: [
+        { t: 'field', label: 'Context', value: '▤ Gateway spec · personal / projects / storm', kind: 'box', chip: true },
+        { t: 'field', label: 'Host', value: 'build-vm · online', sub: 'Runs as dewansh · each session isolated' },
+        { t: 'field', label: 'Workspace', value: 'storm  (another session is working here)', link: 'New workspace…' },
+        { t: 'field', label: 'Agent', value: 'Claude Code · default', sub: 'This host isolates sessions, so Claude Code needs your synced Claude login or an API key.' },
+        { t: 'field', label: 'Model', value: 'the agent’s default', kind: 'mono', placeholder: true },
+        { t: 'field', label: 'Permission mode', value: 'The agent\'s own setting' },
+        { t: 'field', label: 'Can write to', kind: 'toggle', on: true, value: 'personal' },
+        { t: 'field', label: 'Crew', value: 'None' },
+        { t: 'field', label: 'Role', value: 'None' },
+        { t: 'field', label: 'Agents', kind: 'toggle', on: true, value: 'Allow this session to start agents' },
+        { t: 'field', label: '', kind: 'toggle', on: false, value: 'The agents it starts can write to personal' },
+        { t: 'note', text: 'Network: inherits build-vm’s policy. This session can use your integrations and read your vaults, with that network access.' },
+        { t: 'buttons', items: [{ l: 'Launch', k: 'primary' }] }] },
+      delete: { w: 480, title: 'Delete Gateway notes draft.md?', blocks: [
+        { t: 'label', text: 'Who' }, { t: 'row', title: 'gateway-impl', subMono: false, sub: 'Claude Code · opus', sub2: 'Started from Gateway spec', actions: [{ l: 'Open session' }] },
+        { t: 'label', text: 'Claude Code says:' }, { t: 'mono', text: 'Superseded by Gateway spec; everything in it is now in the spec.' },
+        { t: 'label', text: 'What' }, { t: 'row', title: 'projects/storm/Gateway notes draft.md', titleMono: true, sub: '4.2 KB · modified 2h ago' },
+        { t: 'note', text: 'It goes to Trash, which keeps it for 30 days.' }, { t: 'note', text: 'Later closes this and keeps the request waiting: Review it from the session.' },
+        { t: 'buttons', items: [{ l: 'Later' }, { l: 'Decline', k: 'ghost' }, { l: 'Approve', k: 'danger' }] }] },
+      limits: { w: 440, title: 'Limits for build-vm', blocks: [
+        { t: 'field', label: 'Agents per session', value: '−   3   +', kind: 'box' }, { t: 'field', label: 'Agents per tree', value: '−   6   +', kind: 'box' }, { t: 'field', label: 'Sessions at once', value: '4', kind: 'box' },
+        { t: 'note', text: 'Lowering a limit ends nothing that is running; it refuses new starts.' }, { t: 'buttons', items: [{ l: 'Cancel' }, { l: 'Save', k: 'primary' }] }] },
+      enroll: { w: 520, title: 'Enroll a host', blocks: [
+        { t: 'chips', items: [{ l: 'macOS', on: true }, { l: 'Linux' }] }, { t: 'label', text: 'One-time string' }, { t: 'code', lines: ['stm_enr_••••••••••••••••••••'] },
+        { t: 'chips', items: [{ l: 'As you', on: true }, { l: 'As its own account' }] }, { t: 'note', text: 'It runs as you under your user account. Agents can reach what you can.' },
+        { t: 'code', lines: ['curl -fsSL https://storm.home:7420/install.sh | sh', 'storm-runtime enroll --as-user', 'storm-runtime start'] },
+        { t: 'note', text: 'Close this and the string is gone.' }, { t: 'buttons', items: [{ l: 'Done', k: 'primary' }] }] }
+    };
+    const can = { t: 'chips', items: [{ l: 'Writes to personal', on: true }, { l: 'Starts agents', on: true }, { l: 'Uses 2 integrations', on: true }, { l: 'Network: build-vm’s policy' }] };
+    DLG.rLauncher = { w: 480, title: 'New session', blocks: [
+      { t: 'field', label: 'From', value: '▤ Gateway spec · personal / projects / storm', kind: 'box', chip: true },
+      { t: 'field', label: 'Agent', value: 'Claude Code · default' },
+      { t: 'field', label: 'Where', value: 'storm on build-vm', sub: 'Runs as dewansh · each session isolated · another session is working here', link: 'New workspace…' },
+      { t: 'label', text: 'This session can' }, can, { t: 'note', text: 'Tap one to change it. Everything else uses the agent’s defaults.' },
+      { t: 'link', text: 'More: model, permission mode, crew, role ›' },
+      { t: 'buttons', items: [{ l: 'Launch', k: 'primary' }] }] };
+    DLG.rLauncherMore = { w: 480, title: 'New session', blocks: [
+      { t: 'field', label: 'From', value: '▤ Gateway spec · personal / projects / storm', kind: 'box', chip: true },
+      { t: 'field', label: 'Agent', value: 'Claude Code · default' },
+      { t: 'field', label: 'Where', value: 'storm on build-vm', sub: 'Runs as dewansh · each session isolated' },
+      { t: 'label', text: 'This session can' },
+      { t: 'field', label: 'Write to', kind: 'toggle', on: true, value: 'personal ▾' },
+      { t: 'field', label: 'Start agents', kind: 'toggle', on: true, value: 'Up to 3 at once, 6 in its tree' },
+      { t: 'field', label: '', kind: 'toggle', on: false, value: 'Let the agents it starts write to personal' },
+      { t: 'note', text: 'Network: inherits build-vm’s policy. This session can use your integrations (Linear, GitHub) and read your vaults, with that network access.' },
+      { t: 'label', text: 'More' },
+      { t: 'field', label: 'Model', value: 'The agent’s default', sub: 'Or type one: opus, sonnet, haiku' },
+      { t: 'field', label: 'Permission mode', value: 'The agent’s own setting', sub: 'Claude Code and OpenCode only. Tab and ⇧Tab change it in the terminal.' },
+      { t: 'field', label: 'Crew', value: 'None' }, { t: 'field', label: 'Role', value: 'None · a plain agent' },
+      { t: 'link', text: 'Fewer options' }, { t: 'buttons', items: [{ l: 'Launch', k: 'primary' }] }] };
+    const dl0 = DLG[sc.dlg];
+    const dl = dl0 || { title: '', blocks: [] };
+
+    const pBlocks = sc.list === 'vault' ? [{ t: 'label', text: 'Recent' }, { t: 'row', title: 'Gateway spec', subMono: false, sub: 'personal · projects · storm' }, { t: 'row', title: 'BOARD', subMono: false, sub: 'personal · projects · storm' },
+      { t: 'label', text: 'Folders' }, ...['daily', 'projects', 'reading'].map(f => ({ t: 'row', title: '▸  ' + f })), { t: 'row', title: 'Note one.md' }, { t: 'row', title: 'Note two.md' }, { t: 'row', title: '🗑  Trash', sub: '4 items', subMono: false }] : [];
+    const sheet = sc.sheetKey ? INSP[sc.sheetKey] : [{ t: 'title', text: 'gateway-impl' }, ...INSP.About.slice(0, 11)];
+
+    return {
+      rootStyle: `${tokens(PRESETS[theme])};position:relative;width:${w}px;height:${h}px;overflow:hidden;background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased;border:1px solid var(--border);border-radius:${phone ? 36 : 12}px`,
+      pagePad: `max-width:720px;padding:${sc.r ? 14 : 28}px 40px 40px;display:flex;flex-direction:column;gap:14px`, mAh: sc.main === 'ah', ahState: sc.ah || 'grid', desk: !phone, phone, railPad: sc.r ? '8px 0 14px' : '16px 0 14px', sideScroll: `flex:1;min-height:0;overflow:hidden;padding:${sc.r ? 12 : 16}px 8px 12px;display:flex;flex-direction:column;gap:2px`, stripLabelW: sc.r ? '148px' : '120px', appBar: !!sc.r, notAppBar: !sc.r, railCount: !!sc.r,
+      iRail: !!sc.r, notIRail: !sc.r, panelOpen: !sc.closed, panelTitle: (sc.tab || '').replace(/ \d+$/, '') === 'Agents' ? 'Agents it started' : (sc.tab || '').replace(/ \d+$/, ''),
+      inspOuter: sc.r ? 'display:flex;flex:none;min-height:0' : 'width:320px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)',
+      inspPanel: sc.r ? 'width:320px;flex:none;border-left:1px solid var(--border);display:flex;flex-direction:column;min-height:0;background:var(--bg)' : 'display:contents',
+      railTabs: TABS.map(l => { const key = l.split(' ')[0], cnt = (l.match(/\d+$/) || [])[0], on = l === sc.tab && !sc.closed; const k2 = { Context: 'ctx', Wrote: 'wrote', Agents: 'agents', About: 'about', Work: 'work' }[key];
+        return { l: key, is_ctx: k2 === 'ctx', is_wrote: k2 === 'wrote', is_agents: k2 === 'agents', is_about: k2 === 'about', is_work: k2 === 'work', hasCount: !!cnt && cnt !== '0', count: key === 'Agents' ? '1' : cnt,
+          countStyle: `position:absolute;top:2px;right:2px;min-width:15px;height:15px;padding:0 4px;border-radius:999px;font-family:'IBM Plex Mono',monospace;font-size:9.5px;font-weight:500;display:flex;align-items:center;justify-content:center;border:2px solid var(--bg);${key === 'Agents' ? 'background:var(--danger);color:var(--onAccent)' : 'background:var(--surface2);color:var(--text2)'}`,
+          style: `position:relative;width:36px;height:36px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);color:${on ? 'var(--accent)' : 'var(--text3)'};background:${on ? 'var(--accentSoft)' : 'transparent'}` }; }), spawnChip: !!sc.r && !child, termHint: !!sc.r,
+      pCardStyle: sc.r ? 'margin:0 12px 8px;padding:10px 12px;border-radius:var(--rControl);background:color-mix(in oklch, var(--danger) 9%, var(--bg));box-shadow:inset 0 0 0 1px var(--danger);display:flex;align-items:center;gap:10px' : 'margin:0 12px 8px;padding:10px 12px;border-radius:var(--rControl);border:1px solid var(--amber);display:flex;align-items:center;gap:10px',
+      pCardKey: `font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;color:${sc.r ? 'var(--danger)' : 'var(--amber)'}`,
+      railNotes: rail(sc.rail === 'notes'), railAgents: rail(sc.rail === 'agents'), railSettings: rail(sc.rail === 'settings'),
+      side, selBar: !!sc.sel, notesFooter: sc.rail === 'notes',
+      mSession: sc.main === 'session', mPage: sc.main === 'page', ss, stack, hasInsp: !sc.hideInsp, tabs, insp, pg,
+      dlg: !!dl0 && !phone, dl, dlgStyle: `position:absolute;left:50%;top:${sc.dlg === 'launcher' ? 32 : 70}px;transform:translateX(-50%);width:${dl0 ? dl0.w : 460}px;background:var(--surface);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:var(--shadow);padding:22px;display:flex;flex-direction:column;gap:14px;z-index:50`,
+      pSession: phone && sc.pmode === 'session', pList: phone && sc.pmode === 'list', pTitle: 'personal', pBlocks, pSheet: phone && !!sc.sheet, sheet, pDlg: phone && !!dl0
+    };
+  }
+}
+</script>
+</body>
+</html>
