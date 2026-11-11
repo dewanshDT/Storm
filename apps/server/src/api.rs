@@ -15849,6 +15849,145 @@ pub(crate) mod tests {
         assert_eq!(attention(&f, &child).await, serde_json::Value::Null);
     }
 
+    /// 153a/c through the routes: `attention` follows `needs_attention`
+    /// with its reason and start, the same in the list, and `output_end`
+    /// grows with fresh output only. An older client's fields stay.
+    #[tokio::test]
+    async fn attention_has_its_reason_and_output_its_end_on_every_view() {
+        let dir = tempdir::TempDir::new("storm-153-attention").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.state
+            .agent
+            .report_permission_prompts_for_tests(&["claude-code"]);
+        let (parent, child) = f.tree().await;
+        let view = async |f: &GatewayFixture, id: &str| {
+            let (code, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+            assert_eq!(code, StatusCode::OK, "{view}");
+            let (_, list) = f.get("/v1/agent/sessions").await;
+            let listed = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()
+                .clone();
+            for key in [
+                "attention",
+                "pending_decisions",
+                "output_end",
+                "host_last_seen",
+            ] {
+                assert_eq!(listed[key], view[key], "the list says the same of {key}");
+            }
+            view
+        };
+        for id in [&parent, &child] {
+            let v = view(&f, id).await;
+            assert_eq!(v["attention"], serde_json::Value::Null, "{v}");
+            assert_eq!(v["pending_decisions"], serde_json::json!([]), "{v}");
+            assert_eq!(v["host_last_seen"], serde_json::Value::Null, "{v}");
+            assert_eq!(v["output_end"], serde_json::Value::Null, "{v}");
+            assert!(v["needs_attention"].is_null() && v.get("delete_request").is_none());
+        }
+
+        let blocked = serde_json::json!({"outcome": "blocked", "summary": "need a key"});
+        f.tool(&child, "report_result", blocked).await;
+        let v = view(&f, &child).await;
+        assert_eq!(
+            v["needs_attention"], "blocked",
+            "older clients' field stays"
+        );
+        let since = v["attention"]["since"].as_str().unwrap().to_string();
+        assert!(
+            time::OffsetDateTime::parse(&since, &time::format_description::well_known::Rfc3339)
+                .is_ok()
+        );
+        assert_eq!(
+            v["attention"],
+            serde_json::json!({"kind": "blocked", "since": since, "detail": "need a key",
+                "blocked_on": null, "resets_at": null})
+        );
+
+        let prompt = serde_json::json!({"status": "running",
+            "attention": "permission_prompt", "attention_source": "provider_hook"});
+        let status = |body: serde_json::Value| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                body,
+                &f.host_bearer,
+            )
+        };
+        assert!(send(&f.app, status(prompt.clone())).await.0.is_success());
+        let first = view(&f, &child).await["attention"].clone();
+        assert_eq!(first["kind"], "permission_prompt", "{first}");
+        assert_eq!(first["detail"], serde_json::Value::Null);
+        assert!(first["since"].is_string(), "{first}");
+        assert!(send(&f.app, status(prompt)).await.0.is_success());
+        assert_eq!(
+            view(&f, &child).await["attention"]["since"],
+            first["since"],
+            "the same prompt again began when it first did"
+        );
+        let running = serde_json::json!({"status": "running"});
+        assert!(send(&f.app, status(running)).await.0.is_success());
+        assert_eq!(view(&f, &child).await["attention"]["kind"], "blocked");
+
+        let out = |at: u64, bytes: &[u8]| {
+            f.state
+                .agent
+                .host_output(&f.host_id, &parent, at, bytes)
+                .unwrap()
+        };
+        out(0, b"hello");
+        assert_eq!(view(&f, &parent).await["output_end"], 5);
+        out(5, b", you");
+        assert_eq!(view(&f, &parent).await["output_end"], 10);
+        out(0, b"hello");
+        assert_eq!(
+            view(&f, &parent).await["output_end"],
+            10,
+            "a replay is nothing new"
+        );
+    }
+
+    /// 153a: a live session on an offline host says when the host was last
+    /// heard from; an ended one, or one on a host online, says nothing.
+    #[tokio::test]
+    async fn a_session_on_an_offline_host_says_when_it_was_last_seen() {
+        let dir = tempdir::TempDir::new("storm-153-last-seen").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let live = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ended = f.launch("shell", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&ended, "completed").await;
+        let (_, v) = f.get(&format!("/v1/agent/sessions/{live}")).await;
+        assert_eq!(v["host_last_seen"], serde_json::Value::Null, "online");
+
+        let before = crate::index::now_rfc3339();
+        let generation = f.state.agent.connect_host(&f.host_id).0;
+        f.state.agent.disconnect_host(&f.host_id, generation);
+        let (_, v) = f.get(&format!("/v1/agent/sessions/{live}")).await;
+        assert_eq!(v["status"], "unknown", "{v}");
+        let seen = v["host_last_seen"].as_str().unwrap().to_string();
+        assert!(seen[..19] >= before[..19], "{seen} {before}");
+        let (_, list) = f.get("/v1/agent/sessions").await;
+        let by_id = |id: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()["host_last_seen"]
+                .clone()
+        };
+        assert_eq!(by_id(&live), seen.as_str());
+        assert_eq!(by_id(&ended), serde_json::Value::Null, "ended");
+    }
+
     /// A2 over the gateway: only the parent's own descendants, never itself,
     /// an unknown id or anyone from a child; a cap refuses with its name.
     #[tokio::test]
@@ -17539,9 +17678,24 @@ pub(crate) mod tests {
             )
         );
         assert!(f.child_requests().is_empty());
+        let take = async |f: &GatewayFixture| {
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+            (
+                view.get("work_to_take").cloned(),
+                view.get("unapplied_commits").cloned(),
+            )
+        };
+        assert_eq!(take(&f).await, (Some(false.into()), None), "live: not yet");
+        let (_, top) = f.get(&format!("/v1/agent/sessions/{parent}")).await;
+        assert!(top.get("work_to_take").is_none(), "{top}");
 
         f.report(&child, "completed").await;
         f.sent();
+        assert_eq!(
+            take(&f).await,
+            (Some(true.into()), None),
+            "not yet reviewed"
+        );
         let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
         let host = async {
             let list = f
@@ -17559,6 +17713,12 @@ pub(crate) mod tests {
         assert_eq!(body["commits"][0]["id"], tip);
         assert_child_command(&list, &v["list"]["command"]);
         assert_child_command(&export, &v["export"]["command"]);
+        let commits = body["commits"].as_array().unwrap().len();
+        assert_eq!(
+            take(&f).await,
+            (Some(true.into()), Some(commits.into())),
+            "the review counted them"
+        );
 
         let host = async {
             let list = f
@@ -17581,6 +17741,7 @@ pub(crate) mod tests {
         assert_eq!(body["branch"], format!("storm/{child}"));
         assert_child_command(&list, &v["list"]["command"]);
         assert_child_command(&import, &v["import"]["command"]);
+        assert_eq!(take(&f).await, (Some(false.into()), None), "applied");
 
         let host = async {
             f.child_answers(|_| serde_json::json!({"answer": v["list"]["answer"]}))
@@ -19705,6 +19866,20 @@ pub(crate) mod tests {
                 let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
                 if view["delete_request"]["state"] == "pending" {
                     assert_eq!(view["needs_attention"], "delete_approval", "{view}");
+                    let request = &view["delete_request"];
+                    assert_eq!(
+                        view["pending_decisions"],
+                        serde_json::json!([{"kind": "delete_request", "id": request["id"],
+                            "created_at": request["created_at"],
+                            "expires_at": request["expires_at"]}]),
+                        "153b: the one decision, as old clients' field names it"
+                    );
+                    assert_eq!(
+                        view["attention"],
+                        serde_json::json!({"kind": "delete_approval",
+                            "since": request["created_at"], "detail": null,
+                            "blocked_on": null, "resets_at": null})
+                    );
                     return view["delete_request"].clone();
                 }
             }

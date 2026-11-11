@@ -892,6 +892,9 @@ struct SessionLive {
     /// A permission prompt or usage limit waiting, as a gated signal last
     /// said (134-9, 144b).
     attention: Option<String>,
+    /// When `attention` last changed to what it is (153a). Not kept across
+    /// a server restart: the host's next report starts it again.
+    attention_since: Option<String>,
     /// `working` / `idle` from a gated idle signal only (144b), and its
     /// source.
     health: Option<String>,
@@ -920,6 +923,7 @@ impl SessionLive {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             attention: None,
+            attention_since: None,
             health: None,
             health_source: None,
             idle_since: None,
@@ -951,6 +955,9 @@ struct Live {
     /// on the link it was sent on and only for [`START_ACK_DEADLINE`]; past
     /// either it has failed, and its host is told so if it runs it late.
     starts: HashMap<String, PendingStart>,
+    /// When each host that dropped its link in this run last made a request
+    /// (153a), for "host offline · last seen".
+    last_seen_at: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1070,6 +1077,29 @@ fn now() -> String {
     crate::index::now_rfc3339()
 }
 
+/// A child's export's commits (a clone's) and what there is to take in it:
+/// its commits or changed files, or a scratch directory's files. Cut lists
+/// count what the helper `omitted` too.
+fn review_counts(export: &serde_json::Value) -> Option<(Option<i64>, i64)> {
+    let listed = |key: &str| {
+        let shown = export[key].as_array().map_or(0, |a| a.len() as i64);
+        shown + export["omitted"][key].as_i64().unwrap_or(0)
+    };
+    match export["mode"].as_str()? {
+        "clone" => {
+            let commits = listed("commits");
+            Some((Some(commits), commits.max(listed("files"))))
+        }
+        "scratch" => Some((
+            None,
+            export["file_count"]
+                .as_i64()
+                .unwrap_or_else(|| listed("files")),
+        )),
+        _ => None,
+    }
+}
+
 impl AgentManager {
     /// Opens `state/agent/`, and marks every session that had not ended
     /// `unknown` until its host reports in.
@@ -1161,7 +1191,12 @@ impl AgentManager {
             let mut live = self.live.lock().unwrap();
             match live.hosts.get(host_id) {
                 Some(link) if link.generation == generation => {
+                    let seen = crate::index::rfc3339_minus_secs(
+                        &now(),
+                        link.last_seen.elapsed().as_secs() as i64,
+                    );
                     live.hosts.remove(host_id);
+                    live.last_seen_at.insert(host_id.to_string(), seen);
                 }
                 _ => return,
             }
@@ -1252,6 +1287,21 @@ impl AgentManager {
     #[cfg(test)]
     pub fn is_online(&self, host_id: &str) -> bool {
         self.live.lock().unwrap().hosts.contains_key(host_id)
+    }
+
+    /// When an offline host last made a request, if it dropped its link in
+    /// this run of the server.
+    pub fn host_last_seen(&self, host_id: &str) -> Option<String> {
+        self.live.lock().unwrap().last_seen_at.get(host_id).cloned()
+    }
+
+    /// The end of a session's output as the server's cache holds it: a byte
+    /// offset in the host's ring, which only grows (153c). `None` until its
+    /// host has posted any in this run of the server.
+    pub fn output_end(&self, session_id: &str) -> Option<u64> {
+        let live = self.live.lock().unwrap();
+        let s = live.sessions.get(session_id)?;
+        s.cache.initialized().then(|| s.cache.end())
     }
 
     pub fn host_live(&self, host_id: &str) -> HostLive {
@@ -2131,6 +2181,47 @@ impl AgentManager {
 
     pub fn child_workspace_of(&self, session_id: &str) -> Result<Option<ChildWorkspace>> {
         self.store.lock().unwrap().child_workspace(session_id)
+    }
+
+    /// Counts a review of `session_id`'s work (153d), from the host's own
+    /// export: a clone's commits, or a scratch directory's files.
+    pub fn record_child_review(&self, session_id: &str, export: &serde_json::Value) -> Result<()> {
+        let Some((commits, items)) = review_counts(export) else {
+            return Ok(());
+        };
+        self.store
+            .lock()
+            .unwrap()
+            .record_child_review(session_id, commits, items, &now())
+    }
+
+    /// `session_id`'s work was taken (153d): `applied` or `deleted`.
+    pub fn record_child_taken(&self, session_id: &str, taken: &str) -> Result<()> {
+        self.store
+            .lock()
+            .unwrap()
+            .record_child_taken(session_id, taken, &now())
+    }
+
+    /// Whether an ended child has work to take, and a clone's commits when a
+    /// review counted them (153d). `None` for a session that is not a child
+    /// with its own workspace. Storm knows of Apply and delete only through
+    /// itself, and of commits only from a person's last review: the host is
+    /// never asked here.
+    pub fn work_to_take(&self, r: &SessionRecord) -> Result<(Option<bool>, Option<i64>)> {
+        let store = self.store.lock().unwrap();
+        if store.lineage(&r.id)?.parent_session.is_none() || !store::spawn::has_own_workspace(r) {
+            return Ok((None, None));
+        }
+        if !r.is_ended() || store.child_workspace(&r.id)?.is_none() {
+            return Ok((Some(false), None));
+        }
+        let state = store.child_work(&r.id)?;
+        match state {
+            Some(s) if s.taken.is_some() || s.items == Some(0) => Ok((Some(false), None)),
+            Some(s) => Ok((Some(true), s.commits)),
+            None => Ok((Some(true), None)),
+        }
     }
 
     /// The host's word on what the session will not have (131a): bounded, so
@@ -5743,5 +5834,27 @@ mod tests {
         let _link = online(&m, "h1", install_caps());
         m.start_agent_job("h1", "opencode", "update", "usr_1")
             .unwrap();
+    }
+
+    #[test]
+    fn a_review_counts_commits_and_what_there_is_to_take() {
+        use serde_json::json;
+        let commit = json!({"id": "c", "subject": "s"});
+        assert_eq!(
+            super::review_counts(&json!({"mode": "clone", "commits": [commit, commit],
+                "files": [{"path": "a"}], "omitted": {"commits": 3}})),
+            Some((Some(5), 5))
+        );
+        assert_eq!(
+            super::review_counts(&json!({"mode": "clone", "commits": [], "files": []})),
+            Some((Some(0), 0)),
+            "nothing to take"
+        );
+        assert_eq!(
+            super::review_counts(&json!({"mode": "scratch", "files": [{"path": "a"}],
+                "file_count": 12})),
+            Some((None, 12))
+        );
+        assert_eq!(super::review_counts(&json!({"error": "x"})), None);
     }
 }

@@ -17,6 +17,8 @@
 //! here can make Storm show something, and can never approve, refuse,
 //! start, end or unblock anything.
 
+use serde::Serialize;
+
 use super::events::{self, Extra, LiveSignals, OUTPUT_PATTERN, PROVIDER_HOOK};
 use super::store::SessionRecord;
 use super::{AgentManager, AgentResult, StatusReport};
@@ -68,6 +70,38 @@ pub const BLOCKED: &str = "blocked";
 pub const DELETE_APPROVAL: &str = "delete_approval";
 /// The signal behind `activity` (144b).
 pub const IDLE: &str = "idle";
+
+/// Why a session waits for a person (153a), beside `needs_attention`,
+/// which stays for older clients. Every field but `kind` is evidence that
+/// may be missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Attention {
+    /// `needs_attention`'s value.
+    pub kind: &'static str,
+    /// When it began: a signal's first report in this run of the server, a
+    /// blocked result's `reported_at`, a delete request's `created_at`.
+    pub since: Option<String>,
+    /// A blocked result's own summary: the agent's words, as data.
+    pub detail: Option<String>,
+    /// The session it waits on. No result names one as data yet, so always
+    /// `None`; a blocked result says it in `detail`, if at all.
+    pub blocked_on: Option<String>,
+    /// When a usage limit lifts. No host reports it yet (144b's hook
+    /// carries no time), so always `None`.
+    pub resets_at: Option<String>,
+}
+
+impl Attention {
+    fn new(kind: &'static str, since: Option<String>) -> Self {
+        Self {
+            kind,
+            since,
+            detail: None,
+            blocked_on: None,
+            resets_at: None,
+        }
+    }
+}
 
 /// What one host report says, through the gates.
 pub(super) struct Taken {
@@ -154,6 +188,9 @@ impl AgentManager {
             None => s.idle_since = None,
         }
         s.activity = display;
+        if s.attention != attention {
+            s.attention_since = attention.as_ref().map(|_| super::now());
+        }
         s.attention = attention.clone();
         s.health = health.clone();
         s.health_source = health.as_ref().and(activity_source);
@@ -176,6 +213,40 @@ impl AgentManager {
             r,
             live.attention.as_deref(),
         )?)
+    }
+
+    /// The session's attention with its reason (153a): `needs_attention`'s
+    /// kind, when it began and what the record says of it. A deletion
+    /// waiting for the person is [`DELETE_APPROVAL`] whatever else is.
+    pub fn attention(&self, r: &SessionRecord) -> AgentResult<Option<Attention>> {
+        if let Some(request) = self.pending_delete_of(&r.id)? {
+            return Ok(Some(Attention::new(
+                DELETE_APPROVAL,
+                Some(request.created_at),
+            )));
+        }
+        let since = self
+            .live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(&r.id)
+            .and_then(|s| s.attention_since.clone());
+        let Some(kind) = self.needs_attention(r)? else {
+            return Ok(None);
+        };
+        if kind != BLOCKED {
+            return Ok(Some(Attention::new(kind, since)));
+        }
+        let store = self.store.lock().unwrap();
+        let result = events::blocked_result_in(&store.conn, r)?;
+        Ok(Some(match result {
+            Some((summary, reported_at)) => Attention {
+                detail: Some(summary),
+                ..Attention::new(BLOCKED, Some(reported_at))
+            },
+            None => Attention::new(BLOCKED, None),
+        }))
     }
 
     /// Test-only: signals taken, as once their gates have passed.
