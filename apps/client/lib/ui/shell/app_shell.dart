@@ -181,6 +181,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // Outermost on both sides of the breakpoint, so crossing it keeps the
     // watch (decision 149c).
     return DeleteRequestWatcher(
+      location: widget.location,
       child: StormNavShortcuts(
         onBack: () => goBack(context, ref),
         onForward: () => goForward(context, ref),

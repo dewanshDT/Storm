@@ -6,6 +6,7 @@ import '../api/models.dart';
 import '../state/app_state.dart';
 import '../state/vault_config.dart';
 import 'controls.dart';
+import 'decision_strip.dart';
 import 'shell/storm_scaffold.dart';
 import 'breakpoints.dart';
 import 'shell/app_bar.dart' show pageTopInset;
@@ -28,6 +29,43 @@ final trashProvider = FutureProvider.autoDispose.family<TrashPage, String>((
   return api.trash(vaultId);
 });
 
+/// How long a vault's trash keeps an item (decision 150b), as its trash
+/// says: [days], never ([never]), or not known here ([known] false).
+class TrashRetention {
+  const TrashRetention.days(int this.days) : known = true, never = false;
+  const TrashRetention.never() : days = null, known = true, never = true;
+  const TrashRetention.unknown() : days = null, known = false, never = false;
+
+  final int? days;
+  final bool known;
+  final bool never;
+
+  /// "kept for 30 days", "kept until you empty it", or, unknown, "kept for
+  /// the vault's retention period".
+  String get keptFor {
+    if (!known) return 'kept for the vault’s retention period';
+    if (never) return 'kept until you empty it';
+    return days == 1 ? 'kept for 1 day' : 'kept for $days days';
+  }
+}
+
+/// [vaultId]'s own retention, read from its trash (153g): never a constant,
+/// since each vault sets its own.
+final trashRetentionProvider = Provider.autoDispose
+    .family<TrashRetention, String>((ref, vaultId) {
+      if (ref.watch(apiProvider) == null || vaultId.isEmpty) {
+        return const TrashRetention.unknown();
+      }
+      final page = ref.watch(trashProvider(vaultId));
+      return switch (page) {
+        AsyncData(:final value) =>
+          value.retentionDays == null
+              ? const TrashRetention.never()
+              : TrashRetention.days(value.retentionDays!),
+        _ => const TrashRetention.unknown(),
+      };
+    });
+
 /// `/v/<vault>/trash`.
 class TrashScreen extends StatelessWidget {
   const TrashScreen({super.key});
@@ -35,38 +73,6 @@ class TrashScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       StormScaffold(child: TrashView(vaultId: VaultGate.of(context)));
-}
-
-/// Asks before something irreversible. Anything but the button is a no.
-Future<bool> confirmDestructive(
-  BuildContext context, {
-  required String title,
-  required String body,
-  required String action,
-}) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (c) => AlertDialog(
-      title: Text(title),
-      content: Text(body),
-      actions: [
-        TextButton(
-          key: const Key('confirm-cancel'),
-          onPressed: () => Navigator.pop(c, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          key: const Key('confirm-action'),
-          onPressed: () => Navigator.pop(c, true),
-          style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(c).colorScheme.error,
-          ),
-          child: Text(action),
-        ),
-      ],
-    ),
-  );
-  return confirmed == true;
 }
 
 String notesCount(int n) => n == 1 ? '1 note' : '$n notes';
@@ -82,20 +88,39 @@ String deletedAgo(String iso, {DateTime? now}) {
   return '${d.inDays}d ago';
 }
 
-class TrashView extends ConsumerWidget {
+/// What the strip at the top of Trash is asking (153g): one item's Delete
+/// forever, or Empty trash.
+typedef _Confirm = ({
+  String title,
+  String note,
+  String action,
+  TrashItem? item,
+});
+
+class TrashView extends ConsumerStatefulWidget {
   const TrashView({super.key, required this.vaultId});
 
   final String vaultId;
 
+  @override
+  ConsumerState<TrashView> createState() => _TrashViewState();
+}
+
+class _TrashViewState extends ConsumerState<TrashView> {
   static const _periods = [7, 30, 90, null];
 
+  _Confirm? _confirm;
+  bool _busy = false;
+
+  String get vaultId => widget.vaultId;
+
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final t = context.tokens;
     final page = ref.watch(trashProvider(vaultId));
     final items = page.value?.items ?? const <TrashItem>[];
-
-    return ListView(
+    final confirm = _confirm;
+    final list = ListView(
       padding: EdgeInsets.fromLTRB(
         StormChrome.contentInset(context),
         context.isExpanded ? pageTopInset(t) : t.sp * 2,
@@ -120,7 +145,7 @@ class TrashView extends ConsumerWidget {
               key: const Key('trash-empty'),
               label: 'Empty trash',
               icon: LucideIcons.trash_2,
-              onPressed: items.isEmpty ? null : () => _empty(context, ref),
+              onPressed: items.isEmpty ? null : _askEmpty,
             ),
           ],
         ),
@@ -135,7 +160,7 @@ class TrashView extends ConsumerWidget {
           ],
           selected: page.value?.retentionDays,
           onSelected: page.hasValue
-              ? (days) => _setRetention(context, ref, days)
+              ? (days) => _setRetention(context, days)
               : null,
         ),
         SizedBox(height: t.sp * 2.5),
@@ -164,17 +189,49 @@ class TrashView extends ConsumerWidget {
                       _TrashRow(
                         key: Key('trash:${item.id}'),
                         item: item,
-                        onRestore: () => _restore(context, ref, item),
-                        onPurge: () => _purge(context, ref, item),
+                        onRestore: () => _restore(context, item),
+                        onPurge: () => _askPurge(item),
                       ),
                   ],
                 ),
         ),
       ],
     );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (confirm != null)
+          DecisionStrip(
+            key: const Key('trash-confirm'),
+            label: 'CONFIRM',
+            title: confirm.title,
+            note: confirm.note,
+            onEscape: _cancel,
+            actions: [
+              DecisionAction(
+                key: const Key('confirm-cancel'),
+                label: 'Cancel',
+                kind: DecisionActionKind.text,
+                onPressed: _cancel,
+              ),
+              DecisionAction(
+                key: const Key('confirm-action'),
+                label: confirm.action,
+                kind: DecisionActionKind.danger,
+                onPressed: _busy ? null : () => _go(confirm),
+              ),
+            ],
+          ),
+        Expanded(child: list),
+      ],
+    );
   }
 
-  void _changed(WidgetRef ref) {
+  void _cancel() {
+    if (mounted) setState(() => _confirm = null);
+  }
+
+  void _changed() {
     ref.read(vaultRevisionProvider.notifier).state++;
     ref.invalidate(treeProvider);
     ref.invalidate(trashProvider(vaultId));
@@ -184,82 +241,69 @@ class TrashView extends ConsumerWidget {
     context,
   )?.showSnackBar(SnackBar(content: Text(message)));
 
-  Future<void> _run(
-    BuildContext context,
-    WidgetRef ref,
-    Future<void> Function() act,
-    String done,
-  ) async {
+  Future<void> _run(Future<void> Function() act, String done) async {
     try {
       await act();
-      _changed(ref);
-      if (context.mounted) _say(context, done);
+      _changed();
+      if (mounted) _say(context, done);
     } catch (e) {
-      if (context.mounted) _say(context, describeFailure(e));
+      if (mounted) _say(context, describeFailure(e));
     }
   }
 
-  Future<void> _restore(
-    BuildContext context,
-    WidgetRef ref,
-    TrashItem item,
-  ) async {
+  Future<void> _restore(BuildContext context, TrashItem item) async {
     final api = ref.read(apiProvider);
     if (api == null) return;
     await _run(
-      context,
-      ref,
       () => api.restoreTrash(vaultId, item.id),
       'Restored “${item.name}”',
     );
   }
 
-  Future<void> _purge(
-    BuildContext context,
-    WidgetRef ref,
-    TrashItem item,
-  ) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    final ok = await confirmDestructive(
-      context,
+  void _askPurge(TrashItem item) => setState(
+    () => _confirm = (
       title: 'Delete “${item.name}” forever?',
-      body: item.isFolder
+      note: item.isFolder
           ? 'The folder and its ${notesCount(item.noteCount)} are removed '
                 'for good, with their history. This cannot be undone.'
           : 'The note is removed for good, with its history. '
                 'This cannot be undone.',
       action: 'Delete forever',
-    );
-    if (!ok || !context.mounted) return;
-    await _run(
-      context,
-      ref,
-      () => api.purgeTrash(vaultId, item.id),
-      'Deleted “${item.name}” forever',
-    );
-  }
+      item: item,
+    ),
+  );
 
-  Future<void> _empty(BuildContext context, WidgetRef ref) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    final ok = await confirmDestructive(
-      context,
+  void _askEmpty() => setState(
+    () => _confirm = (
       title: 'Empty trash?',
-      body:
-          'Everything in this vault\'s trash is removed for good, with its '
+      note:
+          'Everything in this vault’s trash is removed for good, with its '
           'history. This cannot be undone.',
       action: 'Empty trash',
+      item: null,
+    ),
+  );
+
+  Future<void> _go(_Confirm confirm) async {
+    final api = ref.read(apiProvider);
+    if (api == null) return;
+    setState(() => _busy = true);
+    final item = confirm.item;
+    await _run(
+      item == null
+          ? () => api.emptyTrash(vaultId)
+          : () => api.purgeTrash(vaultId, item.id),
+      item == null ? 'Trash emptied' : 'Deleted “${item.name}” forever',
     );
-    if (!ok || !context.mounted) return;
-    await _run(context, ref, () => api.emptyTrash(vaultId), 'Trash emptied');
+    if (mounted) {
+      setState(() {
+        _busy = false;
+        _confirm = null;
+      });
+    }
   }
 
-  Future<void> _setRetention(
-    BuildContext context,
-    WidgetRef ref,
-    int? days,
-  ) async {
+  Future<void> _setRetention(BuildContext context, int? days) async {
     final config = await ref.read(vaultConfigProvider.future);
     final saved = await saveVaultConfig(ref, config.withTrashRetention(days));
     ref.invalidate(trashProvider(vaultId));

@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_riverpod/legacy.dart';
 
+import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
+import '../ui/decision_strip.dart';
 import '../ui/states.dart' show describeFailure;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
@@ -283,8 +286,8 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
 
 // ---- banners --------------------------------------------------------------
 
-/// The inline banner every confirmation here uses (4p, 4t): a title, groups
-/// of names, an optional tick, Cancel and the action.
+/// The inline confirmation for turning the spawn switch on (4t), in About.
+/// Ending and dismissing ask in the decision strip (153g).
 class _Banner extends StatelessWidget {
   const _Banner({
     super.key,
@@ -292,9 +295,6 @@ class _Banner extends StatelessWidget {
     required this.action,
     required this.onAction,
     required this.onCancel,
-    this.groups = const [],
-    this.note,
-    this.tick,
     this.accent = false,
   });
 
@@ -302,9 +302,6 @@ class _Banner extends StatelessWidget {
   final String action;
   final VoidCallback? onAction;
   final VoidCallback onCancel;
-  final List<(String, List<String>)> groups;
-  final String? note;
-  final ({bool value, ValueChanged<bool> onChanged, String label})? tick;
   final bool accent;
 
   @override
@@ -326,32 +323,6 @@ class _Banner extends StatelessWidget {
             key: const Key('banner-title'),
             style: agentSans(t, weight: FontWeight.w600),
           ),
-          for (final (label, names) in groups)
-            if (names.isNotEmpty)
-              Padding(
-                padding: EdgeInsets.only(top: t.sp * 0.75),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SizedBox(
-                      width: t.sp * 16,
-                      child: Text(label.toUpperCase(), style: agentKey(t)),
-                    ),
-                    Expanded(
-                      child: Text(names.join(', '), style: agentSans(t)),
-                    ),
-                  ],
-                ),
-              ),
-          if (note != null)
-            Padding(
-              padding: EdgeInsets.only(top: t.sp * 0.75),
-              child: Text(
-                note!,
-                key: const Key('banner-note'),
-                style: agentSans(t, color: t.text2),
-              ),
-            ),
           SizedBox(height: t.sp * 1.25),
           Wrap(
             alignment: WrapAlignment.end,
@@ -359,31 +330,6 @@ class _Banner extends StatelessWidget {
             spacing: t.sp,
             runSpacing: t.sp * 0.5,
             children: [
-              if (tick case final tick?)
-                InkWell(
-                  key: const Key('report-first'),
-                  onTap: () => tick.onChanged(!tick.value),
-                  borderRadius: BorderRadius.circular(t.rControl),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Checkbox(
-                        value: tick.value,
-                        onChanged: (v) => tick.onChanged(v ?? false),
-                        activeColor: t.accent,
-                        checkColor: t.onAccent,
-                        side: BorderSide(color: t.text3, width: t.bw),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                      Flexible(
-                        child: Text(
-                          tick.label,
-                          style: agentSans(t, color: t.text2),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
               StormButton.text(
                 key: const Key('banner-cancel'),
                 label: 'Cancel',
@@ -429,27 +375,50 @@ class _Banner extends StatelessWidget {
 }
 
 /// The tick a person's end offers (C9): children get the notice and 30 s.
-const kReportFirst = 'Let children report first (waits 30 s)';
+const kReportFirst = 'Let them report first (waits 30 s)';
 
-/// Ending a parent ends its children, after a person saw which (C1, 4p).
-/// [children] true is End all children (C5): the parent keeps running.
-class EndTreeBanner extends ConsumerStatefulWidget {
-  const EndTreeBanner({
+/// What a session's strip is confirming (153g): the person asked for it,
+/// so it shows in place of a waiting request until it is answered.
+enum SessionConfirm { endTree, endChildren, dismissTree }
+
+/// The confirmation open on a session's desk strip, if any. Device-local.
+final sessionConfirmProvider = StateProvider.autoDispose
+    .family<SessionConfirm?, String>((ref, id) => null);
+
+/// "spike-notes (2 commits not applied stay in its Work tab until you
+/// dismiss it)": an ended child's work the person has not taken (153d).
+String endedWithWork(String name, AgentSession? s) {
+  if (s == null || s.spawn.workToTake != true) return name;
+  final what = switch (s.spawn.unappliedCommits) {
+    1 => '1 commit not applied stays',
+    final n? when n > 1 => '$n commits not applied stay',
+    _ => 'work not applied stays',
+  };
+  return '$name ($what in its Work tab until you dismiss it)';
+}
+
+/// Ending a parent ends its children, after a person saw which (C1, 4p), as
+/// a confirmation strip (153g). [children] true is End all children (C5):
+/// the parent keeps running.
+class EndTreeStrip extends ConsumerStatefulWidget {
+  const EndTreeStrip({
     super.key,
     required this.session,
     required this.onDone,
     this.children = false,
+    this.layout = DecisionLayout.strip,
   });
 
   final AgentSession session;
   final VoidCallback onDone;
   final bool children;
+  final DecisionLayout layout;
 
   @override
-  ConsumerState<EndTreeBanner> createState() => _EndTreeBannerState();
+  ConsumerState<EndTreeStrip> createState() => _EndTreeStripState();
 }
 
-class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
+class _EndTreeStripState extends ConsumerState<EndTreeStrip> {
   bool _reportFirst = false;
   bool _busy = false;
 
@@ -494,19 +463,28 @@ class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
   Widget build(BuildContext context) {
     final s = widget.session;
     final d = ref.watch(sessionDescendantsProvider(s.id)).value;
-    final running = <String>[
+    final o = ref.watch(agentOverviewProvider).value;
+    final running = [
       for (final r in d?.running ?? const <DescendantRef>[]) r.name,
     ];
-    final ended = <String>[
-      for (final r in d?.ended ?? const <DescendantRef>[]) r.name,
+    final ended = [
+      for (final r in d?.ended ?? const <DescendantRef>[])
+        endedWithWork(r.name, o?.byId(r.id)),
     ];
     final n = running.length + (widget.children ? 0 : 1);
-    return _Banner(
+    final agents = running.length == 1 ? '1 agent' : '${running.length} agents';
+    return DecisionStrip(
       key: Key(widget.children ? 'end-children-confirm' : 'end-tree-confirm'),
+      label: 'CONFIRM',
+      layout: widget.layout,
       title: widget.children
-          ? 'End ${s.displayName}’s children? ${s.displayName} keeps running.'
-          : 'End ${s.displayName}? Its children end with it.',
-      groups: [('Running', running), ('Already ended', ended)],
+          ? 'End the $agents ${s.displayName} started? '
+                '${s.displayName} keeps running.'
+          : 'End ${s.displayName} and the $agents it started?',
+      rows: [
+        if (running.isNotEmpty) DecisionRow('Running', running.join(' · ')),
+        if (ended.isNotEmpty) DecisionRow('Already ended', ended.join(' · ')),
+      ],
       tick: running.isEmpty
           ? null
           : (
@@ -514,9 +492,21 @@ class _EndTreeBannerState extends ConsumerState<EndTreeBanner> {
               onChanged: (v) => setState(() => _reportFirst = v),
               label: kReportFirst,
             ),
-      action: 'End $n ${n == 1 ? 'session' : 'sessions'}',
-      onAction: d == null || _busy || n == 0 ? null : () => _go(d),
-      onCancel: widget.onDone,
+      onEscape: widget.onDone,
+      actions: [
+        DecisionAction(
+          key: const Key('banner-cancel'),
+          label: 'Cancel',
+          kind: DecisionActionKind.text,
+          onPressed: widget.onDone,
+        ),
+        DecisionAction(
+          key: const Key('banner-action'),
+          label: 'End $n ${n == 1 ? 'session' : 'sessions'}',
+          kind: DecisionActionKind.danger,
+          onPressed: d == null || _busy || n == 0 ? null : () => _go(d),
+        ),
+      ],
     );
   }
 }
@@ -526,24 +516,27 @@ const kTreeDismissWarning =
     'Each child’s own copy or scratch folder is deleted with it, and any of '
     'its work you haven’t applied goes too.';
 
-/// A tree is dismissed only as a unit, once every member has ended (C8).
-class DismissTreeBanner extends ConsumerStatefulWidget {
-  const DismissTreeBanner({
+/// A tree is dismissed only as a unit, once every member has ended (C8), as
+/// a confirmation strip (153g).
+class DismissTreeStrip extends ConsumerStatefulWidget {
+  const DismissTreeStrip({
     super.key,
     required this.session,
     required this.onDone,
     required this.onDismissed,
+    this.layout = DecisionLayout.strip,
   });
 
   final AgentSession session;
   final VoidCallback onDone;
   final VoidCallback onDismissed;
+  final DecisionLayout layout;
 
   @override
-  ConsumerState<DismissTreeBanner> createState() => _DismissTreeBannerState();
+  ConsumerState<DismissTreeStrip> createState() => _DismissTreeStripState();
 }
 
-class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
+class _DismissTreeStripState extends ConsumerState<DismissTreeStrip> {
   bool _busy = false;
 
   Future<void> _go() async {
@@ -583,21 +576,39 @@ class _DismissTreeBannerState extends ConsumerState<DismissTreeBanner> {
     ];
     final root = o?.byId(s.spawn.rootSession ?? s.id) ?? s;
     final n = members.length;
-    return _Banner(
+    return DecisionStrip(
       key: const Key('dismiss-tree-confirm'),
+      label: 'CONFIRM',
+      layout: widget.layout,
       title: live.isEmpty
           ? 'Dismiss ${root.displayName} and everything it started? '
                 '$n sessions go together.'
           : 'Dismiss ${root.displayName}’s sessions together, once every one '
                 'has ended.',
-      groups: [
-        ('Dismisses', [for (final m in members) m.displayName]),
-        ('Still running', live),
+      rows: [
+        DecisionRow(
+          'Dismisses',
+          [for (final m in members) m.displayName].join(' · '),
+        ),
+        if (live.isNotEmpty) DecisionRow('Still running', live.join(' · ')),
       ],
       note: live.isEmpty ? kTreeDismissWarning : null,
-      action: live.isEmpty ? 'Dismiss $n sessions' : '',
-      onAction: live.isNotEmpty || _busy ? null : _go,
-      onCancel: widget.onDone,
+      onEscape: widget.onDone,
+      actions: [
+        DecisionAction(
+          key: const Key('banner-cancel'),
+          label: 'Cancel',
+          kind: DecisionActionKind.text,
+          onPressed: widget.onDone,
+        ),
+        if (live.isEmpty)
+          DecisionAction(
+            key: const Key('banner-action'),
+            label: 'Dismiss $n sessions',
+            kind: DecisionActionKind.danger,
+            onPressed: _busy ? null : _go,
+          ),
+      ],
     );
   }
 }
@@ -912,10 +923,13 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
             ChildEventsTile(child: k),
         if (running.isNotEmpty) ...[
           SizedBox(height: t.sp),
-          if (_confirm)
-            EndTreeBanner(
+          // At desk width it is asked in the strip under the header; in
+          // the phone's details sheet, in place.
+          if (_confirm && !context.isExpanded)
+            EndTreeStrip(
               session: s,
               children: true,
+              layout: DecisionLayout.sheet,
               onDone: () => setState(() => _confirm = false),
             )
           else
@@ -926,7 +940,12 @@ class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
                 label: 'End all children…',
                 onPressed: () {
                   ref.invalidate(sessionDescendantsProvider(s.id));
-                  setState(() => _confirm = true);
+                  if (context.isExpanded) {
+                    ref.read(sessionConfirmProvider(s.id).notifier).state =
+                        SessionConfirm.endChildren;
+                  } else {
+                    setState(() => _confirm = true);
+                  }
                 },
               ),
             ),

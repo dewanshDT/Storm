@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -555,9 +556,16 @@ void main() {
           await tester.tap(find.byKey(const Key('end-session')));
           await tester.pumpAndSettle();
           expect(
-            find.text('End gateway-impl? Its children end with it.'),
+            find.text('End gateway-impl and the 1 agent it started?'),
             findsOneWidget,
           );
+          // A strip under the header at desk width; in the details sheet
+          // on a phone.
+          expect(
+            find.text('CONFIRM'),
+            size.width >= 900 ? findsOneWidget : findsNothing,
+          );
+          expect(find.byType(AlertDialog), findsNothing);
           expect(find.text('RUNNING'), findsWidgets);
           expect(find.text('test-gateway'), findsWidgets);
           expect(find.text('ALREADY ENDED'), findsOneWidget);
@@ -577,6 +585,88 @@ void main() {
         },
       );
     }
+
+    testWidgets('153g: one strip under the header, with what is running, '
+        'what ended with work not applied, the tick, Cancel and Esc', (
+      tester,
+    ) async {
+      final sessions = family();
+      sessions.last
+        ..['work_to_take'] = true
+        ..['unapplied_commits'] = 2;
+      final agents = FakeAgentServer(hosts: [agentHost()], sessions: sessions);
+      final spawning = FakeSpawning(agents);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      await tester.tap(find.byKey(const Key('end-session')));
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      final strip = find.byKey(const Key('end-tree-confirm'));
+      expect(strip, findsOneWidget);
+      expect(find.byKey(const Key('decision-strip')), findsOneWidget);
+      // Under the header, above the terminal.
+      expect(
+        tester.getTopLeft(strip).dy,
+        greaterThan(
+          tester.getBottomLeft(find.byKey(const Key('session-bar'))).dy - 1,
+        ),
+      );
+      Finder inStrip(String text) =>
+          find.descendant(of: strip, matching: find.text(text));
+      expect(inStrip('CONFIRM'), findsOneWidget);
+      expect(inStrip('RUNNING'), findsOneWidget);
+      expect(inStrip('test-gateway'), findsOneWidget);
+      expect(inStrip('ALREADY ENDED'), findsOneWidget);
+      expect(
+        find.text(
+          'spike-notes (2 commits not applied stay in its Work tab until you '
+          'dismiss it)',
+        ),
+        findsOneWidget,
+      );
+      expect(find.text('Let them report first (waits 30 s)'), findsOneWidget);
+      final end = tester.widget<StormButton>(
+        find.byKey(const Key('banner-action')),
+      );
+      expect(end.label, 'End 2 sessions');
+      expect(end.kind, StormButtonKind.danger);
+      await tester.tap(find.byKey(const Key('banner-cancel')));
+      await tester.pumpAndSettle();
+      expect(strip, findsNothing);
+
+      await tester.tap(find.byKey(const Key('end-session')));
+      await tester.pumpAndSettle();
+      await tester.tap(inStrip('RUNNING'));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(strip, findsNothing, reason: 'Esc is Cancel');
+      expect(spawning.ends, isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('153g: End all children from About asks in the strip at desk '
+        'width', (tester) async {
+      final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
+      FakeSpawning(agents);
+      final c = await open(
+        tester,
+        agents,
+        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+      );
+      await tester.ensureVisible(find.byKey(const Key('end-children')));
+      await tester.tap(find.byKey(const Key('end-children')));
+      await tester.pumpAndSettle();
+      final strip = find.byKey(const Key('end-children-confirm'));
+      expect(strip, findsOneWidget);
+      expect(
+        find.descendant(
+          of: strip,
+          matching: find.byKey(const Key('decision-strip')),
+        ),
+        findsOneWidget,
+        reason: 'the strip under the header, not a card in About',
+      );
+      await disposeShell(tester, c);
+    });
 
     testWidgets('a child the list did not know yet: the server asks first', (
       tester,
@@ -624,7 +714,9 @@ void main() {
       await tester.tap(find.byKey(const Key('end-children')));
       await tester.pumpAndSettle();
       expect(
-        find.text('End gateway-impl’s children? gateway-impl keeps running.'),
+        find.text(
+          'End the 1 agent gateway-impl started? gateway-impl keeps running.',
+        ),
         findsOneWidget,
       );
       await tester.ensureVisible(find.text('End 1 session'));
@@ -664,6 +756,14 @@ void main() {
           );
           await tester.tap(find.byKey(const Key('dismiss-session')));
           await tester.pumpAndSettle();
+          expect(find.byType(AlertDialog), findsNothing);
+          // The strip under the header at desk width; the same strip in a
+          // sheet on a phone (153g).
+          expect(find.byKey(const Key('dismiss-tree-confirm')), findsOneWidget);
+          expect(
+            find.byType(BottomSheet),
+            size.width < 900 ? findsOneWidget : findsNothing,
+          );
           expect(find.text(kTreeDismissWarning), findsOneWidget);
           expect(
             find.text(

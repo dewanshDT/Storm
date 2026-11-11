@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -9,6 +10,7 @@ import 'package:http/testing.dart';
 import 'package:storm/api/storm_api.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
+import 'package:storm/ui/controls.dart';
 import 'package:storm/ui/browse_screen.dart';
 import 'package:storm/ui/trash_screen.dart';
 
@@ -133,7 +135,27 @@ void main() {
 
       await tester.tap(find.byKey(const Key('purge:t2')));
       await tester.pumpAndSettle();
+      // In the strip at the top of Trash, never a dialog (153g).
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byKey(const Key('trash-confirm')), findsOneWidget);
+      expect(find.text('CONFIRM'), findsOneWidget);
+      expect(
+        tester.getTopLeft(find.byKey(const Key('trash-confirm'))).dy,
+        lessThan(tester.getTopLeft(find.text('Trash')).dy),
+      );
       expect(find.text('Delete “Projects” forever?'), findsOneWidget);
+      expect(
+        tester
+            .widget<StormButton>(find.byKey(const Key('confirm-action')))
+            .label,
+        'Delete forever',
+      );
+      expect(
+        tester
+            .widget<StormButton>(find.byKey(const Key('confirm-action')))
+            .kind,
+        StormButtonKind.danger,
+      );
       expect(find.textContaining('its 12 notes'), findsOneWidget);
       await tester.tap(find.byKey(const Key('confirm-cancel')));
       await tester.pumpAndSettle();
@@ -153,9 +175,26 @@ void main() {
 
       await tester.tap(find.byKey(const Key('trash-empty')));
       await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byKey(const Key('trash-confirm')), findsOneWidget);
       expect(find.text('Empty trash?'), findsOneWidget);
+      expect(
+        tester
+            .widget<StormButton>(find.byKey(const Key('confirm-action')))
+            .label,
+        'Empty trash',
+      );
       await tester.tap(find.byKey(const Key('confirm-cancel')));
       await tester.pumpAndSettle();
+      expect(find.byKey(const Key('trash-confirm')), findsNothing);
+      expect(requests, isNot(contains('DELETE /v1/vaults/$vault/trash')));
+
+      // Esc is Cancel.
+      await tester.tap(find.byKey(const Key('trash-empty')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('trash-confirm')), findsNothing);
       expect(requests, isNot(contains('DELETE /v1/vaults/$vault/trash')));
 
       await tester.tap(find.byKey(const Key('trash-empty')));

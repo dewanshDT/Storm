@@ -97,6 +97,14 @@ class FakeServer {
 
   String vaultRoot = '/srv/storm/vaults';
 
+  /// What each vault's trash says its retention is (`retention_days`, null
+  /// for never). A vault not here has no trash route, so its retention is
+  /// unknown to the client.
+  final Map<String, int?> trashRetention = {};
+
+  /// The items each vault's trash lists, where [trashRetention] serves it.
+  final Map<String, List<Map<String, dynamic>>> trashItems = {};
+
   /// Whether the server would serve `/mcp`. Off by default, as the real one is.
   bool mcpEnabled = false;
 
@@ -248,6 +256,20 @@ class FakeServer {
                 'missing': v.missing,
               },
           ],
+        }),
+        200,
+        headers: j(''),
+      );
+    }
+
+    final trash = RegExp(r'^/v1/vaults/([^/]+)/trash$').firstMatch(path);
+    if (trash != null &&
+        request.method == 'GET' &&
+        trashRetention.containsKey(trash.group(1))) {
+      return http.Response(
+        jsonEncode({
+          'items': trashItems[trash.group(1)] ?? const [],
+          'retention_days': trashRetention[trash.group(1)],
         }),
         200,
         headers: j(''),

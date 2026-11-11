@@ -38,6 +38,12 @@ void main() {
     'lib/agent/output_seen.dart',
   ];
   files.addAll(sidebarFiles.map(File.new));
+  // The decision strip's agent side and the session view it sits in (153r).
+  const decisionFiles = [
+    'lib/agent/delete_request.dart',
+    'lib/agent/session_screen.dart',
+  ];
+  files.addAll(decisionFiles.map(File.new));
 
   /// Lines that are not comments, with their 1-based number.
   Iterable<(int, String)> codeLines(File f) sync* {
@@ -74,8 +80,8 @@ void main() {
     );
   });
 
-  test('the Agents sidebar is scanned too', () {
-    for (final path in sidebarFiles) {
+  test('the Agents sidebar and the decision strip are scanned too', () {
+    for (final path in [...sidebarFiles, ...decisionFiles]) {
       expect(File(path).existsSync(), isTrue, reason: path);
     }
   });
