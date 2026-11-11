@@ -15,6 +15,7 @@ import 'package:storm/ui/pairing_screen.dart';
 import 'package:storm/ui/settings/settings_shell.dart';
 import 'package:storm/ui/settings/settings_widgets.dart';
 import 'package:storm/ui/tokens.dart';
+import 'package:storm/ui/widgets.dart' show PopoverItem;
 
 import 'fake_server.dart';
 import 'shell_harness.dart';
@@ -407,6 +408,125 @@ void main() {
       expect(find.textContaining('nothing is deleted'), findsOneWidget);
       await tapKey(tester, 'confirm-remove');
       expect(serverOf(c).vaults.map((v) => v.id), isNot(contains('v-2')));
+      await disposeShell(tester, c);
+    });
+
+    String? configOf(c, String vault) => (serverOf(c).byVault[vault] ?? {})
+        .values
+        .where((n) => n.path == '_storm/vault.md')
+        .firstOrNull
+        ?.content;
+
+    String shown(WidgetTester tester, String vault) => tester
+        .widget<Text>(
+          find.descendant(
+            of: find.byKey(Key('trash-keeps-$vault')),
+            matching: find.byType(Text),
+          ),
+        )
+        .data!;
+
+    for (final (label, size) in [('desk', desk), ('phone', phone)]) {
+      testWidgets('$label: Trash keeps saves the vault config', (tester) async {
+        final c = shellContainer();
+        serverOf(c)
+          ..trashRetention['v-primary'] = 30
+          ..trashItems['v-primary'] = [
+            {'id': 't1', 'kind': 'note', 'name': 'a', 'deleted_by': {}},
+          ]
+          ..addVault('v-2', 'Work')
+          ..trashRetention['v-2'] = 90;
+        await pumpShell(tester, c, size: size);
+        await open(tester, c, 'vaults');
+
+        expect(find.text('Trash keeps'), findsNWidgets(2));
+        expect(shown(tester, 'v-primary'), '30 days');
+        expect(shown(tester, 'v-2'), '90 days');
+        expect(
+          find.text('Then deleted for good. 1 item in Trash now.'),
+          findsOneWidget,
+        );
+        expect(
+          find.text('Then deleted for good. Trash is empty.'),
+          findsOneWidget,
+        );
+
+        // The active vault, through saveVaultConfig.
+        await tapKey(tester, 'trash-keeps-v-primary');
+        for (final d in ['7', '30', '90', 'never']) {
+          expect(find.byKey(Key('trash-keeps-v-primary-$d')), findsOneWidget);
+        }
+        await tapKey(tester, 'trash-keeps-v-primary-7');
+        expect(configOf(c, 'v-primary'), contains('storm.trash.retention: 7'));
+
+        // Another vault, straight through the API.
+        await tapKey(tester, 'trash-keeps-v-2');
+        await tapKey(tester, 'trash-keeps-v-2-never');
+        expect(configOf(c, 'v-2'), contains('storm.trash.retention: never'));
+        await disposeShell(tester, c);
+      });
+    }
+
+    testWidgets('a value set elsewhere shows as one more choice, unwritten', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      serverOf(c).trashRetention['v-primary'] = 14;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'vaults');
+
+      expect(shown(tester, 'v-primary'), '14 days');
+      await tapKey(tester, 'trash-keeps-v-primary');
+      final labels = [
+        for (final d in ['7', '14', '30', '90', 'never'])
+          tester
+              .widget<PopoverItem>(find.byKey(Key('trash-keeps-v-primary-$d')))
+              .label,
+      ];
+      expect(labels, [
+        '7 days',
+        '14 days',
+        '30 days',
+        '90 days',
+        'Never delete',
+      ]);
+      expect(
+        tester
+            .widget<PopoverItem>(
+              find.byKey(const Key('trash-keeps-v-primary-14')),
+            )
+            .selected,
+        isTrue,
+      );
+      // Choosing it again changes nothing.
+      await tapKey(tester, 'trash-keeps-v-primary-14');
+      expect(configOf(c, 'v-primary'), isNull);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an unreadable vault shows the setting disabled, with why', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'vaults');
+
+      expect(
+        find.textContaining("Can't read this vault's settings"),
+        findsOneWidget,
+      );
+      await tapKey(tester, 'trash-keeps-v-primary');
+      expect(find.byKey(const Key('trash-keeps-menu-v-primary')), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Open Trash goes to the vault\'s trash', (tester) async {
+      final c = shellContainer();
+      serverOf(c).trashRetention['v-primary'] = 30;
+      await pumpShell(tester, c, size: desk);
+      await open(tester, c, 'vaults');
+      await tapKey(tester, 'open-trash-v-primary');
+      expect(location(c), Routes.trash('v-primary'));
       await disposeShell(tester, c);
     });
   });

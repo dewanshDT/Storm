@@ -274,14 +274,26 @@ const _seed = '---\n---\n\n# Vault\n';
 /// Sets any vault's accent, not only the active one.
 ///
 /// The dashboard shows every vault at once, so a long-press has to be able to
-/// colour a vault that is not open. That rules out [saveVaultConfig], which
-/// works through the active vault's providers — this goes straight to the API
-/// for the vault named.
-Future<bool> setVaultAccent(
+/// colour a vault that is not open.
+Future<bool> setVaultAccent(WidgetRef ref, String vaultId, Accent accent) =>
+    editVaultConfig(
+      ref,
+      vaultId,
+      (c) => c.withAccent(accent),
+      skipIfMissing: accent.isNone,
+    );
+
+/// Rewrites any vault's config note with [edit], creating the note when the
+/// vault has none (unless [skipIfMissing], when there is nothing to record).
+///
+/// [saveVaultConfig] works through the active vault's providers; this goes
+/// straight to the API for the vault named.
+Future<bool> editVaultConfig(
   WidgetRef ref,
   String vaultId,
-  Accent accent,
-) async {
+  String Function(VaultConfig) edit, {
+  bool skipIfMissing = false,
+}) async {
   final api = ref.read(apiProvider);
   if (api == null) return false;
 
@@ -292,15 +304,15 @@ Future<bool> setVaultAccent(
         .firstOrNull;
 
     if (existing == null) {
-      if (accent.isNone) return true; // nothing to record
+      if (skipIfMissing) return true;
       await api.createNote(
         vaultId: vaultId,
         path: kVaultConfigPath,
-        content: VaultConfig.parse(_seed).withAccent(accent),
+        content: edit(VaultConfig.parse(_seed)),
       );
     } else {
       final note = await api.note(vaultId, existing.id);
-      final updated = VaultConfig.parse(note.content).withAccent(accent);
+      final updated = edit(VaultConfig.parse(note.content));
       if (updated == note.content) return true;
       await api.saveNote(
         vaultId: vaultId,
