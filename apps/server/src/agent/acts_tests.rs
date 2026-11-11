@@ -635,12 +635,15 @@ fn the_sessions_override_only_lowers_the_hosts_own() {
     );
 }
 
-/// 152a: a revoked host keeps no Limits.
+/// 152a as amended by 153: a revoked host keeps its Limits for a
+/// re-enrollment; a removed one keeps none.
 #[test]
-fn revoking_a_host_clears_its_limits() {
+fn removing_a_host_clears_its_limits_and_revoking_keeps_them() {
     let f = fixture(16);
     set_limits(&f, 1, 1, Some(1));
     f.m.revoke_host("hst_A").unwrap();
+    assert_ne!(f.m.host_limits("hst_A").unwrap(), HostLimits::default());
+    f.m.forget_host("hst_A").unwrap();
     assert_eq!(f.m.host_limits("hst_A").unwrap(), HostLimits::default());
     let rows: i64 =
         f.m.store

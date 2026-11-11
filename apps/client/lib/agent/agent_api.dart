@@ -158,6 +158,36 @@ class AgentApi {
     );
   }
 
+  /// Issues an enrollment for a revoked host (decision 153). Redeemed by
+  /// `storm-runtime enroll`, it brings the host back under its id, name and
+  /// limits, with a new key. Shown once, like [enroll].
+  Future<({String enrollment, String expires})> reenrollHost(String id) async {
+    final json =
+        _decode(
+              await _client.post(
+                _uri('/v1/agent/hosts/${Uri.encodeComponent(id)}/reenroll'),
+                headers: _headers,
+                body: jsonEncode({'server_url': baseUrl}),
+              ),
+            )
+            as Map;
+    return (
+      enrollment: json['enrollment'] as String,
+      expires: json['expires'] as String,
+    );
+  }
+
+  /// Removes a revoked host from the list (decision 153); its ended sessions
+  /// stay, with its name. `host_not_revoked` (409) until it is revoked.
+  Future<void> removeHost(String id) async {
+    _decode(
+      await _client.post(
+        _uri('/v1/agent/hosts/${Uri.encodeComponent(id)}/remove'),
+        headers: _headers,
+      ),
+    );
+  }
+
   String _limitsOf(String hostId) =>
       '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/limits';
 

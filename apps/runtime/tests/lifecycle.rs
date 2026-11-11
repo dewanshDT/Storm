@@ -310,16 +310,21 @@ async fn enrollment_is_announced_before_host_json_exists() {
     );
     let host_json = HostConfig::path(state.path());
     let mut announced = false;
-    let config = storm_runtime::client::enroll(state.path(), &enrollment, "mac", false, |c| {
-        assert_eq!(c.host_id, ENROLLED_HOST);
-        assert!(
-            !host_json.exists(),
-            "host.json was written before the announcement"
-        );
-        announced = true;
-    })
-    .await
-    .unwrap();
+    let config =
+        storm_runtime::client::enroll(state.path(), &enrollment, "mac", false, |c, listed| {
+            assert_eq!(c.host_id, ENROLLED_HOST);
+            assert_eq!(
+                listed, "mac",
+                "a server that names no host keeps the name sent"
+            );
+            assert!(
+                !host_json.exists(),
+                "host.json was written before the announcement"
+            );
+            announced = true;
+        })
+        .await
+        .unwrap();
     assert!(announced);
     assert_eq!(HostConfig::load(state.path()).unwrap(), config);
     assert!(
