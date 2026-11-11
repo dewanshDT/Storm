@@ -18709,6 +18709,118 @@ pub(crate) mod tests {
         assert!(plain.get("model").is_none(), "an empty field is no model");
     }
 
+    /// 153-S3: a Shell launches with a line typed in, carried on its start
+    /// as data for the terminal. Any other agent, a resume, a newline, a
+    /// control character or more than 1 KiB is a 400 and nothing starts; a
+    /// host that does not say `typed_input` is a 409 `host_cannot_type`.
+    /// The hosts list says each agent's sign-in command, the server's own.
+    #[tokio::test]
+    async fn a_153_s3_a_shell_launches_with_a_line_typed_in() {
+        let dir = tempdir::TempDir::new("storm-153-s3").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let code_of = |body: &serde_json::Value| {
+            body["error"]
+                .as_str()
+                .unwrap()
+                .split(':')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+
+        let (status, body) = f
+            .launch_body(
+                serde_json::json!({"provider": "shell", "typed_input": "claude auth login"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(code_of(&body), "host_cannot_type", "an old host");
+        assert!(f.sent().iter().all(|m| m["type"] != "start"));
+
+        let mut caps = host_caps(true);
+        caps["typed_input"] = true.into();
+        caps["providers"][0]["login_command"] = "rm -rf ~".into();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+
+        let (_, hosts) = f.get("/v1/agent/hosts").await;
+        let host = &hosts.as_array().unwrap()[0];
+        assert_eq!(host["capabilities"]["typed_input"], true);
+        let providers = &host["capabilities"]["providers"];
+        assert_eq!(
+            providers[0]["login_command"], "claude auth login",
+            "the server's, never the host's: {providers}"
+        );
+        assert!(providers[1]["login_command"].is_null(), "{providers}");
+
+        for (extra, code) in [
+            (
+                serde_json::json!({"typed_input": "claude auth login"}),
+                "typed_input_shell_only",
+            ),
+            (
+                serde_json::json!({"provider": null, "typed_input": "ls"}),
+                "typed_input_shell_only",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "claude auth login\n"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "ls\rrm -rf ~"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "ls\u{1b}[201~"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "a".repeat(1025)}),
+                "typed_input_invalid",
+            ),
+        ] {
+            let (status, body) = f.launch_body(extra.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra} {body}");
+            assert_eq!(code_of(&body), code, "{extra} {body}");
+        }
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing started"
+        );
+
+        let line = &format!("{} claude auth login", "a".repeat(1024 - 18));
+        assert_eq!(line.len(), 1024);
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell", "typed_input": line}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        let start = f.start_of(&id);
+        assert_eq!(start["provider"], "shell");
+        assert_eq!(start["typed_input"], line.as_str());
+        assert_eq!(start.get("context"), None);
+
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell"}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(f.start_of(&id).get("typed_input").is_none(), "none typed");
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell", "typed_input": ""}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(
+            f.start_of(&id).get("typed_input").is_none(),
+            "empty is none"
+        );
+    }
+
     // ---- decision 146: permissions for spawned agents ----
 
     impl GatewayFixture {
