@@ -11,7 +11,8 @@ session started on the laptop can be picked up on the phone.
 
 ## Starting one
 
-Press **Start session** in a note's header, or **New session** in Agents. The
+Press **Start session** in a note's header, or **＋** beside **Agents** at the
+top of the Agents sidebar (`⌘ ⇧ N`, `Ctrl+Shift+N` on Windows and Linux). The
 launcher asks for:
 
 | Field | What it means |
@@ -19,7 +20,7 @@ launcher asks for:
 | **Host** | Which Runtime Host runs it. |
 | **Workspace** | A folder on that host — usually a project checkout. **New workspace…** makes one (see below). |
 | **Agent** | Claude Code (the default), OpenCode, Codex, Cursor, Command Code or a shell. An agent the host does not have is listed as not installed. |
-| **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's row shows it. |
+| **Model** | The model the agent runs, or empty for the agent's own default. Claude Code takes `haiku`, `sonnet`, `opus` or a full id such as `claude-sonnet-4-5`; OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. Not offered for other agents. The session's About shows it. |
 | **Permission mode** | Which of the agent's own permission modes it starts in. **The agent's own setting** (the default) passes nothing, so whatever you set up for that agent applies. Claude Code also offers **Accept edits**, **Plan**, **Auto**, **Don't ask** (it refuses whatever its rules don't allow, without asking) and **Bypass permissions** (it never asks); OpenCode offers **Accept edits**. Storm passes the one you pick to the agent as its own setting and adds nothing of its own. Agents the session starts run in the same mode, or in their own setting when their agent doesn't have it. The session's row and About show it, and a resume keeps it. |
 | **Context** | The note it starts from. The agent reads it through Storm when it begins; remove it to start blank. |
 | **Can write to** | The one vault the agent may write to, or none (read only). Offered only when **Settings › AI access** allows writes chosen at launch, and never for a shell, Cursor or Command Code. |
@@ -46,6 +47,32 @@ shows the agent's logo and whether it is working or idle.
 
 Sessions working toward one goal can be grouped into a
 [crew](/docs/agents/crews/), and each can carry a role label.
+
+## Reading the sidebar
+
+On a desktop, each row in the Agents sidebar says one thing per signal:
+
+- **A red outline** means the session is waiting for you: a permission
+  prompt, a question or a delete request. It is the only thing counted on
+  the Agents icon in the rail.
+- **The badge on the agent's mark** says what it is doing: a pulsing dot
+  while it works, a ring while it's idle, grey while it starts, red once it
+  failed. A parked session, one out of usage and one whose host is offline
+  have none, and their names are dimmed.
+- **The line under the name** says why, in words — "permission prompt ·
+  3m", "blocked · waiting on test-gateway", "failed · host restarted", "out
+  of usage · resets 15:00", "host offline · last seen 9m" — and otherwise
+  the workspace and how long it has run. A child whose work you haven't
+  applied says "2 commits to apply" and stays out of **ENDED** until you
+  apply or delete it.
+- **A dot after the name** means output you haven't seen on this device.
+
+Sessions waiting for you, blocked, failed in the last hour or on an offline
+host move to the top of their crew or section, and crews with one move up
+too; everything else keeps your order. Nothing moves while the pointer is
+over the sidebar. A spawned tree moves as one, and its parent's chevron
+folds it to a line such as "2 agents · 1 needs you". **ENDED** folds to its
+count, with **Dismiss all**.
 
 ## The terminal
 

@@ -20,6 +20,18 @@ Map<ShortcutActivator, Intent> stormGlobalShortcuts() => {
       const StormToggleSidebarIntent(),
 };
 
+/// The Agents activity's chords (153f): ⇧⌘N (Ctrl+Shift+N off macOS) is a
+/// new session there, as it is New folder in Notes; the two never share a
+/// shell, so neither shadows the other.
+Map<ShortcutActivator, Intent> stormAgentsShortcuts() => {
+  stormActivator(LogicalKeyboardKey.keyN, shift: true):
+      const StormNewSessionIntent(),
+};
+
+/// How ⇧⌘N is written on this platform, for the ＋'s tooltip.
+String get stormNewSessionChord =>
+    stormUsesMetaModifier ? '⇧⌘N' : 'Ctrl+Shift+N';
+
 /// The app bar's back and forward (153c): ⌘[ and ⌘] on macOS, Alt+← and
 /// Alt+→ elsewhere. None on the web, where the browser's own keys already
 /// move its history and the bar follows it.

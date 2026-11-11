@@ -5,6 +5,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../agent/agent_state.dart';
+import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../state/nav_memory.dart';
 import '../tokens.dart';
 import 'app_bar.dart' show railTopInset;
@@ -28,6 +29,8 @@ class ActivityRail extends ConsumerWidget {
             ?.live
             .any((s) => s.status == 'running' && s.working) ??
         false;
+    // What waits for the person to answer: the one count on the desk (153e).
+    final needs = ref.watch(needsYouCountProvider);
 
     void open(Activity a) => context.go(memory.entryOf(a));
 
@@ -58,6 +61,7 @@ class ActivityRail extends ConsumerWidget {
               label: 'Agents',
               active: current == Activity.agents,
               animate: working,
+              count: needs,
               onTap: () => open(Activity.agents),
             ),
             const Spacer(),
@@ -108,6 +112,7 @@ class RailItem extends StatelessWidget {
     required this.active,
     required this.onTap,
     this.animate = false,
+    this.count = 0,
   }) : assert((icon == null) != (pixel == null));
 
   final IconData? icon;
@@ -119,17 +124,23 @@ class RailItem extends StatelessWidget {
   /// Cycle a [pixel] glyph's frames (decision 123c).
   final bool animate;
 
+  /// A `danger` count on its corner; none at 0.
+  final int count;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final ink = active ? t.accent : t.text3;
     final radius = BorderRadius.circular(t.rControl);
-    return Tooltip(
-      message: label,
+    final spoken = count == 0
+        ? label
+        : '$label, $count ${count == 1 ? 'needs' : 'need'} you';
+    final button = Tooltip(
+      message: spoken,
       child: Semantics(
         button: true,
         selected: active,
-        label: label,
+        label: spoken,
         onTap: onTap,
         excludeSemantics: true,
         child: Material(
@@ -145,6 +156,41 @@ class RailItem extends StatelessWidget {
           ),
         ),
       ),
+    );
+    if (count == 0) return button;
+    final side = t.sp * 2.125;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        button,
+        Positioned(
+          top: -t.sp * 0.5,
+          right: -t.sp * 0.625,
+          child: IgnorePointer(
+            child: Container(
+              key: const Key('rail-needs-count'),
+              constraints: BoxConstraints(minWidth: side),
+              height: side,
+              padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: t.danger,
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                count > 99 ? '99+' : '$count',
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  height: 1,
+                  fontWeight: FontWeight.w600,
+                  color: t.onAccent,
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 

@@ -377,8 +377,7 @@ void main() {
 
       c.read(routerProvider).go(Routes.agents);
       await t.pumpAndSettle();
-      expect(find.byKey(const Key('attention-delete_approval')), findsWidgets);
-      expect(find.text('Needs you'), findsWidgets);
+      expect(find.text('delete request'), findsWidgets);
       c.read(routerProvider).go('/agents/s/ags_d');
       await t.pumpAndSettle();
       expect(find.byKey(const Key('delete-request-card')), findsOneWidget);

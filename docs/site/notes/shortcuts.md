@@ -9,7 +9,7 @@ description: Desktop shortcuts in the macOS and web apps.
 |---|---|
 | `⌘/Ctrl K` | Search |
 | `⌘/Ctrl N` | New note |
-| `⌘/Ctrl ⇧ N` | New folder |
+| `⌘/Ctrl ⇧ N` | New folder in Notes; New session in Agents |
 | `⌘/Ctrl \` | Show or hide the sidebar |
 | `⌘/Ctrl E` | Switch between Read and Edit |
 | `⌘/Ctrl S` | Save now |

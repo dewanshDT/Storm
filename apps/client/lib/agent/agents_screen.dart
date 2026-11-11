@@ -23,8 +23,10 @@ import 'crew_prefs.dart';
 import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 import 'launcher.dart';
+import 'output_seen.dart' show unreadSessionsProvider;
+import 'sidebar_rules.dart' show namesHosts, parentApart;
 import 'spawn_state.dart' show lineageOrder;
-import 'spawn_widgets.dart' show lineageIndented, lineageLine;
+import 'spawn_widgets.dart' show lineageIndented;
 
 /// Agents at `/agents` (handoff §2.7, §2.8).
 ///
@@ -1071,13 +1073,18 @@ class _PhoneList extends ConsumerWidget {
     final o = overview;
     final crews = o.crews ?? const <Crew>[];
     final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
-    Widget row(AgentSession s) => SnapBackOutline(
+    final unread = ref.watch(unreadSessionsProvider);
+    final showHost = namesHosts(o);
+    Widget row(AgentSession s, List<AgentSession> listed) => SnapBackOutline(
       id: s.id,
       child: SessionRow(
         session: s,
         host: o.hostName(s.hostId),
         phone: true,
-        lineage: lineageLine(s, o),
+        overview: o,
+        fromParent: parentApart(s, listed, o),
+        showHost: showHost,
+        unread: unread.contains(s.id),
         onTap: () => openAgentSession(context, s.id),
         onLongPress: () => showSessionCrewSheet(context, ref, s),
       ),
@@ -1089,7 +1096,8 @@ class _PhoneList extends ConsumerWidget {
           padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
           child: AgentsLabel(label),
         ),
-        for (final s in lineageOrder(list)) lineageIndented(s, list, row(s)),
+        for (final s in lineageOrder(list))
+          lineageIndented(s, list, row(s, list)),
       ],
     );
     return Column(
@@ -1122,7 +1130,11 @@ class _PhoneList extends ConsumerWidget {
                   phone: true,
                   children: [
                     for (final s in liveFirst(o.membersOf(c)))
-                      lineageIndented(s, o.membersOf(c), row(s)),
+                      lineageIndented(
+                        s,
+                        o.membersOf(c),
+                        row(s, o.membersOf(c)),
+                      ),
                   ],
                 ),
             ],

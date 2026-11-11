@@ -946,12 +946,17 @@ void main() {
       expect(find.byKey(const Key('agent-card-claude-code')), findsOneWidget);
       expect(find.byKey(const Key('agent-card-shell')), findsOneWidget);
       expect(find.textContaining('1 of 2 hosts online'), findsOneWidget);
-      // The sidebar's row: only the workspace gives way (decision 138l),
-      // all of it where even "…" has no room.
+      // The sidebar's rows: two hosts, so a plain row names its host; a
+      // failed one says why instead (153e).
+      // Only the workspace gives way (decision 138l).
       expect(
-        find.textContaining(RegExp(r'^mac-mini · (\S* · )?failed$')),
+        find.descendant(
+          of: find.byKey(const Key('sub-ags_site')),
+          matching: find.textContaining(RegExp(r'^build-vm · (\S* · )?now$')),
+        ),
         findsOneWidget,
       );
+      expect(find.text('failed · host restarted · now'), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-ags_site')));
       await tester.pumpAndSettle();
       expect(where(c).path, '/agents/s/ags_site');

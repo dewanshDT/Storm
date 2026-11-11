@@ -500,21 +500,14 @@ void main() {
         await tester.tap(find.byKey(const Key('inspector-toggle')));
         await tester.pumpAndSettle();
       }
-      // The child's row in the sidebar, under its parent.
+      // The sidebar's rows say "workspace · age" only (153e); the model is
+      // in About.
       expect(
         find.descendant(
           of: find.byKey(const Key('session-ags_c')),
           matching: find.textContaining('haiku'),
         ),
-        findsOneWidget,
-      );
-      // The parent's own row shows its model.
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('session-ags_p')),
-          matching: find.textContaining('opus'),
-        ),
-        findsOneWidget,
+        findsNothing,
       );
       expect(find.text('MODEL'), findsOneWidget);
       await disposeShell(tester, c);
@@ -1003,10 +996,7 @@ void main() {
         );
         FakeSpawning(agents);
         final c = await open(tester, agents, size: size);
-        expect(
-          find.text('↳ from gateway-impl · own copy of storm'),
-          findsOneWidget,
-        );
+        expect(find.text('own copy · now'), findsOneWidget);
         expect(find.byType(LineageIndent), findsOneWidget);
         final rows = [
           for (final id in ['ags_p', 'ags_c', 'ags_x'])
@@ -1078,10 +1068,7 @@ void main() {
       ..['child_workspace'] = {'mode': 'clone', 'commit': 'abc1234def'};
     c.invalidate(agentOverviewProvider);
     await tester.pumpAndSettle();
-    expect(
-      find.text('↳ from gateway-impl · own copy of storm'),
-      findsOneWidget,
-    );
+    expect(find.text('own copy · now'), findsOneWidget);
     agents.session(child)!['status'] = 'completed';
     spawning.work[child] = {
       'mode': 'clone',
