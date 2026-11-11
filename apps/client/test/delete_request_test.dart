@@ -263,6 +263,51 @@ void main() {
       await disposeShell(t, c);
     });
 
+    testWidgets('the header leaves Needs you to the strip; a prompt with no '
+        'strip keeps it', (t) async {
+      for (final size in [const Size(1400, 900), const Size(411, 900)]) {
+        final (c, _) = await _open(
+          t,
+          size: size,
+          at: Routes.agentSession('ags_d'),
+        );
+        expect(
+          find.byKey(
+            Key(
+              size.width < 900
+                  ? 'delete-request-compact'
+                  : 'delete-request-strip',
+            ),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const Key('attention-delete_approval')),
+          findsNothing,
+        );
+        expect(find.text('Needs you'), findsNothing);
+        await disposeShell(t, c);
+      }
+
+      final (c, _) = await _open(
+        t,
+        requests: const [],
+        sessions: [
+          {
+            ...agentSession('ags_d', name: 'tidier'),
+            'needs_attention': 'permission_prompt',
+          },
+        ],
+        at: Routes.agentSession('ags_d'),
+      );
+      expect(_strip(), findsNothing);
+      expect(
+        find.byKey(const Key('attention-permission_prompt')),
+        findsOneWidget,
+      );
+      await disposeShell(t, c);
+    });
+
     for (final (how, key, answer) in [
       ('Move to Trash', 'approve', 'approve'),
       ('Decline', 'decline', 'decline'),
