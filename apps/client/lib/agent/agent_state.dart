@@ -172,7 +172,11 @@ class AgentOverview {
 
   AgentHost? host(String id) => hosts.where((h) => h.id == id).firstOrNull;
 
-  String hostName(String id) => host(id)?.name ?? 'host';
+  /// A removed host is named by its sessions' record of it (decision 153).
+  String hostName(String id) =>
+      host(id)?.name ??
+      sessions.where((s) => s.hostId == id).firstOrNull?.hostName ??
+      'host';
 
   AgentSession? byId(String id) =>
       sessions.where((s) => s.id == id).firstOrNull;

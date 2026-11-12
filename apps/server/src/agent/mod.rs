@@ -3263,12 +3263,18 @@ impl AgentManager {
         Ok((failed, dismissed))
     }
 
+    /// A removed host (decision 153): its Limits go. Its sessions and what
+    /// it last reported about itself stay, as their record.
+    pub fn forget_host(&self, host_id: &str) -> Result<()> {
+        self.store.lock().unwrap().forget_host_limits(host_id)
+    }
+
     /// A revoked host: its link is closed and its sessions are failed
-    /// (freeze §5.6). The host ends them itself when next refused.
+    /// (freeze §5.6). The host ends them itself when next refused. Its
+    /// Limits stay, for a re-enrollment (decision 153).
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
-        self.store.lock().unwrap().forget_host_limits(host_id)?;
         self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (

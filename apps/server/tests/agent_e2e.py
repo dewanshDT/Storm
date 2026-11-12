@@ -696,6 +696,46 @@ args = ["-i"]
         checked = subprocess.run([RUNTIME_BIN, "check", "--state", replay], capture_output=True)
         check("and its key cannot authenticate again", checked.returncode != 0 and b"refused" in checked.stderr, checked.stderr)
 
+        print("\n=== decision 153: re-enroll and remove a revoked host ===")
+        status, issued = call("POST", f"/v1/agent/hosts/{host_id}/reenroll", {"server_url": BASE}, auth=owner)
+        check("the owner issues a re-enrollment", status == 200 and issued["enrollment"].startswith("storm-enroll:v1:"), issued)
+        enrolled = subprocess.run(
+            [RUNTIME_BIN, "enroll", "--state", HOST_STATE, "--name", "another-name"],
+            input=(issued["enrollment"] + "\n").encode(), capture_output=True,
+        )
+        check("storm-runtime redeems it without --force", enrolled.returncode == 0, enrolled.stderr.decode())
+        check("it says the name the host kept", b"Enrolled as e2e-host" in enrolled.stdout, enrolled.stdout)
+        again = json.load(open(os.path.join(HOST_STATE, "host.json")))
+        check("under the same host id", again["host_id"] == host_id, again)
+        runtime = start_runtime()
+        back = wait(host_online, "the re-enrolled host to come online", timeout=60)
+        check("it comes back online, not revoked", back["revoked"] is None and back["name"] == "e2e-host", back)
+        _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+        check("listed once", sum(1 for h in hosts if h["id"] == host_id) == 1, hosts)
+        status, rec = launch(owner, host_id, provider="fake")
+        check("it runs sessions again", status == 200, rec)
+        running(owner, rec["id"])
+        call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        wait(lambda: session(owner, rec["id"])["status"] == "stopped", "the session ended")
+        status, _ = call("POST", f"/v1/agent/hosts/{host_id}/remove", {}, auth=owner)
+        check("a live host is not removed (409)", status == 409, status)
+        checked = subprocess.run([RUNTIME_BIN, "check", "--state", replay], capture_output=True)
+        check("the old key is still refused", checked.returncode != 0 and b"refused" in checked.stderr, checked.stderr)
+
+        status, _ = call("DELETE", f"/v1/agent/hosts/{host_id}", auth=owner)
+        try:
+            code = runtime.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            code = None
+        check("revoked again, it exits 3", status == 204 and code == 3, (status, code))
+        status, _ = call("POST", f"/v1/agent/hosts/{host_id}/remove", {}, auth=owner)
+        check("the revoked host is removed", status == 204, status)
+        _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+        check("and leaves the list", all(h["id"] != host_id for h in hosts), hosts)
+        rec = session(owner, doomed)
+        check("its ended sessions stay readable, with its name",
+              rec and rec["host_id"] == host_id and rec["host_name"] == "e2e-host" and rec["end_reason"] == "host_revoked", rec)
+
         print("\n=== AC-S5: no secret in any log ===")
         logs = open(SERVER_LOG).read() + open(RUNTIME_LOG).read()
         check("no enrollment token", not re.search(r"sen_[0-9A-Z]{26}\.[A-Za-z0-9_-]{43}", logs))

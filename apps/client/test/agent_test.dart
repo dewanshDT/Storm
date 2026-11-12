@@ -423,6 +423,74 @@ void main() {
     });
   });
 
+  group('a revoked host is removed or re-enrolled (153)', () {
+    (AgentApi, List<http.Request>) recording(http.Response Function() reply) {
+      final sent = <http.Request>[];
+      final client = MockClient((req) async {
+        sent.add(req);
+        return reply();
+      });
+      return (
+        AgentApi(baseUrl: 'http://s:8484', token: 't', client: client),
+        sent,
+      );
+    }
+
+    test('re-enroll posts this address and reads the enrollment', () async {
+      final (api, sent) = recording(
+        () => http.Response(
+          jsonEncode({'enrollment': 'storm-enroll:v1:x', 'expires': 'soon'}),
+          200,
+        ),
+      );
+      final issued = await api.reenrollHost('hst_a/b');
+      expect(sent.single.method, 'POST');
+      expect(
+        sent.single.url.toString(),
+        'http://s:8484/v1/agent/hosts/hst_a%2Fb/reenroll',
+      );
+      expect(sent.single.headers['Authorization'], 'Bearer t');
+      expect(jsonDecode(sent.single.body), {'server_url': 'http://s:8484'});
+      expect(issued.enrollment, 'storm-enroll:v1:x');
+      expect(issued.expires, 'soon');
+    });
+
+    test('remove posts to the host and surfaces host_not_revoked', () async {
+      var status = 204;
+      final (api, sent) = recording(
+        () => http.Response(
+          status == 204 ? '' : jsonEncode({'error': 'host_not_revoked'}),
+          status,
+        ),
+      );
+      await api.removeHost('hst_1');
+      expect(sent.single.method, 'POST');
+      expect(sent.single.url.path, '/v1/agent/hosts/hst_1/remove');
+      expect(sent.single.headers['Authorization'], 'Bearer t');
+
+      status = 409;
+      await expectLater(
+        api.removeHost('hst_1'),
+        throwsA(
+          isA<AgentRefusal>()
+              .having((e) => e.statusCode, 'status', 409)
+              .having((e) => e.code, 'code', 'host_not_revoked'),
+        ),
+      );
+    });
+
+    test('a removed host is still named by its sessions', () {
+      final o = AgentOverview(
+        sessions: [
+          AgentSession.fromJson({...session(), 'host_name': 'mac-mini'}),
+        ],
+        hosts: const [],
+      );
+      expect(o.hostName('hst_1'), 'mac-mini');
+      expect(o.hostName('hst_other'), 'host');
+    });
+  });
+
   group('the session controller', () {
     AgentApi api(MockClient client) =>
         AgentApi(baseUrl: 'http://s', token: 't', client: client);
