@@ -253,6 +253,8 @@ void main() {
         within('launcher-crew', find.text('Gateway release')),
         findsOneWidget,
       );
+      await t.ensureVisible(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launch')));
       await t.pumpAndSettle();
       expect(agents.launches.single['crew'], {'id': 'crw_1'});

@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,7 +19,9 @@ import 'agent_widgets.dart';
 import 'claude_login_api.dart';
 import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
-import 'spawn_models.dart' show kSpawnProviders;
+import 'spawn_models.dart' show kHostTooOldToSpawn, kSpawnProviders;
+
+part 'launcher_parts.dart';
 
 typedef NoteRef = ({String vaultId, String noteId});
 
@@ -63,8 +67,10 @@ class LaunchPrefill {
   final String? crewId;
 }
 
-/// The New session launcher: a centred modal at desk width, a bottom sheet
-/// on a phone. Pops the launched session, or nothing.
+/// The New session launcher (153-5): From, Agent and Where, what the
+/// session can do as a row of chips, then More in place. A centred modal at
+/// desk width, a bottom sheet on a phone. Pops the launched session, or
+/// nothing.
 class NewSessionLauncher extends ConsumerStatefulWidget {
   const NewSessionLauncher({
     super.key,
@@ -81,7 +87,10 @@ class NewSessionLauncher extends ConsumerStatefulWidget {
 
 class _LauncherState extends ConsumerState<NewSessionLauncher> {
   AgentHost? _host;
-  List<AgentWorkspace>? _workspaces;
+
+  /// Each online host's workspaces, null until listed.
+  final _spaces = <String, List<AgentWorkspace>?>{};
+  final _spacesFailed = <String>{};
   String? _workspace;
   String? _provider;
 
@@ -97,8 +106,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
 
-  /// "Allow this session to start agents" (141e): off by default.
-  // On by default (operator, 2026-11-10); the person can still untick it.
+  // On by default (operator, 2026-11-10); the person can still turn it off.
   bool _spawn = true;
 
   /// Its children write to its write vault (151m): off by default.
@@ -112,6 +120,20 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   String? _error;
   bool _busy = false;
 
+  /// More is open in place (153-5), from the start when a crew is preset
+  /// so the person sees the crew the session joins.
+  late bool _more = widget.prefill.crewId != null;
+
+  /// Why the chip last tapped can't be changed for this agent.
+  String? _chipReason;
+
+  /// The host whose inline New workspace field is open.
+  String? _newWorkspaceOn;
+
+  final _writesAnchor = GlobalKey();
+  final _spawnAnchor = GlobalKey();
+  final _riskAnchor = GlobalKey();
+
   @override
   void dispose() {
     _model.dispose();
@@ -122,6 +144,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     for (final h in widget.hosts)
       if (h.online) h,
   ];
+
+  List<AgentWorkspace>? get _workspaces =>
+      _host == null ? null : _spaces[_host!.id];
 
   @override
   void initState() {
@@ -136,16 +161,20 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   }
 
   /// The session's own host when running one again, else the one this
-  /// device launched on last, else the first online (decision 78).
+  /// device launched on last, else the first online (decision 78). Every
+  /// other online host's workspaces are listed too, for Where.
   Future<void> _preselectHost() async {
     final online = _online;
     if (online.isEmpty) return;
     final wanted = widget.prefill.hostId ?? await lastLaunchHost();
     if (!mounted || _host != null) return;
-    await _pickHost(
-      online.where((h) => h.id == wanted).firstOrNull ?? online.first,
-      keepWorkspace: widget.prefill.workspace,
-    );
+    final first =
+        online.where((h) => h.id == wanted).firstOrNull ?? online.first;
+    final picked = _pickHost(first, keepWorkspace: widget.prefill.workspace);
+    for (final h in online) {
+      if (h.id != first.id) _list(h);
+    }
+    await picked;
   }
 
   Future<void> _loadDefault() async {
@@ -180,39 +209,95 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         : installed.firstOrNull;
   }
 
-  Future<void> _pickHost(AgentHost host, {String? keepWorkspace}) async {
-    setState(() {
-      _host = host;
-      _workspaces = null;
-      _workspace = null;
-      _settleProvider();
-    });
+  /// Lists [host]'s workspaces; only the chosen host's failure is said.
+  Future<List<AgentWorkspace>?> _list(AgentHost host) async {
     final api = agentApi(ref);
-    if (api == null) return;
+    if (api == null) return null;
     try {
       final ws = await api.workspaces(host.id);
-      if (!mounted || _host?.id != host.id) return;
+      if (!mounted) return null;
       setState(() {
-        _workspaces = ws;
-        _workspace =
-            ws.where((w) => w.name == keepWorkspace).firstOrNull?.name ??
-            ws.firstOrNull?.name;
+        _spaces[host.id] = ws;
+        _spacesFailed.remove(host.id);
       });
+      return ws;
     } catch (e) {
-      if (mounted) setState(() => _error = launchErrorText(e));
+      if (!mounted) return null;
+      setState(() {
+        _spacesFailed.add(host.id);
+        if (_host?.id == host.id) _error = launchErrorText(e);
+      });
+      return null;
     } finally {
       api.dispose();
     }
   }
 
-  /// "New workspace…" (decision 141c): made on the host, then picked.
-  Future<void> _newWorkspace(AgentHost host) async {
-    final name = await showDialog<String>(
-      context: context,
-      builder: (_) => NewWorkspaceDialog(host: host),
-    );
-    if (name == null || !mounted || _host?.id != host.id) return;
-    setState(() => _error = null);
+  Future<void> _pickHost(AgentHost host, {String? keepWorkspace}) async {
+    setState(() {
+      _host = host;
+      _spaces[host.id] = null;
+      _workspace = null;
+      _settleProvider();
+    });
+    final ws = await _list(host);
+    if (ws == null || !mounted || _host?.id != host.id) return;
+    setState(() {
+      _workspace =
+          ws.where((w) => w.name == keepWorkspace).firstOrNull?.name ??
+          ws.firstOrNull?.name;
+    });
+  }
+
+  /// A workspace × host from Where's picker.
+  void _pickWhere(String value) {
+    final (hostId, name) = _splitWhere(value);
+    final host = _online.where((h) => h.id == hostId).firstOrNull;
+    if (host == null) return;
+    if (name == _newWorkspaceKey) {
+      _openNewWorkspace(host);
+      return;
+    }
+    setState(() {
+      _error = null;
+      _newWorkspaceOn = null;
+    });
+    final listed = _spaces[host.id];
+    if (_host?.id == host.id || listed != null) {
+      setState(() {
+        if (_host?.id != host.id) {
+          _host = host;
+          _settleProvider();
+        }
+        _workspace = name;
+      });
+    } else {
+      _pickHost(host, keepWorkspace: name);
+    }
+  }
+
+  /// "New workspace…" (decision 141c), inline under Where (153-5).
+  void _openNewWorkspace(AgentHost host) {
+    if (_host?.id != host.id) {
+      if (_spaces[host.id] == null) {
+        _pickHost(host);
+      } else {
+        setState(() {
+          _host = host;
+          _workspace = _spaces[host.id]!.firstOrNull?.name;
+          _settleProvider();
+        });
+      }
+    }
+    setState(() => _newWorkspaceOn = host.id);
+  }
+
+  Future<void> _workspaceMade(AgentHost host, String name) async {
+    setState(() {
+      _newWorkspaceOn = null;
+      _error = null;
+    });
+    if (_host?.id != host.id) return;
     await _pickHost(host, keepWorkspace: name);
   }
 
@@ -289,43 +374,94 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       kSpawnProviders.contains(_provider) &&
       _reachesStorm;
 
-  Widget _toggle(
-    Key key,
-    String text,
-    bool value,
-    ValueChanged<bool> onChanged,
-  ) {
-    final t = context.tokens;
-    return Row(
-      children: [
-        Semantics(
-          label: text,
-          child: StormToggle(key: key, value: value, onChanged: onChanged),
-        ),
-        SizedBox(width: t.sp * 1.25),
-        Expanded(
-          child: Text(
-            text,
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.codeSize,
-              color: t.text,
-            ),
-          ),
-        ),
-      ],
-    );
+  String get _agentName => providerLabel(_provider ?? '');
+
+  /// Why this agent on this host can't start agents, or null when it can.
+  String? get _spawnBlocked {
+    if (!kSpawnProviders.contains(_provider)) {
+      return "$_agentName can't start agents";
+    }
+    if (!_reachesStorm) return "$_agentName can't reach Storm";
+    final host = _host;
+    if (host == null) return null;
+    if (host.execution == null) return kHostTooOldToSpawn;
+    if (!host.offersSpawning) {
+      return "${host.name}'s session isolation isn't working";
+    }
+    return null;
   }
 
   /// The chosen mode while the agent offers it, else its own.
   String get _permissionMode =>
       permissionModesOf(_provider).contains(_mode) ? _mode : 'default';
 
+  /// Opens More with [anchor]'s row in view: a chip's setting.
+  void _openAt(GlobalKey anchor) {
+    setState(() {
+      _more = true;
+      _chipReason = null;
+    });
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final at = anchor.currentContext;
+      if (at == null || !at.mounted) return;
+      Scrollable.ensureVisible(
+        at,
+        duration: context.tokens.duration,
+        alignment: 0.2,
+      );
+    });
+  }
+
+  Widget _toggleLine({
+    required Key key,
+    required String text,
+    required bool value,
+    required bool enabled,
+    required ValueChanged<bool> onChanged,
+    Widget? trailing,
+  }) {
+    final t = context.tokens;
+    return Row(
+      children: [
+        Semantics(
+          label: text,
+          child: StormToggle(
+            key: key,
+            value: value,
+            enabled: enabled,
+            onChanged: onChanged,
+          ),
+        ),
+        SizedBox(width: t.sp * 1.25),
+        Expanded(
+          child:
+              trailing ??
+              Text(
+                text,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.codeSize,
+                  color: enabled ? t.text : t.text3,
+                ),
+              ),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, box) =>
+          _form(context, stacked: box.maxWidth < context.tokens.sp * 50),
+    );
+  }
+
+  Widget _form(BuildContext context, {required bool stacked}) {
     final t = context.tokens;
     final host = _host;
     final shell = !_reachesStorm;
+    final agent = _agentName;
     final allowed = ref.watch(agentWritesSettingProvider).value == true;
     final vaults = [
       for (final v in ref.watch(vaultsProvider).value ?? const <VaultInfo>[])
@@ -334,6 +470,10 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     final writeVault =
         vaults.where((v) => v.id == _writeVault).firstOrNull?.id ??
         vaults.firstOrNull?.id;
+    final writeVaultName = vaults
+        .where((v) => v.id == writeVault)
+        .firstOrNull
+        ?.name;
     final writes = allowed && (_writes ?? true) && writeVault != null;
     final integrations = integrationNamesOn(
       ref.watch(integrationsSummaryProvider).value,
@@ -368,6 +508,38 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       final id => LaunchCrew.join(id),
     };
     final roleKey = _role == null ? _noRole : _roleKey(_role!);
+    final spawnBlocked = _spawnBlocked;
+    final spawnOn = _spawn && spawnBlocked == null;
+    final limits = host?.limits ?? const HostLimits();
+    final held =
+        (_workspaces
+                ?.where((w) => w.name == _workspace)
+                .firstOrNull
+                ?.liveSessions ??
+            0) >
+        0;
+
+    Widget field(
+      String row,
+      String? label, {
+      required Widget child,
+      Widget? under,
+      bool underGap = true,
+      GlobalKey? anchor,
+    }) => _Field(
+      key: Key('launcher-row-$row'),
+      anchor: anchor,
+      label: label,
+      stacked: stacked,
+      under: under,
+      underGap: underGap,
+      child: child,
+    );
+
+    final writesReason = shell ? "$agent can't reach Storm" : null;
+    final childrenReason = spawnOn
+        ? (writes && !shell ? null : 'Turn on Write to first')
+        : 'Turn on Start agents first';
 
     final children = <Widget>[
       Row(
@@ -387,18 +559,22 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         ],
       ),
       if (ctx != null)
-        _ContextBox(
-          at: ctx,
-          title: widget.prefill.context == ctx
-              ? widget.prefill.contextTitle
-              : null,
-          vaults: vaults,
-          onClear: () => setState(() => _context = null),
+        field(
+          'from',
+          'From',
+          child: _ContextChip(
+            at: ctx,
+            title: widget.prefill.context == ctx
+                ? widget.prefill.contextTitle
+                : null,
+            vaults: vaults,
+            onClear: () => setState(() => _context = null),
+          ),
         ),
       if (_online.isEmpty)
         Text(
           'No host is online. Start storm-runtime on one, or enroll a host '
-          'in Settings › Hosts.',
+          'in Settings › Agents & hosts.',
           style: TextStyle(
             fontFamily: StormTokens.sansFamily,
             fontSize: t.codeSize,
@@ -406,53 +582,24 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           ),
         )
       else ...[
-        _Field(
-          label: 'Host',
-          under: host == null
-              ? null
-              : _Under(
-                  key: const Key('launcher-host-execution'),
-                  text: host.executionLine,
-                ),
-          child: _Select<String>(
-            key: const Key('launcher-host'),
-            label: 'Host',
-            value: host?.id,
-            options: [
-              for (final h in _online) _Opt(h.id, '${h.name} · online'),
-            ],
-            onChanged: (id) => _pickHost(_online.firstWhere((h) => h.id == id)),
+        field(
+          'agent',
+          'Agent',
+          underGap: false,
+          // Claude's login line has a slot for every agent, empty for the
+          // others, so nothing below moves when the agent changes.
+          under: KeyedSubtree(
+            key: const Key('launcher-agent-sub'),
+            child:
+                _provider == 'claude-code' &&
+                    host != null &&
+                    claudeLogin != null
+                ? Padding(
+                    padding: EdgeInsets.only(top: t.sp * 0.75),
+                    child: _ClaudeLoginLine(login: claudeLogin, host: host),
+                  )
+                : const SizedBox.shrink(),
           ),
-        ),
-        _Field(
-          label: 'Workspace',
-          child: _Select<String>(
-            key: const Key('launcher-workspace'),
-            label: 'Workspace',
-            value: _workspace,
-            placeholder: _workspaces == null
-                ? '…'
-                : 'No workspaces on this host',
-            options: [
-              for (final w in _workspaces ?? const <AgentWorkspace>[])
-                _Opt(
-                  w.name,
-                  w.liveSessions > 0
-                      ? '${w.name}  (another session is working here)'
-                      : w.name,
-                ),
-              if (host != null && _workspaces != null)
-                const _Opt(_newWorkspaceKey, 'New workspace…'),
-            ],
-            onChanged: (w) => w == _newWorkspaceKey
-                ? _newWorkspace(host!)
-                : setState(() => _workspace = w),
-          ),
-        ),
-        if (host != null && _workspaces != null && _workspaces!.isEmpty)
-          _NoWorkspaces(host: host, onRetry: () => _pickHost(host)),
-        _Field(
-          label: 'Agent',
           child: _Select<String>(
             key: const Key('launcher-agent'),
             label: 'Agent',
@@ -472,18 +619,293 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             onChanged: (p) => setState(() {
               _provider = _chosen = p;
               _mode = _permissionMode;
+              _chipReason = null;
             }),
           ),
         ),
-        if (_provider == 'claude-code' && host != null && claudeLogin != null)
-          _ClaudeLoginLine(login: claudeLogin, host: host),
-        if (modelHint(_provider) case final hint?)
-          _Field(
-            label: 'Model',
-            under: _Under(key: const Key('launcher-model-hint'), text: hint),
+        field(
+          'where',
+          'Where',
+          under: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (host != null)
+                _Under(
+                  key: Key(
+                    held
+                        ? 'launcher-host-execution-held'
+                        : 'launcher-host-execution',
+                  ),
+                  text: held
+                      ? '${host.executionLine} · another session is working '
+                            'here'
+                      : host.executionLine,
+                ),
+              if (host != null &&
+                  _workspaces != null &&
+                  _workspaces!.isEmpty &&
+                  _newWorkspaceOn != host.id) ...[
+                SizedBox(height: t.sp),
+                _NoWorkspaces(host: host, onRetry: () => _pickHost(host)),
+              ],
+              if (host != null && _newWorkspaceOn == host.id) ...[
+                SizedBox(height: t.sp),
+                _NewWorkspaceForm(
+                  key: ValueKey('new-workspace-${host.id}'),
+                  host: host,
+                  onMade: (name) => _workspaceMade(host, name),
+                  onCancel: () => setState(() => _newWorkspaceOn = null),
+                ),
+              ] else if (host != null && _workspaces != null) ...[
+                SizedBox(height: t.sp * 0.5),
+                _Link(
+                  key: const Key('launcher-new-workspace'),
+                  text: 'New workspace…',
+                  onTap: () => _openNewWorkspace(host),
+                ),
+              ],
+            ],
+          ),
+          child: _Select<String>(
+            key: const Key('launcher-where'),
+            label: 'Where',
+            value: host == null ? null : _whereKey(host.id, _workspace ?? ''),
+            placeholder: host == null
+                ? ''
+                : _workspaces == null
+                ? '… on ${host.name}'
+                : 'No workspace on ${host.name}',
+            options: [
+              for (final h in _online)
+                for (final w in _spaces[h.id] ?? const <AgentWorkspace>[])
+                  _Opt(_whereKey(h.id, w.name), '${w.name} on ${h.name}'),
+            ],
+            alwaysOpens: true,
+            menu: (popover, room) => _WhereMenu(
+              hosts: _online,
+              spaces: _spaces,
+              failed: _spacesFailed,
+              selected: host == null
+                  ? null
+                  : _whereKey(host.id, _workspace ?? ''),
+              room: room,
+              onPick: (v) => Navigator.of(popover).pop(v),
+            ),
+            onChanged: _pickWhere,
+          ),
+        ),
+        if (!_more) ...[
+          const AgentsLabel('This session can'),
+          Wrap(
+            key: const Key('launcher-chips'),
+            spacing: t.sp,
+            runSpacing: t.sp,
+            children: [
+              LauncherChip(
+                key: const Key('launcher-chip-writes'),
+                label: 'Writes to ${writeVaultName ?? 'a vault'}',
+                state: shell || !allowed || writeVault == null
+                    ? LauncherChipState.unavailable
+                    : writes
+                    ? LauncherChipState.on
+                    : LauncherChipState.off,
+                onTap: () => shell || !allowed || writeVault == null
+                    ? setState(
+                        () => _chipReason =
+                            writesReason ??
+                            (allowed
+                                ? 'There is no vault to write to'
+                                : 'Off in Settings › AI access'),
+                      )
+                    : _openAt(_writesAnchor),
+              ),
+              LauncherChip(
+                key: const Key('launcher-chip-spawn'),
+                label: 'Starts agents',
+                state: spawnBlocked != null
+                    ? LauncherChipState.unavailable
+                    : spawnOn
+                    ? LauncherChipState.on
+                    : LauncherChipState.off,
+                onTap: () => spawnBlocked != null
+                    ? setState(() => _chipReason = spawnBlocked)
+                    : _openAt(_spawnAnchor),
+              ),
+              LauncherChip(
+                key: const Key('launcher-chip-integrations'),
+                label: switch (integrations.length) {
+                  0 => 'Uses no integrations',
+                  1 => 'Uses 1 integration',
+                  final n => 'Uses $n integrations',
+                },
+                state: shell
+                    ? LauncherChipState.unavailable
+                    : integrations.isEmpty
+                    ? LauncherChipState.off
+                    : LauncherChipState.on,
+                onTap: () => shell
+                    ? setState(() => _chipReason = "$agent can't reach Storm")
+                    : _openAt(_riskAnchor),
+              ),
+              LauncherChip(
+                key: const Key('launcher-chip-network'),
+                label: 'Network: $hostName’s policy',
+                state: LauncherChipState.off,
+                onTap: () => _openAt(_riskAnchor),
+              ),
+            ],
+          ),
+          _Under(
+            key: Key(
+              _chipReason == null
+                  ? 'launcher-chips-hint'
+                  : 'launcher-chip-reason',
+            ),
+            text:
+                _chipReason ??
+                'Tap one to change it. Everything else uses the agent’s '
+                    'defaults.',
+          ),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _Link(
+              key: const Key('launcher-more'),
+              text: 'More: model, permission mode, crew, role ›',
+              onTap: () => setState(() {
+                _more = true;
+                _chipReason = null;
+              }),
+            ),
+          ),
+        ] else ...[
+          const AgentsLabel('This session can'),
+          field(
+            'writes',
+            'Write to',
+            anchor: _writesAnchor,
+            under: writesReason == null
+                ? null
+                : _Under(
+                    key: const Key('launcher-writes-reason'),
+                    text: writesReason,
+                  ),
+            child: _toggleLine(
+              key: const Key('launcher-writes'),
+              text: 'Write to',
+              value: writes && !shell,
+              enabled: allowed && writeVault != null && !shell,
+              onChanged: (v) => setState(() => _writes = v),
+              trailing: writes && !shell
+                  ? Align(
+                      alignment: Alignment.centerLeft,
+                      child: _Select<String>(
+                        key: const Key('launcher-write-vault'),
+                        label: 'Write vault',
+                        value: writeVault,
+                        compact: true,
+                        options: [for (final v in vaults) _Opt(v.id, v.name)],
+                        onChanged: (v) => setState(() => _writeVault = v),
+                      ),
+                    )
+                  : Text(
+                      allowed || shell
+                          ? 'Read only'
+                          : 'Off in Settings › AI access',
+                      key: const Key('launcher-read-only'),
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.codeSize,
+                        color: t.text3,
+                      ),
+                    ),
+            ),
+          ),
+          field(
+            'spawn',
+            'Start agents',
+            anchor: _spawnAnchor,
+            under: spawnBlocked == null
+                ? const _Under(
+                    key: Key('launcher-spawn-note'),
+                    text:
+                        'Its starts, messages and ends act at once and show '
+                        'in About.',
+                  )
+                : _Under(
+                    key: const Key('launcher-spawn-reason'),
+                    text: spawnBlocked,
+                  ),
+            child: _toggleLine(
+              key: const Key('launcher-spawn'),
+              text:
+                  'Up to ${limits.maxChildren} at once, ${limits.maxTree} in '
+                  'its tree',
+              value: spawnOn,
+              enabled: spawnBlocked == null,
+              onChanged: (v) => setState(() => _spawn = v),
+            ),
+          ),
+          field(
+            'children-write',
+            null,
+            under: childrenReason == null
+                ? null
+                : _Under(
+                    key: const Key('launcher-children-write-reason'),
+                    text: childrenReason,
+                  ),
+            child: _toggleLine(
+              key: const Key('launcher-children-write'),
+              text:
+                  'Let the agents it starts write to '
+                  '${writeVaultName ?? 'its vault'}',
+              value: _childrenWrite && childrenReason == null,
+              enabled: childrenReason == null,
+              onChanged: (v) => setState(() => _childrenWrite = v),
+            ),
+          ),
+          KeyedSubtree(
+            key: _riskAnchor,
+            child: Text(
+              key: const Key('launcher-risk'),
+              _provider == 'shell'
+                  ? 'Network: inherits $hostName’s policy. A shell has no access to '
+                        'your vaults or integrations.'
+                  : shell
+                  ? 'Network: inherits $hostName’s policy. '
+                        '$agent runs without access to your '
+                        'vaults or integrations until Storm has checked it with a '
+                        'signed-in account.'
+                  : integrations.isEmpty
+                  ? 'Network: inherits $hostName’s policy. This session can use '
+                        'your integrations and read your vaults, with that network '
+                        'access.'
+                  : 'Network: inherits $hostName’s policy. This session can use '
+                        'your integrations (${integrations.join(', ')}) and read '
+                        'your vaults, with that network access.',
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize * 1.09,
+                height: 1.55,
+                color: t.text3,
+              ),
+            ),
+          ),
+          const AgentsLabel('More'),
+          field(
+            'model',
+            'Model',
+            under: _ModelUnder(
+              agent: agent,
+              hint: modelHint(_provider),
+              suggestions: modelSuggestions(_provider),
+              onPick: (m) => setState(() => _model.text = m),
+            ),
             child: TextField(
               key: const Key('launcher-model'),
               controller: _model,
+              enabled: modelHint(_provider) != null,
               autocorrect: false,
               enableSuggestions: false,
               maxLength: 128,
@@ -492,20 +914,33 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 fontSize: t.codeSize,
                 color: t.text,
               ),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 isDense: true,
                 counterText: '',
-                hintText: 'the agent’s default',
+                hintText: 'The agent’s default',
+                hintStyle: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.uiSize,
+                  color: t.text3,
+                ),
               ),
             ),
           ),
-        if (permissionModesOf(_provider).length > 1)
-          _Field(
-            label: 'Permission mode',
+          field(
+            'permission-mode',
+            'Permission mode',
+            under: _Under(
+              key: const Key('launcher-permission-note'),
+              text: permissionModesOf(_provider).length > 1
+                  ? kPermissionModeNote
+                  : '$agent has only its own setting. Claude Code and '
+                        'OpenCode only.',
+            ),
             child: _Select<String>(
               key: const Key('launcher-permission-mode'),
               label: 'Permission mode',
               value: _permissionMode,
+              enabled: permissionModesOf(_provider).length > 1,
               options: [
                 for (final m in permissionModesOf(_provider))
                   _Opt(m, permissionModeLabel(m)),
@@ -513,154 +948,68 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               onChanged: (m) => setState(() => _mode = m),
             ),
           ),
-        if (!shell)
-          _Field(
-            label: 'Can write to',
-            child: Row(
-              children: [
-                Semantics(
-                  label: 'Can write to',
-                  child: StormToggle(
-                    key: const Key('launcher-writes'),
-                    value: writes,
-                    enabled: allowed && writeVault != null,
-                    onChanged: (v) => setState(() => _writes = v),
-                  ),
-                ),
-                SizedBox(width: t.sp * 1.25),
-                Expanded(
-                  child: writes
-                      ? _Select<String>(
-                          key: const Key('launcher-write-vault'),
-                          label: 'Write vault',
-                          value: writeVault,
-                          compact: true,
-                          options: [for (final v in vaults) _Opt(v.id, v.name)],
-                          onChanged: (v) => setState(() => _writeVault = v),
-                        )
-                      : Text(
-                          allowed ? 'Read only' : 'Off in Settings › AI access',
-                          key: const Key('launcher-read-only'),
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: t.codeSize,
-                            color: t.text3,
-                          ),
-                        ),
-                ),
-              ],
+          if (crews != null)
+            field(
+              'crew',
+              'Crew',
+              child: _Select<String>(
+                key: const Key('launcher-crew'),
+                label: 'Crew',
+                value: crewKey,
+                options: crewOptions,
+                onChanged: (c) => setState(() => _crew = c),
+              ),
             ),
-          ),
-        if (crews != null)
-          _Field(
-            label: 'Crew',
+          field(
+            'role',
+            'Role',
+            under: shell
+                ? _Under(
+                    key: const Key('launcher-role-label-only'),
+                    text:
+                        "$agent can't read Storm notes. "
+                        'A role would only be a label.',
+                  )
+                : writes && _role != null
+                ? const _Under(
+                    key: Key('launcher-role-may-not-write'),
+                    text: 'The role note may tell the agent not to write.',
+                  )
+                : null,
             child: _Select<String>(
-              key: const Key('launcher-crew'),
-              label: 'Crew',
-              value: crewKey,
-              options: crewOptions,
-              onChanged: (c) => setState(() => _crew = c),
+              key: const Key('launcher-role'),
+              label: 'Role',
+              value: shell ? _noRole : roleKey,
+              enabled: !shell,
+              options: [
+                const _Opt(_noRole, 'None · a plain agent'),
+                for (final r in roles) _Opt(_roleKey(r), r.title),
+              ],
+              menu: (popover, room) => RoleMenu(
+                roles: roles,
+                room: room,
+                selected: _role == null
+                    ? null
+                    : (vaultId: _role!.vaultId, noteId: _role!.noteId),
+                onPick: (r) => Navigator.of(
+                  popover,
+                ).pop(r == null ? _noRole : _roleKey(r)),
+              ),
+              onChanged: (k) => setState(
+                () => _role = roles.where((r) => _roleKey(r) == k).firstOrNull,
+              ),
             ),
           ),
-        _Field(
-          label: 'Role',
-          under: shell
-              ? _Under(
-                  key: const Key('launcher-role-label-only'),
-                  text:
-                      "${providerLabel(_provider ?? '')} can't read Storm notes. "
-                      'A role would only be a label.',
-                )
-              : writes && _role != null
-              ? const _Under(
-                  key: Key('launcher-role-may-not-write'),
-                  text: 'The role note may tell the agent not to write.',
-                )
-              : null,
-          child: _Select<String>(
-            key: const Key('launcher-role'),
-            label: 'Role',
-            value: shell ? _noRole : roleKey,
-            enabled: !shell,
-            options: [
-              const _Opt(_noRole, 'None'),
-              for (final r in roles) _Opt(_roleKey(r), r.title),
-            ],
-            menu: (popover, room) => RoleMenu(
-              roles: roles,
-              room: room,
-              selected: _role == null
-                  ? null
-                  : (vaultId: _role!.vaultId, noteId: _role!.noteId),
-              onPick: (r) =>
-                  Navigator.of(popover).pop(r == null ? _noRole : _roleKey(r)),
-            ),
-            onChanged: (k) => setState(
-              () => _role = roles.where((r) => _roleKey(r) == k).firstOrNull,
+          Align(
+            alignment: Alignment.centerLeft,
+            child: _Link(
+              key: const Key('launcher-fewer'),
+              text: 'Fewer options',
+              onTap: () => setState(() => _more = false),
             ),
           ),
-        ),
-        if (_spawnable)
-          _Field(
-            label: 'Agents',
-            under: const _Under(
-              key: Key('launcher-spawn-note'),
-              text:
-                  'Its starts, messages and ends act at once and show in About.',
-            ),
-            child: _toggle(
-              const Key('launcher-spawn'),
-              'Allow this session to start agents',
-              _spawn,
-              (v) => setState(() => _spawn = v),
-            ),
-          ),
-        if (_spawnable && _spawn && writes)
-          _Field(
-            label: '',
-            child: _toggle(
-              const Key('launcher-children-write'),
-              'The agents it starts can write to '
-              '${vaults.where((v) => v.id == writeVault).firstOrNull?.name ?? 'its vault'}',
-              _childrenWrite,
-              (v) => setState(() => _childrenWrite = v),
-            ),
-          ),
+        ],
       ],
-      Container(
-        key: const Key('launcher-risk'),
-        padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 1.5,
-          vertical: t.sp * 1.25,
-        ),
-        decoration: BoxDecoration(
-          color: t.surface2,
-          borderRadius: BorderRadius.circular(t.rControl),
-        ),
-        child: Text(
-          _provider == 'shell'
-              ? 'Network: inherits $hostName’s policy. A shell has no access to '
-                    'your vaults or integrations.'
-              : shell
-              ? 'Network: inherits $hostName’s policy. '
-                    '${providerLabel(_provider ?? '')} runs without access to your '
-                    'vaults or integrations until Storm has checked it with a '
-                    'signed-in account.'
-              : integrations.isEmpty
-              ? 'Network: inherits $hostName’s policy. This session can use '
-                    'your integrations and read your vaults, with that network '
-                    'access.'
-              : 'Network: inherits $hostName’s policy. This session can use '
-                    'your integrations (${integrations.join(', ')}) and read '
-                    'your vaults, with that network access.',
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.labelSize * 1.09,
-            height: 1.55,
-            color: t.text3,
-          ),
-        ),
-      ),
       if (_error != null)
         Text(
           _error!,
@@ -670,28 +1019,16 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             color: t.danger,
           ),
         ),
-      Row(
-        children: [
-          Expanded(
-            child: ctx == null
-                ? const SizedBox.shrink()
-                : Text(
-                    'The agent reads the note through Storm.',
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.labelSize * 1.09,
-                      color: t.text3,
-                    ),
-                  ),
-          ),
-          StormButton.primary(
-            key: const Key('launch'),
-            label: _busy ? 'Starting' : 'Launch',
-            onPressed: _busy || host == null || _workspace == null
-                ? null
-                : () => _launch(writes, writeVault, crew),
-          ),
-        ],
+      Align(
+        alignment: Alignment.centerRight,
+        child: StormButton.primary(
+          key: const Key('launch'),
+          label: _busy ? 'Starting' : 'Launch',
+          expand: stacked,
+          onPressed: _busy || host == null || _workspace == null
+              ? null
+              : () => _launch(writes, writeVault, crew),
+        ),
       ),
     ];
 
@@ -708,271 +1045,9 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   }
 }
 
-class _Close extends StatelessWidget {
-  const _Close({required this.onTap});
-
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Semantics(
-      button: true,
-      label: 'Close',
-      excludeSemantics: true,
-      onTap: onTap,
-      child: InkWell(
-        key: const Key('launcher-close'),
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(t.rControl),
-        child: Padding(
-          padding: EdgeInsets.all(t.sp * 0.5),
-          child: Icon(LucideIcons.x, size: t.bodySize, color: t.text3),
-        ),
-      ),
-    );
-  }
-}
-
-/// CONTEXT, then the note in an `accentSoft` box with its crumb and ×.
-class _ContextBox extends ConsumerWidget {
-  const _ContextBox({
-    required this.at,
-    required this.title,
-    required this.vaults,
-    required this.onClear,
-  });
-
-  final NoteRef at;
-  final String? title;
-  final List<VaultInfo> vaults;
-  final VoidCallback onClear;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final note = ref.watch(agentNoteProvider(at)).value;
-    final vault =
-        vaults.where((v) => v.id == at.vaultId).firstOrNull?.name ?? '';
-    // The launch snapshot when there is one: a rename does not change what
-    // a session was started from.
-    final shown =
-        title ??
-        (note == null ? '' : noteTitleOf(note.meta.title, note.meta.path));
-    return Column(
-      key: const Key('launcher-context'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const AgentsLabel('Context'),
-        SizedBox(height: t.sp * 0.75),
-        Container(
-          padding: EdgeInsets.symmetric(
-            horizontal: t.sp * 1.5,
-            vertical: t.sp * 1.25,
-          ),
-          decoration: BoxDecoration(
-            color: t.accentSoft,
-            borderRadius: BorderRadius.circular(t.rControl),
-            border: Border.all(color: t.border, width: t.bw),
-          ),
-          child: Row(
-            children: [
-              Icon(LucideIcons.file, size: t.uiSize, color: t.accent),
-              SizedBox(width: t.sp * 1.25),
-              ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: t.sp * 25),
-                child: Text(
-                  shown,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.uiSize,
-                    color: t.text,
-                  ),
-                ),
-              ),
-              if (note != null) ...[
-                SizedBox(width: t.sp),
-                Expanded(
-                  child: Text(
-                    noteCrumb(vault, note.meta.path),
-                    textAlign: TextAlign.right,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.monoFamily,
-                      fontSize: t.labelSize,
-                      color: t.text3,
-                    ),
-                  ),
-                ),
-              ],
-              SizedBox(width: t.sp),
-              Semantics(
-                button: true,
-                label: 'Remove context',
-                excludeSemantics: true,
-                onTap: onClear,
-                child: InkWell(
-                  key: const Key('launcher-context-clear'),
-                  onTap: onClear,
-                  child: Icon(LucideIcons.x, size: t.codeSize, color: t.text3),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-/// Which Claude login the session will use (decision 124, spec §4), by the
-/// server's own rules, under the Agent field.
-class _ClaudeLoginLine extends StatelessWidget {
-  const _ClaudeLoginLine({required this.login, required this.host});
-
-  final ClaudeLogin login;
-  final AgentHost host;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final route = claudeLoginRoute(login, host);
-    // Decision 136f: an isolated session never uses the host's own login.
-    final own = host.isolationState == 'verified'
-        ? 'Claude: needs your synced Claude login or an API key, since this '
-              'host isolates sessions'
-        : "Claude: this host's own login";
-    final soon =
-        route == ClaudeLoginRoute.synced &&
-        login.warn == '7d' &&
-        login.daysLeft != null;
-    final text = switch (route) {
-      ClaudeLoginRoute.synced =>
-        soon
-            ? 'Claude: your synced login · expires in ${login.daysLeft} '
-                  '${login.daysLeft == 1 ? 'day' : 'days'}, replace it in Settings'
-            : 'Claude: your synced login',
-      ClaudeLoginRoute.own => own,
-      ClaudeLoginRoute.oldHost =>
-        "$own · ${host.name} can't receive your synced login, update "
-            'storm-runtime',
-      ClaudeLoginRoute.expired =>
-        '$own · your synced login has expired, re-sync it in Settings',
-      ClaudeLoginRoute.needsResync =>
-        "$own · your synced login can't be read, sync it again in Settings",
-    };
-    final warn =
-        soon ||
-        route == ClaudeLoginRoute.expired ||
-        route == ClaudeLoginRoute.needsResync ||
-        route == ClaudeLoginRoute.oldHost;
-    return Padding(
-      padding: EdgeInsets.only(left: t.sp * 13.25),
-      child: Text(
-        text,
-        key: Key('launcher-claude-login-${route.name}'),
-        style: TextStyle(
-          fontFamily: StormTokens.sansFamily,
-          fontSize: t.labelSize * 1.09,
-          height: 1.45,
-          color: warn ? t.danger : t.text3,
-        ),
-      ),
-    );
-  }
-}
-
-/// A host with nothing to work in yet: where a workspace goes, and a way to
-/// look again once one is there.
-class _NoWorkspaces extends StatelessWidget {
-  const _NoWorkspaces({required this.host, required this.onRetry});
-
-  final AgentHost host;
-  final VoidCallback onRetry;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final root = host.workspaceRoots.firstOrNull;
-    final style = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.codeSize,
-      color: t.text3,
-    );
-    return Column(
-      key: const Key('launcher-no-workspaces'),
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'A workspace is a folder in the host\'s workspaces folder. '
-          'Make one, or clone a repository there, on ${host.name}:',
-          style: style,
-        ),
-        SizedBox(height: t.sp * 0.75),
-        SelectableText(
-          root ?? 'the workspace_roots folder in its config.toml',
-          style: style.copyWith(
-            fontFamily: StormTokens.monoFamily,
-            color: t.text2,
-          ),
-        ),
-        SizedBox(height: t.sp * 0.75),
-        StormButton.text(
-          key: const Key('launcher-workspaces-retry'),
-          label: 'Check again',
-          onPressed: onRetry,
-        ),
-      ],
-    );
-  }
-}
-
-class _Field extends StatelessWidget {
-  const _Field({required this.label, required this.child, this.under});
-
-  final String label;
-  final Widget child;
-
-  /// A line under [child], lined up with it.
-  final Widget? under;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final row = Row(
-      children: [
-        SizedBox(
-          width: t.sp * 12,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.codeSize,
-              color: t.text2,
-            ),
-          ),
-        ),
-        SizedBox(width: t.sp * 1.25),
-        Expanded(child: child),
-      ],
-    );
-    if (under == null) return row;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        row,
-        Padding(
-          padding: EdgeInsets.only(left: t.sp * 13.25, top: t.sp * 0.75),
-          child: under,
-        ),
-      ],
-    );
-  }
-}
+/// What Permission mode says under it (153-5).
+const kPermissionModeNote =
+    'Claude Code and OpenCode only. Tab and ⇧Tab change it in the terminal.';
 
 /// What the launcher's Model field says for [provider], or null where Storm
 /// passes no model (decision 145b).
@@ -983,6 +1058,13 @@ String? modelHint(String? provider) => switch (provider) {
   _ => null,
 };
 
+/// The models the launcher offers to fill in over the agent's default
+/// (153-5); the field still takes any the agent accepts.
+List<String> modelSuggestions(String? provider) => switch (provider) {
+  'claude-code' => const ['opus', 'sonnet', 'haiku'],
+  _ => const [],
+};
+
 /// No workspace name starts with a dot, so this is never one.
 const _newWorkspaceKey = '.new';
 const _noCrew = '';
@@ -991,161 +1073,15 @@ const _noRole = '';
 
 String _roleKey(RoleNote r) => '${r.vaultId}/${r.noteId}';
 
-/// A quiet line under a field's control.
-class _Under extends StatelessWidget {
-  const _Under({super.key, required this.text});
+/// Where's value: a host id and a workspace, which never holds a NUL.
+String _whereKey(String hostId, String workspace) => '$hostId\u0000$workspace';
 
-  final String text;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Text(
-      text,
-      style: TextStyle(
-        fontFamily: StormTokens.sansFamily,
-        fontSize: t.labelSize * 1.09,
-        height: 1.45,
-        color: t.text3,
-      ),
-    );
-  }
+(String, String) _splitWhere(String v) {
+  final i = v.indexOf('\u0000');
+  return (v.substring(0, i), v.substring(i + 1));
 }
 
-/// One choice in a [_Select].
-class _Opt<T> {
-  const _Opt(this.value, this.label);
-
-  final T value;
-  final String label;
-}
-
-/// A select: `surface2`, a hairline, `rControl`, a trailing chevron (138h),
-/// and a popover of options.
-class _Select<T> extends StatefulWidget {
-  const _Select({
-    super.key,
-    required this.label,
-    required this.value,
-    required this.options,
-    required this.onChanged,
-    this.disabled = const [],
-    this.placeholder = '',
-    this.compact = false,
-    this.enabled = true,
-    this.menu,
-  });
-
-  final String label;
-  final T? value;
-  final List<_Opt<T>> options;
-  final ValueChanged<T> onChanged;
-
-  /// Shown in the menu, never choosable (an agent not installed).
-  final List<String> disabled;
-  final String placeholder;
-  final bool compact;
-
-  /// False draws it muted and opens nothing.
-  final bool enabled;
-
-  /// The popover in place of the plain list, given the height it has; it
-  /// pops the value picked.
-  final Widget Function(BuildContext popover, double room)? menu;
-
-  @override
-  State<_Select<T>> createState() => _SelectState<T>();
-}
-
-class _SelectState<T> extends State<_Select<T>> {
-  final _anchor = GlobalKey();
-
-  Future<void> _open() async {
-    final box = _anchor.currentContext?.findRenderObject() as RenderBox?;
-    final room = popoverRoom(context, _anchor);
-    final picked = await showStormPopover<T>(
-      context: context,
-      anchorKey: _anchor,
-      width: box?.size.width ?? 240,
-      builder: (popover) =>
-          widget.menu?.call(popover, room) ??
-          StormPopover(
-            children: [
-              for (final o in widget.options)
-                PopoverItem(
-                  label: o.label,
-                  selected: o.value == widget.value,
-                  onTap: () => Navigator.of(popover).pop(o.value),
-                ),
-              for (final label in widget.disabled) PopoverItem(label: label),
-            ],
-          ),
-    );
-    if (picked != null && picked != widget.value) widget.onChanged(picked);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final shown =
-        widget.options
-            .where((o) => o.value == widget.value)
-            .firstOrNull
-            ?.label ??
-        widget.placeholder;
-    final live = widget.enabled && widget.options.isNotEmpty;
-    return Semantics(
-      button: true,
-      enabled: live,
-      label: '${widget.label}: $shown',
-      excludeSemantics: true,
-      onTap: live ? _open : null,
-      child: Material(
-        key: _anchor,
-        color: t.surface2,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(t.rControl),
-          side: BorderSide(color: t.border, width: t.bw),
-        ),
-        child: InkWell(
-          onTap: live ? _open : null,
-          borderRadius: BorderRadius.circular(t.rControl),
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.5,
-              vertical: t.sp * (widget.compact ? 0.875 : 1.125),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    shown,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.uiSize,
-                      color: live ? t.text : t.text3,
-                    ),
-                  ),
-                ),
-                SizedBox(width: t.sp),
-                Icon(
-                  LucideIcons.chevron_down,
-                  key: const Key('select-chevron'),
-                  size: t.codeSize,
-                  color: live ? t.text2 : t.text3,
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// Raises the launcher in the shape the width calls for: a 460 modal at
+/// Raises the launcher in the shape the width calls for: a 480 modal at
 /// [kExpandedWidth] and wider, a bottom sheet below it.
 Future<AgentSession?> showNewSessionLauncher(
   BuildContext context, {
@@ -1169,14 +1105,19 @@ Future<AgentSession?> showNewSessionLauncher(
         padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(sheet).bottom),
         child: SafeArea(
           top: false,
-          child: SingleChildScrollView(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * 2.5,
-              t.sp * 2.5,
-              t.sp * 2.5,
-              t.sp * 4,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheet).height * 0.9,
             ),
-            child: launcher,
+            child: SingleChildScrollView(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 2.5,
+                t.sp * 2.5,
+                t.sp * 2.5,
+                t.sp * 4,
+              ),
+              child: launcher,
+            ),
           ),
         ),
       ),
@@ -1193,7 +1134,7 @@ Future<AgentSession?> showNewSessionLauncher(
       child: Padding(
         padding: EdgeInsets.only(top: t.sp * 12, bottom: t.sp * 3),
         child: SizedBox(
-          width: t.sp * 57.5,
+          width: math.min(t.sp * 60, MediaQuery.sizeOf(dialog).width),
           child: DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(t.rCard),
@@ -1240,7 +1181,7 @@ String launchErrorText(Object e) {
     'owner_only' => 'Only the server’s owner can do that.',
     'spawn_unavailable' =>
       "This host or agent can't offer starting agents now. Turn off "
-          '"Allow this session to start agents" to launch.',
+          'Start agents under More to launch.',
     _ => "Couldn't launch: $code",
   };
 }
@@ -1275,111 +1216,3 @@ String newWorkspaceErrorText(Object e, String name) {
 }
 
 bool _isCode(String s) => RegExp(r'^[a-z][a-z0-9_]*$').hasMatch(s);
-
-/// "New workspace…": a name and whether to start it as a git repository
-/// (on by default). It stays open on a refusal, saying why; it pops the
-/// workspace's name once the host has made it.
-class NewWorkspaceDialog extends ConsumerStatefulWidget {
-  const NewWorkspaceDialog({super.key, required this.host});
-
-  final AgentHost host;
-
-  @override
-  ConsumerState<NewWorkspaceDialog> createState() => _NewWorkspaceState();
-}
-
-class _NewWorkspaceState extends ConsumerState<NewWorkspaceDialog> {
-  late final _name = TextEditingController();
-  bool _git = true;
-  bool _busy = false;
-  String? _error;
-
-  @override
-  void dispose() {
-    _name.dispose();
-    super.dispose();
-  }
-
-  Future<void> _create() async {
-    final name = _name.text.trim();
-    if (name.isEmpty || _busy) return;
-    final api = agentApi(ref);
-    if (api == null) return;
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      final made = await api.createWorkspace(widget.host.id, name, git: _git);
-      if (mounted) Navigator.of(context).pop(made);
-    } catch (e) {
-      if (mounted) setState(() => _error = newWorkspaceErrorText(e, name));
-    } finally {
-      api.dispose();
-      if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final style = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.codeSize,
-      color: t.text2,
-    );
-    return AlertDialog(
-      title: Text('New workspace on ${widget.host.name}'),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          TextField(
-            key: const Key('new-workspace-name'),
-            controller: _name,
-            autofocus: true,
-            autocorrect: false,
-            maxLength: 128,
-            decoration: const InputDecoration(labelText: 'Name'),
-            onChanged: (_) => setState(() {}),
-            onSubmitted: (_) => _create(),
-          ),
-          SizedBox(height: t.sp),
-          Row(
-            children: [
-              Semantics(
-                label: 'Start as a git repository',
-                child: StormToggle(
-                  key: const Key('new-workspace-git'),
-                  value: _git,
-                  onChanged: _busy ? null : (v) => setState(() => _git = v),
-                ),
-              ),
-              SizedBox(width: t.sp),
-              Flexible(child: Text('Start as a git repository', style: style)),
-            ],
-          ),
-          if (_error != null) ...[
-            SizedBox(height: t.sp * 1.5),
-            Text(
-              _error!,
-              key: const Key('new-workspace-error'),
-              style: style.copyWith(color: t.danger),
-            ),
-          ],
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: _busy ? null : () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          key: const Key('new-workspace-create'),
-          onPressed: _busy || _name.text.trim().isEmpty ? null : _create,
-          child: Text(_busy ? 'Creating' : 'Create'),
-        ),
-      ],
-    );
-  }
-}

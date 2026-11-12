@@ -40,7 +40,7 @@ ways:
 | Agent CLIs and logins | yours | the account's, logged in once for it |
 
 **Runs as.** Every host tells the server which account it runs as. Its row in
-**Settings › Hosts**, and the launcher under **Host**, says so: *"Runs as
+**Settings › Hosts**, and the launcher under **Where**, says so: *"Runs as
 storm-runtime"* for the Linux service, or *"Runs as"* and your own account
 name for a host you run as yourself. A host set to isolate sessions adds
 *"· each session isolated"*. A runtime too old to say, or one that can't name

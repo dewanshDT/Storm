@@ -1045,7 +1045,7 @@ Specification*; the slices are decisions 81 and 81a onward):
     `acceptance/*` and the acceptance workflow does. The Windows and Linux
     runners are built on every client change (decision 125).
 
-  **"Can write to" is off by default and absent for `shell`.**
+  **The launcher's "Write to" is off by default; for `shell` it stays visible and disabled with its reason (decision 153k: rows never appear or disappear when the agent changes).**
 - **`gateway.db`'s schema is additive only** — `CREATE … IF NOT EXISTS`, never
   `DROP` or `ALTER`; a test reads the schema to enforce it.
 - **An agent's listings never count against its session's budget**

@@ -45,6 +45,9 @@ void main() {
     // The inspector's rail and its Agents tab (153i).
     'lib/agent/session_inspector.dart',
     'lib/agent/session_agents.dart',
+    // The launcher (153-5).
+    'lib/agent/launcher.dart',
+    'lib/agent/launcher_parts.dart',
   ];
   files.addAll(decisionFiles.map(File.new));
 
@@ -83,8 +86,8 @@ void main() {
     );
   });
 
-  test('the Agents sidebar, the decision strip and the inspector are '
-      'scanned too', () {
+  test('the Agents sidebar, the decision strip, the inspector and the '
+      'launcher are scanned too', () {
     for (final path in [...sidebarFiles, ...decisionFiles]) {
       expect(File(path).existsSync(), isTrue, reason: path);
     }

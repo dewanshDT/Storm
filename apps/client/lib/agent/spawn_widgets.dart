@@ -17,6 +17,7 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart' show agentMono, agentSans;
 import 'crew_changes.dart' show announceDismissedCrews;
+import 'delete_request.dart' show deleteDecisionOf;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
 import 'spawn_state.dart';
@@ -928,7 +929,8 @@ String spawnMeta(String meta, AgentSession s, AgentOverview? o) {
 
 /// A child's "↳ started by gateway-impl ›" and any attention, under the
 /// session's name; nothing for a session nobody started that waits for
-/// nobody.
+/// nobody. A delete request's Needs you is the decision strip's to say
+/// (153-3), so it is left out here while the strip shows one.
 class SpawnHeaderLine extends ConsumerWidget {
   const SpawnHeaderLine({super.key, required this.session, this.onParent});
 
@@ -939,7 +941,9 @@ class SpawnHeaderLine extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final s = session;
     final parent = s.spawn.parentSession;
-    final attention = s.ended ? null : s.spawn.needsAttention;
+    final attention = s.ended || deleteDecisionOf(s) != null
+        ? null
+        : s.spawn.needsAttention;
     if (parent == null && attention == null) return const SizedBox.shrink();
     final t = context.tokens;
     final o = ref.watch(agentOverviewProvider).value;
