@@ -358,6 +358,30 @@ SubLine? reasonLine(
   }
 }
 
+/// The sessions in no crew, as the list shows them: RUNNING holds the live
+/// ones and the ended ones whose work is still to apply (153d), where they
+/// were; ENDED holds the rest.
+({List<AgentSession> running, List<AgentSession> ended}) looseSections(
+  AgentOverview? o,
+) {
+  if (o == null) return (running: const [], ended: const []);
+  final live = {for (final s in o.looseLive) s.id};
+  final kept = {
+    for (final s in o.looseEnded)
+      if (workToApply(s) != null) s.id,
+  };
+  return (
+    running: [
+      for (final s in o.sessions)
+        if (live.contains(s.id) || kept.contains(s.id)) s,
+    ],
+    ended: [
+      for (final s in o.looseEnded)
+        if (!kept.contains(s.id)) s,
+    ],
+  );
+}
+
 /// The parent a child is listed apart from: in another crew or section,
 /// where it is not indented under it. Null when it is, or is no child.
 AgentSession? parentApart(

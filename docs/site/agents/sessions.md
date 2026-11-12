@@ -94,6 +94,14 @@ folds it to a line such as "2 agents · 1 needs you". **ENDED** starts folded
 to its count, with **Dismiss all**; open it and it stays open on that
 device.
 
+On a phone the Agents list follows the same rules and the same order. In
+place of the pointer, nothing moves while your finger is on the list or it
+is still scrolling; the order catches up once it comes to rest. Rows don't
+drag on a phone: long-press one for its crew and role. The count of
+sessions waiting for you sits on the place bubble at the top left, in red,
+wherever you are, and the place picker's Agents row reads "3 running · 1
+needs you".
+
 ## The terminal
 
 - **Images:** paste or drop an image into the session on desktop, the web and

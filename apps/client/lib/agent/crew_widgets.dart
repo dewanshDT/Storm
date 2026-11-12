@@ -482,6 +482,7 @@ class PhoneCrewHeader extends StatelessWidget {
     required this.onToggle,
     required this.onOpen,
     required this.onActions,
+    this.rollUp,
   });
 
   final Crew crew;
@@ -491,11 +492,16 @@ class PhoneCrewHeader extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onActions;
 
+  /// Folded, its most urgent state in place of the count, as on the desk.
+  final RollUp? rollUp;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final c = crew;
-    final count = crewCount(members, collapsed: collapsed);
+    final roll = collapsed ? rollUp : null;
+    final count = roll?.words ?? crewCount(members, collapsed: collapsed);
+    final outlined = roll?.outlined ?? false;
     return Semantics(
       button: true,
       expanded: !collapsed,
@@ -507,66 +513,84 @@ class PhoneCrewHeader extends StatelessWidget {
         CustomSemanticsAction(label: collapsed ? 'Expand' : 'Collapse'):
             onToggle,
       },
-      child: InkWell(
-        key: Key('crew-${c.id}'),
-        onTap: onOpen,
-        onLongPress: onActions,
-        child: Container(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: t.border, width: t.bw),
+      child: Material(
+        color: outlined
+            ? Color.alphaBlend(t.danger.withValues(alpha: 0.09), t.bg)
+            : Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(outlined ? t.rControl : 0),
+          side: outlined
+              ? BorderSide(color: t.danger, width: t.bw)
+              : BorderSide.none,
+        ),
+        child: InkWell(
+          key: Key('crew-${c.id}'),
+          onTap: onOpen,
+          onLongPress: onActions,
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              vertical: t.sp * 1.5,
+              horizontal: outlined ? t.sp : 0,
             ),
-          ),
-          child: Row(
-            children: [
-              CrewSquare(accent: c.accent, size: t.sp * 1.5),
-              SizedBox(width: t.sp * 1.25),
-              Expanded(
-                child: Text(
-                  c.name,
-                  key: Key('crew-name-${c.id}'),
-                  maxLines: 1,
-                  softWrap: false,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.uiSize * 1.05,
-                    fontWeight: FontWeight.w500,
-                    color: t.text,
+            decoration: outlined
+                ? null
+                : BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: t.border, width: t.bw),
+                    ),
                   ),
-                ),
-              ),
-              SizedBox(width: t.sp * 1.25),
-              Text(
-                count,
-                key: Key('crew-count-${c.id}'),
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
-                ),
-              ),
-              GestureDetector(
-                key: Key('crew-chevron-${c.id}'),
-                behavior: HitTestBehavior.opaque,
-                onTap: onToggle,
-                child: SizedBox(
-                  width: t.sp * 4,
-                  height: t.sp * 3,
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: Icon(
-                      collapsed
-                          ? LucideIcons.chevron_right
-                          : LucideIcons.chevron_down,
-                      size: t.labelSize,
-                      color: t.text3,
+            child: Row(
+              children: [
+                CrewSquare(accent: c.accent, size: t.sp * 1.5),
+                SizedBox(width: t.sp * 1.25),
+                Expanded(
+                  child: Text(
+                    c.name,
+                    key: Key('crew-name-${c.id}'),
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize * 1.05,
+                      fontWeight: FontWeight.w500,
+                      color: t.text,
                     ),
                   ),
                 ),
-              ),
-            ],
+                SizedBox(width: t.sp * 1.25),
+                Text(
+                  count,
+                  key: Key('crew-count-${c.id}'),
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: roll == null
+                        ? t.text3
+                        : (roll.loud ? t.danger : t.text2),
+                  ),
+                ),
+                GestureDetector(
+                  key: Key('crew-chevron-${c.id}'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onToggle,
+                  child: SizedBox(
+                    width: t.sp * 4,
+                    height: t.sp * 3,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Icon(
+                        collapsed
+                            ? LucideIcons.chevron_right
+                            : LucideIcons.chevron_down,
+                        size: t.labelSize,
+                        color: t.text3,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -1483,6 +1507,82 @@ class CrewsSectionLabel extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// ENDED · n with its chevron and Dismiss all (§2: ENDED stays folded to
+/// its count, with Dismiss all; it never rolls up).
+class EndedLabel extends StatelessWidget {
+  const EndedLabel({
+    super.key,
+    required this.count,
+    required this.collapsed,
+    required this.onToggle,
+    required this.onDismissAll,
+    this.phone = false,
+  });
+
+  final int count;
+  final bool collapsed;
+  final VoidCallback onToggle;
+  final VoidCallback? onDismissAll;
+
+  /// The phone list's: flush with the rows, like [CrewsSectionLabel].
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      key: const Key('section-ended'),
+      padding: phone
+          ? EdgeInsets.only(top: t.sp * 2.75, bottom: t.sp * 0.5)
+          : EdgeInsets.fromLTRB(t.sp, t.sp * 2, t.sp, t.sp * 0.75),
+      child: Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              button: true,
+              expanded: !collapsed,
+              label: 'Ended, $count',
+              excludeSemantics: true,
+              onTap: onToggle,
+              child: GestureDetector(
+                key: const Key('ended-toggle'),
+                behavior: HitTestBehavior.opaque,
+                onTap: onToggle,
+                child: Row(
+                  children: [
+                    AgentsLabel(collapsed ? 'Ended · $count' : 'Ended'),
+                    SizedBox(width: t.sp * 0.75),
+                    Icon(
+                      collapsed
+                          ? LucideIcons.chevron_right
+                          : LucideIcons.chevron_down,
+                      size: t.labelSize,
+                      color: t.text3,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (onDismissAll != null)
+            Semantics(
+              button: true,
+              label: 'Dismiss all ended',
+              excludeSemantics: true,
+              onTap: onDismissAll,
+              child: GestureDetector(
+                key: const Key('ended-dismiss-all'),
+                behavior: HitTestBehavior.opaque,
+                onTap: onDismissAll,
+                child: Text('Dismiss all', style: agentMono(t, color: t.text2)),
+              ),
+            ),
+        ],
       ),
     );
   }

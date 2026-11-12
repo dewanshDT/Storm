@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../../agent/agent_state.dart';
+import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/nav_memory.dart';
@@ -14,11 +15,14 @@ import '../widgets.dart';
 import '../surfaces.dart';
 import '../theme.dart';
 import '../tokens.dart';
+import 'activity_rail.dart' show NeedsYouCount;
 import 'vault_header.dart' show SyncNowLine, pickVaultAccent;
 import 'vault_tile.dart';
 
 /// Top-left on a phone: where you are (the vault, or Agents) and the place
-/// picker (handoff §2.5).
+/// picker (handoff §2.5). Sessions that need you are counted on its corner in
+/// `danger`, wherever you are (153o, R2 §7); with none it shows the live
+/// dot in Agents, the sync dot in a vault.
 class PlacesBubble extends ConsumerStatefulWidget {
   const PlacesBubble({super.key});
 
@@ -45,6 +49,7 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
         activityOf(GoRouterState.of(context).uri.path) == Activity.agents;
     final engine = ref.watch(syncEngineProvider);
     final live = ref.watch(agentOverviewProvider).value?.live.length ?? 0;
+    final needs = ref.watch(needsYouCountProvider);
     final activeId = ref.watch(activeVaultProvider);
     final vault = (ref.watch(vaultsProvider).value ?? const [])
         .where((v) => v.id == activeId)
@@ -58,7 +63,9 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
       children: [
         StormBubble(
           key: const Key('places-bubble'),
-          tooltip: 'Places',
+          tooltip: needs == 0
+              ? 'Places'
+              : 'Places, $needs ${needs == 1 ? 'needs' : 'need'} you',
           onTap: _open,
           child: inAgents
               ? Icon(
@@ -75,7 +82,12 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
         Positioned(
           top: -t.sp * 0.375,
           right: -t.sp * 0.375,
-          child: inAgents
+          child: needs > 0
+              ? NeedsYouCount(
+                  key: const Key('places-needs-count'),
+                  count: needs,
+                )
+              : inAgents
               ? Container(
                   width: t.sp * 1.25,
                   height: t.sp * 1.25,
@@ -87,6 +99,18 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
                 )
               : StatusDot(status: _sync(engine), size: t.sp * 1.25, ring: t.bg),
         ),
+        // The count takes the sync dot's corner; in a vault the dot moves
+        // down rather than going, since it is the phone's only sync signal.
+        if (needs > 0 && !inAgents)
+          Positioned(
+            bottom: -t.sp * 0.375,
+            right: -t.sp * 0.375,
+            child: StatusDot(
+              status: _sync(engine),
+              size: t.sp * 1.25,
+              ring: t.bg,
+            ),
+          ),
       ],
     );
   }
@@ -98,7 +122,8 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
     await showStormPopover<void>(
       context: context,
       anchorKey: _anchor,
-      width: t.sp * 31.25,
+      // Room for "5 running · 2 need you" beside Agents (153o).
+      width: t.sp * 42,
       builder: (popContext) => PlacePicker(
         inAgents: inAgents,
         onVault: (id) {
@@ -135,7 +160,19 @@ class PlacePicker extends ConsumerWidget {
     final vaults = ref.watch(vaultsProvider).value ?? const [];
     final accents = ref.watch(vaultAccentsProvider).value ?? const {};
     final live = ref.watch(agentOverviewProvider).value?.live.length ?? 0;
+    final needs = ref.watch(needsYouCountProvider);
     final check = Icon(LucideIcons.check, size: t.uiSize, color: t.accent);
+
+    Widget name(String label, VoidCallback? onTap) => Text(
+      label,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.uiSize,
+        color: onTap == null ? t.text3 : t.text,
+      ),
+    );
 
     Widget row({
       required Key key,
@@ -159,19 +196,17 @@ class PlacePicker extends ConsumerWidget {
           children: [
             lead,
             SizedBox(width: t.sp * 1.5),
-            Expanded(
-              child: Text(
-                label,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.uiSize,
-                  color: onTap == null ? t.text3 : t.text,
-                ),
+            // With a meta, the label keeps its width and the meta gives
+            // way: "3 running · 2 need you" is longer than "Agents".
+            if (meta == null)
+              Expanded(child: name(label, onTap))
+            else ...[
+              name(label, onTap),
+              SizedBox(width: t.sp),
+              Expanded(
+                child: Align(alignment: Alignment.centerRight, child: meta),
               ),
-            ),
-            ?meta,
+            ],
             if (selected) ...[SizedBox(width: t.sp), check],
           ],
         ),
@@ -221,9 +256,26 @@ class PlacePicker extends ConsumerWidget {
             ),
           ),
           label: 'Agents',
-          meta: live > 0
-              ? Text(
-                  '$live running',
+          meta: live > 0 || needs > 0
+              ? Text.rich(
+                  key: const Key('place-agents-meta'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  TextSpan(
+                    children: [
+                      if (live > 0) TextSpan(text: '$live running'),
+                      if (live > 0 && needs > 0)
+                        TextSpan(
+                          text: ' · ',
+                          style: TextStyle(color: t.text3),
+                        ),
+                      if (needs > 0)
+                        TextSpan(
+                          text: '$needs ${needs == 1 ? 'needs' : 'need'} you',
+                          style: TextStyle(color: t.danger),
+                        ),
+                    ],
+                  ),
                   style: TextStyle(
                     fontFamily: StormTokens.monoFamily,
                     fontSize: t.labelSize,

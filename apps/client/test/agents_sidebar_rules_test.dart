@@ -744,7 +744,16 @@ void main() {
         find.descendant(of: badge, matching: find.text('2')),
         findsOneWidget,
       );
-      final box = t.widget<Container>(badge).decoration! as BoxDecoration;
+      final box =
+          t
+                  .widget<Container>(
+                    find.descendant(
+                      of: badge,
+                      matching: find.byType(Container),
+                    ),
+                  )
+                  .decoration!
+              as BoxDecoration;
       expect(box.color, tokens(t).danger);
       expect(find.byTooltip('Agents, 2 need you'), findsOneWidget);
 
