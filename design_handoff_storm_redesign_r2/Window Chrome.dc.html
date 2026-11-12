@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#e6e4df}*{box-sizing:border-box}a{color:#2a62d6}a:hover{color:#1b438f}</style>
+</helmet>
+<section id="w1" style="padding:40px 44px 64px;display:flex;flex-direction:column;gap:12px;font-family:system-ui,sans-serif">
+  <div style="font:600 14px/1.2 system-ui,sans-serif;color:#1a1a1a">The window's top · round 2</div>
+  <div style="max-width:1000px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">The last attempt still looked bolted on, because the window buttons were dropped into a cell of Storm's grid. Three columns still met at the top, each with its own background and its own line, and the buttons had to fit around them. Mac apps that feel native do the opposite: the buttons belong to a surface, and the grid starts after that surface. <b>A</b> gives them to the sidebar. The rail and the sidebar become one left panel, full height, one colour, with one vertical line in the whole window. The buttons sit in its top-left corner, and the main pane's top row is a quiet toolbar with no line under it until content scrolls under it. <b>B</b> gives them to a full-width app bar that carries something real: back, forward and a global ⌘K. Only the top of each window is drawn.</div>
+  <sc-for list="{{ frames }}" as="f" hint-placeholder-count="6">
+    <div id="{{ f.id }}" style="display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px;padding-top:22px">
+      <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="{{ f.href }}" style="{{ f.badge }}">{{ f.id }}</a>{{ f.label }}</div>
+      <div style="{{ f.win }}">
+        <sc-if value="{{ f.oldBar }}" hint-placeholder-val="{{ false }}">
+          <div style="height:28px;flex:none;background:#2c2b2a;border-bottom:1px solid #1a1918;display:flex;align-items:center;gap:8px;padding-left:12px"><span style="width:12px;height:12px;border-radius:999px;background:#ff5f57"></span><span style="width:12px;height:12px;border-radius:999px;background:#febc2e"></span><span style="width:12px;height:12px;border-radius:999px;background:#28c840"></span><span style="padding-left:14px;font:600 13px system-ui;color:#bdbab5">Storm</span></div>
+        </sc-if>
+        <sc-if value="{{ f.appBar }}" hint-placeholder-val="{{ false }}">
+          <div style="height:44px;flex:none;display:flex;align-items:center;gap:14px;padding:2px 14px 0 20px;background:var(--bg);border-bottom:1px solid var(--border);box-sizing:border-box">
+            <div style="display:flex;gap:8px"><span style="{{ f.l1 }}"></span><span style="{{ f.l2 }}"></span><span style="{{ f.l3 }}"></span></div>
+            <span style="padding-left:18px;color:var(--text3);font-size:15px">‹</span><span style="color:var(--text3);font-size:15px;opacity:.5">›</span>
+            <span style="flex:1"></span>
+            <div style="width:420px;display:flex;align-items:center;gap:8px;padding:6px 12px;border-radius:var(--rControl);background:var(--bg);border:1px solid var(--border);color:var(--text3);font-size:13px"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg><span style="flex:1">Search notes, jump to a session…</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px">⌘K</span></div>
+            <span style="flex:1"></span>
+            <span style="width:9px;height:9px;border-radius:999px;background:var(--green)"></span>
+          </div>
+        </sc-if>
+        <div style="flex:1;min-height:0;display:flex">
+          <sc-if value="{{ f.hasLeft }}" hint-placeholder-val="{{ true }}">
+            <div style="{{ f.left }}">
+              <sc-if value="{{ f.leftTop }}" hint-placeholder-val="{{ true }}">
+                <div style="height:52px;flex:none;display:flex;align-items:center;padding:0 12px 0 20px;gap:8px">
+                  <sc-if value="{{ f.mac }}" hint-placeholder-val="{{ true }}"><div style="display:flex;gap:8px"><span style="{{ f.l1 }}"></span><span style="{{ f.l2 }}"></span><span style="{{ f.l3 }}"></span></div></sc-if>
+                  <span style="flex:1"></span>
+                  <span style="display:flex;padding:5px;border-radius:var(--rControl);color:var(--text3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></span>
+                </div>
+              </sc-if>
+              <div style="flex:1;min-height:0;display:flex">
+                <div style="{{ f.rail }}">
+                  <div style="{{ f.railIcon }}"><svg width="18" height="20" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v9h-1zM7 1h1v1h-1zM8 2h1v1h-1zM9 3h1v7h-1zM2 3h4v1h-4zM2 5h6v1h-6zM2 7h6v1h-6zM1 10h8v1h-8z"></path></svg></div>
+                  <div style="{{ f.railOn }}"><svg width="20" height="15" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg></div>
+                </div>
+                <div style="{{ f.list }}">
+                  <div style="display:flex;align-items:center;justify-content:space-between;padding:0 4px"><span style="font-size:14px;font-weight:600;color:var(--text)">Agents</span><sc-if value="{{ f.newPlus }}" hint-placeholder-val="{{ true }}"><span style="font-size:18px;line-height:1;color:var(--text2)">＋</span></sc-if></div><sc-if value="{{ f.oldBtn }}" hint-placeholder-val="{{ false }}"><div style="display:flex;justify-content:center;padding:9px;margin-top:4px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">＋ New session</div></sc-if>
+                  <div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:10px 4px 2px">Running</div>
+                  <div style="display:flex;align-items:center;gap:10px;padding:6px 6px;border-radius:var(--rControl);background:var(--surface2)"><div style="width:32px;height:32px;border-radius:var(--rControl);background:var(--bg);display:flex;align-items:center;justify-content:center;font-family:'IBM Plex Mono',monospace;color:#D97757;font-size:13px">C</div><div style="display:flex;flex-direction:column;gap:2px;min-width:0"><span style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Storm agents and use cases</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">storm · 40m</span></div></div>
+                </div>
+              </div>
+            </div>
+          </sc-if>
+          <div style="flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)">
+            <div style="{{ f.mainTop }}">
+              <sc-if value="{{ f.collapsedMac }}" hint-placeholder-val="{{ false }}"><div style="display:flex;gap:8px;padding-right:16px"><span style="{{ f.l1 }}"></span><span style="{{ f.l2 }}"></span><span style="{{ f.l3 }}"></span></div><span style="display:flex;padding:5px;margin-right:6px;border-radius:var(--rControl);color:var(--text3)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M9 4v16"></path></svg></span></sc-if>
+              <span style="{{ f.title }}">Storm agents and use cases</span>
+              <span style="{{ f.chip }}"><span style="width:6px;height:6px;border-radius:999px;background:var(--accent)"></span>Running</span>
+              <span style="flex:1"></span>
+              <span style="flex:none;display:flex;padding:6px;border-radius:var(--rControl);color:var(--text2)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></svg></span>
+              <span style="flex:none;font-size:12.5px;color:var(--text2);padding:4px 10px;border:1px solid var(--border);border-radius:var(--rControl)">End</span>
+              <sc-if value="{{ f.win32 }}" hint-placeholder-val="{{ false }}"><div style="display:flex;align-self:stretch;margin:0 -12px 0 10px"><span style="width:46px;display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:15px">–</span><span style="width:46px;display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:12px">▢</span><span style="width:46px;display:flex;align-items:center;justify-content:center;color:var(--text2);font-size:16px">✕</span></div></sc-if>
+            </div>
+            <div style="flex:1;padding:6px 24px;font-family:'IBM Plex Mono',monospace;font-size:12.5px;line-height:1.7;color:var(--text2)">$ claude<br>› read personal/projects/storm/Agents brief<br>› drafting use cases…</div>
+          </div>
+        </div>
+      </div>
+      <div style="{{ f.capStyle }}">{{ f.cap }}</div>
+    </div>
+  </sc-for>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Spec for B (chosen)</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;max-width:1240px;font:400 12.5px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>The bar</b><br>44px tall, full width, on <code>bg</code> (the rail's colour, so bar and rail read as one L-shaped frame, as in Slack, VS Code and Teams), with a 1px <code>border</code> line under it. It's the only full-width line in the window. On macOS the window buttons sit at x 20, centred. Back and forward follow at 18px, and the health dot sits at the right end; it's the same dot that's on the rail today, which moves here. Blank space in the bar drags the window, and double-clicking it zooms.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>⌘K field</b><br>Centred, 420px wide, shrinking to 280 at narrow widths. It uses <code>bg</code> with a <code>border</code> outline and <code>rControl</code> radius. The placeholder reads "Search notes, jump to a session…", with ⌘K on the right. Clicking it or pressing ⌘K opens the palette in place. The palette isn't designed yet, and it needs search across vaults (new server work).</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Below the bar</b><br>Rail, sidebar and main pane as today. The sidebar's own search field goes away, since ⌘K replaces it. "Agents" or the vault name heads the list, with ＋. The main header keeps its line.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Windows and Linux</b><br>The same bar. Caption buttons sit at its right end, three 46px buttons the full height of the bar, with close red on hover, and the health dot moves left of them. Linux follows the desktop's button order. On web, the browser owns the window, so the bar starts with back and forward.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>States</b><br>Not focused: the buttons go grey and the field turns <code>text3</code>. Full screen: the buttons go away and back and forward move to x 20. The bar never hides, because the ⌘K field is the way in.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Phone</b><br>No bar. Search stays in the bubbles and the pill, as v2 has it.</div>
+  </div>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Spec for A (not chosen, kept for reference)</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:14px;max-width:1240px;font:400 12.5px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>One left panel</b><br>The rail and the sidebar share <code>surface</code> and run the full height. The line between them is gone; spacing and the selected icon's <code>accentSoft</code> pill carry the split. There's one vertical line in the window, between the panel and the main pane. The panel's top 52px holds the window buttons at x 20, centred, with the collapse toggle at the panel's right end.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>The main toolbar</b><br>52px, on <code>bg</code>, with no line under it while the content is at the top. A 1px line fades in once the content scrolls under it, as in Finder and Notes. The title is 15/600 on the same centre line as the buttons. The status chip loses its pill and becomes a dot and a word, which is quieter in a toolbar.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>The list header</b><br>"Agents" moves out of the top row and becomes the first line of the list, with ＋ beside it in place of the full-width New session button. So the window buttons own the corner and the list starts below them.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Behaviour</b><br>Blank space in the panel's top row and the toolbar drags the window, and double-clicking it zooms. When the window isn't focused, the buttons go grey and the title turns <code>text2</code>. In full screen the buttons go away and the panel's top row shrinks to 12px. When the sidebar collapses, the buttons and the toggle move into the toolbar.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Windows and Linux</b><br>The same panel and toolbar. The panel's top row holds only the toggle. Caption buttons sit at the toolbar's right end: three 46px buttons, the full height of the row, with close red on hover. Linux follows the desktop's button order.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Optional, macOS only</b><br>The left panel could use the system sidebar material (vibrancy), so the desktop shows faintly through it, as in Finder. It's off by default: tokens stay the source of colour, and the three themes must look the same everywhere.</div>
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+function tokens() {
+  const n = (l) => `oklch(${l.toFixed(3)} 0.008 55)`;
+  return Object.entries({ '--bg': n(0.22), '--surface': n(0.27), '--surface2': n(0.31), '--border': n(0.36), '--text': n(0.95), '--text2': n(0.74), '--text3': n(0.66), '--accent': 'oklch(0.68 0.15 293)', '--accentSoft': 'oklch(0.30 0.05 293)', '--onAccent': 'oklch(0.16 0.03 293)', '--green': 'oklch(0.74 0.13 148)', '--rControl': '10px' }).map(([k, v]) => `${k}:${v}`).join(';');
+}
+const FR = [
+  ['old', 'Today · two top rows', 'The OS bar, then Storm\'s headers below it. Three columns meet at the top, each with its own background and line.'],
+  ['a', 'A · the sidebar owns the top', 'One left panel holds the rail and the list, in one colour, with the window buttons in its corner. The toolbar shares their centre line and has no line under it. The window has one vertical line and no horizontal ones at the top. This is how Notes, Mail, Linear and Things feel native.'],
+  ['aInactive', 'A · window not focused', 'The buttons go grey and the title dims. Nothing else changes.'],
+  ['aCollapsed', 'A · sidebar collapsed (⌘\\)', 'The left panel is gone, so the buttons and the toggle move to the start of the toolbar, and the title follows them.'],
+  ['aWin', 'A · Windows and Linux', 'The same panel, with no buttons in its corner. The caption buttons are at the toolbar\'s right end.'],
+  ['b', 'B · a full-width app bar (chosen)', 'The buttons sit in a 44px bar that carries back, forward and a global ⌘K search. It earns its row, and it gives Storm the cross-vault level it lacks (discovery P1). The cost is a second row above every screen, and a global search that doesn\'t exist yet: search is per vault today, so this is new server work, not a restyle.']
+];
+class Component extends DCLogic {
+  renderVals() {
+    const frames = FR.map(([k, label, cap], i) => {
+      const old = k === 'old', b = k === 'b', inactive = k === 'aInactive', collapsed = k === 'aCollapsed', win32 = k === 'aWin', mac = !win32;
+      const light = (c) => `width:12px;height:12px;border-radius:999px;background:${inactive ? '#55534f' : c};box-shadow:inset 0 0 0 .5px rgba(0,0,0,.25)`;
+      const id = 'w' + 'abcdef'[i];
+      const icon = 'width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl)';
+      return { id, href: '#' + id, label, cap, newPlus: !old, oldBtn: old, chip: `flex:none;display:inline-flex;align-items:center;gap:6px;font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--accent);${old ? 'border:1px solid var(--border);border-radius:999px;padding:2px 9px' : 'padding:2px 0'}`, oldBar: old, appBar: b, mac, win32, hasLeft: !collapsed, leftTop: !old && !b, collapsedMac: collapsed,
+        l1: light('#ff5f57'), l2: light('#febc2e'), l3: light('#28c840'),
+        badge: `font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:${k === 'b' ? '#2a78d6' : 'rgba(0,0,0,.08)'};color:${k === 'b' ? '#fff' : '#1a1a1a'};border-radius:5px;text-decoration:none`,
+        win: `${tokens()};width:1280px;height:${old ? 248 : b ? 264 : 220}px;display:flex;flex-direction:column;overflow:hidden;border-radius:12px;border:1px solid #111;box-shadow:0 20px 50px -20px rgba(0,0,0,.5);font-family:'IBM Plex Sans',sans-serif;color:var(--text);-webkit-font-smoothing:antialiased;background:var(--bg)`,
+        left: `width:333px;flex:none;display:flex;flex-direction:column;background:var(--surface);border-right:1px solid var(--border)`,
+        rail: `width:56px;flex:none;display:flex;flex-direction:column;align-items:center;gap:8px;padding-top:${old || b ? 14 : 4}px;${old || b ? 'background:var(--bg);border-right:1px solid var(--border)' : ''}`,
+        railOn: `${icon};color:var(--accent);background:var(--accentSoft)`, railIcon: `${icon};color:var(--text3)`,
+        list: `flex:1;min-width:0;padding:${old || b ? '14px' : '10px'} 12px 0 ${old || b ? 12 : 2}px;display:flex;flex-direction:column;gap:6px`,
+        mainTop: `height:52px;flex:none;display:flex;align-items:center;gap:10px;padding:0 12px 0 ${collapsed ? 20 : 24}px;${old || b ? 'border-bottom:1px solid var(--border);height:60px' : ''}`,
+        title: `min-width:0;font-size:15px;font-weight:600;color:${inactive ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+        capStyle: 'max-width:1280px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.62)' };
+    });
+    return { frames };
+  }
+}
+</script>
+</body>
+</html>
