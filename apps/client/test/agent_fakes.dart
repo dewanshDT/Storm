@@ -195,6 +195,11 @@ class FakeAgentServer {
         jsonDecode(r.body) as Map<String, dynamic>,
   ];
 
+  /// Answers `POST /v1/agent/hosts/refresh` (153-S4) with the hosts it
+  /// asked, after changing them the way their fresh inventories would; null
+  /// is a server older than that (404).
+  int Function()? onRefreshHosts;
+
   /// Called when a poll first sees a job done, to change the host the way
   /// the job would have.
   void Function(String hostId, String agent, String op)? onAgentJobDone;
@@ -428,6 +433,12 @@ class FakeAgentServer {
       return crewAnswer;
     }
     if (path == '/v1/agent/hosts') return _json(hosts);
+    if (path == '/v1/agent/hosts/refresh' && req.method == 'POST') {
+      if (onRefreshHosts case final refresh?) {
+        return _json({'asked': refresh()}, 202);
+      }
+      return _json({'error': 'nope'}, 404);
+    }
     if (path == '/v1/config') return _json({'agent_writes': agentWrites});
     if (path == '/v1/config/agent') {
       return _json({'default_provider': defaultProvider});

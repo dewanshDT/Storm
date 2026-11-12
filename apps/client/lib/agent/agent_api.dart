@@ -86,6 +86,18 @@ class AgentApi {
     ];
   }
 
+  /// Asks every linked host to look again at its agents, sign-in included
+  /// (153-S4). How many were asked; 0 from a server older than that.
+  Future<int> refreshHosts() async {
+    final r = await _client.post(
+      _uri('/v1/agent/hosts/refresh'),
+      headers: _headers,
+    );
+    if (r.statusCode == 404 || r.statusCode == 405) return 0;
+    final json = _decode(r);
+    return json is Map ? (json['asked'] as int? ?? 0) : 0;
+  }
+
   String _agentOn(String hostId, String agent) =>
       '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/'
       '${Uri.encodeComponent(agent)}';

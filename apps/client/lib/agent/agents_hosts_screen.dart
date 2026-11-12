@@ -24,10 +24,15 @@ class AgentsHostsScreen extends ConsumerStatefulWidget {
   const AgentsHostsScreen({
     super.key,
     this.pollEvery = const Duration(seconds: 1),
+    this.lookAgainAfter = const Duration(seconds: 6),
   });
 
   /// How often a running install is asked about.
   final Duration pollEvery;
+
+  /// How long after opening the hosts are given to look again at their
+  /// agents before they are listed again (153-S4).
+  final Duration lookAgainAfter;
 
   @override
   ConsumerState<AgentsHostsScreen> createState() => _AgentsHostsScreenState();
@@ -61,14 +66,18 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
   final _tick = ValueNotifier(0);
   bool _sheetOpen = false;
 
+  Timer? _lookAgain;
+
   @override
   void initState() {
     super.initState();
     _load();
+    _askHostsToLookAgain();
   }
 
   @override
   void dispose() {
+    _lookAgain?.cancel();
     for (final t in _polls.values) {
       t.cancel();
     }
@@ -98,9 +107,27 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
     }
   }
 
-  Future<void> _load() async {
+  /// Whether each agent is signed in is found by the host, not asked per
+  /// request (153-S4): opening the page has every host look again, and the
+  /// list is fetched again once they have had the time to.
+  Future<void> _askHostsToLookAgain() async {
+    final api = agentApi(ref);
+    if (api == null) return;
+    var asked = 0;
+    try {
+      asked = await api.refreshHosts();
+    } catch (_) {
+      // Best effort: the hosts look again on their own every few minutes.
+    } finally {
+      api.dispose();
+    }
+    if (!mounted || asked == 0) return;
+    _lookAgain = Timer(widget.lookAgainAfter, () => _load(quiet: true));
+  }
+
+  Future<void> _load({bool quiet = false}) async {
     setState(() {
-      _loading = true;
+      if (!quiet) _loading = true;
       _error = null;
     });
     final result = await _with(

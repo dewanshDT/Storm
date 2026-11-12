@@ -184,8 +184,8 @@ it:
 
 | Word | What it means |
 |---|---|
-| **Ready** | Installed. Sessions on the host can use it. Storm can't yet see whether an agent is signed in, so its details still offer **Sign in in a Shell** |
-| **Sign in** | Installed, and its host reports it is not signed in |
+| **Ready** | Installed, and signed in or Storm can't tell. When the host can't tell, the details say so and still offer **Sign in in a Shell** |
+| **Sign in** | Installed, and its host found it is not signed in. Sessions can't use it there until it is |
 | **Update** | Storm installed it and a newer version is available |
 | **Install** | Not installed, and the host can install it |
 | **Installing** | Being installed (or updated or removed), with its step and a bar |
@@ -212,6 +212,39 @@ too old to type a command shows the command with **Copy** and **Open a Shell
 on** the host instead. On a host that runs each session as its own user,
 signing in inside a session would not last, so the cell says to sign in on
 the host itself and shows the command.
+
+### How a host knows an agent is signed in
+
+The host checks its own agent CLIs, as its own account, and tells the server
+only *signed in*, *not signed in* or *can't tell*. **It never reads a
+credential, and never logs or sends anything a CLI prints.** For each agent:
+
+| Agent | What the host checks |
+|---|---|
+| Claude Code | `claude auth status`, by its exit code only |
+| Codex | `codex login status`, by its exit code only, in the Codex home its sessions use |
+| Cursor | `cursor-agent status --format json`, by its `isAuthenticated` field only |
+| OpenCode | Whether its credential file (`~/.local/share/opencode/auth.json`) has anything in it, by its size only. OpenCode runs free models without signing in, so it is never *not signed in* |
+| Command Code | Nothing: it has no status command Storm knows, so it is *can't tell* |
+
+An API key the host gives that agent's sessions (from the host's own
+environment or a provider env file: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+`CURSOR_API_KEY` and the like) counts as signed in, by the variable's
+presence only; the host then runs nothing. A Claude login you
+[synced](/docs/agents/claude-login/) to that host counts as signed in for Claude Code.
+
+Each command runs with no input, in a neutral folder, and is stopped after
+5 seconds; a timeout, an error or an answer the host doesn't recognise is
+*can't tell*. The host checks when it connects, after it installs or
+updates an agent, when a session on it ends (so signing in from a Shell
+shows up), every 10 minutes, and when you open **Settings › Agents &
+hosts**; never more than once in 30 seconds, and never per request. A host
+older than this release says nothing, which reads as *can't tell*.
+
+**A host that runs each session as its own user** (`isolation =
+"per-session"`) checks nothing and every agent is *can't tell*: its
+sessions sign in only through the paths isolation allows, which the host's
+own login doesn't show.
 
 Installing needs no sudo and no terminal, on a Linux or macOS host:
 

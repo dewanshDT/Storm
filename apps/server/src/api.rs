@@ -497,6 +497,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         // Agent Runtime host administration — owner only, checked in ops.
         .route("/v1/agent/hosts", get(agent_list_hosts))
         .route("/v1/agent/hosts/enrollments", post(agent_issue_enrollment))
+        // Look again at every host's agents (153-S4): owner only, in ops.
+        .route("/v1/agent/hosts/refresh", post(agent_refresh_hosts))
         .route(
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
@@ -1601,6 +1603,16 @@ async fn agent_list_hosts(
     State(state): State<Shared>,
 ) -> ApiResult<Json<Vec<crate::ops::HostView>>> {
     Ok(Json(crate::ops::list_hosts(&state).await?))
+}
+
+async fn agent_refresh_hosts(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(crate::ops::refresh_hosts(&state, &actor)?),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -13177,6 +13189,113 @@ pub(crate) mod tests {
         let (status, _, body) = f.pull(&session).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(refusal_code(&body), "host_not_in_scope");
+    }
+
+    /// 153-S4: the hosts list says what each host found of its agents'
+    /// sign-in, nothing for an agent it cannot tell (or an older host), and
+    /// Claude Code signed in wherever the synced login goes. The owner, and
+    /// only the owner, can ask the hosts to look again, at most once per
+    /// host per `REFRESH_EVERY`.
+    #[tokio::test]
+    async fn a_153_s4_hosts_say_whether_each_agent_is_signed_in() {
+        let dir = tempdir::TempDir::new("storm-153-s4").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let providers = |f: &SyncFixture| {
+            let app = f.app.clone();
+            let bearer = f.owner_bearer.clone();
+            async move {
+                let (status, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &bearer)).await;
+                assert_eq!(status, StatusCode::OK);
+                hosts[0]["capabilities"]["providers"].clone()
+            }
+        };
+        let by_id = |ps: &serde_json::Value, id: &str| {
+            ps.as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let old = providers(&f).await;
+        for id in ["claude-code", "opencode"] {
+            assert!(
+                by_id(&old, id).get("signed_in").is_none(),
+                "an older host: {old}"
+            );
+        }
+
+        let mut caps = sync_caps(true);
+        caps["providers"][0]["signed_in"] = false.into();
+        caps["providers"][2]["signed_in"] = "signed_in".into();
+        caps["providers"][1]["signed_in"] = "maybe".into();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        let now = providers(&f).await;
+        assert_eq!(by_id(&now, "claude-code")["signed_in"], false, "{now}");
+        assert_eq!(by_id(&now, "opencode")["signed_in"], true, "{now}");
+        assert!(by_id(&now, "shell").get("signed_in").is_none(), "{now}");
+
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let synced = providers(&f).await;
+        assert_eq!(
+            by_id(&synced, "claude-code")["signed_in"],
+            true,
+            "the synced login signs its sessions in: {synced}"
+        );
+
+        while f.link.try_recv().is_ok() {}
+        let refresh = |bearer: &str| {
+            post_json_with_auth("/v1/agent/hosts/refresh", serde_json::json!({}), bearer)
+        };
+        let (status, body) = send(&f.app, refresh(&f.owner_bearer)).await;
+        assert_eq!(
+            (status, body["asked"].clone()),
+            (StatusCode::ACCEPTED, 1.into())
+        );
+        let sent: Vec<_> = std::iter::from_fn(|| f.link.try_recv().ok())
+            .map(|e| serde_json::to_value(e).unwrap()["type"].clone())
+            .collect();
+        assert_eq!(sent, ["refresh"]);
+        let (status, body) = send(&f.app, refresh(&f.owner_bearer)).await;
+        assert_eq!(
+            (status, body["asked"].clone()),
+            (StatusCode::ACCEPTED, 0.into())
+        );
+        assert!(f.link.try_recv().is_err(), "not again so soon");
+
+        let (_, key) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "k"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = send(&f.app, refresh(bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let r = crate::ops::refresh_hosts(
+            &f.state,
+            &Actor::Key {
+                key_id: "key_X".into(),
+                user_id: "u".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!((r.0, r.1.as_str()), (StatusCode::FORBIDDEN, "owner_only"));
+        assert!(
+            !include_str!("mcp.rs").contains("refresh_hosts"),
+            "never an MCP tool"
+        );
     }
 
     #[tokio::test]
