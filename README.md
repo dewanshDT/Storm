@@ -165,14 +165,14 @@ two ways, on Linux, macOS and Windows:
 
 Storm coordinates agents; it does not isolate a session from the account it
 runs as. What an agent asks before acting is its own harness's setting.
-**Settings › Hosts** says which account each host runs as.
+**Settings › Agents & hosts** says which account each host runs as.
 
 The service on Linux is a separate package in the same apt repository:
 
 ```sh
 sudo apt install storm-runtime
 sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
-# In the app: Settings › Hosts & default agent › Enroll a host, then paste the string:
+# In the app: Settings › Agents & hosts › Enroll a host, then paste the string:
 sudo -u storm-runtime storm-runtime enroll
 sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
