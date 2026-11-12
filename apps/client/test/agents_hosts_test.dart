@@ -214,17 +214,19 @@ void main() {
         findsOneWidget,
       );
     }
-    // The host column is 170 and the five agent columns are equal.
+    // The host column is about a quarter of the card, never under 170, and
+    // the five agent columns are equal.
     final widths = [
       for (final a in kInstallableAgents)
         tester.getSize(find.byKey(Key('cell-h1-$a'))).width,
     ];
     expect(widths.toSet(), hasLength(1));
-    expect(
-      tester.getTopLeft(find.byKey(const Key('cell-h1-claude-code'))).dx -
-          tester.getTopLeft(find.byKey(const Key('host-cell-h1'))).dx,
-      closeTo(170, 0.01),
-    );
+    final hostColumn =
+        tester.getTopLeft(find.byKey(const Key('cell-h1-claude-code'))).dx -
+        tester.getTopLeft(find.byKey(const Key('host-cell-h1'))).dx;
+    final card = tester.getSize(find.byKey(const Key('agents-grid'))).width;
+    expect(hostColumn, greaterThanOrEqualTo(170));
+    expect(hostColumn / card, inInclusiveRange(0.22, 0.28));
     final tag = find.byKey(const Key('default-tag-claude-code'));
     expect(tag, findsOneWidget);
     expect(

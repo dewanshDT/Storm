@@ -540,7 +540,6 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
     final page = SettingsPage(
       title: 'Agents & hosts',
       intro: 'The machines agents run on, and which agent CLIs each one has.',
-      broad: true,
       action: StormButton.soft(
         key: const Key('enroll-host'),
         label: '＋ Enroll a host',

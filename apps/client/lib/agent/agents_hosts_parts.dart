@@ -12,6 +12,7 @@ import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart';
 import '../ui/tokens.dart';
+import '../ui/widgets.dart' show ReadingMeasure;
 import 'agent_models.dart';
 import 'agents_settings_screen.dart';
 
@@ -168,12 +169,18 @@ class _AgentsGridState extends State<AgentsGrid> {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final hostWidth = t.sp * 21.25;
+    final minHost = t.sp * 21.25;
     // The narrowest an agent column gets before it would need smaller type:
     // "needs Node 22" in mono, or "Command Code" at the header's size.
     final minColumn = t.sp * 12.5;
     return LayoutBuilder(
       builder: (context, c) {
+        // A quarter of the card while the agents still fit beside it, so
+        // "Runs as storm-runtime" keeps to one line; never under 170.
+        final hostWidth = math.max(
+          minHost,
+          math.min(c.maxWidth * 0.25, c.maxWidth - minColumn * 5 - 2),
+        );
         final column = math.max(minColumn, (c.maxWidth - hostWidth - 2) / 5);
         return Container(
           key: const Key('agents-grid'),
@@ -1034,33 +1041,35 @@ class _HostDetailsState extends State<HostDetails> {
           strip(
             key: const Key('remove-live-strip'),
             children: [
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                spacing: t.sp * 0.5,
-                children: [
-                  Text(
-                    'Remove ${h.name}?',
-                    key: const Key('remove-live-title'),
-                    style: value.copyWith(fontWeight: FontWeight.w600),
-                  ),
-                  Text(
-                    "It's revoked if it isn't already, then taken off this "
-                    'list. Its ended sessions keep its name. To use the '
-                    'machine again, enroll it as a new host.',
-                    key: const Key('remove-live-body'),
-                    style: value,
-                  ),
-                  if (n > 0)
+              ReadingMeasure(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  spacing: t.sp * 0.5,
+                  children: [
                     Text(
-                      n == 1
-                          ? '1 session on it is running; it stops being '
-                                'reachable.'
-                          : '$n sessions on it are running; they stop being '
-                                'reachable.',
-                      key: const Key('remove-live-running'),
+                      'Remove ${h.name}?',
+                      key: const Key('remove-live-title'),
+                      style: value.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    Text(
+                      "It's revoked if it isn't already, then taken off this "
+                      'list. Its ended sessions keep its name. To use the '
+                      'machine again, enroll it as a new host.',
+                      key: const Key('remove-live-body'),
                       style: value,
                     ),
-                ],
+                    if (n > 0)
+                      Text(
+                        n == 1
+                            ? '1 session on it is running; it stops being '
+                                  'reachable.'
+                            : '$n sessions on it are running; they stop being '
+                                  'reachable.',
+                        key: const Key('remove-live-running'),
+                        style: value,
+                      ),
+                  ],
+                ),
               ),
               StormButton.danger(
                 key: const Key('remove-live-confirm'),
@@ -1832,8 +1841,7 @@ class NoHostsCard extends StatelessWidget {
                 color: t.text,
               ),
             ),
-            ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: t.sp * 60),
+            ReadingMeasure(
               child: Text(
                 'Agents run on a machine you own. Enroll one, then install '
                 'Claude Code, OpenCode, Codex, Cursor or Command Code on it '
