@@ -793,6 +793,166 @@ void main() {
     });
   });
 
+  group('Remove on a live host', () {
+    FakeAgentServer live({int removeStatus = 204, bool sessions = false}) {
+      final agents = FakeAgentServer(
+        hosts: [
+          host('h1', 'build-vm', []),
+          host(
+            'h2',
+            'mac-mini',
+            [],
+            status: 'offline',
+            lastSeen: DateTime.now().toUtc().toIso8601String(),
+          ),
+          host('h9', 'old-mini', [], status: 'revoked'),
+        ],
+        sessions: [
+          if (sessions) ...[
+            agentSession('s1', hostId: 'h1'),
+            agentSession('s2', hostId: 'h1', status: 'starting'),
+            agentSession('s3', hostId: 'h1', status: 'completed'),
+            agentSession('s4', hostId: 'h2'),
+          ],
+        ],
+      );
+      agents.extra = (req) async {
+        final seg = req.url.pathSegments;
+        if (seg.length < 4 || seg[2] != 'hosts') return null;
+        final id = seg[3];
+        if (seg.length == 4 && req.method == 'DELETE') {
+          agents.hosts.firstWhere((h) => h['id'] == id)
+            ..['status'] = 'revoked'
+            ..['capabilities'] = null;
+          return http.Response('', 204);
+        }
+        if (seg.length == 5 && seg[4] == 'remove') {
+          if (removeStatus != 204) {
+            return http.Response(
+              jsonEncode({'error': 'the disk is full', 'code': 'io'}),
+              removeStatus,
+            );
+          }
+          agents.hosts.removeWhere((h) => h['id'] == id);
+          return http.Response('', 204);
+        }
+        return null;
+      };
+      return agents;
+    }
+
+    List<String> hostCalls(FakeAgentServer agents) => [
+      for (final r in agents.requests)
+        if (r.method != 'GET' && r.url.path.startsWith('/v1/agent/hosts/'))
+          '${r.method} ${r.url.path}',
+    ];
+
+    testWidgets('shows for online, offline and revoked hosts', (tester) async {
+      final c = await open(tester, live());
+      expect(find.byKey(const Key('remove-host-h1')), findsOneWidget);
+      expect(find.byKey(const Key('remove-host-h9')), findsOneWidget);
+      expect(find.byKey(const Key('reenroll-host-h9')), findsOneWidget);
+      await tap(tester, find.byKey(const Key('host-cell-h2')));
+      expect(find.byKey(const Key('remove-host-h2')), findsOneWidget);
+      final revoke = tester.getTopLeft(find.byKey(const Key('revoke-host-h2')));
+      final remove = tester.getTopLeft(find.byKey(const Key('remove-host-h2')));
+      expect(remove.dx, greaterThan(revoke.dx), reason: 'after Revoke…');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('confirms in place with the copy, and no dialog', (
+      tester,
+    ) async {
+      final agents = live();
+      final c = await open(tester, agents);
+      await tap(tester, find.byKey(const Key('remove-host-h1')));
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byKey(const Key('remove-live-strip')), findsOneWidget);
+      expect(textOf(tester, 'remove-live-title').data, 'Remove build-vm?');
+      expect(
+        textOf(tester, 'remove-live-body').data,
+        "It's revoked if it isn't already, then taken off this list. Its "
+        'ended sessions keep its name. To use the machine again, enroll it '
+        'as a new host.',
+      );
+      expect(find.byKey(const Key('remove-live-running')), findsNothing);
+      expect(find.text('Remove host'), findsOneWidget);
+      await tap(tester, find.byKey(const Key('remove-live-cancel')));
+      expect(hostCalls(agents), isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('counts the running sessions it disconnects', (tester) async {
+      final c = await open(tester, live(sessions: true));
+      await tap(tester, find.byKey(const Key('remove-host-h1')));
+      expect(
+        textOf(tester, 'remove-live-running').data,
+        '2 sessions on it are running; they stop being reachable.',
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('revokes, then removes', (tester) async {
+      final agents = live();
+      final c = await open(tester, agents);
+      await tap(tester, find.byKey(const Key('remove-host-h1')));
+      await tap(tester, find.byKey(const Key('remove-live-confirm')));
+      expect(hostCalls(agents), [
+        'DELETE /v1/agent/hosts/h1',
+        'POST /v1/agent/hosts/h1/remove',
+      ]);
+      expect(find.byKey(const Key('host-row-h1')), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a revoked host is only removed', (tester) async {
+      final agents = live();
+      final c = await open(tester, agents);
+      await tap(tester, find.byKey(const Key('remove-host-h9')));
+      await tap(tester, find.byKey(const Key('remove-host-confirm')));
+      expect(hostCalls(agents), ['POST /v1/agent/hosts/h9/remove']);
+      expect(find.byKey(const Key('host-row-h9')), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('a refused remove leaves it revoked, with a toast', (
+      tester,
+    ) async {
+      final agents = live(removeStatus: 500);
+      final c = await open(tester, agents);
+      await tap(tester, find.byKey(const Key('remove-host-h1')));
+      await tap(tester, find.byKey(const Key('remove-live-confirm')));
+      expect(hostCalls(agents), [
+        'DELETE /v1/agent/hosts/h1',
+        'POST /v1/agent/hosts/h1/remove',
+      ]);
+      expect(
+        find.textContaining("Revoked build-vm, but couldn't remove it: "),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('host-row-h1')), findsOneWidget);
+      expect(find.byKey(const Key('remove-host-h1')), findsOneWidget);
+      expect(find.byKey(const Key('reenroll-host-h1')), findsOneWidget);
+      await disposeShell(tester, c);
+    });
+
+    for (final status in [404, 405]) {
+      testWidgets('an older server ($status) hides Remove after', (
+        tester,
+      ) async {
+        final agents = live(removeStatus: status);
+        final c = await open(tester, agents);
+        await tap(tester, find.byKey(const Key('remove-host-h1')));
+        await tap(tester, find.byKey(const Key('remove-live-confirm')));
+        expect(find.byKey(const Key('remove-host-h1')), findsNothing);
+        expect(find.byKey(const Key('remove-host-h9')), findsNothing);
+        expect(find.byKey(const Key('remove-host-h2')), findsNothing);
+        expect(find.textContaining('too old to remove hosts'), findsOneWidget);
+        await disposeShell(tester, c);
+      });
+    }
+  });
+
   testWidgets('no hosts is one dashed card with Enroll a host', (tester) async {
     final c = await open(tester, FakeAgentServer());
     expect(find.byKey(const Key('hosts-empty')), findsOneWidget);

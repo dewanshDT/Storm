@@ -620,14 +620,14 @@ class _RevokedActionsState extends State<RevokedActions> {
         children: [
           Expanded(
             child: Text(
-              'Remove ${widget.host.name} from the list? Its ended sessions '
-              'keep its name.',
+              'Remove ${widget.host.name}? Its ended sessions keep its name. '
+              'To use the machine again, enroll it as a new host.',
               style: style.copyWith(color: t.text2),
             ),
           ),
           TextAction(
             key: const Key('remove-host-confirm'),
-            label: 'Remove',
+            label: 'Remove host',
             danger: true,
             onTap: () {
               setState(() => _confirming = false);
@@ -670,20 +670,32 @@ class _RevokedActionsState extends State<RevokedActions> {
   }
 }
 
-/// The selected host under the grid: its name and state, Rename and
-/// Revoke…, who it runs as, and its Limits as steppers (decision 152).
+/// The selected host under the grid: its name and state, Rename, Revoke…
+/// and Remove…, who it runs as, and its Limits as steppers (decision 152).
 class HostDetails extends StatefulWidget {
   const HostDetails({
     super.key,
     required this.host,
     required this.onRename,
     required this.onRevoke,
+    required this.onRemove,
     required this.onSaveLimits,
+    this.hostAdmin = true,
+    this.running = 0,
   });
 
   final AgentHost host;
   final Future<void> Function(String name) onRename;
   final Future<void> Function() onRevoke;
+
+  /// Revokes the host if it is not already, then takes it off the list.
+  final Future<void> Function() onRemove;
+
+  /// The server can remove a host; false hides Remove….
+  final bool hostAdmin;
+
+  /// Its sessions that have not ended, which a revoke disconnects.
+  final int running;
 
   /// Answers why it was refused, or null once saved.
   final Future<String?> Function(int children, int tree, int? sessions)
@@ -696,6 +708,7 @@ class HostDetails extends StatefulWidget {
 class _HostDetailsState extends State<HostDetails> {
   bool _renaming = false;
   bool _confirmRevoke = false;
+  bool _confirmRemove = false;
   late final _name = TextEditingController(text: widget.host.name);
 
   late HostLimits _limits = widget.host.limits ?? const HostLimits();
@@ -852,6 +865,46 @@ class _HostDetailsState extends State<HostDetails> {
             ],
           );
 
+    final stateText = Text(
+      state,
+      key: Key('host-state-${h.id}'),
+      style: TextStyle(
+        fontFamily: StormTokens.monoFamily,
+        fontSize: t.labelSize,
+        color: t.text3,
+      ),
+    );
+    final actions = [
+      TextAction(
+        key: Key('rename-host-${h.id}'),
+        label: 'Rename',
+        onTap: () => setState(() {
+          _renaming = true;
+          _confirmRevoke = false;
+          _confirmRemove = false;
+        }),
+      ),
+      TextAction(
+        key: Key('revoke-host-${h.id}'),
+        label: 'Revoke…',
+        danger: true,
+        onTap: () => setState(() {
+          _confirmRevoke = true;
+          _confirmRemove = false;
+        }),
+      ),
+      if (widget.hostAdmin)
+        TextAction(
+          key: Key('remove-host-${h.id}'),
+          label: 'Remove…',
+          danger: true,
+          onTap: () => setState(() {
+            _confirmRemove = true;
+            _confirmRevoke = false;
+          }),
+        ),
+    ];
+
     final heading = _renaming
         ? Row(
             spacing: t.sp * 1.5,
@@ -888,6 +941,16 @@ class _HostDetailsState extends State<HostDetails> {
               ),
             ],
           )
+        : narrow
+        // A phone's line is too short for the state and three actions.
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            spacing: t.sp * 0.75,
+            children: [
+              stateText,
+              Row(spacing: t.sp * 1.75, children: actions),
+            ],
+          )
         : Row(
             crossAxisAlignment: CrossAxisAlignment.baseline,
             textBaseline: TextBaseline.alphabetic,
@@ -899,47 +962,43 @@ class _HostDetailsState extends State<HostDetails> {
                   textBaseline: TextBaseline.alphabetic,
                   spacing: t.sp * 1.25,
                   children: [
-                    if (!narrow)
-                      Flexible(
-                        child: Text(
-                          h.name,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: t.bodySize,
-                            fontWeight: FontWeight.w600,
-                            color: t.text,
-                          ),
+                    Flexible(
+                      child: Text(
+                        h.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.bodySize,
+                          fontWeight: FontWeight.w600,
+                          color: t.text,
                         ),
                       ),
-                    Text(
-                      state,
-                      key: Key('host-state-${h.id}'),
-                      style: TextStyle(
-                        fontFamily: StormTokens.monoFamily,
-                        fontSize: t.labelSize,
-                        color: t.text3,
-                      ),
                     ),
+                    stateText,
                   ],
                 ),
               ),
-              TextAction(
-                key: Key('rename-host-${h.id}'),
-                label: 'Rename',
-                onTap: () => setState(() {
-                  _renaming = true;
-                  _confirmRevoke = false;
-                }),
-              ),
-              TextAction(
-                key: Key('revoke-host-${h.id}'),
-                label: 'Revoke…',
-                danger: true,
-                onTap: () => setState(() => _confirmRevoke = true),
-              ),
+              ...actions,
             ],
           );
+
+    Widget strip({required Key key, required List<Widget> children}) =>
+        Container(
+          key: key,
+          padding: EdgeInsets.all(t.sp * 1.5),
+          decoration: BoxDecoration(
+            color: t.danger.withValues(alpha: 0.08),
+            borderRadius: BorderRadius.circular(t.rControl),
+            border: Border.all(color: t.danger, width: t.bw),
+          ),
+          child: Wrap(
+            spacing: t.sp * 1.5,
+            runSpacing: t.sp,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: children,
+          ),
+        );
+    final n = widget.running;
 
     return Column(
       key: Key('host-details-${h.id}'),
@@ -948,39 +1007,75 @@ class _HostDetailsState extends State<HostDetails> {
       children: [
         heading,
         if (_confirmRevoke)
-          Container(
+          strip(
             key: const Key('revoke-strip'),
-            padding: EdgeInsets.all(t.sp * 1.5),
-            decoration: BoxDecoration(
-              color: t.danger.withValues(alpha: 0.08),
-              borderRadius: BorderRadius.circular(t.rControl),
-              border: Border.all(color: t.danger, width: t.bw),
-            ),
-            child: Wrap(
-              spacing: t.sp * 1.5,
-              runSpacing: t.sp,
-              crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text(
-                  'Revoke ${h.name}? Its sessions end and it can no longer '
-                  'connect. To use the machine again, re-enroll it.',
-                  style: value,
-                ),
-                StormButton.danger(
-                  key: const Key('revoke-host-confirm'),
-                  label: 'Revoke',
-                  onPressed: () async {
-                    setState(() => _confirmRevoke = false);
-                    await widget.onRevoke();
-                  },
-                ),
-                StormButton.text(
-                  key: const Key('revoke-host-cancel'),
-                  label: 'Cancel',
-                  onPressed: () => setState(() => _confirmRevoke = false),
-                ),
-              ],
-            ),
+            children: [
+              Text(
+                'Revoke ${h.name}? Its sessions end and it can no longer '
+                'connect. To use the machine again, re-enroll it.',
+                style: value,
+              ),
+              StormButton.danger(
+                key: const Key('revoke-host-confirm'),
+                label: 'Revoke',
+                onPressed: () async {
+                  setState(() => _confirmRevoke = false);
+                  await widget.onRevoke();
+                },
+              ),
+              StormButton.text(
+                key: const Key('revoke-host-cancel'),
+                label: 'Cancel',
+                onPressed: () => setState(() => _confirmRevoke = false),
+              ),
+            ],
+          ),
+        if (_confirmRemove && widget.hostAdmin)
+          strip(
+            key: const Key('remove-live-strip'),
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                spacing: t.sp * 0.5,
+                children: [
+                  Text(
+                    'Remove ${h.name}?',
+                    key: const Key('remove-live-title'),
+                    style: value.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                  Text(
+                    "It's revoked if it isn't already, then taken off this "
+                    'list. Its ended sessions keep its name. To use the '
+                    'machine again, enroll it as a new host.',
+                    key: const Key('remove-live-body'),
+                    style: value,
+                  ),
+                  if (n > 0)
+                    Text(
+                      n == 1
+                          ? '1 session on it is running; it stops being '
+                                'reachable.'
+                          : '$n sessions on it are running; they stop being '
+                                'reachable.',
+                      key: const Key('remove-live-running'),
+                      style: value,
+                    ),
+                ],
+              ),
+              StormButton.danger(
+                key: const Key('remove-live-confirm'),
+                label: 'Remove host',
+                onPressed: () async {
+                  setState(() => _confirmRemove = false);
+                  await widget.onRemove();
+                },
+              ),
+              StormButton.text(
+                key: const Key('remove-live-cancel'),
+                label: 'Cancel',
+                onPressed: () => setState(() => _confirmRemove = false),
+              ),
+            ],
           ),
         pair(
           'Runs as',

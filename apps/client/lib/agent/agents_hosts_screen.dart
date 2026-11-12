@@ -187,6 +187,45 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
     }
   }
 
+  /// Remove… on a host that may still be live: revoke it, then remove it.
+  /// A remove refused after the revoke leaves it revoked, with its row's
+  /// own Remove.
+  Future<void> _revokeAndRemove(AgentHost host) async {
+    final api = agentApi(ref);
+    if (api == null) return;
+    try {
+      if (host.status != 'revoked') {
+        try {
+          await api.revokeHost(host.id);
+        } catch (e) {
+          if (mounted) setState(() => _error = describeFailure(e));
+          return;
+        }
+      }
+      try {
+        await api.removeHost(host.id);
+      } catch (e) {
+        if (!mounted) return;
+        final older = _olderServer(e);
+        if (older) setState(() => _noHostAdmin = true);
+        final reason = older
+            ? 'this server is too old to remove hosts'
+            : describeFailure(e);
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(
+            content: Text(
+              "Revoked ${host.name}, but couldn't remove it: "
+              '$reason',
+            ),
+          ),
+        );
+      }
+    } finally {
+      api.dispose();
+      if (mounted) await _load();
+    }
+  }
+
   Future<void> _rename(AgentHost host, String name) async {
     if (name.trim().isEmpty || name.trim() == host.name) return;
     await _with((api) => api.renameHost(host.id, name.trim()));
@@ -480,11 +519,17 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
     final wide = context.isExpanded;
     final selected = hosts?.where((h) => h.id == _selected).firstOrNull;
 
+    final sessions =
+        ref.watch(agentOverviewProvider).value?.sessions ??
+        const <AgentSession>[];
     Widget details(AgentHost h) => HostDetails(
       key: ValueKey('details-${h.id}'),
       host: h,
+      hostAdmin: !_noHostAdmin,
+      running: sessions.where((s) => s.hostId == h.id && !s.ended).length,
       onRename: (name) => _rename(h, name),
       onRevoke: () => _revoke(h),
+      onRemove: () => _revokeAndRemove(h),
       onSaveLimits: (c, tr, s) => _saveLimits(h, c, tr, s),
     );
 
