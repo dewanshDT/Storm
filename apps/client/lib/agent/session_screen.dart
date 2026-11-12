@@ -1561,6 +1561,75 @@ List<(String, String)> aboutRows(
   ('Started by', startedByLine(s, overview, now: now)),
 ];
 
+/// What it was given at launch, in one line: "Can: writes to Work · 2
+/// integrations". Launch history, so a later disconnect does not change it.
+String canLine(AgentSession s, {String? vaultName}) {
+  if (s.isShell) return 'Can: shell only, no Storm access';
+  final n = s.integrations?.length;
+  return [
+    s.writeVaultId == null
+        ? 'Can: read only'
+        : 'Can: writes to ${vaultName ?? 'a vault'}',
+    if (n != null)
+      n == 0 ? 'no integrations' : '$n integration${n == 1 ? '' : 's'}',
+  ].join(' · ');
+}
+
+/// [canLine], quiet; tapping it lists the integrations by name.
+class AboutCan extends ConsumerStatefulWidget {
+  const AboutCan({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  ConsumerState<AboutCan> createState() => _AboutCanState();
+}
+
+class _AboutCanState extends ConsumerState<AboutCan> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final s = widget.session;
+    final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final vault = vaults.where((v) => v.id == s.writeVaultId).firstOrNull;
+    final names = s.isShell ? const <String>[] : s.integrations ?? const [];
+    final line = Text(
+      canLine(s, vaultName: vault?.name),
+      key: const Key('about-can'),
+      style: agentSans(t, color: t.text3),
+    );
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 1.75),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (names.isEmpty)
+            line
+          else
+            Semantics(
+              button: true,
+              expanded: _open,
+              child: InkWell(
+                key: const Key('about-can-toggle'),
+                onTap: () => setState(() => _open = !_open),
+                borderRadius: BorderRadius.circular(t.rControl),
+                child: line,
+              ),
+            ),
+          if (_open && names.isNotEmpty)
+            Text(
+              names.join(', '),
+              key: const Key('about-can-integrations'),
+              style: agentSans(t, color: t.text3),
+            ),
+        ],
+      ),
+    );
+  }
+}
+
 /// "You, from Gateway spec, 40m ago", or the agent that started it.
 String startedByLine(AgentSession s, AgentOverview? o, {DateTime? now}) {
   final age = shortAge(s.createdAt, now: now);
@@ -1659,7 +1728,8 @@ class _AboutRow extends StatelessWidget {
 }
 
 /// About, slimmed down (153j): who and what the session is. Crew, Role,
-/// Starts agents, Ran as, Started by, and a plugin problem in one line.
+/// Starts agents, what it can do, Ran as, Started by, and a plugin problem in
+/// one line.
 class AboutSections extends ConsumerWidget {
   const AboutSections({
     super.key,
@@ -1690,6 +1760,7 @@ class AboutSections extends ConsumerWidget {
             label: 'Starts agents',
             child: StartsAgentsAbout(session: session, host: host),
           ),
+        AboutCan(session: session),
         for (final (label, value) in rows)
           _AboutRow(
             label: label,
