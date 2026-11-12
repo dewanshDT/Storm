@@ -7,8 +7,15 @@ description: Let Claude Code, Claude Desktop, Cursor and other MCP clients read 
 
 MCP is **off by default**. In **Settings › AI access**, turn on **Let AI apps
 read your notes**. Writing needs **Let them create, edit and delete** as well;
-without it the write tools are not even offered. The tools are listed in
-[MCP tools](/docs/reference/mcp-tools/).
+without it the write tools are not even offered. A note an app deletes goes
+to its vault's **Trash**, kept for as long as that vault's **Trash keeps**
+setting says (**Settings › Vaults**).
+
+Storm's own agents are set further down the page: **Allow writes when chosen
+at launch** lets a session write to the one vault you pick for it. An
+agent's delete always waits for you to approve it, then goes to Trash.
+
+The tools are listed in [MCP tools](/docs/reference/mcp-tools/).
 
 Each AI app gets its own **key**: **Settings › Devices & access › New key**.
 A key is shown once, revocable, and accepted on `/mcp` and nowhere else —

@@ -3,10 +3,9 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
-import '../../agent/agents_settings_screen.dart';
+import '../../agent/agents_hosts_screen.dart';
 import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
 import '../../agent/claude_login_screen.dart';
-import '../../agent/hosts_screen.dart';
 import '../../agent/integrations_screen.dart';
 import '../../keyboard/storm_activators.dart' show stormHasKeyboard;
 import '../../router.dart';
@@ -31,19 +30,11 @@ import 'vaults_page.dart';
 
 /// One settings page (handoff §5.1). [storm] pages sit under the STORM label.
 class SettingsPageInfo {
-  const SettingsPageInfo(
-    this.id,
-    this.label, {
-    this.storm = false,
-    this.beta = false,
-  });
+  const SettingsPageInfo(this.id, this.label, {this.storm = false});
 
   final String id;
   final String label;
   final bool storm;
-
-  /// Still settling: the navigation and the page say so.
-  final bool beta;
 }
 
 const kSettingsPages = [
@@ -52,10 +43,10 @@ const kSettingsPages = [
   SettingsPageInfo('access', 'Devices & access'),
   SettingsPageInfo('vaults', 'Vaults', storm: true),
   SettingsPageInfo('ai', 'AI access', storm: true),
-  SettingsPageInfo('integrations', 'Integrations', storm: true, beta: true),
-  SettingsPageInfo('claude-login', 'Claude login', storm: true, beta: true),
-  SettingsPageInfo('hosts', 'Hosts & default agent', storm: true),
-  SettingsPageInfo('agents', 'Agents', storm: true, beta: true),
+  // One page for hosts and their agents (153-7); `agents` redirects here.
+  SettingsPageInfo('hosts', 'Agents & hosts', storm: true),
+  SettingsPageInfo('integrations', 'Integrations', storm: true),
+  SettingsPageInfo('claude-login', 'Claude login', storm: true),
   SettingsPageInfo('storage', 'Storage', storm: true),
   SettingsPageInfo('connection', 'Connection', storm: true),
   SettingsPageInfo('advanced', 'Advanced', storm: true),
@@ -74,8 +65,7 @@ Widget _pageFor(String id) => switch (id) {
   'ai' => const AiPage(),
   'integrations' => const IntegrationsScreen(),
   'claude-login' => const ClaudeLoginScreen(),
-  'hosts' => const HostsScreen(),
-  'agents' => const AgentsSettingsScreen(),
+  'hosts' => const AgentsHostsScreen(),
   'storage' => const StoragePage(),
   'connection' => const ConnectionPage(),
   'advanced' => const AdvancedPage(),
@@ -205,7 +195,6 @@ class SettingsNav extends StatelessWidget {
                     ),
                   ),
                 ),
-                if (p.beta) ...[const BetaTag(), SizedBox(width: t.sp)],
                 if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
               ],
             ),
@@ -271,7 +260,6 @@ class SettingsListScreen extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         spacing: t.sp,
         children: [
-          if (p.beta) const BetaTag(),
           if (_AttentionDot.has(p.id)) _AttentionDot(p.id),
           Icon(LucideIcons.chevron_right, size: t.uiSize, color: t.text3),
         ],

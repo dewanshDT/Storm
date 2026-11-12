@@ -322,7 +322,9 @@ class _ClaudeLoginScreenState extends ConsumerState<ClaudeLoginScreen> {
     if (hosts == null) return const [SkeletonRows(rows: 2)];
     if (hosts.isEmpty) {
       return const [
-        SettingsMuted('No hosts are enrolled. Enroll one in Settings › Hosts.'),
+        SettingsMuted(
+          'No hosts are enrolled. Enroll one in Settings › Agents & hosts.',
+        ),
       ];
     }
     return [

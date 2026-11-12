@@ -1,379 +1,12 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-import '../state/health.dart' show relativeTime;
 import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
-import '../ui/settings/settings_widgets.dart';
 import '../ui/states.dart';
 import '../ui/tokens.dart';
 import 'agent_api.dart';
-import 'agent_models.dart';
-import 'agent_state.dart';
-
-/// Runtime Hosts: the machines that run agents for this server (freeze §10,
-/// item 1). Owner only; the route is reachable only from an entry point the
-/// owner check shows.
-class HostsScreen extends ConsumerStatefulWidget {
-  const HostsScreen({super.key});
-
-  @override
-  ConsumerState<HostsScreen> createState() => _HostsScreenState();
-}
-
-class _HostsScreenState extends ConsumerState<HostsScreen> {
-  List<AgentHost>? _hosts;
-  String? _defaultProvider;
-  String? _error;
-  bool _loading = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _load();
-  }
-
-  Future<T?> _with<T>(Future<T> Function(AgentApi api) run) async {
-    final api = agentApi(ref);
-    if (api == null) {
-      setState(() => _error = 'Sign in first.');
-      return null;
-    }
-    try {
-      return await run(api);
-    } catch (e) {
-      if (mounted) setState(() => _error = describeFailure(e));
-      return null;
-    } finally {
-      api.dispose();
-    }
-  }
-
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
-    final result = await _with(
-      (api) async => (await api.hosts(), await api.defaultProvider()),
-    );
-    if (!mounted) return;
-    setState(() {
-      if (result != null) {
-        _hosts = result.$1;
-        _defaultProvider = result.$2;
-      }
-      _loading = false;
-    });
-    // Every change here ends in this reload, and at desk width the sessions
-    // sidebar sits beside this screen showing the same hosts: refresh it too
-    // rather than leave it up to a poll behind.
-    ref.invalidate(agentOverviewProvider);
-  }
-
-  Future<void> _enroll() async {
-    final issued = await _with((api) => api.enroll());
-    if (issued == null || !mounted) return;
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) =>
-          _EnrollDialog(enrollment: issued.enrollment, expires: issued.expires),
-    );
-    if (mounted) await _load();
-  }
-
-  Future<void> _rename(AgentHost host) async {
-    final name = await showDialog<String>(
-      context: context,
-      builder: (_) => _RenameDialog(initial: host.name),
-    );
-    if (name == null || name.trim().isEmpty || !mounted) return;
-    await _with((api) => api.renameHost(host.id, name.trim()));
-    if (mounted) await _load();
-  }
-
-  Future<void> _revoke(AgentHost host) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Revoke ${host.name}?'),
-        content: const Text(
-          'Its sessions end and it can no longer connect. To use the machine '
-          'again, enroll it again.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Revoke'),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    await _with((api) => api.revokeHost(host.id));
-    if (mounted) await _load();
-  }
-
-  Future<void> _limits(AgentHost host) async {
-    final changed = await showDialog<bool>(
-      context: context,
-      builder: (_) => HostLimitsDialog(
-        host: host,
-        onSave: (children, tree, sessions) async {
-          final api = agentApi(ref);
-          if (api == null) return 'Sign in first.';
-          try {
-            await api.setHostLimits(
-              host.id,
-              maxChildren: children,
-              maxTree: tree,
-              maxSessions: sessions,
-            );
-            return null;
-          } catch (e) {
-            return hostLimitsRefusal(e);
-          } finally {
-            api.dispose();
-          }
-        },
-      ),
-    );
-    if (changed == true && mounted) await _load();
-  }
-
-  Future<void> _setDefault(String id) async {
-    await _with((api) => api.setDefaultProvider(id));
-    if (mounted) setState(() => _defaultProvider = id);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final hosts = _hosts;
-    return SettingsPage(
-      title: 'Hosts & default agent',
-      intro: 'The machines agents run on.',
-      children: [
-        if (_error != null) SettingsMuted(_error!, danger: true),
-        if (_loading && hosts == null)
-          const SkeletonRows(rows: 2)
-        else if (hosts != null && hosts.isEmpty)
-          const SettingsMuted('No hosts enrolled yet.')
-        else
-          for (final host in hosts ?? <AgentHost>[])
-            _HostTile(
-              host: host,
-              onRename: () => _rename(host),
-              onRevoke: () => _revoke(host),
-              onLimits: () => _limits(host),
-            ),
-        SettingsButtonRow(
-          child: StormButton.primary(
-            key: const Key('enroll-host'),
-            label: '＋ Enroll a host',
-            onPressed: _loading ? null : _enroll,
-          ),
-        ),
-        SizedBox(height: t.sp * 0.75),
-        Text.rich(
-          TextSpan(
-            children: [
-              const TextSpan(
-                text:
-                    'Enrolling shows a one-time string and the commands to '
-                    'run on the machine. Paste the string when ',
-              ),
-              TextSpan(
-                text: 'storm-runtime enroll',
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  color: t.text2,
-                ),
-              ),
-              const TextSpan(text: ' asks for it.'),
-            ],
-          ),
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.labelSize * 1.09,
-            color: t.text3,
-            height: 1.5,
-          ),
-        ),
-        if (_defaultProvider != null) ...[
-          GroupLabel('Default agent', top: t.sp * 3, bottom: t.sp),
-          _DefaultProvider(
-            current: _defaultProvider!,
-            hosts: hosts ?? const [],
-            onChanged: _setDefault,
-          ),
-        ],
-      ],
-    );
-  }
-}
-
-class _DefaultProvider extends StatelessWidget {
-  const _DefaultProvider({
-    required this.current,
-    required this.hosts,
-    required this.onChanged,
-  });
-
-  final String current;
-  final List<AgentHost> hosts;
-  final ValueChanged<String> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final ids = <String>{
-      'claude-code',
-      'opencode',
-      'shell',
-      for (final h in hosts) ...h.providers.map((p) => p.id),
-      current,
-    }.toList();
-    return ChoiceChips<String>(
-      key: const Key('default-provider'),
-      options: [for (final id in ids) ChoiceOption(id, providerLabel(id))],
-      selected: current,
-      onSelected: onChanged,
-    );
-  }
-}
-
-class _HostTile extends StatelessWidget {
-  const _HostTile({
-    required this.host,
-    required this.onRename,
-    required this.onRevoke,
-    required this.onLimits,
-  });
-
-  final AgentHost host;
-  final VoidCallback onRename;
-  final VoidCallback onRevoke;
-  final VoidCallback onLimits;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final revoked = host.status == 'revoked';
-    final seen = DateTime.tryParse(host.lastSeen ?? '');
-    final state = host.online
-        ? 'online now'
-        : revoked
-        ? 'revoked'
-        : seen == null
-        ? 'offline'
-        : 'offline · last seen ${relativeTime(seen)}';
-    final agents = host.providers.isEmpty
-        ? 'agents appear once it connects'
-        : host.providers
-              .map((p) => p.available ? p.label : '${p.label} (not installed)')
-              .join(', ');
-    // The execution line already says a working sandbox isolates.
-    final isolation =
-        host.execution?.perSession == true &&
-            host.isolationLabel == kIsolationVerified
-        ? null
-        : host.isolationLabel;
-    // Freeze §12.2: V1 has no egress policy of its own, and says so.
-    return Opacity(
-      opacity: revoked ? 0.55 : 1,
-      child: SettingsRow(
-        key: Key('host-${host.id}'),
-        leading: Container(
-          width: t.sp,
-          height: t.sp,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: host.online ? t.green : t.text3,
-          ),
-        ),
-        label: host.name,
-        sub:
-            '$state · $agents · network: host policy'
-            '\n${host.executionLine}'
-            '${host.identityUnverified && !revoked ? '\n$kIdentityNotVerified' : ''}'
-            '${isolation != null && !revoked ? '\n$isolation' : ''}'
-            '${host.limits != null && !revoked ? '\n${hostLimitsLine(host.limits!)}' : ''}',
-        monoSub: true,
-        trailing: revoked
-            ? null
-            : RowActions(
-                children: [
-                  if (host.limits != null)
-                    TextAction(
-                      key: Key('limits-host-${host.id}'),
-                      label: 'Limits',
-                      onTap: onLimits,
-                    ),
-                  TextAction(
-                    key: Key('rename-host-${host.id}'),
-                    label: 'Rename',
-                    onTap: onRename,
-                  ),
-                  TextAction(
-                    key: Key('revoke-host-${host.id}'),
-                    label: 'Revoke',
-                    onTap: onRevoke,
-                  ),
-                ],
-              ),
-      ),
-    );
-  }
-}
-
-enum ChipTone { good, warn, bad, muted }
-
-/// A status label with a tinted background. It carries a real state, never
-/// decoration (decision 77d).
-class StatusChip extends StatelessWidget {
-  const StatusChip({super.key, required this.label, required this.tone});
-
-  final String label;
-  final ChipTone tone;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final color = switch (tone) {
-      ChipTone.good => t.green,
-      ChipTone.warn => t.amber,
-      ChipTone.bad => t.danger,
-      ChipTone.muted => t.text3,
-    };
-    return Container(
-      padding: EdgeInsets.symmetric(horizontal: t.sp, vertical: t.sp * 0.25),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.14),
-        borderRadius: BorderRadius.circular(t.rControl),
-      ),
-      // The family is set, not inherited: a chip inside a ListTile's trailing
-      // slot would otherwise pick up the mono label style, and the same
-      // component would look different on two screens.
-      child: Text(
-        label,
-        style: TextStyle(
-          fontFamily: StormTokens.sansFamily,
-          fontSize: t.labelSize,
-          color: color,
-          fontWeight: FontWeight.w600,
-          height: 1.2,
-        ),
-      ),
-    );
-  }
-}
 
 /// The machine being enrolled. It is not necessarily the one this client
 /// runs on, so the enroll sheet offers every platform (AM40, AM56).
@@ -526,14 +159,22 @@ String enrollFootnote(HostPlatform platform, EnrollShape shape) => switch ((
 
 /// The enrollment string, shown once: it carries a single-use secret that
 /// nothing stores.
-class _EnrollDialog extends StatefulWidget {
-  const _EnrollDialog({required this.enrollment, required this.expires});
+class EnrollDialog extends StatefulWidget {
+  const EnrollDialog({
+    super.key,
+    required this.enrollment,
+    required this.expires,
+    this.title = 'Enroll a host',
+  });
 
   final String enrollment;
   final String expires;
 
+  /// "Re-enroll build-vm" for a revoked host (decision 153).
+  final String title;
+
   @override
-  State<_EnrollDialog> createState() => _EnrollDialogState();
+  State<EnrollDialog> createState() => _EnrollDialogState();
 }
 
 /// The enrollment string with its secret hidden: the scheme, then the last
@@ -546,7 +187,7 @@ String maskEnrollment(String s) {
   return '$head${'•' * 12}${s.substring(s.length - 4)}';
 }
 
-class _EnrollDialogState extends State<_EnrollDialog> {
+class _EnrollDialogState extends State<EnrollDialog> {
   bool _copied = false;
   bool _revealed = false;
   HostPlatform _platform = defaultHostPlatform();
@@ -571,9 +212,9 @@ class _EnrollDialogState extends State<_EnrollDialog> {
       borderRadius: BorderRadius.circular(t.rControl),
     );
     return AlertDialog(
-      title: const Text('Enroll a host'),
+      title: Text(widget.title),
       content: SizedBox(
-        width: 520,
+        width: t.sp * 65,
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -615,7 +256,7 @@ class _EnrollDialogState extends State<_EnrollDialog> {
                     IconButton(
                       key: const Key('reveal-enrollment'),
                       tooltip: _revealed ? 'Hide' : 'Show',
-                      iconSize: 16,
+                      iconSize: t.sp * 2,
                       icon: Icon(
                         _revealed ? LucideIcons.eye_off : LucideIcons.eye,
                       ),
@@ -652,7 +293,7 @@ class _EnrollDialogState extends State<_EnrollDialog> {
                         IconButton(
                           key: Key('copy-${shape.name}-command-$i'),
                           tooltip: 'Copy',
-                          iconSize: 16,
+                          iconSize: t.sp * 2,
                           icon: Icon(
                             _copiedCommand == '${shape.name}-$i'
                                 ? LucideIcons.check
@@ -696,7 +337,10 @@ class _EnrollDialogState extends State<_EnrollDialog> {
             final ok = await copyToClipboard(widget.enrollment);
             if (mounted) setState(() => _copied = ok);
           },
-          icon: Icon(_copied ? LucideIcons.check : LucideIcons.copy, size: 16),
+          icon: Icon(
+            _copied ? LucideIcons.check : LucideIcons.copy,
+            size: t.sp * 2,
+          ),
           label: Text(_copied ? 'Copied' : 'Copy string'),
         ),
         FilledButton(
@@ -720,237 +364,3 @@ String hostLimitsRefusal(Object e) => switch (e is AgentRefusal
   'owner_only' => 'Only the host’s owner can change its limits.',
   _ => describeFailure(e),
 };
-
-/// A host's Limits (decision 152): how many agents a session and a tree run
-/// at once, and an optional lower cap on its concurrent sessions. Lowering
-/// one ends nothing; it refuses new starts. Owner only, like this screen.
-class HostLimitsDialog extends StatefulWidget {
-  const HostLimitsDialog({super.key, required this.host, required this.onSave});
-
-  final AgentHost host;
-
-  /// Answers why it was refused, or null once saved.
-  final Future<String?> Function(int children, int tree, int? sessions) onSave;
-
-  @override
-  State<HostLimitsDialog> createState() => _HostLimitsDialogState();
-}
-
-class _HostLimitsDialogState extends State<HostLimitsDialog> {
-  late final HostLimits _was = widget.host.limits ?? const HostLimits();
-  late int _children = _was.maxChildren;
-  late int _tree = _was.maxTree;
-  late final _sessions = TextEditingController(
-    text: _was.maxSessions?.toString() ?? '',
-  );
-  String? _error;
-  bool _saving = false;
-
-  @override
-  void dispose() {
-    _sessions.dispose();
-    super.dispose();
-  }
-
-  String get _hostOwn {
-    final n = _was.hostMaxSessions;
-    if (n == null) return 'The host’s own';
-    return n == 0 ? 'The host’s own (no limit)' : 'The host’s own ($n)';
-  }
-
-  Future<void> _save() async {
-    final text = _sessions.text.trim();
-    final sessions = text.isEmpty ? null : int.tryParse(text);
-    if (text.isNotEmpty && sessions == null) {
-      setState(() => _error = 'Concurrent sessions is a whole number.');
-      return;
-    }
-    setState(() {
-      _saving = true;
-      _error = null;
-    });
-    final refused = await widget.onSave(_children, _tree, sessions);
-    if (!mounted) return;
-    if (refused == null) {
-      Navigator.of(context).pop(true);
-    } else {
-      setState(() {
-        _saving = false;
-        _error = refused;
-      });
-    }
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final muted = TextStyle(fontSize: t.labelSize, color: t.text3);
-    return AlertDialog(
-      key: const Key('host-limits'),
-      title: Text('Limits for ${widget.host.name}'),
-      content: SizedBox(
-        width: 420,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            _LimitStepper(
-              id: 'children',
-              label: 'Agents per session',
-              value: _children,
-              max: _was.hardMaxChildren,
-              onChanged: (v) => setState(() => _children = v),
-            ),
-            _LimitStepper(
-              id: 'tree',
-              label: 'Agents per tree',
-              value: _tree,
-              max: _was.hardMaxTree,
-              onChanged: (v) => setState(() => _tree = v),
-            ),
-            SizedBox(height: t.sp),
-            TextField(
-              key: const Key('limit-sessions'),
-              controller: _sessions,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'Concurrent sessions',
-                hintText: _hostOwn,
-                helperText: 'Blank is the host’s own. It can only be lowered.',
-              ),
-            ),
-            if (_was.overrideIneffective) ...[
-              SizedBox(height: t.sp * 0.5),
-              Text(
-                'Above the host’s own, so the host’s '
-                '${_was.effectiveMaxSessions} is in force.',
-                key: const Key('limit-sessions-ineffective'),
-                style: muted,
-              ),
-            ],
-            SizedBox(height: t.sp * 1.5),
-            Text(
-              'Depth: ${depthLine(_was.depth)}',
-              key: const Key('limit-depth'),
-            ),
-            SizedBox(height: t.sp),
-            Text(
-              'Lowering a limit ends nothing that is running; it refuses new '
-              'starts.',
-              style: muted,
-            ),
-            if (_error != null) ...[
-              SizedBox(height: t.sp),
-              Text(
-                _error!,
-                key: const Key('limits-error'),
-                style: TextStyle(color: t.danger),
-              ),
-            ],
-          ],
-        ),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          key: const Key('save-limits'),
-          onPressed: _saving ? null : _save,
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
-}
-
-class _LimitStepper extends StatelessWidget {
-  const _LimitStepper({
-    required this.id,
-    required this.label,
-    required this.value,
-    required this.max,
-    required this.onChanged,
-  });
-
-  final String id;
-  final String label;
-  final int value;
-  final int max;
-  final ValueChanged<int> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Expanded(child: Text(label)),
-        IconButton(
-          key: Key('limit-$id-less'),
-          tooltip: 'Fewer',
-          iconSize: 16,
-          icon: const Icon(LucideIcons.minus),
-          onPressed: value > 1 ? () => onChanged(value - 1) : null,
-        ),
-        SizedBox(
-          width: 32,
-          child: Text(
-            '$value',
-            key: Key('limit-$id'),
-            textAlign: TextAlign.center,
-          ),
-        ),
-        IconButton(
-          key: Key('limit-$id-more'),
-          tooltip: 'More',
-          iconSize: 16,
-          icon: const Icon(LucideIcons.plus),
-          onPressed: value < max ? () => onChanged(value + 1) : null,
-        ),
-      ],
-    );
-  }
-}
-
-class _RenameDialog extends StatefulWidget {
-  const _RenameDialog({required this.initial});
-
-  final String initial;
-
-  @override
-  State<_RenameDialog> createState() => _RenameDialogState();
-}
-
-class _RenameDialogState extends State<_RenameDialog> {
-  late final _controller = TextEditingController(text: widget.initial);
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('Rename host'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        maxLength: 64,
-        decoration: const InputDecoration(labelText: 'Name'),
-        onSubmitted: (v) => Navigator.of(context).pop(v),
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.of(context).pop(_controller.text),
-          child: const Text('Save'),
-        ),
-      ],
-    );
-  }
-}

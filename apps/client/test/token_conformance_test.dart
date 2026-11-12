@@ -50,6 +50,15 @@ void main() {
     'lib/agent/launcher_parts.dart',
   ];
   files.addAll(decisionFiles.map(File.new));
+  // Settings › Agents & hosts and Integrations (153-7).
+  const settingsAgentFiles = [
+    'lib/agent/agents_hosts_screen.dart',
+    'lib/agent/agents_hosts_parts.dart',
+    'lib/agent/hosts_screen.dart',
+    'lib/agent/agents_settings_screen.dart',
+    'lib/agent/integrations_screen.dart',
+  ];
+  files.addAll(settingsAgentFiles.map(File.new));
 
   /// Lines that are not comments, with their 1-based number.
   Iterable<(int, String)> codeLines(File f) sync* {
@@ -88,9 +97,29 @@ void main() {
 
   test('the Agents sidebar, the decision strip, the inspector and the '
       'launcher are scanned too', () {
-    for (final path in [...sidebarFiles, ...decisionFiles]) {
+    for (final path in [
+      ...sidebarFiles,
+      ...decisionFiles,
+      ...settingsAgentFiles,
+    ]) {
       expect(File(path).existsSync(), isTrue, reason: path);
     }
+  });
+
+  test('host states are never green and never claim safety (153-7)', () {
+    final offenders = <String>[];
+    for (final path in settingsAgentFiles.take(3)) {
+      for (final (n, line) in codeLines(File(path))) {
+        if (RegExp(r'\.green\b').hasMatch(line) ||
+            RegExp(
+              r"'[^']*\b(trusted|secure|protected|sandboxed)\b",
+              caseSensitive: false,
+            ).hasMatch(line)) {
+          offenders.add('$path:$n');
+        }
+      }
+    }
+    expect(offenders, isEmpty);
   });
 
   test('no amber in the Agents sidebar: amber is for tags (153e)', () {

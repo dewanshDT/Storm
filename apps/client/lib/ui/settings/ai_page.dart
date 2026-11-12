@@ -94,7 +94,7 @@ class _AiPageState extends ConsumerState<AiPage> {
             ),
             SettingsRow(
               label: 'Let them create, edit and delete',
-              sub: 'Storm has no trash. A deleted note is gone.',
+              sub: "A deleted note goes to its vault's Trash.",
               muted: !on,
               trailing: StormToggle(
                 key: const Key('mcp-write'),
@@ -126,8 +126,8 @@ class _AiPageState extends ConsumerState<AiPage> {
               label: 'Allow writes when chosen at launch',
               sub: agentWrites == null
                   ? 'Needs a newer server'
-                  : 'You pick one vault per session. Agents never delete '
-                        'notes.',
+                  : "You pick one vault per session. An agent's delete always "
+                        'waits for you, then goes to Trash.',
               muted: agentWrites == null,
               trailing: StormToggle(
                 key: const Key('agent-writes'),

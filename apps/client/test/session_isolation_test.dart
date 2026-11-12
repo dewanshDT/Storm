@@ -10,7 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/hosts_screen.dart';
+import 'package:storm/agent/agents_hosts_screen.dart';
 import 'package:storm/agent/session_screen.dart';
 import 'package:storm/ui/theme.dart';
 
@@ -156,7 +156,7 @@ void main() {
               data: MediaQuery.of(
                 context,
               ).copyWith(size: const Size(1280, 800)),
-              child: const Scaffold(body: HostsScreen()),
+              child: const Scaffold(body: AgentsHostsScreen()),
             ),
           ),
         ),
@@ -165,9 +165,7 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  const line = 'online now · Shell · network: host policy';
-
-  testWidgets('the host row says what isolation is, only when it is on', (
+  testWidgets('the selected host says what isolation is, only when it is on', (
     tester,
   ) async {
     await pumpHosts(tester, [
@@ -176,18 +174,23 @@ void main() {
       host('hst_down', isolation('unavailable', 'self_test')),
       host('hst_old', null),
     ]);
-    expect(find.text('$line\n$kRunsAsUnknown'), findsNWidgets(2));
-    expect(
-      find.text('$line\n$kRunsAsUnknown\n$kIsolationVerified'),
-      findsOneWidget,
-    );
-    expect(
-      find.text(
-        '$line\n$kRunsAsUnknown\nSession isolation unavailable (self-test '
-        'failed) — new sessions are refused',
-      ),
-      findsOneWidget,
-    );
+    const down =
+        'Session isolation unavailable (self-test failed) — new sessions are '
+        'refused';
+    for (final (id, says) in [
+      ('hst_off', null),
+      ('hst_ok', kIsolationVerified),
+      ('hst_down', down),
+      ('hst_old', null),
+    ]) {
+      final lines = await hostDetails(tester, id);
+      expect(lines, contains('an unknown account'), reason: id);
+      expect(
+        lines.where((l) => l.contains('isolat')),
+        says == null ? isEmpty : [says],
+        reason: id,
+      );
+    }
   });
 
   // Decision 151q: every row says who its host runs as, and identity only
@@ -208,18 +211,24 @@ void main() {
       ),
       host('hst_old', null, identity: 'unavailable'),
     ]);
-    expect(find.text('$line\nRuns as dewansh'), findsOneWidget);
-    expect(find.text('$line\nRuns as storm-runtime'), findsOneWidget);
+    expect(hostSub(tester, 'hst_me'), 'Runs as dewansh');
+    expect(hostSub(tester, 'hst_svc'), 'Runs as storm-runtime');
+    expect(hostSub(tester, 'hst_box'), 'Runs as storm-runtime');
+    expect(hostSub(tester, 'hst_nameless'), kRunsAsUnknown);
+    expect(hostSub(tester, 'hst_old'), kRunsAsUnknown);
     expect(
-      find.text('$line\nRuns as storm-runtime · each session isolated'),
-      findsOneWidget,
+      await hostDetails(tester, 'hst_box'),
+      contains('storm-runtime · each session isolated'),
     );
-    expect(find.text('$line\n$kRunsAsUnknown'), findsOneWidget);
+    expect(await hostDetails(tester, 'hst_me'), contains('dewansh'));
     expect(
-      find.text('$line\n$kRunsAsUnknown\n$kIdentityNotVerified'),
-      findsOneWidget,
+      await hostDetails(tester, 'hst_old'),
+      contains(kIdentityNotVerified),
     );
-    expect(find.textContaining(kIdentityNotVerified), findsOneWidget);
+    expect(
+      await hostDetails(tester, 'hst_svc'),
+      isNot(contains(kIdentityNotVerified)),
+    );
   });
 
   testWidgets('no non-sandbox host is called isolated, trusted, secure or '
@@ -234,11 +243,15 @@ void main() {
       r'isolated|trusted|secure|protected',
       caseSensitive: false,
     );
-    final said = [
+    final said = <String>[
       for (final w in tester.widgetList<Text>(find.byType(Text)))
         w.data ?? w.textSpan?.toPlainText() ?? '',
+      for (final id in ['hst_me', 'hst_svc', 'hst_old', 'hst_unverified'])
+        ...await hostDetails(tester, id),
     ];
-    expect(said.where((x) => x.contains('\nRuns as ')), hasLength(4));
+    for (final id in ['hst_me', 'hst_svc', 'hst_old', 'hst_unverified']) {
+      expect(hostSub(tester, id), startsWith('Runs as '), reason: id);
+    }
     expect(said.where(forbidden.hasMatch), isEmpty);
     for (final r in [
       ranAsLine(null),
@@ -251,3 +264,24 @@ void main() {
     }
   });
 }
+
+/// The selected host's lines under the grid, once its row is clicked.
+Future<List<String>> hostDetails(WidgetTester tester, String id) async {
+  final cell = find.byKey(Key('host-cell-$id'));
+  await tester.ensureVisible(cell);
+  await tester.pumpAndSettle();
+  await tester.tap(cell);
+  await tester.pumpAndSettle();
+  return [
+    for (final w in tester.widgetList<Text>(
+      find.descendant(
+        of: find.byKey(Key('host-details-$id')),
+        matching: find.byType(Text),
+      ),
+    ))
+      w.data ?? w.textSpan?.toPlainText() ?? '',
+  ];
+}
+
+String hostSub(WidgetTester tester, String id) =>
+    tester.widget<Text>(find.byKey(Key('host-sub-$id'))).data!;

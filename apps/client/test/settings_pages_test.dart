@@ -108,66 +108,78 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('Integrations, Claude login and Agents say Beta, in the nav '
-        'and on the page, and nothing else does', (tester) async {
+    const order = [
+      'This device',
+      'Terminal',
+      'Devices & access',
+      'Vaults',
+      'AI access',
+      'Agents & hosts',
+      'Integrations',
+      'Claude login',
+      'Storage',
+      'Connection',
+      'Advanced',
+      'About & health',
+    ];
+
+    testWidgets('desk: the nav is in its order, under STORM, with no Beta '
+        'tag (153-7)', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'device');
-      final beta = kSettingsPages.where((p) => p.beta).map((p) => p.id);
-      expect(beta, ['integrations', 'claude-login', 'agents']);
-      for (final p in kSettingsPages) {
-        expect(
-          find.descendant(
-            of: find.byKey(Key('settings-nav-${p.id}')),
-            matching: find.byType(BetaTag),
-          ),
-          p.beta ? findsOneWidget : findsNothing,
-          reason: p.id,
-        );
+      expect([for (final p in kSettingsPages) p.label], order);
+      expect([
+        for (final p in kSettingsPages.where((p) => p.storm)) p.label,
+      ], order.sublist(3, 11));
+      double top(String id) =>
+          tester.getTopLeft(find.byKey(Key('settings-nav-$id'))).dy;
+      final ids = [for (final p in kSettingsPages) p.id];
+      for (var i = 1; i < ids.length; i++) {
+        expect(top(ids[i - 1]), lessThan(top(ids[i])), reason: ids[i]);
       }
-      for (final id in beta) {
+      expect(
+        find.descendant(
+          of: find.byType(SettingsNav),
+          matching: find.byType(BetaTag),
+        ),
+        findsNothing,
+      );
+      for (final id in ['integrations', 'hosts']) {
         await open(tester, c, id);
         expect(
           find.descendant(
             of: find.byType(SettingsPage),
             matching: find.byType(BetaTag),
           ),
-          findsOneWidget,
+          findsNothing,
           reason: id,
         );
       }
-      await open(tester, c, 'storage');
-      expect(
-        find.descendant(
-          of: find.byType(SettingsPage),
-          matching: find.byType(BetaTag),
-        ),
-        findsNothing,
-      );
       await disposeShell(tester, c);
     });
 
-    testWidgets('phone: the list marks the beta pages', (tester) async {
+    testWidgets('phone: the list has no Beta tag', (tester) async {
       final c = shellContainer();
       await pumpShell(tester, c, size: phone);
       c.read(routerProvider).go(Routes.settings);
       await tester.pumpAndSettle();
-      for (final id in ['integrations', 'claude-login', 'agents']) {
-        final row = find.byKey(Key('settings-row-$id'));
-        await tester.ensureVisible(row);
-        expect(
-          find.descendant(of: row, matching: find.byType(BetaTag)),
-          findsOneWidget,
-          reason: id,
-        );
+      expect(find.byType(BetaTag), findsNothing);
+      expect(find.byKey(const Key('settings-row-agents')), findsNothing);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the old Agents page and /agents/hosts open Agents & hosts', (
+      tester,
+    ) async {
+      final c = shellContainer();
+      await pumpShell(tester, c, size: desk);
+      for (final old in ['/settings/agents', '/agents/hosts']) {
+        c.read(routerProvider).go(old);
+        await tester.pumpAndSettle();
+        expect(location(c), Routes.settingsPage('hosts'), reason: old);
+        expect(find.text('Agents & hosts'), findsWidgets);
       }
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('settings-row-ai')),
-          matching: find.byType(BetaTag),
-        ),
-        findsNothing,
-      );
       await disposeShell(tester, c);
     });
 
@@ -666,7 +678,7 @@ void main() {
     }
   });
 
-  group('Hosts & default agent', () {
+  group('Agents & hosts', () {
     (MockClient, List<http.Request>) agent({bool hosts = true}) {
       final seen = <http.Request>[];
       return (
@@ -703,37 +715,39 @@ void main() {
       );
     }
 
-    testWidgets('host rows and the default agent chips', (tester) async {
+    testWidgets('the grid, and a header click sets the default agent', (
+      tester,
+    ) async {
       final (client, seen) = agent();
       final c = shellContainer(agentClient: client);
       await pumpShell(tester, c, size: desk);
       await open(tester, c, 'hosts');
-      expect(find.text('build-vm'), findsOneWidget);
+      expect(find.byKey(const Key('agents-grid')), findsOneWidget);
       expect(
-        find.text(
-          'online now · Claude Code, Shell · network: host policy\n'
-          'Runs as dewansh',
-        ),
-        findsOneWidget,
+        tester.widget<Text>(find.byKey(const Key('host-sub-hst_1'))).data,
+        'Runs as dewansh',
       );
       expect(find.byKey(const Key('rename-host-hst_1')), findsOneWidget);
-      await tester.tap(find.text('OpenCode'));
+      await tester.tap(find.byKey(const Key('agent-head-opencode')));
       await tester.pumpAndSettle();
       final put = seen.where(
         (r) => r.method == 'PUT' && r.url.path == '/v1/config/agent',
       );
       expect(jsonDecode(put.single.body), {'default_provider': 'opencode'});
+      expect(find.byKey(const Key('default-tag-opencode')), findsOneWidget);
+      expect(find.byKey(const Key('default-tag-claude-code')), findsNothing);
       await disposeShell(tester, c);
     });
 
-    testWidgets('no hosts says so, and About & health offers Enroll', (
+    testWidgets('no hosts is one card, and About & health offers Enroll', (
       tester,
     ) async {
       final (client, _) = agent(hosts: false);
       final c = shellContainer(agentClient: client);
       await pumpShell(tester, c, size: phone);
       await open(tester, c, 'hosts');
-      expect(find.text('No hosts enrolled yet.'), findsOneWidget);
+      expect(find.byKey(const Key('hosts-empty')), findsOneWidget);
+      expect(find.text('No hosts yet'), findsOneWidget);
       await open(tester, c, 'health');
       expect(find.text('No hosts enrolled'), findsOneWidget);
       await tester.tap(find.text('Enroll'));

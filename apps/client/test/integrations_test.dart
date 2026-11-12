@@ -246,17 +246,47 @@ void main() {
       final (client, _) = server(suggestions: suggestions);
       await tester.pumpWidget(app(const IntegrationsScreen(), client));
       await tester.pumpAndSettle();
-      expect(find.text('FROM YOUR PLUGINS'), findsOneWidget);
+      expect(find.text('YOUR PLUGINS USE THESE'), findsOneWidget);
       expect(find.text('Slack'), findsOneWidget);
-      expect(find.text('Plugin slack on build-vm'), findsOneWidget);
+      expect(
+        find.text('https://mcp.slack.com/mcp · plugin slack on build-vm'),
+        findsOneWidget,
+      );
       expect(
         find.textContaining("registered to its vendor's app"),
         findsOneWidget,
       );
       expect(find.text('Jfrog Mcp'), findsOneWidget);
       expect(
-        find.textContaining(r'Needs its address: ${JFROG_URL}/mcp'),
+        find.textContaining('needs its address · plugin jfrog on build-vm'),
         findsOneWidget,
+      );
+      // The same row as a connected service: name, one mono line, then
+      // Connect and Dismiss.
+      Finder action(String key, String label) =>
+          find.descendant(of: find.byKey(Key(key)), matching: find.text(label));
+      expect(action('add-suggestion-slack-slack', 'Connect'), findsOneWidget);
+      expect(
+        action('add-suggestion-jfrog-jfrog-mcp', 'Connect…'),
+        findsOneWidget,
+      );
+      expect(
+        action('dismiss-suggestion-slack-slack', 'Dismiss'),
+        findsOneWidget,
+      );
+      final row = tester.widget<Container>(
+        find.byKey(const Key('suggestion-slack-slack')),
+      );
+      final tile = tester.widget<Container>(
+        find.byKey(const Key('integration-storm')),
+      );
+      expect(row.padding, tile.padding);
+      expect(row.decoration, tile.decoration);
+      double top(Finder f) => tester.getTopLeft(f).dy;
+      expect(
+        top(find.text('YOUR PLUGINS USE THESE')),
+        lessThan(top(find.byKey(const Key('add-integration')))),
+        reason: 'the buttons come after the plugin rows',
       );
     });
 
@@ -264,7 +294,7 @@ void main() {
       final (client, _) = server();
       await tester.pumpWidget(app(const IntegrationsScreen(), client));
       await tester.pumpAndSettle();
-      expect(find.text('FROM YOUR PLUGINS'), findsNothing);
+      expect(find.text('YOUR PLUGINS USE THESE'), findsNothing);
     });
 
     testWidgets('Add fills the dialog in, asks for a templated address, and '
@@ -525,35 +555,58 @@ void main() {
     expect(got!.scopes, ['chat:write', 'search:read']);
   });
 
-  testWidgets('an OAuth integration offers your own app, a token one does not, '
-      'and the web neither', (tester) async {
-    final slack = {
+  testWidgets('"Use your own OAuth app…" is a visible button that asks which '
+      'integration when there are several, and the web has none', (
+    tester,
+  ) async {
+    Map<String, dynamic> oauthItem(String id, String name) => {
       ...github(status: 'pending_auth'),
-      'id': 'mcc_SL',
-      'slug': 'slack',
-      'display_name': 'Slack',
+      'id': id,
+      'slug': name.toLowerCase(),
+      'display_name': name,
       'auth_kind': 'oauth',
     };
-    for (final (oauth, want) in [
-      (true, findsOneWidget),
-      (false, findsNothing),
-    ]) {
-      final (client, _) = server(items: [builtin(), slack, github()]);
-      await tester.pumpWidget(
-        app(const IntegrationsScreen(), client, oauth: oauth),
-      );
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('menu-mcc_SL')));
-      await tester.pumpAndSettle();
-      expect(find.text('Use your own app'), want);
-      await tester.tapAt(Offset.zero);
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('menu-mcc_GH')));
-      await tester.pumpAndSettle();
-      expect(find.text('Use your own app'), findsNothing);
-      await tester.tapAt(Offset.zero);
-      await tester.pumpAndSettle();
-    }
+    final (web, _) = server(items: [builtin(), oauthItem('mcc_SL', 'Slack')]);
+    await tester.pumpWidget(app(const IntegrationsScreen(), web, oauth: false));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('own-app')), findsNothing);
+    await tester.pumpWidget(const SizedBox());
+
+    final (client, _) = server(
+      items: [
+        builtin(),
+        oauthItem('mcc_SL', 'Slack'),
+        oauthItem('mcc_NO', 'Notion'),
+        github(),
+      ],
+    );
+    await tester.pumpWidget(app(const IntegrationsScreen(), client));
+    await tester.pumpAndSettle();
+    final button = find.byKey(const Key('own-app'));
+    expect(find.text('Use your own OAuth app…'), findsOneWidget);
+    double top(Finder f) => tester.getTopLeft(f).dy;
+    expect(
+      top(button),
+      closeTo(top(find.byKey(const Key('add-integration'))), 8),
+      reason: 'beside ＋ Add integration',
+    );
+    // Not hidden in a menu any more.
+    await tester.tap(find.byKey(const Key('menu-mcc_SL')));
+    await tester.pumpAndSettle();
+    expect(find.text('Use your own app'), findsNothing);
+    await tester.tapAt(Offset.zero);
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(button);
+    await tester.pumpAndSettle();
+    await tester.tap(button);
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('own-app-which')), findsOneWidget);
+    expect(find.byKey(const Key('own-app-pick-mcc_GH')), findsNothing);
+    await tester.tap(find.byKey(const Key('own-app-pick-mcc_NO')));
+    await tester.pumpAndSettle();
+    expect(find.byType(OwnAppDialog), findsOneWidget);
+    expect(find.textContaining('Notion'), findsWidgets);
   });
 
   testWidgets('on the web, an OAuth integration is reconnected from an app, '

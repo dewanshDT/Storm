@@ -10,12 +10,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/hosts_screen.dart';
+import 'package:storm/agent/agents_hosts_screen.dart';
 import 'package:storm/agent/session_screen.dart';
 import 'package:storm/ui/theme.dart';
 
 /// Decision 135d: a host or session whose identity is not verified says so,
-/// on the host row and in the session's Details.
+/// on the selected host under the grid (153-7).
 void main() {
   Map<String, dynamic> identity(String state, [String? reason]) => {
     'state': state,
@@ -102,15 +102,41 @@ void main() {
               data: MediaQuery.of(
                 context,
               ).copyWith(size: const Size(1280, 800)),
-              child: const Scaffold(body: HostsScreen()),
+              child: const Scaffold(body: AgentsHostsScreen()),
             ),
           ),
         ),
       ),
     );
     await tester.pumpAndSettle();
-    const line = 'online now · Shell · network: host policy\n$kRunsAsUnknown';
-    expect(find.text('$line\n$kIdentityNotVerified'), findsOneWidget);
-    expect(find.text(line), findsNWidgets(2));
+    for (final id in ['hst_old', 'hst_ok', 'hst_unknown']) {
+      expect(hostSub(tester, id), kRunsAsUnknown);
+      expect(
+        (await hostDetails(tester, id)).contains(kIdentityNotVerified),
+        id == 'hst_old',
+        reason: id,
+      );
+    }
   });
 }
+
+/// The selected host's lines under the grid, once its row is clicked.
+Future<List<String>> hostDetails(WidgetTester tester, String id) async {
+  final cell = find.byKey(Key('host-cell-$id'));
+  await tester.ensureVisible(cell);
+  await tester.pumpAndSettle();
+  await tester.tap(cell);
+  await tester.pumpAndSettle();
+  return [
+    for (final w in tester.widgetList<Text>(
+      find.descendant(
+        of: find.byKey(Key('host-details-$id')),
+        matching: find.byType(Text),
+      ),
+    ))
+      w.data ?? w.textSpan?.toPlainText() ?? '',
+  ];
+}
+
+String hostSub(WidgetTester tester, String id) =>
+    tester.widget<Text>(find.byKey(Key('host-sub-$id'))).data!;

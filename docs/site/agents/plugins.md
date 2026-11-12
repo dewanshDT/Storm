@@ -13,7 +13,7 @@ in (decision 132). Storm adds your
 A remote server can also be an integration, signed in once on your server
 and given to the hosts you choose, with Storm's audit and its question
 before each tool. Settings › Integrations lists your plugins' remote
-servers under **From your plugins** for that.
+servers under **Your plugins use these** for that.
 
 ## Agent by agent
 
@@ -74,8 +74,8 @@ themselves, so you add it with **your own Slack app**:
 > refuses Storm's redirect, or its server refuses your app's sign-in, please
 > [open an issue](https://github.com/dewanshDT/Storm/issues).
 
-1. In **Settings › Integrations**, find Slack under **From your plugins** and
-   choose **Add** (or add `https://mcp.slack.com/mcp` yourself), with
+1. In **Settings › Integrations**, find Slack under **Your plugins use these** and
+   choose **Connect** (or add `https://mcp.slack.com/mcp` yourself), with
    **Sign in**.
 2. Storm asks for your own app and shows the **redirect** to register.
 3. At [api.slack.com/apps](https://api.slack.com/apps), create an app in your
