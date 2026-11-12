@@ -15,6 +15,7 @@ import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/agent_widgets.dart';
 import 'package:storm/agent/launcher.dart';
+import 'package:storm/agent/agents_hosts_screen.dart';
 import 'package:storm/agent/hosts_screen.dart';
 import 'package:storm/agent/session_controller.dart';
 import 'package:storm/agent/terminal_events.dart';
@@ -772,19 +773,22 @@ void main() {
 
     setUp(() => SharedPreferences.setMockInitialValues({}));
 
-    testWidgets('hosts show their real status, providers and network line', (
+    testWidgets('a host row says who it runs as, and its agents by cell', (
       tester,
     ) async {
-      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
       await tester.pumpAndSettle();
-      expect(find.text('build-vm'), findsOneWidget);
-      // Freeze §12.2: the row says the host's network policy applies.
+      expect(find.text('build-vm'), findsWidgets);
       expect(
-        find.text(
-          'online now · Claude Code (not installed), Shell · '
-          'network: host policy\n$kRunsAsUnknown',
-        ),
-        findsOneWidget,
+        tester.widget<Text>(find.byKey(const Key('host-sub-hst_1'))).data,
+        kRunsAsUnknown,
+      );
+      // An older host without agent_install can't install Claude Code.
+      expect(
+        tester
+            .widget<Text>(find.byKey(const Key('cell-word-hst_1-claude-code')))
+            .data,
+        "Can't install",
       );
     });
 
@@ -841,86 +845,72 @@ void main() {
         return (client, puts);
       }
 
-      testWidgets('the row says them; the section shows the defaults and '
-          'depth read-only', (tester) async {
+      testWidgets('the selected host shows them as steppers', (tester) async {
         final (client, _) = limitsServer();
-        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpWidget(app(const AgentsHostsScreen(), client));
         await tester.pumpAndSettle();
+        String shown(String id) =>
+            tester.widget<Text>(find.byKey(Key('limit-$id'))).data!;
+        expect(shown('children'), '3');
+        expect(shown('tree'), '6');
+        expect(shown('sessions'), '8');
         expect(
-          find.textContaining(
-            'Limits: 3 agents per session · 6 per tree · 8 sessions at once',
+          find.text(
+            'Lowering a limit ends nothing that is running; it refuses new '
+            'starts.',
           ),
           findsOneWidget,
         );
-        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
-        await tester.pumpAndSettle();
-        expect(find.byKey(const Key('host-limits')), findsOneWidget);
-        expect(
-          tester.widget<Text>(find.byKey(const Key('limit-children'))).data,
-          '3',
-        );
-        expect(
-          tester.widget<Text>(find.byKey(const Key('limit-tree'))).data,
-          '6',
-        );
-        expect(find.text('The host’s own (8)'), findsOneWidget);
-        expect(
-          tester.widget<Text>(find.byKey(const Key('limit-depth'))).data,
-          'Depth: 1 level (agents can’t start their own agents yet)',
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('host-limits')),
-            matching: find.byType(TextField),
-          ),
-          findsOneWidget,
-          reason: 'depth is not a field',
-        );
+        expect(find.byType(AlertDialog), findsNothing);
       });
 
-      testWidgets('saving sends them all and the row follows', (tester) async {
+      testWidgets('each step saves them all at once', (tester) async {
         final (client, puts) = limitsServer();
-        await tester.pumpWidget(app(const HostsScreen(), client));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
+        await tester.pumpWidget(app(const AgentsHostsScreen(), client));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('limit-children-less')));
+        await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('limit-tree-more')));
-        await tester.enterText(find.byKey(const Key('limit-sessions')), '4');
-        await tester.tap(find.byKey(const Key('save-limits')));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const Key('limit-sessions-less')));
         await tester.pumpAndSettle();
         expect(puts, [
-          {'max_children': 2, 'max_tree': 7, 'max_sessions': 4},
+          {'max_children': 2, 'max_tree': 6, 'max_sessions': null},
+          {'max_children': 2, 'max_tree': 7, 'max_sessions': null},
+          {'max_children': 2, 'max_tree': 7, 'max_sessions': 7},
         ]);
-        expect(find.byKey(const Key('host-limits')), findsNothing);
         expect(
-          find.textContaining(
-            'Limits: 2 agents per session · 7 per tree · 4 sessions at once',
-          ),
-          findsOneWidget,
+          tester.widget<Text>(find.byKey(const Key('limit-sessions'))).data,
+          '7',
         );
+        // Back up to the host's own: the override goes.
+        await tester.tap(find.byKey(const Key('limit-sessions-more')));
+        await tester.pumpAndSettle();
+        expect(puts.last['max_sessions'], isNull);
       });
 
-      testWidgets('a refusal is shown and the section stays open', (
+      testWidgets('a tree below a session is refused before it is sent', (
         tester,
       ) async {
         final (client, puts) = limitsServer();
-        await tester.pumpWidget(app(const HostsScreen(), client));
+        await tester.pumpWidget(app(const AgentsHostsScreen(), client));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const Key('limits-host-hst_1')));
-        await tester.pumpAndSettle();
-        for (var i = 0; i < 4; i++) {
-          await tester.tap(find.byKey(const Key('limit-children-more')));
-          await tester.pump();
+        for (var i = 0; i < 3; i++) {
+          await tester.tap(find.byKey(const Key('limit-tree-less')));
+          await tester.pumpAndSettle();
         }
-        await tester.tap(find.byKey(const Key('save-limits')));
+        expect(puts.map((p) => p['max_tree']), [5, 4, 3]);
+        await tester.tap(find.byKey(const Key('limit-tree-less')));
         await tester.pumpAndSettle();
-        expect(puts.single['max_children'], 7);
+        expect(puts, hasLength(3), reason: 'refused here, never sent');
         expect(
           find.text('Agents per tree must be at least agents per session.'),
           findsOneWidget,
         );
-        expect(find.byKey(const Key('host-limits')), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('limit-tree'))).data,
+          '3',
+        );
       });
 
       test('an override above the host’s own is not in force', () {
@@ -941,29 +931,10 @@ void main() {
       });
     });
 
-    testWidgets('the enroll blurb points at the sheet, not a bare command', (
-      tester,
-    ) async {
-      await tester.pumpWidget(app(const HostsScreen(), server()));
-      await tester.pumpAndSettle();
-      expect(
-        find.textContaining(
-          'Enrolling shows a one-time string and the commands to run on the '
-          'machine. Paste the string when storm-runtime enroll asks for it.',
-          findRichText: true,
-        ),
-        findsOneWidget,
-      );
-      expect(
-        find.textContaining('on the machine and paste it', findRichText: true),
-        findsNothing,
-      );
-    });
-
     testWidgets('an enrollment string is shown once, with the command', (
       tester,
     ) async {
-      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('enroll-host')));
       await tester.pumpAndSettle();
@@ -986,7 +957,7 @@ void main() {
       tester,
     ) async {
       const full = 'storm-enroll:v1:http://s:srv_X:pk:sen_TOKEN.secret';
-      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('enroll-host')));
       await tester.pumpAndSettle();
@@ -1025,7 +996,7 @@ void main() {
     testWidgets('the enroll sheet shows one platform at a time and switches', (
       tester,
     ) async {
-      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('enroll-host')));
       await tester.pumpAndSettle();
@@ -1060,7 +1031,7 @@ void main() {
     testWidgets('on a Mac the enroll sheet opens on macOS', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       try {
-        await tester.pumpWidget(app(const HostsScreen(), server()));
+        await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('enroll-host')));
         await tester.pumpAndSettle();
@@ -1073,7 +1044,7 @@ void main() {
     testWidgets('on Windows the enroll sheet opens on Windows', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.windows;
       try {
-        await tester.pumpWidget(app(const HostsScreen(), server()));
+        await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(const Key('enroll-host')));
         await tester.pumpAndSettle();
@@ -1089,7 +1060,7 @@ void main() {
       tester,
     ) async {
       expect(EnrollShape.values, [EnrollShape.you, EnrollShape.service]);
-      await tester.pumpWidget(app(const HostsScreen(), server()));
+      await tester.pumpWidget(app(const AgentsHostsScreen(), server()));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('enroll-host')));
       await tester.pumpAndSettle();

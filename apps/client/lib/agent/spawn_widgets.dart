@@ -189,8 +189,7 @@ String startsAgentsText(AgentSession s, AgentOverview? o) {
   return why == null ? 'Off.' : 'Off. $why.';
 }
 
-/// Settings › hosts, where the limits are set (153-7 renames it Agents &
-/// hosts).
+/// Settings › Agents & hosts, where each host's limits are set.
 void openSpawnLimits(BuildContext context) =>
     GoRouter.of(context).go(Routes.settingsPage('hosts'));
 

@@ -375,13 +375,49 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
     await _with((api) => api.delete(i.id));
   }
 
+  /// "Use your own OAuth app…": the existing dialog, for the one OAuth
+  /// integration there is, or the one you pick (131e).
+  Future<void> _ownAppButton() async {
+    final oauth = [
+      for (final i in _items ?? const <Integration>[])
+        if (!i.builtin && i.authKind == 'oauth') i,
+    ];
+    if (oauth.isEmpty) {
+      _say(
+        'Add an integration that signs in with OAuth first, then use your own '
+        'app for it.',
+      );
+      return;
+    }
+    final chosen = oauth.length == 1
+        ? oauth.single
+        : await showDialog<Integration>(
+            context: context,
+            builder: (context) => SimpleDialog(
+              key: const Key('own-app-which'),
+              title: const Text('Use your own OAuth app for'),
+              children: [
+                for (final i in oauth)
+                  SimpleDialogOption(
+                    key: Key('own-app-pick-${i.id}'),
+                    onPressed: () => Navigator.of(context).pop(i),
+                    child: Text(i.displayName),
+                  ),
+              ],
+            ),
+          );
+    if (chosen == null || !mounted) return;
+    await _useOwnApp(chosen);
+  }
+
   @override
   Widget build(BuildContext context) {
+    final t = context.tokens;
     final items = _items;
     final names = {for (final h in _hosts ?? const <AgentHost>[]) h.id: h.name};
+    final canSignIn = ref.read(oauthSupportedProvider);
     return SettingsPage(
       title: 'Integrations',
-      beta: true,
       intro: 'Services your agents can use, such as Linear or GitHub.',
       children: [
         const InfoBox(
@@ -389,43 +425,30 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
           'can then use it. Anything an agent can read, it can send '
           'elsewhere.',
         ),
-        SizedBox(height: context.tokens.sp * 0.5),
+        SizedBox(height: t.sp * 0.5),
         if (_error != null)
           SettingsMuted(_error!, danger: true)
         else if (items == null)
           const SkeletonRows(rows: 3)
         else ...[
+          GroupLabel('Connected', top: t.sp * 1.5),
           for (final i in items)
             _IntegrationTile(
               integration: i,
               scope: hostScopeLabel(i.hosts, names),
               busy: _loading,
-              canSignIn: ref.read(oauthSupportedProvider),
+              canSignIn: canSignIn,
               onTest: () =>
                   _with((api) async => _reportCheck(await api.test(i.id))),
               onTools: () => _tools(i),
               onHosts: () => _chooseHosts(i),
               onReconnect: () => _reconnect(i),
-              onOwnApp: () => _useOwnApp(i),
               onToggle: () =>
                   _with((api) => api.update(i.id, enabled: i.disabled)),
               onDisconnect: () => _disconnect(i),
             ),
-          SettingsButtonRow(
-            child: StormButton.primary(
-              key: const Key('add-integration'),
-              label: '＋ Add integration',
-              onPressed: _loading ? null : _add,
-            ),
-          ),
           if (_suggestions.isNotEmpty) ...[
-            GroupLabel('From your plugins', top: context.tokens.sp * 1.5),
-            const SettingsNote(
-              "Your agents' plugins use these servers. A session reaches one "
-              'only once it is an integration.',
-              small: true,
-            ),
-            SizedBox(height: context.tokens.sp * 0.5),
+            GroupLabel('Your plugins use these', top: t.sp * 2.5),
             for (final s in _suggestions)
               _SuggestionTile(
                 suggestion: s,
@@ -435,6 +458,27 @@ class _IntegrationsScreenState extends ConsumerState<IntegrationsScreen> {
                 onDismiss: () => _dismissSuggestion(s),
               ),
           ],
+          SettingsButtonRow(
+            child: Wrap(
+              spacing: t.sp * 1.5,
+              runSpacing: t.sp,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                StormButton.primary(
+                  key: const Key('add-integration'),
+                  label: '＋ Add integration',
+                  onPressed: _loading ? null : _add,
+                ),
+                // Signing in needs a Storm app (G-D13): the browser can't.
+                if (canSignIn)
+                  StormButton.text(
+                    key: const Key('own-app'),
+                    label: 'Use your own OAuth app…',
+                    onPressed: _loading ? null : _ownAppButton,
+                  ),
+              ],
+            ),
+          ),
         ],
       ],
     );
@@ -464,12 +508,17 @@ class _SuggestionTile extends StatelessWidget {
     final t = context.tokens;
     final s = suggestion;
     final from = [
-      'Plugin ${s.plugin}',
+      'plugin ${s.plugin}',
       if (hosts.isNotEmpty) 'on ${hosts.join(', ')}',
     ].join(' ');
-    return Padding(
+    return Container(
       key: Key('suggestion-${s.plugin}-${s.server}'),
-      padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
+      padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: t.border, width: t.bw),
+        ),
+      ),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -479,38 +528,50 @@ class _SuggestionTile extends StatelessWidget {
               children: [
                 Text(
                   s.displayName,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontFamily: StormTokens.sansFamily,
                     fontSize: t.uiSize,
-                    fontWeight: FontWeight.w500,
                     color: t.text,
                   ),
                 ),
+                SizedBox(height: t.sp * 0.25),
                 Text(
-                  s.templated ? 'Needs its address: ${s.url}' : s.url,
-                  maxLines: 1,
+                  '${s.templated ? 'needs its address' : s.url} · $from',
+                  key: Key('suggestion-detail-${s.plugin}-${s.server}'),
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontFamily: StormTokens.monoFamily,
                     fontSize: t.labelSize,
                     color: t.text3,
+                    height: 1.45,
                   ),
                 ),
-                SettingsNote(from, small: true),
                 if (s.vendorClient)
-                  const SettingsNote(
-                    "This plugin's own sign-in is registered to its vendor's "
-                    'app; Storm signs in with its own registration or yours.',
-                    small: true,
+                  Padding(
+                    padding: EdgeInsets.only(top: t.sp * 0.5),
+                    child: Text(
+                      "This plugin's own sign-in is registered to its "
+                      "vendor's app; Storm signs in with its own registration "
+                      'or yours.',
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.labelSize * 1.09,
+                        color: t.text3,
+                        height: 1.45,
+                      ),
+                    ),
                   ),
               ],
             ),
           ),
+          SizedBox(width: t.sp * 1.5),
           RowActions(
             children: [
               TextAction(
                 key: Key('add-suggestion-${s.plugin}-${s.server}'),
-                label: 'Add',
+                label: s.templated ? 'Connect…' : 'Connect',
                 accent: true,
                 onTap: busy ? null : onAdd,
               ),
@@ -537,7 +598,6 @@ class _IntegrationTile extends StatelessWidget {
     required this.onTools,
     required this.onHosts,
     required this.onReconnect,
-    required this.onOwnApp,
     required this.onToggle,
     required this.onDisconnect,
   });
@@ -554,9 +614,6 @@ class _IntegrationTile extends StatelessWidget {
   final VoidCallback onTools;
   final VoidCallback onHosts;
   final VoidCallback onReconnect;
-
-  /// Signs in with an app the owner registered with the service (131e).
-  final VoidCallback onOwnApp;
   final VoidCallback onToggle;
   final VoidCallback onDisconnect;
 
@@ -705,8 +762,6 @@ class _IntegrationTile extends StatelessWidget {
                     onHosts();
                   case 'reconnect':
                     onReconnect();
-                  case 'own-app':
-                    onOwnApp();
                   case 'toggle':
                     onToggle();
                   default:
@@ -736,11 +791,6 @@ class _IntegrationTile extends StatelessWidget {
                         : 'Sign in again from a Storm app',
                   ),
                 ),
-                if (i.authKind == 'oauth' && canSignIn)
-                  const PopupMenuItem(
-                    value: 'own-app',
-                    child: Text('Use your own app'),
-                  ),
                 PopupMenuItem(
                   value: 'toggle',
                   child: Text(i.disabled ? 'Enable' : 'Disable'),
@@ -1133,7 +1183,7 @@ class _OwnAppDialogState extends State<OwnAppDialog> {
     return AlertDialog(
       title: Text('Sign in to ${widget.name} with your own app'),
       content: SizedBox(
-        width: 440,
+        width: t.sp * 55,
         child: ListView(
           shrinkWrap: true,
           children: [
@@ -1285,7 +1335,7 @@ class _ToolsDialogState extends State<_ToolsDialog> {
     return AlertDialog(
       title: Text('Tools of ${widget.integration.displayName}'),
       content: SizedBox(
-        width: 420,
+        width: t.sp * 52.5,
         child: ListView(
           shrinkWrap: true,
           children: [
@@ -1364,7 +1414,7 @@ class _HostsDialogState extends State<_HostsDialog> {
     return AlertDialog(
       title: Text('Hosts for ${widget.integration.displayName}'),
       content: SizedBox(
-        width: 420,
+        width: t.sp * 52.5,
         child: ListView(
           shrinkWrap: true,
           children: [

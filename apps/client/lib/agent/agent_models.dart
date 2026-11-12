@@ -20,6 +20,7 @@ class ProviderCap {
     this.checksumVerified = true,
     this.latest,
     this.loginCommand,
+    this.signedIn,
   });
 
   final String id;
@@ -51,6 +52,10 @@ class ProviderCap {
   /// into a Shell for the person to run. Null for an agent without one.
   final String? loginCommand;
 
+  /// Whether the host found it signed in; null while no host says, which
+  /// none does yet, so Storm can't tell and never claims either.
+  final bool? signedIn;
+
   bool get managed => source == 'storm';
 
   /// The host can give its sessions Storm's MCP (decision 130a); null from a
@@ -69,6 +74,7 @@ class ProviderCap {
     checksumVerified: j['checksum_verified'] as bool? ?? true,
     latest: j['latest'] as String?,
     loginCommand: j['login_command'] as String?,
+    signedIn: j['signed_in'] as bool?,
   );
 
   /// Its sessions can read your vaults and use your integrations: what the
@@ -403,7 +409,7 @@ const kIdentityNotVerified =
     "Session identity not verified — Storm can't tell which session is "
     'calling';
 
-/// The agents a host can install from Settings › Agents, in the page's
+/// The agents a host can install from Settings › Agents & hosts, in the grid's
 /// order (decision 133).
 const kInstallableAgents = [
   'claude-code',

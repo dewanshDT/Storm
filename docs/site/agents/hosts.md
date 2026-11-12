@@ -40,10 +40,11 @@ ways:
 | Agent CLIs and logins | yours | the account's, logged in once for it |
 
 **Runs as.** Every host tells the server which account it runs as. Its row in
-**Settings › Hosts**, and the launcher under **Where**, says so: *"Runs as
-storm-runtime"* for the Linux service, or *"Runs as"* and your own account
-name for a host you run as yourself. A host set to isolate sessions adds
-*"· each session isolated"*. A runtime too old to say, or one that can't name
+**Settings › Agents & hosts**, and the launcher under **Where**, says so:
+*"Runs as storm-runtime"* for the Linux service, or *"Runs as"* and your own
+account name for a host you run as yourself. Click the host to see its
+details under the grid; a host set to isolate sessions adds
+*"· each session isolated"* there. A runtime too old to say, or one that can't name
 its account, shows *"Runs as an unknown account"*. When a session starts,
 Storm keeps the account, isolation and identity the host had then, and the
 session's About shows them under **Ran as**, whatever the host says later.
@@ -122,29 +123,32 @@ agent.
 
 A host that is not `verified` — macOS, Windows, a Linux host missing a
 precondition, or a runtime too old to say — shows *"Session identity not
-verified — Storm can't tell which session is calling"* as an extra line on
-its row in **Settings › Hosts**. A verified host shows no identity line. That is a
+verified — Storm can't tell which session is calling"* as an extra line in
+its details in **Settings › Agents & hosts**. A verified host shows no
+identity line. That is a
 disclosure, not a restriction: every tool keeps working there. Each of an
 agent's calls to Storm or an integration is audited as `verified` or
 `unverified`, and a connection the host refused is recorded on the server as
 an `identity_mismatch` event on the session it named.
 
-**Enrolling** is the same everywhere: in the app, open **Settings › Hosts &
-default agent › Enroll a host**, then paste the one-time string at the host's
+**Enrolling** is the same everywhere: in the app, open **Settings › Agents &
+hosts › ＋ Enroll a host**, then paste the one-time string at the host's
 `enroll` prompt. For the platform you pick, the sheet lists two sets of
 commands: **As you** first, then **As its own account**.
 
 ## Limits
 
-Each host has **Limits**, which you set from **Settings › Hosts & default
-agent › Limits** on its row. Storm keeps them on your server; nothing is
-written to the host, its `runtime.toml` or any agent's settings.
+Each host has **Limits**, which you set in **Settings › Agents & hosts**:
+click the host, and its limits are steppers under the grid (**Agents per
+session**, **Per tree**, **Sessions at once**). Each step is saved at once.
+Storm keeps them on your server; nothing is written to the host, its
+`runtime.toml` or any agent's settings.
 
 | Limit | Default | Range | What it counts |
 |---|---|---|---|
 | **Agents per session** | 3 | 1–10 | Agents one session has running at a time |
 | **Agents per tree** | 6 | 1–24 | Sessions running in one tree: the session you started and every agent under it. At least agents per session |
-| **Concurrent sessions** | the host's own | 1 or more | Sessions running on the host. It can only lower the host's `max_sessions`: a number above it is kept, and the host's number stays in force |
+| **Sessions at once** | the host's own | 1 or more | Sessions running on the host. It can only lower the host's `max_sessions`: stepping back up to the host's own number clears it, and a number above it is kept with the host's number in force |
 | **Depth** | 1 level | not adjustable | Agents a session starts can't start their own agents yet |
 
 Lowering a limit ends and pauses nothing: what is running keeps running,
@@ -153,12 +157,63 @@ applies to the next start. Only you can change them, signed in on a paired
 device: no MCP key, host credential or agent can. Every change is recorded
 on your server, with the old and new values.
 
-## Installing agents from the app
+## Revoking, removing and re-enrolling
 
-**Settings › Agents** (beta) lists every agent on every host, with its version
-and whether you or Storm installed it, and can **Install**, **Update** and
-**Remove** Claude Code, OpenCode, Codex, Cursor and Command Code on a Linux or
-macOS host. No sudo and no terminal:
+Click a host in **Settings › Agents & hosts**, then **Revoke…**, and confirm
+in the strip that opens. Its sessions end and it can no longer connect: the
+host renames `host.json` to `host.json.revoked` and stays stopped.
+
+A revoked host keeps one dimmed row, *"It can't connect again."*, with two
+actions:
+
+- **Re-enroll…** issues a one-time string for that host, shown once with the
+  same commands as **Enroll a host**. Run `storm-runtime enroll` on the
+  machine and paste it: the host comes back under its old name, id and
+  limits, with a new key.
+- **Remove** takes it off the list, after you confirm in the row. Its ended
+  sessions stay, under its name.
+
+A server older than this release has neither, and the row shows neither.
+
+## Agents & hosts: installing and signing in
+
+**Settings › Agents & hosts** is one grid: a row per host and a column per
+agent (Claude Code, OpenCode, Codex, Cursor and Command Code). Each cell is
+one word for that agent on that host, with its version or the reason under
+it:
+
+| Word | What it means |
+|---|---|
+| **Ready** | Installed. Sessions on the host can use it. Storm can't yet see whether an agent is signed in, so its details still offer **Sign in in a Shell** |
+| **Sign in** | Installed, and its host reports it is not signed in |
+| **Update** | Storm installed it and a newer version is available |
+| **Install** | Not installed, and the host can install it |
+| **Installing** | Being installed (or updated or removed), with its step and a bar |
+| **Can't install** | The host can't install it, with the reason, such as *needs Node 22* |
+| **—** | The host is offline |
+
+Only the words you can act on are in the accent colour. The agent with the
+`default` tag is the one a new session starts with; click another agent's
+name to make it the default.
+
+Click a cell for its details: the version and who installed it, what the
+state means for sessions, and the one fix, **Install**, **Update** or
+**Sign in in a Shell**. **Remove** is there too for a copy Storm installed.
+A copy you installed yourself says *"Installed outside Storm, so Storm won't
+update or remove it."* On a phone the grid is a list per host, and a row
+opens the same details as a sheet. At a narrow window the host column stays
+put and the agents scroll sideways.
+
+**Sign in in a Shell** opens a Shell session on that host with the agent's
+own sign-in command typed in (`claude auth login`, `opencode auth login`,
+`codex login`, `cursor-agent login` or `command-code login`), and takes you
+to it. Nothing runs until you press Enter. A host whose `storm-runtime` is
+too old to type a command shows the command with **Copy** and **Open a Shell
+on** the host instead. On a host that runs each session as its own user,
+signing in inside a session would not last, so the cell says to sign in on
+the host itself and shows the command.
+
+Installing needs no sudo and no terminal, on a Linux or macOS host:
 
 - The host installs into its own folder, `agents/managed` under its state
   directory. On the service it comes first on the search path; on a host
@@ -167,7 +222,7 @@ macOS host. No sudo and no terminal:
   and Storm only ever updates or removes its own copies.
 - The host downloads from each vendor's own release channel and checks the
   checksum the vendor publishes; a download that does not match is never
-  installed. Cursor publishes no checksum, and its row says so.
+  installed. Cursor publishes no checksum, and its details say so.
 - Codex and Command Code install through npm, so they need Node.js on the
   host (Command Code needs Node 22).
 - A running session keeps the version it started with; the next one gets the
@@ -175,9 +230,8 @@ macOS host. No sudo and no terminal:
 - Once a day the host checks for newer versions and updates what it
   installed while none of that agent's sessions is running. Every install,
   update and removal, automatic or not, is recorded on your server.
-- Signing in stays the agent's own: Claude Code from **Settings › Claude
-  login**, the others from a shell session on the host (`opencode auth
-  login`, `codex login --device-auth`, `cursor-agent login`).
+- Claude Code can also use the login you sync from **Settings › Claude
+  login**.
 
 To turn this off for a host, or keep its versions where they are, set in
 its `runtime.toml`:
@@ -199,7 +253,7 @@ sudo apt install storm-runtime
 # Workspaces are the directories under /var/lib/storm-runtime/workspaces.
 # Make one here, or later from the launcher's "New workspace…".
 sudo -u storm-runtime mkdir /var/lib/storm-runtime/workspaces/myproject
-# In the app: Settings › Hosts & default agent › Enroll a host. Paste the string here:
+# In the app: Settings › Agents & hosts › Enroll a host. Paste the string here:
 sudo -u storm-runtime storm-runtime enroll
 sudo systemctl enable --now storm-runtime
 sudo -u storm-runtime storm-runtime check        # proves the whole path
@@ -315,7 +369,7 @@ OpenCode an API key, or one of its free models. A session with none of these
 fails with `credential_unavailable` rather than using your login. The agents
 Storm installs belong to a separate `storm-install` account while isolation
 is on: sessions can run them but not change them, and installs and updates
-from Settings › Agents run as that account.
+from Settings › Agents & hosts run as that account.
 
 Each isolated session reaches Storm through **its own bridge socket**, in
 its own session directory, which only it and the host can open; the host
@@ -421,7 +475,7 @@ sudo./storm-runtime install
 **The job does not run yet.** launchd keeps it alive only while
 `state/host.json` exists, so an unenrolled host never runs.
 
-**Enroll.** In the app: Settings › Hosts & default agent › Enroll a host. Then paste
+**Enroll.** In the app: Settings › Agents & hosts › Enroll a host. Then paste
 the string at this prompt:
 
 ```sh
@@ -634,7 +688,7 @@ Expand-Archive -Force $env:TEMP\storm-runtime.zip $env:TEMP\storm-runtime
   prints the line for yours.
 
 **Enroll**, still as administrator (no one can run as a virtual account), and
-paste the string from Settings › Hosts & default agent › Enroll a host at the
+paste the string from Settings › Agents & hosts › Enroll a host at the
 prompt. Enrolling starts the service and makes it start with Windows:
 
 ```powershell
@@ -762,7 +816,7 @@ distributions without the `.deb`):
 ```sh
 tar -xzf storm-runtime-<version>-x86_64-linux.tar.gz
 ./storm-runtime install --user
-# In the app: Settings › Hosts & default agent › Enroll a host. Paste the string here:
+# In the app: Settings › Agents & hosts › Enroll a host. Paste the string here:
 ~/.local/bin/storm-runtime enroll
 systemctl --user start storm-runtime
 ~/.local/bin/storm-runtime check
@@ -965,7 +1019,7 @@ old one. Both can run on one machine while you switch.
 1. **Install and enroll the new host as yourself**, with the steps for your
    platform: [Linux](#as-yourself-on-linux), [Mac](#as-yourself-on-a-mac) or
    [Windows](#as-yourself-on-windows). The installer keeps a host installed
-   as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Hosts** as
+   as the service running that way, so pass it `--user` (`-User`) here. It appears in **Settings › Agents & hosts** as
    a second host, *"Runs as"* your account. Both take the machine's name
    unless you pass `enroll --name`, so rename one there to tell them apart.
 2. **Give it your workspaces.** A new `runtime.toml` names `workspaces` in
@@ -975,9 +1029,10 @@ old one. Both can run on one machine while you switch.
    projects you want into your own root.
 3. **Log your agent CLIs in as yourself**, if they are not already. The
    service account's logins stay with it.
-4. **Revoke the old host** from its row in **Settings › Hosts**. Its running
-   sessions end and show as failed, *"host revoked"*; it stops, and stays
-   stopped.
+4. **Revoke the old host** in **Settings › Agents & hosts**: click it, then
+   **Revoke…** and confirm. Its running sessions end and show as failed,
+   *"host revoked"*; it stops, and stays stopped. **Remove** on its row then
+   takes it off the list.
 5. **Remove the old service**:
    - **Linux:** `sudo systemctl disable --now storm-runtime`. Keep the
      package if your own unit runs its `/usr/bin/storm-runtime`;

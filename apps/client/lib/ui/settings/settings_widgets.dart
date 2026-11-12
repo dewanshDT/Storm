@@ -20,6 +20,8 @@ class SettingsPage extends StatelessWidget {
     required this.intro,
     required this.children,
     this.beta = false,
+    this.action,
+    this.broad = false,
   });
 
   final String title;
@@ -28,6 +30,12 @@ class SettingsPage extends StatelessWidget {
 
   /// Shows [BetaTag] beside the title.
   final bool beta;
+
+  /// The page's own action, at the title's right.
+  final Widget? action;
+
+  /// The 680 column (a grid's page, 153-7) instead of 600.
+  final bool broad;
 
   @override
   Widget build(BuildContext context) {
@@ -41,6 +49,7 @@ class SettingsPage extends StatelessWidget {
           spacing: t.sp * 1.25,
           children: [
             Flexible(
+              fit: action == null ? FlexFit.loose : FlexFit.tight,
               child: Text(
                 title,
                 style: TextStyle(
@@ -53,6 +62,7 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
             if (beta) const BetaTag(),
+            ?action,
           ],
         ),
         SizedBox(height: t.sp * 1.25),
@@ -97,7 +107,7 @@ class SettingsPage extends StatelessWidget {
           Align(
             alignment: Alignment.topLeft,
             child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: t.sp * 75),
+              constraints: BoxConstraints(maxWidth: t.sp * (broad ? 85 : 75)),
               child: body,
             ),
           ),

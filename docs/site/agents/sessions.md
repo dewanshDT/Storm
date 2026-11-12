@@ -127,7 +127,7 @@ crew**), its **Role** (with **Change label**), whether it **Starts agents**
 and within what limits, who it **Ran as**, and who **Started** it. A plugin
 server the host left out is one line there, with **Fix in Integrations ›**.
 The agent, workspace, model and mode are on the header's second line, and a
-host's identity and isolation on its row in **Settings › Hosts**.
+host's identity and isolation in its details in **Settings › Agents & hosts**.
 
 **Agents** lists the agents the session started, each with its state in a
 word (**Needs you**, **Running**, **Parked** or **Ended**), why, and **Open**

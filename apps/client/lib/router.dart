@@ -360,6 +360,8 @@ String? _shellRedirect(GoRouterState state, Ref ref) {
   if (path == '/settings/server') return Routes.settingsPage('vaults');
   if (path == '/settings/mcp-keys') return Routes.settingsPage('access');
   if (path == '/agents/hosts') return Routes.settingsPage('hosts');
+  // Settings › Agents became Agents & hosts (153-7).
+  if (path == '/settings/agents') return Routes.settingsPage('hosts');
   if (seg.length == 4 && seg[0] == 'v' && seg[2] == 'settings') {
     return Routes.settingsPage(seg[3] == 'client' ? 'device' : 'vaults');
   }

@@ -204,7 +204,7 @@ void main() {
     });
   });
 
-  testWidgets('Hosts are a Settings page, reached from the list', (
+  testWidgets('Agents & hosts is a Settings page, reached from the list', (
     tester,
   ) async {
     final c = shellContainer(
@@ -216,7 +216,7 @@ void main() {
     await tester.tap(find.byKey(const Key('settings-row-hosts')));
     await tester.pumpAndSettle();
     expect(location(c), Routes.settingsPage('hosts'));
-    expect(find.text('Hosts & default agent'), findsOneWidget);
+    expect(find.text('Agents & hosts'), findsOneWidget);
     await disposeShell(tester, c);
   });
 }

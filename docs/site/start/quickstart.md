@@ -63,8 +63,8 @@ Every device gets its own credential, and you can sign any of them out from
 
 Agents run on a **Runtime Host**: the server's own machine or another one. If
 you chose a Runtime Host in the installer, it is enrolled already. Otherwise
-install `storm-runtime` on that machine, open **Settings › Hosts & default
-agent › Enroll a host**, and give the host the one-time string it shows.
+install `storm-runtime` on that machine, open **Settings › Agents & hosts ›
+Enroll a host**, and give the host the one-time string it shows.
 
 A host runs one of two ways ([Runtime Hosts](/docs/agents/hosts/#two-ways-to-run-it)):
 
@@ -78,7 +78,7 @@ A host runs one of two ways ([Runtime Hosts](/docs/agents/hosts/#two-ways-to-run
   `--runtime --service` (`-Runtime -Service`). Log the agent CLIs in once
   on the host, as that account.
 
-**Settings › Hosts** shows which account each host runs as.
+**Settings › Agents & hosts** shows which account each host runs as.
 
 Then press **Start session** on a note, or **New session** in Agents. A
 session runs Claude Code, OpenCode, Codex or a shell in a workspace on the

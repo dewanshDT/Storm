@@ -26,13 +26,14 @@ service's **MCP server address**, then choose how Storm signs in:
   GitHub, use a fine-grained token.
 - **No sign-in** — for public servers that need no credential.
 
-### From your plugins
+### Your plugins use these
 
 When your agents' plugins use remote MCP servers — the Slack plugin, for
-one — they appear under **From your plugins**, with the plugin and the hosts
-that use it. The plugin's agent can already sign in to it on each host; as
-an integration it is signed in once, for every host you choose. **Add**
-fills in the name and address (asking for the address when the
+one — they appear under **Your plugins use these**, below your connected
+services and in the same rows: the server's address (or *needs its
+address*), the plugin and the hosts that use it. The plugin's agent can
+already sign in to it on each host; as an integration it is signed in once,
+for every host you choose. **Connect** fills in the name and address (asking for the address when the
 plugin builds it from its host's settings), keeps its tools under the
 plugin's own names in Claude Code, and starts it on the hosts that reported
 it. **Dismiss** hides it. Hosts report only a server's address and, at most,
@@ -42,8 +43,9 @@ the *name* of a header it needs — never a value.
 
 Most services let Storm register itself when you sign in. Some, such as
 Slack, don't: they only accept an app you create in their developer
-settings. Storm then asks for **your own app**, which you can also choose
-from an integration's **⋯ › Use your own app**:
+settings. Storm then asks for **your own app**. You can also choose it with
+**Use your own OAuth app…**, beside **＋ Add integration**; with more than one
+integration that signs in, it asks which one first:
 
 1. Create an app in the service's developer settings.
 2. Add the **redirect** Storm shows to the app's redirect URLs. Use **Copy**:
