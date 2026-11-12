@@ -10,9 +10,11 @@ import '../panels.dart' show MonoTag;
 import '../shell/storm_scaffold.dart';
 import '../shell/app_bar.dart' show pageTopInset;
 import '../tokens.dart';
+import '../widgets.dart' show ReadingMeasure;
 
-/// A page's frame: the 680 column beside the navigation at desk width; on a
-/// phone, a pushed screen under the corner bubbles with "‹ Settings" first.
+/// A page's frame: the whole pane beside the navigation at desk width, the
+/// intro held to a reading measure; on a phone, a pushed screen under the
+/// corner bubbles with "‹ Settings" first.
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
     super.key,
@@ -21,7 +23,6 @@ class SettingsPage extends StatelessWidget {
     required this.children,
     this.beta = false,
     this.action,
-    this.broad = false,
   });
 
   final String title;
@@ -33,9 +34,6 @@ class SettingsPage extends StatelessWidget {
 
   /// The page's own action, at the title's right.
   final Widget? action;
-
-  /// The 680 column (a grid's page, 153-7) instead of 600.
-  final bool broad;
 
   @override
   Widget build(BuildContext context) {
@@ -66,13 +64,15 @@ class SettingsPage extends StatelessWidget {
           ],
         ),
         SizedBox(height: t.sp * 1.25),
-        Text(
-          intro,
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.uiSize,
-            color: t.text2,
-            height: 1.5,
+        ReadingMeasure(
+          child: Text(
+            intro,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.uiSize,
+              color: t.text2,
+              height: 1.5,
+            ),
           ),
         ),
         SizedBox(height: wide ? t.sp * 2.25 : t.sp * 2),
@@ -103,15 +103,7 @@ class SettingsPage extends StatelessWidget {
           t.sp * 5,
           t.sp * 7.5,
         ),
-        children: [
-          Align(
-            alignment: Alignment.topLeft,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: t.sp * (broad ? 85 : 75)),
-              child: body,
-            ),
-          ),
-        ],
+        children: [body],
       ),
     );
   }

@@ -327,17 +327,7 @@ class _TrashViewState extends ConsumerState<TrashView> {
             ? t.sp * 3
             : StormChrome.navClearance(context),
       ),
-      children: [
-        Align(
-          alignment: Alignment.topLeft,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: wide ? t.sp * 80 : double.infinity,
-            ),
-            child: body,
-          ),
-        ),
-      ],
+      children: [body],
     );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
