@@ -2,6 +2,8 @@ import Cocoa
 import FlutterMacOS
 
 class MainFlutterWindow: NSWindow {
+  private var frameObservers: [NSObjectProtocol] = []
+
   override func awakeFromNib() {
     let flutterViewController = FlutterViewController()
     let windowFrame = self.frame
@@ -33,7 +35,20 @@ class MainFlutterWindow: NSWindow {
         forName: name, object: self, queue: .main
       ) { [weak self] _ in self?.placeTrafficLights() }
     }
+    // AppKit also moves them back on any title bar layout, focused or not,
+    // so follow the views themselves.
+    for view in [
+      standardWindowButton(.closeButton),
+      standardWindowButton(.closeButton)?.superview?.superview,
+    ].compactMap({ $0 }) {
+      view.postsFrameChangedNotifications = true
+      frameObservers.append(
+        NotificationCenter.default.addObserver(
+          forName: NSView.frameDidChangeNotification, object: view, queue: .main
+        ) { [weak self] _ in self?.placeTrafficLights() })
+    }
     placeTrafficLights()
+    DispatchQueue.main.async { [weak self] in self?.placeTrafficLights() }
   }
 
   /// The traffic lights at x 20, centred 2px below the middle of the bar,
@@ -49,15 +64,16 @@ class MainFlutterWindow: NSWindow {
     var frame = titlebar.frame
     frame.size.height = barHeight
     frame.origin.y = self.frame.height - barHeight
-    titlebar.frame = frame
+    if titlebar.frame != frame { titlebar.frame = frame }
 
     let spacing = mini.frame.minX - close.frame.minX
     let centreFromBottom = barHeight / 2 - 1
     for (i, button) in [close, mini, zoom].enumerated() {
-      button.setFrameOrigin(
-        NSPoint(
-          x: 20 + CGFloat(i) * spacing,
-          y: centreFromBottom - button.frame.height / 2))
+      let origin = NSPoint(
+        x: 20 + CGFloat(i) * spacing,
+        y: centreFromBottom - button.frame.height / 2)
+      // Setting an unchanged origin would post another frame change.
+      if button.frame.origin != origin { button.setFrameOrigin(origin) }
     }
   }
 }
