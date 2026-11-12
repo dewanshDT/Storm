@@ -1,13 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/semantics.dart' show CustomSemanticsAction;
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
 import '../ui/session_status.dart';
 import '../ui/shell/nav_bubble.dart' show StormPill;
+import '../ui/shell/sidebar_rows.dart' show UnseenDot;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
-import 'crew_widgets.dart' show RoleTagRow;
-import 'spawn_widgets.dart' show AttentionTag, childWorkspaceLabel;
+import 'agent_state.dart' show AgentOverview;
+import 'crew_widgets.dart' show CrewDots, RoleTagRow;
+import 'sidebar_rules.dart';
+import 'spawn_widgets.dart' show childWorkspaceLabel;
 
 /// The pieces every agent surface draws a session with: the sidebar, the
 /// overview, the phone list and the session itself say the same words.
@@ -143,9 +147,11 @@ String sessionMeta(AgentSession s, String hostName) {
 }
 
 /// One session in a list: its agent's mark, its name, and a mono line under
-/// it. The sidebar's rows are tighter and fill when selected; the phone's
-/// are separated by hairlines (handoff §2.6, §2.8; D15 AM44).
-class SessionRow extends StatelessWidget {
+/// it (handoff §2.6, §2.8; D15 AM44). One signal per channel (153e): the
+/// outline is for what needs you, the mark's badge for what the agent is
+/// doing, the sub-line for why, in words. The sidebar's rows are tighter
+/// and fill when selected; the phone's are separated by hairlines.
+class SessionRow extends StatefulWidget {
   const SessionRow({
     super.key,
     required this.session,
@@ -153,7 +159,14 @@ class SessionRow extends StatelessWidget {
     required this.onTap,
     this.selected = false,
     this.phone = false,
-    this.lineage,
+    this.overview,
+    this.tier,
+    this.now,
+    this.fromParent,
+    this.showHost = false,
+    this.unread = false,
+    this.tree,
+    this.onMenu,
     this.onLongPress,
   });
 
@@ -163,24 +176,127 @@ class SessionRow extends StatelessWidget {
   final bool selected;
   final bool phone;
 
-  /// A spawned child's "↳ from …" in place of the sub-line (134l).
-  final String? lineage;
+  /// Names whoever it is blocked on.
+  final AgentOverview? overview;
+
+  /// Its tier as the list sorted it; its own otherwise.
+  final SidebarTier? tier;
+  final DateTime? now;
+
+  /// The parent it is listed apart from (another crew or section): "from
+  /// {parent}" leads the sub-line, with no indent.
+  final AgentSession? fromParent;
+
+  /// Name the host: sessions run on more than one.
+  final bool showHost;
+
+  /// Output past what this device last showed.
+  final bool unread;
+
+  /// It started agents listed under it: their chevron and, folded, their
+  /// roll-up.
+  final TreeFold? tree;
+
+  /// The ··· on hover, and a right-click, open its menu at the anchor.
+  final void Function(GlobalKey anchor)? onMenu;
 
   /// The phone's crew and role sheet (decision 138n).
   final VoidCallback? onLongPress;
 
   @override
+  State<SessionRow> createState() => _SessionRowState();
+}
+
+/// A tree parent's fold: how many are under it and, folded, their most
+/// urgent state.
+class TreeFold {
+  const TreeFold({
+    required this.size,
+    required this.collapsed,
+    required this.onToggle,
+    this.rollUp,
+  });
+
+  final int size;
+  final bool collapsed;
+  final VoidCallback onToggle;
+  final RollUp? rollUp;
+}
+
+class _SessionRowState extends State<SessionRow> {
+  final _anchor = GlobalKey();
+  bool _hover = false;
+
+  Color _tone(StormTokens t, SubTone tone) => switch (tone) {
+    SubTone.plain => t.text3,
+    SubTone.loud => t.text,
+    SubTone.quiet => t.text2,
+    SubTone.danger => t.danger,
+    SubTone.accent => t.accent,
+  };
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final s = session;
-    final radius = BorderRadius.circular(phone ? 0 : t.rControl);
-    final subStyle = agentMono(t);
+    final s = widget.session;
+    final phone = widget.phone;
+    final now = widget.now ?? DateTime.now();
+    final tier = widget.tier ?? tierOf(s, now);
+    final tree = widget.tree;
+    final folded = tree != null && tree.collapsed && tree.size > 0;
+    final roll = folded ? tree.rollUp : null;
+    final rolled = roll != null && roll.tier.index < tier.index;
+    final outlined = tier == SidebarTier.needsYou || (rolled && roll.outlined);
+    final reason = reasonLine(s, now: now, tier: tier, o: widget.overview);
+    final quietName =
+        s.ended ||
+        tier == SidebarTier.parked ||
+        tier == SidebarTier.outOfUsage ||
+        tier == SidebarTier.unknown;
+
+    final subBase = agentMono(t);
+    Widget subLine() {
+      final lead = folded
+          ? '${tree.size} ${tree.size == 1 ? 'agent' : 'agents'}'
+          : null;
+      if (rolled) {
+        return _Line(
+          '$lead · ${roll.words}',
+          agentMono(t, color: roll.loud ? t.danger : t.text2),
+        );
+      }
+      if (reason != null) {
+        return _Line(
+          [?lead, reason.text].join(' · '),
+          agentMono(t, color: _tone(t, reason.tone)),
+        );
+      }
+      return SessionSubLine(
+        session: s,
+        host: widget.showHost ? widget.host : null,
+        lead: [
+          ?lead,
+          if (widget.fromParent case final p?) 'from ${p.displayName}',
+        ],
+        details: false,
+        style: subBase,
+      );
+    }
+
+    final radius = BorderRadius.circular(phone && !outlined ? 0 : t.rControl);
+    final base = widget.selected ? t.surface2 : Colors.transparent;
+    final fill = outlined
+        ? Color.alphaBlend(
+            t.danger.withValues(alpha: 0.09),
+            widget.selected ? t.surface2 : (phone ? t.bg : t.surface),
+          )
+        : base;
     final content = Row(
       children: [
         AgentMark(
           session: s,
           size: t.sp * (phone ? 4.5 : 4),
-          background: selected ? t.surface2 : (phone ? t.bg : t.surface),
+          background: widget.selected ? t.surface2 : (phone ? t.bg : t.surface),
         ),
         SizedBox(width: t.sp * (phone ? 1.5 : 1.25)),
         Expanded(
@@ -188,64 +304,104 @@ class SessionRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Row(
-                children: [
-                  Flexible(
-                    child: RoleTagRow(
-                      name: s.displayName,
-                      role: s.role,
-                      launchRole: s.launchRole,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: phone ? t.uiSize : t.codeSize,
-                        color: s.ended ? t.text2 : t.text,
-                      ),
-                    ),
-                  ),
-                  if (!s.ended && s.spawn.needsAttention != null) ...[
-                    SizedBox(width: t.sp * 0.75),
-                    Flexible(child: AttentionTag(kind: s.spawn.needsAttention)),
-                  ],
-                ],
+              RoleTagRow(
+                name: s.displayName,
+                role: s.role,
+                launchRole: s.launchRole,
+                dot: widget.unread
+                    ? UnseenDot(
+                        key: Key('unread-${s.id}'),
+                        message: UnseenDot.sessionMessage,
+                      )
+                    : null,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: phone ? t.uiSize : t.codeSize,
+                  color: quietName ? t.text2 : t.text,
+                ),
               ),
               SizedBox(height: t.sp * (phone ? 0.25 : 0.125)),
-              if (lineage case final line?)
-                Text(
-                  line,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: subStyle,
-                )
-              else
-                SessionSubLine(session: s, host: host, style: subStyle),
+              KeyedSubtree(key: Key('sub-${s.id}'), child: subLine()),
             ],
           ),
         ),
+        // Folded, or under the pointer: an open tree shows no chevron, as
+        // the handoff draws it.
+        if (tree != null && tree.size > 0 && (tree.collapsed || _hover)) ...[
+          SizedBox(width: t.sp * 0.5),
+          ExcludeSemantics(
+            child: GestureDetector(
+              key: Key('tree-chevron-${s.id}'),
+              behavior: HitTestBehavior.opaque,
+              onTap: tree.onToggle,
+              child: SizedBox(
+                width: t.sp * 2,
+                height: t.sp * 2.5,
+                child: Icon(
+                  tree.collapsed
+                      ? LucideIcons.chevron_right
+                      : LucideIcons.chevron_down,
+                  size: t.labelSize,
+                  color: t.text3,
+                ),
+              ),
+            ),
+          ),
+        ],
+        if (widget.onMenu != null && _hover) ...[
+          SizedBox(width: t.sp * 0.5),
+          CrewDots(
+            key: Key('session-menu-${s.id}'),
+            label: 'Session actions',
+            onTap: () => widget.onMenu!(_anchor),
+          ),
+        ],
       ],
     );
-    return Semantics(
+    final row = Semantics(
       button: true,
-      selected: selected,
-      label: sessionSpoken(s, host),
+      selected: widget.selected,
+      customSemanticsActions: tree == null || tree.size == 0
+          ? null
+          : {
+              CustomSemanticsAction(
+                label: tree.collapsed ? 'Expand' : 'Collapse',
+              ): tree.onToggle,
+            },
+      label: [
+        sessionSpoken(s, widget.host),
+        if (tier == SidebarTier.needsYou) 'needs you',
+        ?reason?.text,
+        if (widget.unread) 'new output',
+      ].join(', '),
       excludeSemantics: true,
-      onTap: onTap,
-      onLongPress: onLongPress,
+      onTap: widget.onTap,
+      onLongPress: widget.onLongPress,
       child: Material(
-        color: selected ? t.surface2 : Colors.transparent,
-        borderRadius: radius,
+        key: _anchor,
+        color: fill,
+        shape: RoundedRectangleBorder(
+          borderRadius: radius,
+          side: outlined
+              ? BorderSide(color: t.danger, width: t.bw)
+              : BorderSide.none,
+        ),
         child: InkWell(
           key: Key('session-${s.id}'),
           borderRadius: radius,
-          onTap: onTap,
-          onLongPress: onLongPress,
+          onTap: widget.onTap,
+          onLongPress: widget.onLongPress,
           child: Container(
             padding: phone
-                ? EdgeInsets.symmetric(vertical: t.sp * 1.5)
+                ? EdgeInsets.symmetric(
+                    vertical: t.sp * 1.5,
+                    horizontal: outlined ? t.sp : 0,
+                  )
                 : EdgeInsets.symmetric(
                     horizontal: t.sp,
                     vertical: t.sp * 0.875,
                   ),
-            decoration: phone
+            decoration: phone && !outlined
                 ? BoxDecoration(
                     border: Border(
                       bottom: BorderSide(color: t.border, width: t.bw),
@@ -257,22 +413,58 @@ class SessionRow extends StatelessWidget {
         ),
       ),
     );
+    final menu = widget.onMenu;
+    if (menu == null && tree == null) return row;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: menu == null
+          ? row
+          : GestureDetector(onSecondaryTapUp: (_) => menu(_anchor), child: row),
+    );
   }
 }
 
-/// "build-vm · storm · 40m", where only the workspace gives way: the host
-/// and the age are never cut (decision 138l).
+class _Line extends StatelessWidget {
+  const _Line(this.text, this.style);
+
+  final String text;
+  final TextStyle style;
+
+  @override
+  Widget build(BuildContext context) => Text(
+    text,
+    maxLines: 1,
+    softWrap: false,
+    overflow: TextOverflow.ellipsis,
+    style: style,
+  );
+}
+
+/// "build-vm · storm · 40m", where only the workspace gives way: the host,
+/// what leads it and the age are never cut (decision 138l). The sidebar's
+/// says no model or mode (153e: "workspace · age").
 class SessionSubLine extends StatelessWidget {
   const SessionSubLine({
     super.key,
     required this.session,
     required this.host,
     required this.style,
+    this.lead = const [],
+    this.details = true,
   });
 
   final AgentSession session;
-  final String host;
+
+  /// Null leaves the host out.
+  final String? host;
   final TextStyle style;
+
+  /// Said before the workspace: "2 agents", "from gateway-impl".
+  final List<String> lead;
+
+  /// The model and permission mode beside the age.
+  final bool details;
 
   @override
   Widget build(BuildContext context) {
@@ -287,13 +479,16 @@ class SessionSubLine extends StatelessWidget {
         : session.workspace;
     // The model, when one was chosen (145b), stays whole with the age.
     final when = [
-      ?session.model,
-      ?permissionModeWord(session.permissionMode),
+      if (details) ...[
+        ?session.model,
+        ?permissionModeWord(session.permissionMode),
+      ],
       sessionWhen(session),
     ].join(' · ');
+    final head = [?host, ...lead];
     return LayoutBuilder(
       builder: (context, box) {
-        String line(String w) => '$host · $w · $when';
+        String line(String? w) => [...head, ?w, when].join(' · ');
         bool fits(String text) =>
             (TextPainter(
               text: TextSpan(text: text, style: drawn),
@@ -312,7 +507,7 @@ class SessionSubLine extends StatelessWidget {
           text = line('${ws.substring(0, lo)}…');
           // No room for even a cut workspace: it goes, so the host and age
           // stay whole (the overview card at 900).
-          if (lo == 0 && !fits(text)) text = '$host · $when';
+          if (lo == 0 && !fits(text)) text = line(null);
         }
         return Text(
           text,
@@ -447,9 +642,11 @@ class AgentsLabel extends StatelessWidget {
   }
 }
 
-/// The agent's mark on a rounded tile, the session's status a badge on its
-/// corner (D15 AM44): pulsing while the agent works, amber while unknown,
-/// danger once failed; an ended session's tile is faded.
+/// The agent's mark on a rounded tile, what the agent is doing a badge on
+/// its corner (D15 AM44, 153e): filled `accent` and pulsing while it works,
+/// an `accent` ring while idle, `text3` while starting, `danger` once
+/// failed. Parked, out of usage and unknown have none; an ended session's
+/// tile is faded.
 class AgentMark extends StatelessWidget {
   const AgentMark({
     super.key,
@@ -473,10 +670,14 @@ class AgentMark extends StatelessWidget {
     final side = size ?? t.sp * 4;
     final glyph = side * 0.6;
     final mark = ProviderGlyph(s.provider, size: glyph);
+    final outOfUsage =
+        s.spawn.attention?.kind == 'usage_limit' ||
+        s.spawn.needsAttention == 'usage_limit';
+    final idle = s.status == 'running' && !s.working && !outOfUsage;
     final badge = switch (s.status) {
-      'running' when s.working => t.accent,
+      'running' when outOfUsage => null,
+      'running' => t.accent,
       'creating' || 'starting' => t.text3,
-      'unknown' => t.amber,
       'failed' => t.danger,
       _ => null,
     };
@@ -509,6 +710,7 @@ class AgentMark extends StatelessWidget {
                 key: Key('badge-${s.id}'),
                 color: badge,
                 ring: background ?? t.bg,
+                hollow: idle,
                 size: dot,
                 pulse: s.status == 'running' && s.working,
               ),
@@ -548,8 +750,9 @@ class ProviderGlyph extends StatelessWidget {
 }
 
 /// The session's status as a bare dot, in the [AgentMark] badge's colours:
-/// pulsing while the agent works, amber while unknown, danger once failed;
-/// otherwise the status's own colour (the phone session header).
+/// pulsing while the agent works, danger once failed; otherwise the
+/// status's own colour (the phone session header). Never amber, which is
+/// for tags (153e).
 class SessionHeaderDot extends StatelessWidget {
   const SessionHeaderDot({super.key, required this.session, this.size});
 
@@ -561,8 +764,7 @@ class SessionHeaderDot extends StatelessWidget {
     final t = context.tokens;
     final s = session;
     final color = switch (s.status) {
-      'creating' || 'starting' => t.text3,
-      'unknown' => t.amber,
+      'creating' || 'starting' || 'unknown' => t.text3,
       'failed' => t.danger,
       _ => sessionStatusLook(s.status, t).color,
     };
@@ -582,6 +784,7 @@ class _Badge extends StatefulWidget {
     required this.color,
     this.ring,
     this.fade,
+    this.hollow = false,
     required this.size,
     required this.pulse,
   });
@@ -590,6 +793,9 @@ class _Badge extends StatefulWidget {
 
   /// Cut out of what is behind the badge; none for a bare dot.
   final Color? ring;
+
+  /// A ring of [color] around [ring]'s colour: idle.
+  final bool hollow;
 
   /// What a pulse fades towards, when there is no [ring].
   final Color? fade;
@@ -643,17 +849,23 @@ class _BadgeState extends State<_Badge> with SingleTickerProviderStateMixin {
       builder: (context, _) => Container(
         width: widget.size,
         height: widget.size,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: Color.lerp(
-            widget.color,
-            widget.ring ?? widget.fade,
-            _pulse.value * 0.55,
-          ),
-          border: widget.ring == null
-              ? null
-              : Border.all(color: widget.ring!, width: t.bw * 2),
-        ),
+        decoration: widget.hollow
+            ? BoxDecoration(
+                shape: BoxShape.circle,
+                color: widget.ring,
+                border: Border.all(color: widget.color, width: t.bw * 2),
+              )
+            : BoxDecoration(
+                shape: BoxShape.circle,
+                color: Color.lerp(
+                  widget.color,
+                  widget.ring ?? widget.fade,
+                  _pulse.value * 0.55,
+                ),
+                border: widget.ring == null
+                    ? null
+                    : Border.all(color: widget.ring!, width: t.bw * 2),
+              ),
       ),
     );
   }

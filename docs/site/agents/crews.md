@@ -24,7 +24,11 @@ workspaces can share a crew. Crews are listed under **CREWS**, above
 - **Several at once:** ⌘-click (Ctrl-click on Windows and Linux) or
   Shift-click sessions in the sidebar, then choose **Make crew** in the bar
   at its foot.
-- **On a phone**, long-press a session and choose **New crew…**.
+- **Without dragging:** a session's **···** (on hover, or right-click) has
+  **Add to crew…**, and a crew's menu has **Add sessions…**, a checklist of
+  the sessions not in it.
+- **On a phone**, long-press a session and choose **New crew…**, or
+  long-press a crew for **Add sessions…**.
 - **When you launch** from a note, the launcher's **Crew** row offers
   **New crew: {the note's title}**, or any crew you already have.
 

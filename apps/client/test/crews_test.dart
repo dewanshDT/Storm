@@ -29,7 +29,12 @@ void main() {
   const long = 'Install guide and relay docs refresh, Q4'; // 40 characters
 
   setUpAll(loadRealFonts);
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded (153e); these read its rows, so it is open here.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   /// Gateway release: a running and an ended member, out of crew order on
   /// purpose; one loose running session and one loose ended one.
@@ -213,6 +218,7 @@ void main() {
     ) async {
       SharedPreferences.setMockInitialValues({
         'storm.crews.collapsed.crews': ['crw_1'],
+        'storm.agents.collapsed.ended': false,
       });
       final c = await open(t, crewServer());
       expect(find.byKey(const Key('crew-row-ags_impl')), findsNothing);

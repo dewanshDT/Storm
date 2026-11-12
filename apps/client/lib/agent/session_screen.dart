@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
@@ -30,6 +32,7 @@ import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'output_seen.dart';
 import 'delete_request.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
@@ -256,6 +259,21 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ref.invalidate(agentOverviewProvider);
       }
     });
+    // Open, so its output is read here up to wherever it has got (153e).
+    void seen(int? end) {
+      if (end == null) return;
+      final n = ref.read(seenOutputProvider.notifier);
+      scheduleMicrotask(() => n.markSeen(_id, end));
+    }
+
+    seen(
+      ref.watch(sessionDetailProvider(_id).select((s) => s.value?.outputEnd)),
+    );
+    seen(
+      ref.watch(
+        agentOverviewProvider.select((o) => o.value?.byId(_id)?.outputEnd),
+      ),
+    );
     final detail = ref.watch(sessionDetailProvider(_id));
     final overview = ref.watch(agentOverviewProvider).value;
     return ListenableBuilder(

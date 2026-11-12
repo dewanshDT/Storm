@@ -30,6 +30,14 @@ void main() {
       .where((f) => RegExp(r'/spawn_[^/]*\.dart$').hasMatch(f.path))
       .toList();
   files.addAll(spawnFiles);
+  // The Agents sidebar and the rows it draws (153r).
+  const sidebarFiles = [
+    'lib/agent/agents_shell.dart',
+    'lib/agent/agent_widgets.dart',
+    'lib/agent/sidebar_rules.dart',
+    'lib/agent/output_seen.dart',
+  ];
+  files.addAll(sidebarFiles.map(File.new));
 
   /// Lines that are not comments, with their 1-based number.
   Iterable<(int, String)> codeLines(File f) sync* {
@@ -64,6 +72,28 @@ void main() {
         'spawn_api.dart',
       ]),
     );
+  });
+
+  test('the Agents sidebar is scanned too', () {
+    for (final path in sidebarFiles) {
+      expect(File(path).existsSync(), isTrue, reason: path);
+    }
+  });
+
+  test('no amber in the Agents sidebar: amber is for tags (153e)', () {
+    final offenders = <String>[];
+    for (final path in [
+      ...sidebarFiles,
+      'lib/agent/crew_widgets.dart',
+      'lib/agent/crew_add.dart',
+      'lib/ui/shell/activity_rail.dart',
+    ]) {
+      final f = File(path);
+      for (final (n, line) in codeLines(f)) {
+        if (RegExp(r'\.amber').hasMatch(line)) offenders.add('$path:$n');
+      }
+    }
+    expect(offenders, isEmpty);
   });
 
   test('no literal Colors.*', () {

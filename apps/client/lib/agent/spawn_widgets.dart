@@ -68,22 +68,6 @@ class AttentionTag extends StatelessWidget {
   }
 }
 
-/// "↳ from gateway-impl · own copy of storm": a child's sub-line in a list,
-/// or null for a session nobody started.
-String? lineageLine(AgentSession s, AgentOverview? o) {
-  final parentId = s.spawn.parentSession;
-  if (parentId == null) return null;
-  final parent = o?.byId(parentId);
-  final ws = parent?.workspace ?? 'its parent’s workspace';
-  final mode = childWorkspaceLabel(s, parent: ws);
-  return [
-    '↳ from ${parent?.displayName ?? 'its parent'}',
-    mode,
-    ?s.model,
-    ?permissionModeWord(s.permissionMode),
-  ].join(' · ');
-}
-
 /// A child's workspace named for what it is rather than its record's
 /// `children/<id>`, with its [parent]'s workspace where the line has room.
 /// A child without one of its own runs in a workspace by name (151 N6).

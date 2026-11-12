@@ -152,7 +152,12 @@ void main() {
       c.read(routerProvider).go(Routes.agents);
       await tester.pumpAndSettle();
       expect(find.text('Agents run on a machine you own'), findsOneWidget);
-      expect(find.byKey(const Key('new-session')), findsNothing);
+      // ＋ stays in the header, off, and says why (153e).
+      expect(
+        tester.widget<InkWell>(find.byKey(const Key('new-session'))).onTap,
+        isNull,
+      );
+      expect(find.byTooltip('No host is set up yet'), findsOneWidget);
       await tester.tap(find.byKey(const Key('enroll-host-step')));
       await tester.pumpAndSettle();
       expect(location(c), Routes.settingsPage('hosts'));
@@ -175,7 +180,8 @@ void main() {
         top(tester, find.text('RUNNING')),
         lessThan(top(tester, find.text('ENDED'))),
       );
-      expect(find.textContaining(' · storm · completed'), findsOneWidget);
+      // One host: rows don't name it (153e).
+      expect(find.text('storm · completed'), findsOneWidget);
       expect(find.byType(AgentMark), findsWidgets);
       expect(find.byKey(const Key('places-bubble')), findsOneWidget);
       expect(find.byKey(const Key('rail-agents')), findsNothing);

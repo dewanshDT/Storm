@@ -226,7 +226,8 @@ void main() {
           expect(
             find.descendant(
               of: row,
-              matching: find.text('↳ from gateway-impl · own copy of storm'),
+              // Under its parent the row says only where and when (153e).
+              matching: find.text('own copy · now'),
             ),
             findsOneWidget,
           );
@@ -274,10 +275,7 @@ void main() {
         final c = await open(t, agents, size: size);
         final row = find.byKey(const Key('session-ags_c'));
         expect(
-          find.descendant(
-            of: row,
-            matching: find.text('↳ from gateway-impl · in storm'),
-          ),
+          find.descendant(of: row, matching: find.text('in storm · now')),
           findsOneWidget,
         );
         expect(find.textContaining('own copy'), findsNothing);

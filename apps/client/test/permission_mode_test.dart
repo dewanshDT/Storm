@@ -217,10 +217,8 @@ void main() {
           );
           final spawning = FakeSpawning(agents);
           final c = await open(t, agents, size: size);
-          expect(
-            find.byKey(const Key('attention-permission_prompt')),
-            findsWidgets,
-          );
+          // No tag in the lists: the sub-line says it (153e).
+          expect(find.textContaining('permission prompt'), findsWidgets);
           expect(spawning.terminalWrites, 0);
           await disposeShell(t, c);
         },
