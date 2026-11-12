@@ -1692,6 +1692,17 @@ pub mod spawn {
                  created_at  TEXT NOT NULL
              );
 
+             -- 153d: what a person last saw of an ended child's work, and
+             -- whether it was taken: applied or deleted, through Storm.
+             CREATE TABLE IF NOT EXISTS session_child_work (
+                 session_id  TEXT PRIMARY KEY,
+                 commits     INTEGER,
+                 items       INTEGER,
+                 reviewed_at TEXT,
+                 taken       TEXT CHECK (taken IN ('applied', 'deleted')),
+                 taken_at    TEXT
+             );
+
              -- 134f: a child's task, the exact text a person approved.
              CREATE TABLE IF NOT EXISTS session_task (
                  session_id TEXT PRIMARY KEY,
@@ -2163,6 +2174,17 @@ pub mod spawn {
         pub state: String,
     }
 
+    /// What Storm knows of a child's work without asking its host (153d).
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct ChildWorkState {
+        /// The last review's commits, a clone's only.
+        pub commits: Option<i64>,
+        /// The last review's commits or files: none means nothing to take.
+        pub items: Option<i64>,
+        /// `applied` or `deleted`.
+        pub taken: Option<String>,
+    }
+
     impl Store {
         pub fn lineage(&self, session_id: &str) -> Result<Lineage> {
             lineage_of(&self.conn, session_id)
@@ -2407,6 +2429,53 @@ pub mod spawn {
                             branch: r.get(2)?,
                             submodules: r.get(3)?,
                             large_files: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()?)
+        }
+
+        /// What a review of a child's work counted (153d): a clone's commits,
+        /// and the commits or files there were to take.
+        pub fn record_child_review(
+            &self,
+            session_id: &str,
+            commits: Option<i64>,
+            items: i64,
+            now: &str,
+        ) -> Result<()> {
+            self.conn.execute(
+                "INSERT INTO session_child_work (session_id, commits, items, reviewed_at)
+                 SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?1)
+                 ON CONFLICT (session_id) DO UPDATE
+                   SET commits = ?2, items = ?3, reviewed_at = ?4",
+                params![session_id, commits, items, now],
+            )?;
+            Ok(())
+        }
+
+        /// A child's work was applied or deleted (153d).
+        pub fn record_child_taken(&self, session_id: &str, taken: &str, now: &str) -> Result<()> {
+            self.conn.execute(
+                "INSERT INTO session_child_work (session_id, taken, taken_at)
+                 SELECT ?1, ?2, ?3 WHERE EXISTS (SELECT 1 FROM sessions WHERE id = ?1)
+                 ON CONFLICT (session_id) DO UPDATE SET taken = ?2, taken_at = ?3",
+                params![session_id, taken, now],
+            )?;
+            Ok(())
+        }
+
+        pub fn child_work(&self, session_id: &str) -> Result<Option<ChildWorkState>> {
+            Ok(self
+                .conn
+                .query_row(
+                    "SELECT commits, items, taken FROM session_child_work WHERE session_id = ?1",
+                    params![session_id],
+                    |r| {
+                        Ok(ChildWorkState {
+                            commits: r.get(0)?,
+                            items: r.get(1)?,
+                            taken: r.get(2)?,
                         })
                     },
                 )
@@ -3578,6 +3647,7 @@ pub mod spawn {
             "session_spawn_asks",
             "session_spawn_launch",
             "session_child_workspace",
+            "session_child_work",
             "session_ran_as",
             "session_task",
             "session_result",

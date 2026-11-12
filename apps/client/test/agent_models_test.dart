@@ -107,4 +107,91 @@ void main() {
     }
     expect(host(null).execution, isNull);
   });
+  test('153: attention, decisions, last seen, output end and work parse', () {
+    final s = AgentSession.fromJson({
+      ...spawnSession('ags_c', parent: 'ags_p', depth: 1),
+      'needs_attention': 'blocked',
+      'attention': {
+        'kind': 'blocked',
+        'since': '2026-11-12T10:00:00Z',
+        'detail': 'need a key',
+        'blocked_on': null,
+        'resets_at': null,
+      },
+      'pending_decisions': [
+        {
+          'kind': 'delete_request',
+          'id': 'adr_1',
+          'created_at': '2026-11-12T10:01:00Z',
+          'expires_at': '2026-11-12T10:11:00Z',
+        },
+        {'kind': 'something_new', 'id': 'x_2'},
+        {'kind': 'broken'},
+        'garbage',
+      ],
+      'host_last_seen': '2026-11-12T09:51:00Z',
+      'output_end': 4096,
+      'work_to_take': true,
+      'unapplied_commits': 2,
+    });
+    expect(s.spawn.needsAttention, 'blocked');
+    expect(s.spawn.attention?.kind, 'blocked');
+    expect(s.spawn.attention?.since, DateTime.utc(2026, 11, 12, 10));
+    expect(s.spawn.attention?.detail, 'need a key');
+    expect(s.spawn.attention?.blockedOn, isNull);
+    expect(s.spawn.attention?.resetsAt, isNull);
+    expect(
+      [for (final d in s.pendingDecisions) d.kind],
+      ['delete_request', 'something_new'],
+    );
+    expect(s.pendingDecisions.first.id, 'adr_1');
+    expect(
+      s.pendingDecisions.first.expiresAt,
+      DateTime.utc(2026, 11, 12, 10, 11),
+    );
+    expect(s.pendingDecisions.last.createdAt, isNull);
+    expect(s.hostLastSeen, DateTime.utc(2026, 11, 12, 9, 51));
+    expect(s.outputEnd, 4096);
+    expect(s.spawn.workToTake, isTrue);
+    expect(s.spawn.unappliedCommits, 2);
+    final copy = s.withCrew(null);
+    expect(copy.pendingDecisions.length, 2);
+    expect(copy.hostLastSeen, s.hostLastSeen);
+    expect(copy.outputEnd, 4096);
+    expect(copy.spawn.attention?.detail, 'need a key');
+  });
+
+  test('153: an older server, or a garbled field, parses as nothing', () {
+    final old = AgentSession.fromJson(
+      spawnSession('ags_o', needsAttention: 'blocked'),
+    );
+    expect(old.spawn.needsAttention, 'blocked');
+    expect(old.spawn.attention, isNull);
+    expect(old.pendingDecisions, isEmpty);
+    expect(old.hostLastSeen, isNull);
+    expect(old.outputEnd, isNull);
+    expect(old.spawn.workToTake, isNull);
+    expect(old.spawn.unappliedCommits, isNull);
+    final garbled = AgentSession.fromJson({
+      ...spawnSession('ags_g'),
+      'attention': {'kind': 3, 'since': 'yesterday'},
+      'pending_decisions': {'kind': 'delete_request'},
+      'host_last_seen': 12,
+      'output_end': 'lots',
+      'work_to_take': 'yes',
+      'unapplied_commits': '2',
+    });
+    expect(garbled.spawn.attention, isNull);
+    expect(garbled.pendingDecisions, isEmpty);
+    expect(garbled.hostLastSeen, isNull);
+    expect(garbled.outputEnd, isNull);
+    expect(garbled.spawn.workToTake, isNull);
+    expect(garbled.spawn.unappliedCommits, isNull);
+    final partial = AgentSession.fromJson({
+      ...spawnSession('ags_q'),
+      'attention': {'kind': 'usage_limit'},
+    });
+    expect(partial.spawn.attention?.kind, 'usage_limit');
+    expect(partial.spawn.attention?.since, isNull);
+  });
 }

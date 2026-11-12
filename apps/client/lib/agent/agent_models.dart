@@ -686,6 +686,9 @@ class AgentSession {
     this.model,
     this.permissionMode,
     this.deleteRequest,
+    this.pendingDecisions = const [],
+    this.hostLastSeen,
+    this.outputEnd,
   }) : name = name ?? workspace;
 
   final String id;
@@ -777,6 +780,19 @@ class AgentSession {
   /// Its agent's deletion waiting for the person (decision 149); null
   /// otherwise.
   final DeleteRequest? deleteRequest;
+
+  /// What waits for the person to decide, oldest first (153b); empty from
+  /// an older server, which says only [deleteRequest].
+  final List<PendingDecision> pendingDecisions;
+
+  /// When its offline host was last heard from, while it has not ended
+  /// (153a); null otherwise or from an older server.
+  final DateTime? hostLastSeen;
+
+  /// The end of its output, a byte offset that only grows (153c). A device
+  /// keeps the one it last showed: past it is unread. Null when the server
+  /// has none yet, or is older.
+  final int? outputEnd;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -927,6 +943,9 @@ class AgentSession {
     model: model,
     permissionMode: permissionMode,
     deleteRequest: deleteRequest,
+    pendingDecisions: pendingDecisions,
+    hostLastSeen: hostLastSeen,
+    outputEnd: outputEnd,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
@@ -992,6 +1011,11 @@ class AgentSession {
     deleteRequest: _map(j['delete_request']) == null
         ? null
         : DeleteRequest.fromJson(_map(j['delete_request'])!),
+    pendingDecisions: PendingDecision.listOf(j['pending_decisions']),
+    hostLastSeen: j['host_last_seen'] is String
+        ? DateTime.tryParse(j['host_last_seen'] as String)
+        : null,
+    outputEnd: j['output_end'] is num ? (j['output_end'] as num).toInt() : null,
   );
 }
 
