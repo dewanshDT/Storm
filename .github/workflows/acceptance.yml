@@ -137,6 +137,12 @@ jobs:
           open build/macos/Build/Products/Release/Storm.app
           sleep 25
           screencapture -x shots/macos-window.png
+          osascript -e 'tell application "Storm" to activate' || true
+          sleep 3
+          screencapture -x shots/macos-window-active.png
+          osascript -e 'tell application "Finder" to activate' || true
+          sleep 3
+          screencapture -x shots/macos-window-inactive.png
           osascript -e 'tell application "System Events" to get {position, size} of window 1 of process "Storm"' || true
           osascript -e 'tell application "System Events" to keystroke "f" using {command down, control down}' || true
           sleep 6
