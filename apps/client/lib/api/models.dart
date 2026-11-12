@@ -582,10 +582,11 @@ class TrashItem {
 
   bool get isFolder => kind == 'folder';
 
-  /// Who deleted it, as the row says it.
+  /// Who deleted it, as the card says it. An agent's delete always waited
+  /// for the person, so it says so.
   String get byLabel => switch (deletedBy.kind) {
     'person' => deletedBy.name ?? 'you',
-    'agent' => sessionName == null ? 'an agent' : 'an agent ($sessionName)',
+    'agent' => '${sessionName ?? 'an agent'} (approved by you)',
     'key' => 'an MCP key',
     'sync' => 'outside Storm',
     _ => deletedBy.kind,

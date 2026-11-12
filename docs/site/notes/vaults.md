@@ -48,19 +48,28 @@ Trash as one item. Storm's own settings folder, `_storm`, cannot be deleted.
 
 Nothing you delete is gone at once. A deleted note or folder moves to the
 vault's `.trash/` folder, keeping its id and its history, and appears under
-**Trash** in the vault's sidebar with where it was, when it was deleted and
-by which device. This holds for a delete from the app, from an MCP key, and
-for a note removed outside Storm (by another machine or a sync tool): the
-server keeps the last version it had.
+**Trash** in the vault's sidebar. Each item shows where it was, how long it
+has left, when it was deleted and by whom: the device, or the agent session
+whose delete you approved, with the agent's reason in its own words. This
+holds for a delete from the app, from an MCP key, and for a note removed
+outside Storm (by another machine or a sync tool): the server keeps the last
+version it had.
 
-- **Restore** puts it back where it was, as the same note. If something new
-  now has that name, the restored one is called `Name (restored).md` —
-  nothing is overwritten. Attachments only that note used come back with it.
+- **Restore** puts it back where it was, as the same note, without asking.
+  If something new now has that name, the restored one is called
+  `Name (restored).md` — nothing is overwritten. Attachments only that note
+  used come back with it.
+- **Select several** with their checkboxes (on a phone, long-press one),
+  then **Restore** or **Delete forever…** them together. Esc clears the
+  selection.
 - **Delete forever** and **Empty trash** ask first, in a strip at the top
   of the Trash view, then remove the files and their history for good.
-- Items are kept for **30 days**, then removed automatically. Change this
-  per vault in the Trash view (7, 30 or 90 days, or never); it is stored as
-  `storm.trash.retention` in `_storm/vault.md`.
+- Each vault keeps deleted items for **30 days** unless you change it, then
+  removes them automatically. Change it per vault under **Settings ›
+  Vaults › Trash keeps** (7, 30 or 90 days, or never delete); the top of the
+  Trash view says what the vault's setting is. It is stored as
+  `storm.trash.retention` in `_storm/vault.md`; a value set there by hand,
+  such as `14`, is shown and kept as it is.
 
 An agent's deletion lands here only after you
 [approve it](/docs/agents/sessions/#deletes-wait-for-you). Agents never see the Trash: no MCP tool lists, restores or empties it, and
