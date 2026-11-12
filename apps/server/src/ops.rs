@@ -1838,8 +1838,23 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
     });
     let limits = limits_view(state, &host.id, live.capabilities.as_ref());
     let mut capabilities = live.capabilities;
+    // A synced Claude login signs every Claude Code session on the host in,
+    // whatever the host's own CLI says (decision 124, 153-S4).
+    let synced = capabilities.as_ref().is_some_and(|caps| {
+        matches!(
+            crate::agent::credential::decide(
+                crate::agent::credential::PROVIDER,
+                deliverable_credential(state, &host.id),
+                caps,
+            ),
+            crate::agent::credential::CredentialOutcome::Synced(_)
+        )
+    });
     for p in capabilities.iter_mut().flat_map(|c| c.providers.iter_mut()) {
         p.login_command = crate::agent::typed::login_command(&p.id);
+        if synced && p.id == crate::agent::credential::PROVIDER && p.available {
+            p.signed_in = Some(true);
+        }
     }
     HostView {
         host,
@@ -2107,6 +2122,19 @@ pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
         .into_iter()
         .map(|h| host_view(state, h))
         .collect())
+}
+
+/// Asks the linked hosts to look again at their agents (153-S4), each at
+/// most once per `REFRESH_EVERY`; what they find arrives as inventories.
+/// Owner only.
+pub fn refresh_hosts(state: &Shared, actor: &Actor) -> ApiResult<serde_json::Value> {
+    if !matches!(actor, Actor::Session { .. }) {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "owner_only".into(),
+        ));
+    }
+    Ok(serde_json::json!({ "asked": state.agent.refresh_hosts() }))
 }
 
 pub async fn rename_host(

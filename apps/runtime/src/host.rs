@@ -71,6 +71,10 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const LINK_IDLE: Duration = Duration::from_secs(45);
 /// How often a host looks for newer agent CLIs (133-5).
 const AUTO_UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a host looks again whether its agents are signed in (153-S4),
+/// and how soon a link-up, a refresh or a session's end may look again.
+const SIGN_IN_EVERY: Duration = Duration::from_secs(10 * 60);
+const SIGN_IN_MIN: Duration = Duration::from_secs(30);
 /// A child's: the helper's 660 s for its workspace, then a start's own.
 const CHILD_START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(10)
@@ -544,6 +548,8 @@ pub struct Host {
     launch_remote: Mutex<Vec<serde_json::Value>>,
     /// The agents' versions and Node's, probed in the background (133-3).
     agents: Arc<crate::agents::Inventory>,
+    /// Whether each agent is signed in, probed in the background (153-S4).
+    sign_in: Arc<crate::signin::Ledger>,
     /// Agents with a job running: one at a time each (133-4).
     agent_jobs: Mutex<std::collections::HashSet<String>>,
     /// With isolation on, the helper: agent installs run through it under
@@ -649,6 +655,7 @@ impl Host {
             plugin_inventory: Arc::new(Mutex::new(Vec::new())),
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
+            sign_in: Arc::default(),
             agent_jobs: Mutex::default(),
             isolation,
         }))
@@ -913,6 +920,9 @@ impl Host {
         if let Some(latest) = self.agents.latest(id) {
             cap["latest"] = json!(latest);
         }
+        if let Some(signed_in) = self.sign_in.get(id).wire() {
+            cap["signed_in"] = json!(signed_in);
+        }
         if !crate::install::verified(id) {
             cap["checksum_verified"] = json!(false);
         }
@@ -1021,6 +1031,7 @@ impl Host {
             self.agents.record_update(&agent, result.is_ok());
         }
         self.probe_agents();
+        self.probe_sign_in(true);
     }
 
     async fn isolated_job(
@@ -1153,6 +1164,74 @@ impl Host {
         });
     }
 
+    /// Looks whether each agent is signed in (153-S4), in the background,
+    /// and sends a fresh inventory when that changed. Unless `force`, not
+    /// within [`SIGN_IN_MIN`] of the last look.
+    ///
+    /// Not on a per-session host: each session there runs as its own user,
+    /// signed in only by 136f's paths, which the host account's CLIs cannot
+    /// show. Every agent there is unknown, and no CLI runs.
+    fn probe_sign_in(self: &Arc<Self>, force: bool) {
+        if self.config.isolated() || !self.sign_in.begin(force, SIGN_IN_MIN) {
+            return;
+        }
+        let codex_home = self.codex_home().ok();
+        let probes: Vec<_> = self
+            .providers
+            .iter()
+            .filter(|p| crate::agents::MANAGEABLE.contains(&p.id().as_str()))
+            .map(|p| {
+                let id = p.id().as_str().to_string();
+                let mut command = p.helper_command();
+                if let (Some(command), Some(home), "codex") =
+                    (command.as_mut(), &codex_home, id.as_str())
+                {
+                    command.env(crate::codex::HOME_ENV, home.path());
+                }
+                (id, command, p.env_names())
+            })
+            .collect();
+        let host = self.clone();
+        tokio::spawn(async move {
+            let found = tokio::task::spawn_blocking(move || {
+                let daemon: Vec<_> = std::env::vars_os().collect();
+                let store = crate::signin::opencode_store();
+                probes
+                    .into_iter()
+                    .map(|(agent, command, env)| {
+                        let env = crate::signin::present(daemon.iter().cloned(), &env);
+                        let state = crate::signin::probe(crate::signin::Probe {
+                            agent: &agent,
+                            command,
+                            env: &env,
+                            opencode_store: store.as_deref(),
+                            deadline: crate::signin::DEADLINE,
+                        });
+                        tracing::debug!(agent = %agent, state = state.as_str(), "agent sign-in");
+                        (agent, state)
+                    })
+                    .collect()
+            })
+            .await;
+            let Ok(found) = found else { return };
+            if host.sign_in.record(found) && *host.link_up.borrow() {
+                let _ = host
+                    .post("/v1/runtime/inventory", &host.capabilities())
+                    .await;
+            }
+        });
+    }
+
+    /// Every [`SIGN_IN_EVERY`] while linked (153-S4).
+    async fn sign_in_checks(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(SIGN_IN_EVERY).await;
+            if *self.link_up.borrow() {
+                self.probe_sign_in(true);
+            }
+        }
+    }
+
     fn plugin_remote(&self) -> Vec<serde_json::Value> {
         let listed = self.plugin_inventory.lock().unwrap().clone();
         let launched = self.launch_remote.lock().unwrap().clone();
@@ -1265,6 +1344,7 @@ impl Host {
         let listener = self.bind_socket()?;
         tokio::spawn(self.clone().serve_socket(listener, None));
         tokio::spawn(self.clone().auto_updates());
+        tokio::spawn(self.clone().sign_in_checks());
         tokio::spawn(self.clone().report_isolation_changes());
         if self.isolation_status.pending() {
             tokio::spawn(self.clone().isolation_self_test());
@@ -1414,6 +1494,7 @@ impl Host {
         self.hello().await?;
         self.link_up.send_replace(true);
         self.probe_agents();
+        self.probe_sign_in(false);
         tracing::info!(host = %self.identity.host_id, "link up");
         for session in self.sessions.lock().unwrap().values() {
             session.events.wake.notify_one();
@@ -1630,6 +1711,7 @@ impl Host {
             Command::Refresh => {
                 self.refresh_plugin_inventory();
                 self.probe_agents();
+                self.probe_sign_in(false);
                 let _ = self
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
@@ -2470,6 +2552,8 @@ impl Host {
                         self.forget_mcp(&s.id);
                         self.write_table();
                         tracing::info!(session = %s.id, status = body["status"].as_str().unwrap_or(""), "session ended");
+                        // A Shell may have just signed an agent in.
+                        self.probe_sign_in(false);
                         return;
                     }
                     _ => {
@@ -5424,6 +5508,135 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         assert!(!seen.lock().unwrap().iter().any(|(p, _)| p.contains("evil")));
         assert!(!roots.path().join("x").exists());
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A host whose agents are the given scripts, linked to a recording
+    /// server.
+    #[cfg(unix)]
+    async fn sign_in_host(
+        settings: &str,
+        scripts: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let mut toml = format!(
+            "{settings}\ncodex_home = \"storm\"\nworkspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for (id, body) in scripts {
+            let bin = roots.path().join(format!("{id}.sh"));
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = {:?}\n",
+                bin.display().to_string()
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    /// 153-S4: each agent's own status command decides, in its sessions'
+    /// environment; the inventory says only the state, never what it
+    /// printed, and a refresh soon after does not run it again.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn the_inventory_says_whether_each_agent_is_signed_in_and_nothing_it_printed() {
+        let (host, seen, _state, roots) = sign_in_host(
+            "",
+            &[
+                (
+                    "claude-code",
+                    "[ \"$*\" = \"auth status\" ] || exit 9; echo ran >> \"$(dirname \"$0\")/claude-runs\"; echo LEAK-claude-sk-ant; exit 0",
+                ),
+                (
+                    "codex",
+                    "case \"$CODEX_HOME\" in */agents/codex) ;; *) exit 7;; esac; echo LEAK-codex; exit 1",
+                ),
+                ("cursor", "echo 'LEAK-cursor Not logged in'"),
+                ("command-code", "echo LEAK-cc; exit 0"),
+            ],
+        )
+        .await;
+        let keyed = std::env::var_os("OPENAI_API_KEY").is_some()
+            || std::env::var_os("CODEX_API_KEY").is_some();
+        host.probe_sign_in(false);
+        wait_for("an inventory with sign-in", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/inventory") && b["providers"][0].get("signed_in").is_some()
+            })
+        })
+        .await;
+        let caps = host.capabilities();
+        let by_id = |id: &str| {
+            caps["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_id("claude-code")["signed_in"], json!(true));
+        if !keyed {
+            assert_eq!(
+                by_id("codex")["signed_in"],
+                json!(false),
+                "Storm's own home"
+            );
+        }
+        for id in ["cursor", "command-code"] {
+            assert!(by_id(id).get("signed_in").is_none(), "{id}: unknown");
+        }
+        let posted = serde_json::to_string(&*seen.lock().unwrap()).unwrap();
+        assert!(!posted.contains("LEAK"), "{posted}");
+
+        host.probe_sign_in(false);
+        host.clone().handle(Command::Refresh).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let runs = std::fs::read_to_string(roots.path().join("claude-runs")).unwrap();
+        assert_eq!(runs.lines().count(), 1, "not again within SIGN_IN_MIN");
+    }
+
+    /// 153-S4: on a per-session host the account's sign-in is not the
+    /// sessions', so nothing runs and every agent is unknown.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_per_session_host_runs_no_sign_in_probe() {
+        let (host, _seen, _state, roots) = sign_in_host(
+            "isolation = \"per-session\"",
+            &[("claude-code", "touch \"$(dirname \"$0\")/ran\"; exit 0")],
+        )
+        .await;
+        host.probe_sign_in(true);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!roots.path().join("ran").exists());
+        assert!(
+            host.capabilities()["providers"][0]
+                .get("signed_in")
+                .is_none()
+        );
     }
 
     /// Decision 133-4: a job the host must refuse is reported failed with

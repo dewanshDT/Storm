@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agents_settings_screen.dart';
 import 'package:storm/router.dart';
+import 'package:storm/ui/controls.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'agent_fakes.dart';
@@ -629,6 +630,109 @@ void main() {
     });
   });
 
+  group('whether each agent is signed in (153-S4)', () {
+    FakeAgentServer states() => FakeAgentServer(
+      hosts: [
+        host('h1', 'build-vm', [
+          provider(
+            'claude-code',
+            available: true,
+            version: '2.1',
+            login: 'claude auth login',
+            signedIn: true,
+          ),
+          provider(
+            'codex',
+            available: true,
+            version: '0.166',
+            login: 'codex login',
+            signedIn: false,
+          ),
+          provider(
+            'cursor',
+            available: true,
+            version: '2026.11',
+            login: 'cursor-agent login',
+          ),
+          provider('shell', available: true),
+        ]),
+      ],
+    );
+
+    StormButtonKind signInKind(WidgetTester tester) =>
+        tester.widget<StormButton>(find.byKey(const Key('cell-signin'))).kind;
+
+    Future<void> close(WidgetTester tester) async {
+      await tester.tapAt(const Offset(1270, 790));
+      await tester.pumpAndSettle();
+    }
+
+    testWidgets('signed in is Ready, signed out is Sign in, unknown is Ready '
+        'with sign-in second', (tester) async {
+      final c = await open(tester, states());
+      expect(word(tester, 'h1', 'claude-code'), 'Ready');
+      expect(word(tester, 'h1', 'codex'), 'Sign in');
+      expect(word(tester, 'h1', 'cursor'), 'Ready');
+      Color colour(String a) => textOf(tester, 'cell-word-h1-$a').style!.color!;
+      expect(colour('claude-code'), dark.text);
+      expect(colour('codex'), dark.accent);
+      expect(colour('cursor'), dark.text);
+
+      await openCell(tester, 'h1', 'claude-code');
+      expect(
+        meaning(tester),
+        'Signed in. Sessions on build-vm can use Claude Code.',
+      );
+      expect(find.byKey(const Key('cell-signin')), findsNothing);
+      await close(tester);
+
+      await openCell(tester, 'h1', 'codex');
+      expect(
+        meaning(tester),
+        "Not signed in. Sessions can't use Codex on build-vm until it is.",
+      );
+      expect(signInKind(tester), StormButtonKind.primary);
+      await close(tester);
+
+      await openCell(tester, 'h1', 'cursor');
+      expect(meaning(tester), contains("Storm can't see whether"));
+      expect(signInKind(tester), StormButtonKind.outline);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('opening the page has the hosts look again, then shows what '
+        'they found', (tester) async {
+      final agents = states();
+      agents.onRefreshHosts = () {
+        final providers =
+            (agents.hosts[0]['capabilities'] as Map)['providers'] as List;
+        (providers[0] as Map)['signed_in'] = false;
+        return 1;
+      };
+      final c = await open(tester, agents);
+      expect(agents.count('POST', '/v1/agent/hosts/refresh'), 1);
+      expect(word(tester, 'h1', 'claude-code'), 'Ready');
+      await tester.pump(const Duration(seconds: 7));
+      await tester.pumpAndSettle();
+      expect(word(tester, 'h1', 'claude-code'), 'Sign in');
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('an older server is not asked twice and lists once', (
+      tester,
+    ) async {
+      final agents = states();
+      final c = await open(tester, agents);
+      expect(agents.count('POST', '/v1/agent/hosts/refresh'), 1);
+      final listed = agents.count('GET', '/v1/agent/hosts');
+      await tester.pump(const Duration(seconds: 7));
+      await tester.pumpAndSettle();
+      expect(agents.count('GET', '/v1/agent/hosts'), listed);
+      expect(find.byKey(const Key('cell-error')), findsNothing);
+      await disposeShell(tester, c);
+    });
+  });
+
   group('a revoked host', () {
     FakeAgentServer revoked({int status = 200}) {
       final agents = FakeAgentServer(
@@ -845,7 +949,9 @@ void main() {
 
     List<String> hostCalls(FakeAgentServer agents) => [
       for (final r in agents.requests)
-        if (r.method != 'GET' && r.url.path.startsWith('/v1/agent/hosts/'))
+        if (r.method != 'GET' &&
+            r.url.path.startsWith('/v1/agent/hosts/') &&
+            r.url.path != '/v1/agent/hosts/refresh')
           '${r.method} ${r.url.path}',
     ];
 

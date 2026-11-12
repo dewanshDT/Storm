@@ -122,14 +122,14 @@ pub(crate) fn run_version(binary: &Path, path: Option<&OsStr>) -> Option<String>
 }
 
 #[cfg(unix)]
-fn end_group(child: &std::process::Child) {
+pub(crate) fn end_group(child: &std::process::Child) {
     if let Some(pid) = rustix::process::Pid::from_raw(child.id() as i32) {
         let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
     }
 }
 
 #[cfg(not(unix))]
-fn end_group(_: &std::process::Child) {}
+pub(crate) fn end_group(_: &std::process::Child) {}
 
 /// One agent as last probed.
 #[derive(Debug, Clone, PartialEq)]

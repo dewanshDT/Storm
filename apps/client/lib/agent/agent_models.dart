@@ -52,8 +52,8 @@ class ProviderCap {
   /// into a Shell for the person to run. Null for an agent without one.
   final String? loginCommand;
 
-  /// Whether the host found it signed in; null while no host says, which
-  /// none does yet, so Storm can't tell and never claims either.
+  /// Whether the host found it signed in (153-S4); null when it can't tell,
+  /// and from an older host, so Storm never claims either.
   final bool? signedIn;
 
   bool get managed => source == 'storm';

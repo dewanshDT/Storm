@@ -611,6 +611,24 @@ pub struct ProviderCap {
     /// from a host. Null for an agent without one.
     #[serde(default, skip_deserializing)]
     pub login_command: Option<&'static str>,
+    /// Whether the host found the agent signed in (153-S4): absent while it
+    /// cannot tell, and from an older host. A host's `"signed_in"` or
+    /// `"signed_out"` is taken too; anything else is unknown.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "signed_in_state"
+    )]
+    pub signed_in: Option<bool>,
+}
+
+fn signed_in_state<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => Some(b),
+        serde_json::Value::String(s) if s == "signed_in" => Some(true),
+        serde_json::Value::String(s) if s == "signed_out" => Some(false),
+        _ => None,
+    })
 }
 
 /// One session in a host's `hello`.
@@ -902,6 +920,8 @@ struct HostLink {
     /// This link has sent `hello` or an inventory. What it carried over
     /// from an earlier link says nothing about now, so C0 waits for this.
     reported: bool,
+    /// When a person last asked it to look again (153-S4).
+    asked: Option<std::time::Instant>,
 }
 
 struct SessionLive {
@@ -1029,6 +1049,9 @@ pub struct AgentManager {
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
 }
+
+/// How soon a person's refresh may ask the same host again (153-S4).
+const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a paste waits for its host to stage the image.
 const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
@@ -1198,6 +1221,7 @@ impl AgentManager {
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
                 reported: false,
+                asked: None,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -1603,6 +1627,26 @@ impl AgentManager {
             return;
         }
         let _ = tokio::time::timeout(wait, rx.changed()).await;
+    }
+
+    /// Asks every linked host to look again, its agents' sign-in included
+    /// (153-S4); a host asked within [`REFRESH_EVERY`] is not asked again.
+    /// The answer arrives as an inventory. Returns how many were asked.
+    pub fn refresh_hosts(&self) -> usize {
+        let due: Vec<String> = {
+            let mut live = self.live.lock().unwrap();
+            live.hosts
+                .iter_mut()
+                .filter(|(_, link)| link.asked.is_none_or(|at| at.elapsed() >= REFRESH_EVERY))
+                .map(|(id, link)| {
+                    link.asked = Some(std::time::Instant::now());
+                    id.clone()
+                })
+                .collect()
+        };
+        due.iter()
+            .filter(|id| self.send(id, Command::Refresh).is_ok())
+            .count()
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
@@ -3593,6 +3637,7 @@ mod tests {
                     checksum_verified: None,
                     latest: None,
                     login_command: None,
+                    signed_in: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -5377,6 +5422,44 @@ mod tests {
     }
 
     #[test]
+    fn a_providers_sign_in_is_a_bool_or_absent() {
+        let base = serde_json::json!({"id": "codex", "kind": "cli", "available": true});
+        let parse = |v: serde_json::Value| {
+            let mut cap = base.clone();
+            cap["signed_in"] = v;
+            serde_json::from_value::<ProviderCap>(cap)
+                .unwrap()
+                .signed_in
+        };
+        assert_eq!(
+            serde_json::from_value::<ProviderCap>(base.clone())
+                .unwrap()
+                .signed_in,
+            None
+        );
+        for (wire, want) in [
+            (serde_json::json!(true), Some(true)),
+            (serde_json::json!(false), Some(false)),
+            (serde_json::json!("signed_in"), Some(true)),
+            (serde_json::json!("signed_out"), Some(false)),
+            (serde_json::json!("unknown"), None),
+            (serde_json::json!(null), None),
+            (serde_json::json!({"x": 1}), None),
+        ] {
+            assert_eq!(parse(wire.clone()), want, "{wire}");
+        }
+        let mut cap: ProviderCap = serde_json::from_value(base).unwrap();
+        assert!(
+            serde_json::to_value(&cap)
+                .unwrap()
+                .get("signed_in")
+                .is_none()
+        );
+        cap.signed_in = Some(false);
+        assert_eq!(serde_json::to_value(&cap).unwrap()["signed_in"], false);
+    }
+
+    #[test]
     fn a_providers_install_fields_round_trip_and_are_absent_when_unknown() {
         let old = r#"{"id":"codex","kind":"cli","interactions":["terminal"],"available":true,"mcp":null}"#;
         let cap: ProviderCap = serde_json::from_str(old).unwrap();
@@ -5792,6 +5875,7 @@ mod tests {
                 checksum_verified: None,
                 latest: None,
                 login_command: None,
+                signed_in: None,
             }
         };
         c.providers[0].source = Some("storm".into());

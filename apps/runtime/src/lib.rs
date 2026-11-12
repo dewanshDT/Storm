@@ -92,6 +92,7 @@ mod pty;
 pub mod race;
 pub mod scrollback;
 pub mod serve;
+pub mod signin;
 pub mod srp;
 pub mod status;
 pub mod terminal;
