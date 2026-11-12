@@ -5,11 +5,13 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/session_screen.dart' show terminalHint;
+import 'package:storm/agent/agent_models.dart';
+import 'package:storm/agent/session_screen.dart' show canLine, terminalHint;
 import 'package:storm/router.dart';
 import 'package:storm/ui/tokens.dart';
 
 import 'agent_fakes.dart';
+import 'fake_server.dart';
 import 'shell_harness.dart';
 import 'spawn_fakes.dart';
 
@@ -525,6 +527,127 @@ void main() {
       await tester.tap(find.byKey(const Key('fix-in-integrations')));
       await tester.pumpAndSettle();
       expect(where(c).path, Routes.integrations);
+      await disposeShell(tester, c);
+    });
+  });
+
+  group('About says what it was given at launch', () {
+    AgentSession session({
+      String provider = 'claude-code',
+      String? writeVaultId,
+      List<String>? integrations,
+    }) => AgentSession.fromJson(
+      agentSession(
+        'ags_1',
+        provider: provider,
+        writeVaultId: writeVaultId,
+        integrations: integrations == null
+            ? null
+            : [
+                for (final n in integrations) {'slug': n, 'display_name': n},
+              ],
+      ),
+    );
+
+    test('its write vault and how many integrations', () {
+      expect(
+        canLine(
+          session(writeVaultId: 'v-work', integrations: ['Linear', 'Figma']),
+          vaultName: 'Work',
+        ),
+        'Can: writes to Work · 2 integrations',
+      );
+      expect(
+        canLine(session(integrations: [])),
+        'Can: read only · no integrations',
+      );
+      expect(
+        canLine(session(integrations: ['Linear', 'Figma'])),
+        'Can: read only · 2 integrations',
+      );
+      expect(
+        canLine(session(writeVaultId: 'v-work', integrations: ['Linear'])),
+        'Can: writes to a vault · 1 integration',
+      );
+      expect(
+        canLine(session(writeVaultId: 'v-work'), vaultName: 'Work'),
+        'Can: writes to Work',
+        reason: 'a server that does not say what integrations it got',
+      );
+      expect(
+        canLine(session(provider: 'shell', writeVaultId: 'v-work')),
+        'Can: shell only, no Storm access',
+      );
+    });
+
+    testWidgets('under Starts agents, quiet; tapping lists the integrations', (
+      tester,
+    ) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          {
+            ...spawnSession(
+              'ags_p',
+              spawn: {'enabled': true, 'launched_on': true},
+              writeVaultId: FakeServer.primaryVault,
+            ),
+            'integrations': [
+              {'slug': 'linear', 'display_name': 'Linear'},
+              {'slug': 'figma', 'display_name': 'Figma'},
+            ],
+          },
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await open(
+        tester,
+        agents,
+        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+      );
+      final can = find.byKey(const Key('about-can'));
+      final line = tester.widget<Text>(can);
+      // Nothing is connected now; the line is what it got at launch.
+      expect(line.data, 'Can: writes to Primary · 2 integrations');
+      expect(line.style!.color, tester.element(can).tokens.text3);
+      final starts = find.byKey(const Key('about-starts-agents'));
+      expect(
+        tester.getTopLeft(can).dy,
+        greaterThan(tester.getBottomLeft(starts).dy - 1),
+      );
+      expect(
+        tester.getTopLeft(can).dy,
+        lessThan(tester.getTopLeft(find.text('RAN AS')).dy),
+      );
+      expect(find.byKey(const Key('about-can-integrations')), findsNothing);
+      await tester.tap(find.byKey(const Key('about-can-toggle')));
+      await tester.pumpAndSettle();
+      expect(
+        tester
+            .widget<Text>(find.byKey(const Key('about-can-integrations')))
+            .data,
+        'Linear, Figma',
+      );
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('the same line in the phone details sheet', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [agentSession('ags_1', integrations: const [])],
+      );
+      final c = await open(
+        tester,
+        agents,
+        size: phone,
+        at: Routes.agentSession('ags_1'),
+      );
+      await tester.tap(find.byKey(const Key('session-header')));
+      await tester.pumpAndSettle();
+      final can = find.byKey(const Key('about-can'));
+      await tester.ensureVisible(can);
+      expect(tester.widget<Text>(can).data, 'Can: read only · no integrations');
+      expect(find.byKey(const Key('about-can-toggle')), findsNothing);
       await disposeShell(tester, c);
     });
   });
