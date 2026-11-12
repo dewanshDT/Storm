@@ -62,12 +62,6 @@ final List<Pair> pairs = [
   ('count on danger', (t) => t.onAccent, (t) => t.danger, 4.5),
 ];
 
-/// Pairs that miss with today's tokens, and the floor they must hold until
-/// a token change fixes them. Selected `accent` on `accentSoft` is the design
-/// system's selected state (chips, soft buttons, tabs) from before 153; only
-/// SlowFlow earth misses, and no other existing token keeps the state.
-const known = {('accent on accentSoft', StormPreset.slowflowEarth): 4.3};
-
 void main() {
   for (final preset in StormPreset.values) {
     group(preset.label, () {
@@ -77,11 +71,6 @@ void main() {
           final ratio = contrastRatio(fg(t), bg(t));
           final why =
               '$name is ${ratio.toStringAsFixed(2)}:1 in ${preset.label}';
-          if (known[(name, preset)] case final floor?) {
-            expect(ratio, greaterThanOrEqualTo(floor), reason: why);
-            expect(ratio, lessThan(min), reason: '$why: drop it from known');
-            return;
-          }
           expect(ratio, greaterThanOrEqualTo(min), reason: why);
         });
       }
