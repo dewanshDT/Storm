@@ -13,19 +13,18 @@ import 'agent_fakes.dart';
 import 'shell_harness.dart';
 import 'spawn_fakes.dart';
 
-/// Decision 144 in the client: a parent's About lists each child's latest
-/// events, how many its agent has not read, and where a less-than-certain
-/// signal came from; a child's activity reads "Unknown" until a gated
-/// signal says more, and never as working. Since decision 148 a child's
-/// denials show there and in its parent's Activity, and since 151 N5 its
-/// own prompt is an ordinary permission prompt.
+/// Decision 144 in the client, as the Agents tab (153i) shows it: each
+/// child with its state in a word and why, never as working; since
+/// decision 148 a child's denials in what its parent sent, and since 151 N5
+/// its own prompt an ordinary permission prompt; a round's stats on the
+/// entry that began it (153j).
 void main() {
   const edge = Size(900, 700);
   const wide = Size(1400, 900);
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
-  Future<ProviderContainer> about(
+  Future<ProviderContainer> agentsTab(
     WidgetTester tester,
     FakeAgentServer agents,
     String id, {
@@ -35,13 +34,13 @@ void main() {
     await pumpShell(tester, c, size: size);
     c
         .read(routerProvider)
-        .go(Routes.agentSession(id, tab: SessionTab.about.name));
+        .go(Routes.agentSession(id, tab: SessionTab.agents.name));
     await tester.pumpAndSettle();
-    if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+    if (find.byKey(const Key('agents-panel')).evaluate().isEmpty) {
       await tester.tap(find.byKey(const Key('inspector-toggle')));
       await tester.pumpAndSettle();
     }
-    expect(find.byKey(const Key('session-about')), findsOneWidget);
+    expect(find.byKey(const Key('agents-panel')), findsOneWidget);
     return c;
   }
 
@@ -116,88 +115,54 @@ void main() {
   ];
 
   for (final size in [wide, edge]) {
-    testWidgets(
-      'a parent sees each child’s events, unread count and evidence at '
-      '${size.width.toInt()}px',
-      (tester) async {
-        final agents = FakeAgentServer(
-          hosts: [agentHost()],
-          sessions: family(),
-        );
-        FakeSpawning(agents);
-        final c = await about(tester, agents, 'ags_p', size: size);
-        final tile = find.byKey(const Key('child-events-ags_c'));
-        await tester.ensureVisible(tile);
-        expect(tile, findsOneWidget);
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('child-pending-ags_c')),
-            matching: find.text('2 unread events'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.text('Started · ${clockAt(DateTime.parse(startedAt))}'),
-          findsOneWidget,
-        );
-        expect(
-          find.text('Permission prompt · ${clockAt(DateTime.parse(promptAt))}'),
-          findsOneWidget,
-        );
-        expect(
-          find.text('Denied Bash ×3 · ${clockAt(DateTime.parse(deniedAt))}'),
-          findsOneWidget,
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('event-detail-evt_ags_p_4')),
-            matching: find.text('curl https://example.com/[x](y)'),
-          ),
-          findsOneWidget,
-          reason: 'the detail is the child’s own text, shown as it is',
-        );
-        // Certain evidence carries no badge; a hook's word says so.
-        expect(
-          find.byKey(const Key('event-evidence-evt_ags_p_1')),
-          findsNothing,
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('event-evidence-evt_ags_p_2')),
-            matching: find.text('agent hook · reported'),
-          ),
-          findsOneWidget,
-        );
-        expect(
-          find.descendant(
-            of: find.byKey(const Key('event-evidence-evt_ags_p_3')),
-            matching: find.text('output · heuristic'),
-          ),
-          findsOneWidget,
-        );
-        expect(find.byKey(const Key('child-pending-ags_w')), findsNothing);
-        await disposeShell(tester, c);
-      },
-    );
+    testWidgets('a parent sees each child’s state and why at '
+        '${size.width.toInt()}px', (tester) async {
+      final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
+      FakeSpawning(agents);
+      final c = await agentsTab(tester, agents, 'ags_p', size: size);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('agent-child-tag-ags_c')),
+          matching: find.text('Needs you'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<Text>(find.byKey(const Key('agent-child-reason-ags_c')))
+            .data,
+        startsWith('permission prompt'),
+      );
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('agent-child-tag-ags_w')),
+          matching: find.text('Running'),
+        ),
+        findsOneWidget,
+      );
+      await disposeShell(tester, c);
+    });
   }
 
-  testWidgets('A-148-2: the parent’s Activity lists its children’s denials', (
+  testWidgets('A-148-2: what the parent sent lists its children’s denials', (
     tester,
   ) async {
     final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
     FakeSpawning(agents);
-    final c = shellContainer(agentClient: agents.client);
-    await pumpShell(tester, c, size: wide);
-    c
-        .read(routerProvider)
-        .go(Routes.agentSession('ags_p', tab: SessionTab.requests.name));
-    await tester.pumpAndSettle();
+    final c = await agentsTab(tester, agents, 'ags_p');
     final row = find.byKey(const Key('act-denied-evt_ags_p_4'));
+    await tester.ensureVisible(row);
     expect(row, findsOneWidget);
+    expect(
+      find.descendant(of: row, matching: find.text('DENIED spike-notes')),
+      findsOneWidget,
+    );
     expect(
       find.descendant(
         of: row,
-        matching: find.text('spike-notes: Denied Bash ×3'),
+        matching: find.text(
+          '${clockAt(DateTime.parse(deniedAt))} · Denied Bash ×3',
+        ),
       ),
       findsOneWidget,
     );
@@ -207,39 +172,25 @@ void main() {
         matching: find.text('curl https://example.com/[x](y)'),
       ),
       findsOneWidget,
+      reason: 'the detail is the child’s own text, shown as it is',
     );
-    expect(find.byKey(const Key('acts-empty')), findsNothing);
+    expect(find.byKey(const Key('agents-empty')), findsNothing);
     await disposeShell(tester, c);
   });
 
-  testWidgets('a child’s unknown activity reads Unknown, never working', (
-    tester,
-  ) async {
+  testWidgets('a child is never said to be working', (tester) async {
     final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
     FakeSpawning(agents);
-    final c = await about(tester, agents, 'ags_p');
-    final unknown = find.byKey(const Key('child-activity-ags_c'));
-    await tester.ensureVisible(unknown);
+    final c = await agentsTab(tester, agents, 'ags_p');
+    final panel = find.byKey(const Key('agents-panel'));
     expect(
-      find.descendant(of: unknown, matching: find.text('Unknown')),
-      findsOneWidget,
-    );
-    expect(
-      find.descendant(of: unknown, matching: find.text('Working')),
+      find.descendant(of: panel, matching: find.textContaining('orking')),
       findsNothing,
-    );
-    expect(
-      find.descendant(
-        of: find.byKey(const Key('child-activity-ags_w')),
-        matching: find.text('Working'),
-      ),
-      findsOneWidget,
-      reason: 'only a gated signal says working',
     );
     await disposeShell(tester, c);
   });
 
-  testWidgets('a session nobody started shows no events', (tester) async {
+  testWidgets('a session that started none says so', (tester) async {
     final agents = FakeAgentServer(
       hosts: [agentHost()],
       sessions: [
@@ -247,15 +198,14 @@ void main() {
       ],
     );
     FakeSpawning(agents);
-    final c = await about(tester, agents, 'ags_p');
-    expect(find.byKey(const Key('child-events-ags_p')), findsNothing);
+    final c = await agentsTab(tester, agents, 'ags_p');
+    expect(find.byKey(const Key('agents-empty')), findsOneWidget);
+    expect(find.text('STARTED BY THIS SESSION'), findsNothing);
     await disposeShell(tester, c);
   });
 
-  testWidgets('a child’s round shows what it took, tokens included (145f)', (
-    tester,
-  ) async {
-    const reportedAt = '2026-10-27T10:06:00Z';
+  testWidgets('a round shows what it took on the entry that began it, '
+      'tokens included (145f, 153j)', (tester) async {
     final agents = FakeAgentServer(
       hosts: [agentHost()],
       sessions: [
@@ -280,21 +230,42 @@ void main() {
                 'cache_write_tokens': 300,
                 'output_tokens': 456,
               },
-              at: reportedAt,
             ),
           ],
         ),
       ],
     );
-    FakeSpawning(agents);
-    final c = await about(tester, agents, 'ags_p');
+    final spawning = FakeSpawning(agents);
+    spawning.addAct(
+      'ags_p',
+      name: 'counter',
+      session: 'ags_c',
+      task: 'Count the lines.',
+    );
+    final message = spawning.addAct(
+      'ags_p',
+      kind: 'message',
+      target: 'ags_c',
+      text: 'Now count the words.',
+      round: 2,
+      outcome: 'delivered',
+    );
+    final c = await agentsTab(tester, agents, 'ags_p');
+    final id = message['id'];
+    expect(find.text('MESSAGE counter'), findsOneWidget);
     expect(
-      find.text(
-        'Reported: succeeded · Round 2 · 14s · 12k in · 456 out · '
-        '${clockAt(DateTime.parse(reportedAt))}',
+      find.descendant(
+        of: find.byKey(Key('act-text-$id')),
+        matching: find.text('Now count the words.'),
       ),
       findsOneWidget,
     );
+    expect(
+      tester.widget<Text>(find.byKey(Key('act-round-$id'))).data,
+      'round 2 · 14s · 12k in · 456 out',
+    );
+    // The start has no round-1 event, so no round line of its own.
+    expect(find.byKey(const Key('act-round-agr_1')), findsNothing);
     await disposeShell(tester, c);
   });
 

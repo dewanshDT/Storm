@@ -71,6 +71,10 @@ const HEARTBEAT: Duration = Duration::from_secs(15);
 const LINK_IDLE: Duration = Duration::from_secs(45);
 /// How often a host looks for newer agent CLIs (133-5).
 const AUTO_UPDATE_EVERY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a host looks again whether its agents are signed in (153-S4),
+/// and how soon a link-up, a refresh or a session's end may look again.
+const SIGN_IN_EVERY: Duration = Duration::from_secs(10 * 60);
+const SIGN_IN_MIN: Duration = Duration::from_secs(30);
 /// A child's: the helper's 660 s for its workspace, then a start's own.
 const CHILD_START_DEADLINE: Duration = if cfg!(test) {
     Duration::from_secs(10)
@@ -84,6 +88,8 @@ const START_DEADLINE: Duration = if cfg!(test) {
 };
 
 /// A command from the server (freeze §11.5).
+// One lives per message, briefly: boxing `Start` would buy nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 pub enum Command {
@@ -136,6 +142,10 @@ pub enum Command {
         /// canonical and inside a root here; never on an isolated host.
         #[serde(default)]
         cwd: Option<String>,
+        /// A Shell's line to type once it is ready, without Enter (153-S3).
+        /// Written to the PTY as input; never argv or the environment.
+        #[serde(default)]
+        typed_input: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -391,6 +401,22 @@ pub(crate) struct Leader {
     user: Option<u32>,
 }
 
+/// Types a Shell's line once it is ready (153-S3), through the session's
+/// own writer, so it is ordered with what the person types. No Enter.
+async fn type_when_ready(s: Arc<HostSession>, text: String) {
+    let events = s.events.clone();
+    let ended = events.clone();
+    if crate::typed::ready(
+        move || events.ring.lock().unwrap().end(),
+        move || ended.ended.lock().unwrap().is_some(),
+    )
+    .await
+    {
+        tracing::info!(session = %s.id, bytes = text.len(), "typing the launch's line");
+        let _ = s.input.send(text.into_bytes());
+    }
+}
+
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
         if self.titles {
@@ -522,6 +548,8 @@ pub struct Host {
     launch_remote: Mutex<Vec<serde_json::Value>>,
     /// The agents' versions and Node's, probed in the background (133-3).
     agents: Arc<crate::agents::Inventory>,
+    /// Whether each agent is signed in, probed in the background (153-S4).
+    sign_in: Arc<crate::signin::Ledger>,
     /// Agents with a job running: one at a time each (133-4).
     agent_jobs: Mutex<std::collections::HashSet<String>>,
     /// With isolation on, the helper: agent installs run through it under
@@ -627,6 +655,7 @@ impl Host {
             plugin_inventory: Arc::new(Mutex::new(Vec::new())),
             launch_remote: Mutex::new(Vec::new()),
             agents: Arc::default(),
+            sign_in: Arc::default(),
             agent_jobs: Mutex::default(),
             isolation,
         }))
@@ -734,6 +763,9 @@ impl Host {
             // It makes a workspace a person names (`workspace.create`,
             // decision 141c).
             "workspace_create": true,
+            // It types a Shell's `typed_input` once the shell is ready
+            // (153-S3).
+            "typed_input": true,
             // The providers whose sessions it can resume (decision 89). A
             // host without this would start a resume as a new conversation.
             "resume": self
@@ -888,6 +920,9 @@ impl Host {
         if let Some(latest) = self.agents.latest(id) {
             cap["latest"] = json!(latest);
         }
+        if let Some(signed_in) = self.sign_in.get(id).wire() {
+            cap["signed_in"] = json!(signed_in);
+        }
         if !crate::install::verified(id) {
             cap["checksum_verified"] = json!(false);
         }
@@ -996,6 +1031,7 @@ impl Host {
             self.agents.record_update(&agent, result.is_ok());
         }
         self.probe_agents();
+        self.probe_sign_in(true);
     }
 
     async fn isolated_job(
@@ -1128,6 +1164,74 @@ impl Host {
         });
     }
 
+    /// Looks whether each agent is signed in (153-S4), in the background,
+    /// and sends a fresh inventory when that changed. Unless `force`, not
+    /// within [`SIGN_IN_MIN`] of the last look.
+    ///
+    /// Not on a per-session host: each session there runs as its own user,
+    /// signed in only by 136f's paths, which the host account's CLIs cannot
+    /// show. Every agent there is unknown, and no CLI runs.
+    fn probe_sign_in(self: &Arc<Self>, force: bool) {
+        if self.config.isolated() || !self.sign_in.begin(force, SIGN_IN_MIN) {
+            return;
+        }
+        let codex_home = self.codex_home().ok();
+        let probes: Vec<_> = self
+            .providers
+            .iter()
+            .filter(|p| crate::agents::MANAGEABLE.contains(&p.id().as_str()))
+            .map(|p| {
+                let id = p.id().as_str().to_string();
+                let mut command = p.helper_command();
+                if let (Some(command), Some(home), "codex") =
+                    (command.as_mut(), &codex_home, id.as_str())
+                {
+                    command.env(crate::codex::HOME_ENV, home.path());
+                }
+                (id, command, p.env_names())
+            })
+            .collect();
+        let host = self.clone();
+        tokio::spawn(async move {
+            let found = tokio::task::spawn_blocking(move || {
+                let daemon: Vec<_> = std::env::vars_os().collect();
+                let store = crate::signin::opencode_store();
+                probes
+                    .into_iter()
+                    .map(|(agent, command, env)| {
+                        let env = crate::signin::present(daemon.iter().cloned(), &env);
+                        let state = crate::signin::probe(crate::signin::Probe {
+                            agent: &agent,
+                            command,
+                            env: &env,
+                            opencode_store: store.as_deref(),
+                            deadline: crate::signin::DEADLINE,
+                        });
+                        tracing::debug!(agent = %agent, state = state.as_str(), "agent sign-in");
+                        (agent, state)
+                    })
+                    .collect()
+            })
+            .await;
+            let Ok(found) = found else { return };
+            if host.sign_in.record(found) && *host.link_up.borrow() {
+                let _ = host
+                    .post("/v1/runtime/inventory", &host.capabilities())
+                    .await;
+            }
+        });
+    }
+
+    /// Every [`SIGN_IN_EVERY`] while linked (153-S4).
+    async fn sign_in_checks(self: Arc<Self>) {
+        loop {
+            tokio::time::sleep(SIGN_IN_EVERY).await;
+            if *self.link_up.borrow() {
+                self.probe_sign_in(true);
+            }
+        }
+    }
+
     fn plugin_remote(&self) -> Vec<serde_json::Value> {
         let listed = self.plugin_inventory.lock().unwrap().clone();
         let launched = self.launch_remote.lock().unwrap().clone();
@@ -1240,6 +1344,7 @@ impl Host {
         let listener = self.bind_socket()?;
         tokio::spawn(self.clone().serve_socket(listener, None));
         tokio::spawn(self.clone().auto_updates());
+        tokio::spawn(self.clone().sign_in_checks());
         tokio::spawn(self.clone().report_isolation_changes());
         if self.isolation_status.pending() {
             tokio::spawn(self.clone().isolation_self_test());
@@ -1389,6 +1494,7 @@ impl Host {
         self.hello().await?;
         self.link_up.send_replace(true);
         self.probe_agents();
+        self.probe_sign_in(false);
         tracing::info!(host = %self.identity.host_id, "link up");
         for session in self.sessions.lock().unwrap().values() {
             session.events.wake.notify_one();
@@ -1584,6 +1690,7 @@ impl Host {
                 resumed_from,
                 child_of,
                 cwd,
+                typed_input,
             } => {
                 self.start(
                     session,
@@ -1597,13 +1704,14 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
-                    (permission_mode, spawn, cwd),
+                    (permission_mode, spawn, cwd, typed_input),
                 )
                 .await
             }
             Command::Refresh => {
                 self.refresh_plugin_inventory();
                 self.probe_agents();
+                self.probe_sign_in(false);
                 let _ = self
                     .post("/v1/runtime/inventory", &self.capabilities())
                     .await;
@@ -1763,7 +1871,12 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
-        (permission_mode, spawn, cwd): (Option<String>, bool, Option<String>),
+        (permission_mode, spawn, cwd, typed_input): (
+            Option<String>,
+            bool,
+            Option<String>,
+            Option<String>,
+        ),
     ) {
         if !self.start_wanted(&id).await {
             tracing::warn!(session = %id, "Storm no longer wants this start: dropped");
@@ -1778,6 +1891,13 @@ impl Host {
         };
         if interaction.as_deref().is_some_and(|i| i != "terminal") {
             refuse("unsupported interaction");
+            return self.post_start_failure(&id).await;
+        }
+        let typed_input = typed_input.filter(|t| !t.is_empty());
+        if let Some(text) = &typed_input
+            && (provider_id != crate::typed::PROVIDER || !crate::typed::allowed(text))
+        {
+            refuse("typed input is one line for a Shell");
             return self.post_start_failure(&id).await;
         }
         if self.sessions.lock().unwrap().len() >= self.config.max_sessions as usize {
@@ -2252,6 +2372,9 @@ impl Host {
             took_ms = begun.elapsed().as_millis() as u64,
             "session started"
         );
+        if let Some(text) = typed_input {
+            tokio::spawn(type_when_ready(host_session.clone(), text));
+        }
         tokio::spawn(self.clone().upload(host_session));
         // What arrived while it started, in order. The lock is held
         // throughout, so a newer command waits for these rather than
@@ -2429,6 +2552,8 @@ impl Host {
                         self.forget_mcp(&s.id);
                         self.write_table();
                         tracing::info!(session = %s.id, status = body["status"].as_str().unwrap_or(""), "session ended");
+                        // A Shell may have just signed an agent in.
+                        self.probe_sign_in(false);
                         return;
                     }
                     _ => {
@@ -3815,6 +3940,7 @@ mod tests {
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -3864,6 +3990,152 @@ mod tests {
             .unwrap_err();
         assert!(format!("{err}").contains("not an image"), "{err}");
         host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// A host whose `shell` is `/bin/sh -c script`, and a start for it.
+    #[cfg(target_os = "linux")]
+    async fn shell_host(script: &str) -> (Arc<Host>, tempfile::TempDir, tempfile::TempDir) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, _seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n",
+            roots.path().display().to_string(),
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, state, roots)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn typed_start(session: &str, provider: &str, typed_input: &str) -> Command {
+        Command::Start {
+            session: session.into(),
+            workspace: "w".into(),
+            provider: provider.into(),
+            interaction: Some("terminal".into()),
+            terminal: Size { cols: 80, rows: 24 },
+            mcp: Vec::new(),
+            context: false,
+            resume: None,
+            provider_credential: None,
+            model: None,
+            permission_mode: None,
+            spawn: false,
+            resumed_from: None,
+            child_of: None,
+            cwd: None,
+            typed_input: Some(typed_input.into()),
+        }
+    }
+
+    /// 153-S3: a Shell's line is typed into its terminal after the shell's
+    /// first output has gone quiet, with no Enter after it, and it is in
+    /// neither the argv nor the environment of the session's processes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_shells_line_is_typed_once_it_is_ready_and_never_run() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        // Echo stays on until the prompt: a line typed too early would be
+        // echoed before it.
+        let script = format!(
+            "echo $$ > {o}/pid; sleep 0.5; stty raw -echo; printf 'ready> '; \
+             timeout --foreground 2 cat > {o}/typed; touch {o}/done; sleep 1000; :"
+        );
+        let (host, _state, _roots) = shell_host(&script).await;
+        let line = "claude auth login # 153-S3-MARKER";
+        host.clone()
+            .handle(typed_start("ags_TYPED", "shell", line))
+            .await;
+        let s = host.session("ags_TYPED").expect("the shell started");
+        wait_for("the shell to read its line", || {
+            out.path().join("done").exists()
+        })
+        .await;
+        assert_eq!(
+            std::fs::read(out.path().join("typed")).unwrap(),
+            line.as_bytes(),
+            "exactly the line, and no Enter after it"
+        );
+        let shown = match s.events.ring.lock().unwrap().read(0, 1 << 20) {
+            crate::scrollback::Read::Data { bytes, .. } => {
+                String::from_utf8_lossy(&bytes).into_owned()
+            }
+            other => panic!("{other:?}"),
+        };
+        assert!(shown.contains("ready> "), "{shown:?}");
+        assert!(
+            !shown.contains("153-S3-MARKER"),
+            "typed before the prompt: {shown:?}"
+        );
+
+        let pid = std::fs::read_to_string(out.path().join("pid")).unwrap();
+        let pid = pid.trim();
+        let children = || {
+            std::fs::read_to_string(format!("/proc/{pid}/task/{pid}/children")).unwrap_or_default()
+        };
+        wait_for("the leader's sleep", || !children().trim().is_empty()).await;
+        let children = children();
+        let pids: Vec<&str> = std::iter::once(pid)
+            .chain(children.split_whitespace())
+            .collect();
+        for p in pids {
+            for what in ["cmdline", "environ"] {
+                let bytes = std::fs::read(format!("/proc/{p}/{what}")).unwrap();
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains("153-S3-MARKER"),
+                    "the line is in {p}'s {what}"
+                );
+            }
+        }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 153-S3: the host checks the line again. One for any other provider,
+    /// or with a newline in it, fails the start and nothing runs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_line_for_an_agent_or_with_a_newline_fails_the_start() {
+        let (host, _state, _roots) = shell_host("exec sleep 1000").await;
+        for (session, provider, line) in [
+            ("ags_NEWLINE", "shell", "ls\n"),
+            ("ags_CR", "shell", "ls\r"),
+            ("ags_ESC", "shell", "\u{1b}[201~ls"),
+            ("ags_LONG", "shell", &"a".repeat(1025)),
+            ("ags_AGENT", "claude-code", "claude auth login"),
+        ] {
+            host.clone()
+                .handle(typed_start(session, provider, line))
+                .await;
+            assert!(host.session(session).is_none(), "{session} started");
+        }
+        host.clone()
+            .handle(typed_start("ags_OK", "shell", "ls"))
+            .await;
+        assert!(host.session("ags_OK").is_some());
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
+    async fn the_host_says_it_types() {
+        let (host, ..) = test_host(vec![Arc::new(crate::fake::FakeProvider::new())]).await;
+        assert_eq!(host.capabilities()["typed_input"], true);
     }
 
     /// A host whose `claude-code` and `opencode` are `/bin/sh` running
@@ -3951,6 +4223,7 @@ mod tests {
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 
@@ -5237,6 +5510,135 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// A host whose agents are the given scripts, linked to a recording
+    /// server.
+    #[cfg(unix)]
+    async fn sign_in_host(
+        settings: &str,
+        scripts: &[(&str, &str)],
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let mut toml = format!(
+            "{settings}\ncodex_home = \"storm\"\nworkspace_roots = [{:?}]\n",
+            roots.path().display().to_string()
+        );
+        for (id, body) in scripts {
+            let bin = roots.path().join(format!("{id}.sh"));
+            std::fs::write(&bin, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            toml.push_str(&format!(
+                "[[providers]]\nid = {id:?}\ncommand = {:?}\n",
+                bin.display().to_string()
+            ));
+        }
+        let host = Host::new(state.path(), toml::from_str(&toml).unwrap()).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    /// 153-S4: each agent's own status command decides, in its sessions'
+    /// environment; the inventory says only the state, never what it
+    /// printed, and a refresh soon after does not run it again.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn the_inventory_says_whether_each_agent_is_signed_in_and_nothing_it_printed() {
+        let (host, seen, _state, roots) = sign_in_host(
+            "",
+            &[
+                (
+                    "claude-code",
+                    "[ \"$*\" = \"auth status\" ] || exit 9; echo ran >> \"$(dirname \"$0\")/claude-runs\"; echo LEAK-claude-sk-ant; exit 0",
+                ),
+                (
+                    "codex",
+                    "case \"$CODEX_HOME\" in */agents/codex) ;; *) exit 7;; esac; echo LEAK-codex; exit 1",
+                ),
+                ("cursor", "echo 'LEAK-cursor Not logged in'"),
+                ("command-code", "echo LEAK-cc; exit 0"),
+            ],
+        )
+        .await;
+        let keyed = std::env::var_os("OPENAI_API_KEY").is_some()
+            || std::env::var_os("CODEX_API_KEY").is_some();
+        host.probe_sign_in(false);
+        wait_for("an inventory with sign-in", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/inventory") && b["providers"][0].get("signed_in").is_some()
+            })
+        })
+        .await;
+        let caps = host.capabilities();
+        let by_id = |id: &str| {
+            caps["providers"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(by_id("claude-code")["signed_in"], json!(true));
+        if !keyed {
+            assert_eq!(
+                by_id("codex")["signed_in"],
+                json!(false),
+                "Storm's own home"
+            );
+        }
+        for id in ["cursor", "command-code"] {
+            assert!(by_id(id).get("signed_in").is_none(), "{id}: unknown");
+        }
+        let posted = serde_json::to_string(&*seen.lock().unwrap()).unwrap();
+        assert!(!posted.contains("LEAK"), "{posted}");
+
+        host.probe_sign_in(false);
+        host.clone().handle(Command::Refresh).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let runs = std::fs::read_to_string(roots.path().join("claude-runs")).unwrap();
+        assert_eq!(runs.lines().count(), 1, "not again within SIGN_IN_MIN");
+    }
+
+    /// 153-S4: on a per-session host the account's sign-in is not the
+    /// sessions', so nothing runs and every agent is unknown.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_per_session_host_runs_no_sign_in_probe() {
+        let (host, _seen, _state, roots) = sign_in_host(
+            "isolation = \"per-session\"",
+            &[("claude-code", "touch \"$(dirname \"$0\")/ran\"; exit 0")],
+        )
+        .await;
+        host.probe_sign_in(true);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(!roots.path().join("ran").exists());
+        assert!(
+            host.capabilities()["providers"][0]
+                .get("signed_in")
+                .is_none()
+        );
+    }
+
     /// Decision 133-4: a job the host must refuse is reported failed with
     /// its stable code, and never touches the managed folder.
     #[tokio::test(flavor = "multi_thread")]
@@ -5515,6 +5917,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
 
@@ -5613,6 +6016,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -6978,6 +7382,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 
@@ -7304,6 +7709,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             resumed_from: None,
             child_of: None,
             cwd: None,
+            typed_input: None,
         }
     }
 

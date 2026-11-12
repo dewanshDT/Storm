@@ -5,13 +5,13 @@ import 'package:flutter_svg/flutter_svg.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../agent/agent_state.dart';
-import '../../state/health.dart';
+import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../state/nav_memory.dart';
-import '../surfaces.dart';
 import '../tokens.dart';
+import 'app_bar.dart' show railTopInset;
 
-/// The desktop activity rail (handoff §2.1): Notes, Agents, then the health
-/// dot and Settings at the foot.
+/// The desktop activity rail (handoff §2.1): Notes, Agents, then Settings at
+/// the foot. The health dot is in the app bar (153a).
 class ActivityRail extends ConsumerWidget {
   const ActivityRail({super.key, required this.current});
 
@@ -29,6 +29,8 @@ class ActivityRail extends ConsumerWidget {
             ?.live
             .any((s) => s.status == 'running' && s.working) ??
         false;
+    // What waits for the person to answer: the one count on the desk (153e).
+    final needs = ref.watch(needsYouCountProvider);
 
     void open(Activity a) => context.go(memory.entryOf(a));
 
@@ -40,7 +42,7 @@ class ActivityRail extends ConsumerWidget {
           right: BorderSide(color: t.border, width: t.bw),
         ),
       ),
-      padding: EdgeInsets.only(top: t.sp * 2, bottom: t.sp),
+      padding: EdgeInsets.only(top: railTopInset(t), bottom: t.sp),
       child: SafeArea(
         right: false,
         child: Column(
@@ -59,10 +61,10 @@ class ActivityRail extends ConsumerWidget {
               label: 'Agents',
               active: current == Activity.agents,
               animate: working,
+              count: needs,
               onTap: () => open(Activity.agents),
             ),
             const Spacer(),
-            const RailStatusDot(),
             RailItem(
               key: const Key('rail-settings'),
               icon: LucideIcons.settings_2,
@@ -110,6 +112,7 @@ class RailItem extends StatelessWidget {
     required this.active,
     required this.onTap,
     this.animate = false,
+    this.count = 0,
   }) : assert((icon == null) != (pixel == null));
 
   final IconData? icon;
@@ -121,17 +124,23 @@ class RailItem extends StatelessWidget {
   /// Cycle a [pixel] glyph's frames (decision 123c).
   final bool animate;
 
+  /// A `danger` count on its corner; none at 0.
+  final int count;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final ink = active ? t.accent : t.text3;
     final radius = BorderRadius.circular(t.rControl);
-    return Tooltip(
-      message: label,
+    final spoken = count == 0
+        ? label
+        : '$label, $count ${count == 1 ? 'needs' : 'need'} you';
+    final button = Tooltip(
+      message: spoken,
       child: Semantics(
         button: true,
         selected: active,
-        label: label,
+        label: spoken,
         onTap: onTap,
         excludeSemantics: true,
         child: Material(
@@ -147,6 +156,21 @@ class RailItem extends StatelessWidget {
           ),
         ),
       ),
+    );
+    if (count == 0) return button;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        button,
+        Positioned(
+          top: -t.sp * 0.5,
+          right: -t.sp * 0.625,
+          child: NeedsYouCount(
+            key: const Key('rail-needs-count'),
+            count: count,
+          ),
+        ),
+      ],
     );
   }
 
@@ -241,145 +265,38 @@ class _PixelGlyphViewState extends State<_PixelGlyphView>
 
 double railFootSize(StormTokens t) => t.sp * 5;
 
-Color healthColor(HealthTone tone, StormTokens t) => switch (tone) {
-  HealthTone.good => t.green,
-  HealthTone.muted => t.text3,
-  HealthTone.danger => t.danger,
-};
+/// The `danger` count of sessions that need you: on the rail's Agents item
+/// and on the phone's place bubble (153e, 153o).
+class NeedsYouCount extends StatelessWidget {
+  const NeedsYouCount({super.key, required this.count});
 
-class RailStatusDot extends ConsumerStatefulWidget {
-  const RailStatusDot({super.key});
-
-  @override
-  ConsumerState<RailStatusDot> createState() => _RailStatusDotState();
-}
-
-class _RailStatusDotState extends ConsumerState<RailStatusDot> {
-  final _anchor = GlobalKey();
+  final int count;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final tone = ref.watch(healthToneProvider);
-    return Semantics(
-      button: true,
-      label: 'Status',
-      onTap: _open,
-      excludeSemantics: true,
-      child: InkWell(
-        key: const Key('rail-status'),
-        borderRadius: BorderRadius.circular(t.rControl),
-        onTap: _open,
-        child: SizedBox.square(
-          key: _anchor,
-          dimension: railFootSize(t),
-          child: Center(
-            child: Container(
-              width: t.sp * 1.125,
-              height: t.sp * 1.125,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: healthColor(tone, t),
-              ),
-            ),
+    final side = t.sp * 2.125;
+    return IgnorePointer(
+      child: Container(
+        constraints: BoxConstraints(minWidth: side),
+        height: side,
+        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: t.danger,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          count > 99 ? '99+' : '$count',
+          style: TextStyle(
+            fontFamily: StormTokens.monoFamily,
+            fontSize: t.labelSize,
+            height: 1,
+            fontWeight: FontWeight.w600,
+            color: t.onAccent,
           ),
         ),
       ),
-    );
-  }
-
-  Future<void> _open() async {
-    final t = context.tokens;
-    await showStormPopover<void>(
-      context: context,
-      anchorKey: _anchor,
-      width: t.sp * 35,
-      side: PopoverSide.right,
-      builder: (popContext) => HealthPopover(
-        onAbout: () {
-          Navigator.pop(popContext);
-          context.go('/settings/health');
-        },
-      ),
-    );
-  }
-}
-
-class HealthPopover extends StatelessWidget {
-  const HealthPopover({super.key, required this.onAbout});
-
-  final VoidCallback onAbout;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return StormPopover(
-      children: [
-        const HealthRows(),
-        InkWell(
-          key: const Key('health-about'),
-          onTap: onAbout,
-          borderRadius: BorderRadius.circular(t.rControl),
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 0.75,
-              vertical: t.sp,
-            ),
-            child: Text(
-              'About & health ›',
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.codeSize,
-                color: t.accent,
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class HealthRows extends ConsumerWidget {
-  const HealthRows({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        for (final row in ref.watch(healthRowsProvider))
-          Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 0.75,
-              vertical: t.sp * 0.75,
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: t.sp,
-                  height: t.sp,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: healthColor(row.tone, t),
-                  ),
-                ),
-                SizedBox(width: t.sp * 1.5),
-                Expanded(
-                  child: Text(
-                    row.text,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: t.text,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-      ],
     );
   }
 }

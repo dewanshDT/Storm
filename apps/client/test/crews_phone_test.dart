@@ -21,7 +21,12 @@ void main() {
   const wide = Size(1400, 900);
 
   setUpAll(loadRealFonts);
-  setUp(() => SharedPreferences.setMockInitialValues({}));
+  // ENDED starts folded (153o); these read its rows, so it is open.
+  setUp(
+    () => SharedPreferences.setMockInitialValues({
+      'storm.agents.collapsed.ended': false,
+    }),
+  );
 
   FakeAgentServer crewServer() => FakeAgentServer(
     hosts: [
@@ -150,9 +155,10 @@ void main() {
       await t.tap(find.byKey(const Key('crew-chevron-crw_1')));
       await t.pumpAndSettle();
       expect(row('ags_impl'), findsNothing);
+      // Folded, its most urgent state, as on the desk (153o).
       expect(
         t.widget<Text>(find.byKey(const Key('crew-count-crw_1'))).data,
-        '3 · 1',
+        '1 host offline',
       );
       await t.tap(header);
       await t.pumpAndSettle();

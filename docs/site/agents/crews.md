@@ -24,9 +24,14 @@ workspaces can share a crew. Crews are listed under **CREWS**, above
 - **Several at once:** ⌘-click (Ctrl-click on Windows and Linux) or
   Shift-click sessions in the sidebar, then choose **Make crew** in the bar
   at its foot.
-- **On a phone**, long-press a session and choose **New crew…**.
-- **When you launch** from a note, the launcher's **Crew** row offers
-  **New crew: {the note's title}**, or any crew you already have.
+- **Without dragging:** a session's **···** (on hover, or right-click) has
+  **Add to crew…**, and a crew's menu has **Add sessions…**, a checklist of
+  the sessions not in it.
+- **On a phone**, long-press a session and choose **New crew…**, or
+  long-press a crew for **Add sessions…**.
+- **When you launch** from a note, the launcher's **Crew** row, under
+  **More**, offers **New crew: {the note's title}**, or any crew you
+  already have.
 
 **Moving sessions:**
 
@@ -56,7 +61,8 @@ started them, or making a crew from it, takes them along.
 
 Agents a session started are read only unless you ticked **The agents it
 starts can write to {vault}** when you launched it; then they write to that
-vault and no other. The session's **About** says which.
+vault and no other. The session's **About** says which, under **Starts
+agents**.
 
 Agents a session started run in its permission mode, or in their own
 agent's setting when their agent doesn't have that mode. Where they run
@@ -72,7 +78,7 @@ permission prompt: it shows **Needs you**, and you answer it in that
 agent's terminal, as you would any other. Whatever its permissions refuse
 goes to the session that started it, which decides what to do next: give
 the agent another task, do the step itself, end it or start another. Its
-**Activity** and its list of children show what was refused.
+**Agents** tab shows what was refused, among what it sent them.
 
 **How many it may start** is set per host, in its
 [Limits](/docs/agents/hosts/#limits): by default a session runs at most 3
@@ -80,7 +86,8 @@ agents of its own at a time, and a tree of agents (the session that started
 them included) at most 6. Agents it started can't start agents of their own
 yet. An agent that has ended no longer counts, so the session ends the ones
 it is done with. A start past a limit is refused and names the limit; the
-session's **About** says the limits it runs under.
+session's **About** says the limits it runs under, under **Starts agents**,
+with a link to change them.
 
 **Known gap: Codex children.** Claude Code and OpenCode tell Storm when
 their own permission prompt opens. Codex has no hook for that. A Codex
@@ -132,7 +139,7 @@ that uses it; a deleted role note leaves its tag struck through.
 
 A role note can tell the agent how to behave, "write nothing in the vault"
 for example. That is advice to the agent, not a rule: what a session may
-write is still the **Can write to** you chose at launch. The launcher says so
+write is still the **Write to** you chose at launch. The launcher says so
 under Role when you grant a write vault.
 
 ### Agents that can't read roles

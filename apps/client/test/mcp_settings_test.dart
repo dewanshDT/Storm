@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -173,18 +175,52 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('says a deleted note is not recoverable', (tester) async {
-      // Storm has no trash. The screen is the only place that says so before
-      // an agent is given permission to delete.
+    testWidgets("says a deleted note goes to its vault's Trash (153-7)", (
+      tester,
+    ) async {
+      // Since decision 150 a delete goes to Trash; the screen says so before
+      // an app is given permission to delete.
       final c = shellContainer();
       final server = serverOf(c);
       server.mcpEnabled = true;
       server.mcpWritable = true;
+      server.agentWrites = true;
       await pumpShell(tester, c);
       await openSettings(tester, c);
 
-      expect(find.textContaining('no trash'), findsOneWidget);
+      expect(
+        find.text("A deleted note goes to its vault's Trash."),
+        findsOneWidget,
+      );
+      expect(
+        find.text(
+          "You pick one vault per session. An agent's delete always waits "
+          'for you, then goes to Trash.',
+        ),
+        findsOneWidget,
+      );
       await disposeShell(tester, c);
     });
+  });
+
+  test('"Storm has no trash" and "Agents never delete notes" are gone from '
+      'the app and the docs (153-7)', () {
+    final offenders = <String>[];
+    for (final root in ['lib', '../../docs/site']) {
+      for (final f in Directory(root).listSync(recursive: true)) {
+        if (f is! File) continue;
+        if (!f.path.endsWith('.dart') && !f.path.endsWith('.md')) continue;
+        // Release notes record what a version said; they are not changed.
+        if (f.path.contains('/releases/')) continue;
+        final text = f.readAsStringSync().toLowerCase();
+        for (final phrase in [
+          'storm has no trash',
+          'agents never delete notes',
+        ]) {
+          if (text.contains(phrase)) offenders.add('${f.path}: $phrase');
+        }
+      }
+    }
+    expect(offenders, isEmpty);
   });
 }

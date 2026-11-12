@@ -368,6 +368,10 @@ enum StormPreset {
 
   /// A warm, light alternate — and the proof the token layer is genuinely
   /// theme-independent rather than dark-only with a light afterthought.
+  ///
+  /// `accentL` 38 sits under the light cap so selected `accent` on
+  /// `accentSoft` reaches 4.5:1 (4.33 at the cap), and the running dot moves
+  /// off `text3`'s lightness.
   slowflowEarth(
     'slowflow-earth',
     'SlowFlow earth',
@@ -378,7 +382,7 @@ enum StormPreset {
       chroma: 22,
       accentH: 55,
       accentC: 0.06,
-      accentL: 45,
+      accentL: 38,
       scale: 1.30,
       rCard: 2,
       rControl: 10,

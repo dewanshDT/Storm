@@ -168,6 +168,7 @@ impl AgentManager {
             resumed_from: Some(r.id.clone()),
             child_of: Some(parent.id.clone()),
             cwd,
+            typed_input: None,
         };
         self.live
             .lock()

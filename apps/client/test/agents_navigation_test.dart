@@ -152,7 +152,12 @@ void main() {
       c.read(routerProvider).go(Routes.agents);
       await tester.pumpAndSettle();
       expect(find.text('Agents run on a machine you own'), findsOneWidget);
-      expect(find.byKey(const Key('new-session')), findsNothing);
+      // ＋ stays in the header, off, and says why (153e).
+      expect(
+        tester.widget<InkWell>(find.byKey(const Key('new-session'))).onTap,
+        isNull,
+      );
+      expect(find.byTooltip('No host is set up yet'), findsOneWidget);
       await tester.tap(find.byKey(const Key('enroll-host-step')));
       await tester.pumpAndSettle();
       expect(location(c), Routes.settingsPage('hosts'));
@@ -171,11 +176,16 @@ void main() {
 
       expect(find.byKey(const Key('new-session-pill')), findsOneWidget);
       expect(find.byType(FloatingActionButton), findsNothing);
+      // ENDED is folded to its count, as on the desk (153o).
       expect(
         top(tester, find.text('RUNNING')),
-        lessThan(top(tester, find.text('ENDED'))),
+        lessThan(top(tester, find.text('ENDED · 1'))),
       );
-      expect(find.textContaining(' · storm · completed'), findsOneWidget);
+      expect(find.text('storm · completed'), findsNothing);
+      await tester.tap(find.byKey(const Key('ended-toggle')));
+      await tester.pumpAndSettle();
+      // One host: rows don't name it (153e).
+      expect(find.text('storm · completed'), findsOneWidget);
       expect(find.byType(AgentMark), findsWidgets);
       expect(find.byKey(const Key('places-bubble')), findsOneWidget);
       expect(find.byKey(const Key('rail-agents')), findsNothing);
@@ -198,7 +208,7 @@ void main() {
     });
   });
 
-  testWidgets('Hosts are a Settings page, reached from the list', (
+  testWidgets('Agents & hosts is a Settings page, reached from the list', (
     tester,
   ) async {
     final c = shellContainer(
@@ -210,7 +220,7 @@ void main() {
     await tester.tap(find.byKey(const Key('settings-row-hosts')));
     await tester.pumpAndSettle();
     expect(location(c), Routes.settingsPage('hosts'));
-    expect(find.text('Hosts & default agent'), findsOneWidget);
+    expect(find.text('Agents & hosts'), findsOneWidget);
     await disposeShell(tester, c);
   });
 }

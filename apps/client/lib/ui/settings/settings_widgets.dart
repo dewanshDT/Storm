@@ -8,10 +8,13 @@ import '../../router.dart';
 import '../breakpoints.dart';
 import '../panels.dart' show MonoTag;
 import '../shell/storm_scaffold.dart';
+import '../shell/app_bar.dart' show pageTopInset;
 import '../tokens.dart';
+import '../widgets.dart' show ReadingMeasure;
 
-/// A page's frame: the 680 column beside the navigation at desk width; on a
-/// phone, a pushed screen under the corner bubbles with "‹ Settings" first.
+/// A page's frame: the whole pane beside the navigation at desk width, the
+/// intro held to a reading measure; on a phone, a pushed screen under the
+/// corner bubbles with "‹ Settings" first.
 class SettingsPage extends StatelessWidget {
   const SettingsPage({
     super.key,
@@ -19,6 +22,7 @@ class SettingsPage extends StatelessWidget {
     required this.intro,
     required this.children,
     this.beta = false,
+    this.action,
   });
 
   final String title;
@@ -27,6 +31,9 @@ class SettingsPage extends StatelessWidget {
 
   /// Shows [BetaTag] beside the title.
   final bool beta;
+
+  /// The page's own action, at the title's right.
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
@@ -40,6 +47,7 @@ class SettingsPage extends StatelessWidget {
           spacing: t.sp * 1.25,
           children: [
             Flexible(
+              fit: action == null ? FlexFit.loose : FlexFit.tight,
               child: Text(
                 title,
                 style: TextStyle(
@@ -52,16 +60,19 @@ class SettingsPage extends StatelessWidget {
               ),
             ),
             if (beta) const BetaTag(),
+            ?action,
           ],
         ),
         SizedBox(height: t.sp * 1.25),
-        Text(
-          intro,
-          style: TextStyle(
-            fontFamily: StormTokens.sansFamily,
-            fontSize: t.uiSize,
-            color: t.text2,
-            height: 1.5,
+        ReadingMeasure(
+          child: Text(
+            intro,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.uiSize,
+              color: t.text2,
+              height: 1.5,
+            ),
           ),
         ),
         SizedBox(height: wide ? t.sp * 2.25 : t.sp * 2),
@@ -88,19 +99,11 @@ class SettingsPage extends StatelessWidget {
       child: ListView(
         padding: EdgeInsets.fromLTRB(
           t.sp * 5,
-          t.sp * 3.5,
+          pageTopInset(t),
           t.sp * 5,
           t.sp * 7.5,
         ),
-        children: [
-          Align(
-            alignment: Alignment.topLeft,
-            child: ConstrainedBox(
-              constraints: BoxConstraints(maxWidth: t.sp * 75),
-              child: body,
-            ),
-          ),
-        ],
+        children: [body],
       ),
     );
   }

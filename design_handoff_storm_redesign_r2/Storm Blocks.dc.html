@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<div style="display:flex;flex-direction:column;gap:10px;min-width:0">
+<sc-for list="{{ items }}" as="b" hint-placeholder-count="4">
+  <sc-if value="{{ b.isLabel }}" hint-placeholder-val="{{ false }}"><div style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding-top:6px">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isTitle }}" hint-placeholder-val="{{ false }}"><div style="font-size:15px;font-weight:600;color:var(--text);line-height:1.35">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isText }}" hint-placeholder-val="{{ true }}"><div style="font-size:13.5px;color:var(--text2);line-height:1.5;text-wrap:pretty">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isNote }}" hint-placeholder-val="{{ false }}"><div style="font-size:12px;color:var(--text3);line-height:1.5">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isEvent }}" hint-placeholder-val="{{ false }}"><div style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text3);line-height:1.5;padding-left:12px;margin-top:-6px">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isMono }}" hint-placeholder-val="{{ false }}"><div style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text);background:var(--surface2);border-radius:6px;padding:8px 10px;line-height:1.5;white-space:pre-wrap">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isLink }}" hint-placeholder-val="{{ false }}"><div style="{{ b.linkStyle }}">{{ b.text }}</div></sc-if>
+  <sc-if value="{{ b.isDivider }}" hint-placeholder-val="{{ false }}"><div style="height:1px;background:var(--border)"></div></sc-if>
+  <sc-if value="{{ b.isKv }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-direction:column;gap:3px">
+      <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">{{ b.k }}</span>
+      <span style="font-size:13.5px;color:var(--text);line-height:1.45">{{ b.v }}</span>
+      <sc-if value="{{ b.hasLink }}" hint-placeholder-val="{{ false }}"><span style="font-size:13px;color:var(--accent)">{{ b.link }}</span></sc-if>
+    </div>
+  </sc-if>
+  <sc-if value="{{ b.isField }}" hint-placeholder-val="{{ false }}">
+    <div style="display:grid;grid-template-columns:{{ b.cols }};align-items:start;gap:4px 10px">
+      <sc-if value="{{ b.label }}" hint-placeholder-val="{{ true }}"><span style="font-size:13px;color:var(--text2);padding-top:9px">{{ b.label }}</span></sc-if>
+      <div style="display:flex;flex-direction:column;gap:4px;min-width:0">
+        <sc-if value="{{ b.isToggle }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;gap:10px;padding-top:6px"><div style="{{ b.track }}"><div style="{{ b.knob }}"></div></div><span style="font-size:13.5px;color:var(--text)">{{ b.value }}</span></div>
+        </sc-if>
+        <sc-if value="{{ b.isBox }}" hint-placeholder-val="{{ true }}">
+          <div style="{{ b.boxStyle }}"><span style="flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ b.value }}</span><sc-if value="{{ b.chev }}" hint-placeholder-val="{{ true }}"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex:none;color:var(--text3)"><path d="m6 9 6 6 6-6"></path></svg></sc-if></div>
+        </sc-if>
+        <sc-if value="{{ b.hasSub }}" hint-placeholder-val="{{ false }}"><span style="font-size:12px;color:var(--text3);line-height:1.45">{{ b.sub }}</span></sc-if>
+        <sc-if value="{{ b.hasLink }}" hint-placeholder-val="{{ false }}"><span style="font-size:12.5px;color:var(--accent)">{{ b.link }}</span></sc-if>
+      </div>
+    </div>
+  </sc-if>
+  <sc-if value="{{ b.isChips }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-wrap:wrap;gap:6px"><sc-for list="{{ b.chips }}" as="c" hint-placeholder-count="3"><span style="{{ c.style }}">{{ c.l }}</span></sc-for></div>
+  </sc-if>
+  <sc-if value="{{ b.isRow }}" hint-placeholder-val="{{ false }}">
+    <div style="{{ b.rowStyle }}">
+      <sc-if value="{{ b.hasDot }}" hint-placeholder-val="{{ false }}"><span style="{{ b.dotStyle }}"></span></sc-if>
+      <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+        <div style="display:flex;align-items:center;gap:8px;min-width:0"><span style="{{ b.titleStyle }}">{{ b.title }}</span><sc-if value="{{ b.hasTag }}" hint-placeholder-val="{{ false }}"><span style="{{ b.tagStyle }}">{{ b.tag }}</span></sc-if></div>
+        <sc-for list="{{ b.subs }}" as="s" hint-placeholder-count="1"><span style="{{ s.style }}">{{ s.text }}</span></sc-for>
+        <sc-if value="{{ b.hasQuote }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2);background:var(--surface2);border-radius:6px;padding:6px 8px;margin-top:4px;line-height:1.45">{{ b.quote }}</span></sc-if>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;flex:none">
+        <sc-for list="{{ b.actions }}" as="a" hint-placeholder-count="1"><span style="{{ a.style }}">{{ a.l }}</span></sc-for>
+      </div>
+    </div>
+  </sc-if>
+  <sc-if value="{{ b.isCode }}" hint-placeholder-val="{{ false }}">
+    <div style="display:flex;flex-direction:column;gap:4px">
+      <sc-for list="{{ b.lines }}" as="l" hint-placeholder-count="2"><div style="display:flex;align-items:center;gap:8px;background:var(--surface2);border-radius:6px;padding:6px 8px"><span style="flex:1;min-width:0;font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ l }}</span><span style="font-size:12px;color:var(--accent);flex:none">Copy</span></div></sc-for>
+    </div>
+  </sc-if>
+  <sc-if value="{{ b.isButtons }}" hint-placeholder-val="{{ false }}">
+    <div style="{{ b.btnRow }}"><sc-for list="{{ b.btns }}" as="a" hint-placeholder-count="2"><span style="{{ a.style }}">{{ a.l }}</span></sc-for></div>
+  </sc-if>
+</sc-for>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;blocks&quot;:{&quot;editor&quot;:null,&quot;tsType&quot;:&quot;object[]&quot;},&quot;phone&quot;:{&quot;editor&quot;:&quot;boolean&quot;,&quot;default&quot;:false,&quot;tsType&quot;:&quot;boolean&quot;}}">
+const TONE = { accent: 'var(--accent)', amber: 'var(--amber)', danger: 'var(--danger)', text3: 'var(--text3)', text2: 'var(--text2)', green: 'var(--green)' };
+const mono = "font-family:'IBM Plex Mono',monospace";
+const btn = (k, phone) => {
+  const pad = phone ? 'padding:12px 16px;flex:1;text-align:center;font-size:15px' : 'padding:7px 14px;font-size:13px';
+  if (k === 'primary') return `${pad};border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-weight:500`;
+  if (k === 'danger') return `${pad};border-radius:var(--rControl);background:var(--danger);color:var(--onAccent);font-weight:500`;
+  if (k === 'ghost') return `${pad};border-radius:var(--rControl);border:1px solid var(--border);color:var(--text)`;
+  if (k === 'dangerText') return `${pad};color:var(--danger)`;
+  if (k === 'soft') return `${pad};border-radius:var(--rControl);background:var(--accentSoft);color:var(--accent);font-weight:500`;
+  return `${pad};color:var(--text2)`;
+};
+class Component extends DCLogic {
+  renderVals() {
+    const phone = !!this.props.phone;
+    const items = (this.props.blocks || []).map(b => {
+      const t = b.t || 'text', o = { isLabel: t === 'label', isTitle: t === 'title', isText: t === 'text', isNote: t === 'note', isEvent: t === 'event', isMono: t === 'mono', isLink: t === 'link', isDivider: t === 'divider', isKv: t === 'kv', isField: t === 'field', isChips: t === 'chips', isRow: t === 'row' || t === 'card', isCode: t === 'code', isButtons: t === 'buttons', ...b };
+      if (t === 'link') o.linkStyle = `font-size:13px;color:${b.danger ? 'var(--danger)' : 'var(--accent)'}`;
+      if (t === 'kv') o.hasLink = !!b.link;
+      if (t === 'field') {
+        const on = !!b.on, kind = b.kind || 'select';
+        Object.assign(o, {
+          cols: phone || !b.label ? 'minmax(0,1fr)' : '108px minmax(0,1fr)', isToggle: kind === 'toggle', isBox: kind !== 'toggle', chev: kind === 'select', hasSub: !!b.sub, hasLink: !!b.link,
+          boxStyle: `display:flex;align-items:center;gap:8px;min-width:0;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rControl);padding:8px 12px;font-size:14px;${kind === 'mono' ? mono + ';font-size:13px;' : ''}color:${b.placeholder || b.disabled ? 'var(--text3)' : 'var(--text)'}${b.chip ? ';background:var(--accentSoft)' : ''}`,
+          track: `width:34px;height:20px;flex:none;border-radius:999px;position:relative;background:${on ? 'var(--accent)' : 'var(--surface2)'};border:1px solid ${on ? 'var(--accent)' : 'var(--border)'}`,
+          knob: `position:absolute;top:2px;left:${on ? 16 : 2}px;width:14px;height:14px;border-radius:999px;background:${on ? 'var(--onAccent)' : 'var(--text3)'}`
+        });
+      }
+      if (t === 'chips') o.chips = (b.items || []).map(c => ({ l: c.l, style: `white-space:nowrap;padding:5px 11px;border-radius:999px;font-size:13px;border:1px solid ${c.on ? 'var(--accent)' : 'var(--border)'};color:${c.on ? 'var(--accent)' : 'var(--text2)'};background:${c.on ? 'var(--accentSoft)' : 'transparent'}` }));
+      if (t === 'row' || t === 'card') {
+        const card = t === 'card';
+        Object.assign(o, {
+          hasDot: !!b.dot, dotStyle: `width:8px;height:8px;flex:none;border-radius:999px;margin-top:6px;background:${TONE[b.dot] || 'var(--text3)'}`,
+          titleStyle: `min-width:0;font-size:${phone ? 15 : 14}px;${b.titleMono ? mono + ';font-size:12.5px;' : ''}color:var(--text);font-weight:${card ? 500 : 400};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+          hasTag: !!b.tag, tagStyle: `flex:none;white-space:nowrap;${mono};font-size:10.5px;line-height:16px;color:${TONE[b.tone] || 'var(--text2)'};border:1px solid ${b.tone ? TONE[b.tone] : 'var(--border)'};border-radius:999px;padding:0 7px`,
+          subs: [b.sub, b.sub2].filter(Boolean).map((s, i) => ({ text: s, style: `font-size:12px;color:var(--text3);line-height:1.45;${i === 0 && b.subMono !== false ? mono + ';font-size:11.5px;' : ''}` })),
+          hasQuote: !!b.quote,
+          actions: (b.actions || []).map(a => typeof a === 'string' ? { l: a, style: 'font-size:13px;color:var(--text2)' } : { l: a.l, style: a.k === 'danger' ? 'font-size:13px;color:var(--danger)' : a.k ? btn(a.k).replace('flex:1;', '') : 'font-size:13px;color:var(--accent)' }),
+          rowStyle: card ? 'display:flex;align-items:flex-start;gap:12px;padding:14px 16px;border-radius:var(--rCard);background:var(--surface);border:1px solid var(--border)' : `display:flex;align-items:flex-start;gap:12px;padding:${phone ? '11px 0' : '10px 0'};${b.noLine ? '' : 'border-bottom:1px solid var(--border)'}`
+        });
+      }
+      if (t === 'buttons') Object.assign(o, { btnRow: `display:flex;align-items:center;gap:8px;justify-content:${b.align || 'flex-end'};padding-top:4px${phone ? ';flex-direction:column-reverse;align-items:stretch' : ''}`, btns: (b.items || []).map(x => ({ l: x.l, style: btn(x.k, phone) })) });
+      return o;
+    });
+    return { items };
+  }
+}
+</script>
+</body>
+</html>

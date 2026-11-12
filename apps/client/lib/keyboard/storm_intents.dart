@@ -19,8 +19,21 @@ class StormNewFolderIntent extends Intent {
   const StormNewFolderIntent();
 }
 
+/// ⇧⌘N while Agents is open (153f); in Notes the same chord is New folder.
+class StormNewSessionIntent extends Intent {
+  const StormNewSessionIntent();
+}
+
 class StormToggleSidebarIntent extends Intent {
   const StormToggleSidebarIntent();
+}
+
+class StormBackIntent extends Intent {
+  const StormBackIntent();
+}
+
+class StormForwardIntent extends Intent {
+  const StormForwardIntent();
 }
 
 // --- Note open ------------------------------------------------------------

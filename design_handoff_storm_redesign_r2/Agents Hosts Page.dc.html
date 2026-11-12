@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<div style="height:100%;overflow:hidden;position:relative;font-family:'IBM Plex Sans',sans-serif">
+  <div style="max-width:760px;padding:14px 40px 40px;display:flex;flex-direction:column;gap:16px">
+    <div style="display:flex;align-items:center;gap:12px">
+      <span style="flex:1;font-size:25px;font-weight:600;line-height:1.2;color:var(--text)">Agents &amp; hosts</span>
+      <span style="padding:7px 14px;border-radius:var(--rControl);background:var(--accentSoft);color:var(--accent);font-size:13px;font-weight:500">＋ Enroll a host</span>
+    </div>
+    <div style="font-size:14px;color:var(--text2);line-height:1.5;margin-top:-8px">The machines agents run on, and which agent CLIs each one has.</div>
+
+    <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+      <div style="border:1px dashed var(--border);border-radius:var(--rCard);padding:28px;display:flex;flex-direction:column;gap:10px;align-items:flex-start">
+        <span style="font-size:16px;font-weight:600;color:var(--text)">No hosts yet</span>
+        <span style="font-size:14px;color:var(--text2);line-height:1.55;max-width:480px">Agents run on a machine you own. Enroll one, then install Claude Code, OpenCode, Codex, Cursor or Command Code on it from this page.</span>
+        <span style="margin-top:4px;padding:8px 16px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13.5px;font-weight:500">Enroll a host</span>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ isGrid }}" hint-placeholder-val="{{ true }}">
+      <div style="border:1px solid var(--border);border-radius:var(--rCard);background:var(--surface);overflow:hidden">
+        <div style="{{ headRow }}">
+          <div style="padding:12px 16px;font-family:'IBM Plex Mono',monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3)">Host</div>
+          <sc-for list="{{ agents }}" as="a" hint-placeholder-count="5">
+            <div title="{{ a.tip }}" style="padding:10px 4px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px">
+              <span style="font-size:12.5px;font-weight:500;color:var(--text);text-align:center;line-height:1.25">{{ a.name }}</span>
+              <sc-if value="{{ a.isDefault }}" hint-placeholder-val="{{ false }}"><span style="font-family:'IBM Plex Mono',monospace;font-size:10px;line-height:14px;color:var(--accent);border:1px solid var(--accent);border-radius:5px;padding:0 5px">default</span></sc-if>
+            </div>
+          </sc-for>
+        </div>
+        <sc-for list="{{ hosts }}" as="h" hint-placeholder-count="4">
+          <div style="{{ h.rowStyle }}">
+            <div style="padding:12px 16px;display:flex;align-items:flex-start;gap:10px;min-width:0">
+              <span style="{{ h.dot }}"></span>
+              <div style="display:flex;flex-direction:column;gap:3px;min-width:0">
+                <span style="{{ h.nameStyle }}">{{ h.name }}</span>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3);line-height:1.4">{{ h.sub }}</span>
+              </div>
+            </div>
+            <sc-if value="{{ h.revoked }}" hint-placeholder-val="{{ false }}">
+              <div style="grid-column:2 / -1;display:flex;align-items:center;gap:14px;padding:0 16px;font-size:13px;color:var(--text3)"><span style="flex:1">It can't connect again.</span><span style="color:var(--accent)">Re-enroll…</span><span style="color:var(--danger)">Remove</span></div>
+            </sc-if>
+            <sc-for list="{{ h.cells }}" as="c" hint-placeholder-count="5">
+              <div style="{{ c.style }}">
+                <span style="{{ c.topStyle }}">{{ c.top }}</span>
+                <sc-if value="{{ c.hasBar }}" hint-placeholder-val="{{ false }}"><span style="width:56px;height:3px;border-radius:2px;background:var(--surface2);overflow:hidden;display:block"><span style="display:block;width:66%;height:3px;background:var(--text3)"></span></span></sc-if>
+                <span style="font-family:'IBM Plex Mono',monospace;font-size:10.5px;color:var(--text3);white-space:nowrap">{{ c.bottom }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </sc-for>
+      </div>
+      <div style="font-size:12px;color:var(--text3);margin-top:-6px">Click a cell to see details or act on it. Click an agent's name to make it the default.</div>
+
+      <div style="display:flex;flex-direction:column;gap:12px;padding-top:4px">
+        <div style="display:flex;align-items:baseline;gap:10px">
+          <span style="font-size:16px;font-weight:600;color:var(--text)">build-vm</span>
+          <span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text3)">online</span>
+          <span style="flex:1"></span>
+          <span style="font-size:13px;color:var(--text2)">Rename</span>
+          <span style="font-size:13px;color:var(--danger)">Revoke…</span>
+        </div>
+        <div style="display:grid;grid-template-columns:120px minmax(0,1fr);gap:10px 14px;align-items:start">
+          <span style="font-size:13px;color:var(--text2);padding-top:1px">Runs as</span>
+          <span style="font-size:13.5px;color:var(--text)">dewansh · each session isolated</span>
+          <span style="font-size:13px;color:var(--text2);padding-top:8px">Limits</span>
+          <div style="display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;flex-wrap:wrap;gap:8px">
+              <sc-for list="{{ limits }}" as="l" hint-placeholder-count="3">
+                <div style="flex:none;display:flex;align-items:center;gap:10px;padding:5px 6px 5px 12px;border-radius:var(--rControl);background:var(--surface2);border:1px solid var(--border)">
+                  <span style="font-size:13px;color:var(--text2);white-space:nowrap">{{ l.k }}</span>
+                  <span style="display:flex;align-items:center;gap:2px;font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--text)"><span style="width:22px;text-align:center;color:var(--text3)">−</span><span style="min-width:14px;text-align:center">{{ l.v }}</span><span style="width:22px;text-align:center;color:var(--text3)">+</span></span>
+                </div>
+              </sc-for>
+            </div>
+            <span style="font-size:12px;color:var(--text3);line-height:1.45">Lowering a limit ends nothing that is running; it refuses new starts.</span>
+          </div>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+
+  <sc-if value="{{ isCell }}" hint-placeholder-val="{{ false }}">
+    <div style="position:absolute;left:296px;top:236px;width:300px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:var(--shadow);padding:16px;display:flex;flex-direction:column;gap:10px;z-index:5">
+      <div style="display:flex;flex-direction:column;gap:3px"><span style="font-size:14px;font-weight:600;color:var(--text)">OpenCode on build-vm</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11.5px;color:var(--text3)">0.15.2 · your own install · up to date</span></div>
+      <span style="font-size:13px;color:var(--text);line-height:1.5">Not signed in. Sessions can't use OpenCode on build-vm until it is.</span>
+      <span style="align-self:flex-start;padding:7px 14px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">Sign in in a Shell</span>
+      <span style="font-size:12px;color:var(--text3);line-height:1.5">Opens a Shell session on build-vm with <span style="font-family:'IBM Plex Mono',monospace;color:var(--text2)">opencode auth login</span> typed in. Press Enter to run it.</span>
+      <div style="height:1px;background:var(--border)"></div>
+      <span style="font-size:12px;color:var(--text3);line-height:1.5">Installed outside Storm, so Storm won't update or remove it.</span>
+    </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;$preview&quot;:{&quot;width&quot;:900,&quot;height&quot;:760},&quot;state&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;grid&quot;,&quot;cell&quot;,&quot;empty&quot;],&quot;default&quot;:&quot;grid&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const mono = "font-family:'IBM Plex Mono',monospace";
+const AGENTS = ['Claude Code', 'OpenCode', 'Codex', 'Cursor', 'Command Code'];
+const C = (top, bottom, kind, extra = {}) => ({ top, bottom, kind, ...extra });
+const HOSTS = [
+  { name: 'build-vm', online: true, sub: 'Runs as dewansh', cells: [C('Ready', '2.0.31', 'ready'), C('Sign in', '0.15.2', 'act'), C('Installing', 'step 2 of 3', 'busy', { bar: true }), C('Install', '', 'act'), C('Install', '', 'act')] },
+  { name: 'pi-lab', online: true, sub: 'Runs as storm-runtime', cells: [C('Install', '', 'act'), C('Update', '0.15 → 0.16', 'act'), C("Can't install", 'needs Node 22', 'muted'), C('Install', '', 'act'), C('Ready', '1.4.0', 'ready')] },
+  { name: 'mac-mini', online: false, sub: 'Offline · last seen 9 days ago', cells: AGENTS.map(() => C('—', '', 'muted')) },
+  { name: 'mac-mini', revoked: true, sub: 'Revoked 12 Oct', cells: [] }
+];
+class Component extends DCLogic {
+  renderVals() {
+    const state = this.props.state || 'grid';
+    const cols = '170px repeat(5, minmax(0, 1fr))';
+    const hosts = HOSTS.map((h, hi) => {
+      const sel = hi === 0;
+      return { ...h, revoked: !!h.revoked,
+        rowStyle: `display:grid;grid-template-columns:${cols};align-items:stretch;border-top:1px solid var(--border);${sel ? 'background:var(--surface2)' : ''}${h.revoked ? ';opacity:.75' : ''}`,
+        dot: `width:8px;height:8px;flex:none;margin-top:6px;border-radius:999px;box-sizing:border-box;${h.online ? 'background:var(--text2)' : 'border:1.5px solid var(--text3)'}`,
+        nameStyle: `font-size:14px;font-weight:500;color:${h.online ? 'var(--text)' : 'var(--text2)'}`,
+        cells: h.cells.map((c, ci) => {
+          const ring = state === 'cell' && hi === 0 && ci === 1;
+          return { ...c, hasBar: !!c.bar,
+            style: `display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:10px 4px;border-left:1px solid var(--border);${ring ? 'box-shadow:inset 0 0 0 1.5px var(--accent);background:var(--accentSoft)' : ''}`,
+            topStyle: `font-size:13px;${c.kind === 'act' ? 'color:var(--accent);font-weight:500' : c.kind === 'ready' ? 'color:var(--text)' : 'color:var(--text3)'}` };
+        }) };
+    });
+    return {
+      isEmpty: state === 'empty', isGrid: state !== 'empty', isCell: state === 'cell',
+      headRow: `display:grid;grid-template-columns:${cols};align-items:stretch`,
+      agents: AGENTS.map((name, i) => ({ name, isDefault: i === 0, tip: i === 0 ? 'The default agent' : 'Make ' + name + ' the default' })),
+      hosts,
+      limits: [{ k: 'Agents per session', v: 3 }, { k: 'Per tree', v: 6 }, { k: 'Sessions at once', v: 4 }]
+    };
+  }
+}
+</script>
+</body>
+</html>

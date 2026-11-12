@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
@@ -6,19 +8,20 @@ import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
 import '../editor/frontmatter.dart' as fm;
+import '../keyboard/storm_activators.dart' show stormUsesMetaModifier;
 import '../router.dart';
 import '../state/app_state.dart';
-import '../state/health.dart' show integrationsSummaryProvider;
 import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
 import '../ui/panels.dart';
 import '../ui/session_status.dart';
-import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
+import '../ui/decision_strip.dart' show DecisionLayout;
+import '../ui/surfaces.dart' show showStormSheet;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
@@ -28,9 +31,10 @@ import 'agents_screen.dart' show launchAgentSession, resumeAgentSession;
 import 'crew_changes.dart';
 import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
-import 'integrations_api.dart' show integrationNamesOn;
 import 'launcher.dart' show NoteRef;
+import 'output_seen.dart';
 import 'delete_request.dart';
+import 'session_agents.dart';
 import 'session_controller.dart';
 import 'session_crew.dart';
 import 'session_inspector.dart';
@@ -42,8 +46,9 @@ import 'terminal_surface.dart';
 
 /// One session at `/agents/s/:id` (handoff §3.6).
 ///
-/// At [kExpandedWidth] and wider: the terminal beside a panel of Context,
-/// Wrote and About. Below it — the default — a full-screen terminal under a
+/// At [kExpandedWidth] and wider: the terminal beside the inspector, an
+/// icon rail of Context, Wrote, Agents, About and Work and the open tab's
+/// panel (153i). Below it — the default — a full-screen terminal under a
 /// compact header between the corner bubbles, the extra keys while it is
 /// live, and a details sheet the header opens. Both are
 /// the same route and share one stream (`sessionControllerProvider`), so a
@@ -67,11 +72,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _confirmEnd = false;
   bool _ending = false;
 
-  /// Ending a parent lists its children first (C1); dismissing one of a
-  /// tree dismisses the tree (C8).
-  bool _endTree = false;
-  bool _dismissTree = false;
   bool _reloadedAtEnd = false;
+
+  /// The delete request put aside here with Later (or Esc): its strip folds
+  /// to one line with Review until the next one.
+  String? _laterFor;
 
   /// A written note shown in the Wrote tab, with "‹ Wrote" back.
   NoteRef? _wroteNote;
@@ -91,9 +96,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.didUpdateWidget(old);
     if (old.sessionId != widget.sessionId) {
       _confirmEnd = false;
-      _endTree = false;
-      _dismissTree = false;
       _reloadedAtEnd = false;
+      _laterFor = null;
       _wroteNote = null;
     }
     if (old.tab != widget.tab) _wroteNote = null;
@@ -128,14 +132,54 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
   }
 
+  /// Ending a parent lists its children first (C1); dismissing one of a
+  /// tree dismisses the tree (C8). Both ask in the strip under the header
+  /// at desk width, and in a sheet on a phone (153g).
+  void _ask(SessionConfirm what) {
+    if (!mounted) return;
+    setState(() => _confirmEnd = false);
+    if (context.isExpanded) {
+      ref.read(sessionConfirmProvider(_id).notifier).state = what;
+      return;
+    }
+    final s =
+        ref.read(sessionDetailProvider(_id)).value ??
+        ref.read(agentOverviewProvider).value?.byId(_id);
+    if (s == null) return;
+    showStormSheet<void>(
+      context: context,
+      title: 'Confirm',
+      heightFactor: 0.85,
+      builder: (sheet) {
+        void done() {
+          if (!sheet.mounted) return;
+          final route = ModalRoute.of(sheet);
+          if (route != null && route.isCurrent) Navigator.of(sheet).pop();
+        }
+
+        return what == SessionConfirm.dismissTree
+            ? DismissTreeStrip(
+                session: s,
+                layout: DecisionLayout.sheet,
+                onDone: done,
+                onDismissed: () {
+                  done();
+                  _gone();
+                },
+              )
+            : EndTreeStrip(
+                session: s,
+                children: what == SessionConfirm.endChildren,
+                layout: DecisionLayout.sheet,
+                onDone: done,
+              );
+      },
+    );
+  }
+
   void _showEndTree() {
     ref.invalidate(sessionDescendantsProvider(_id));
-    if (mounted) {
-      setState(() {
-        _confirmEnd = false;
-        _endTree = true;
-      });
-    }
+    _ask(SessionConfirm.endTree);
   }
 
   /// End, or End with its children listed when it has any running.
@@ -156,7 +200,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   Future<void> _dismiss([AgentSession? s]) async {
     if (s != null && inTree(ref.read(agentOverviewProvider).value, s)) {
-      setState(() => _dismissTree = true);
+      _ask(SessionConfirm.dismissTree);
       return;
     }
     final api = agentApi(ref);
@@ -171,7 +215,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     } catch (e) {
       if (e is AgentRefusal &&
           (e.code == 'confirm_tree' || e.code == 'tree_live')) {
-        setState(() => _dismissTree = true);
+        _ask(SessionConfirm.dismissTree);
       } else {
         _say(describeFailure(e));
       }
@@ -180,31 +224,84 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
   }
 
-  /// The confirmations spawning adds below the header.
-  List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
-    if (s.deleteRequest case final r? when r.pending && !s.ended)
-      Padding(
-        padding: padding,
-        child: DeleteRequestCard(session: s),
-      ),
-    if (_endTree && !s.ended)
-      Padding(
-        padding: padding,
-        child: EndTreeBanner(
+  /// The one strip under the header at desk width (153g): a confirmation
+  /// the person asked for, else End's own, else what waits for them. Never
+  /// more than one, and never a dialog.
+  Widget? _deskStrip(AgentSession s, SessionController? c, String host) {
+    final t = context.tokens;
+    void done() => ref.read(sessionConfirmProvider(_id).notifier).state = null;
+    switch (ref.watch(sessionConfirmProvider(_id))) {
+      case SessionConfirm.endTree || SessionConfirm.endChildren when !s.ended:
+        return EndTreeStrip(
           session: s,
-          onDone: () => setState(() => _endTree = false),
-        ),
-      ),
-    if (_dismissTree)
-      Padding(
-        padding: padding,
-        child: DismissTreeBanner(
+          children:
+              ref.read(sessionConfirmProvider(_id)) ==
+              SessionConfirm.endChildren,
+          onDone: done,
+        );
+      case SessionConfirm.dismissTree:
+        return DismissTreeStrip(
           session: s,
-          onDone: () => setState(() => _dismissTree = false),
-          onDismissed: _gone,
+          onDone: done,
+          onDismissed: () {
+            done();
+            _gone();
+          },
+        );
+      default:
+    }
+    if (ref.watch(spawnOnAskProvider(_id)) && showsSpawnSwitch(s)) {
+      return Container(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 2,
+          t.sp * 1.5,
+          t.sp * 2,
+          t.sp * 1.5,
         ),
-      ),
-  ];
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: t.border, width: t.bw),
+          ),
+        ),
+        child: SpawnOnConfirm(
+          session: s,
+          host: host,
+          onDone: () =>
+              ref.read(spawnOnAskProvider(_id).notifier).state = false,
+        ),
+      );
+    }
+    if (_confirmEnd && !s.ended) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 2,
+          t.sp * 1.5,
+          t.sp * 2,
+          t.sp * 1.5,
+        ),
+        child: InlineConfirm(
+          key: const Key('end-confirm'),
+          title: 'End ${s.displayName}',
+          message:
+              'The agent and everything it started are stopped on the host.',
+          confirmLabel: 'End session',
+          onConfirm: _ending ? null : () => _end(c),
+          onCancel: () => setState(() => _confirmEnd = false),
+        ),
+      );
+    }
+    final d = deleteDecisionOf(s);
+    if (d == null) return null;
+    return DeleteDecisionStrip(
+      key: ValueKey('delete-${d.request.id}'),
+      session: s,
+      collapsed: _laterFor == d.request.id,
+      onLater: () => setState(() => _laterFor = d.request.id),
+      onReview: () => setState(() => _laterFor = null),
+      // The terminal's own Esc is the agent's (147b).
+      escapeAllowed: () => !_focus.hasFocus,
+    );
+  }
 
   void _runAgain(AgentSession s) =>
       launchAgentSession(context, ref, runAgain: s);
@@ -256,6 +353,21 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         ref.invalidate(agentOverviewProvider);
       }
     });
+    // Open, so its output is read here up to wherever it has got (153e).
+    void seen(int? end) {
+      if (end == null) return;
+      final n = ref.read(seenOutputProvider.notifier);
+      scheduleMicrotask(() => n.markSeen(_id, end));
+    }
+
+    seen(
+      ref.watch(sessionDetailProvider(_id).select((s) => s.value?.outputEnd)),
+    );
+    seen(
+      ref.watch(
+        agentOverviewProvider.select((o) => o.value?.byId(_id)?.outputEnd),
+      ),
+    );
     final detail = ref.watch(sessionDetailProvider(_id));
     final overview = ref.watch(agentOverviewProvider).value;
     return ListenableBuilder(
@@ -345,6 +457,26 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                   ),
                 ),
         ),
+        if (!s.ended)
+          Padding(
+            padding: EdgeInsets.fromLTRB(
+              t.sp * 2.5,
+              t.sp * 0.75,
+              t.sp * 2.5,
+              t.sp * 1.25,
+            ),
+            child: Text(
+              terminalHint,
+              key: const Key('terminal-hint'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.codeSize,
+                color: t.text3,
+              ),
+            ),
+          ),
         if (s.ended)
           Container(
             key: const Key('ended-footer'),
@@ -372,40 +504,25 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _header(context, s, host, inspectorOpen: open),
-            if (_confirmEnd && !s.ended)
-              Padding(
-                padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
-                child: InlineConfirm(
-                  key: const Key('end-confirm'),
-                  title: 'End ${s.displayName}',
-                  message:
-                      'The agent and everything it started are stopped on '
-                      'the host.',
-                  confirmLabel: 'End session',
-                  onConfirm: _ending ? null : () => _end(c),
-                  onCancel: () => setState(() => _confirmEnd = false),
-                ),
-              ),
-            ..._spawnBanners(
-              s,
-              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
-            ),
+            ?_deskStrip(s, c, host),
             _Trouble(controller: c),
             Expanded(
-              child: open
-                  ? LayoutBuilder(
-                      builder: (context, box) => Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          Expanded(child: terminal),
-                          SessionInspector(
-                            available: box.maxWidth,
-                            child: _panel(context, s, host),
-                          ),
-                        ],
-                      ),
-                    )
-                  : terminal,
+              child: LayoutBuilder(
+                builder: (context, box) => Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Expanded(child: terminal),
+                    SessionInspector(
+                      available: box.maxWidth,
+                      open: open,
+                      items: _railItems(s),
+                      selected: _shownTab(s),
+                      onPick: (tab) => _pickRail(tab, open: open),
+                      panel: _panel(context, s, host),
+                    ),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -457,6 +574,10 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     ),
                     SizedBox(width: t.sp * 1.25),
                     SessionStatusChip(status: s.status),
+                    if (showsSpawnSwitch(s)) ...[
+                      SizedBox(width: t.sp),
+                      SpawnChip(session: s),
+                    ],
                   ],
                 ),
               ),
@@ -543,9 +664,77 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     );
   }
 
+  /// The rail's icons (153i): Agents where the session can start agents or
+  /// has, Work for a child with a workspace of its own.
+  List<InspectorRailItem> _railItems(AgentSession s) {
+    final o = ref.watch(agentOverviewProvider).value;
+    return [
+      (
+        tab: SessionTab.context,
+        name: 'Context',
+        icon: LucideIcons.file,
+        badge: null,
+      ),
+      (
+        tab: SessionTab.wrote,
+        name: 'Wrote',
+        icon: LucideIcons.pen_line,
+        badge: s.wroteCount > 0 ? (count: s.wroteCount, loud: false) : null,
+      ),
+      if (showsAgentsTab(s, o))
+        (
+          tab: SessionTab.agents,
+          name: 'Agents',
+          icon: LucideIcons.git_fork,
+          badge: agentsBadge(s, o),
+        ),
+      (
+        tab: SessionTab.about,
+        name: 'About',
+        icon: LucideIcons.info,
+        badge: null,
+      ),
+      if (s.hasOwnWorkspace)
+        (
+          tab: SessionTab.work,
+          name: 'Work',
+          icon: LucideIcons.git_commit_horizontal,
+          badge: null,
+        ),
+    ];
+  }
+
+  /// The tab the route names, or About where this session has no such tab.
+  SessionTab _shownTab(AgentSession s) {
+    final tab = widget.tab;
+    return switch (tab) {
+      SessionTab.agents
+          when !showsAgentsTab(s, ref.watch(agentOverviewProvider).value) =>
+        SessionTab.about,
+      // A shared-workspace child has no Work tab (151 N6).
+      SessionTab.work when !s.hasOwnWorkspace => SessionTab.about,
+      _ => tab,
+    };
+  }
+
+  /// The open tab's icon closes the panel; any other opens its tab.
+  void _pickRail(SessionTab tab, {required bool open}) {
+    final inspector = ref.read(sessionInspectorOpenProvider.notifier);
+    if (open && tab == widget.tab) {
+      inspector.state = false;
+      return;
+    }
+    inspector.state = true;
+    if (tab == widget.tab) {
+      setState(() => _wroteNote = null);
+    } else {
+      _pickTab(tab);
+    }
+  }
+
   Widget _panel(BuildContext context, AgentSession s, String host) {
     final t = context.tokens;
-    final tab = widget.tab;
+    final tab = _shownTab(s);
     final Widget body = switch (tab) {
       SessionTab.context =>
         s.context == null
@@ -572,16 +761,22 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                 session: s,
                 onOpen: (at) => setState(() => _wroteNote = at),
               ),
-      SessionTab.work when s.hasOwnWorkspace => ChildWorkPanel(session: s),
-      // A shared-workspace child has no Work tab (151 N6).
-      SessionTab.about || SessionTab.work => SingleChildScrollView(
+      SessionTab.work => ChildWorkPanel(session: s),
+      SessionTab.agents => AgentsPanel(session: s),
+      SessionTab.about => SingleChildScrollView(
         padding: EdgeInsets.symmetric(
           horizontal: t.sp * 2,
-          vertical: t.sp * 2.75,
+          vertical: t.sp * 0.75,
         ),
         child: _About(session: s, host: host),
       ),
-      SessionTab.requests => ActsPanel(session: s),
+    };
+    final title = switch (tab) {
+      SessionTab.context => 'Context',
+      SessionTab.wrote => 'Wrote',
+      SessionTab.agents => 'Agents',
+      SessionTab.about => 'About',
+      SessionTab.work => 'Work',
     };
     return ColoredBox(
       color: t.bg,
@@ -589,9 +784,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Container(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.75,
-              vertical: t.sp * 1.25,
+            padding: EdgeInsets.fromLTRB(
+              t.sp * 2,
+              t.sp * 0.75,
+              t.sp * 0.75,
+              t.sp * 0.75,
             ),
             decoration: BoxDecoration(
               border: Border(
@@ -601,25 +798,17 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
             child: Row(
               children: [
                 Expanded(
-                  // Wraps rather than hiding a tab past the edge: a
-                  // child's Work tab was out of sight at 320px.
-                  child: PanelTabs<SessionTab>(
-                    wrap: true,
-                    tabs: [
-                      (SessionTab.context, 'Context'),
-                      (SessionTab.wrote, 'Wrote ${s.wroteCount}'),
-                      (SessionTab.about, 'About'),
-                      if (showsActs(s)) (SessionTab.requests, 'Activity'),
-                      if (s.hasOwnWorkspace) (SessionTab.work, 'Work'),
-                    ],
-                    selected: tab,
-                    onSelected: (next) {
-                      if (next == tab) {
-                        setState(() => _wroteNote = null);
-                      } else {
-                        _pickTab(next);
-                      }
-                    },
+                  child: Text(
+                    title,
+                    key: const Key('inspector-title'),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.codeSize,
+                      fontWeight: FontWeight.w600,
+                      color: t.text,
+                    ),
                   ),
                 ),
                 IconButton(
@@ -661,10 +850,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ..._spawnBanners(
-              s,
-              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp),
-            ),
+            PhoneDeleteStrip(session: s),
             _Trouble(controller: c),
             Expanded(
               child: DecoratedBox(
@@ -963,7 +1149,7 @@ class _PhoneHeader extends ConsumerWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: 15,
+                      fontSize: t.bodySize * 0.94,
                       fontWeight: FontWeight.w600,
                       height: 1.25,
                       color: t.text,
@@ -973,7 +1159,11 @@ class _PhoneHeader extends ConsumerWidget {
                 SizedBox(width: t.sp * 0.75),
                 Text(
                   '▾',
-                  style: TextStyle(fontSize: 11, height: 1, color: t.text3),
+                  style: TextStyle(
+                    fontSize: t.labelSize,
+                    height: 1,
+                    color: t.text3,
+                  ),
                 ),
               ],
             ),
@@ -1353,138 +1543,255 @@ class _WroteRow extends StatelessWidget {
   }
 }
 
-/// What the session is and may touch (handoff §3.6, About).
+/// The way in and out of the terminal (147b), said under it at desk width
+/// (153j), with this platform's Shift.
+String get terminalHint =>
+    'Tab and ${stormUsesMetaModifier ? '⇧Tab' : 'Shift+Tab'} go to the agent '
+    '· Esc, then Tab, leaves the terminal';
+
+/// About's plain rows after Crew, Role and Starts agents (153j): who it ran
+/// as and who started it. What the header's meta line says, and the
+/// internals (identity, isolation, network, vault access), are not here.
 List<(String, String)> aboutRows(
   AgentSession s, {
-  required String host,
-  required String? writeVault,
-  required List<String>? integrations,
   AgentOverview? overview,
+  DateTime? now,
 }) => [
-  ('Agent', providerLabel(s.provider)),
-  if (s.model != null) ('Model', s.model!),
-  if (s.permissionMode case final mode?)
-    ('Permission mode', permissionModeLabel(mode)),
-  (
-    'Workspace',
-    s.spawn.isChild
-        ? childWorkspaceText(
-            s,
-            overview?.byId(s.spawn.parentSession!)?.workspace ??
-                'its parent’s workspace',
-            host,
-          )
-        : '${s.workspace} on $host',
-  ),
-  ...spawnAboutRows(s, overview),
-  (
-    'Vault access',
-    s.isShell
-        ? 'None. Shell sessions have no Storm access.'
-        : s.writeVaultId != null
-        ? 'Reads all vaults. Writes to ${writeVault ?? 'one vault'}. Never '
-              'deletes.'
-        : 'Reads all vaults. No writes.',
-  ),
-  (
-    'Integrations',
-    s.isShell
-        ? 'None'
-        : integrations == null || integrations.isEmpty
-        ? 'None'
-        : '${integrations.join(', ')}. Fixed when the session started.',
-  ),
-  if (s.mcpPluginLocal.isNotEmpty)
-    (
-      'Plugin servers',
-      '${s.mcpPluginLocal.join(', ')}. They run on $host, outside Storm’s '
-          'integrations.',
-    ),
-  if (s.mcpSkipped.isNotEmpty)
-    (
-      'Not loaded',
-      [
-        for (final x in s.mcpSkipped) '${x.name} (${x.source}): ${x.reason}',
-      ].join('\n'),
-    ),
-  ('Network', 'Inherits $host’s policy'),
   ('Ran as', ranAsLine(s.ranAs)),
-  if (s.identityUnverified) ('Identity', '$kIdentityNotVerified.'),
-  // Ran as says a working isolation from the snapshot; only a fault stays.
-  if (s.isolationLabel case final label? when label != kIsolationVerified)
-    ('Isolation', '$label.'),
+  ('Started by', startedByLine(s, overview, now: now)),
 ];
 
-/// Under About when a plugin's remote server was skipped: it reaches a
-/// session only as an integration (131a, 131g).
-class AddSkippedToIntegrations extends StatelessWidget {
-  const AddSkippedToIntegrations({super.key, required this.session});
+/// What it was given at launch, in one line: "Can: writes to Work · 2
+/// integrations". Launch history, so a later disconnect does not change it.
+String canLine(AgentSession s, {String? vaultName}) {
+  if (s.isShell) return 'Can: shell only, no Storm access';
+  final n = s.integrations?.length;
+  return [
+    s.writeVaultId == null
+        ? 'Can: read only'
+        : 'Can: writes to ${vaultName ?? 'a vault'}',
+    if (n != null)
+      n == 0 ? 'no integrations' : '$n integration${n == 1 ? '' : 's'}',
+  ].join(' · ');
+}
+
+/// [canLine], quiet; tapping it lists the integrations by name.
+class AboutCan extends ConsumerStatefulWidget {
+  const AboutCan({super.key, required this.session});
 
   final AgentSession session;
 
   @override
+  ConsumerState<AboutCan> createState() => _AboutCanState();
+}
+
+class _AboutCanState extends ConsumerState<AboutCan> {
+  bool _open = false;
+
+  @override
   Widget build(BuildContext context) {
-    if (!session.mcpSkipped.any((x) => x.remote)) {
-      return const SizedBox.shrink();
-    }
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: TextAction(
-        key: const Key('add-skipped-to-integrations'),
-        label: 'Add to Integrations',
-        accent: true,
-        onTap: () => context.go(Routes.integrations),
+    final t = context.tokens;
+    final s = widget.session;
+    final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final vault = vaults.where((v) => v.id == s.writeVaultId).firstOrNull;
+    final names = s.isShell ? const <String>[] : s.integrations ?? const [];
+    final line = Text(
+      canLine(s, vaultName: vault?.name),
+      key: const Key('about-can'),
+      style: agentSans(t, color: t.text3),
+    );
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 1.75),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (names.isEmpty)
+            line
+          else
+            Semantics(
+              button: true,
+              expanded: _open,
+              child: InkWell(
+                key: const Key('about-can-toggle'),
+                onTap: () => setState(() => _open = !_open),
+                borderRadius: BorderRadius.circular(t.rControl),
+                child: line,
+              ),
+            ),
+          if (_open && names.isNotEmpty)
+            Text(
+              names.join(', '),
+              key: const Key('about-can-integrations'),
+              style: agentSans(t, color: t.text3),
+            ),
+        ],
       ),
     );
   }
 }
 
-/// What the session was granted at launch (launch history); from a server
-/// that does not say, the account's connections now.
-List<String>? sessionIntegrations(WidgetRef ref, AgentSession s) {
-  if (s.integrations != null) return s.integrations;
-  final connections = ref.watch(integrationsSummaryProvider).value;
-  return connections == null ? null : integrationNamesOn(connections, s.hostId);
+/// "You, from Gateway spec, 40m ago", or the agent that started it.
+String startedByLine(AgentSession s, AgentOverview? o, {DateTime? now}) {
+  final age = shortAge(s.createdAt, now: now);
+  final when = age.isEmpty
+      ? null
+      : age == 'now'
+      ? 'just now'
+      : '$age ago';
+  final parent = s.spawn.parentSession;
+  if (parent != null) {
+    return [o?.byId(parent)?.displayName ?? parent, ?when].join(', ');
+  }
+  final from = s.resumedFrom == null ? null : o?.byId(s.resumedFrom!);
+  final oldParent = from?.spawn.parentSession;
+  return [
+    'You',
+    if (s.context != null) 'from ${s.context!.title}',
+    if (oldParent != null)
+      'resuming what ${o?.byId(oldParent)?.displayName ?? oldParent} '
+          'started',
+    ?when,
+  ].join(', ');
 }
 
-class _About extends ConsumerWidget {
+/// "figma isn't loaded: it needs its address." (153j): its plugins' MCP
+/// servers the host left out, in one line. Null when none was.
+String? pluginProblemLine(AgentSession s) {
+  final skipped = [
+    for (final x in s.mcpSkipped)
+      if (x.source.startsWith('plugin')) x,
+  ];
+  if (skipped.isEmpty) return null;
+  if (skipped.length > 1) {
+    return '${skipped.length} plugin servers aren’t loaded: '
+        '${skipped.map((x) => x.name).join(', ')}.';
+  }
+  final x = skipped.single;
+  final why = x.remote
+      ? 'it reaches a session only as an integration'
+      : x.reason.trim();
+  return '${x.name} isn’t loaded${why.isEmpty ? '' : ': $why'}.';
+}
+
+/// The plugin problem, with where it is fixed.
+class PluginProblem extends StatelessWidget {
+  const PluginProblem({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final line = pluginProblemLine(session);
+    if (line == null) return const SizedBox.shrink();
+    final t = context.tokens;
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 2),
+      child: Column(
+        key: const Key('plugin-problem'),
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(line, style: agentSans(t, color: t.text3)),
+          SizedBox(height: t.sp * 0.5),
+          AccentLink(
+            key: const Key('fix-in-integrations'),
+            label: 'Fix in Integrations ›',
+            onTap: () => context.go(Routes.integrations),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A mono label over its value, as About's rows are.
+class _AboutRow extends StatelessWidget {
+  const _AboutRow({required this.label, required this.child});
+
+  final String label;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      padding: EdgeInsets.only(top: t.sp * 1.75),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(label.toUpperCase(), style: agentKey(t)),
+          SizedBox(height: t.sp * 0.375),
+          child,
+        ],
+      ),
+    );
+  }
+}
+
+/// About, slimmed down (153j): who and what the session is. Crew, Role,
+/// Starts agents, what it can do, Ran as, Started by, and a plugin problem in
+/// one line.
+class AboutSections extends ConsumerWidget {
+  const AboutSections({
+    super.key,
+    required this.session,
+    required this.host,
+    this.crewRole = true,
+  });
+
+  final AgentSession session;
+  final String host;
+
+  /// False in the phone's sheet, which has its own Crew and Role (138n).
+  final bool crewRole;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final rows = aboutRows(
+      session,
+      overview: ref.watch(agentOverviewProvider).value,
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (crewRole) AboutCrewRole(session: session),
+        if (session.spawn.switchState != null)
+          _AboutRow(
+            label: 'Starts agents',
+            child: StartsAgentsAbout(session: session, host: host),
+          ),
+        AboutCan(session: session),
+        for (final (label, value) in rows)
+          _AboutRow(
+            label: label,
+            child: Text(
+              value,
+              key: Key('about-${label.toLowerCase().replaceAll(' ', '-')}'),
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.uiSize,
+                height: 1.45,
+                color: t.text,
+              ),
+            ),
+          ),
+        PluginProblem(session: session),
+      ],
+    );
+  }
+}
+
+class _About extends StatelessWidget {
   const _About({required this.session, required this.host});
 
   final AgentSession session;
   final String host;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-    final rows = aboutRows(
-      session,
-      host: host,
-      writeVault: vaults
-          .where((v) => v.id == session.writeVaultId)
-          .firstOrNull
-          ?.name,
-      integrations: sessionIntegrations(ref, session),
-      overview: ref.watch(agentOverviewProvider).value,
-    );
-    // Crew and Role sit after Agent and Workspace (handoff 4e).
-    return Column(
-      key: const Key('session-about'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        KeyValueList(rows: rows.take(2).toList()),
-        AboutCrewRole(session: session),
-        SizedBox(height: t.sp * 1.75),
-        KeyValueList(rows: rows.skip(2).toList()),
-        AddSkippedToIntegrations(session: session),
-        if (session.spawn.switchState != null && !session.ended) ...[
-          SizedBox(height: t.sp * 1.75),
-          SpawnSwitchRow(session: session, host: host),
-        ],
-        SpawnChildrenSection(session: session),
-      ],
-    );
-  }
+  Widget build(BuildContext context) => KeyedSubtree(
+    key: const Key('session-about'),
+    child: AboutSections(session: session, host: host),
+  );
 }
 
 /// The phone's details: where it started, what it wrote, About, and End
@@ -1521,19 +1828,12 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
     final record = ref.watch(sessionDetailProvider(widget.sessionId)).value;
     final s = (record ?? widget.fallback).withLive(live?.session);
     final writes = ref.watch(sessionWritesProvider(s.id)).value;
-    final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
+    final overview = ref.watch(agentOverviewProvider).value;
     final label = TextStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: t.labelSize,
       letterSpacing: t.labelSize * 0.08,
       color: t.text3,
-    );
-    final rows = aboutRows(
-      s,
-      host: widget.host,
-      writeVault: vaults.where((v) => v.id == s.writeVaultId).firstOrNull?.name,
-      integrations: sessionIntegrations(ref, s),
-      overview: ref.watch(agentOverviewProvider).value,
     );
 
     final children = <Widget>[
@@ -1555,7 +1855,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             key: const Key('details-name'),
             style: TextStyle(
               fontFamily: StormTokens.sansFamily,
-              fontSize: 17,
+              fontSize: t.bodySize * 1.06,
               fontWeight: FontWeight.w600,
               height: 1.3,
               color: t.text,
@@ -1566,16 +1866,10 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
           SpawnHeaderLine(session: s),
         ],
       ),
-      if (s.spawn.switchState != null && !s.ended)
-        SpawnSwitchRow(session: s, host: widget.host),
-      if (showsActs(s))
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('ACTIVITY', style: label),
-            SizedBox(height: t.sp * 0.25),
-            ActsPanel(session: s, sheet: true),
-          ],
+      if (showsAgentsTab(s, overview))
+        KeyedSubtree(
+          key: const Key('details-agents'),
+          child: AgentsPanel(session: s, sheet: true),
         ),
       if (s.hasOwnWorkspace)
         Column(
@@ -1688,13 +1982,12 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       ),
       // The same Crew and Role a long-press on its row raises (138n).
       CrewRoleSections(session: s),
-      KeyValueList(rows: rows),
-      AddSkippedToIntegrations(session: s),
-      SpawnChildrenSection(session: s),
+      AboutSections(session: s, host: widget.host, crewRole: false),
       if (!s.ended) ...[
         if (_endTree)
-          EndTreeBanner(
+          EndTreeStrip(
             session: s,
+            layout: DecisionLayout.sheet,
             onDone: () => setState(() => _endTree = false),
           )
         else if (_confirm) ...[

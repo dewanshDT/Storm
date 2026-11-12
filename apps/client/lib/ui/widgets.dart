@@ -982,3 +982,21 @@ class VaultCard extends StatelessWidget {
     );
   }
 }
+
+/// A paragraph's measure on a page that fills the pane: about 72 characters
+/// of UI type. Only the text is held to it; the page's cards, tables and
+/// grids take the width.
+class ReadingMeasure extends StatelessWidget {
+  const ReadingMeasure({super.key, required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) => Align(
+    alignment: AlignmentDirectional.centerStart,
+    child: ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: context.tokens.sp * 72),
+      child: child,
+    ),
+  );
+}

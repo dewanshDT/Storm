@@ -55,7 +55,7 @@ Everything else an agent does, it does as an ordinary process of the
 yourself, that account is yours. Storm does not isolate those sessions from
 you or from each other. What an agent asks before acting is its own
 harness's setting (its permission mode, its rules and its own sandbox).
-Storm passes on the mode you pick at launch and adds no rule of its own. **Settings › Hosts** says which
+Storm passes on the mode you pick at launch and adds no rule of its own. **Settings › Agents & hosts** says which
 account each host runs as.
 
 So, on a host you run as yourself:
@@ -72,7 +72,7 @@ So, on a host you run as yourself:
   and so by every agent that account runs. That is true of the service too,
   unless it isolates sessions. Whoever holds the key can connect to your
   server as that host. If you think it got out, revoke the host in
-  **Settings › Hosts** and enroll it again.
+  **Settings › Agents & hosts** and enroll it again.
 - **One machine, server and host together.** On Linux the server's data
   belongs to `storm` and its group, so a host you run as yourself cannot
   read the vaults unless you join that group; never do (`install --user`

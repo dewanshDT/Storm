@@ -54,6 +54,8 @@ pub const EVENT_ENROLLMENT_ISSUED: &str = "host_enrollment_issued";
 pub const EVENT_HOST_ENROLLED: &str = "host_enrolled";
 pub const EVENT_HOST_RENAMED: &str = "host_renamed";
 pub const EVENT_HOST_REVOKED: &str = "host_revoked";
+pub const EVENT_HOST_REENROLLED: &str = "host_reenrolled";
+pub const EVENT_HOST_REMOVED: &str = "host_removed";
 pub const EVENT_HOST_AUTH_REJECTED: &str = "host_auth_rejected";
 
 /// A Runtime Host as stored: public metadata only.
@@ -232,6 +234,46 @@ pub struct Enrollment {
 /// Mints a single-use enrollment for `user_id` (who must be the owner — the
 /// caller checks). Returns the record and the **token, once**.
 pub fn issue_enrollment(db: &mut AuthDb, user_id: &str, now: &str) -> Result<(Enrollment, String)> {
+    mint_enrollment(db, user_id, None, now)
+}
+
+/// Why an administrative change to a host was refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdminRefusal {
+    NoSuchHost,
+    /// Remove and re-enroll are for a revoked host only (decision 153).
+    NotRevoked,
+}
+
+fn revoked_host(db: &AuthDb, host_id: &str) -> Result<std::result::Result<Host, AdminRefusal>> {
+    Ok(match db.host_by_id(host_id)? {
+        None => Err(AdminRefusal::NoSuchHost),
+        Some(h) if !h.is_revoked() => Err(AdminRefusal::NotRevoked),
+        Some(h) => Ok(h),
+    })
+}
+
+/// An enrollment for a **revoked** host (decision 153): redeemed, it gives
+/// that host a new key under the same id, name and limits, and clears its
+/// revocation. The old key stays refused: it is replaced, not restored.
+pub fn issue_reenrollment(
+    db: &mut AuthDb,
+    user_id: &str,
+    host_id: &str,
+    now: &str,
+) -> Result<std::result::Result<(Enrollment, String), AdminRefusal>> {
+    if let Err(refusal) = revoked_host(db, host_id)? {
+        return Ok(Err(refusal));
+    }
+    mint_enrollment(db, user_id, Some(host_id), now).map(Ok)
+}
+
+fn mint_enrollment(
+    db: &mut AuthDb,
+    user_id: &str,
+    host_id: Option<&str>,
+    now: &str,
+) -> Result<(Enrollment, String)> {
     let id = random_id(ENROLLMENT_ID_PREFIX);
     let mut secret = [0u8; 32];
     rand::rng().fill_bytes(&mut secret);
@@ -242,16 +284,20 @@ pub fn issue_enrollment(db: &mut AuthDb, user_id: &str, now: &str) -> Result<(En
     );
     let expires = plus_secs(now, ENROLLMENT_TTL_SECS)?;
     db.conn.execute(
-        "INSERT INTO host_enrollments (id, token_hash, created_by, created, expires)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, token::hash(&token), user_id, now, expires],
+        "INSERT INTO host_enrollments (id, token_hash, created_by, created, expires, host_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, token::hash(&token), user_id, now, expires, host_id],
     )?;
+    let detail = match host_id {
+        Some(host_id) => serde_json::json!({"enrollment_id": id, "host_id": host_id}),
+        None => serde_json::json!({"enrollment_id": id}),
+    };
     db.record_event(
         EVENT_ENROLLMENT_ISSUED,
         Some(user_id),
         None,
         now,
-        &format!(r#"{{"enrollment_id":"{id}"}}"#),
+        &detail.to_string(),
     )?;
     Ok((Enrollment { id, expires }, token))
 }
@@ -287,15 +333,17 @@ pub fn enroll(
         return refused(HostFailure::Malformed);
     };
 
-    let row: Option<(String, String, Option<String>, String)> = db
+    type Row = (String, String, Option<String>, String, Option<String>);
+    let row: Option<Row> = db
         .conn
         .query_row(
-            "SELECT id, expires, consumed, created_by FROM host_enrollments WHERE token_hash = ?1",
+            "SELECT id, expires, consumed, created_by, host_id
+             FROM host_enrollments WHERE token_hash = ?1",
             params![token::hash(req.token)],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()?;
-    let Some((id, expires, consumed, created_by)) = row else {
+    let Some((id, expires, consumed, created_by, target)) = row else {
         return refused(HostFailure::Unknown);
     };
     // The public half must name the row the secret found: a token whose two
@@ -311,6 +359,10 @@ pub fn enroll(
     }
     if !verify(&key, &enroll_message(server_id, &token_id), req.signature) {
         return refused(HostFailure::BadSignature);
+    }
+
+    if let Some(host_id) = target {
+        return reenroll(db, &id, &host_id, &key, req.key_id, &created_by, now);
     }
 
     let host_id = random_id(HOST_ID_PREFIX);
@@ -352,6 +404,59 @@ pub fn enroll(
     )?;
     db.host_by_id(&host_id)?
         .context("the host just enrolled is missing")
+        .map_err(HostError::Internal)
+}
+
+/// The redemption of a re-enrollment: the revoked host keeps its id, name and
+/// everything keyed by them, and takes the new key. The name the host sent is
+/// not used; the owner renames from the app.
+fn reenroll(
+    db: &mut AuthDb,
+    enrollment_id: &str,
+    host_id: &str,
+    key: &VerifyingKey,
+    key_id: &str,
+    created_by: &str,
+    now: &str,
+) -> HostResult<Host> {
+    let tx = db.conn.transaction()?;
+    let claimed = tx.execute(
+        "UPDATE host_enrollments SET consumed = ?1, consumed_by = ?2
+         WHERE id = ?3 AND consumed IS NULL",
+        params![now, host_id, enrollment_id],
+    )?;
+    if claimed == 0 {
+        return refused(HostFailure::AlreadyUsed);
+    }
+    // Only while still revoked: a host removed, or re-enrolled by another
+    // token, since this one was issued is not taken over. Dropping `tx`
+    // leaves the token unspent.
+    let rekeyed = tx.execute(
+        "UPDATE runtime_hosts SET public_key = ?1, key_id = ?2, revoked = NULL, last_seen = NULL
+         WHERE id = ?3 AND revoked IS NOT NULL",
+        params![key.as_bytes().as_slice(), key_id, host_id],
+    )?;
+    if rekeyed == 0 {
+        return refused(HostFailure::Unknown);
+    }
+    tx.execute(
+        "DELETE FROM host_tokens WHERE host_id = ?1",
+        params![host_id],
+    )?;
+    tx.execute(
+        "DELETE FROM host_challenges WHERE host_id = ?1",
+        params![host_id],
+    )?;
+    tx.commit()?;
+    db.record_event(
+        EVENT_HOST_REENROLLED,
+        Some(created_by),
+        None,
+        now,
+        &serde_json::json!({"host_id": host_id, "enrollment_id": enrollment_id}).to_string(),
+    )?;
+    db.host_by_id(host_id)?
+        .context("the host just re-enrolled is missing")
         .map_err(HostError::Internal)
 }
 
@@ -553,7 +658,56 @@ pub fn revoke(db: &mut AuthDb, host_id: &str, by: &str, now: &str) -> Result<boo
     Ok(true)
 }
 
+/// Removes a **revoked** host's record (decision 153). Its sessions are
+/// another database's and stay; its name is kept in `removed_hosts` so they
+/// still say where they ran. Its tokens go with the row, and an unredeemed
+/// re-enrollment for it is dropped.
+pub fn remove(
+    db: &mut AuthDb,
+    host_id: &str,
+    by: &str,
+    now: &str,
+) -> Result<std::result::Result<Host, AdminRefusal>> {
+    let host = match revoked_host(db, host_id)? {
+        Ok(host) => host,
+        Err(refusal) => return Ok(Err(refusal)),
+    };
+    let tx = db.conn.transaction()?;
+    tx.execute(
+        "INSERT OR REPLACE INTO removed_hosts (id, name, removed_at) VALUES (?1, ?2, ?3)",
+        params![host_id, host.name, now],
+    )?;
+    tx.execute(
+        "DELETE FROM host_enrollments WHERE host_id = ?1 AND consumed IS NULL",
+        params![host_id],
+    )?;
+    tx.execute(
+        "DELETE FROM host_challenges WHERE host_id = ?1",
+        params![host_id],
+    )?;
+    tx.execute("DELETE FROM runtime_hosts WHERE id = ?1", params![host_id])?;
+    tx.commit()?;
+    db.record_event(
+        EVENT_HOST_REMOVED,
+        Some(by),
+        None,
+        now,
+        &serde_json::json!({"host_id": host_id, "name": host.name}).to_string(),
+    )?;
+    Ok(Ok(host))
+}
+
 impl AuthDb {
+    /// Every host name a session may need, by id: the enrolled ones and the
+    /// removed ones (decision 153).
+    pub fn host_names(&self) -> Result<std::collections::HashMap<String, String>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name FROM removed_hosts UNION ALL SELECT id, name FROM runtime_hosts",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn host_by_id(&self, host_id: &str) -> Result<Option<Host>> {
         Ok(self
             .conn
@@ -881,6 +1035,138 @@ mod tests {
             revoke(&mut db, &host.id, &owner, NOW).unwrap(),
             "idempotent"
         );
+    }
+
+    fn connect(db: &mut AuthDb, host_id: &str, k: &SigningKey) -> HostResult<IssuedHostToken> {
+        let (nonce, _) = issue_challenge(db, host_id, NOW)?;
+        let sig = sign(k, &connect_message(SERVER_ID, host_id, &nonce));
+        authenticate_key(db, SERVER_ID, host_id, &nonce, &sig, NOW)
+    }
+
+    #[test]
+    fn a_reenrollment_gives_the_revoked_host_a_new_key_under_its_id() {
+        let (mut db, owner) = db_with_owner();
+        let (_, token) = issue_enrollment(&mut db, &owner, NOW).unwrap();
+        let old = key();
+        let host = enroll_with(&mut db, &token, &old, NOW).unwrap();
+        let old_token = connect(&mut db, &host.id, &old).unwrap();
+        rename(&mut db, &host.id, "kept-name", &owner, NOW).unwrap();
+
+        assert_eq!(
+            issue_reenrollment(&mut db, &owner, &host.id, NOW)
+                .unwrap()
+                .err(),
+            Some(AdminRefusal::NotRevoked)
+        );
+        assert_eq!(
+            issue_reenrollment(&mut db, &owner, "hst_01ARZ3NDEKTSV4RRFFQ69G5FAV", NOW)
+                .unwrap()
+                .err(),
+            Some(AdminRefusal::NoSuchHost)
+        );
+        revoke(&mut db, &host.id, &owner, NOW).unwrap();
+        let (_, again) = issue_reenrollment(&mut db, &owner, &host.id, NOW)
+            .unwrap()
+            .unwrap();
+        let fresh = SigningKey::from_bytes(&[9u8; 32]);
+        let back = enroll_with(&mut db, &again, &fresh, LATER).unwrap();
+        assert_eq!(back.id, host.id);
+        assert_eq!(back.name, "kept-name", "the name the host sent is not used");
+        assert!(!back.is_revoked());
+        assert_eq!(db.list_hosts().unwrap().len(), 1);
+
+        assert!(connect(&mut db, &host.id, &fresh).is_ok());
+        assert_eq!(
+            refusal(connect(&mut db, &host.id, &old)),
+            HostFailure::BadSignature,
+            "the old key is replaced, not restored"
+        );
+        assert_eq!(
+            refusal(authenticate_token(&mut db, &old_token.token, NOW)),
+            HostFailure::Unknown
+        );
+        assert_eq!(
+            refusal(enroll_with(&mut db, &again, &fresh, LATER)),
+            HostFailure::AlreadyUsed
+        );
+        let events = db.all_events().unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == EVENT_HOST_REENROLLED && d.contains(&host.id))
+        );
+    }
+
+    #[test]
+    fn a_reenrollment_for_a_host_removed_since_is_refused_and_unspent() {
+        let (mut db, owner) = db_with_owner();
+        let (_, token) = issue_enrollment(&mut db, &owner, NOW).unwrap();
+        let host = enroll_with(&mut db, &token, &key(), NOW).unwrap();
+        revoke(&mut db, &host.id, &owner, NOW).unwrap();
+        let (_, again) = issue_reenrollment(&mut db, &owner, &host.id, NOW)
+            .unwrap()
+            .unwrap();
+        // Re-enrolled by another token first: this one no longer applies.
+        let (_, first) = issue_reenrollment(&mut db, &owner, &host.id, NOW)
+            .unwrap()
+            .unwrap();
+        enroll_with(&mut db, &first, &key(), NOW).unwrap();
+        assert_eq!(
+            refusal(enroll_with(&mut db, &again, &key(), NOW)),
+            HostFailure::Unknown
+        );
+        assert_eq!(db.host_by_id(&host.id).unwrap().unwrap().revoked, None);
+
+        revoke(&mut db, &host.id, &owner, NOW).unwrap();
+        let (_, pending) = issue_reenrollment(&mut db, &owner, &host.id, NOW)
+            .unwrap()
+            .unwrap();
+        remove(&mut db, &host.id, &owner, NOW).unwrap().unwrap();
+        assert_eq!(
+            refusal(enroll_with(&mut db, &pending, &key(), NOW)),
+            HostFailure::Unknown,
+            "removal drops its pending re-enrollment"
+        );
+        assert!(db.host_by_id(&host.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn only_a_revoked_host_is_removed_and_its_name_is_kept() {
+        let (mut db, owner) = db_with_owner();
+        let (_, token) = issue_enrollment(&mut db, &owner, NOW).unwrap();
+        let host = enroll_with(&mut db, &token, &key(), NOW).unwrap();
+        assert_eq!(
+            remove(&mut db, &host.id, &owner, NOW).unwrap().err(),
+            Some(AdminRefusal::NotRevoked)
+        );
+        revoke(&mut db, &host.id, &owner, NOW).unwrap();
+        remove(&mut db, &host.id, &owner, LATER).unwrap().unwrap();
+        assert!(db.list_hosts().unwrap().is_empty());
+        assert_eq!(
+            db.host_names().unwrap().get(&host.id).map(String::as_str),
+            Some("build-vm")
+        );
+        assert_eq!(
+            remove(&mut db, &host.id, &owner, LATER).unwrap().err(),
+            Some(AdminRefusal::NoSuchHost)
+        );
+        assert_eq!(
+            refusal(issue_challenge(&mut db, &host.id, NOW)),
+            HostFailure::Unknown
+        );
+        let tokens: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM host_tokens WHERE host_id = ?1",
+                params![host.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(tokens, 0);
+        let events = db.all_events().unwrap();
+        assert!(events.iter().any(|(k, d)| k == EVENT_HOST_REMOVED
+            && d.contains(&host.id)
+            && d.contains("build-vm")));
     }
 
     #[test]

@@ -497,10 +497,15 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         // Agent Runtime host administration — owner only, checked in ops.
         .route("/v1/agent/hosts", get(agent_list_hosts))
         .route("/v1/agent/hosts/enrollments", post(agent_issue_enrollment))
+        // Look again at every host's agents (153-S4): owner only, in ops.
+        .route("/v1/agent/hosts/refresh", post(agent_refresh_hosts))
         .route(
             "/v1/agent/hosts/{id}",
             patch(agent_rename_host).delete(agent_revoke_host),
         )
+        // A revoked host's Remove and Re-enroll (decision 153): owner only.
+        .route("/v1/agent/hosts/{id}/remove", post(agent_remove_host))
+        .route("/v1/agent/hosts/{id}/reenroll", post(agent_reenroll_host))
         // A host's Limits (decision 152): owner only, in ops.
         .route(
             "/v1/agent/hosts/{id}/limits",
@@ -1600,6 +1605,16 @@ async fn agent_list_hosts(
     Ok(Json(crate::ops::list_hosts(&state).await?))
 }
 
+async fn agent_refresh_hosts(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<(StatusCode, Json<serde_json::Value>)> {
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(crate::ops::refresh_hosts(&state, &actor)?),
+    ))
+}
+
 #[derive(Deserialize)]
 struct IssueEnrollmentRequest {
     /// How *this client* reaches the server. The server cannot know it — it
@@ -1615,6 +1630,26 @@ async fn agent_issue_enrollment(
     Ok(Json(
         crate::ops::issue_host_enrollment(&state, &actor, &body.server_url).await?,
     ))
+}
+
+async fn agent_reenroll_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+    Json(body): Json<IssueEnrollmentRequest>,
+) -> ApiResult<Json<crate::ops::IssuedEnrollment>> {
+    Ok(Json(
+        crate::ops::reenroll_host(&state, &actor, &id, &body.server_url).await?,
+    ))
+}
+
+async fn agent_remove_host(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::remove_host(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Deserialize)]
@@ -6840,7 +6875,6 @@ pub(crate) mod tests {
 
     /// Enrolls a host through the real routes and returns `(host_id, token)`.
     async fn enroll_a_host(app: &Router, owner_bearer: &str) -> (String, String) {
-        use ed25519_dalek::Signer;
         let (status, body) = send(
             app,
             post_json_with_auth(
@@ -6851,20 +6885,33 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        let enrollment = body["enrollment"].as_str().unwrap().to_string();
+        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
+        let (status, body) = redeem(app, body["enrollment"].as_str().unwrap(), &key).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let host_id = body["host_id"].as_str().unwrap().to_string();
+        let token = host_token(app, body["server_id"].as_str().unwrap(), &host_id, &key).await;
+        (host_id, token)
+    }
+
+    /// Redeems an enrollment string as `storm-runtime enroll` does, under the
+    /// name `build-vm`.
+    async fn redeem(
+        app: &Router,
+        enrollment: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> (StatusCode, serde_json::Value) {
+        use ed25519_dalek::Signer;
         // Parsed from the right, as decision 77b specifies: the URL has colons.
         let mut parts = enrollment.rsplitn(4, ':');
         let token = parts.next().unwrap().to_string();
         let _pubkey = parts.next().unwrap();
         let server_id = parts.next().unwrap().to_string();
-
-        let key = ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]);
         let token_id = crate::auth::hosts::enrollment_token_id(&token).unwrap();
         let sig = data_encoding::BASE64URL_NOPAD.encode(
             &key.sign(&crate::auth::hosts::enroll_message(&server_id, &token_id))
                 .to_bytes(),
         );
-        let (status, body) = send(
+        send(
             app,
             post_json(
                 "/v1/runtime/enroll",
@@ -6877,10 +6924,17 @@ pub(crate) mod tests {
                 }),
             ),
         )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let host_id = body["host_id"].as_str().unwrap().to_string();
+        .await
+    }
 
+    /// Proves `key` for `host_id` and returns the host token.
+    async fn host_token(
+        app: &Router,
+        server_id: &str,
+        host_id: &str,
+        key: &ed25519_dalek::SigningKey,
+    ) -> String {
+        use ed25519_dalek::Signer;
         let (status, body) = send(
             app,
             post_json(
@@ -6893,7 +6947,7 @@ pub(crate) mod tests {
         let nonce = body["nonce"].as_str().unwrap().to_string();
         let sig = data_encoding::BASE64URL_NOPAD.encode(
             &key.sign(&crate::auth::hosts::connect_message(
-                &server_id, &host_id, &nonce,
+                server_id, host_id, &nonce,
             ))
             .to_bytes(),
         );
@@ -6906,7 +6960,7 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "{body}");
-        (host_id, body["token"].as_str().unwrap().to_string())
+        body["token"].as_str().unwrap().to_string()
     }
 
     #[tokio::test]
@@ -6977,12 +7031,252 @@ pub(crate) mod tests {
             ),
             patch_json_with_auth(&path, serde_json::json!({"name": "mine"}), &key),
             delete_with_auth(&path, &key),
+            post_json_with_auth(&format!("{path}/remove"), serde_json::json!({}), &key),
+            post_json_with_auth(
+                &format!("{path}/reenroll"),
+                serde_json::json!({"server_url": "http://x"}),
+                &key,
+            ),
         ];
         for request in requests {
             let uri = request.uri().to_string();
             let (status, _) = send(&app, request).await;
             assert_eq!(status, StatusCode::UNAUTHORIZED, "{uri}");
         }
+    }
+
+    #[tokio::test]
+    async fn only_a_revoked_host_is_removed_and_its_ended_sessions_keep_its_name() {
+        let dir = tempdir::TempDir::new("storm-hosts-remove").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host_id, _) = enroll_a_host(&app, &owner_bearer).await;
+        let _link = online_host(&state, &host_id, false);
+        let (status, launched) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "host_id": host_id, "workspace": "storm", "provider": "shell",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{launched}");
+        assert_eq!(launched["host_name"], "build-vm");
+        let session = launched["id"].as_str().unwrap().to_string();
+
+        let remove = format!("/v1/agent/hosts/{host_id}/remove");
+        let (status, body) = send(
+            &app,
+            post_json_with_auth(&remove, serde_json::json!({}), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "revoke first");
+        assert_eq!(body["error"], "host_not_revoked");
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/hosts/hst_01ARZ3NDEKTSV4RRFFQ69G5FAV/remove",
+                serde_json::json!({}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        let (status, _) = send(
+            &app,
+            delete_with_auth(&format!("/v1/agent/hosts/{host_id}"), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(&remove, serde_json::json!({}), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &owner_bearer)).await;
+        assert_eq!(hosts, serde_json::json!([]));
+        let (status, view) = send(
+            &app,
+            get_with_auth(&format!("/v1/agent/sessions/{session}"), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{view}");
+        assert_eq!(
+            (
+                &view["host_id"],
+                &view["host_name"],
+                &view["status"],
+                &view["end_reason"]
+            ),
+            (
+                &serde_json::json!(host_id),
+                &serde_json::json!("build-vm"),
+                &serde_json::json!("failed"),
+                &serde_json::json!("host_revoked")
+            )
+        );
+        let (_, list) = send(&app, get_with_auth("/v1/agent/sessions", &owner_bearer)).await;
+        assert_eq!(list[0]["host_name"], "build-vm", "{list}");
+        // What joins a host by id treats a removed one as gone.
+        for path in [
+            format!("/v1/agent/hosts/{host_id}/limits"),
+            format!("/v1/agent/hosts/{host_id}/children"),
+        ] {
+            let (status, _) = send(&app, get_with_auth(&path, &owner_bearer)).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{path}");
+        }
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({
+                    "host_id": host_id, "workspace": "storm", "provider": "shell",
+                    "terminal": {"cols": 80, "rows": 24},
+                }),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = send(
+            &app,
+            post_json_with_auth(
+                &format!("/v1/agent/hosts/{host_id}/reenroll"),
+                serde_json::json!({"server_url": "http://127.0.0.1:8484"}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "a removed host is not re-enrolled"
+        );
+        let removed = security_events(&state)
+            .await
+            .into_iter()
+            .filter(|(k, d)| k == "host_removed" && d.contains(&host_id))
+            .count();
+        assert_eq!(removed, 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_host_reenrolls_under_its_id_name_and_limits() {
+        let dir = tempdir::TempDir::new("storm-hosts-reenroll").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        let (host_id, old_token) = enroll_a_host(&app, &owner_bearer).await;
+        let path = format!("/v1/agent/hosts/{host_id}");
+        send(
+            &app,
+            patch_json_with_auth(
+                &path,
+                serde_json::json!({"name": "mac-mini"}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        let (status, body) = send(
+            &app,
+            put_json_with_auth(
+                &format!("{path}/limits"),
+                serde_json::json!({"max_children": 2, "max_tree": 3}),
+                &owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        let reenroll = format!("{path}/reenroll");
+        let body = serde_json::json!({"server_url": "http://127.0.0.1:8484/"});
+        let (status, refused) = send(
+            &app,
+            post_json_with_auth(&reenroll, body.clone(), &owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(refused["error"], "host_not_revoked");
+
+        send(&app, delete_with_auth(&path, &owner_bearer)).await;
+        let (status, issued) =
+            send(&app, post_json_with_auth(&reenroll, body, &owner_bearer)).await;
+        assert_eq!(status, StatusCode::OK, "{issued}");
+        let enrollment = issued["enrollment"].as_str().unwrap();
+        assert!(
+            enrollment.starts_with("storm-enroll:v1:http://127.0.0.1:8484:"),
+            "{enrollment}"
+        );
+        assert!(issued["expires"].is_string());
+
+        let fresh = ed25519_dalek::SigningKey::from_bytes(&[43u8; 32]);
+        let (status, enrolled) = redeem(&app, enrollment, &fresh).await;
+        assert_eq!(status, StatusCode::OK, "{enrolled}");
+        assert_eq!(enrolled["host_id"], host_id);
+        assert_eq!(enrolled["name"], "mac-mini", "the host keeps its name");
+        let server_id = enrolled["server_id"].as_str().unwrap();
+        let token = host_token(&app, server_id, &host_id, &fresh).await;
+        let (status, _) = send(
+            &app,
+            get_with_auth("/v1/runtime/whoami", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &app,
+            get_with_auth("/v1/runtime/whoami", &format!("Bearer {old_token}")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "the old credential stays dead"
+        );
+
+        let (_, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &owner_bearer)).await;
+        assert_eq!(hosts.as_array().unwrap().len(), 1, "{hosts}");
+        assert_eq!(
+            (
+                &hosts[0]["id"],
+                &hosts[0]["name"],
+                &hosts[0]["status"],
+                &hosts[0]["revoked"]
+            ),
+            (
+                &serde_json::json!(host_id),
+                &serde_json::json!("mac-mini"),
+                &serde_json::json!("offline"),
+                &serde_json::Value::Null
+            )
+        );
+        assert_eq!(
+            (
+                &hosts[0]["limits"]["max_children"],
+                &hosts[0]["limits"]["max_tree"]
+            ),
+            (&serde_json::json!(2), &serde_json::json!(3))
+        );
+        let (status, _) = redeem(&app, enrollment, &fresh).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "single use");
+        let events = security_events(&state).await;
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "host_enrollment_issued" && d.contains(&host_id))
+        );
+        assert!(
+            events
+                .iter()
+                .any(|(k, d)| k == "host_reenrolled" && d.contains(&host_id))
+        );
     }
 
     // ---- MCP Gateway: integrations (decision 81c) ------------------------
@@ -12897,6 +13191,113 @@ pub(crate) mod tests {
         assert_eq!(refusal_code(&body), "host_not_in_scope");
     }
 
+    /// 153-S4: the hosts list says what each host found of its agents'
+    /// sign-in, nothing for an agent it cannot tell (or an older host), and
+    /// Claude Code signed in wherever the synced login goes. The owner, and
+    /// only the owner, can ask the hosts to look again, at most once per
+    /// host per `REFRESH_EVERY`.
+    #[tokio::test]
+    async fn a_153_s4_hosts_say_whether_each_agent_is_signed_in() {
+        let dir = tempdir::TempDir::new("storm-153-s4").unwrap();
+        let mut f = sync_fixture(dir.path(), true).await;
+        let providers = |f: &SyncFixture| {
+            let app = f.app.clone();
+            let bearer = f.owner_bearer.clone();
+            async move {
+                let (status, hosts) = send(&app, get_with_auth("/v1/agent/hosts", &bearer)).await;
+                assert_eq!(status, StatusCode::OK);
+                hosts[0]["capabilities"]["providers"].clone()
+            }
+        };
+        let by_id = |ps: &serde_json::Value, id: &str| {
+            ps.as_array()
+                .unwrap()
+                .iter()
+                .find(|p| p["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        let old = providers(&f).await;
+        for id in ["claude-code", "opencode"] {
+            assert!(
+                by_id(&old, id).get("signed_in").is_none(),
+                "an older host: {old}"
+            );
+        }
+
+        let mut caps = sync_caps(true);
+        caps["providers"][0]["signed_in"] = false.into();
+        caps["providers"][2]["signed_in"] = "signed_in".into();
+        caps["providers"][1]["signed_in"] = "maybe".into();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+        let now = providers(&f).await;
+        assert_eq!(by_id(&now, "claude-code")["signed_in"], false, "{now}");
+        assert_eq!(by_id(&now, "opencode")["signed_in"], true, "{now}");
+        assert!(by_id(&now, "shell").get("signed_in").is_none(), "{now}");
+
+        f.sync(None).await;
+        f.tick(&[&f.host.clone()]).await;
+        let synced = providers(&f).await;
+        assert_eq!(
+            by_id(&synced, "claude-code")["signed_in"],
+            true,
+            "the synced login signs its sessions in: {synced}"
+        );
+
+        while f.link.try_recv().is_ok() {}
+        let refresh = |bearer: &str| {
+            post_json_with_auth("/v1/agent/hosts/refresh", serde_json::json!({}), bearer)
+        };
+        let (status, body) = send(&f.app, refresh(&f.owner_bearer)).await;
+        assert_eq!(
+            (status, body["asked"].clone()),
+            (StatusCode::ACCEPTED, 1.into())
+        );
+        let sent: Vec<_> = std::iter::from_fn(|| f.link.try_recv().ok())
+            .map(|e| serde_json::to_value(e).unwrap()["type"].clone())
+            .collect();
+        assert_eq!(sent, ["refresh"]);
+        let (status, body) = send(&f.app, refresh(&f.owner_bearer)).await;
+        assert_eq!(
+            (status, body["asked"].clone()),
+            (StatusCode::ACCEPTED, 0.into())
+        );
+        assert!(f.link.try_recv().is_err(), "not again so soon");
+
+        let (_, key) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/keys",
+                serde_json::json!({"name": "k"}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        let key = format!("Bearer {}", key["secret"].as_str().unwrap());
+        for bearer in [&key, &f.host_bearer] {
+            let (status, _) = send(&f.app, refresh(bearer)).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+        }
+        let r = crate::ops::refresh_hosts(
+            &f.state,
+            &Actor::Key {
+                key_id: "key_X".into(),
+                user_id: "u".into(),
+            },
+        )
+        .unwrap_err();
+        assert_eq!((r.0, r.1.as_str()), (StatusCode::FORBIDDEN, "owner_only"));
+        assert!(
+            !include_str!("mcp.rs").contains("refresh_hosts"),
+            "never an MCP tool"
+        );
+    }
+
     #[tokio::test]
     async fn a_ticked_host_is_told_the_kind_and_pulls_the_token_while_starting() {
         let dir = tempdir::TempDir::new("storm-ts-synced").unwrap();
@@ -15849,6 +16250,145 @@ pub(crate) mod tests {
         assert_eq!(attention(&f, &child).await, serde_json::Value::Null);
     }
 
+    /// 153a/c through the routes: `attention` follows `needs_attention`
+    /// with its reason and start, the same in the list, and `output_end`
+    /// grows with fresh output only. An older client's fields stay.
+    #[tokio::test]
+    async fn attention_has_its_reason_and_output_its_end_on_every_view() {
+        let dir = tempdir::TempDir::new("storm-153-attention").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.state
+            .agent
+            .report_permission_prompts_for_tests(&["claude-code"]);
+        let (parent, child) = f.tree().await;
+        let view = async |f: &GatewayFixture, id: &str| {
+            let (code, view) = f.get(&format!("/v1/agent/sessions/{id}")).await;
+            assert_eq!(code, StatusCode::OK, "{view}");
+            let (_, list) = f.get("/v1/agent/sessions").await;
+            let listed = list
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()
+                .clone();
+            for key in [
+                "attention",
+                "pending_decisions",
+                "output_end",
+                "host_last_seen",
+            ] {
+                assert_eq!(listed[key], view[key], "the list says the same of {key}");
+            }
+            view
+        };
+        for id in [&parent, &child] {
+            let v = view(&f, id).await;
+            assert_eq!(v["attention"], serde_json::Value::Null, "{v}");
+            assert_eq!(v["pending_decisions"], serde_json::json!([]), "{v}");
+            assert_eq!(v["host_last_seen"], serde_json::Value::Null, "{v}");
+            assert_eq!(v["output_end"], serde_json::Value::Null, "{v}");
+            assert!(v["needs_attention"].is_null() && v.get("delete_request").is_none());
+        }
+
+        let blocked = serde_json::json!({"outcome": "blocked", "summary": "need a key"});
+        f.tool(&child, "report_result", blocked).await;
+        let v = view(&f, &child).await;
+        assert_eq!(
+            v["needs_attention"], "blocked",
+            "older clients' field stays"
+        );
+        let since = v["attention"]["since"].as_str().unwrap().to_string();
+        assert!(
+            time::OffsetDateTime::parse(&since, &time::format_description::well_known::Rfc3339)
+                .is_ok()
+        );
+        assert_eq!(
+            v["attention"],
+            serde_json::json!({"kind": "blocked", "since": since, "detail": "need a key",
+                "blocked_on": null, "resets_at": null})
+        );
+
+        let prompt = serde_json::json!({"status": "running",
+            "attention": "permission_prompt", "attention_source": "provider_hook"});
+        let status = |body: serde_json::Value| {
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{child}/status"),
+                body,
+                &f.host_bearer,
+            )
+        };
+        assert!(send(&f.app, status(prompt.clone())).await.0.is_success());
+        let first = view(&f, &child).await["attention"].clone();
+        assert_eq!(first["kind"], "permission_prompt", "{first}");
+        assert_eq!(first["detail"], serde_json::Value::Null);
+        assert!(first["since"].is_string(), "{first}");
+        assert!(send(&f.app, status(prompt)).await.0.is_success());
+        assert_eq!(
+            view(&f, &child).await["attention"]["since"],
+            first["since"],
+            "the same prompt again began when it first did"
+        );
+        let running = serde_json::json!({"status": "running"});
+        assert!(send(&f.app, status(running)).await.0.is_success());
+        assert_eq!(view(&f, &child).await["attention"]["kind"], "blocked");
+
+        let out = |at: u64, bytes: &[u8]| {
+            f.state
+                .agent
+                .host_output(&f.host_id, &parent, at, bytes)
+                .unwrap()
+        };
+        out(0, b"hello");
+        assert_eq!(view(&f, &parent).await["output_end"], 5);
+        out(5, b", you");
+        assert_eq!(view(&f, &parent).await["output_end"], 10);
+        out(0, b"hello");
+        assert_eq!(
+            view(&f, &parent).await["output_end"],
+            10,
+            "a replay is nothing new"
+        );
+    }
+
+    /// 153a: a live session on an offline host says when the host was last
+    /// heard from; an ended one, or one on a host online, says nothing.
+    #[tokio::test]
+    async fn a_session_on_an_offline_host_says_when_it_was_last_seen() {
+        let dir = tempdir::TempDir::new("storm-153-last-seen").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let live = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let ended = f.launch("shell", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&ended, "completed").await;
+        let (_, v) = f.get(&format!("/v1/agent/sessions/{live}")).await;
+        assert_eq!(v["host_last_seen"], serde_json::Value::Null, "online");
+
+        let before = crate::index::now_rfc3339();
+        let generation = f.state.agent.connect_host(&f.host_id).0;
+        f.state.agent.disconnect_host(&f.host_id, generation);
+        let (_, v) = f.get(&format!("/v1/agent/sessions/{live}")).await;
+        assert_eq!(v["status"], "unknown", "{v}");
+        let seen = v["host_last_seen"].as_str().unwrap().to_string();
+        assert!(seen[..19] >= before[..19], "{seen} {before}");
+        let (_, list) = f.get("/v1/agent/sessions").await;
+        let by_id = |id: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()["host_last_seen"]
+                .clone()
+        };
+        assert_eq!(by_id(&live), seen.as_str());
+        assert_eq!(by_id(&ended), serde_json::Value::Null, "ended");
+    }
+
     /// A2 over the gateway: only the parent's own descendants, never itself,
     /// an unknown id or anyone from a child; a cap refuses with its name.
     #[tokio::test]
@@ -17539,9 +18079,24 @@ pub(crate) mod tests {
             )
         );
         assert!(f.child_requests().is_empty());
+        let take = async |f: &GatewayFixture| {
+            let (_, view) = f.get(&format!("/v1/agent/sessions/{child}")).await;
+            (
+                view.get("work_to_take").cloned(),
+                view.get("unapplied_commits").cloned(),
+            )
+        };
+        assert_eq!(take(&f).await, (Some(false.into()), None), "live: not yet");
+        let (_, top) = f.get(&format!("/v1/agent/sessions/{parent}")).await;
+        assert!(top.get("work_to_take").is_none(), "{top}");
 
         f.report(&child, "completed").await;
         f.sent();
+        assert_eq!(
+            take(&f).await,
+            (Some(true.into()), None),
+            "not yet reviewed"
+        );
         let (app, bearer) = (f.app.clone(), f.owner_bearer.clone());
         let host = async {
             let list = f
@@ -17559,6 +18114,12 @@ pub(crate) mod tests {
         assert_eq!(body["commits"][0]["id"], tip);
         assert_child_command(&list, &v["list"]["command"]);
         assert_child_command(&export, &v["export"]["command"]);
+        let commits = body["commits"].as_array().unwrap().len();
+        assert_eq!(
+            take(&f).await,
+            (Some(true.into()), Some(commits.into())),
+            "the review counted them"
+        );
 
         let host = async {
             let list = f
@@ -17581,6 +18142,7 @@ pub(crate) mod tests {
         assert_eq!(body["branch"], format!("storm/{child}"));
         assert_child_command(&list, &v["list"]["command"]);
         assert_child_command(&import, &v["import"]["command"]);
+        assert_eq!(take(&f).await, (Some(false.into()), None), "applied");
 
         let host = async {
             f.child_answers(|_| serde_json::json!({"answer": v["list"]["answer"]}))
@@ -18264,6 +18826,118 @@ pub(crate) mod tests {
         let (status, plain) = f.launch_body(serde_json::json!({"model": ""})).await;
         assert_eq!(status, StatusCode::OK, "{plain}");
         assert!(plain.get("model").is_none(), "an empty field is no model");
+    }
+
+    /// 153-S3: a Shell launches with a line typed in, carried on its start
+    /// as data for the terminal. Any other agent, a resume, a newline, a
+    /// control character or more than 1 KiB is a 400 and nothing starts; a
+    /// host that does not say `typed_input` is a 409 `host_cannot_type`.
+    /// The hosts list says each agent's sign-in command, the server's own.
+    #[tokio::test]
+    async fn a_153_s3_a_shell_launches_with_a_line_typed_in() {
+        let dir = tempdir::TempDir::new("storm-153-s3").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let code_of = |body: &serde_json::Value| {
+            body["error"]
+                .as_str()
+                .unwrap()
+                .split(':')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+
+        let (status, body) = f
+            .launch_body(
+                serde_json::json!({"provider": "shell", "typed_input": "claude auth login"}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(code_of(&body), "host_cannot_type", "an old host");
+        assert!(f.sent().iter().all(|m| m["type"] != "start"));
+
+        let mut caps = host_caps(true);
+        caps["typed_input"] = true.into();
+        caps["providers"][0]["login_command"] = "rm -rf ~".into();
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth("/v1/runtime/inventory", caps, &f.host_bearer),
+        )
+        .await;
+        assert!(code.is_success());
+
+        let (_, hosts) = f.get("/v1/agent/hosts").await;
+        let host = &hosts.as_array().unwrap()[0];
+        assert_eq!(host["capabilities"]["typed_input"], true);
+        let providers = &host["capabilities"]["providers"];
+        assert_eq!(
+            providers[0]["login_command"], "claude auth login",
+            "the server's, never the host's: {providers}"
+        );
+        assert!(providers[1]["login_command"].is_null(), "{providers}");
+
+        for (extra, code) in [
+            (
+                serde_json::json!({"typed_input": "claude auth login"}),
+                "typed_input_shell_only",
+            ),
+            (
+                serde_json::json!({"provider": null, "typed_input": "ls"}),
+                "typed_input_shell_only",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "claude auth login\n"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "ls\rrm -rf ~"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "ls\u{1b}[201~"}),
+                "typed_input_invalid",
+            ),
+            (
+                serde_json::json!({"provider": "shell", "typed_input": "a".repeat(1025)}),
+                "typed_input_invalid",
+            ),
+        ] {
+            let (status, body) = f.launch_body(extra.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{extra} {body}");
+            assert_eq!(code_of(&body), code, "{extra} {body}");
+        }
+        assert!(
+            f.sent().iter().all(|m| m["type"] != "start"),
+            "nothing started"
+        );
+
+        let line = &format!("{} claude auth login", "a".repeat(1024 - 18));
+        assert_eq!(line.len(), 1024);
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell", "typed_input": line}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        let start = f.start_of(&id);
+        assert_eq!(start["provider"], "shell");
+        assert_eq!(start["typed_input"], line.as_str());
+        assert_eq!(start.get("context"), None);
+
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell"}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(f.start_of(&id).get("typed_input").is_none(), "none typed");
+        let (status, body) = f
+            .launch_body(serde_json::json!({"provider": "shell", "typed_input": ""}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let id = body["id"].as_str().unwrap().to_string();
+        assert!(
+            f.start_of(&id).get("typed_input").is_none(),
+            "empty is none"
+        );
     }
 
     // ---- decision 146: permissions for spawned agents ----
@@ -19705,6 +20379,20 @@ pub(crate) mod tests {
                 let (_, view) = self.get(&format!("/v1/agent/sessions/{session}")).await;
                 if view["delete_request"]["state"] == "pending" {
                     assert_eq!(view["needs_attention"], "delete_approval", "{view}");
+                    let request = &view["delete_request"];
+                    assert_eq!(
+                        view["pending_decisions"],
+                        serde_json::json!([{"kind": "delete_request", "id": request["id"],
+                            "created_at": request["created_at"],
+                            "expires_at": request["expires_at"]}]),
+                        "153b: the one decision, as old clients' field names it"
+                    );
+                    assert_eq!(
+                        view["attention"],
+                        serde_json::json!({"kind": "delete_approval",
+                            "since": request["created_at"], "detail": null,
+                            "blocked_on": null, "resets_at": null})
+                    );
                     return view["delete_request"].clone();
                 }
             }

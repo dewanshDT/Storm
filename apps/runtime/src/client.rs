@@ -40,6 +40,9 @@ struct ChallengeAnswer {
 struct Enrolled {
     host_id: String,
     server_id: String,
+    /// What the server lists it as; a re-enrolled host keeps its old name.
+    /// Absent from servers before decision 153.
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -126,7 +129,8 @@ impl ServerClient {
     }
 
     /// Consumes the enrollment token, registering `key` as this host's.
-    pub async fn enroll(&self, token: &str, key: &HostKey, name: &str) -> Result<String> {
+    /// Answers the host id and the name the server lists it under.
+    pub async fn enroll(&self, token: &str, key: &HostKey, name: &str) -> Result<(String, String)> {
         let tid = token_id(token).context("malformed enrollment token")?;
         let response = self
             .http
@@ -157,7 +161,8 @@ impl ServerClient {
             bail!("the enrollment answer names another server");
         }
         validate_host_id(&enrolled.host_id).map_err(|e| anyhow!("{e}"))?;
-        Ok(enrolled.host_id)
+        let listed = enrolled.name.unwrap_or_else(|| name.to_string());
+        Ok((enrolled.host_id, listed))
     }
 
     /// Challenge, sign, and receive a host token (freeze §5.4).
@@ -221,7 +226,8 @@ impl std::error::Error for Refused {}
 ///
 /// `host.json` existing therefore implies a key on disk that the server knows.
 ///
-/// `announce` runs after the server accepted the enrollment and **before**
+/// `announce` gets the name the server lists the host under, and runs after
+/// the server accepted the enrollment and **before**
 /// `host.json` is written, which is the last write. Under launchd that file
 /// starts the host (AM35's `PathState`), and a host started with
 /// `--exclusive-account` ends every other process of its account (AM37) —
@@ -232,7 +238,7 @@ pub async fn enroll(
     enrollment: &str,
     name: &str,
     force: bool,
-    announce: impl FnOnce(&HostConfig),
+    announce: impl FnOnce(&HostConfig, &str),
 ) -> Result<HostConfig> {
     let enrollment = Enrollment::parse(enrollment).map_err(|e| anyhow!("{e}"))?;
     let enrolled = HostConfig::exists(state_dir).map_err(|e| {
@@ -272,7 +278,7 @@ pub async fn enroll(
             e
         }
     })?;
-    let host_id = client.enroll(&enrollment.token, &key, name).await?;
+    let (host_id, listed) = client.enroll(&enrollment.token, &key, name).await?;
     let config = HostConfig {
         server_url: enrollment.server_url,
         server_id: enrollment.server_id,
@@ -287,7 +293,7 @@ pub async fn enroll(
     if let Err(e) = HostConfig::archive_revoked(state_dir) {
         eprintln!("warning: could not keep the revoked enrollment: {e:#}");
     }
-    announce(&config);
+    announce(&config, &listed);
     config.save(state_dir)?;
     Ok(config)
 }

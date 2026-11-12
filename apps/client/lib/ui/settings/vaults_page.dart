@@ -1,15 +1,22 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../api/models.dart';
+import '../../router.dart';
 import '../../state/app_state.dart';
-import '../../state/vault_config.dart' show setVaultAccent;
+import '../../state/vault_config.dart';
 import '../accents.dart';
+import '../breakpoints.dart';
 import '../controls.dart';
 import '../shell/vault_tile.dart';
 import '../states.dart' show describeFailure;
 import '../surfaces.dart';
+import '../widgets.dart' show PopoverItem;
 import '../tokens.dart';
+import '../trash_screen.dart'
+    show daysWord, itemsCount, retentionOf, trashProvider;
 import 'settings_widgets.dart';
 
 /// Settings › Vaults. Removing a vault only unregisters it, and the page says
@@ -154,8 +161,9 @@ class _VaultRowState extends ConsumerState<_VaultRow> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final v = widget.vault;
-    return SettingsRow(
+    final row = SettingsRow(
       key: Key('vault-row-${v.id}'),
+      divider: false,
       leading: Semantics(
         button: true,
         label: 'Colour of ${v.name}',
@@ -190,6 +198,217 @@ class _VaultRowState extends ConsumerState<_VaultRow> {
           ),
         ],
       ),
+    );
+    return Container(
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: t.border, width: t.bw),
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          row,
+          _TrashKeeps(vault: v),
+        ],
+      ),
+    );
+  }
+}
+
+/// "Trash keeps": the vault's retention (153l), read from its trash so it is
+/// what the server's sweep will do, and written to its config note.
+class _TrashKeeps extends ConsumerStatefulWidget {
+  const _TrashKeeps({required this.vault});
+
+  final VaultInfo vault;
+
+  @override
+  ConsumerState<_TrashKeeps> createState() => _TrashKeepsState();
+}
+
+class _TrashKeepsState extends ConsumerState<_TrashKeeps> {
+  static const _choices = <int?>[7, 30, 90, null];
+
+  final _anchor = GlobalKey();
+  bool _saving = false;
+
+  String get _id => widget.vault.id;
+
+  static String _label(int? days) =>
+      days == null ? 'Never delete' : daysWord(days);
+
+  /// The four choices, and a value set some other way (14 days, say) as one
+  /// more, so showing it never rewrites it.
+  static List<int?> _options(int? current) => [
+    for (final d in _choices.whereType<int>()) d,
+    if (current != null && !_choices.contains(current)) current,
+    null,
+  ]..sort((a, b) => (a ?? 1 << 30).compareTo(b ?? 1 << 30));
+
+  Future<void> _open(int? current) async {
+    final t = context.tokens;
+    final box = _anchor.currentContext?.findRenderObject() as RenderBox?;
+    final picked = await showStormPopover<(int?,)>(
+      context: context,
+      anchorKey: _anchor,
+      width: box?.size.width ?? t.sp * 30,
+      builder: (popover) => StormPopover(
+        key: Key('trash-keeps-menu-$_id'),
+        children: [
+          for (final d in _options(current))
+            PopoverItem(
+              key: Key('trash-keeps-$_id-${d ?? 'never'}'),
+              label: _label(d),
+              selected: d == current,
+              onTap: () => Navigator.of(popover).pop((d,)),
+            ),
+        ],
+      ),
+    );
+    if (picked == null || picked.$1 == current || !mounted) return;
+    await _save(picked.$1);
+  }
+
+  Future<void> _save(int? days) async {
+    setState(() => _saving = true);
+    final bool ok;
+    if (_id == ref.read(activeVaultProvider)) {
+      final config = await ref.read(vaultConfigProvider.future);
+      ok = await saveVaultConfig(ref, config.withTrashRetention(days));
+    } else {
+      ok = await editVaultConfig(ref, _id, (c) => c.withTrashRetention(days));
+    }
+    if (!mounted) return;
+    ref.invalidate(trashProvider(_id));
+    setState(() => _saving = false);
+    if (!ok) settingsToast(context, "Couldn't change how long Trash keeps.");
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final page = ref.watch(trashProvider(_id));
+    final value = page.value;
+    final current = value?.retentionDays;
+    final live = value != null && !_saving;
+    final small = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: t.text3,
+      height: 1.45,
+    );
+    final String note;
+    if (page.hasError && value == null) {
+      note =
+          "Can't read this vault's settings: ${describeFailure(page.error!)}";
+    } else if (value == null) {
+      note = 'Loading…';
+    } else {
+      final count = value.items.isEmpty
+          ? 'Trash is empty.'
+          : '${itemsCount(value.items.length)} in Trash now.';
+      note = retentionOf(current).never
+          ? 'Kept until you empty it. $count'
+          : 'Then deleted for good. $count';
+    }
+    final shown = value == null ? '—' : _label(current);
+
+    final select = Semantics(
+      button: true,
+      enabled: live,
+      label: 'Trash keeps: $shown',
+      excludeSemantics: true,
+      onTap: live ? () => _open(current) : null,
+      child: Material(
+        key: _anchor,
+        color: t.surface2,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(t.rControl),
+          side: BorderSide(color: t.border, width: t.bw),
+        ),
+        child: InkWell(
+          key: Key('trash-keeps-$_id'),
+          onTap: live ? () => _open(current) : null,
+          borderRadius: BorderRadius.circular(t.rControl),
+          child: Padding(
+            padding: EdgeInsets.symmetric(
+              horizontal: t.sp * 1.5,
+              vertical: t.sp * 1.125,
+            ),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    shown,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize,
+                      color: live ? t.text : t.text3,
+                    ),
+                  ),
+                ),
+                SizedBox(width: t.sp),
+                Icon(
+                  LucideIcons.chevron_down,
+                  size: t.codeSize,
+                  color: live ? t.text2 : t.text3,
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final details = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      spacing: t.sp * 0.75,
+      children: [
+        // A choice of a few words, not a field to fill the pane.
+        ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: t.sp * 40),
+          child: select,
+        ),
+        Text(note, key: Key('trash-keeps-note-$_id'), style: small),
+        TextAction(
+          key: Key('open-trash-$_id'),
+          label: 'Open Trash ›',
+          accent: true,
+          onTap: () => GoRouter.of(context).go(Routes.trash(_id)),
+        ),
+      ],
+    );
+    final label = Text(
+      'Trash keeps',
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.codeSize,
+        color: t.text2,
+      ),
+    );
+
+    return Padding(
+      key: Key('trash-keeps-row-$_id'),
+      padding: EdgeInsets.only(bottom: t.sp * 1.5),
+      child: context.isExpanded
+          ? Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: EdgeInsets.only(top: t.sp * 1.25),
+                  child: SizedBox(width: t.sp * 14.75, child: label),
+                ),
+                Expanded(child: details),
+              ],
+            )
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              spacing: t.sp * 0.75,
+              children: [label, details],
+            ),
     );
   }
 }

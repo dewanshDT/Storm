@@ -502,6 +502,35 @@ args = ["-i"]
         rec = session(owner, sid3)
         check("exiting completes it with the exit code", (rec["status"], rec["exit_code"]) == ("completed", 7), rec)
 
+        print("\n=== a Shell with a command typed in (153-S3) ===")
+        check("the host says it types", caps.get("typed_input") is True, caps)
+        check("the server names no sign-in for the Shell",
+              all(p.get("login_command") is None for p in caps["providers"]), caps)
+        ran = os.path.join(WORKSPACES, "site", "typed-ran")
+        line = f"touch {ran} # 153-S3"
+        body = {"host_id": host_id, "workspace": "site", "terminal": {"cols": 120, "rows": 24}}
+        status, refused = call("POST", "/v1/agent/sessions", {**body, "provider": "fake", "typed_input": line}, auth=owner)
+        check("typed input is for a Shell only", status == 400
+              and refused["error"].startswith("typed_input_shell_only"), (status, refused))
+        status, refused = call("POST", "/v1/agent/sessions", {**body, "provider": "shell", "typed_input": line + "\n"}, auth=owner)
+        check("a newline is refused", status == 400
+              and refused["error"].startswith("typed_input_invalid"), (status, refused))
+        status, rec = call("POST", "/v1/agent/sessions", {**body, "provider": "shell", "typed_input": line}, auth=owner)
+        check("a Shell launches with it", status == 200, rec)
+        sid4 = rec["id"]
+        running(owner, sid4)
+        s = Stream(f"/v1/agent/sessions/{sid4}/terminal/stream?offset=0", owner)
+        text, _, _ = s.until(lambda e, i, d, t: "# 153-S3" in t)
+        check("the line is typed in where the person sees it", line in text, text)
+        time.sleep(1.5)
+        check("and nothing runs it", not os.path.exists(ran))
+        write(owner, sid4, "\r")
+        wait(lambda: os.path.exists(ran), "the typed line to run on Enter")
+        check("the person's Enter runs it", os.path.exists(ran))
+        write(owner, sid4, "exit\r")
+        s.until(lambda e, i, d, t: e == "status" and json.loads(d)["status"] == "completed")
+        s.close()
+
         print("\n=== fallback and the default provider (AC-F7) ===")
         status, rec = launch(owner, host_id, provider="claude-code")
         fb = rec.get("provider_fallback")
@@ -695,6 +724,46 @@ args = ["-i"]
             open(os.path.join(replay, "identity", f), "wb").write(open(os.path.join(HOST_STATE, "identity", f), "rb").read())
         checked = subprocess.run([RUNTIME_BIN, "check", "--state", replay], capture_output=True)
         check("and its key cannot authenticate again", checked.returncode != 0 and b"refused" in checked.stderr, checked.stderr)
+
+        print("\n=== decision 153: re-enroll and remove a revoked host ===")
+        status, issued = call("POST", f"/v1/agent/hosts/{host_id}/reenroll", {"server_url": BASE}, auth=owner)
+        check("the owner issues a re-enrollment", status == 200 and issued["enrollment"].startswith("storm-enroll:v1:"), issued)
+        enrolled = subprocess.run(
+            [RUNTIME_BIN, "enroll", "--state", HOST_STATE, "--name", "another-name"],
+            input=(issued["enrollment"] + "\n").encode(), capture_output=True,
+        )
+        check("storm-runtime redeems it without --force", enrolled.returncode == 0, enrolled.stderr.decode())
+        check("it says the name the host kept", b"Enrolled as e2e-host" in enrolled.stdout, enrolled.stdout)
+        again = json.load(open(os.path.join(HOST_STATE, "host.json")))
+        check("under the same host id", again["host_id"] == host_id, again)
+        runtime = start_runtime()
+        back = wait(host_online, "the re-enrolled host to come online", timeout=60)
+        check("it comes back online, not revoked", back["revoked"] is None and back["name"] == "e2e-host", back)
+        _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+        check("listed once", sum(1 for h in hosts if h["id"] == host_id) == 1, hosts)
+        status, rec = launch(owner, host_id, provider="fake")
+        check("it runs sessions again", status == 200, rec)
+        running(owner, rec["id"])
+        call("POST", f"/v1/agent/sessions/{rec['id']}/end", auth=owner)
+        wait(lambda: session(owner, rec["id"])["status"] == "stopped", "the session ended")
+        status, _ = call("POST", f"/v1/agent/hosts/{host_id}/remove", {}, auth=owner)
+        check("a live host is not removed (409)", status == 409, status)
+        checked = subprocess.run([RUNTIME_BIN, "check", "--state", replay], capture_output=True)
+        check("the old key is still refused", checked.returncode != 0 and b"refused" in checked.stderr, checked.stderr)
+
+        status, _ = call("DELETE", f"/v1/agent/hosts/{host_id}", auth=owner)
+        try:
+            code = runtime.wait(timeout=90)
+        except subprocess.TimeoutExpired:
+            code = None
+        check("revoked again, it exits 3", status == 204 and code == 3, (status, code))
+        status, _ = call("POST", f"/v1/agent/hosts/{host_id}/remove", {}, auth=owner)
+        check("the revoked host is removed", status == 204, status)
+        _, hosts = call("GET", "/v1/agent/hosts", auth=owner)
+        check("and leaves the list", all(h["id"] != host_id for h in hosts), hosts)
+        rec = session(owner, doomed)
+        check("its ended sessions stay readable, with its name",
+              rec and rec["host_id"] == host_id and rec["host_name"] == "e2e-host" and rec["end_reason"] == "host_revoked", rec)
 
         print("\n=== AC-S5: no secret in any log ===")
         logs = open(SERVER_LOG).read() + open(RUNTIME_LOG).read()

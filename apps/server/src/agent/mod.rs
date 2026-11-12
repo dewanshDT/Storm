@@ -33,6 +33,7 @@ pub mod round;
 pub mod said;
 pub mod scope;
 pub mod store;
+pub mod typed;
 pub mod wake;
 
 #[cfg(test)]
@@ -160,6 +161,11 @@ pub enum Command {
         /// otherwise, so the session starts in `workspace`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
+        /// A Shell's typed-in line (153-S3): written to its terminal once it
+        /// is ready, without Enter. Data for the PTY, never argv or the
+        /// environment. Sent only to a host that says `typed_input`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        typed_input: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -371,6 +377,10 @@ pub struct Capabilities {
     /// (decision 151). An old host does not say; a malformed one is `None`.
     #[serde(default, deserialize_with = "execution_or_none")]
     pub execution: Option<Execution>,
+    /// The host types a Shell's `typed_input` (153-S3). An old host does
+    /// not, and such a launch is refused `host_cannot_type`.
+    #[serde(default)]
+    pub typed_input: bool,
 }
 
 impl Capabilities {
@@ -597,6 +607,28 @@ pub struct ProviderCap {
     /// The newest version the host can install.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest: Option<String>,
+    /// The agent's sign-in command (153-S3), the server's own: never read
+    /// from a host. Null for an agent without one.
+    #[serde(default, skip_deserializing)]
+    pub login_command: Option<&'static str>,
+    /// Whether the host found the agent signed in (153-S4): absent while it
+    /// cannot tell, and from an older host. A host's `"signed_in"` or
+    /// `"signed_out"` is taken too; anything else is unknown.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "signed_in_state"
+    )]
+    pub signed_in: Option<bool>,
+}
+
+fn signed_in_state<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Bool(b) => Some(b),
+        serde_json::Value::String(s) if s == "signed_in" => Some(true),
+        serde_json::Value::String(s) if s == "signed_out" => Some(false),
+        _ => None,
+    })
 }
 
 /// One session in a host's `hello`.
@@ -763,6 +795,11 @@ pub struct Launch {
     /// `default` passes nothing. A resume keeps its predecessor's.
     #[serde(default)]
     pub permission_mode: Option<String>,
+    /// A line typed into a new Shell once it is ready, never followed by
+    /// Enter (153-S3): the Sign in fix. Shell only, one line of at most
+    /// [`typed::MAX_BYTES`]; a host that cannot type it refuses the launch.
+    #[serde(default)]
+    pub typed_input: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -883,6 +920,8 @@ struct HostLink {
     /// This link has sent `hello` or an inventory. What it carried over
     /// from an earlier link says nothing about now, so C0 waits for this.
     reported: bool,
+    /// When a person last asked it to look again (153-S4).
+    asked: Option<std::time::Instant>,
 }
 
 struct SessionLive {
@@ -892,6 +931,9 @@ struct SessionLive {
     /// A permission prompt or usage limit waiting, as a gated signal last
     /// said (134-9, 144b).
     attention: Option<String>,
+    /// When `attention` last changed to what it is (153a). Not kept across
+    /// a server restart: the host's next report starts it again.
+    attention_since: Option<String>,
     /// `working` / `idle` from a gated idle signal only (144b), and its
     /// source.
     health: Option<String>,
@@ -920,6 +962,7 @@ impl SessionLive {
             cache: OutputCache::new(cache::DEFAULT_CAPACITY),
             activity: None,
             attention: None,
+            attention_since: None,
             health: None,
             health_source: None,
             idle_since: None,
@@ -951,6 +994,9 @@ struct Live {
     /// on the link it was sent on and only for [`START_ACK_DEADLINE`]; past
     /// either it has failed, and its host is told so if it runs it late.
     starts: HashMap<String, PendingStart>,
+    /// When each host that dropped its link in this run last made a request
+    /// (153a), for "host offline · last seen".
+    last_seen_at: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1003,6 +1049,9 @@ pub struct AgentManager {
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
 }
+
+/// How soon a person's refresh may ask the same host again (153-S4).
+const REFRESH_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// How long a paste waits for its host to stage the image.
 const IMAGE_DEADLINE: std::time::Duration = if cfg!(test) {
@@ -1068,6 +1117,29 @@ pub struct HostLive {
 
 fn now() -> String {
     crate::index::now_rfc3339()
+}
+
+/// A child's export's commits (a clone's) and what there is to take in it:
+/// its commits or changed files, or a scratch directory's files. Cut lists
+/// count what the helper `omitted` too.
+fn review_counts(export: &serde_json::Value) -> Option<(Option<i64>, i64)> {
+    let listed = |key: &str| {
+        let shown = export[key].as_array().map_or(0, |a| a.len() as i64);
+        shown + export["omitted"][key].as_i64().unwrap_or(0)
+    };
+    match export["mode"].as_str()? {
+        "clone" => {
+            let commits = listed("commits");
+            Some((Some(commits), commits.max(listed("files"))))
+        }
+        "scratch" => Some((
+            None,
+            export["file_count"]
+                .as_i64()
+                .unwrap_or_else(|| listed("files")),
+        )),
+        _ => None,
+    }
 }
 
 impl AgentManager {
@@ -1149,6 +1221,7 @@ impl AgentManager {
                 last_seen: std::time::Instant::now(),
                 inventory: watch::channel(0).0,
                 reported: false,
+                asked: None,
             },
         );
         tracing::info!(host = host_id, generation, "runtime host connected");
@@ -1161,7 +1234,12 @@ impl AgentManager {
             let mut live = self.live.lock().unwrap();
             match live.hosts.get(host_id) {
                 Some(link) if link.generation == generation => {
+                    let seen = crate::index::rfc3339_minus_secs(
+                        &now(),
+                        link.last_seen.elapsed().as_secs() as i64,
+                    );
                     live.hosts.remove(host_id);
+                    live.last_seen_at.insert(host_id.to_string(), seen);
                 }
                 _ => return,
             }
@@ -1252,6 +1330,21 @@ impl AgentManager {
     #[cfg(test)]
     pub fn is_online(&self, host_id: &str) -> bool {
         self.live.lock().unwrap().hosts.contains_key(host_id)
+    }
+
+    /// When an offline host last made a request, if it dropped its link in
+    /// this run of the server.
+    pub fn host_last_seen(&self, host_id: &str) -> Option<String> {
+        self.live.lock().unwrap().last_seen_at.get(host_id).cloned()
+    }
+
+    /// The end of a session's output as the server's cache holds it: a byte
+    /// offset in the host's ring, which only grows (153c). `None` until its
+    /// host has posted any in this run of the server.
+    pub fn output_end(&self, session_id: &str) -> Option<u64> {
+        let live = self.live.lock().unwrap();
+        let s = live.sessions.get(session_id)?;
+        s.cache.initialized().then(|| s.cache.end())
     }
 
     pub fn host_live(&self, host_id: &str) -> HostLive {
@@ -1534,6 +1627,26 @@ impl AgentManager {
             return;
         }
         let _ = tokio::time::timeout(wait, rx.changed()).await;
+    }
+
+    /// Asks every linked host to look again, its agents' sign-in included
+    /// (153-S4); a host asked within [`REFRESH_EVERY`] is not asked again.
+    /// The answer arrives as an inventory. Returns how many were asked.
+    pub fn refresh_hosts(&self) -> usize {
+        let due: Vec<String> = {
+            let mut live = self.live.lock().unwrap();
+            live.hosts
+                .iter_mut()
+                .filter(|(_, link)| link.asked.is_none_or(|at| at.elapsed() >= REFRESH_EVERY))
+                .map(|(id, link)| {
+                    link.asked = Some(std::time::Instant::now());
+                    id.clone()
+                })
+                .collect()
+        };
+        due.iter()
+            .filter(|id| self.send(id, Command::Refresh).is_ok())
+            .count()
     }
 
     pub fn inventory(&self, host_id: &str, capabilities: Capabilities) -> AgentResult<()> {
@@ -2133,6 +2246,47 @@ impl AgentManager {
         self.store.lock().unwrap().child_workspace(session_id)
     }
 
+    /// Counts a review of `session_id`'s work (153d), from the host's own
+    /// export: a clone's commits, or a scratch directory's files.
+    pub fn record_child_review(&self, session_id: &str, export: &serde_json::Value) -> Result<()> {
+        let Some((commits, items)) = review_counts(export) else {
+            return Ok(());
+        };
+        self.store
+            .lock()
+            .unwrap()
+            .record_child_review(session_id, commits, items, &now())
+    }
+
+    /// `session_id`'s work was taken (153d): `applied` or `deleted`.
+    pub fn record_child_taken(&self, session_id: &str, taken: &str) -> Result<()> {
+        self.store
+            .lock()
+            .unwrap()
+            .record_child_taken(session_id, taken, &now())
+    }
+
+    /// Whether an ended child has work to take, and a clone's commits when a
+    /// review counted them (153d). `None` for a session that is not a child
+    /// with its own workspace. Storm knows of Apply and delete only through
+    /// itself, and of commits only from a person's last review: the host is
+    /// never asked here.
+    pub fn work_to_take(&self, r: &SessionRecord) -> Result<(Option<bool>, Option<i64>)> {
+        let store = self.store.lock().unwrap();
+        if store.lineage(&r.id)?.parent_session.is_none() || !store::spawn::has_own_workspace(r) {
+            return Ok((None, None));
+        }
+        if !r.is_ended() || store.child_workspace(&r.id)?.is_none() {
+            return Ok((Some(false), None));
+        }
+        let state = store.child_work(&r.id)?;
+        match state {
+            Some(s) if s.taken.is_some() || s.items == Some(0) => Ok((Some(false), None)),
+            Some(s) => Ok((Some(true), s.commits)),
+            None => Ok((Some(true), None)),
+        }
+    }
+
     /// The host's word on what the session will not have (131a): bounded, so
     /// a host cannot grow a session's row without limit.
     fn record_mcp_notice(&self, session_id: &str, report: &StatusReport) -> AgentResult<()> {
@@ -2197,6 +2351,16 @@ impl AgentManager {
                 "a terminal has at least one cell".into(),
             ));
         }
+        let typed_input = req.typed_input.clone().filter(|t| !t.is_empty());
+        if let Some(text) = &typed_input {
+            if req.provider.as_deref() != Some(typed::PROVIDER) || req.resume_of.is_some() {
+                return Err(AgentError::BadRequest(
+                    "typed_input_shell_only: only a new Shell starts with a command typed in"
+                        .into(),
+                ));
+            }
+            typed::check(text).map_err(AgentError::BadRequest)?;
+        }
         let caps = {
             let live = self.live.lock().unwrap();
             let link = live
@@ -2224,6 +2388,13 @@ impl AgentManager {
         };
         if max_sessions > 0 && live_on_host >= max_sessions as usize {
             return Err(AgentError::TooManySessions);
+        }
+        if typed_input.is_some() && !caps.typed_input {
+            return Err(AgentError::Conflict(
+                "host_cannot_type: this host's runtime can't type a command in — update \
+                 storm-runtime"
+                    .into(),
+            ));
         }
 
         let resume = match &req.resume_of {
@@ -2256,6 +2427,12 @@ impl AgentManager {
         };
         let (provider, fallback) = match offered(&requested) {
             Some(p) => (p, None),
+            // Typed into a Shell or into nothing, never into an agent.
+            None if typed_input.is_some() => {
+                return Err(AgentError::Conflict(
+                    "shell_unavailable: the host offers no Shell".into(),
+                ));
+            }
             // A conversation reopens in its own agent or not at all.
             None if resume.is_some() => {
                 return Err(AgentError::Conflict(format!(
@@ -2507,6 +2684,7 @@ impl AgentManager {
                 spawn,
                 child_of: None,
                 cwd,
+                typed_input,
             },
         );
         let mut record = record;
@@ -3172,12 +3350,18 @@ impl AgentManager {
         Ok((failed, dismissed))
     }
 
+    /// A removed host (decision 153): its Limits go. Its sessions and what
+    /// it last reported about itself stay, as their record.
+    pub fn forget_host(&self, host_id: &str) -> Result<()> {
+        self.store.lock().unwrap().forget_host_limits(host_id)
+    }
+
     /// A revoked host: its link is closed and its sessions are failed
-    /// (freeze §5.6). The host ends them itself when next refused.
+    /// (freeze §5.6). The host ends them itself when next refused. Its
+    /// Limits stay, for a re-enrollment (decision 153).
     pub fn revoke_host(&self, host_id: &str) -> Result<()> {
         let was_online = self.live.lock().unwrap().hosts.remove(host_id).is_some();
         tracing::info!(host = host_id, was_online, "runtime host revoked");
-        self.store.lock().unwrap().forget_host_limits(host_id)?;
         self.transition_host_sessions(host_id, events::STORM, |r| {
             (!r.is_ended()).then(|| {
                 (
@@ -3452,6 +3636,8 @@ mod tests {
                     install_blocked: None,
                     checksum_verified: None,
                     latest: None,
+                    login_command: None,
+                    signed_in: None,
                 })
                 .collect(),
             workspaces: vec!["storm".into(), "site".into()],
@@ -3473,6 +3659,7 @@ mod tests {
                 .map(|(k, v)| (k.into(), v.into()))
                 .collect(),
             execution: None,
+            typed_input: false,
         }
     }
 
@@ -3541,6 +3728,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             meta,
             grants,
@@ -3567,6 +3755,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -4242,6 +4431,7 @@ mod tests {
                     children_write: false,
                     model: None,
                     permission_mode: None,
+                    typed_input: None,
                 },
                 meta,
                 offered(),
@@ -4458,6 +4648,7 @@ mod tests {
                 children_write: false,
                 model: None,
                 permission_mode: None,
+                typed_input: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -5195,6 +5386,7 @@ mod tests {
                 resumed_from: None,
                 child_of: None,
                 cwd: None,
+                typed_input: None,
             },
         };
         let start = |provider_credential| start_with(provider_credential, None);
@@ -5227,6 +5419,44 @@ mod tests {
             serde_json::to_string(&moded).unwrap(),
             r#"{"cmd_seq":1,"type":"start","session":"ags_X","workspace":"storm","provider":"claude-code","interaction":"terminal","terminal":{"cols":80,"rows":24},"permission_mode":"accept_edits","spawn":true}"#
         );
+    }
+
+    #[test]
+    fn a_providers_sign_in_is_a_bool_or_absent() {
+        let base = serde_json::json!({"id": "codex", "kind": "cli", "available": true});
+        let parse = |v: serde_json::Value| {
+            let mut cap = base.clone();
+            cap["signed_in"] = v;
+            serde_json::from_value::<ProviderCap>(cap)
+                .unwrap()
+                .signed_in
+        };
+        assert_eq!(
+            serde_json::from_value::<ProviderCap>(base.clone())
+                .unwrap()
+                .signed_in,
+            None
+        );
+        for (wire, want) in [
+            (serde_json::json!(true), Some(true)),
+            (serde_json::json!(false), Some(false)),
+            (serde_json::json!("signed_in"), Some(true)),
+            (serde_json::json!("signed_out"), Some(false)),
+            (serde_json::json!("unknown"), None),
+            (serde_json::json!(null), None),
+            (serde_json::json!({"x": 1}), None),
+        ] {
+            assert_eq!(parse(wire.clone()), want, "{wire}");
+        }
+        let mut cap: ProviderCap = serde_json::from_value(base).unwrap();
+        assert!(
+            serde_json::to_value(&cap)
+                .unwrap()
+                .get("signed_in")
+                .is_none()
+        );
+        cap.signed_in = Some(false);
+        assert_eq!(serde_json::to_value(&cap).unwrap()["signed_in"], false);
     }
 
     #[test]
@@ -5263,6 +5493,8 @@ mod tests {
         );
         let mut expected = new;
         expected["mcp"] = serde_json::Value::Null;
+        // The server's own (153-S3), filled in for the hosts list only.
+        expected["login_command"] = serde_json::Value::Null;
         assert_eq!(serde_json::to_value(&cap).unwrap(), expected);
 
         let blocked: ProviderCap = serde_json::from_value(serde_json::json!({
@@ -5642,6 +5874,8 @@ mod tests {
                 install_blocked: blocked.map(Into::into),
                 checksum_verified: None,
                 latest: None,
+                login_command: None,
+                signed_in: None,
             }
         };
         c.providers[0].source = Some("storm".into());
@@ -5743,5 +5977,27 @@ mod tests {
         let _link = online(&m, "h1", install_caps());
         m.start_agent_job("h1", "opencode", "update", "usr_1")
             .unwrap();
+    }
+
+    #[test]
+    fn a_review_counts_commits_and_what_there_is_to_take() {
+        use serde_json::json;
+        let commit = json!({"id": "c", "subject": "s"});
+        assert_eq!(
+            super::review_counts(&json!({"mode": "clone", "commits": [commit, commit],
+                "files": [{"path": "a"}], "omitted": {"commits": 3}})),
+            Some((Some(5), 5))
+        );
+        assert_eq!(
+            super::review_counts(&json!({"mode": "clone", "commits": [], "files": []})),
+            Some((Some(0), 0)),
+            "nothing to take"
+        );
+        assert_eq!(
+            super::review_counts(&json!({"mode": "scratch", "files": [{"path": "a"}],
+                "file_count": 12})),
+            Some((None, 12))
+        );
+        assert_eq!(super::review_counts(&json!({"error": "x"})), None);
     }
 }

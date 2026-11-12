@@ -78,11 +78,15 @@ class _TwistyPainter extends CustomPainter {
       old.open != open || old.color != color;
 }
 
-/// A note an agent changed since it was last opened here.
+/// A note an agent changed since it was last opened here; a session's
+/// output since it was last shown here (153e).
 class UnseenDot extends StatelessWidget {
-  const UnseenDot({super.key});
+  const UnseenDot({super.key, this.message = noteMessage});
 
-  static const message = 'Changed by an agent since you last opened it';
+  static const noteMessage = 'Changed by an agent since you last opened it';
+  static const sessionMessage = 'New output since you last looked';
+
+  final String message;
 
   @override
   Widget build(BuildContext context) {

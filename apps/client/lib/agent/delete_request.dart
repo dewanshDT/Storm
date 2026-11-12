@@ -1,18 +1,23 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-import '../ui/controls.dart';
+import '../router.dart';
+import '../state/app_state.dart' show rootMessengerKey, vaultsProvider;
+import '../ui/decision_strip.dart';
 import '../ui/states.dart' show describeFailure;
-import '../ui/tokens.dart';
+import '../ui/surfaces.dart' show showStormSheet;
+import '../ui/trash_screen.dart' show TrashRetention, trashRetentionProvider;
 import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
-import 'agent_widgets.dart' show agentKey, agentMono, agentSans;
+import 'sidebar_rules.dart' show agoWords;
 
-/// The agent asking, as the dialog names it.
+/// The agent asking, as the strip names it.
 class DeleteAsker {
   const DeleteAsker({
     required this.sessionId,
@@ -107,25 +112,23 @@ extension DeleteApi on AgentApi {
   );
 }
 
-/// "Delete *Ideas.md*?" or "Delete folder *Projects/Old* and its 12 notes?".
-/// The emphasised part is the target.
-(String, String, String) deleteTitle(DeleteRequest r) {
-  if (!r.isFolder) {
-    return ('Delete ', r.path.split('/').last, '?');
-  }
-  final rest = switch (r.notes) {
-    0 => '?',
-    1 => ' and its 1 note?',
-    final n => ' and its $n notes?',
+/// "Ideas.md", or "folder Projects/Old and its 12 notes".
+String deleteItem(DeleteRequest r) {
+  if (!r.isFolder) return r.path.split('/').last;
+  return switch (r.notes) {
+    0 => 'folder ${r.path}',
+    1 => 'folder ${r.path} and its 1 note',
+    final n => 'folder ${r.path} and its $n notes',
   };
-  return ('Delete folder ', r.path, rest);
 }
 
-const kDeleteFootnote = 'It goes to Trash, which keeps it for 30 days.';
+/// "tidier wants to delete Ideas.md" (153g).
+String deleteTitle(String session, DeleteRequest r) =>
+    '$session wants to delete ${deleteItem(r)}';
 
-const kDeleteLaterNote =
-    'Later closes this and keeps the request waiting: Review it from the '
-    'session until it times out.';
+/// The phone's one line: "Delete Ideas.md?" under a header that already
+/// names the session.
+String deleteShortTitle(DeleteRequest r) => 'Delete ${deleteItem(r)}?';
 
 String _bytes(int n) {
   if (n < 1024) return '$n B';
@@ -133,66 +136,63 @@ String _bytes(int n) {
   return '${(n / (1024 * 1024)).toStringAsFixed(1)} MB';
 }
 
-String _when(String? iso) {
-  final at = DateTime.tryParse(iso ?? '')?.toLocal();
-  if (at == null) return '';
-  String two(int v) => v.toString().padLeft(2, '0');
-  return '${at.year}-${two(at.month)}-${two(at.day)} '
-      '${two(at.hour)}:${two(at.minute)}';
+/// "Ideas/Ideas.md · 2.0 KB · modified 2h ago".
+String deleteWhat(DeleteRequest r, {DateTime? now}) {
+  final at = DateTime.tryParse(r.modified ?? '');
+  return [
+    r.path,
+    if (r.isFolder) r.notes == 1 ? '1 note' : '${r.notes} notes',
+    _bytes(r.size),
+    if (at != null) 'modified ${_ago(at, now ?? DateTime.now())}',
+  ].join(' · ');
 }
 
-/// What a dialog ended with: the person's answer, or another device's.
-enum _Ended { approve, decline, elsewhere }
+String _ago(DateTime at, DateTime now) {
+  final words = agoWords(at, now);
+  return words == 'now' ? 'just now' : '$words ago';
+}
 
-/// The dialogs open on this device, by request, each with how to close it
-/// when another device answers first.
-final _open = <String, void Function()>{};
+/// "It moves to personal’s Trash and is kept for 30 days.": the vault's own
+/// retention, never a constant (153g).
+String deleteIfApproved(String? vault, TrashRetention keep) =>
+    'It moves to ${vault ?? 'the vault'}’s Trash and is ${keep.keptFor}.';
 
-/// Asks the person (149c, amended 2026-10-31). Approve is the main,
-/// destructive button and only Decline declines; Later, Esc and dismissing
-/// it close it on this device and leave the request pending. Nothing when
-/// its dialog is already open here.
-Future<void> showDeleteRequestDialog(
-  BuildContext context,
+/// The request a session's strip shows, with its place among what waits
+/// (153b, oldest first). An older server lists no decisions: then it is
+/// the one.
+({DeleteRequest request, int index, int total})? deleteDecisionOf(
+  AgentSession s,
+) {
+  final r = s.deleteRequest;
+  if (s.ended || r == null || !r.pending) return null;
+  final all = s.pendingDecisions;
+  if (all.isEmpty) return (request: r, index: 1, total: 1);
+  final i = all.indexWhere((d) => d.id == r.id);
+  return (request: r, index: i < 0 ? 1 : i + 1, total: math.max(all.length, 1));
+}
+
+String needsYouLabel(int index, int total) => 'NEEDS YOU · $index OF $total';
+
+/// Requests this device answered, so the watcher does not report them as
+/// answered elsewhere.
+final _answeredHere = <String>{};
+
+/// Sends the person's answer (149c). Nothing else answers a request: Later
+/// and Esc only put the strip aside on this device.
+Future<void> answerDeleteRequest(
   ProviderContainer container,
-  DeleteRequest r,
-  DeleteAsker asker,
-) async {
-  if (_open.containsKey(r.id)) return;
-  final messenger = ScaffoldMessenger.maybeOf(context);
-  final ended = await showDialog<_Ended>(
-    context: context,
-    useRootNavigator: true,
-    builder: (dialog) {
-      void close() {
-        if (dialog.mounted) Navigator.of(dialog).pop(_Ended.elsewhere);
-      }
-
-      _open[r.id] = close;
-      return DeleteRequestDialog(
-        request: r,
-        asker: asker,
-        onGone: () {
-          if (_open[r.id] == close) _open.remove(r.id);
-        },
-        onOpenSession: () {
-          Navigator.of(dialog).pop(_Ended.elsewhere);
-          _open.remove(r.id);
-          if (context.mounted) openAgentSession(context, asker.sessionId);
-        },
-      );
-    },
-  );
-  _open.remove(r.id);
-  if (ended == null || ended == _Ended.elsewhere) return;
+  DeleteRequest r, {
+  required bool approve,
+  ScaffoldMessengerState? messenger,
+}) async {
   final api = container.read(agentApiFactoryProvider)?.call();
   if (api == null) return;
-  final approve = ended == _Ended.approve;
+  _answeredHere.add(r.id);
   try {
     await api.decideDeleteRequest(r.sessionId, r.id, approve: approve);
   } catch (e) {
     final code = e is AgentRefusal ? e.code : null;
-    messenger?.showSnackBar(
+    (messenger ?? rootMessengerKey.currentState)?.showSnackBar(
       SnackBar(
         content: Text(switch (code) {
           'request_timed_out' => 'That request timed out: nothing was deleted.',
@@ -204,241 +204,244 @@ Future<void> showDeleteRequestDialog(
   } finally {
     api.dispose();
     container.invalidate(sessionDetailProvider(r.sessionId));
+    container.invalidate(agentOverviewProvider);
   }
 }
 
-/// Closes this device's dialog for [r], answered elsewhere, and says who.
-void closeAnsweredElsewhere(BuildContext context, DeleteRequest r) {
-  final close = _open.remove(r.id);
-  if (close == null) return;
-  close();
-  final who = r.decidedBy;
-  ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-    SnackBar(
-      key: const Key('delete-answered-elsewhere'),
-      content: Text(switch (r.state) {
-        'timed_out' => 'The request to delete ${r.path} timed out.',
-        _ => 'Answered on ${who ?? 'another device'}',
-      }),
-    ),
-  );
-}
-
-class DeleteRequestDialog extends StatefulWidget {
-  const DeleteRequestDialog({
+/// A session's delete request as a decision strip (153g): who asks, the
+/// reason word for word, what goes and where it goes. Later (and Esc) puts
+/// it aside here; Decline and Move to Trash answer it.
+class DeleteDecisionStrip extends ConsumerStatefulWidget {
+  const DeleteDecisionStrip({
     super.key,
-    required this.request,
-    required this.asker,
-    required this.onOpenSession,
-    this.onGone,
+    required this.session,
+    this.layout = DecisionLayout.strip,
+    this.collapsed = false,
+    this.onLater,
+    this.onReview,
+    this.onAnswered,
+    this.escapeAllowed,
   });
 
-  final DeleteRequest request;
-  final DeleteAsker asker;
-  final VoidCallback onOpenSession;
+  final AgentSession session;
+  final DecisionLayout layout;
 
-  /// Called once it is off screen, however it closed.
-  final VoidCallback? onGone;
+  /// Put aside with Later: one line with Review.
+  final bool collapsed;
+  final VoidCallback? onLater;
+  final VoidCallback? onReview;
+  final VoidCallback? onAnswered;
+  final bool Function()? escapeAllowed;
 
   @override
-  State<DeleteRequestDialog> createState() => _DeleteRequestDialogState();
+  ConsumerState<DeleteDecisionStrip> createState() =>
+      _DeleteDecisionStripState();
 }
 
-class _DeleteRequestDialogState extends State<DeleteRequestDialog> {
-  bool _all = false;
+class _DeleteDecisionStripState extends ConsumerState<DeleteDecisionStrip> {
+  bool _busy = false;
 
-  @override
-  void initState() {
-    super.initState();
-    HardwareKeyboard.instance.addHandler(_key);
+  Future<void> _answer(DeleteRequest r, {required bool approve}) async {
+    setState(() => _busy = true);
+    final c = ProviderScope.containerOf(context, listen: false);
+    await answerDeleteRequest(
+      c,
+      r,
+      approve: approve,
+      messenger: ScaffoldMessenger.maybeOf(context),
+    );
+    if (mounted) setState(() => _busy = false);
+    widget.onAnswered?.call();
   }
 
   @override
-  void dispose() {
-    HardwareKeyboard.instance.removeHandler(_key);
-    widget.onGone?.call();
-    super.dispose();
-  }
-
-  /// Esc closes it, as Later does, wherever focus is: a page the shell's
-  /// own navigator finishes while this is open takes focus. Closed after
-  /// the key has gone through the focus tree, never before: the dialog's
-  /// own Esc would otherwise pop the page beneath it.
-  bool _key(KeyEvent e) {
-    if (e is! KeyDownEvent || e.logicalKey != LogicalKeyboardKey.escape) {
-      return false;
-    }
-    final route = ModalRoute.of(context);
-    if (!mounted || route == null || !route.isCurrent) return false;
-    scheduleMicrotask(() {
-      if (mounted && route.isCurrent) Navigator.of(context).pop();
-    });
-    return true;
-  }
-
-  @override
-  Widget build(BuildContext context) => _dialog(context);
-
-  Widget _dialog(BuildContext context) {
-    final t = context.tokens;
-    final r = widget.request;
-    final a = widget.asker;
-    final (lead, target, tail) = deleteTitle(r);
-    final agent = [
-      providerLabel(a.provider),
-      if (a.model != null) a.model!,
-    ].join(' · ');
-    const shown = 5;
-    final paths = _all ? r.paths : r.paths.take(shown).toList();
-    final hidden = r.notes - paths.length;
-    return AlertDialog(
-      key: const Key('delete-request-dialog'),
-      title: Text.rich(
-        key: const Key('delete-request-title'),
-        TextSpan(
-          children: [
-            TextSpan(text: lead),
-            TextSpan(
-              text: target,
-              style: const TextStyle(fontStyle: FontStyle.italic),
-            ),
-            TextSpan(text: tail),
-          ],
-        ),
-      ),
-      content: SizedBox(
-        width: 480,
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Text('WHO', style: agentKey(t)),
-              SizedBox(height: t.sp * 0.5),
-              Text(
-                a.name,
-                key: const Key('delete-request-agent'),
-                style: agentSans(t, weight: FontWeight.w600),
-              ),
-              Text(agent, style: agentSans(t, color: t.text2)),
-              if (a.context case final note?)
-                Text(
-                  'Started from ${note.title}',
-                  key: const Key('delete-request-context'),
-                  style: agentSans(t, color: t.text2),
-                ),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: StormButton.text(
-                  key: const Key('delete-request-open-session'),
-                  label: 'Open session',
-                  onPressed: widget.onOpenSession,
-                ),
-              ),
-              SizedBox(height: t.sp),
-              Text(
-                '${a.speaker.toUpperCase()} SAYS:',
-                key: const Key('delete-request-says'),
-                style: agentKey(t),
-              ),
-              SizedBox(height: t.sp * 0.5),
-              Container(
-                padding: EdgeInsets.all(t.sp),
-                decoration: BoxDecoration(
-                  color: t.surface2,
-                  borderRadius: BorderRadius.circular(t.rControl),
-                ),
-                // The agent's words: plain text, never markup or a link.
-                child: Text(
-                  r.reason,
-                  key: const Key('delete-request-reason'),
-                  style: agentMono(t, color: t.text2),
-                ),
-              ),
-              SizedBox(height: t.sp * 1.5),
-              Text('WHAT', style: agentKey(t)),
-              SizedBox(height: t.sp * 0.5),
-              if (!r.isFolder)
-                Text(
-                  [
-                    r.path,
-                    _bytes(r.size),
-                    if (_when(r.modified).isNotEmpty)
-                      'modified ${_when(r.modified)}',
-                  ].join(' · '),
-                  key: const Key('delete-request-what'),
-                  style: agentMono(t),
-                )
-              else ...[
-                Text(
-                  r.notes == 1 ? '1 note' : '${r.notes} notes',
-                  key: const Key('delete-request-count'),
-                  style: agentSans(t),
-                ),
-                for (final p in paths)
-                  Text(
-                    p,
-                    key: ValueKey('delete-request-path-$p'),
-                    style: agentMono(t, color: t.text2),
-                  ),
-                if (hidden > 0)
-                  Align(
-                    alignment: Alignment.centerLeft,
-                    child: StormButton.text(
-                      key: const Key('delete-request-more'),
-                      label: _all || r.paths.length <= shown
-                          ? '…and $hidden more'
-                          : 'Show $hidden more',
-                      onPressed: _all || r.paths.length <= shown
-                          ? null
-                          : () => setState(() => _all = true),
-                    ),
-                  ),
-              ],
-              SizedBox(height: t.sp * 1.5),
-              Text(
-                kDeleteFootnote,
-                key: const Key('delete-request-footnote'),
-                style: agentSans(t, color: t.text2),
-              ),
-              SizedBox(height: t.sp * 0.5),
-              Text(
-                kDeleteLaterNote,
-                key: const Key('delete-request-later-note'),
-                style: agentSans(t, color: t.text2),
-              ),
-            ],
+  Widget build(BuildContext context) {
+    final s = widget.session;
+    final d = deleteDecisionOf(s);
+    if (d == null) return const SizedBox.shrink();
+    final r = d.request;
+    final label = needsYouLabel(d.index, d.total);
+    final title = deleteTitle(s.displayName, r);
+    if (widget.collapsed) {
+      return DecisionStrip(
+        key: const Key('delete-request-strip'),
+        tone: DecisionTone.waiting,
+        label: label,
+        title: title,
+        actions: [
+          DecisionAction(
+            key: const Key('delete-request-review'),
+            label: 'Review',
+            kind: DecisionActionKind.ghost,
+            onPressed: widget.onReview,
           ),
-        ),
+        ],
+      );
+    }
+    final vault = ref
+        .watch(vaultsProvider)
+        .value
+        ?.where((v) => v.id == r.vaultId)
+        .firstOrNull
+        ?.name;
+    final keep = ref.watch(trashRetentionProvider(r.vaultId));
+    const shown = 3;
+    final hidden = r.paths.length > shown ? r.notes - shown : 0;
+    final rows = [
+      DecisionRow(
+        '${DeleteAsker.of(s).speaker} says',
+        r.reason,
+        key: const Key('delete-request-says'),
+        quote: true,
       ),
-      actions: [
-        StormButton.text(
-          key: const Key('delete-request-later'),
-          label: 'Later',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        StormButton.outline(
-          key: const Key('delete-request-decline'),
-          label: 'Decline',
-          onPressed: () => Navigator.of(context).pop(_Ended.decline),
-        ),
-        StormButton.danger(
-          key: const Key('delete-request-approve'),
-          label: 'Approve',
-          onPressed: () => Navigator.of(context).pop(_Ended.approve),
-        ),
-      ],
+      DecisionRow(
+        'What',
+        deleteWhat(r),
+        key: const Key('delete-request-what'),
+        more: r.isFolder
+            ? [...r.paths.take(shown), if (hidden > 0) '…and $hidden more']
+            : const [],
+      ),
+      DecisionRow(
+        'If you approve',
+        deleteIfApproved(vault, keep),
+        key: const Key('delete-request-if-approved'),
+      ),
+    ];
+    final later = DecisionAction(
+      key: const Key('delete-request-later'),
+      label: 'Later',
+      kind: DecisionActionKind.text,
+      onPressed: widget.onLater,
+    );
+    final decline = DecisionAction(
+      key: const Key('delete-request-decline'),
+      label: 'Decline',
+      kind: DecisionActionKind.ghost,
+      onPressed: _busy ? null : () => _answer(r, approve: false),
+    );
+    final approve = DecisionAction(
+      key: const Key('delete-request-approve'),
+      label: 'Move to Trash',
+      kind: DecisionActionKind.primary,
+      onPressed: _busy ? null : () => _answer(r, approve: true),
+    );
+    return DecisionStrip(
+      key: const Key('delete-request-strip'),
+      tone: DecisionTone.waiting,
+      layout: widget.layout,
+      label: label,
+      title: title,
+      rows: rows,
+      onEscape: widget.onLater,
+      escapeAllowed: widget.escapeAllowed,
+      actions: widget.layout == DecisionLayout.sheet
+          ? [approve, decline, later]
+          : [later, decline, approve],
     );
   }
 }
 
-/// Watches for agents' deletions on every screen while signed in (149c):
-/// each new one opens its dialog, and one answered on another device
-/// closes here with who answered. A long poll, paused in the background,
-/// and stopped on a server without the route.
-class DeleteRequestWatcher extends ConsumerStatefulWidget {
-  const DeleteRequestWatcher({super.key, required this.child});
+/// The phone's strip for a session's delete request (§7): one line under
+/// the header, and Review raises the whole request in a sheet.
+class PhoneDeleteStrip extends StatelessWidget {
+  const PhoneDeleteStrip({super.key, required this.session});
 
+  final AgentSession session;
+
+  @override
+  Widget build(BuildContext context) {
+    final d = deleteDecisionOf(session);
+    if (d == null) return const SizedBox.shrink();
+    return CompactDecisionStrip(
+      key: const Key('delete-request-compact'),
+      label: 'NEEDS YOU',
+      title: deleteShortTitle(d.request),
+      onReview: () => showDeleteRequestSheet(context, session),
+    );
+  }
+}
+
+/// The request as a sheet, never a dialog (§7): Move to Trash, Decline and
+/// Later full width. It closes itself once the request is answered here or
+/// anywhere else.
+Future<void> showDeleteRequestSheet(BuildContext context, AgentSession s) {
+  final d = deleteDecisionOf(s);
+  if (d == null) return Future.value();
+  return showStormSheet<void>(
+    context: context,
+    title: needsYouLabel(d.index, d.total),
+    heightFactor: 0.85,
+    builder: (sheet) => _DeleteSheet(
+      session: s,
+      requestId: d.request.id,
+      // Once only: an answer and the request leaving the view both close it.
+      close: () {
+        if (!sheet.mounted) return;
+        final route = ModalRoute.of(sheet);
+        if (route != null && route.isCurrent) Navigator.of(sheet).pop();
+      },
+    ),
+  );
+}
+
+class _DeleteSheet extends ConsumerWidget {
+  const _DeleteSheet({
+    required this.session,
+    required this.requestId,
+    required this.close,
+  });
+
+  final AgentSession session;
+  final String requestId;
+  final VoidCallback close;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final fresh = ref.watch(sessionDetailProvider(session.id)).value;
+    final s = fresh ?? session;
+    final d = deleteDecisionOf(s);
+    if (d == null || d.request.id != requestId) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => close());
+      return const SizedBox.shrink();
+    }
+    return DeleteDecisionStrip(
+      session: s,
+      layout: DecisionLayout.sheet,
+      onLater: close,
+      onAnswered: close,
+    );
+  }
+}
+
+// ---- other screens and devices (153h) ------------------------------------
+
+/// The requests this device has toasted, kept so a restart does not toast
+/// them again. Device-local, like what it has seen.
+const kDeleteToastedKey = 'storm.agents.delete_toasted';
+const _toastedLimit = 200;
+
+/// `/agents/s/<id>` → the session shown there.
+String? shownSessionOf(String location) {
+  final m = RegExp(r'^/agents/s/([^/?#]+)').firstMatch(location);
+  return m == null ? null : Uri.decodeComponent(m.group(1)!);
+}
+
+/// Watches for agents' deletions on every screen while signed in (149c,
+/// 153h). A long poll, paused in the background and stopped on a server
+/// without the route. It never opens a dialog: a new request for a session
+/// this device is not showing raises one toast with Review, once per
+/// request, and the session's strip is where it is answered. The rail's
+/// count says it too.
+class DeleteRequestWatcher extends ConsumerStatefulWidget {
+  const DeleteRequestWatcher({
+    super.key,
+    required this.location,
+    required this.child,
+  });
+
+  /// Where the shell is, to know which session is on screen.
+  final String location;
   final Widget child;
 
   @override
@@ -456,9 +459,16 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
   Timer? _retry;
   AppLifecycleListener? _lifecycle;
 
-  /// Requests this device already showed, so one put off with Later is
-  /// not opened again while it is still listed: Review reopens it.
-  final _seen = <String>{};
+  /// Requests toasted, or shown in their session's strip, on this device.
+  Set<String>? _toasted;
+
+  /// Requests this device saw waiting, so one answered elsewhere while its
+  /// session is open here is said.
+  final _pending = <String>{};
+
+  /// The toast on screen now, and its request: a newer one replaces it.
+  String? _toastFor;
+  ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _toast;
 
   @override
   void initState() {
@@ -480,6 +490,31 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
     return s == null || s == AppLifecycleState.resumed;
   }
 
+  Future<Set<String>> _loadToasted() async {
+    if (_toasted case final t?) return t;
+    var loaded = <String>{};
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      loaded = {...?prefs.getStringList(kDeleteToastedKey)};
+    } catch (_) {
+      // No preferences store (tests, previews): memory still works.
+    }
+    return _toasted ??= loaded;
+  }
+
+  Future<void> _remember(String id) async {
+    final toasted = await _loadToasted();
+    if (!toasted.add(id)) return;
+    final list = toasted.toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        kDeleteToastedKey,
+        list.sublist(math.max(0, list.length - _toastedLimit)),
+      );
+    } catch (_) {}
+  }
+
   Future<void> _poll() async {
     if (_running || _stopped || !mounted || !_foreground) return;
     final api = ref.read(agentApiFactoryProvider)?.call();
@@ -493,8 +528,9 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
         wait: kDeleteWatchWait,
       );
       if (!mounted || _stopped) return;
+      final first = _version == null;
       _version = version;
-      _show(requests);
+      await _show(requests, first: first);
     } on AgentRefusal catch (e) {
       // A server before decision 149 has no such route: nothing to watch.
       if (e.statusCode == 404 || e.statusCode == 403) {
@@ -517,18 +553,91 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
     );
   }
 
-  void _show(List<(DeleteRequest, DeleteAsker)> requests) {
-    final at = context;
-    for (final (r, _) in requests) {
-      if (!r.pending) closeAnsweredElsewhere(at, r);
+  Future<void> _show(
+    List<(DeleteRequest, DeleteAsker)> requests, {
+    required bool first,
+  }) async {
+    final toasted = await _loadToasted();
+    if (!mounted) return;
+    final shown = shownSessionOf(widget.location);
+    final c = ProviderScope.containerOf(context, listen: false);
+    if (!first && requests.isNotEmpty) {
+      // The strip and the rail count follow now, not at the next list poll.
+      for (final id in {for (final (r, _) in requests) r.sessionId}) {
+        c.invalidate(sessionDetailProvider(id));
+      }
+      c.invalidate(agentOverviewProvider);
     }
-    final next = requests
-        .where((e) => e.$1.pending && !_seen.contains(e.$1.id))
-        .firstOrNull;
-    if (next == null) return;
-    _seen.add(next.$1.id);
-    final container = ProviderScope.containerOf(context, listen: false);
-    unawaited(showDeleteRequestDialog(at, container, next.$1, next.$2));
+    for (final (r, _) in requests) {
+      if (r.pending) continue;
+      if (_toastFor == r.id) _hideToast();
+      final waited = _pending.remove(r.id);
+      final here = _answeredHere.remove(r.id);
+      if (waited && !here && r.sessionId == shown) _answeredElsewhere(r);
+    }
+    for (final (r, asker) in requests) {
+      if (!r.pending) continue;
+      _pending.add(r.id);
+      if (toasted.contains(r.id)) continue;
+      unawaited(_remember(r.id));
+      // Its session is on screen: the strip is already saying it.
+      if (r.sessionId == shown) continue;
+      _raise(r, asker);
+    }
+  }
+
+  void _hideToast() {
+    final toast = _toast;
+    _toast = null;
+    _toastFor = null;
+    if (toast == null) return;
+    try {
+      toast.close();
+    } catch (_) {}
+  }
+
+  void _raise(DeleteRequest r, DeleteAsker asker) {
+    final messenger = rootMessengerKey.currentState;
+    if (messenger == null) return;
+    // Never a stack: a newer request takes the place of the one showing.
+    if (_toast != null) {
+      _toast = null;
+      messenger.removeCurrentSnackBar();
+    }
+    final router = GoRouter.maybeOf(context);
+    final toast = messenger.showSnackBar(
+      SnackBar(
+        key: ValueKey('delete-toast-${r.id}'),
+        content: Text('${asker.name} wants to delete ${deleteItem(r)}'),
+        persist: false,
+        duration: const Duration(seconds: 10),
+        action: SnackBarAction(
+          key: const Key('delete-toast-review'),
+          label: 'Review',
+          onPressed: () => router?.go(Routes.agentSession(r.sessionId)),
+        ),
+      ),
+    );
+    _toast = toast;
+    _toastFor = r.id;
+    toast.closed.then((_) {
+      if (_toast == toast) {
+        _toast = null;
+        _toastFor = null;
+      }
+    });
+  }
+
+  void _answeredElsewhere(DeleteRequest r) {
+    rootMessengerKey.currentState?.showSnackBar(
+      SnackBar(
+        key: const Key('delete-answered-elsewhere'),
+        content: Text(switch (r.state) {
+          'timed_out' => 'The request to delete ${r.path} timed out.',
+          _ => 'Answered on ${r.decidedBy ?? 'another device'}',
+        }),
+      ),
+    );
   }
 
   @override
@@ -538,65 +647,5 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
       if (next != null) _poll();
     });
     return widget.child;
-  }
-}
-
-/// A session's Needs you entry for its agent's deletion (149c), so it is
-/// not lost when the dialog was closed, here or elsewhere: Review opens it.
-class DeleteRequestCard extends ConsumerWidget {
-  const DeleteRequestCard({super.key, required this.session});
-
-  final AgentSession session;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final r = session.deleteRequest;
-    if (r == null || !r.pending) return const SizedBox.shrink();
-    final t = context.tokens;
-    final (lead, target, tail) = deleteTitle(r);
-    return Semantics(
-      container: true,
-      liveRegion: true,
-      child: Container(
-        key: const Key('delete-request-card'),
-        padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 2,
-          vertical: t.sp * 1.5,
-        ),
-        decoration: BoxDecoration(
-          color: t.surface2,
-          borderRadius: BorderRadius.circular(t.rControl),
-          border: Border.all(color: t.amber, width: t.bw),
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('NEEDS YOU', style: agentKey(t)),
-                  SizedBox(height: t.sp * 0.5),
-                  Text(
-                    '${session.displayName} asks: $lead$target$tail',
-                    style: agentSans(t, weight: FontWeight.w600),
-                  ),
-                ],
-              ),
-            ),
-            SizedBox(width: t.sp),
-            StormButton.primary(
-              key: const Key('delete-request-review'),
-              label: 'Review',
-              onPressed: () => showDeleteRequestDialog(
-                context,
-                ProviderScope.containerOf(context, listen: false),
-                r,
-                DeleteAsker.of(session),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
   }
 }

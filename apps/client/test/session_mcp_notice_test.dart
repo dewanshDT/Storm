@@ -18,13 +18,13 @@ void main() {
         'mcp_plugin_local': ?local,
       });
 
-  test('the skipped and local plugin servers are About rows', () {
+  test('a plugin problem is one line in About (153j)', () {
     final s = session(
       skipped: [
         {
-          'name': 'slack',
-          'source': 'plugin slack',
-          'reason': 'remote: add it in Settings ▸ Integrations',
+          'name': 'figma',
+          'source': 'plugin figma',
+          'reason': 'it needs its address',
         },
         {
           'name': 'proxmox',
@@ -34,53 +34,71 @@ void main() {
       ],
       local: ['plugin_playwright_playwright'],
     );
-    final rows = Map.fromEntries(
-      aboutRows(
-        s,
-        host: 'work-mac',
-        writeVault: null,
-        integrations: const [],
-      ).map((r) => MapEntry(r.$1, r.$2)),
-    );
-    expect(
-      rows['Plugin servers'],
-      'plugin_playwright_playwright. They run on work-mac, outside Storm’s '
-      'integrations.',
-    );
-    expect(rows['Not loaded'], contains('slack (plugin slack): remote'));
-    expect(rows['Not loaded'], contains('proxmox (your own)'));
-    expect(s.mcpSkipped.first.remote, isTrue);
+    expect(pluginProblemLine(s), 'figma isn’t loaded: it needs its address.');
     expect(s.mcpSkipped.last.remote, isFalse);
+    // About's rows are who it ran as and who started it, nothing more.
+    expect([for (final r in aboutRows(s)) r.$1], ['Ran as', 'Started by']);
   });
 
-  test('a session from an older server has neither row', () {
-    final rows = aboutRows(
-      session(),
-      host: 'h',
-      writeVault: null,
-      integrations: null,
-    ).map((r) => r.$1);
-    expect(rows, isNot(contains('Plugin servers')));
-    expect(rows, isNot(contains('Not loaded')));
+  test('a remote plugin server reaches a session only as an integration', () {
+    final s = session(
+      skipped: [
+        {
+          'name': 'slack',
+          'source': 'plugin slack',
+          'reason': 'remote: add it in Settings ▸ Integrations',
+        },
+      ],
+    );
+    expect(s.mcpSkipped.single.remote, isTrue);
+    expect(
+      pluginProblemLine(s),
+      'slack isn’t loaded: it reaches a session only as an integration.',
+    );
   });
 
-  testWidgets('Add to Integrations is offered only for a remote server', (
+  test('several are counted; none, or only your own, says nothing', () {
+    expect(
+      pluginProblemLine(
+        session(
+          skipped: [
+            {'name': 'a', 'source': 'plugin a', 'reason': 'x'},
+            {'name': 'b', 'source': 'plugin b', 'reason': 'y'},
+          ],
+        ),
+      ),
+      '2 plugin servers aren’t loaded: a, b.',
+    );
+    expect(pluginProblemLine(session()), isNull);
+    expect(
+      pluginProblemLine(
+        session(
+          skipped: [
+            {'name': 'mine', 'source': 'your own', 'reason': 'your own …'},
+          ],
+        ),
+      ),
+      isNull,
+    );
+  });
+
+  testWidgets('Fix in Integrations is offered with the problem', (
     tester,
   ) async {
     Future<void> show(AgentSession s) => tester.pumpWidget(
       MaterialApp(
         theme: StormTheme.light(),
-        home: Scaffold(body: AddSkippedToIntegrations(session: s)),
+        home: Scaffold(body: PluginProblem(session: s)),
       ),
     );
     await show(
       session(
         skipped: [
-          {'name': 'slack', 'source': 'plugin slack', 'reason': 'remote: …'},
+          {'name': 'figma', 'source': 'plugin figma', 'reason': 'remote: …'},
         ],
       ),
     );
-    expect(find.text('Add to Integrations'), findsOneWidget);
+    expect(find.text('Fix in Integrations ›'), findsOneWidget);
     await show(
       session(
         skipped: [
@@ -88,6 +106,6 @@ void main() {
         ],
       ),
     );
-    expect(find.text('Add to Integrations'), findsNothing);
+    expect(find.text('Fix in Integrations ›'), findsNothing);
   });
 }

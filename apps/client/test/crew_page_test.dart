@@ -253,6 +253,8 @@ void main() {
         within('launcher-crew', find.text('Gateway release')),
         findsOneWidget,
       );
+      await t.ensureVisible(find.byKey(const Key('launch')));
+      await t.pumpAndSettle();
       await t.tap(find.byKey(const Key('launch')));
       await t.pumpAndSettle();
       expect(agents.launches.single['crew'], {'id': 'crw_1'});
@@ -461,16 +463,12 @@ void main() {
         'reviewer',
       );
       expect(within('about-crew', find.text('Gateway release')), findsOne);
-      // Agent, Workspace, Crew, Role, then what it may touch.
-      expect(
-        top(t, find.text('WORKSPACE')),
-        lessThan(top(t, find.text('CREW'))),
-      );
+      // Crew and Role lead About, then who it ran as and who started it
+      // (153j).
       expect(top(t, find.text('CREW')), lessThan(top(t, find.text('ROLE'))));
-      expect(
-        top(t, find.text('ROLE')),
-        lessThan(top(t, find.text('VAULT ACCESS'))),
-      );
+      expect(top(t, find.text('ROLE')), lessThan(top(t, find.text('RAN AS'))));
+      expect(find.text('WORKSPACE'), findsNothing);
+      expect(find.text('VAULT ACCESS'), findsNothing);
       await disposeShell(t, c);
     });
 

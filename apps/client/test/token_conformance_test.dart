@@ -30,6 +30,35 @@ void main() {
       .where((f) => RegExp(r'/spawn_[^/]*\.dart$').hasMatch(f.path))
       .toList();
   files.addAll(spawnFiles);
+  // The Agents sidebar and the rows it draws (153r).
+  const sidebarFiles = [
+    'lib/agent/agents_shell.dart',
+    'lib/agent/agent_widgets.dart',
+    'lib/agent/sidebar_rules.dart',
+    'lib/agent/output_seen.dart',
+  ];
+  files.addAll(sidebarFiles.map(File.new));
+  // The decision strip's agent side and the session view it sits in (153r).
+  const decisionFiles = [
+    'lib/agent/delete_request.dart',
+    'lib/agent/session_screen.dart',
+    // The inspector's rail and its Agents tab (153i).
+    'lib/agent/session_inspector.dart',
+    'lib/agent/session_agents.dart',
+    // The launcher (153-5).
+    'lib/agent/launcher.dart',
+    'lib/agent/launcher_parts.dart',
+  ];
+  files.addAll(decisionFiles.map(File.new));
+  // Settings › Agents & hosts and Integrations (153-7).
+  const settingsAgentFiles = [
+    'lib/agent/agents_hosts_screen.dart',
+    'lib/agent/agents_hosts_parts.dart',
+    'lib/agent/hosts_screen.dart',
+    'lib/agent/agents_settings_screen.dart',
+    'lib/agent/integrations_screen.dart',
+  ];
+  files.addAll(settingsAgentFiles.map(File.new));
 
   /// Lines that are not comments, with their 1-based number.
   Iterable<(int, String)> codeLines(File f) sync* {
@@ -64,6 +93,49 @@ void main() {
         'spawn_api.dart',
       ]),
     );
+  });
+
+  test('the Agents sidebar, the decision strip, the inspector and the '
+      'launcher are scanned too', () {
+    for (final path in [
+      ...sidebarFiles,
+      ...decisionFiles,
+      ...settingsAgentFiles,
+    ]) {
+      expect(File(path).existsSync(), isTrue, reason: path);
+    }
+  });
+
+  test('host states are never green and never claim safety (153-7)', () {
+    final offenders = <String>[];
+    for (final path in settingsAgentFiles.take(3)) {
+      for (final (n, line) in codeLines(File(path))) {
+        if (RegExp(r'\.green\b').hasMatch(line) ||
+            RegExp(
+              r"'[^']*\b(trusted|secure|protected|sandboxed)\b",
+              caseSensitive: false,
+            ).hasMatch(line)) {
+          offenders.add('$path:$n');
+        }
+      }
+    }
+    expect(offenders, isEmpty);
+  });
+
+  test('no amber in the Agents sidebar: amber is for tags (153e)', () {
+    final offenders = <String>[];
+    for (final path in [
+      ...sidebarFiles,
+      'lib/agent/crew_widgets.dart',
+      'lib/agent/crew_add.dart',
+      'lib/ui/shell/activity_rail.dart',
+    ]) {
+      final f = File(path);
+      for (final (n, line) in codeLines(f)) {
+        if (RegExp(r'\.amber').hasMatch(line)) offenders.add('$path:$n');
+      }
+    }
+    expect(offenders, isEmpty);
   });
 
   test('no literal Colors.*', () {

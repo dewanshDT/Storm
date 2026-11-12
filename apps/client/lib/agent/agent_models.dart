@@ -19,6 +19,8 @@ class ProviderCap {
     this.installBlocked,
     this.checksumVerified = true,
     this.latest,
+    this.loginCommand,
+    this.signedIn,
   });
 
   final String id;
@@ -46,6 +48,14 @@ class ProviderCap {
   /// The newest version available, when the server knows it.
   final String? latest;
 
+  /// The command that signs the agent in, the server's own (153-S3): typed
+  /// into a Shell for the person to run. Null for an agent without one.
+  final String? loginCommand;
+
+  /// Whether the host found it signed in (153-S4); null when it can't tell,
+  /// and from an older host, so Storm never claims either.
+  final bool? signedIn;
+
   bool get managed => source == 'storm';
 
   /// The host can give its sessions Storm's MCP (decision 130a); null from a
@@ -63,6 +73,8 @@ class ProviderCap {
     installBlocked: j['install_blocked'] as String?,
     checksumVerified: j['checksum_verified'] as bool? ?? true,
     latest: j['latest'] as String?,
+    loginCommand: j['login_command'] as String?,
+    signedIn: j['signed_in'] as bool?,
   );
 
   /// Its sessions can read your vaults and use your integrations: what the
@@ -101,6 +113,7 @@ class AgentHost {
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
     this.agentInstall = false,
+    this.typedInput = false,
     this.identityState,
     this.isolationState,
     this.isolationReason,
@@ -135,6 +148,10 @@ class AgentHost {
   /// It can install, update and remove agents (decision 133); false for an
   /// older runtime.
   final bool agentInstall;
+
+  /// It can open a Shell with a command typed in (153-S3); false for an
+  /// older runtime, which refuses such a launch `host_cannot_type`.
+  final bool typedInput;
 
   /// Its bridge identity (decision 135d): `verified`, `unsupported` or
   /// `unavailable`; null from a server that does not say.
@@ -203,6 +220,7 @@ class AgentHost {
       ],
       capabilitiesKnown: caps != null,
       agentInstall: caps?['agent_install'] == true,
+      typedInput: caps?['typed_input'] == true,
       identityState: _identityState(j),
       isolationState: _isolation(j).$1,
       isolationReason: _isolation(j).$2,
@@ -391,7 +409,7 @@ const kIdentityNotVerified =
     "Session identity not verified — Storm can't tell which session is "
     'calling';
 
-/// The agents a host can install from Settings › Agents, in the page's
+/// The agents a host can install from Settings › Agents & hosts, in the grid's
 /// order (decision 133).
 const kInstallableAgents = [
   'claude-code',
@@ -650,6 +668,7 @@ class AgentSession {
   AgentSession({
     required this.id,
     required this.hostId,
+    this.hostName,
     required this.workspace,
     required this.provider,
     required this.status,
@@ -686,10 +705,17 @@ class AgentSession {
     this.model,
     this.permissionMode,
     this.deleteRequest,
+    this.pendingDecisions = const [],
+    this.hostLastSeen,
+    this.outputEnd,
   }) : name = name ?? workspace;
 
   final String id;
   final String hostId;
+
+  /// Its host's name as the server last knew it, kept after the host is
+  /// removed (decision 153).
+  final String? hostName;
   final String workspace;
   final String provider;
 
@@ -777,6 +803,19 @@ class AgentSession {
   /// Its agent's deletion waiting for the person (decision 149); null
   /// otherwise.
   final DeleteRequest? deleteRequest;
+
+  /// What waits for the person to decide, oldest first (153b); empty from
+  /// an older server, which says only [deleteRequest].
+  final List<PendingDecision> pendingDecisions;
+
+  /// When its offline host was last heard from, while it has not ended
+  /// (153a); null otherwise or from an older server.
+  final DateTime? hostLastSeen;
+
+  /// The end of its output, a byte offset that only grows (153c). A device
+  /// keeps the one it last showed: past it is unread. Null when the server
+  /// has none yet, or is older.
+  final int? outputEnd;
 
   /// There is a conversation to reopen.
   bool get hasConversation =>
@@ -889,6 +928,7 @@ class AgentSession {
   }) => AgentSession(
     id: id,
     hostId: hostId,
+    hostName: hostName,
     workspace: workspace,
     provider: provider,
     status: status ?? this.status,
@@ -927,11 +967,15 @@ class AgentSession {
     model: model,
     permissionMode: permissionMode,
     deleteRequest: deleteRequest,
+    pendingDecisions: pendingDecisions,
+    hostLastSeen: hostLastSeen,
+    outputEnd: outputEnd,
   );
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
     hostId: j['host_id'] as String,
+    hostName: j['host_name'] as String?,
     workspace: j['workspace'] as String,
     provider: j['provider'] as String,
     status: j['status'] as String,
@@ -992,6 +1036,11 @@ class AgentSession {
     deleteRequest: _map(j['delete_request']) == null
         ? null
         : DeleteRequest.fromJson(_map(j['delete_request'])!),
+    pendingDecisions: PendingDecision.listOf(j['pending_decisions']),
+    hostLastSeen: j['host_last_seen'] is String
+        ? DateTime.tryParse(j['host_last_seen'] as String)
+        : null,
+    outputEnd: j['output_end'] is num ? (j['output_end'] as num).toInt() : null,
   );
 }
 

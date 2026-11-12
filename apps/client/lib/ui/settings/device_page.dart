@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -93,6 +94,11 @@ class DevicePage extends ConsumerWidget {
             _Shortcut('${_mod()}N', 'New note'),
             _Shortcut('${_mod()}\\', 'Sidebar'),
             _Shortcut('${_mod()}E', 'Read / Edit'),
+            if (!kIsWeb)
+              _Shortcut(
+                stormUsesMetaModifier ? '⌘[ ⌘]' : 'Alt+← Alt+→',
+                'Back / Forward',
+              ),
           ],
         ),
       ],

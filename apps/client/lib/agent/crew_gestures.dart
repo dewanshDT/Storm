@@ -161,6 +161,34 @@ Future<void> placeInCrew(
   );
 }
 
+/// Moves [ids], each as its tree's root (145i), into [to] (null: out of
+/// any crew), last in it; those already there stay where they are.
+Future<void> moveSessionsTo(
+  BuildContext context,
+  AgentOverview overview,
+  List<String> ids,
+  String? to,
+) async {
+  final sessions = [
+    for (final id in overview.rootIdsOf(ids)) ?overview.byId(id),
+  ].where((s) => s.crew?.id != to).toList();
+  if (sessions.isEmpty) return;
+  await sendCrewChange(
+    context,
+    what: sessions.length == 1
+        ? 'move ${sessions.single.displayName}'
+        : 'move the sessions',
+    patch: moveAllPatch([for (final s in sessions) s.id], to),
+    send: (api) async {
+      final removed = <Crew>[];
+      for (final s in sessions) {
+        removed.addAll((await api.moveToCrew(s.id, to)).removedCrews);
+      }
+      return CrewChange(removedCrews: removed);
+    },
+  );
+}
+
 /// Takes [s] out of its crew.
 Future<void> leaveCrew(
   BuildContext context,
@@ -437,24 +465,9 @@ class _SelectionBarState extends ConsumerState<SelectionBar> {
       ),
     );
     if (picked == null || !mounted) return;
-    final to = picked.$1;
-    final sessions = [
-      for (final id in widget.overview.rootIdsOf(_ids))
-        ?widget.overview.byId(id),
-    ].where((s) => s.crew?.id != to).toList();
+    final ids = _ids;
     _clear();
-    await sendCrewChange(
-      context,
-      what: 'move the sessions',
-      patch: moveAllPatch([for (final s in sessions) s.id], to),
-      send: (api) async {
-        final removed = <Crew>[];
-        for (final s in sessions) {
-          removed.addAll((await api.moveToCrew(s.id, to)).removedCrews);
-        }
-        return CrewChange(removedCrews: removed);
-      },
-    );
+    await moveSessionsTo(context, widget.overview, ids, picked.$1);
   }
 
   @override

@@ -13,6 +13,7 @@ import '../controls.dart';
 import '../icons.dart';
 import '../states.dart';
 import '../tokens.dart';
+import 'app_bar.dart' show sidebarTopInset;
 import '../widgets.dart';
 import 'nav_bubble.dart' show NewFolderRequest, NewNoteRequest;
 import 'sidebar_frame.dart';
@@ -53,7 +54,7 @@ class VaultSidebar extends ConsumerWidget {
           Padding(
             padding: EdgeInsets.fromLTRB(
               t.sp * 1.5,
-              t.sp * 2,
+              sidebarTopInset(t),
               t.sp * 1.5,
               t.sp,
             ),

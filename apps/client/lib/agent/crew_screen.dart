@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
+import '../ui/shell/app_bar.dart' show pageTopInset;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
@@ -18,10 +19,11 @@ import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
 import 'crew_sheets.dart';
 import 'crew_widgets.dart';
+import 'sidebar_rules.dart' show namesHosts, parentApart;
 import 'spawn_api.dart';
 import 'spawn_models.dart' show DescendantRef, Descendants;
 import 'spawn_state.dart' show childrenOf, sessionDescendantsProvider;
-import 'spawn_widgets.dart' show lineageIndented, lineageLine;
+import 'spawn_widgets.dart' show lineageIndented;
 
 /// One crew at `/agents/c/:id` (decision 138, handoff §3 Crew page, 4d): its
 /// header and hosts, End all running in place, its members, the notes they
@@ -76,20 +78,14 @@ class _CrewScreenState extends ConsumerState<CrewScreen> {
         body: SafeArea(
           left: false,
           child: SingleChildScrollView(
-            child: Align(
-              alignment: Alignment.topLeft,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: t.sp * 95),
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    t.sp * 5,
-                    t.sp * 3.5,
-                    t.sp * 5,
-                    t.sp * 7.5,
-                  ),
-                  child: body,
-                ),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 5,
+                pageTopInset(t),
+                t.sp * 5,
+                t.sp * 7.5,
               ),
+              child: body,
             ),
           ),
         ),
@@ -293,7 +289,9 @@ class _CrewPage extends ConsumerWidget {
                     session: s,
                     host: o.hostName(s.hostId),
                     phone: true,
-                    lineage: lineageLine(s, o),
+                    overview: o,
+                    fromParent: parentApart(s, members, o),
+                    showHost: namesHosts(o),
                     onTap: () => openAgentSession(context, s.id),
                     onLongPress: () => showSessionCrewSheet(context, ref, s),
                   ),

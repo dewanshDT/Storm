@@ -30,9 +30,9 @@ const kEditorInset = 40.0;
 /// the editor surface and its header row are not bound by it.
 const kEditorMeasure = 900.0;
 
-/// The note pane's top padding, which is what puts the version line on the
-/// same baseline as the sidebar's vault name.
-const kEditorTopInset = 28.0;
+/// The note pane's top padding under the app bar: a page title's 14
+/// (decision 153a), on the top line the rail and the sidebar share.
+const kEditorTopInset = 14.0;
 
 extension Layout on BuildContext {
   /// Wide enough for two panes.

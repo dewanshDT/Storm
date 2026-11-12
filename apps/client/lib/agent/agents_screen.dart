@@ -12,8 +12,10 @@ import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/panels.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
+import '../ui/shell/app_bar.dart' show pageTopInset;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
+import '../ui/widgets.dart' show ReadingMeasure;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
@@ -22,8 +24,9 @@ import 'crew_prefs.dart';
 import 'crew_sheets.dart';
 import 'crew_widgets.dart';
 import 'launcher.dart';
-import 'spawn_state.dart' show lineageOrder;
-import 'spawn_widgets.dart' show lineageIndented, lineageLine;
+import 'output_seen.dart' show unreadSessionsProvider;
+import 'sidebar_rules.dart';
+import 'spawn_widgets.dart' show lineageIndented;
 
 /// Agents at `/agents` (handoff §2.7, §2.8).
 ///
@@ -45,7 +48,7 @@ class AgentsScreen extends ConsumerWidget {
       final Widget body;
       if (o == null) {
         body = Padding(
-          padding: EdgeInsets.fromLTRB(t.sp * 5, t.sp * 3.5, t.sp * 5, 0),
+          padding: EdgeInsets.fromLTRB(t.sp * 5, pageTopInset(t), t.sp * 5, 0),
           child: const SkeletonRows(rows: 4),
         );
       } else if (o.unreachable) {
@@ -70,29 +73,31 @@ class AgentsScreen extends ConsumerWidget {
         child: Stack(
           children: [
             Positioned.fill(
-              child: RefreshIndicator(
-                onRefresh: () => reloadAgents(ref),
-                child: ListView(
-                  padding: EdgeInsets.fromLTRB(
-                    StormChrome.contentInset(context),
-                    0,
-                    StormChrome.contentInset(context),
-                    StormChrome.navClearance(context),
-                  ),
-                  children: [
-                    _PageTitle('Agents'),
-                    if (o == null)
-                      const SkeletonRows(rows: 4)
-                    else if (o.unreachable)
-                      _Offline(onRetry: () => reloadAgents(ref))
-                    else if (o.hosts.isEmpty)
-                      const _NoHost(wide: false)
-                    else ...[
-                      if (o.sessions.isEmpty)
-                        _FirstSession(overview: o, wide: false),
-                      _PhoneList(overview: o),
+              child: PhoneListFreeze(
+                builder: (held) => RefreshIndicator(
+                  onRefresh: () => reloadAgents(ref),
+                  child: ListView(
+                    padding: EdgeInsets.fromLTRB(
+                      StormChrome.contentInset(context),
+                      0,
+                      StormChrome.contentInset(context),
+                      StormChrome.navClearance(context),
+                    ),
+                    children: [
+                      _PageTitle('Agents'),
+                      if (o == null)
+                        const SkeletonRows(rows: 4)
+                      else if (o.unreachable)
+                        _Offline(onRetry: () => reloadAgents(ref))
+                      else if (o.hosts.isEmpty)
+                        const _NoHost(wide: false)
+                      else ...[
+                        if (o.sessions.isEmpty)
+                          _FirstSession(overview: o, wide: false),
+                        _PhoneList(overview: o, held: held),
+                      ],
                     ],
-                  ],
+                  ),
                 ),
               ),
             ),
@@ -671,70 +676,62 @@ class _Overview extends ConsumerWidget {
     }
 
     return SingleChildScrollView(
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: t.sp * 95),
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * 5,
-              t.sp * 3.5,
-              t.sp * 5,
-              t.sp * 7.5,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 5,
+          pageTopInset(t),
+          t.sp * 5,
+          t.sp * 7.5,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const _PageTitle('Agents'),
+            SizedBox(height: t.sp * 0.75),
+            ReadingMeasure(
+              child: _Copy(
+                'What your agents are working on. Sessions keep running '
+                'on your hosts when you close Storm.',
+                size: t.uiSize,
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const _PageTitle('Agents'),
-                SizedBox(height: t.sp * 0.75),
-                _Copy(
-                  'What your agents are working on. Sessions keep running on '
-                  'your hosts when you close Storm.',
-                  size: t.uiSize,
+            SizedBox(height: t.sp * 3),
+            if (crews.isNotEmpty) ...[
+              const AgentsLabel('Crews'),
+              SizedBox(height: t.sp * 1.5),
+              for (final c in crews) ...[
+                CrewCard(
+                  crew: c,
+                  overview: o,
+                  collapsed: prefs.collapsed(c.id),
+                  onOpenSession: (s) => openAgentSession(context, s.id),
                 ),
-                SizedBox(height: t.sp * 3),
-                if (crews.isNotEmpty) ...[
-                  const AgentsLabel('Crews'),
-                  SizedBox(height: t.sp * 1.5),
-                  for (final c in crews) ...[
-                    CrewCard(
-                      crew: c,
-                      overview: o,
-                      collapsed: prefs.collapsed(c.id),
-                      onOpenSession: (s) => openAgentSession(context, s.id),
-                    ),
-                    SizedBox(height: t.sp * 1.5),
-                  ],
-                  SizedBox(height: t.sp * 1.5),
-                ],
-                // Until the first crew exists, and only once crews have
-                // loaded from a server that has them.
-                if (o.crews != null && crews.isEmpty) ...[
-                  const _NoCrewsHint(),
-                  SizedBox(height: t.sp * 2.5),
-                ],
-                if (crews.isEmpty || groups.isNotEmpty) ...[
-                  AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
-                  SizedBox(height: t.sp * 1.5),
-                ],
-                for (final MapEntry(key: (ws, host), value: rows)
-                    in groups.entries) ...[
-                  _WorkCard(
-                    workspace: ws,
-                    host: o.hostName(host),
-                    sessions: rows,
-                  ),
-                  SizedBox(height: t.sp * 1.5),
-                ],
                 SizedBox(height: t.sp * 1.5),
-                const AgentsLabel('Start an agent'),
-                SizedBox(height: t.sp * 1.25),
-                _AgentCards(overview: o),
-                SizedBox(height: t.sp * 3),
-                _InfraLine(overview: o),
               ],
-            ),
-          ),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            // Until the first crew exists, and only once crews have
+            // loaded from a server that has them.
+            if (o.crews != null && crews.isEmpty) ...[
+              const _NoCrewsHint(),
+              SizedBox(height: t.sp * 2.5),
+            ],
+            if (crews.isEmpty || groups.isNotEmpty) ...[
+              AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            for (final MapEntry(key: (ws, host), value: rows)
+                in groups.entries) ...[
+              _WorkCard(workspace: ws, host: o.hostName(host), sessions: rows),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            SizedBox(height: t.sp * 1.5),
+            const AgentsLabel('Start an agent'),
+            SizedBox(height: t.sp * 1.25),
+            _AgentCards(overview: o),
+            SizedBox(height: t.sp * 3),
+            _InfraLine(overview: o),
+          ],
         ),
       ),
     );
@@ -1055,42 +1052,68 @@ class _AgentCards extends ConsumerWidget {
   }
 }
 
-/// The phone list: CREWS as on the desk, then Running and Ended with the
-/// sessions in no crew, then the infrastructure line. No work grouping, the
-/// rows already carry the workspace (handoff §2.8; crews 4j). A long-press
-/// on any row is its Crew and Role sheet; there is no drag on a phone.
+/// The phone list: CREWS, RUNNING and ENDED as on the desk (153o), in the
+/// sidebar's order: [sidebarOrder], [crewOrder], trees moving as one,
+/// roll-ups when folded and ENDED folded by default. Then the
+/// infrastructure line. A long-press on any row is its Crew and Role sheet;
+/// there is no drag on a phone. [held] places rows while the list is being
+/// touched or scrolled ([PhoneListFreeze]).
 class _PhoneList extends ConsumerWidget {
-  const _PhoneList({required this.overview});
+  const _PhoneList({required this.overview, this.held});
 
   final AgentOverview overview;
+  final Map<String, SidebarTier>? held;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final o = overview;
-    final crews = o.crews ?? const <Crew>[];
+    final now = DateTime.now();
+    final tier = tierLookup(now, held);
+    final shown = tierLookup(now);
+    final crews = crewOrder(o.crews ?? const <Crew>[], o.membersOf, tier);
+    final (running: live, ended: ended) = looseSections(o);
     final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
-    Widget row(AgentSession s) => SnapBackOutline(
-      id: s.id,
-      child: SessionRow(
-        session: s,
-        host: o.hostName(s.hostId),
-        phone: true,
-        lineage: lineageLine(s, o),
-        onTap: () => openAgentSession(context, s.id),
-        onLongPress: () => showSessionCrewSheet(context, ref, s),
-      ),
-    );
-    Widget section(String label, List<AgentSession> list, double top) => Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Padding(
-          padding: EdgeInsets.only(top: top, bottom: t.sp * 0.5),
-          child: AgentsLabel(label),
+    final unread = ref.watch(unreadSessionsProvider);
+    final showHost = namesHosts(o);
+
+    List<AgentSession> ordered(List<AgentSession> list) =>
+        withoutCollapsed(sidebarOrder(list, tier), prefs.trees);
+
+    Widget row(AgentSession s, List<AgentSession> listed) {
+      final kids = descendantsIn(listed, s.id);
+      return SnapBackOutline(
+        id: s.id,
+        child: SessionRow(
+          session: s,
+          host: o.hostName(s.hostId),
+          phone: true,
+          overview: o,
+          tier: shown(s),
+          now: now,
+          fromParent: parentApart(s, listed, o),
+          showHost: showHost,
+          unread: unread.contains(s.id),
+          tree: kids.isEmpty
+              ? null
+              : TreeFold(
+                  size: kids.length,
+                  collapsed: prefs.treeCollapsed(s.id),
+                  rollUp: rollUpOf(kids, shown),
+                  onToggle: () =>
+                      ref.read(crewPrefsProvider.notifier).toggleTree(s.id),
+                ),
+          onTap: () => openAgentSession(context, s.id),
+          onLongPress: () => showSessionCrewSheet(context, ref, s),
         ),
-        for (final s in lineageOrder(list)) lineageIndented(s, list, row(s)),
-      ],
-    );
+      );
+    }
+
+    List<Widget> rows(List<AgentSession> list) => [
+      for (final s in ordered(list)) lineageIndented(s, list, row(s, list)),
+    ];
+
+    final dismissable = dismissableEnded(o, ended).length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -1109,6 +1132,7 @@ class _PhoneList extends ConsumerWidget {
                   crew: c,
                   members: o.membersOf(c),
                   collapsed: prefs.collapsed(c.id),
+                  rollUp: rollUpOf(o.membersOf(c), shown),
                   onToggle: () =>
                       ref.read(crewPrefsProvider.notifier).toggleCrew(c.id),
                   onOpen: () => context.go(Routes.agentCrew(c.id)),
@@ -1119,17 +1143,33 @@ class _PhoneList extends ConsumerWidget {
               if (!prefs.collapsed(c.id) && o.membersOf(c).isNotEmpty)
                 CrewMembers(
                   phone: true,
-                  children: [
-                    for (final s in liveFirst(o.membersOf(c)))
-                      lineageIndented(s, o.membersOf(c), row(s)),
-                  ],
+                  children: rows(liveFirst(o.membersOf(c))),
                 ),
             ],
         ],
-        if (o.looseLive.isNotEmpty)
-          section('Running', o.looseLive, t.sp * (crews.isEmpty ? 1.75 : 2)),
-        if (o.looseEnded.isNotEmpty)
-          section('Ended', o.looseEnded, t.sp * 2.75),
+        if (live.isNotEmpty) ...[
+          Padding(
+            key: const Key('section-running'),
+            padding: EdgeInsets.only(
+              top: t.sp * (crews.isEmpty ? 1.75 : 2),
+              bottom: t.sp * 0.5,
+            ),
+            child: const AgentsLabel('Running'),
+          ),
+          ...rows(live),
+        ],
+        if (ended.isNotEmpty) ...[
+          EndedLabel(
+            phone: true,
+            count: ended.length,
+            collapsed: prefs.ended,
+            onToggle: () => ref.read(crewPrefsProvider.notifier).toggleEnded(),
+            onDismissAll: dismissable == 0
+                ? null
+                : () => dismissEndedSessions(context, o, ended),
+          ),
+          if (!prefs.ended) ...rows(ended),
+        ],
         Padding(
           padding: EdgeInsets.only(top: t.sp * 2.25),
           child: _InfraLine(overview: o, phone: true),
@@ -1137,4 +1177,66 @@ class _PhoneList extends ConsumerWidget {
       ],
     );
   }
+}
+
+/// The phone's stand-in for the sidebar's freeze while the pointer is over
+/// it (§2 Sorting): while a finger is down on the list or it is scrolling,
+/// rows keep the tiers they had when it began, and the order catches up
+/// once it settles. Nothing moves under a thumb about to tap.
+class PhoneListFreeze extends ConsumerStatefulWidget {
+  const PhoneListFreeze({super.key, required this.builder});
+
+  final Widget Function(Map<String, SidebarTier>? held) builder;
+
+  @override
+  ConsumerState<PhoneListFreeze> createState() => _PhoneListFreezeState();
+}
+
+class _PhoneListFreezeState extends ConsumerState<PhoneListFreeze> {
+  Map<String, SidebarTier>? _held;
+  final _pointers = <int>{};
+  bool _scrolling = false;
+
+  void _hold() {
+    if (_held != null) return;
+    final o = ref.read(agentOverviewProvider).value;
+    if (o == null) return;
+    setState(() => _held = tiersOf(o.sessions, DateTime.now()));
+  }
+
+  void _settle() {
+    if (_pointers.isNotEmpty || _scrolling || _held == null) return;
+    setState(() => _held = null);
+  }
+
+  void _up(PointerEvent e) {
+    _pointers.remove(e.pointer);
+    _settle();
+  }
+
+  bool _onScroll(ScrollNotification n) {
+    if (n.depth != 0) return false;
+    if (n is ScrollStartNotification) {
+      _scrolling = true;
+      _hold();
+    } else if (n is ScrollEndNotification) {
+      _scrolling = false;
+      _settle();
+    }
+    return false;
+  }
+
+  @override
+  Widget build(BuildContext context) => Listener(
+    onPointerDown: (e) {
+      _pointers.add(e.pointer);
+      _hold();
+    },
+    onPointerUp: _up,
+    onPointerCancel: _up,
+    child: NotificationListener<ScrollNotification>(
+      onNotification: _onScroll,
+      child: widget.builder(_held),
+    ),
+  );
 }

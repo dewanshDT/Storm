@@ -1,12 +1,18 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
+import '../router.dart';
 import '../state/app_state.dart';
-import '../state/vault_config.dart';
 import 'controls.dart';
+import 'decision_strip.dart';
+import 'settings/settings_widgets.dart' show TextAction;
 import 'shell/storm_scaffold.dart';
+import 'breakpoints.dart';
+import 'shell/app_bar.dart' show pageTopInset;
 import 'shell/vault_gate.dart';
 import 'states.dart';
 import 'tokens.dart';
@@ -26,48 +32,90 @@ final trashProvider = FutureProvider.autoDispose.family<TrashPage, String>((
   return api.trash(vaultId);
 });
 
-/// `/v/<vault>/trash`.
-class TrashScreen extends StatelessWidget {
+/// How long a vault's trash keeps an item (decision 150b), as its trash
+/// says: [days], never ([never]), or not known here ([known] false).
+class TrashRetention {
+  const TrashRetention.days(int this.days) : known = true, never = false;
+  const TrashRetention.never() : days = null, known = true, never = true;
+  const TrashRetention.unknown() : days = null, known = false, never = false;
+
+  final int? days;
+  final bool known;
+  final bool never;
+
+  /// "kept for 30 days", "kept until you empty it", or, unknown, "kept for
+  /// the vault's retention period".
+  String get keptFor {
+    if (!known) return 'kept for the vault’s retention period';
+    if (never) return 'kept until you empty it';
+    return 'kept for ${daysWord(days!)}';
+  }
+
+  /// The first line under the Trash title (153l).
+  String get intro => !known
+      ? 'Deleted notes are kept for the vault’s retention period.'
+      : never
+      ? 'Deleted notes are kept until you empty the trash.'
+      : 'Deleted notes are kept for ${daysWord(days!)}, '
+            'then removed for good.';
+
+  /// "27 days left", "less than a day left", or null when nothing counts
+  /// down: kept until emptied, or the retention isn't known.
+  String? timeLeft(String deletedAt, {DateTime? now}) {
+    final keep = days;
+    final at = DateTime.tryParse(deletedAt);
+    if (keep == null || at == null) return null;
+    final left = at.add(Duration(days: keep)).difference(now ?? DateTime.now());
+    if (left.inDays < 1) return 'less than a day left';
+    return '${daysWord(left.inDays)} left';
+  }
+}
+
+String daysWord(int n) => n == 1 ? '1 day' : '$n days';
+
+/// [vaultId]'s own retention, read from its trash (153g): never a constant,
+/// since each vault sets its own.
+final trashRetentionProvider = Provider.autoDispose
+    .family<TrashRetention, String>((ref, vaultId) {
+      if (ref.watch(apiProvider) == null || vaultId.isEmpty) {
+        return const TrashRetention.unknown();
+      }
+      final page = ref.watch(trashProvider(vaultId));
+      return switch (page) {
+        AsyncData(:final value) => retentionOf(value.retentionDays),
+        _ => const TrashRetention.unknown(),
+      };
+    });
+
+TrashRetention retentionOf(int? days) =>
+    days == null ? const TrashRetention.never() : TrashRetention.days(days);
+
+/// `/v/<vault>/trash`. On a phone the selection bar takes the nav's place.
+class TrashScreen extends StatefulWidget {
   const TrashScreen({super.key});
 
   @override
-  Widget build(BuildContext context) =>
-      StormScaffold(child: TrashView(vaultId: VaultGate.of(context)));
+  State<TrashScreen> createState() => _TrashScreenState();
 }
 
-/// Asks before something irreversible. Anything but the button is a no.
-Future<bool> confirmDestructive(
-  BuildContext context, {
-  required String title,
-  required String body,
-  required String action,
-}) async {
-  final confirmed = await showDialog<bool>(
-    context: context,
-    builder: (c) => AlertDialog(
-      title: Text(title),
-      content: Text(body),
-      actions: [
-        TextButton(
-          key: const Key('confirm-cancel'),
-          onPressed: () => Navigator.pop(c, false),
-          child: const Text('Cancel'),
-        ),
-        FilledButton(
-          key: const Key('confirm-action'),
-          onPressed: () => Navigator.pop(c, true),
-          style: FilledButton.styleFrom(
-            backgroundColor: Theme.of(c).colorScheme.error,
-          ),
-          child: Text(action),
-        ),
-      ],
+class _TrashScreenState extends State<TrashScreen> {
+  bool _selecting = false;
+
+  @override
+  Widget build(BuildContext context) => StormScaffold(
+    showNav: context.isExpanded || !_selecting,
+    child: TrashView(
+      vaultId: VaultGate.of(context),
+      onSelecting: (on) {
+        if (mounted && on != _selecting) setState(() => _selecting = on);
+      },
     ),
   );
-  return confirmed == true;
 }
 
 String notesCount(int n) => n == 1 ? '1 note' : '$n notes';
+
+String itemsCount(int n) => n == 1 ? '1 item' : '$n items';
 
 /// "3h ago", "just now".
 String deletedAgo(String iso, {DateTime? now}) {
@@ -80,32 +128,115 @@ String deletedAgo(String iso, {DateTime? now}) {
   return '${d.inDays}d ago';
 }
 
-class TrashView extends ConsumerWidget {
-  const TrashView({super.key, required this.vaultId});
+/// What the strip at the top of Trash is asking (153g): Delete forever for
+/// the selected [items], or Empty trash (empty [items]).
+typedef _Confirm = ({
+  String title,
+  String note,
+  String action,
+  List<TrashItem> items,
+});
+
+class TrashView extends ConsumerStatefulWidget {
+  const TrashView({super.key, required this.vaultId, this.onSelecting});
 
   final String vaultId;
 
-  static const _periods = [7, 30, 90, null];
+  /// Told when a selection starts or ends.
+  final ValueChanged<bool>? onSelecting;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final page = ref.watch(trashProvider(vaultId));
-    final items = page.value?.items ?? const <TrashItem>[];
+  ConsumerState<TrashView> createState() => _TrashViewState();
+}
 
-    return ListView(
-      padding: EdgeInsets.fromLTRB(
-        StormChrome.contentInset(context),
-        t.sp * 2,
-        StormChrome.contentInset(context),
-        StormChrome.navClearance(context),
-      ),
+class _TrashViewState extends ConsumerState<TrashView> {
+  _Confirm? _confirm;
+  bool _busy = false;
+  final _selected = <String>{};
+
+  String get vaultId => widget.vaultId;
+
+  @override
+  void initState() {
+    super.initState();
+    HardwareKeyboard.instance.addHandler(_key);
+  }
+
+  @override
+  void dispose() {
+    HardwareKeyboard.instance.removeHandler(_key);
+    super.dispose();
+  }
+
+  /// Esc clears the selection, unless the strip is asking: then Esc is its
+  /// Cancel, and the selection waits for the answer.
+  bool _key(KeyEvent e) {
+    if (e is! KeyDownEvent ||
+        e.logicalKey != LogicalKeyboardKey.escape ||
+        _selected.isEmpty ||
+        _confirm != null ||
+        !mounted) {
+      return false;
+    }
+    final route = ModalRoute.of(context);
+    if (route != null && !route.isCurrent) return false;
+    _clear();
+    return true;
+  }
+
+  void _select(void Function() change) {
+    final was = _selected.isNotEmpty;
+    setState(change);
+    if (was != _selected.isNotEmpty) {
+      widget.onSelecting?.call(_selected.isNotEmpty);
+    }
+  }
+
+  void _toggle(TrashItem item) => _select(() {
+    if (!_selected.remove(item.id)) _selected.add(item.id);
+  });
+
+  void _clear() => _select(_selected.clear);
+
+  List<TrashItem> _picked(List<TrashItem> items) => [
+    for (final i in items)
+      if (_selected.contains(i.id)) i,
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final wide = context.isExpanded;
+    final page = ref.watch(trashProvider(vaultId));
+    final keep = ref.watch(trashRetentionProvider(vaultId));
+    final items = page.value?.items ?? const <TrashItem>[];
+    final picked = _picked(items);
+    final vault = ref
+        .watch(vaultsProvider)
+        .value
+        ?.where((v) => v.id == vaultId)
+        .firstOrNull;
+    final confirm = _confirm;
+    final selectionBar = picked.isEmpty
+        ? null
+        : _SelectionBar(
+            count: picked.length,
+            busy: _busy,
+            docked: !wide,
+            onRestore: () => _restoreAll(picked),
+            onPurge: () => _askPurge(picked),
+            onClear: _clear,
+          );
+
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         Row(
           children: [
             Expanded(
               child: Text(
-                'Trash',
+                vault == null ? 'Trash' : 'Trash · ${vault.name}',
+                key: const Key('trash-title'),
                 style: TextStyle(
                   fontFamily: StormTokens.sansFamily,
                   fontSize: t.titleSize,
@@ -118,25 +249,38 @@ class TrashView extends ConsumerWidget {
               key: const Key('trash-empty'),
               label: 'Empty trash',
               icon: LucideIcons.trash_2,
-              onPressed: items.isEmpty ? null : () => _empty(context, ref),
+              onPressed: items.isEmpty ? null : _askEmpty,
             ),
           ],
         ),
         Padding(
-          padding: EdgeInsets.only(top: t.sp * 2, bottom: t.sp),
-          child: const SectionLabel('Keep deleted items for'),
+          padding: EdgeInsets.only(top: t.sp, bottom: t.sp * 2.5),
+          child: Wrap(
+            spacing: t.sp * 0.75,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              Text(
+                keep.intro,
+                key: const Key('trash-intro'),
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.uiSize,
+                  color: t.text2,
+                  height: 1.5,
+                ),
+              ),
+              TextAction(
+                key: const Key('trash-retention-link'),
+                label: 'Change in Settings › Vaults ›',
+                accent: true,
+                large: true,
+                onTap: () =>
+                    GoRouter.of(context).go(Routes.settingsPage('vaults')),
+              ),
+            ],
+          ),
         ),
-        ChoiceChips<int?>(
-          options: [
-            for (final days in _periods)
-              ChoiceOption(days, days == null ? 'Never delete' : '$days days'),
-          ],
-          selected: page.value?.retentionDays,
-          onSelected: page.hasValue
-              ? (days) => _setRetention(context, ref, days)
-              : null,
-        ),
-        SizedBox(height: t.sp * 2.5),
+        if (wide && selectionBar != null) selectionBar,
         page.when(
           loading: () => const SkeletonRows(),
           error: (e, _) => EmptyState(
@@ -159,200 +303,432 @@ class TrashView extends ConsumerWidget {
                   spacing: t.sp,
                   children: [
                     for (final item in p.items)
-                      _TrashRow(
+                      _TrashCard(
                         key: Key('trash:${item.id}'),
                         item: item,
-                        onRestore: () => _restore(context, ref, item),
-                        onPurge: () => _purge(context, ref, item),
+                        keep: keep,
+                        selected: _selected.contains(item.id),
+                        selecting: wide || picked.isNotEmpty,
+                        onToggle: () => _toggle(item),
+                        onRestore: _busy ? null : () => _restoreAll([item]),
                       ),
                   ],
                 ),
         ),
       ],
     );
+
+    final list = ListView(
+      padding: EdgeInsets.fromLTRB(
+        wide ? t.sp * 5 : StormChrome.contentInset(context),
+        wide ? pageTopInset(t) : t.sp * 2,
+        wide ? t.sp * 5 : StormChrome.contentInset(context),
+        selectionBar != null && !wide
+            ? t.sp * 3
+            : StormChrome.navClearance(context),
+      ),
+      children: [body],
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (confirm != null)
+          DecisionStrip(
+            key: const Key('trash-confirm'),
+            label: 'CONFIRM',
+            title: confirm.title,
+            note: confirm.note,
+            onEscape: _cancel,
+            actions: [
+              DecisionAction(
+                key: const Key('confirm-cancel'),
+                label: 'Cancel',
+                kind: DecisionActionKind.text,
+                onPressed: _cancel,
+              ),
+              DecisionAction(
+                key: const Key('confirm-action'),
+                label: confirm.action,
+                kind: DecisionActionKind.danger,
+                onPressed: _busy ? null : () => _go(confirm),
+              ),
+            ],
+          ),
+        Expanded(child: list),
+        if (!wide && selectionBar != null) selectionBar,
+      ],
+    );
   }
 
-  void _changed(WidgetRef ref) {
+  void _cancel() {
+    if (mounted) setState(() => _confirm = null);
+  }
+
+  void _changed() {
     ref.read(vaultRevisionProvider.notifier).state++;
     ref.invalidate(treeProvider);
     ref.invalidate(trashProvider(vaultId));
   }
 
-  void _say(BuildContext context, String message) => ScaffoldMessenger.maybeOf(
+  void _say(String message) => ScaffoldMessenger.maybeOf(
     context,
   )?.showSnackBar(SnackBar(content: Text(message)));
 
-  Future<void> _run(
-    BuildContext context,
-    WidgetRef ref,
-    Future<void> Function() act,
-    String done,
-  ) async {
-    try {
-      await act();
-      _changed(ref);
-      if (context.mounted) _say(context, done);
-    } catch (e) {
-      if (context.mounted) _say(context, describeFailure(e));
+  /// Runs [act] on each of [items] in turn, since the server takes one at a
+  /// time. What failed stays selected, and one toast says what and why.
+  Future<void> _each(
+    List<TrashItem> items,
+    Future<void> Function(TrashItem) act, {
+    required String done,
+    required String verb,
+  }) async {
+    setState(() => _busy = true);
+    final failed = <TrashItem>[];
+    Object? why;
+    for (final item in items) {
+      try {
+        await act(item);
+      } catch (e) {
+        failed.add(item);
+        why ??= e;
+      }
+    }
+    if (!mounted) return;
+    _changed();
+    _select(() {
+      _busy = false;
+      _selected
+        ..clear()
+        ..addAll(failed.map((i) => i.id));
+    });
+    if (failed.isEmpty) {
+      _say(done);
+    } else if (items.length == 1) {
+      _say(describeFailure(why!));
+    } else {
+      _say(
+        'Couldn’t $verb ${failed.length} of ${itemsCount(items.length)}: '
+        '${describeFailure(why!)}',
+      );
     }
   }
 
-  Future<void> _restore(
-    BuildContext context,
-    WidgetRef ref,
-    TrashItem item,
-  ) async {
+  Future<void> _restoreAll(List<TrashItem> items) async {
     final api = ref.read(apiProvider);
-    if (api == null) return;
-    await _run(
-      context,
-      ref,
-      () => api.restoreTrash(vaultId, item.id),
-      'Restored “${item.name}”',
+    if (api == null || items.isEmpty) return;
+    await _each(
+      items,
+      (i) => api.restoreTrash(vaultId, i.id),
+      done: items.length == 1
+          ? 'Restored “${items.single.name}”'
+          : 'Restored ${itemsCount(items.length)}',
+      verb: 'restore',
     );
   }
 
-  Future<void> _purge(
-    BuildContext context,
-    WidgetRef ref,
-    TrashItem item,
-  ) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    final ok = await confirmDestructive(
-      context,
-      title: 'Delete “${item.name}” forever?',
-      body: item.isFolder
-          ? 'The folder and its ${notesCount(item.noteCount)} are removed '
+  void _askPurge(List<TrashItem> items) => setState(() {
+    final one = items.length == 1 ? items.single : null;
+    _confirm = (
+      title: one == null
+          ? 'Delete ${itemsCount(items.length)} forever?'
+          : 'Delete “${one.name}” forever?',
+      note: one == null
+          ? 'They are removed for good, with their history. '
+                'This cannot be undone.'
+          : one.isFolder
+          ? 'The folder and its ${notesCount(one.noteCount)} are removed '
                 'for good, with their history. This cannot be undone.'
           : 'The note is removed for good, with its history. '
                 'This cannot be undone.',
       action: 'Delete forever',
+      items: items,
     );
-    if (!ok || !context.mounted) return;
-    await _run(
-      context,
-      ref,
-      () => api.purgeTrash(vaultId, item.id),
-      'Deleted “${item.name}” forever',
-    );
-  }
+  });
 
-  Future<void> _empty(BuildContext context, WidgetRef ref) async {
-    final api = ref.read(apiProvider);
-    if (api == null) return;
-    final ok = await confirmDestructive(
-      context,
+  void _askEmpty() => setState(
+    () => _confirm = (
       title: 'Empty trash?',
-      body:
-          'Everything in this vault\'s trash is removed for good, with its '
+      note:
+          'Everything in this vault’s trash is removed for good, with its '
           'history. This cannot be undone.',
       action: 'Empty trash',
-    );
-    if (!ok || !context.mounted) return;
-    await _run(context, ref, () => api.emptyTrash(vaultId), 'Trash emptied');
-  }
+      items: const [],
+    ),
+  );
 
-  Future<void> _setRetention(
-    BuildContext context,
-    WidgetRef ref,
-    int? days,
-  ) async {
-    final config = await ref.read(vaultConfigProvider.future);
-    final saved = await saveVaultConfig(ref, config.withTrashRetention(days));
-    ref.invalidate(trashProvider(vaultId));
-    if (!saved && context.mounted) {
-      _say(context, 'Could not change how long the trash keeps items');
+  Future<void> _go(_Confirm confirm) async {
+    final api = ref.read(apiProvider);
+    if (api == null) return;
+    final items = confirm.items;
+    setState(() => _confirm = null);
+    if (items.isEmpty) {
+      setState(() => _busy = true);
+      try {
+        await api.emptyTrash(vaultId);
+        if (mounted) {
+          _changed();
+          _say('Trash emptied');
+        }
+      } catch (e) {
+        if (mounted) _say(describeFailure(e));
+      }
+      if (mounted) _select(() => _busy = false);
+      return;
     }
+    await _each(
+      items,
+      (i) => api.purgeTrash(vaultId, i.id),
+      done: items.length == 1
+          ? 'Deleted “${items.single.name}” forever'
+          : 'Deleted ${itemsCount(items.length)} forever',
+      verb: 'delete',
+    );
   }
 }
 
-class _TrashRow extends StatelessWidget {
-  const _TrashRow({
-    super.key,
-    required this.item,
+/// "{n} selected · Restore · Delete forever… · Esc": above the cards at
+/// desk width, docked at the bottom on a phone.
+class _SelectionBar extends StatelessWidget {
+  const _SelectionBar({
+    required this.count,
+    required this.busy,
+    required this.docked,
     required this.onRestore,
     required this.onPurge,
+    required this.onClear,
   });
 
-  final TrashItem item;
+  final int count;
+  final bool busy;
+  final bool docked;
   final VoidCallback onRestore;
   final VoidCallback onPurge;
+  final VoidCallback onClear;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final small = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.codeSize,
-      color: t.text3,
+    final counted = Text(
+      '$count selected',
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.uiSize,
+        color: t.text,
+      ),
     );
-    final meta = [
-      'Deleted ${deletedAgo(item.deletedAt)} by ${item.byLabel}',
+    final restore = StormButton.soft(
+      key: const Key('selection-restore'),
+      label: 'Restore',
+      expand: docked,
+      onPressed: busy ? null : onRestore,
+    );
+    final purge = TextAction(
+      key: const Key('selection-purge'),
+      label: 'Delete forever…',
+      danger: true,
+      large: true,
+      onTap: busy ? null : onPurge,
+    );
+    final clear = TextAction(
+      key: const Key('selection-clear'),
+      label: docked ? 'Clear' : 'Esc',
+      large: true,
+      onTap: onClear,
+    );
+    if (docked) {
+      return Container(
+        key: const Key('trash-selection'),
+        padding: EdgeInsets.fromLTRB(
+          StormChrome.contentInset(context),
+          t.sp * 1.5,
+          StormChrome.contentInset(context),
+          t.sp * 1.5 + MediaQuery.paddingOf(context).bottom,
+        ),
+        decoration: BoxDecoration(
+          color: t.surface,
+          border: Border(
+            top: BorderSide(color: t.border, width: t.bw),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          spacing: t.sp * 1.25,
+          children: [
+            Row(
+              children: [
+                Expanded(child: counted),
+                clear,
+              ],
+            ),
+            Row(
+              spacing: t.sp * 2,
+              children: [
+                Expanded(child: restore),
+                purge,
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+    final row = Row(
+      spacing: t.sp * 1.5,
+      children: [
+        Expanded(child: counted),
+        restore,
+        purge,
+        clear,
+      ],
+    );
+    return Container(
+      key: const Key('trash-selection'),
+      margin: EdgeInsets.only(bottom: t.sp * 1.5),
+      padding: EdgeInsets.only(bottom: t.sp * 1.25),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: t.border, width: t.bw),
+        ),
+      ),
+      child: row,
+    );
+  }
+}
+
+class _TrashCard extends StatelessWidget {
+  const _TrashCard({
+    super.key,
+    required this.item,
+    required this.keep,
+    required this.selected,
+    required this.selecting,
+    required this.onToggle,
+    required this.onRestore,
+  });
+
+  final TrashItem item;
+  final TrashRetention keep;
+  final bool selected;
+
+  /// Checkboxes show: always at desk width, on a phone once one is chosen.
+  final bool selecting;
+  final VoidCallback onToggle;
+  final VoidCallback? onRestore;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final mono = TextStyle(
+      fontFamily: StormTokens.monoFamily,
+      fontSize: t.labelSize,
+      color: t.text3,
+      height: 1.5,
+    );
+    final where = [
+      item.originalPath,
       if (item.isFolder) notesCount(item.noteCount),
+      ?keep.timeLeft(item.deletedAt),
     ].join(' · ');
     final reason = item.deletedBy.reason;
 
-    return Container(
-      padding: EdgeInsets.all(t.sp * 1.5),
-      decoration: BoxDecoration(
+    return Semantics(
+      selected: selected,
+      child: Material(
         color: t.surface2,
-        borderRadius: BorderRadius.circular(t.rControl),
-        border: Border.all(color: t.border, width: t.bw),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        spacing: t.sp * 0.5,
-        children: [
-          Row(
-            children: [
-              Icon(
-                item.isFolder ? LucideIcons.folder : LucideIcons.file_text,
-                size: t.uiSize,
-                color: t.text2,
-              ),
-              SizedBox(width: t.sp),
-              Expanded(
-                child: Text(
-                  item.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.bodySize,
-                    fontWeight: FontWeight.w500,
-                    color: t.text,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(t.rCard),
+          side: BorderSide(color: selected ? t.accent : t.border, width: t.bw),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: selecting && !context.isExpanded ? onToggle : null,
+          onLongPress: onToggle,
+          child: Padding(
+            padding: EdgeInsets.all(t.sp * 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: t.sp * 1.5,
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    spacing: t.sp * 0.5,
+                    children: [
+                      Row(
+                        spacing: t.sp,
+                        children: [
+                          if (selecting)
+                            StormCheckbox(
+                              key: Key('trash-check:${item.id}'),
+                              value: selected,
+                              size: t.sp * 2,
+                              onChanged: (_) => onToggle(),
+                            )
+                          else
+                            Icon(
+                              item.isFolder
+                                  ? LucideIcons.folder
+                                  : LucideIcons.file_text,
+                              size: t.uiSize,
+                              color: t.text2,
+                            ),
+                          Expanded(
+                            child: Text(
+                              item.name,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontFamily: StormTokens.sansFamily,
+                                fontSize: t.uiSize,
+                                fontWeight: FontWeight.w600,
+                                color: t.text,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      Text(where, style: mono),
+                      Text(
+                        'Deleted ${deletedAgo(item.deletedAt)} by '
+                        '${item.byLabel}',
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.text2,
+                        ),
+                      ),
+                      // An agent's reason is its own words: plain text,
+                      // never markdown.
+                      if (reason != null && reason.isNotEmpty)
+                        Container(
+                          margin: EdgeInsets.only(top: t.sp * 0.5),
+                          padding: EdgeInsets.symmetric(
+                            horizontal: t.sp,
+                            vertical: t.sp * 0.75,
+                          ),
+                          decoration: BoxDecoration(
+                            color: t.bg,
+                            borderRadius: BorderRadius.circular(t.rControl),
+                          ),
+                          child: Text(
+                            '“$reason”',
+                            style: mono.copyWith(color: t.text2),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-              ),
-            ],
-          ),
-          Text(item.originalPath, style: small),
-          Text(meta, style: small),
-          // An agent's reason is its own words: plain text, never markdown.
-          if (reason != null && reason.isNotEmpty)
-            Text('“$reason”', style: small.copyWith(color: t.text2)),
-          Padding(
-            padding: EdgeInsets.only(top: t.sp * 0.5),
-            child: Wrap(
-              spacing: t.sp,
-              runSpacing: t.sp,
-              children: [
                 StormButton.soft(
                   key: Key('restore:${item.id}'),
                   label: 'Restore',
-                  icon: LucideIcons.undo_2,
                   onPressed: onRestore,
-                ),
-                StormButton.text(
-                  key: Key('purge:${item.id}'),
-                  label: 'Delete forever',
-                  onPressed: onPurge,
                 ),
               ],
             ),
           ),
-        ],
+        ),
       ),
     );
   }

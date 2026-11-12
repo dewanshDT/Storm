@@ -86,6 +86,18 @@ class AgentApi {
     ];
   }
 
+  /// Asks every linked host to look again at its agents, sign-in included
+  /// (153-S4). How many were asked; 0 from a server older than that.
+  Future<int> refreshHosts() async {
+    final r = await _client.post(
+      _uri('/v1/agent/hosts/refresh'),
+      headers: _headers,
+    );
+    if (r.statusCode == 404 || r.statusCode == 405) return 0;
+    final json = _decode(r);
+    return json is Map ? (json['asked'] as int? ?? 0) : 0;
+  }
+
   String _agentOn(String hostId, String agent) =>
       '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/agents/'
       '${Uri.encodeComponent(agent)}';
@@ -153,6 +165,36 @@ class AgentApi {
     _decode(
       await _client.delete(
         _uri('/v1/agent/hosts/${Uri.encodeComponent(id)}'),
+        headers: _headers,
+      ),
+    );
+  }
+
+  /// Issues an enrollment for a revoked host (decision 153). Redeemed by
+  /// `storm-runtime enroll`, it brings the host back under its id, name and
+  /// limits, with a new key. Shown once, like [enroll].
+  Future<({String enrollment, String expires})> reenrollHost(String id) async {
+    final json =
+        _decode(
+              await _client.post(
+                _uri('/v1/agent/hosts/${Uri.encodeComponent(id)}/reenroll'),
+                headers: _headers,
+                body: jsonEncode({'server_url': baseUrl}),
+              ),
+            )
+            as Map;
+    return (
+      enrollment: json['enrollment'] as String,
+      expires: json['expires'] as String,
+    );
+  }
+
+  /// Removes a revoked host from the list (decision 153); its ended sessions
+  /// stay, with its name. `host_not_revoked` (409) until it is revoked.
+  Future<void> removeHost(String id) async {
+    _decode(
+      await _client.post(
+        _uri('/v1/agent/hosts/${Uri.encodeComponent(id)}/remove'),
         headers: _headers,
       ),
     );
@@ -250,6 +292,7 @@ class AgentApi {
     bool childrenWrite = false,
     String? model,
     String? permissionMode,
+    String? typedInput,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -283,6 +326,9 @@ class AgentApi {
               // Absent is the agent's own (decision 146b).
               if (permissionMode != null && permissionMode != 'default')
                 'permission_mode': permissionMode,
+              // A Shell only (153-S3): typed in once it is ready, never run.
+              if (typedInput != null && typedInput.isNotEmpty)
+                'typed_input': typedInput,
             }),
           ),
         )

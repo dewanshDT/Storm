@@ -18,8 +18,10 @@ import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart' show launchAgentSession;
+import 'crew_add.dart' show showAddSessions;
 import 'crew_changes.dart';
 import 'crew_prefs.dart';
+import 'sidebar_rules.dart' show RollUp;
 import 'spawn_state.dart';
 
 /// The pieces crews are drawn with (decision 138, plan §4.2): one role tag,
@@ -161,6 +163,7 @@ double roleTagRowWidth(
 
 /// A name and, when there is one, its role tag. The tag gives way first,
 /// down to 5ch, and only then the name (handoff §3: shrink 1000 against 1).
+/// [dot] sits right after the name, before the tag (the unread dot, 153e).
 class RoleTagRow extends StatelessWidget {
   const RoleTagRow({
     super.key,
@@ -168,12 +171,14 @@ class RoleTagRow extends StatelessWidget {
     required this.role,
     required this.style,
     this.launchRole,
+    this.dot,
   });
 
   final String name;
   final RoleRef? role;
   final RoleRef? launchRole;
   final TextStyle style;
+  final Widget? dot;
 
   @override
   Widget build(BuildContext context) {
@@ -185,11 +190,24 @@ class RoleTagRow extends StatelessWidget {
       overflow: TextOverflow.ellipsis,
       style: style,
     );
+    final dotGap = t.sp * 0.75;
+    final named = dot == null
+        ? label
+        : Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Flexible(child: label),
+              SizedBox(width: dotGap),
+              dot!,
+            ],
+          );
     final r = role;
-    if (r == null) return label;
+    if (r == null) return named;
     final gap = t.sp * 0.75;
     final bounds = _roleBounds(context);
-    final nameW = _textWidth(context, name, style).ceilToDouble();
+    final nameW =
+        _textWidth(context, name, style).ceilToDouble() +
+        (dot == null ? 0 : dotGap + t.sp * 0.75);
     final tagText = _textWidth(
       context,
       roleTagText(r, launchRole: launchRole),
@@ -211,7 +229,7 @@ class RoleTagRow extends StatelessWidget {
         return Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            SizedBox(width: nameRoom, child: label),
+            SizedBox(width: nameRoom, child: named),
             SizedBox(width: gap),
             SizedBox(
               width: tag,
@@ -300,10 +318,15 @@ class CrewHeader extends StatefulWidget {
     required this.onMenu,
     this.selected = false,
     this.nameField,
+    this.rollUp,
   });
 
   final Crew crew;
   final List<AgentSession> members;
+
+  /// Folded, its most urgent state in place of the count (153e): "1 needs
+  /// you" in `danger` and outlined, "1 failed" in `danger`.
+  final RollUp? rollUp;
 
   /// Drawn in place of the name while it is being edited.
   final Widget? nameField;
@@ -329,8 +352,12 @@ class _CrewHeaderState extends State<CrewHeader> {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final c = widget.crew;
-    final count = crewCount(widget.members, collapsed: widget.collapsed);
+    final roll = widget.collapsed ? widget.rollUp : null;
+    final count =
+        roll?.words ?? crewCount(widget.members, collapsed: widget.collapsed);
+    final outlined = roll?.outlined ?? false;
     final radius = BorderRadius.circular(t.rControl);
+    final plain = widget.selected || _hover ? t.surface2 : Colors.transparent;
     return MouseRegion(
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
@@ -350,8 +377,18 @@ class _CrewHeaderState extends State<CrewHeader> {
           },
           child: Material(
             key: _anchor,
-            color: widget.selected || _hover ? t.surface2 : Colors.transparent,
-            borderRadius: radius,
+            color: outlined
+                ? Color.alphaBlend(
+                    t.danger.withValues(alpha: 0.09),
+                    widget.selected || _hover ? t.surface2 : t.surface,
+                  )
+                : plain,
+            shape: RoundedRectangleBorder(
+              borderRadius: radius,
+              side: outlined
+                  ? BorderSide(color: t.danger, width: t.bw)
+                  : BorderSide.none,
+            ),
             child: InkWell(
               key: Key('crew-${c.id}'),
               borderRadius: radius,
@@ -403,7 +440,9 @@ class _CrewHeaderState extends State<CrewHeader> {
                         style: TextStyle(
                           fontFamily: StormTokens.monoFamily,
                           fontSize: t.labelSize,
-                          color: t.text3,
+                          color: roll == null
+                              ? t.text3
+                              : (roll.loud ? t.danger : t.text2),
                         ),
                       ),
                       if (_hover) ...[
@@ -443,6 +482,7 @@ class PhoneCrewHeader extends StatelessWidget {
     required this.onToggle,
     required this.onOpen,
     required this.onActions,
+    this.rollUp,
   });
 
   final Crew crew;
@@ -452,11 +492,16 @@ class PhoneCrewHeader extends StatelessWidget {
   final VoidCallback onOpen;
   final VoidCallback onActions;
 
+  /// Folded, its most urgent state in place of the count, as on the desk.
+  final RollUp? rollUp;
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     final c = crew;
-    final count = crewCount(members, collapsed: collapsed);
+    final roll = collapsed ? rollUp : null;
+    final count = roll?.words ?? crewCount(members, collapsed: collapsed);
+    final outlined = roll?.outlined ?? false;
     return Semantics(
       button: true,
       expanded: !collapsed,
@@ -468,66 +513,84 @@ class PhoneCrewHeader extends StatelessWidget {
         CustomSemanticsAction(label: collapsed ? 'Expand' : 'Collapse'):
             onToggle,
       },
-      child: InkWell(
-        key: Key('crew-${c.id}'),
-        onTap: onOpen,
-        onLongPress: onActions,
-        child: Container(
-          padding: EdgeInsets.symmetric(vertical: t.sp * 1.5),
-          decoration: BoxDecoration(
-            border: Border(
-              bottom: BorderSide(color: t.border, width: t.bw),
+      child: Material(
+        color: outlined
+            ? Color.alphaBlend(t.danger.withValues(alpha: 0.09), t.bg)
+            : Colors.transparent,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(outlined ? t.rControl : 0),
+          side: outlined
+              ? BorderSide(color: t.danger, width: t.bw)
+              : BorderSide.none,
+        ),
+        child: InkWell(
+          key: Key('crew-${c.id}'),
+          onTap: onOpen,
+          onLongPress: onActions,
+          child: Container(
+            padding: EdgeInsets.symmetric(
+              vertical: t.sp * 1.5,
+              horizontal: outlined ? t.sp : 0,
             ),
-          ),
-          child: Row(
-            children: [
-              CrewSquare(accent: c.accent, size: t.sp * 1.5),
-              SizedBox(width: t.sp * 1.25),
-              Expanded(
-                child: Text(
-                  c.name,
-                  key: Key('crew-name-${c.id}'),
-                  maxLines: 1,
-                  softWrap: false,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.uiSize * 1.05,
-                    fontWeight: FontWeight.w500,
-                    color: t.text,
+            decoration: outlined
+                ? null
+                : BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(color: t.border, width: t.bw),
+                    ),
                   ),
-                ),
-              ),
-              SizedBox(width: t.sp * 1.25),
-              Text(
-                count,
-                key: Key('crew-count-${c.id}'),
-                style: TextStyle(
-                  fontFamily: StormTokens.monoFamily,
-                  fontSize: t.labelSize,
-                  color: t.text3,
-                ),
-              ),
-              GestureDetector(
-                key: Key('crew-chevron-${c.id}'),
-                behavior: HitTestBehavior.opaque,
-                onTap: onToggle,
-                child: SizedBox(
-                  width: t.sp * 4,
-                  height: t.sp * 3,
-                  child: Align(
-                    alignment: Alignment.centerRight,
-                    child: Icon(
-                      collapsed
-                          ? LucideIcons.chevron_right
-                          : LucideIcons.chevron_down,
-                      size: t.labelSize,
-                      color: t.text3,
+            child: Row(
+              children: [
+                CrewSquare(accent: c.accent, size: t.sp * 1.5),
+                SizedBox(width: t.sp * 1.25),
+                Expanded(
+                  child: Text(
+                    c.name,
+                    key: Key('crew-name-${c.id}'),
+                    maxLines: 1,
+                    softWrap: false,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: StormTokens.sansFamily,
+                      fontSize: t.uiSize * 1.05,
+                      fontWeight: FontWeight.w500,
+                      color: t.text,
                     ),
                   ),
                 ),
-              ),
-            ],
+                SizedBox(width: t.sp * 1.25),
+                Text(
+                  count,
+                  key: Key('crew-count-${c.id}'),
+                  style: TextStyle(
+                    fontFamily: StormTokens.monoFamily,
+                    fontSize: t.labelSize,
+                    color: roll == null
+                        ? t.text3
+                        : (roll.loud ? t.danger : t.text2),
+                  ),
+                ),
+                GestureDetector(
+                  key: Key('crew-chevron-${c.id}'),
+                  behavior: HitTestBehavior.opaque,
+                  onTap: onToggle,
+                  child: SizedBox(
+                    width: t.sp * 4,
+                    height: t.sp * 3,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: Icon(
+                        collapsed
+                            ? LucideIcons.chevron_right
+                            : LucideIcons.chevron_down,
+                        size: t.labelSize,
+                        color: t.text3,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -543,9 +606,13 @@ class CrewDots extends StatelessWidget {
     required this.onTap,
     this.card = false,
     this.page = false,
+    this.label = 'Crew actions',
   });
 
   final VoidCallback onTap;
+
+  /// Its name for screen readers.
+  final String label;
 
   /// The overview card's: bare, in `text3`.
   final bool card;
@@ -559,7 +626,7 @@ class CrewDots extends StatelessWidget {
     final radius = BorderRadius.circular(t.rControl * (page ? 1 : 0.6));
     return Semantics(
       button: true,
-      label: 'Crew actions',
+      label: label,
       excludeSemantics: true,
       onTap: onTap,
       child: Material(
@@ -622,7 +689,15 @@ class CrewMembers extends StatelessWidget {
 }
 
 /// What the crew menu was closed with.
-enum CrewAction { openPage, rename, collapse, newSession, dismissEnded, endAll }
+enum CrewAction {
+  openPage,
+  rename,
+  collapse,
+  newSession,
+  addSessions,
+  dismissEnded,
+  endAll,
+}
 
 /// The crew menu's contents (handoff §3): 220 wide on `surface2`. A counted
 /// item with nothing to count is drawn disabled.
@@ -708,6 +783,7 @@ class CrewMenu extends StatelessWidget {
       item(CrewAction.collapse, collapsed ? 'Expand' : 'Collapse'),
       const PopoverDivider(),
       item(CrewAction.newSession, 'New session in crew'),
+      item(CrewAction.addSessions, 'Add sessions…'),
       item(CrewAction.dismissEnded, 'Dismiss ended', count: ended),
       item(
         CrewAction.endAll,
@@ -806,7 +882,14 @@ Future<void> showCrewMenu(
     ),
   );
   if (picked == null || !context.mounted) return;
-  await runCrewAction(context, ref, picked, crew: crew, overview: overview);
+  await runCrewAction(
+    context,
+    ref,
+    picked,
+    crew: crew,
+    overview: overview,
+    anchor: anchor,
+  );
 }
 
 /// The crew actions as a sheet, on a phone (handoff §3 Phone: ··· opens
@@ -848,13 +931,67 @@ List<AgentSession> dismissableEnded(
     if (s.ended && !inTree(overview, s)) s,
 ];
 
-/// Does what the crew menu or sheet was closed with.
+/// Dismisses the ended among [sessions] that may go alone, saying which
+/// were kept for their tree (C8); [where] ends the sentences (" in Docs").
+Future<void> dismissEndedSessions(
+  BuildContext context,
+  AgentOverview overview,
+  List<AgentSession> sessions, {
+  String where = '',
+}) async {
+  final c = ProviderScope.containerOf(context, listen: false);
+  final messenger = ScaffoldMessenger.maybeOf(context);
+  final loose = dismissableEnded(overview, sessions);
+  final kept = sessions.where((s) => s.ended).length - loose.length;
+  final done = await sendCrewChange(
+    context,
+    what: 'dismiss every ended session$where',
+    removed: (_) => const <Crew>[],
+    send: (api) async {
+      final removed = <Crew>[];
+      Object? failure;
+      var failed = 0;
+      for (final s in loose) {
+        try {
+          removed.addAll(await api.dismiss(s.id));
+        } catch (e) {
+          failure ??= e;
+          failed++;
+        }
+      }
+      return (removed: removed, failed: failed, failure: failure);
+    },
+  );
+  if (done == null) return;
+  announceDismissedCrews(c, overview, done.removed, fallback: messenger);
+  if (done.failure case final e?) {
+    showUndoToast(
+      "Couldn't dismiss ${done.failed} of ${loose.length} ended sessions"
+      '$where: ${describeFailure(e)}',
+      fallback: messenger,
+    );
+  }
+  if (kept > 0) {
+    showUndoToast(
+      kept == 1
+          ? '1 is in a spawned tree and was kept: dismiss a tree from '
+                'its session.'
+          : '$kept are in a spawned tree and were kept: dismiss a tree '
+                'from its session.',
+      fallback: messenger,
+    );
+  }
+}
+
+/// Does what the crew menu or sheet was closed with; [anchor] is the
+/// menu's, where a follow-up popover opens (a sheet without one).
 Future<void> runCrewAction(
   BuildContext context,
   WidgetRef ref,
   Object picked, {
   required Crew crew,
   required AgentOverview overview,
+  GlobalKey? anchor,
 }) async {
   final members = overview.membersOf(crew);
   switch (picked) {
@@ -883,52 +1020,23 @@ Future<void> runCrewAction(
     case CrewAction.collapse:
       ref.read(crewPrefsProvider.notifier).toggleCrew(crew.id);
     case CrewAction.dismissEnded:
-      final c = ProviderScope.containerOf(context, listen: false);
-      final messenger = ScaffoldMessenger.maybeOf(context);
-      final loose = dismissableEnded(overview, members);
-      final kept = members.where((s) => s.ended).length - loose.length;
-      final done = await sendCrewChange(
+      await dismissEndedSessions(
         context,
-        what: 'dismiss every ended session in ${crew.name}',
-        removed: (_) => const <Crew>[],
-        send: (api) async {
-          final removed = <Crew>[];
-          Object? failure;
-          var failed = 0;
-          for (final s in loose) {
-            try {
-              removed.addAll(await api.dismiss(s.id));
-            } catch (e) {
-              failure ??= e;
-              failed++;
-            }
-          }
-          return (removed: removed, failed: failed, failure: failure);
-        },
+        overview,
+        members,
+        where: ' in ${crew.name}',
       );
-      if (done == null) return;
-      announceDismissedCrews(c, overview, done.removed, fallback: messenger);
-      if (done.failure case final e?) {
-        showUndoToast(
-          "Couldn't dismiss ${done.failed} of ${loose.length} ended sessions "
-          'in ${crew.name}: ${describeFailure(e)}',
-          fallback: messenger,
-        );
-      }
-      if (kept > 0) {
-        showUndoToast(
-          kept == 1
-              ? '1 is in a spawned tree and was kept: dismiss a tree from '
-                    'its session.'
-              : '$kept are in a spawned tree and were kept: dismiss a tree '
-                    'from its session.',
-          fallback: messenger,
-        );
-      }
     case CrewAction.openPage:
       context.go(Routes.agentCrew(crew.id));
     case CrewAction.newSession:
       await launchAgentSession(context, ref, crew: crew);
+    case CrewAction.addSessions:
+      await showAddSessions(
+        context,
+        crew: crew,
+        overview: overview,
+        anchor: anchor,
+      );
     case CrewAction.endAll:
       ref.read(crewEndAllProvider.notifier).state = crew.id;
       context.go(Routes.agentCrew(crew.id));
@@ -1399,6 +1507,82 @@ class CrewsSectionLabel extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// ENDED · n with its chevron and Dismiss all (§2: ENDED stays folded to
+/// its count, with Dismiss all; it never rolls up).
+class EndedLabel extends StatelessWidget {
+  const EndedLabel({
+    super.key,
+    required this.count,
+    required this.collapsed,
+    required this.onToggle,
+    required this.onDismissAll,
+    this.phone = false,
+  });
+
+  final int count;
+  final bool collapsed;
+  final VoidCallback onToggle;
+  final VoidCallback? onDismissAll;
+
+  /// The phone list's: flush with the rows, like [CrewsSectionLabel].
+  final bool phone;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Padding(
+      key: const Key('section-ended'),
+      padding: phone
+          ? EdgeInsets.only(top: t.sp * 2.75, bottom: t.sp * 0.5)
+          : EdgeInsets.fromLTRB(t.sp, t.sp * 2, t.sp, t.sp * 0.75),
+      child: Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              button: true,
+              expanded: !collapsed,
+              label: 'Ended, $count',
+              excludeSemantics: true,
+              onTap: onToggle,
+              child: GestureDetector(
+                key: const Key('ended-toggle'),
+                behavior: HitTestBehavior.opaque,
+                onTap: onToggle,
+                child: Row(
+                  children: [
+                    AgentsLabel(collapsed ? 'Ended · $count' : 'Ended'),
+                    SizedBox(width: t.sp * 0.75),
+                    Icon(
+                      collapsed
+                          ? LucideIcons.chevron_right
+                          : LucideIcons.chevron_down,
+                      size: t.labelSize,
+                      color: t.text3,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          if (onDismissAll != null)
+            Semantics(
+              button: true,
+              label: 'Dismiss all ended',
+              excludeSemantics: true,
+              onTap: onDismissAll,
+              child: GestureDetector(
+                key: const Key('ended-dismiss-all'),
+                behavior: HitTestBehavior.opaque,
+                onTap: onDismissAll,
+                child: Text('Dismiss all', style: agentMono(t, color: t.text2)),
+              ),
+            ),
+        ],
       ),
     );
   }

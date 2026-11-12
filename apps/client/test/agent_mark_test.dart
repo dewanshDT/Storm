@@ -90,7 +90,18 @@ void main() {
     expect(find.byIcon(LucideIcons.bot), findsOneWidget);
   });
 
-  testWidgets('working pulses in accent; waiting shows no badge', (
+  BoxDecoration badgeBox(WidgetTester tester) =>
+      tester
+              .widget<Container>(
+                find.descendant(
+                  of: find.byKey(const Key('badge-ags_1')),
+                  matching: find.byType(Container),
+                ),
+              )
+              .decoration!
+          as BoxDecoration;
+
+  testWidgets('working pulses in accent; idle is an accent ring (153e)', (
     tester,
   ) async {
     final t = await pump(tester, session(activity: 'working'));
@@ -98,10 +109,19 @@ void main() {
     await tester.pump(const Duration(milliseconds: 550));
     expect(badgeColor(tester), isNot(t.accent), reason: 'it pulses');
 
-    await pump(tester, session(activity: 'idle'));
-    expect(find.byKey(const Key('badge-ags_1')), findsNothing);
-    await pump(tester, session());
-    expect(find.byKey(const Key('badge-ags_1')), findsNothing);
+    for (final idle in [session(activity: 'idle'), session()]) {
+      await pump(tester, idle);
+      final box = badgeBox(tester);
+      expect((box.border! as Border).top.color, t.accent, reason: 'a ring');
+      expect(box.color, isNot(t.accent), reason: 'not filled');
+      await tester.pump(const Duration(milliseconds: 550));
+      expect((badgeBox(tester).border! as Border).top.color, t.accent);
+    }
+  });
+
+  testWidgets('starting is filled text3', (tester) async {
+    final t = await pump(tester, session(status: 'starting'));
+    expect(badgeColor(tester), t.text3);
   });
 
   testWidgets('reduced motion holds the badge still', (tester) async {
@@ -114,10 +134,32 @@ void main() {
     expect(badgeColor(tester), t.accent);
   });
 
-  testWidgets('unknown, failed and ended', (tester) async {
-    var t = await pump(tester, session(status: 'unknown'));
-    expect(badgeColor(tester), t.amber);
-    t = await pump(tester, session(status: 'failed'));
+  testWidgets('parked, out of usage and unknown have none; never amber', (
+    tester,
+  ) async {
+    await pump(tester, session(status: 'unknown'));
+    expect(find.byKey(const Key('badge-ags_1')), findsNothing);
+    await pump(tester, session(status: 'parked'));
+    expect(find.byKey(const Key('badge-ags_1')), findsNothing);
+    final usage = AgentSession.fromJson({
+      ...{
+        'id': 'ags_1',
+        'host_id': 'hst_1',
+        'workspace': 'storm',
+        'provider': 'claude-code',
+        'status': 'running',
+        'cols': 80,
+        'rows': 24,
+        'created_at': '2026-10-03T12:00:00Z',
+      },
+      'needs_attention': 'usage_limit',
+    });
+    await pump(tester, usage);
+    expect(find.byKey(const Key('badge-ags_1')), findsNothing);
+  });
+
+  testWidgets('failed and ended', (tester) async {
+    final t = await pump(tester, session(status: 'failed'));
     expect(badgeColor(tester), t.danger);
     expect(opacity(tester), 0.5);
     await pump(tester, session(status: 'completed'));

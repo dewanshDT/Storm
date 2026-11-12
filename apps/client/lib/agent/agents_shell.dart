@@ -4,21 +4,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
+import '../keyboard/storm_activators.dart' show stormHasKeyboard;
+import '../keyboard/storm_intents.dart' show StormNewSessionIntent;
+import '../keyboard/storm_shortcut_maps.dart'
+    show stormAgentsShortcuts, stormNewSessionChord;
 import '../ui/breakpoints.dart';
-import '../ui/controls.dart';
 import '../ui/shell/sidebar_frame.dart';
+import '../ui/shell/app_bar.dart' show sidebarTopInset;
 import '../ui/states.dart' show SkeletonRows;
 import '../ui/tokens.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
 import 'agents_screen.dart';
+import 'crew_add.dart' show showSessionMenu;
 import 'crew_changes.dart';
 import 'crew_gestures.dart';
 import 'crew_prefs.dart';
 import 'crew_widgets.dart';
-import 'spawn_state.dart' show lineageOrder;
-import 'spawn_widgets.dart' show lineageIndented, lineageLine;
+import 'output_seen.dart';
+import 'sidebar_rules.dart';
+import 'spawn_widgets.dart' show LineageIndent;
 import 'spawn_models.dart' show kMovesWithParent;
 
 /// The session a location shows, or null on the overview.
@@ -39,35 +45,68 @@ String? crewIdOf(Uri location) {
 /// screen it puts [AgentsSidebar] beside it. Built by a `ShellRoute`, so the
 /// sidebar keeps its state while the pane moves between the overview and
 /// sessions.
-class AgentsShell extends StatelessWidget {
+class AgentsShell extends ConsumerWidget {
   const AgentsShell({super.key, required this.location, required this.child});
 
   final Uri location;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (!context.isExpanded) return child;
-    return Scaffold(
-      body: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          AgentsSidebar(
-            selected: sessionIdOf(location),
-            selectedCrew: crewIdOf(location),
+    // Focus so the app bar's ⌘[ / ⌘] and ⇧⌘N work before anything is
+    // clicked, as VaultShell's does for the Notes chords.
+    return Shortcuts(
+      shortcuts: stormAgentsShortcuts(),
+      child: Actions(
+        actions: {
+          StormNewSessionIntent: CallbackAction<StormNewSessionIntent>(
+            onInvoke: (_) {
+              if (newSessionBlocker(ref.read(agentOverviewProvider)) == null) {
+                launchAgentSession(context, ref);
+              }
+              return null;
+            },
           ),
-          Expanded(child: PaneSemantics(child: child)),
-        ],
+        },
+        child: Focus(
+          autofocus: stormHasKeyboard,
+          skipTraversal: true,
+          child: Scaffold(
+            body: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                AgentsSidebar(
+                  selected: sessionIdOf(location),
+                  selectedCrew: crewIdOf(location),
+                ),
+                Expanded(child: PaneSemantics(child: child)),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
 }
 
-/// Title, ＋ New session while a host is online, Overview, then CREWS,
-/// RUNNING and ENDED (handoff §2.6; crews Round 4 §3). RUNNING and ENDED
-/// list only sessions in no crew. Rows and crew headers drag, and ⌘/Ctrl-
-/// and Shift-click select (138n); the sidebar is desktop only.
-class AgentsSidebar extends ConsumerWidget {
+/// Why ＋ cannot start a session now, or null when it can.
+String? newSessionBlocker(AsyncValue<AgentOverview> overview) {
+  final o = overview.value;
+  if (o == null) return 'Loading hosts…';
+  if (o.unreachable) return kAgentsOfflineTitle;
+  if (o.online.isEmpty) {
+    return o.hosts.isEmpty ? 'No host is set up yet' : 'No host is online';
+  }
+  return null;
+}
+
+/// The one header row, then CREWS, RUNNING and ENDED (handoff §2, Sidebar
+/// Rules A; crews Round 4 §3). RUNNING and ENDED list only sessions in no
+/// crew. Rows sort by [sidebarOrder], and the order holds while the pointer
+/// is over the sidebar. Rows and crew headers drag, and ⌘/Ctrl- and
+/// Shift-click select (138n); the sidebar is desktop only.
+class AgentsSidebar extends ConsumerStatefulWidget {
   const AgentsSidebar({super.key, this.selected, this.selectedCrew});
 
   /// The open session, if any.
@@ -77,28 +116,58 @@ class AgentsSidebar extends ConsumerWidget {
   final String? selectedCrew;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AgentsSidebar> createState() => _AgentsSidebarState();
+}
+
+class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
+  /// The tiers rows had when the pointer came in: while it is over the
+  /// sidebar nothing moves under it (§2 Sorting).
+  Map<String, SidebarTier>? _held;
+
+  void _hold() {
+    final o = ref.read(agentOverviewProvider).value;
+    if (o == null) return;
+    setState(() => _held = tiersOf(o.sessions, DateTime.now()));
+  }
+
+  void _release() => setState(() => _held = null);
+
+  @override
+  Widget build(BuildContext context) {
     final t = context.tokens;
-    final o = ref.watch(agentOverviewProvider).value;
-    final sessions = o?.sessions ?? const <AgentSession>[];
-    final live = o?.looseLive ?? const <AgentSession>[];
-    final ended = o?.looseEnded ?? const <AgentSession>[];
-    final crews = o?.crews ?? const <Crew>[];
+    final selected = widget.selected;
+    final selectedCrew = widget.selectedCrew;
+    final async = ref.watch(agentOverviewProvider);
+    final o = async.value;
+    final now = DateTime.now();
+    // Held tiers place rows; what a row shows is always now's.
+    final tier = tierLookup(now, _held);
+    final shown = tierLookup(now);
     final prefs = ref.watch(crewPrefsProvider).value ?? const CrewPrefs();
+    final unread = ref.watch(unreadSessionsProvider);
     final selection = ref.watch(sessionSelectionProvider);
     final dragging = ref.watch(crewDragActiveProvider);
     final renaming = ref.watch(crewRenameProvider);
     final overview = selected == null && selectedCrew == null;
+    final showHost = namesHosts(o);
 
-    final shownCrews = prefs.section ? const <Crew>[] : crews;
+    final (running: live, ended: ended) = looseSections(o);
+    final crews = o?.crews ?? const <Crew>[];
+    final sortedCrews = crewOrder(crews, (c) => o!.membersOf(c), tier);
+    final shownCrews = prefs.section ? const <Crew>[] : sortedCrews;
+
+    List<AgentSession> ordered(List<AgentSession> list) =>
+        withoutCollapsed(sidebarOrder(list, tier), prefs.trees);
     List<AgentSession> membersShown(Crew c) =>
-        prefs.collapsed(c.id) ? const [] : liveFirst(o!.membersOf(c));
+        prefs.collapsed(c.id) ? const [] : ordered(liveFirst(o!.membersOf(c)));
+    final endedShown = prefs.ended ? const <AgentSession>[] : ordered(ended);
+
     // Every row, top to bottom: what a Shift-click range runs over.
     final order = [
       for (final c in shownCrews)
         for (final s in membersShown(c)) s.id,
-      for (final s in lineageOrder(live)) s.id,
-      for (final s in lineageOrder(ended)) s.id,
+      for (final s in ordered(live)) s.id,
+      for (final s in endedShown) s.id,
     ];
 
     void click(AgentSession s) {
@@ -119,14 +188,41 @@ class AgentsSidebar extends ConsumerWidget {
       openAgentSession(context, s.id);
     }
 
-    Widget row(AgentSession s) {
+    Widget row(AgentSession s, List<AgentSession> listed) {
+      final kids = descendantsIn(listed, s.id);
+      final folded = prefs.treeCollapsed(s.id);
       final drawn = SnapBackOutline(
         id: s.id,
         child: SessionRow(
           session: s,
           host: o?.hostName(s.hostId) ?? 'host',
           selected: s.id == selected || selection.contains(s.id),
-          lineage: lineageLine(s, o),
+          overview: o,
+          tier: shown(s),
+          now: now,
+          fromParent: parentApart(s, listed, o),
+          showHost: showHost,
+          // The open session is being read: no dot for it.
+          unread: s.id != selected && unread.contains(s.id),
+          tree: kids.isEmpty
+              ? null
+              : TreeFold(
+                  size: kids.length,
+                  collapsed: folded,
+                  rollUp: rollUpOf(kids, shown),
+                  onToggle: () =>
+                      ref.read(crewPrefsProvider.notifier).toggleTree(s.id),
+                ),
+          onMenu: o == null
+              ? null
+              : (anchor) => showSessionMenu(
+                  context,
+                  ref,
+                  anchor: anchor,
+                  session: s,
+                  overview: o,
+                  onOpen: () => openAgentSession(context, s.id),
+                ),
           onTap: () => click(s),
         ),
       );
@@ -137,12 +233,22 @@ class AgentsSidebar extends ConsumerWidget {
       return CrewDraggable<SessionDrag>(data: SessionDrag(s), child: drawn);
     }
 
+    // A child under its parent sits on the dashed indent; one listed apart
+    // from it has none and says "from {parent}" (gap 3).
+    Widget indented(AgentSession s, List<AgentSession> listed, Widget child) {
+      final p = s.spawn.parentSession;
+      return p != null && listed.any((m) => m.id == p)
+          ? LineageIndent(child: child)
+          : child;
+    }
+
     // A loose row: another session dropped on it makes a crew of the two.
-    Widget looseRow(AgentSession s) => ZoneDropTarget<SessionDrag>(
-      zoneOf: (d, _) => d.session.id == s.id ? null : DropZone.onto,
-      onDrop: (d, _) => makeCrew(context, [s.id, d.session.id]),
-      child: row(s),
-    );
+    Widget looseRow(AgentSession s, List<AgentSession> listed) =>
+        ZoneDropTarget<SessionDrag>(
+          zoneOf: (d, _) => d.session.id == s.id ? null : DropZone.onto,
+          onDrop: (d, _) => makeCrew(context, [s.id, d.session.id]),
+          child: row(s, listed),
+        );
 
     // A member: onto it joins its crew; its top or bottom band is the gap
     // beside it, which places the session there.
@@ -175,34 +281,64 @@ class AgentsSidebar extends ConsumerWidget {
               reorder: true,
             );
           },
-          child: row(m),
+          child: row(m, o!.membersOf(c)),
         );
 
     // RUNNING and ENDED: a member dropped on either leaves its crew.
-    Widget sectionLabel(String label, double top) =>
+    Widget sectionLabel(String label, double top, {Widget? trailing}) =>
         ZoneDropTarget<SessionDrag>(
           zoneOf: (d, _) => d.session.crew == null ? null : DropZone.onto,
           onDrop: (d, _) => leaveCrew(context, ref, d.session),
           child: Padding(
             key: Key('section-${label.toLowerCase()}'),
             padding: EdgeInsets.fromLTRB(t.sp, top, t.sp, t.sp * 0.75),
-            child: AgentsLabel(label),
+            child: trailing == null
+                ? AgentsLabel(label)
+                : Row(
+                    children: [
+                      Expanded(child: AgentsLabel(label)),
+                      trailing,
+                    ],
+                  ),
           ),
         );
 
-    Widget section(String label, List<AgentSession> list, double top) => Column(
+    Widget rows(List<AgentSession> list) => Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        sectionLabel(label, top),
-        for (final (i, s) in lineageOrder(list).indexed) ...[
+        for (final (i, s) in ordered(list).indexed) ...[
           if (i > 0) SizedBox(height: t.sp * 0.25),
-          lineageIndented(s, list, looseRow(s)),
+          indented(s, list, looseRow(s, list)),
         ],
       ],
     );
 
+    Widget endedSection() {
+      final dismissable = o == null ? 0 : dismissableEnded(o, ended).length;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          ZoneDropTarget<SessionDrag>(
+            zoneOf: (d, _) => d.session.crew == null ? null : DropZone.onto,
+            onDrop: (d, _) => leaveCrew(context, ref, d.session),
+            child: EndedLabel(
+              count: ended.length,
+              collapsed: prefs.ended,
+              onToggle: () =>
+                  ref.read(crewPrefsProvider.notifier).toggleEnded(),
+              onDismissAll: dismissable == 0
+                  ? null
+                  : () => dismissEndedSessions(context, o!, ended),
+            ),
+          ),
+          if (!prefs.ended) rows(ended),
+        ],
+      );
+    }
+
     Widget header(Crew c, int i) {
       final next = i + 1 < crews.length ? crews[i + 1].id : null;
+      final members = o!.membersOf(c);
       return CrewDraggable<CrewDrag>(
         data: CrewDrag(c),
         // The header's halves are the gaps above and below it, for a crew;
@@ -227,8 +363,9 @@ class AgentsSidebar extends ConsumerWidget {
               id: c.id,
               child: CrewHeader(
                 crew: c,
-                members: o!.membersOf(c),
+                members: members,
                 collapsed: prefs.collapsed(c.id),
+                rollUp: rollUpOf(members, shown),
                 selected: c.id == selectedCrew,
                 nameField: renaming == c.id
                     ? CrewNameField(crew: c, style: crewHeaderNameStyle(t))
@@ -260,13 +397,13 @@ class AgentsSidebar extends ConsumerWidget {
         ),
         for (final (i, c) in shownCrews.indexed) ...[
           if (i > 0) SizedBox(height: t.sp * 0.25),
-          header(c, i),
+          header(c, crews.indexOf(c)),
           if (membersShown(c) case final members when members.isNotEmpty) ...[
             SizedBox(height: t.sp * 0.25),
             CrewMembers(
               children: [
                 for (final m in members)
-                  lineageIndented(m, members, memberRow(c, members, m)),
+                  indented(m, o!.membersOf(c), memberRow(c, members, m)),
               ],
             ),
           ],
@@ -274,124 +411,143 @@ class AgentsSidebar extends ConsumerWidget {
       ],
     );
 
-    return SidebarFrame(
-      footer: selection.isEmpty || o == null ? null : SelectionBar(overview: o),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * 1.5,
-              t.sp * 2,
-              t.sp * 1.5,
-              t.sp,
+    return MouseRegion(
+      onEnter: (_) => _hold(),
+      onExit: (_) => _release(),
+      child: SidebarFrame(
+        footer: selection.isEmpty || o == null
+            ? null
+            : SelectionBar(overview: o),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Padding(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 1.5,
+                sidebarTopInset(t),
+                t.sp * 1.5,
+                t.sp * 0.5,
+              ),
+              child: AgentsHeaderRow(
+                current: overview,
+                blocker: newSessionBlocker(async),
+                onOverview: () => context.go(Routes.agents),
+                onNewSession: () => launchAgentSession(context, ref),
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    t.sp,
-                    t.sp * 0.75,
-                    t.sp,
-                    t.sp * 0.5,
-                  ),
-                  child: Text(
-                    'Agents',
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.uiSize,
-                      fontWeight: FontWeight.w600,
-                      color: t.text,
-                    ),
-                  ),
-                ),
-                if (o != null && o.online.isNotEmpty) ...[
-                  SizedBox(height: t.sp * 0.75),
-                  StormButton.primary(
-                    key: const Key('new-session'),
-                    label: 'New session',
-                    icon: LucideIcons.plus,
-                    expand: true,
-                    onPressed: () => launchAgentSession(context, ref),
-                  ),
+            Expanded(
+              child: ListView(
+                padding: EdgeInsets.fromLTRB(t.sp, 0, t.sp, t.sp * 1.5),
+                children: [
+                  // Nothing is drawn as a crew until crews have loaded.
+                  if (o == null) const SkeletonRows(rows: 3),
+                  if (crews.isNotEmpty) crewsSection(),
+                  // While a member is dragged RUNNING is always there to
+                  // drop it on, even with no loose session running.
+                  if (live.isNotEmpty || (dragging && crews.isNotEmpty)) ...[
+                    sectionLabel('Running', t.sp * (crews.isEmpty ? 1.5 : 2)),
+                    rows(live),
+                  ],
+                  if (ended.isNotEmpty) endedSection(),
                 ],
-                SizedBox(height: t.sp * 0.75),
-                _OverviewRow(
-                  selected: overview && sessions.isNotEmpty,
-                  current: overview,
-                  onTap: () => context.go(Routes.agents),
-                ),
-              ],
+              ),
             ),
-          ),
-          Expanded(
-            child: ListView(
-              padding: EdgeInsets.fromLTRB(t.sp, 0, t.sp, t.sp * 1.5),
-              children: [
-                // Nothing is drawn as a crew until crews have loaded.
-                if (o == null) const SkeletonRows(rows: 3),
-                if (crews.isNotEmpty) crewsSection(),
-                // While a member is dragged RUNNING is always there to drop
-                // it on, even with no loose session running.
-                if (live.isNotEmpty || (dragging && crews.isNotEmpty))
-                  section('Running', live, t.sp * (crews.isEmpty ? 1.5 : 2)),
-                if (ended.isNotEmpty) section('Ended', ended, t.sp * 2),
-              ],
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
 }
 
-class _OverviewRow extends StatelessWidget {
-  const _OverviewRow({
-    required this.selected,
+/// The sidebar's one header row (153e): "Agents", which opens the overview,
+/// and a 28px ＋ that starts a session. It keeps the old heading's height,
+/// so it stays on the rail's and the page titles' line.
+class AgentsHeaderRow extends StatelessWidget {
+  const AgentsHeaderRow({
+    super.key,
     required this.current,
-    required this.onTap,
+    required this.blocker,
+    required this.onOverview,
+    required this.onNewSession,
   });
 
-  /// Filled: the overview is showing and has something on it.
-  final bool selected;
-
-  /// In `text`: no session is open.
+  /// The overview is showing.
   final bool current;
-  final VoidCallback onTap;
+
+  /// Why ＋ is off, or null when it starts a session.
+  final String? blocker;
+  final VoidCallback onOverview;
+  final VoidCallback onNewSession;
 
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      button: true,
-      selected: current,
-      label: 'Overview',
-      excludeSemantics: true,
-      onTap: onTap,
-      child: Material(
-        color: selected ? t.surface2 : Colors.transparent,
-        borderRadius: radius,
-        child: InkWell(
-          key: const Key('agents-overview'),
-          borderRadius: radius,
-          onTap: onTap,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.25,
-              vertical: t.sp * 0.875,
-            ),
-            child: Text(
-              'Overview',
-              style: TextStyle(
-                fontFamily: StormTokens.sansFamily,
-                fontSize: t.codeSize,
-                color: current ? t.text : t.text2,
+    final side = t.sp * 3.5;
+    final on = blocker == null;
+    final radius = BorderRadius.circular(t.rControl * 0.8);
+    return SizedBox(
+      height: side,
+      child: Row(
+        children: [
+          Expanded(
+            child: Semantics(
+              button: true,
+              selected: current,
+              label: 'Agents, overview',
+              excludeSemantics: true,
+              onTap: onOverview,
+              child: InkWell(
+                key: const Key('agents-overview'),
+                borderRadius: radius,
+                onTap: onOverview,
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: t.sp),
+                  child: Align(
+                    alignment: AlignmentDirectional.centerStart,
+                    child: Text(
+                      'Agents',
+                      key: const Key('agents-heading'),
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontFamily: StormTokens.sansFamily,
+                        fontSize: t.uiSize,
+                        fontWeight: FontWeight.w600,
+                        color: t.text,
+                      ),
+                    ),
+                  ),
+                ),
               ),
             ),
           ),
-        ),
+          Tooltip(
+            message: blocker ?? 'New session $stormNewSessionChord',
+            child: Semantics(
+              button: true,
+              enabled: on,
+              label: 'New session',
+              excludeSemantics: true,
+              onTap: on ? onNewSession : null,
+              child: Material(
+                color: on ? t.accentSoft : t.surface2,
+                borderRadius: radius,
+                child: InkWell(
+                  key: const Key('new-session'),
+                  borderRadius: radius,
+                  onTap: on ? onNewSession : null,
+                  child: SizedBox.square(
+                    dimension: side,
+                    child: Icon(
+                      LucideIcons.plus,
+                      size: t.uiSize,
+                      color: on ? t.accent : t.text3,
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

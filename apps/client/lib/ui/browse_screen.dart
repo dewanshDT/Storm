@@ -16,7 +16,7 @@ import 'shell/sidebar_rows.dart';
 import 'states.dart';
 import 'shell/storm_scaffold.dart';
 import 'shell/vault_sidebar.dart' show NoNoteSelected, TrashRow;
-import 'trash_screen.dart' show confirmDestructive, notesCount;
+import 'trash_screen.dart' show notesCount;
 import 'shell/vault_gate.dart';
 
 /// The phone's Notes list (handoff §2.4): the vault root with RECENT above
@@ -530,6 +530,39 @@ Future<void> showFolderActions(
   }
 
   await deleteFolderToTrash(context, ref, vaultId, entry);
+}
+
+/// Asks before a folder of notes goes to the trash. Anything but the button
+/// is a no.
+Future<bool> confirmDestructive(
+  BuildContext context, {
+  required String title,
+  required String body,
+  required String action,
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text(title),
+      content: Text(body),
+      actions: [
+        TextButton(
+          key: const Key('confirm-cancel'),
+          onPressed: () => Navigator.pop(c, false),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(
+          key: const Key('confirm-action'),
+          onPressed: () => Navigator.pop(c, true),
+          style: FilledButton.styleFrom(
+            backgroundColor: Theme.of(c).colorScheme.error,
+          ),
+          child: Text(action),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
 }
 
 /// "Delete folder X and its N notes? They go to Trash." (decision 150a).

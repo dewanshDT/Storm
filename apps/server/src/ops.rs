@@ -1837,10 +1837,29 @@ fn host_view(state: &Shared, host: crate::auth::hosts::Host) -> HostView {
         None
     });
     let limits = limits_view(state, &host.id, live.capabilities.as_ref());
+    let mut capabilities = live.capabilities;
+    // A synced Claude login signs every Claude Code session on the host in,
+    // whatever the host's own CLI says (decision 124, 153-S4).
+    let synced = capabilities.as_ref().is_some_and(|caps| {
+        matches!(
+            crate::agent::credential::decide(
+                crate::agent::credential::PROVIDER,
+                deliverable_credential(state, &host.id),
+                caps,
+            ),
+            crate::agent::credential::CredentialOutcome::Synced(_)
+        )
+    });
+    for p in capabilities.iter_mut().flat_map(|c| c.providers.iter_mut()) {
+        p.login_command = crate::agent::typed::login_command(&p.id);
+        if synced && p.id == crate::agent::credential::PROVIDER && p.available {
+            p.signed_in = Some(true);
+        }
+    }
     HostView {
         host,
         status,
-        capabilities: live.capabilities,
+        capabilities,
         identity,
         isolation,
         execution,
@@ -2033,15 +2052,66 @@ pub async fn issue_host_enrollment(
     let (enrollment, token) =
         crate::auth::hosts::issue_enrollment(&mut auth_db, actor.user_id(), &now)
             .map_err(internal)?;
-    Ok(IssuedEnrollment {
+    Ok(issued_enrollment(state, server_url, enrollment, &token))
+}
+
+fn issued_enrollment(
+    state: &Shared,
+    server_url: &str,
+    enrollment: crate::auth::hosts::Enrollment,
+    token: &str,
+) -> IssuedEnrollment {
+    IssuedEnrollment {
         enrollment: crate::auth::hosts::enrollment_string(
             server_url.trim_end_matches('/'),
             &state.identity.server_id,
             &state.identity.public_key_b64(),
-            &token,
+            token,
         ),
         expires: enrollment.expires,
-    })
+    }
+}
+
+fn host_admin_refusal(refusal: crate::auth::hosts::AdminRefusal) -> ApiError {
+    match refusal {
+        crate::auth::hosts::AdminRefusal::NoSuchHost => not_found("no such host"),
+        crate::auth::hosts::AdminRefusal::NotRevoked => conflict("host_not_revoked"),
+    }
+}
+
+/// `POST /v1/agent/hosts/{id}/reenroll` (decision 153): an enrollment for a
+/// revoked host, in the shape a new one has. `storm-runtime enroll` redeems
+/// it as it would any other; the host comes back under its id, name and
+/// Limits, with the new key.
+pub async fn reenroll_host(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    server_url: &str,
+) -> ApiResult<IssuedEnrollment> {
+    crews_owner(actor)?;
+    crate::auth::hosts::validate_server_url(server_url).map_err(bad_request)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let (enrollment, token) =
+        crate::auth::hosts::issue_reenrollment(&mut auth_db, actor.user_id(), host_id, &now)
+            .map_err(internal)?
+            .map_err(host_admin_refusal)?;
+    Ok(issued_enrollment(state, server_url, enrollment, &token))
+}
+
+/// `POST /v1/agent/hosts/{id}/remove` (decision 153): a revoked host leaves
+/// the list. Its ended sessions stay readable and keep its name.
+pub async fn remove_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiResult<()> {
+    crews_owner(actor)?;
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
+        .map_err(internal)?
+        .map_err(host_admin_refusal)?;
+    drop(auth_db);
+    state.agent.forget_host(host_id).map_err(internal)?;
+    Ok(())
 }
 
 pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
@@ -2052,6 +2122,19 @@ pub async fn list_hosts(state: &Shared) -> ApiResult<Vec<HostView>> {
         .into_iter()
         .map(|h| host_view(state, h))
         .collect())
+}
+
+/// Asks the linked hosts to look again at their agents (153-S4), each at
+/// most once per `REFRESH_EVERY`; what they find arrives as inventories.
+/// Owner only.
+pub fn refresh_hosts(state: &Shared, actor: &Actor) -> ApiResult<serde_json::Value> {
+    if !matches!(actor, Actor::Session { .. }) {
+        return Err(ApiError(
+            axum::http::StatusCode::FORBIDDEN,
+            "owner_only".into(),
+        ));
+    }
+    Ok(serde_json::json!({ "asked": state.agent.refresh_hosts() }))
 }
 
 pub async fn rename_host(
@@ -2123,6 +2206,8 @@ fn host_refusal(
 pub struct EnrolledHost {
     pub host_id: String,
     pub server_id: String,
+    /// The name it is listed under: a re-enrolled host keeps its own.
+    pub name: String,
 }
 
 pub struct EnrollHost<'a> {
@@ -2151,6 +2236,7 @@ pub async fn enroll_host(
         Ok(host) => Ok(EnrolledHost {
             host_id: host.id,
             server_id: state.identity.server_id.clone(),
+            name: host.name,
         }),
         Err(e) => Err(host_refusal(&auth_db, e, None, remote, &now)),
     }
@@ -4152,11 +4238,15 @@ pub async fn child_review(
     child_host(state, actor, host_id).await?;
     child_id(child)?;
     checked_child(state, actor, host_id, child, ChildUse::Review).await?;
-    state
+    let export = state
         .agent
         .child_workspace(host_id, ChildOp::Export, Some(child), None, None)
         .await
-        .map_err(agent_error)
+        .map_err(agent_error)?;
+    if let Err(e) = state.agent.record_child_review(child, &export) {
+        tracing::warn!(error = %e, child, "could not count a child's work");
+    }
+    Ok(export)
 }
 
 /// `POST /v1/agent/hosts/{id}/children/{child}/apply {name?}` (137e): a
@@ -4223,6 +4313,9 @@ pub async fn apply_child(
         .await;
     audit_child(state, actor, "apply", host_id, child, &result).await;
     let answer = result.map_err(agent_error)?;
+    if let Err(e) = state.agent.record_child_taken(child, "applied") {
+        tracing::warn!(error = %e, child, "could not record a child's work applied");
+    }
     tracing::info!(host = host_id, child, "a child's work was applied");
     Ok(answer)
 }
@@ -4244,7 +4337,11 @@ pub async fn delete_child(
         .child_workspace(host_id, ChildOp::Dispose, Some(child), None, None)
         .await;
     audit_child(state, actor, "delete", host_id, child, &result).await;
-    result.map_err(agent_error)
+    let answer = result.map_err(agent_error)?;
+    if let Err(e) = state.agent.record_child_taken(child, "deleted") {
+        tracing::warn!(error = %e, child, "could not record a child's work deleted");
+    }
+    Ok(answer)
 }
 
 /// A spawned child's own session, the owner's, and its host: what 134-10's
@@ -4505,6 +4602,9 @@ pub struct SessionView {
     #[serde(flatten)]
     pub session: crate::agent::store::SessionRecord,
     pub name: String,
+    /// Its host's name, kept after the host is removed (decision 153);
+    /// `None` only for a host this server never knew.
+    pub host_name: Option<String>,
     pub context: Option<crate::agent::store::Context>,
     pub write_vault_id: Option<String>,
     pub wrote_count: i64,
@@ -4572,6 +4672,37 @@ pub struct SessionView {
     /// Needs you; absent otherwise.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delete_request: Option<crate::agent::deletes::DeleteRequest>,
+    /// `needs_attention` with its reason (153a); `null` when it is.
+    pub attention: Option<crate::agent::attention::Attention>,
+    /// Its host's last request, while the host is offline and the session
+    /// has not ended (153a); `null` otherwise.
+    pub host_last_seen: Option<String>,
+    /// What waits for the person to decide, oldest first (153b).
+    pub pending_decisions: Vec<PendingDecision>,
+    /// The end of its output, a byte offset that only grows (153c): a
+    /// device keeps the one it last showed and calls anything past it
+    /// unread. `null` until its host has posted output in this run of the
+    /// server.
+    pub output_end: Option<u64>,
+    /// An ended child's work not yet applied or deleted (153d). Only on a
+    /// child with its own workspace.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_to_take: Option<bool>,
+    /// A clone's commits there, as a person's last review counted them;
+    /// `null` before any review, for a scratch child, or with nothing to
+    /// take (153d).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unapplied_commits: Option<i64>,
+}
+
+/// One thing waiting for the person to decide (153b). `kind` names what it
+/// is and which of its routes answers it; only `delete_request` today.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingDecision {
+    pub kind: &'static str,
+    pub id: String,
+    pub created_at: String,
+    pub expires_at: Option<String>,
 }
 
 /// A role label as clients see it. `title` follows the note's renames and is
@@ -4678,9 +4809,22 @@ fn session_view(
     } else {
         needs_attention
     };
+    let attention = state.agent.attention(&session).map_err(agent_error)?;
+    let pending_decisions = delete_request
+        .iter()
+        .map(|d| PendingDecision {
+            kind: "delete_request",
+            id: d.id.clone(),
+            created_at: d.created_at.clone(),
+            expires_at: Some(d.expires_at.clone()),
+        })
+        .collect();
+    let output_end = state.agent.output_end(&session.id);
+    let (work_to_take, unapplied_commits) = state.agent.work_to_take(&session).map_err(internal)?;
     Ok(SessionView {
         session,
         name,
+        host_name: None,
         context,
         write_vault_id,
         wrote_count,
@@ -4704,12 +4848,50 @@ fn session_view(
         permission_mode,
         cwd,
         delete_request,
+        attention,
+        host_last_seen: None,
+        pending_decisions,
+        output_end,
+        work_to_take,
+        unapplied_commits,
     })
+}
+
+/// Says when each live session's offline host was last heard from (153a):
+/// by its last request in this run of the server, else by its last hello.
+async fn name_host_seen(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
+    let mut seen: std::collections::HashMap<String, Option<String>> =
+        std::collections::HashMap::new();
+    for view in views.iter_mut() {
+        let host = &view.session.host_id;
+        if view.session.is_ended() || state.agent.host_live(host).online {
+            continue;
+        }
+        if !seen.contains_key(host) {
+            let at = match state.agent.host_last_seen(host) {
+                Some(at) => Some(at),
+                None => state
+                    .auth_db
+                    .lock()
+                    .await
+                    .host_by_id(host)
+                    .map_err(internal)?
+                    .and_then(|h| h.last_seen),
+            };
+            seen.insert(host.clone(), at);
+        }
+        view.host_last_seen = seen[host].clone();
+    }
+    Ok(())
 }
 
 /// Names each view's role by its note's title now, so a rename follows and a
 /// deleted note reads as `None`.
 async fn name_roles(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
+    let hosts = state.auth_db.lock().await.host_names().map_err(internal)?;
+    for view in views.iter_mut() {
+        view.host_name = hosts.get(&view.session.host_id).cloned();
+    }
     for view in views.iter_mut() {
         let Some(role) = view.role.as_mut() else {
             continue;
@@ -4997,6 +5179,7 @@ pub async fn launch_session(
     let mut view = [SessionView {
         session,
         name: launch.name,
+        host_name: None,
         context: launch.context,
         write_vault_id: launch.write_vault_id.clone(),
         wrote_count: 0,
@@ -5024,6 +5207,12 @@ pub async fn launch_session(
         permission_mode: launch.permission_mode.clone(),
         cwd: launch.cwd.clone(),
         delete_request: None,
+        attention: None,
+        host_last_seen: None,
+        pending_decisions: Vec::new(),
+        output_end: None,
+        work_to_take: None,
+        unapplied_commits: None,
     }];
     name_roles(state, &mut view).await?;
     let [view] = view;
@@ -5048,6 +5237,7 @@ pub async fn list_sessions(state: &Shared) -> ApiResult<Vec<SessionView>> {
         .map(|s| session_view(state, s))
         .collect::<ApiResult<Vec<_>>>()?;
     name_roles(state, &mut views).await?;
+    name_host_seen(state, &mut views).await?;
     Ok(views)
 }
 
@@ -5057,6 +5247,7 @@ pub async fn get_session(state: &Shared, id: &str) -> ApiResult<SessionView> {
         state.agent.get(id).map_err(agent_error)?,
     )?];
     name_roles(state, &mut view).await?;
+    name_host_seen(state, &mut view).await?;
     let [view] = view;
     Ok(view)
 }
