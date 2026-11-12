@@ -151,22 +151,7 @@ class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
     final overview = selected == null && selectedCrew == null;
     final showHost = namesHosts(o);
 
-    // Work still to apply keeps an ended session out of ENDED (153d), in
-    // RUNNING where it was.
-    final looseLive = {...?o?.looseLive.map((s) => s.id)};
-    final looseEnded = o?.looseEnded ?? const <AgentSession>[];
-    final kept = {
-      for (final s in looseEnded)
-        if (workToApply(s) != null) s.id,
-    };
-    final live = [
-      for (final s in o?.sessions ?? const <AgentSession>[])
-        if (looseLive.contains(s.id) || kept.contains(s.id)) s,
-    ];
-    final ended = [
-      for (final s in looseEnded)
-        if (!kept.contains(s.id)) s,
-    ];
+    final (running: live, ended: ended) = looseSections(o);
     final crews = o?.crews ?? const <Crew>[];
     final sortedCrews = crewOrder(crews, (c) => o!.membersOf(c), tier);
     final shownCrews = prefs.section ? const <Crew>[] : sortedCrews;
@@ -336,7 +321,7 @@ class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
           ZoneDropTarget<SessionDrag>(
             zoneOf: (d, _) => d.session.crew == null ? null : DropZone.onto,
             onDrop: (d, _) => leaveCrew(context, ref, d.session),
-            child: _EndedLabel(
+            child: EndedLabel(
               count: ended.length,
               collapsed: prefs.ended,
               onToggle: () =>
@@ -562,75 +547,6 @@ class AgentsHeaderRow extends StatelessWidget {
               ),
             ),
           ),
-        ],
-      ),
-    );
-  }
-}
-
-/// ENDED · n with its chevron and Dismiss all (§2: ENDED stays folded to
-/// its count, with Dismiss all; it never rolls up).
-class _EndedLabel extends StatelessWidget {
-  const _EndedLabel({
-    required this.count,
-    required this.collapsed,
-    required this.onToggle,
-    required this.onDismissAll,
-  });
-
-  final int count;
-  final bool collapsed;
-  final VoidCallback onToggle;
-  final VoidCallback? onDismissAll;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Padding(
-      key: const Key('section-ended'),
-      padding: EdgeInsets.fromLTRB(t.sp, t.sp * 2, t.sp, t.sp * 0.75),
-      child: Row(
-        children: [
-          Expanded(
-            child: Semantics(
-              button: true,
-              expanded: !collapsed,
-              label: 'Ended, $count',
-              excludeSemantics: true,
-              onTap: onToggle,
-              child: GestureDetector(
-                key: const Key('ended-toggle'),
-                behavior: HitTestBehavior.opaque,
-                onTap: onToggle,
-                child: Row(
-                  children: [
-                    AgentsLabel(collapsed ? 'Ended · $count' : 'Ended'),
-                    SizedBox(width: t.sp * 0.75),
-                    Icon(
-                      collapsed
-                          ? LucideIcons.chevron_right
-                          : LucideIcons.chevron_down,
-                      size: t.labelSize,
-                      color: t.text3,
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-          if (onDismissAll != null)
-            Semantics(
-              button: true,
-              label: 'Dismiss all ended',
-              excludeSemantics: true,
-              onTap: onDismissAll,
-              child: GestureDetector(
-                key: const Key('ended-dismiss-all'),
-                behavior: HitTestBehavior.opaque,
-                onTap: onDismissAll,
-                child: Text('Dismiss all', style: agentMono(t, color: t.text2)),
-              ),
-            ),
         ],
       ),
     );

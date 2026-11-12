@@ -465,12 +465,15 @@ class DefaultTag extends StatelessWidget {
   }
 }
 
-/// The colour of a cell's word: `accent` only where you can act.
-Color cellWordColor(StormTokens t, AgentCell cell) => cell.actionable
+/// The colour of a cell's word: `accent` only where you can act. On an
+/// open cell's `accentSoft` a quiet word is `text2`: `text3` misses 4.5:1
+/// there in dark and earth (153-8).
+Color cellWordColor(StormTokens t, AgentCell cell, {bool open = false}) =>
+    cell.actionable
     ? t.accent
     : cell.word == CellWord.ready
     ? t.text
-    : t.text3;
+    : (open ? t.text2 : t.text3);
 
 /// One cell: the word, then the version, step or reason under it.
 class AgentCellView extends StatelessWidget {
@@ -528,7 +531,7 @@ class AgentCellView extends StatelessWidget {
                     fontWeight: cell.actionable
                         ? FontWeight.w500
                         : FontWeight.w400,
-                    color: cellWordColor(t, cell),
+                    color: cellWordColor(t, cell, open: open),
                   ),
                 ),
                 if (cell.progress != null)
@@ -544,7 +547,7 @@ class AgentCellView extends StatelessWidget {
                     style: TextStyle(
                       fontFamily: StormTokens.monoFamily,
                       fontSize: t.labelSize,
-                      color: t.text3,
+                      color: open ? t.text2 : t.text3,
                     ),
                   ),
               ],

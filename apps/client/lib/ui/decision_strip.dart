@@ -386,9 +386,10 @@ class _DecisionStripState extends State<DecisionStrip> {
           Align(alignment: Alignment.centerLeft, child: _tick(t, tick)),
         ],
         SizedBox(height: gap),
+        // Thumb-sized, as the phone frame (r15) draws them.
         for (final (i, a) in widget.actions.indexed) ...[
           if (i > 0) SizedBox(height: t.sp),
-          _button(t, a, expand: true),
+          SizedBox(height: t.sp * 5.25, child: _button(t, a, expand: true)),
         ],
       ],
     );
@@ -417,10 +418,11 @@ class CompactDecisionStrip extends StatelessWidget {
       liveRegion: true,
       child: Container(
         key: const Key('decision-compact'),
+        // 12 from the edges, as r14 draws it.
         margin: EdgeInsets.fromLTRB(
-          t.sp * 2,
+          t.sp * 1.5,
           t.sp * 1.25,
-          t.sp * 2,
+          t.sp * 1.5,
           t.sp * 1.25,
         ),
         padding: EdgeInsets.fromLTRB(
@@ -459,7 +461,8 @@ class CompactDecisionStrip extends StatelessWidget {
                 ),
               ),
             ),
-            // A link, as the frame draws it: `accent`, not a button.
+            // A link, not a button. In `text`, not the frame's `accent`:
+            // `accent` on the tint misses 4.5:1 in dark and earth (153-8).
             Semantics(
               button: true,
               label: 'Review',
@@ -480,7 +483,7 @@ class CompactDecisionStrip extends StatelessWidget {
                       fontFamily: StormTokens.sansFamily,
                       fontSize: t.codeSize,
                       fontWeight: FontWeight.w500,
-                      color: t.accent,
+                      color: t.text,
                     ),
                   ),
                 ),

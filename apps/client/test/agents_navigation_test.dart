@@ -176,10 +176,14 @@ void main() {
 
       expect(find.byKey(const Key('new-session-pill')), findsOneWidget);
       expect(find.byType(FloatingActionButton), findsNothing);
+      // ENDED is folded to its count, as on the desk (153o).
       expect(
         top(tester, find.text('RUNNING')),
-        lessThan(top(tester, find.text('ENDED'))),
+        lessThan(top(tester, find.text('ENDED · 1'))),
       );
+      expect(find.text('storm · completed'), findsNothing);
+      await tester.tap(find.byKey(const Key('ended-toggle')));
+      await tester.pumpAndSettle();
       // One host: rows don't name it (153e).
       expect(find.text('storm · completed'), findsOneWidget);
       expect(find.byType(AgentMark), findsWidgets);

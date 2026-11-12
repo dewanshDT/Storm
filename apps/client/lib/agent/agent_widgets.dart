@@ -326,8 +326,10 @@ class _SessionRowState extends State<SessionRow> {
           ),
         ),
         // Folded, or under the pointer: an open tree shows no chevron, as
-        // the handoff draws it.
-        if (tree != null && tree.size > 0 && (tree.collapsed || _hover)) ...[
+        // the handoff draws it. A phone has no pointer, so it always shows.
+        if (tree != null &&
+            tree.size > 0 &&
+            (tree.collapsed || _hover || phone)) ...[
           SizedBox(width: t.sp * 0.5),
           ExcludeSemantics(
             child: GestureDetector(
