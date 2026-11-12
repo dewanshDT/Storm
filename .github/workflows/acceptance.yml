@@ -124,26 +124,53 @@ jobs:
           # Ad-hoc signed and unnotarized, like a release's.
           ditto -c -k --sequesterRsrc --keepParent "$APP" \
             "dist/Storm-acceptance-${GITHUB_SHA::7}-macos.zip"
+          # A copy that installs beside the released app (temporary,
+          # r2-chrome): its own bundle id, so its own sandbox container,
+          # preferences and keychain; no storm:// handler, so links keep
+          # opening the released app.
+          mkdir -p staging
+          STG="staging/Storm Staging.app"
+          ditto "$APP" "$STG"
+          PL="$STG/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.storm.storm.staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName Storm Staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Storm Staging" "$PL" || \
+            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Storm Staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "$PL" || true
+          codesign -d --entitlements :- "$APP" > staging/entitlements.plist
+          codesign --force --deep --sign - --entitlements staging/entitlements.plist "$STG"
+          codesign --verify --deep --strict "$STG"
+          plutil -p "$PL" | grep -E "CFBundleIdentifier|CFBundleName|URLTypes" || true
+          ditto -c -k --sequesterRsrc --keepParent "$STG" \
+            "dist-staging/Storm-Staging-${GITHUB_SHA::7}-macos.zip" 2>/dev/null || {
+            mkdir -p dist-staging
+            ditto -c -k --sequesterRsrc --keepParent "$STG" \
+              "dist-staging/Storm-Staging-${GITHUB_SHA::7}-macos.zip"; }
       - uses: actions/upload-artifact@v4
         with:
           name: macos-acceptance
           path: apps/client/dist/*
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-staging
+          path: apps/client/dist-staging/*
           retention-days: 14
       - name: Screenshot the window chrome (temporary, r2-chrome)
         if: always()
         working-directory: apps/client
         run: |
           mkdir -p shots
-          open build/macos/Build/Products/Release/Storm.app
+          open "staging/Storm Staging.app"
           sleep 25
           screencapture -x shots/macos-window.png
-          osascript -e 'tell application "Storm" to activate' || true
+          osascript -e 'tell application "Storm Staging" to activate' || true
           sleep 3
           screencapture -x shots/macos-window-active.png
           osascript -e 'tell application "Finder" to activate' || true
           sleep 3
           screencapture -x shots/macos-window-inactive.png
-          osascript -e 'tell application "System Events" to get {position, size} of window 1 of process "Storm"' || true
+          osascript -e 'tell application "System Events" to get {position, size} of window 1 of process "Storm Staging"' || true
           osascript -e 'tell application "System Events" to keystroke "f" using {command down, control down}' || true
           sleep 6
           screencapture -x shots/macos-fullscreen.png
