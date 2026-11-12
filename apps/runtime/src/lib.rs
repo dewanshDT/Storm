@@ -96,3 +96,4 @@ pub mod srp;
 pub mod status;
 pub mod terminal;
 pub mod transport;
+pub mod typed;

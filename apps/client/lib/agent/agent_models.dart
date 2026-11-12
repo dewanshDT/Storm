@@ -19,6 +19,7 @@ class ProviderCap {
     this.installBlocked,
     this.checksumVerified = true,
     this.latest,
+    this.loginCommand,
   });
 
   final String id;
@@ -46,6 +47,10 @@ class ProviderCap {
   /// The newest version available, when the server knows it.
   final String? latest;
 
+  /// The command that signs the agent in, the server's own (153-S3): typed
+  /// into a Shell for the person to run. Null for an agent without one.
+  final String? loginCommand;
+
   bool get managed => source == 'storm';
 
   /// The host can give its sessions Storm's MCP (decision 130a); null from a
@@ -63,6 +68,7 @@ class ProviderCap {
     installBlocked: j['install_blocked'] as String?,
     checksumVerified: j['checksum_verified'] as bool? ?? true,
     latest: j['latest'] as String?,
+    loginCommand: j['login_command'] as String?,
   );
 
   /// Its sessions can read your vaults and use your integrations: what the
@@ -101,6 +107,7 @@ class AgentHost {
     this.providerCredentials = const [],
     this.capabilitiesKnown = false,
     this.agentInstall = false,
+    this.typedInput = false,
     this.identityState,
     this.isolationState,
     this.isolationReason,
@@ -135,6 +142,10 @@ class AgentHost {
   /// It can install, update and remove agents (decision 133); false for an
   /// older runtime.
   final bool agentInstall;
+
+  /// It can open a Shell with a command typed in (153-S3); false for an
+  /// older runtime, which refuses such a launch `host_cannot_type`.
+  final bool typedInput;
 
   /// Its bridge identity (decision 135d): `verified`, `unsupported` or
   /// `unavailable`; null from a server that does not say.
@@ -203,6 +214,7 @@ class AgentHost {
       ],
       capabilitiesKnown: caps != null,
       agentInstall: caps?['agent_install'] == true,
+      typedInput: caps?['typed_input'] == true,
       identityState: _identityState(j),
       isolationState: _isolation(j).$1,
       isolationReason: _isolation(j).$2,

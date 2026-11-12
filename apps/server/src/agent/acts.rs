@@ -254,6 +254,7 @@ impl AgentManager {
                     resumed_from: None,
                     child_of: Some(parent.id.clone()),
                     cwd,
+                    typed_input: None,
                 },
             ))
         });
