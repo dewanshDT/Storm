@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<style>body{margin:0;background:#ecebe7}a{color:#2a62d6}a:hover{color:#1b438f}</style>
+</helmet>
+<section id="r2" style="padding:40px 44px 64px;display:flex;flex-direction:column;gap:12px;font-family:system-ui,sans-serif">
+  <div style="display:flex;align-items:baseline;gap:10px"><span style="font:600 10px ui-monospace,Menlo,monospace;padding:3px 7px;background:#2a78d6;color:#fff;border-radius:4px">R2</span><span style="font:600 14px/1.2 system-ui,sans-serif;color:#1a1a1a">Redesign round 2 · fixing the places that look bolted on</span></div>
+  <div style="max-width:1000px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">Each frame below replaces a surface in <a href="Storm As Built.dc.html">Storm As Built</a>, and its caption names the pattern it fixes. Five things hold across all of them:</div>
+  <ul style="max-width:1000px;margin:0;padding-left:20px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">
+    <li><b>One decision strip.</b> Anything that needs you to decide appears as one strip under the header, never a modal, and never more than one at a time.</li>
+    <li><b>One inspector tab per subject.</b></li>
+    <li><b>Settings where you'd look for them.</b></li>
+    <li><b>No internals by default.</b></li>
+    <li><b>Every gesture has a visible equivalent.</b></li>
+    <li><b>One sidebar header.</b> The Agents sidebar starts with a single row: "Agents" opens the overview, and a compact ＋ starts a new session (⇧⌘N). It replaces the title, the full-width New session button and the Overview row.</li>
+    <li><b>One app bar.</b> Every desktop frame has the full-width 44px bar from <a href="Window Chrome.dc.html">Window Chrome</a> B: window buttons, back and forward, a global ⌘K field and the health dot. The OS title bar and the sidebar's own search field are gone.</li>
+  </ul>
+  <div style="max-width:1000px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty">The Agents sidebar follows <a href="Agents Sidebar Rules.dc.html">Agents Sidebar Rules</a> variant A: an outline for needs you, the reason in the sub-line, and a count on the rail. Every hard rule in the brief stands. Deletes always ask. "Runs as" shows on every host. Spawning acts at once and is logged. Crews never grant access. Tokens only.</div>
+  <sc-for list="{{ groups }}" as="g" hint-placeholder-count="5">
+    <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">{{ g.title }}</div>
+    <div style="display:flex;flex-wrap:wrap;gap:32px;align-items:flex-start">
+      <sc-for list="{{ g.frames }}" as="f" hint-placeholder-count="2">
+        <div id="{{ f.id }}" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+          <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="{{ f.href }}" style="font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none">{{ f.id }}</a>{{ f.label }}</div>
+          <dc-import name="Redesign Frame" scene="{{ f.scene }}" theme="{{ theme }}" hint-size="1280px,800px"></dc-import>
+          <div style="{{ f.capStyle }}">{{ f.cap }}</div>
+        </div>
+      </sc-for>
+    </div>
+  </sc-for>
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">Open questions</div>
+  <ol style="max-width:1000px;margin:0;padding-left:20px;display:flex;flex-direction:column;gap:6px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <li><b>The delete request on other devices.</b> The strip appears only in the session it belongs to, and every device gets the rail count. Today a modal opens on every device. Dropping it means a person who isn't looking at Storm learns of a request only from the count, until push notifications exist.</li>
+    <li><b>Sign in from Agents &amp; hosts.</b> "Sign in…" would open a Shell session on that host with the login command already typed. The spec had "Open a shell on this host"; it was never built.</li>
+    <li><b>The decision queue.</b> "1 of 2" assumes the server can list pending decisions for a session in order.</li>
+    <li><b>Re-enroll and Remove for hosts.</b> Both need server work. Revoke stays as it is.</li>
+    <li><b>Round stats</b> ("Round 2 · 14s · 12.3k in") are gone from the default views. Should they live in About under a "Show usage" toggle, or only in Activity?</li>
+  </ol>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props="{&quot;theme&quot;:{&quot;editor&quot;:&quot;enum&quot;,&quot;options&quot;:[&quot;dark&quot;,&quot;light&quot;,&quot;earth&quot;],&quot;default&quot;:&quot;dark&quot;,&quot;tsType&quot;:&quot;string&quot;}}">
+const GROUPS = [
+ ['Session · one decision strip, one tab per subject', [
+  ['r-session-agents', 'Delete request as a strip · new Agents tab', 'Replaces: the NEEDS YOU card above the terminal, and the modal on every device (stacked, off-grammar). The request sits in one strip under the header and keeps WHO, SAYS and WHAT verbatim. Approve becomes "Move to Trash" and uses the primary style, not danger, because the delete can be undone. "1 of 2" says another decision is waiting. The Agents tab joins Children and Activity: children first, with their state in words, then exactly what the parent sent. The header shows a "Starts agents" chip instead of a switch buried in About. The terminal shows how to leave it.'],
+  ['r-session-rail-closed', 'Inspector closed · the icon rail stays', 'The tabs are an icon rail on the left edge of the inspector, as with the v2 properties drawer. The rail stays when the panel is closed, so the terminal goes full width while you can still see where something needs you. The red 1 on Agents means a child needs you; Wrote shows its count. Clicking an icon opens the panel on that tab, and clicking the open icon again closes it. Each icon has a tooltip with its name.'],
+  ['r-session-about', 'About, slimmed down', 'Replaces: the About junk drawer. It keeps who and what the session is: crew, role, starts agents with its limits, ran as, started by. Round stats are gone. The plugin note becomes one line that links to Integrations, where that setting lives.'],
+  ['r-end-tree', 'End tree, in the same strip', 'Replaces: the End tree banner (a third confirm style). Same strip, same place, same button order. It warns about the ended child\'s unapplied commits.']]],
+ ['Launcher · three choices, a summary, and More', [
+  ['r-launcher', 'Default view', 'Replaces: the 12-field flat form (shifting fields). From, Agent and Where, which joins host and workspace, then "This session can" as a row of chips summarising writes, spawning, integrations and network. Tap a chip to change it. New workspace is an inline field, not a dialog on top of the launcher.'],
+  ['r-launcher-more', 'More', 'The same form, expanded. The capabilities become toggles, with the full network and integrations sentence kept as the brief requires. Model offers suggestions instead of an empty field. Permission mode says which agents have it, and that Tab and ⇧Tab change it in the terminal. Rows never appear or vanish when you switch agents; a row the agent can\'t use is disabled with the reason.']]],
+ ['Trash and vaults · retention lives with the vault', [
+  ['r-trash', 'Trash', 'Replaces: retention chips inside Trash (wrong home). Each item shows its time left, and items can be multi-selected for Restore or Delete forever. Delete forever confirms in the decision strip, not an AlertDialog. The "deleted by" line and the quoted reason are kept.'],
+  ['r-vaults', 'Settings › Vaults with retention', 'Each vault sets how long its Trash keeps things, next to Rename and Remove.']]],
+ ['Settings · one grid for agents and hosts', [
+  ['r-agents-hosts', 'Agents & hosts · one grid', 'Replaces: the page as a list of lists, regrouped by host but still read top to bottom. Hosts are rows and agents are columns, so you can see at a glance what runs where. Each cell holds one word for its state (Ready, Sign in, Update, Install, Installing, Can\'t install, or — when the host is offline) plus a version or reason underneath. Only actionable words use accent. The default agent is marked in its column header; clicking another header makes that one the default. Below the grid, the selected host shows its Runs as line, inline limit steppers, and Rename and Revoke. A revoked host takes one row, with Re-enroll and Remove. Host dots stay neutral, per the copy rule.'],
+  ['r-agents-hosts-cell', 'A cell opened', 'Clicking a cell opens its details in a popover: version and who installed it, what the state means for sessions, and the one action that fixes it. Here, "Sign in in a Shell" opens a Shell session on that host with the login command already typed. An install Storm didn\'t make says Storm won\'t update or remove it.'],
+  ['r-agents-hosts-empty', 'No hosts', 'One empty state in place of the same sentence repeated under five agents.'],
+  ['r-integrations', 'Integrations', 'Replaces: plugin tiles appended below the button, and "Use your own app" hidden in a ⋯ menu. Plugin servers use the same row style as connected services, and the OAuth app option is a visible button.'],
+  ['r-ai', 'AI access · copy fixed', 'Replaces: "Storm has no trash" and "Agents never delete notes". The new copy matches what shipped: deletes go to Trash, and an agent\'s delete always waits for you.']]],
+ ['Phone', [
+  ['rp-session', 'Session · decision strip', 'The same strip in compact form, under the header. Review opens the full request.'],
+  ['rp-decision', 'The request as a sheet', 'WHO, SAYS and WHAT in a sheet, with full-width buttons, not a dialog.'],
+  ['rp-launcher', 'Launcher', 'The same three choices and the same row of chips.']]]
+];
+class Component extends DCLogic {
+  renderVals() {
+    let n = 0;
+    const groups = GROUPS.map(([title, frames]) => ({ title, frames: frames.map(([scene, label, cap]) => { n++; const id = 'r' + n, w = scene.startsWith('rp-') ? 390 : 1280; return { id, href: '#' + id, scene, label, cap, capStyle: `max-width:${w}px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.62)` }; }) }));
+    return { groups, theme: this.props.theme ?? 'dark' };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<meta name="design_doc_mode" content="canvas">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>body{margin:0;background:#ecebe7}*{box-sizing:border-box}a{color:#2a62d6}a:hover{color:#1b438f}@keyframes stormPulse{0%,100%{opacity:1}50%{opacity:.3}}</style>
+</helmet>
+<section id="s1" style="padding:40px 44px 60px;display:flex;flex-direction:column;gap:12px;font-family:system-ui,sans-serif">
+  <div style="font:600 14px/1.2 system-ui,sans-serif;color:#1a1a1a">Agents sidebar · one rule per signal</div>
+  <div style="max-width:960px;font:400 13px/1.6 system-ui,sans-serif;color:rgba(0,0,0,.68);text-wrap:pretty"><b>A</b> is the recommendation. A red outline means an agent is waiting for you, and only that raises the count on the rail and the bubble. The badge on the mark shows what the agent is doing: a pulse for working, a ring for idle, danger for failed. The sub-line says why it stopped, in words. <b>B</b> is the same, except that failed is outlined too. Rows sort as needs you → blocked → failed (for one hour) → out of usage → working → idle → parked. A row only moves when it enters or leaves the top four, and the order freezes while the pointer is in the sidebar. Children stay under their parent, and the tree moves as one. The sub-line drops to "workspace · age", and children lose "↳ from".</div>
+  <div style="display:flex;flex-wrap:wrap;gap:36px;align-items:flex-start;padding-top:14px">
+    <sc-for list="{{ frames }}" as="f" hint-placeholder-count="5">
+      <div id="{{ f.id }}" style="flex:none;display:flex;flex-direction:column;gap:8px;scroll-margin-top:16px">
+        <div style="display:flex;align-items:baseline;gap:8px;font:400 11px/1.3 system-ui,sans-serif;color:rgba(0,0,0,.55)"><a href="{{ f.href }}" style="{{ f.badge }}">{{ f.id }}</a>{{ f.label }}</div>
+        <div style="{{ f.frame }}">
+          <sc-if value="{{ f.desk }}" hint-placeholder-val="{{ true }}">
+            <div style="width:56px;flex:none;background:var(--bg);border-right:1px solid var(--border);display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+              <div style="width:40px;height:40px;display:flex;align-items:center;justify-content:center;color:var(--text3)"><svg width="20" height="22" viewBox="0 0 10 11" shape-rendering="crispEdges"><path fill="currentColor" d="M1 0h6v1h-6zM0 1h1v9h-1zM7 1h1v1h-1zM8 2h1v1h-1zM9 3h1v7h-1zM2 3h4v1h-4zM2 5h6v1h-6zM2 7h6v1h-6zM1 10h8v1h-8z"></path></svg></div>
+              <div style="position:relative;width:40px;height:40px;display:flex;align-items:center;justify-content:center;border-radius:var(--rControl);color:var(--accent);background:var(--accentSoft)"><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg><span style="{{ f.railCount }}">{{ f.needs }}</span></div>
+            </div>
+          </sc-if>
+          <div style="{{ f.side }}">
+            <sc-if value="{{ f.phone }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;align-items:center;justify-content:space-between;padding-bottom:14px">
+                <div style="position:relative;width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;color:var(--text2)"><svg width="22" height="16" viewBox="0 0 11 8" shape-rendering="crispEdges"><path fill="currentColor" d="M2 0h1v1h-1zM8 0h1v1h-1zM3 1h1v1h-1zM7 1h1v1h-1zM2 2h7v1h-7zM1 3h2v1h-2zM4 3h3v1h-3zM8 3h2v1h-2zM0 4h11v1h-11zM0 5h1v1h-1zM2 5h7v1h-7zM10 5h1v1h-1zM0 6h1v1h-1zM2 6h1v1h-1zM8 6h1v1h-1zM10 6h1v1h-1zM3 7h2v1h-2zM6 7h2v1h-2z"></path></svg><span style="{{ f.railCount }}">{{ f.needs }}</span></div>
+                <div style="width:44px;height:44px;border-radius:var(--rControl);background:var(--surface);border:1px solid var(--border)"></div>
+              </div>
+              <div style="font-size:25px;font-weight:600;color:var(--text);padding-bottom:4px">Agents</div>
+            </sc-if>
+            <sc-if value="{{ f.desk }}" hint-placeholder-val="{{ true }}">
+              <div style="font-size:14px;font-weight:600;color:var(--text);padding:6px 12px">Agents</div>
+              <div style="margin:0 4px 4px;display:flex;justify-content:center;padding:9px;border-radius:var(--rControl);background:var(--accent);color:var(--onAccent);font-size:13px;font-weight:500">＋ New session</div>
+              <div style="padding:7px 12px;font-size:13px;color:var(--text2)">Overview</div>
+            </sc-if>
+            <sc-for list="{{ f.rows }}" as="r" hint-placeholder-count="12">
+              <sc-if value="{{ r.isLabel }}" hint-placeholder-val="{{ false }}"><div style="{{ r.style }}"><span style="flex:1">{{ r.l }}</span><span style="text-transform:none;letter-spacing:0;color:var(--text2)">{{ r.right }}</span></div></sc-if>
+              <sc-if value="{{ r.isCrew }}" hint-placeholder-val="{{ false }}">
+                <div style="{{ r.style }}"><span style="width:12px;flex:none;color:var(--text3);font-size:10px">{{ r.chev }}</span><span style="{{ r.sq }}"></span><span style="flex:1;min-width:0;font-size:13px;font-weight:500;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.l }}</span><span style="{{ r.countStyle }}">{{ r.count }}</span><sc-if value="{{ r.hover }}" hint-placeholder-val="{{ false }}"><span style="flex:none;width:22px;height:20px;border-radius:6px;background:var(--surface);color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:1px">···</span></sc-if></div>
+              </sc-if>
+              <sc-if value="{{ r.isRow }}" hint-placeholder-val="{{ true }}">
+                <div style="{{ r.outer }}"><div style="{{ r.inner }}">
+                  <div style="position:relative;width:32px;height:32px;flex:none"><div style="{{ r.mark }}">{{ r.a }}</div><sc-if value="{{ r.hasBadge }}" hint-placeholder-val="{{ false }}"><div style="{{ r.badgeStyle }}"></div></sc-if></div>
+                  <div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:2px">
+                    <div style="display:flex;align-items:center;gap:6px;min-width:0"><span style="{{ r.nameStyle }}">{{ r.name }}</span><sc-if value="{{ r.unread }}" hint-placeholder-val="{{ false }}"><span style="width:6px;height:6px;flex:none;border-radius:999px;background:var(--accent)"></span></sc-if><sc-if value="{{ r.hasRole }}" hint-placeholder-val="{{ false }}"><span style="flex:0 1000 auto;min-width:5ch;max-width:15ch;font-family:'IBM Plex Mono',monospace;font-size:10.5px;line-height:16px;color:var(--text2);border:1px solid var(--border);border-radius:5px;padding:0 5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ r.role }}</span></sc-if></div>
+                    <span style="{{ r.subStyle }}">{{ r.sub }}</span>
+                  </div>
+                  <sc-if value="{{ r.hover }}" hint-placeholder-val="{{ false }}"><span style="flex:none;width:22px;height:20px;border-radius:6px;background:var(--surface);color:var(--text2);display:flex;align-items:center;justify-content:center;font-size:13px;letter-spacing:1px">···</span></sc-if>
+                </div></div>
+              </sc-if>
+            </sc-for>
+          </div>
+          <sc-for list="{{ f.pops }}" as="p" hint-placeholder-count="0">
+            <div style="{{ p.style }}">
+              <sc-for list="{{ p.items }}" as="it" hint-placeholder-count="3"><div style="{{ it.style }}"><span style="{{ it.box }}">{{ it.check }}</span><span style="{{ it.lStyle }}">{{ it.l }}</span><span style="font-family:'IBM Plex Mono',monospace;font-size:11px;color:var(--text3)">{{ it.r }}</span></div></sc-for>
+            </div>
+          </sc-for>
+        </div>
+        <div style="{{ f.capStyle }}">{{ f.cap }}</div>
+      </div>
+    </sc-for>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:30px 0 4px">The rule set</div>
+  <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;max-width:1240px;font:400 12.5px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Row outline: waiting for you</b><br>A 1px solid danger outline on a faint danger tint. Used for a permission prompt, a question, or a delete approval. It's the only thing that raises the count on the rail and the bubble. Solid, because dashed already means lineage.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Mark badge: what it's doing</b><br>Working: a filled accent badge that pulses. Idle: an accent ring. Starting: a filled text3 badge. Failed: a filled danger badge. Parked and out of usage: no badge, with the name in text2.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Sub-line: why, in words</b><br>"permission prompt · 3m", "blocked · waiting on test-gateway", "failed · host restarted", "out of usage · resets 15:00". Otherwise "workspace · age". The host shows only when it isn't one the crew header already names. There are no tag pills and no amber.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Roll-up when collapsed</b><br>A collapsed crew or tree takes on its most urgent state. "1 needs you" adds the outline. "1 failed" turns the count text danger in A; in B it adds the outline too. ENDED stays collapsed, showing its count and Dismiss all.</div>
+    <div style="background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:8px;padding:14px"><b>Sorting</b><br>Crews sort among crews, and loose trees within RUNNING, by their most urgent member. Within a crew, the attention tier sorts first and your drag order holds below it. Within a tree, children sort the same way under their parent.</div>
+  </div>
+
+  <div style="font:600 11px ui-monospace,Menlo,monospace;letter-spacing:.06em;text-transform:uppercase;color:rgba(0,0,0,.5);margin:26px 0 4px">New in these frames · not built today</div>
+  <div style="max-width:960px;display:flex;flex-direction:column;gap:5px;font:400 13px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.72)">
+    <div>• <b>Collapsing a tree</b> (the parent's chevron). Today a tree is always open.</div>
+    <div>• <b>The idle ring.</b> Today the build shows no badge when idle, and the chip reads Running.</div>
+    <div>• <b>Server-side attention reasons</b> ("blocked · waiting on …", "resets 15:00"). The spawn models already carry blocked and usage_limit; "waiting on" and the reset time may not exist yet.</div>
+    <div>• <b>The rail and bubble count.</b></div>
+  </div>
+</section>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+function tokens() {
+  const n = (l) => `oklch(${l.toFixed(3)} 0.008 55)`;
+  const v = { '--bg': n(0.22), '--surface': n(0.27), '--surface2': n(0.31), '--border': n(0.36), '--text': n(0.95), '--text2': n(0.74), '--text3': n(0.66), '--accent': 'oklch(0.68 0.15 293)', '--accentSoft': 'oklch(0.30 0.05 293)', '--onAccent': 'oklch(0.16 0.03 293)', '--danger': 'oklch(0.70 0.17 25)', '--rCard': '16px', '--rControl': '10px' };
+  return Object.entries(v).map(([k, x]) => `${k}:${x}`).join(';');
+}
+const mono = "font-family:'IBM Plex Mono',monospace";
+const RANK = { needs: 0, blocked: 1, failed: 2, usage: 3, working: 4, idle: 5, starting: 5, parked: 6 };
+const S = (name, a, st, sub, extra = {}) => ({ name, a, st, sub, ...extra });
+const CREWS = [
+  { name: 'Relay hardening', hue: 70, c: 0.05, members: [
+    S('relay-load-test', 'C', 'working', 'relay · 12m'),
+    S('relay-probe', 'C', 'failed', 'failed · host restarted · 20m', { host: 'mac-mini' }),
+    S('relay-timeouts', 'O', 'usage', 'out of usage · resets 15:00', { role: 'storm coder' })] },
+  { name: 'Gateway release', hue: 135, c: 0.10, members: [
+    S('release-notes', 'C', 'idle', 'site · 2h'),
+    S('review-gateway', 'O', 'blocked', 'blocked · waiting on test-gateway', { role: 'storm reviewer' }),
+    S('gateway-impl', 'C', 'working', 'storm · 40m', { role: 'storm coder', kids: [S('bench-check', 'C', 'parked', 'parked until its next message'), S('test-gateway', 'C', 'needs', 'permission prompt · 3m')] })] }
+];
+const LOOSE = [S('docs-pass', 'X', 'working', 'site · 1h'), S('shell-1', 'S', 'idle', 'storm · 5m'), S('spike-sync', 'C', 'needs', 'delete request · 1m'), S('migrate-db', 'C', 'working', 'storm · 25m', { kids: [S('schema-diff', 'C', 'working', 'storm · 4m'), S('backfill', 'C', 'idle', 'storm · 9m')] })];
+const worst = (s) => Math.min(RANK[s.st], ...(s.kids || []).map(worst));
+const sortS = (arr) => [...arr].sort((x, y) => (Math.min(worst(x), 4)) - (Math.min(worst(y), 4)));
+const count = (arr) => arr.flatMap(s => [s, ...(s.kids || [])]);
+class Component extends DCLogic {
+  renderVals() {
+    const mk = (variant, mode, phone) => {
+      const B = variant === 'B', collapsed = mode === 'collapsed';
+      const loud = (st) => st === 'needs' || (B && st === 'failed');
+      const rows = [];
+      const label = (l, right = '') => rows.push({ isLabel: true, isCrew: false, isRow: false, l, right, style: `display:flex;align-items:center;${mono};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:${phone ? '16px 0 4px' : '12px 12px 6px'}` });
+      const out = (tint) => tint ? 'box-shadow:inset 0 0 0 1px var(--danger);background:color-mix(in oklch, var(--danger) 9%, transparent);' : '';
+      const row = (s, ctx) => {
+        const isLoud = loud(s.st), kidsWorst = s.kids ? Math.min(...s.kids.map(worst)) : 9;
+        const rollNeeds = ctx.treeClosed && kidsWorst === 0, rollFail = ctx.treeClosed && kidsWorst === 2;
+        const badge = { working: 'var(--accent)', starting: 'var(--text3)', failed: 'var(--danger)' }[s.st];
+        const ring = s.st === 'idle';
+        let sub = s.sub;
+        if (rollNeeds) sub = `${s.kids.length} agents · 1 needs you`; else if (ctx.treeClosed && s.kids) sub = `${s.kids.length} agents · ${s.sub}`;
+        rows.push({ isLabel: false, isCrew: false, isRow: true, name: s.name, a: s.a, sub, hasRole: !!s.role, role: s.role,
+          mark: `width:32px;height:32px;border-radius:var(--rControl);background:var(--surface2);display:flex;align-items:center;justify-content:center;${mono};font-size:13px;font-weight:500;color:${s.a === 'C' ? '#D97757' : 'var(--text)'}`,
+          hasBadge: !!badge || ring, badgeStyle: `position:absolute;right:-3px;bottom:-3px;width:11px;height:11px;border-radius:999px;box-sizing:border-box;${ring ? 'border:2px solid var(--accent);background:var(--surface)' : `border:2px solid var(--surface);background:${badge}`};${s.st === 'working' ? 'animation:stormPulse 1.6s ease-in-out infinite' : ''}`,
+          nameStyle: `flex:0 1 auto;min-width:0;font-size:${phone ? 15 : 13}px;color:${s.st === 'parked' || s.st === 'usage' ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+          subStyle: `${mono};font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${(s.st === 'failed' && !B) || rollNeeds ? 'var(--danger)' : s.st === 'needs' ? 'var(--text)' : s.st === 'blocked' || s.st === 'usage' ? 'var(--text2)' : 'var(--text3)'}`,
+          outer: ctx.crew ? `margin-left:${phone ? 5 : 13}px;padding-left:${phone ? 10 : 6}px;border-left:1px solid var(--border)` : '',
+          inner: `display:flex;align-items:center;gap:10px;padding:${phone ? '8px 8px' : '6px 8px'};border-radius:${ctx.child ? '0 var(--rControl) var(--rControl) 0' : 'var(--rControl)'};${ctx.child ? `margin-left:${phone ? 12 : 10}px;border-left:1px dashed var(--text3);` : ''}${out(isLoud || rollNeeds || (B && rollFail))}` });
+        if (s.kids && !ctx.treeClosed) sortS(s.kids).forEach(k => row(k, { ...ctx, child: true }));
+      };
+      const all = count([...CREWS.flatMap(c => c.members), ...LOOSE]);
+      const needs = all.filter(s => s.st === 'needs').length;
+      label('Crews', '▾');
+      [...CREWS].sort((x, y) => Math.min(...x.members.map(worst)) - Math.min(...y.members.map(worst))).forEach((c, ci) => {
+        const ms = count(c.members), w = Math.min(...c.members.map(worst));
+        const closed = collapsed && ci === 0;
+        const run = ms.filter(s => RANK[s.st] <= 6).length;
+        const cnt = closed ? (w === 0 ? '1 needs you' : w === 2 ? '1 failed' : `${run} running`) : `${run} running`;
+        rows.push({ isLabel: false, isCrew: true, isRow: false, l: c.name, chev: closed ? '▸' : '▾', count: cnt,
+          countStyle: `flex:none;${mono};font-size:11px;color:${closed && (w === 0 || w === 2) ? 'var(--danger)' : 'var(--text3)'}`,
+          sq: `width:10px;height:10px;flex:none;border-radius:3px;background:oklch(0.70 ${c.c} ${c.hue})`,
+          style: `display:flex;align-items:center;gap:8px;padding:${phone ? '10px 8px' : '7px 8px'};border-radius:var(--rControl);${out(closed && (w === 0 || (B && w === 2)))}` });
+        if (!closed) sortS(c.members).forEach(s => row(s, { crew: true, treeClosed: collapsed && !!s.kids && s.name === 'gateway-impl' ? false : false }));
+      });
+      label('Running');
+      sortS(LOOSE).forEach(s => row(s, { treeClosed: collapsed && !!s.kids }));
+      label('Ended · 4 ▸', 'Dismiss all');
+      return { rows, needs };
+    };
+    const FR = [
+      ['A', 'expanded', false, 'A · recommended · expanded', 'Gateway release sorts above Relay hardening because test-gateway needs you. The gateway-impl tree leads its crew, with test-gateway outlined first under it. In RUNNING, spike-sync (delete request) is outlined at the top. relay-probe failed: it has a danger badge and a danger sub-line, but no outline. relay-timeouts is out of usage: no badge, and the reason is in the sub-line.'],
+      ['A', 'collapsed', false, 'A · collapsed crew and tree roll-ups', 'Collapsed, Gateway release shows "1 needs you" in danger and the outline. The migrate-db tree collapses to "2 agents · storm · 25m", with nothing to roll up. The rail badge counts the two needs-you items.'],
+      ['B', 'expanded', false, 'B · failed outlined too · expanded', 'relay-probe now carries the outline as well. There are three outlined rows, and two kinds of red that mean different things. The rail still counts only needs you, so the outline and the count disagree.'],
+      ['B', 'collapsed', false, 'B · collapsed', 'Same roll-ups as A. B differs only in outlining failed members, which this collapsed state doesn\'t show.'],
+      ['A', 'expanded', true, 'A · phone', 'The same rules at phone size. The count sits on the place bubble, because the phone has no rail. Long-press is unchanged.']
+    ];
+    const frames = FR.map(([v, m, phone, label, cap], i) => {
+      const { rows, needs } = mk(v, m, phone);
+      const id = '1' + 'abcde'[i];
+      return { id, href: '#' + id, label, cap, rows, needs: String(needs), desk: !phone, phone,
+        badge: `font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:${i === 0 ? '#2a78d6' : 'rgba(0,0,0,.08)'};color:${i === 0 ? '#fff' : '#1a1a1a'};border-radius:5px;text-decoration:none`,
+        frame: `${tokens()};position:relative;display:flex;width:${phone ? 390 : 333}px;height:${phone ? (m === 'expanded' ? 1080 : 844) : (m === 'expanded' ? 980 : 780)}px;overflow:hidden;background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased;border:1px solid var(--border);border-radius:${phone ? 36 : 12}px`,
+        side: phone ? 'flex:1;padding:20px 20px;display:flex;flex-direction:column;gap:2px;background:var(--bg)' : 'width:277px;flex:none;background:var(--surface);padding:16px 8px;display:flex;flex-direction:column;gap:2px',
+        railCount: `position:absolute;top:-4px;right:-5px;min-width:17px;height:17px;padding:0 4px;border-radius:999px;background:var(--danger);color:var(--onAccent);${mono};font-size:10.5px;font-weight:500;display:flex;align-items:center;justify-content:center;border:2px solid ${phone ? 'var(--bg)' : 'var(--bg)'}`,
+        capStyle: `max-width:${phone ? 390 : 333}px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.62)` };
+    });
+    frames.forEach(f => { f.pops = []; f.rows = f.rows.map(r => ({ unread: false, hover: false, ...r })); });
+    const G = (phone, hv = {}) => {
+      const rows = [];
+      const label = (l, right = '') => rows.push({ isLabel: true, isCrew: false, isRow: false, l, right, style: `display:flex;align-items:center;${mono};font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:${phone ? '16px 0 4px' : '12px 12px 6px'}` });
+      const crew = (l, hue, c, count, hover) => rows.push({ isLabel: false, isCrew: true, isRow: false, hover: !!hover, l, chev: '▾', count, countStyle: `flex:none;${mono};font-size:11px;color:var(--text3)`, sq: `width:10px;height:10px;flex:none;border-radius:3px;background:oklch(0.70 ${c} ${hue})`, style: `display:flex;align-items:center;gap:8px;padding:${phone ? '10px 8px' : '7px 8px'};border-radius:var(--rControl);${hover ? 'background:var(--surface2)' : ''}` });
+      const row = (name, a, st, sub, o = {}) => {
+        const badge = { working: 'var(--accent)', failed: 'var(--danger)' }[st], ring = st === 'idle', dim = st === 'unknown' || st === 'ended';
+        rows.push({ isLabel: false, isCrew: false, isRow: true, name, a, sub, hasRole: false, unread: !!o.unread, hover: !!o.hover,
+          mark: `width:32px;height:32px;border-radius:var(--rControl);background:var(--surface2);display:flex;align-items:center;justify-content:center;${mono};font-size:13px;font-weight:500;color:${a === 'C' ? '#D97757' : 'var(--text)'};opacity:${st === 'ended' ? 0.5 : 1}`,
+          hasBadge: !!badge || ring, badgeStyle: `position:absolute;right:-3px;bottom:-3px;width:11px;height:11px;border-radius:999px;box-sizing:border-box;${ring ? 'border:2px solid var(--accent);background:var(--surface)' : `border:2px solid ${o.hover ? 'var(--surface2)' : 'var(--surface)'};background:${badge}`};${st === 'working' ? 'animation:stormPulse 1.6s ease-in-out infinite' : ''}`,
+          nameStyle: `flex:0 1 auto;min-width:0;font-size:${phone ? 15 : 13}px;color:${dim ? 'var(--text2)' : 'var(--text)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis`,
+          subStyle: `${mono};font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:${o.subTone || 'var(--text3)'}`,
+          outer: o.crew ? `margin-left:${phone ? 5 : 13}px;padding-left:${phone ? 10 : 6}px;border-left:1px solid var(--border)` : '',
+          inner: `display:flex;align-items:center;gap:10px;padding:${phone ? '8px 8px' : '6px 8px'};border-radius:${o.child ? '0 var(--rControl) var(--rControl) 0' : 'var(--rControl)'};${o.child ? 'margin-left:10px;border-left:1px dashed var(--text3);' : ''}${o.hover ? 'background:var(--surface2);' : ''}` });
+      };
+      label('Crews', '▾');
+      crew('Relay hardening', 70, 0.05, '2 running');
+      row('relay-probe', 'C', 'unknown', 'host offline · last seen 9m', { crew: true, subTone: 'var(--text2)' });
+      row('bench-check', 'C', 'working', 'from gateway-impl · scratch · 6m', { crew: true, unread: true });
+      row('relay-load-test', 'C', 'working', 'relay · 12m', { crew: true, hover: !!hv.row });
+      crew('Gateway release', 135, 0.10, '2 running', !!hv.crew);
+      row('gateway-impl', 'C', 'working', 'storm · 40m', { crew: true, unread: true });
+      row('test-gateway', 'C', 'ended', 'completed · 2 commits to apply', { crew: true, child: true, subTone: 'var(--accent)' });
+      row('review-gateway', 'O', 'idle', 'storm · 12m', { crew: true });
+      label('Running');
+      row('docs-pass', 'X', 'working', 'site · 1h', { unread: true });
+      row('shell-1', 'S', 'idle', 'storm · 5m');
+      row('spike-sync', 'C', 'idle', 'storm · 2h');
+      label('Ended · 4 ▸', 'Dismiss all');
+      return rows;
+    };
+    const item = (l, r = '', o = {}) => ({ l, r, lStyle: o.btn ? 'flex:1;text-align:center' : 'flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis', check: o.check || '', box: o.box ? `width:16px;height:16px;flex:none;border-radius:4px;display:flex;align-items:center;justify-content:center;font-size:11px;border:1.5px solid ${o.check ? 'var(--accent)' : 'var(--text3)'};background:${o.check ? 'var(--accent)' : 'transparent'};color:var(--onAccent)` : 'display:none', style: `display:flex;align-items:center;gap:9px;padding:${o.btn ? '8px 10px' : '7px 10px'};border-radius:7px;font-size:13px;color:${o.danger ? 'var(--danger)' : o.btn ? 'var(--onAccent)' : 'var(--text)'};${o.on ? 'background:var(--surface)' : ''}${o.btn ? 'background:var(--accent);justify-content:center;margin-top:4px;font-weight:500' : ''}${o.label ? `;${mono};font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--text3);padding:8px 10px 3px` : ''}` });
+    const popBox = (left, top, w) => `position:absolute;left:${left}px;top:${top}px;width:${w}px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--rCard);box-shadow:0 12px 42px -8px rgba(0,0,0,.35);padding:6px;display:flex;flex-direction:column;z-index:10`;
+    const gapFrame = (id, label, cap, phone, pops, hv) => ({ id, href: '#' + id, label, cap, rows: G(phone, hv).map(r => ({ unread: false, ...r, hover: !!r.hover })), needs: '0', desk: !phone, phone, pops,
+      badge: 'font:600 10.5px ui-monospace,Menlo,monospace;padding:3px 7px;background:rgba(0,0,0,.08);color:#1a1a1a;border-radius:5px;text-decoration:none',
+      frame: `${tokens()};position:relative;display:flex;width:${phone ? 390 : 333}px;height:${phone ? 844 : 860}px;overflow:hidden;background:var(--bg);color:var(--text);font-family:'IBM Plex Sans',sans-serif;-webkit-font-smoothing:antialiased;border:1px solid var(--border);border-radius:${phone ? 36 : 12}px`,
+      side: phone ? 'flex:1;padding:20px 20px;display:flex;flex-direction:column;gap:2px;background:var(--bg)' : 'width:277px;flex:none;background:var(--surface);padding:16px 8px;display:flex;flex-direction:column;gap:2px',
+      railCount: 'display:none', capStyle: `max-width:${phone ? 390 : 333}px;font:400 12px/1.55 system-ui,sans-serif;color:rgba(0,0,0,.62)` });
+    frames.push(gapFrame('2a', 'Gaps 1–4 and 5 · the ··· on a session row', 'Unread: a 6px accent dot after the name (gateway-impl, bench-check, docs-pass). Ended with work: test-gateway stays in its crew with "2 commits to apply" in accent until you Apply or Dismiss. Child in another crew: bench-check, which has no indent and reads "from gateway-impl". Unknown: relay-probe has no badge, its name is text2, and the sub-line reads "host offline"; it sorts with failed. Gap 5: the ··· on the hovered row (relay-load-test) opens this menu. Add to crew… opens the list of crews: Gateway release, Relay hardening ✓, Not in a crew, New crew…', false, [
+      { style: popBox(130, 340, 176), items: [item('Open'), item('Add to crew…', '›', { on: true }), item('Change role…'), item('End…', '', { danger: true })] }], { row: true }));
+    frames.push(gapFrame('2b', 'Gap 5 · crew header ··· → Add sessions…', 'The crew header\'s menu gains "Add sessions…", a checklist of sessions that aren\'t in this crew. This is the non-gesture route to the same result as dragging.', false, [
+      { style: popBox(96, 378, 224), items: [item('Add to Gateway release', '', { label: true }), item('docs-pass', 'site', { box: true, check: '✓' }), item('shell-1', 'storm', { box: true }), item('spike-sync', 'storm', { box: true }), item('relay-load-test', 'Relay', { box: true }), item('Add 1', '', { btn: true })] }], { crew: true }));
+    frames.push(gapFrame('2c', 'Gap 5 · phone · long-press a crew → Add sessions…', 'The same checklist as a sheet. Long-press a session to get Add to crew… (the existing Crew and role sheet).', true, [
+      { style: 'position:absolute;left:0;right:0;bottom:0;background:var(--surface2);border-top:1px solid var(--border);border-radius:var(--rCard) var(--rCard) 0 0;padding:14px 16px 30px;display:flex;flex-direction:column;gap:2px;z-index:10;box-shadow:0 -12px 40px rgba(0,0,0,.4)', items: [item('Add to Gateway release', '', { label: true }), item('docs-pass', 'site', { box: true, check: '✓' }), item('shell-1', 'storm', { box: true }), item('spike-sync', 'storm', { box: true }), item('relay-load-test', 'in Relay hardening', { box: true }), item('Add 1 session', '', { btn: true })] }], { crew: true }));
+    return { frames };
+  }
+}
+</script>
+</body>
+</html>
