@@ -367,7 +367,11 @@ class _TrashKeepsState extends ConsumerState<_TrashKeeps> {
       crossAxisAlignment: CrossAxisAlignment.start,
       spacing: t.sp * 0.75,
       children: [
-        select,
+        // A choice of a few words, not a field to fill the pane.
+        ConstrainedBox(
+          constraints: BoxConstraints(maxWidth: t.sp * 40),
+          child: select,
+        ),
         Text(note, key: Key('trash-keeps-note-$_id'), style: small),
         TextAction(
           key: Key('open-trash-$_id'),

@@ -78,20 +78,14 @@ class _CrewScreenState extends ConsumerState<CrewScreen> {
         body: SafeArea(
           left: false,
           child: SingleChildScrollView(
-            child: Align(
-              alignment: Alignment.topLeft,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(maxWidth: t.sp * 95),
-                child: Padding(
-                  padding: EdgeInsets.fromLTRB(
-                    t.sp * 5,
-                    pageTopInset(t),
-                    t.sp * 5,
-                    t.sp * 7.5,
-                  ),
-                  child: body,
-                ),
+            child: Padding(
+              padding: EdgeInsets.fromLTRB(
+                t.sp * 5,
+                pageTopInset(t),
+                t.sp * 5,
+                t.sp * 7.5,
               ),
+              child: body,
             ),
           ),
         ),

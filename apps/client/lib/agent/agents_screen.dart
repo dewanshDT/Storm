@@ -15,6 +15,7 @@ import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/shell/app_bar.dart' show pageTopInset;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
+import '../ui/widgets.dart' show ReadingMeasure;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
@@ -675,70 +676,62 @@ class _Overview extends ConsumerWidget {
     }
 
     return SingleChildScrollView(
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: ConstrainedBox(
-          constraints: BoxConstraints(maxWidth: t.sp * 95),
-          child: Padding(
-            padding: EdgeInsets.fromLTRB(
-              t.sp * 5,
-              pageTopInset(t),
-              t.sp * 5,
-              t.sp * 7.5,
+      child: Padding(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 5,
+          pageTopInset(t),
+          t.sp * 5,
+          t.sp * 7.5,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const _PageTitle('Agents'),
+            SizedBox(height: t.sp * 0.75),
+            ReadingMeasure(
+              child: _Copy(
+                'What your agents are working on. Sessions keep running '
+                'on your hosts when you close Storm.',
+                size: t.uiSize,
+              ),
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                const _PageTitle('Agents'),
-                SizedBox(height: t.sp * 0.75),
-                _Copy(
-                  'What your agents are working on. Sessions keep running on '
-                  'your hosts when you close Storm.',
-                  size: t.uiSize,
+            SizedBox(height: t.sp * 3),
+            if (crews.isNotEmpty) ...[
+              const AgentsLabel('Crews'),
+              SizedBox(height: t.sp * 1.5),
+              for (final c in crews) ...[
+                CrewCard(
+                  crew: c,
+                  overview: o,
+                  collapsed: prefs.collapsed(c.id),
+                  onOpenSession: (s) => openAgentSession(context, s.id),
                 ),
-                SizedBox(height: t.sp * 3),
-                if (crews.isNotEmpty) ...[
-                  const AgentsLabel('Crews'),
-                  SizedBox(height: t.sp * 1.5),
-                  for (final c in crews) ...[
-                    CrewCard(
-                      crew: c,
-                      overview: o,
-                      collapsed: prefs.collapsed(c.id),
-                      onOpenSession: (s) => openAgentSession(context, s.id),
-                    ),
-                    SizedBox(height: t.sp * 1.5),
-                  ],
-                  SizedBox(height: t.sp * 1.5),
-                ],
-                // Until the first crew exists, and only once crews have
-                // loaded from a server that has them.
-                if (o.crews != null && crews.isEmpty) ...[
-                  const _NoCrewsHint(),
-                  SizedBox(height: t.sp * 2.5),
-                ],
-                if (crews.isEmpty || groups.isNotEmpty) ...[
-                  AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
-                  SizedBox(height: t.sp * 1.5),
-                ],
-                for (final MapEntry(key: (ws, host), value: rows)
-                    in groups.entries) ...[
-                  _WorkCard(
-                    workspace: ws,
-                    host: o.hostName(host),
-                    sessions: rows,
-                  ),
-                  SizedBox(height: t.sp * 1.5),
-                ],
                 SizedBox(height: t.sp * 1.5),
-                const AgentsLabel('Start an agent'),
-                SizedBox(height: t.sp * 1.25),
-                _AgentCards(overview: o),
-                SizedBox(height: t.sp * 3),
-                _InfraLine(overview: o),
               ],
-            ),
-          ),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            // Until the first crew exists, and only once crews have
+            // loaded from a server that has them.
+            if (o.crews != null && crews.isEmpty) ...[
+              const _NoCrewsHint(),
+              SizedBox(height: t.sp * 2.5),
+            ],
+            if (crews.isEmpty || groups.isNotEmpty) ...[
+              AgentsLabel(crews.isEmpty ? 'Work' : 'Not in a crew'),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            for (final MapEntry(key: (ws, host), value: rows)
+                in groups.entries) ...[
+              _WorkCard(workspace: ws, host: o.hostName(host), sessions: rows),
+              SizedBox(height: t.sp * 1.5),
+            ],
+            SizedBox(height: t.sp * 1.5),
+            const AgentsLabel('Start an agent'),
+            SizedBox(height: t.sp * 1.25),
+            _AgentCards(overview: o),
+            SizedBox(height: t.sp * 3),
+            _InfraLine(overview: o),
+          ],
         ),
       ),
     );
