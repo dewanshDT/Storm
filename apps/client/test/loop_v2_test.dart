@@ -353,9 +353,8 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('About lists the integrations granted at launch', (
-      tester,
-    ) async {
+    testWidgets('About no longer lists the integrations: who and what the '
+        'session is only (153j)', (tester) async {
       for (final size in [desk, phone]) {
         final agents = FakeAgentServer(
           hosts: [agentHost()],
@@ -380,8 +379,9 @@ void main() {
         }
         expect(
           find.text('Linear. Fixed when the session started.'),
-          findsOneWidget,
+          findsNothing,
         );
+        expect(find.text('STARTED BY'), findsOneWidget);
         await disposeShell(tester, c);
       }
     });
@@ -470,7 +470,8 @@ void main() {
     await tester.pumpAndSettle();
     final id = agents.sessions.single['id'] as String;
     expect(where(c).path, '/agents/s/$id');
-    expect(find.text('Wrote 0'), findsOneWidget);
+    expect(find.byKey(const Key('inspector-rail-wrote')), findsOneWidget);
+    expect(find.byKey(const Key('inspector-badge-wrote')), findsNothing);
 
     // The agent edits Design through the gateway.
     server.notes['n3'] = server.notes['n3']!.copyWith(
@@ -493,7 +494,13 @@ void main() {
     final listed = agents.count('GET', '/v1/agent/sessions');
     await tester.pump(const Duration(seconds: 5));
     await tester.pumpAndSettle();
-    expect(find.text('Wrote 1'), findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const Key('inspector-badge-wrote')),
+        matching: find.text('1'),
+      ),
+      findsOneWidget,
+    );
     expect(
       agents.count('GET', '/v1/agent/sessions'),
       greaterThan(listed),

@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_riverpod/legacy.dart';
+import 'package:go_router/go_router.dart';
 
+import '../router.dart';
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/decision_strip.dart';
 import '../ui/states.dart' show describeFailure;
+import '../ui/surfaces.dart' show StormPopover, showStormPopover;
 import '../ui/tokens.dart';
+import '../ui/widgets.dart' show PopoverItem, PopoverTone;
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
 import 'agent_state.dart';
-import 'agent_widgets.dart' show agentKey, agentMono, agentSans, clockAt;
+import 'agent_widgets.dart' show agentMono, agentSans;
 import 'crew_changes.dart' show announceDismissedCrews;
 import 'spawn_api.dart';
 import 'spawn_models.dart';
@@ -139,18 +144,6 @@ class _DashedEdge extends CustomPainter {
 
 // ---- the spawn switch ---------------------------------------------------
 
-/// What the switch row says under its label.
-String spawnSwitchNote(SpawnSwitch sw, String agent) {
-  final why = sw.refused == null ? null : spawnRefusalText(sw.refused!, agent);
-  if (sw.enabled) {
-    return why == null
-        ? 'On · it starts, messages and ends its own agents · Turn off any time'
-        : 'On, but not offered now: $why';
-  }
-  if (sw.refused == 'launched_without_spawn') return kSpawnAtLaunch;
-  return why == null ? 'Off' : 'Unavailable · $why';
-}
-
 /// The confirmation for turning it on (4t, as 138p point 6 corrects it).
 String spawnOnConfirmText(String name, String host) =>
     'Allow $name to start agents? It can then start, message and end '
@@ -158,25 +151,278 @@ String spawnOnConfirmText(String name, String host) =>
     'Children never get more access than $name. You can turn this off at '
     'any time; children keep running.';
 
-/// "Allow this session to start agents": a person's switch for one running
-/// session (134c, B1, B2). Shown only where the server's view carries it.
-class SpawnSwitchRow extends ConsumerStatefulWidget {
-  const SpawnSwitchRow({super.key, required this.session, required this.host});
+/// Whether a session shows the spawn switch, now the header's "Starts
+/// agents ▾" chip and About's Starts agents (153j): only where the
+/// server's view carries it, while it runs.
+bool showsSpawnSwitch(AgentSession s) =>
+    s.spawn.switchState != null && !s.ended;
+
+/// Whether turning it on is waiting for the person's Allow, asked from the
+/// header chip or About at desk width, and shown in the strip under the
+/// header. Device-local.
+final spawnOnAskProvider = StateProvider.autoDispose.family<bool, String>(
+  (ref, id) => false,
+);
+
+/// About's Starts agents, in words (153j): on with the host's limits, or
+/// why it is off.
+String startsAgentsText(AgentSession s, AgentOverview? o) {
+  final sw = s.spawn.switchState;
+  if (sw == null) return 'Off';
+  final agent = providerLabel(s.provider);
+  final why = sw.refused == null ? null : spawnRefusalText(sw.refused!, agent);
+  if (sw.enabled) {
+    if (why != null) return 'On, but not offered now: $why.';
+    final l = o?.hosts.where((h) => h.id == s.hostId).firstOrNull?.limits;
+    final limits = l == null
+        ? ''
+        : ', up to ${l.maxChildren} at once and ${l.maxTree} in its tree';
+    final write = sw.launchedOn
+        ? (sw.childrenWrite
+              ? ' They write to the same vault as this session.'
+              : ' They are read only.')
+        : '';
+    return 'On. It starts, messages and ends its own agents$limits.$write';
+  }
+  if (sw.refused == 'launched_without_spawn') return kSpawnAtLaunch;
+  return why == null ? 'Off.' : 'Off. $why.';
+}
+
+/// Settings › hosts, where the limits are set (153-7 renames it Agents &
+/// hosts).
+void openSpawnLimits(BuildContext context) =>
+    GoRouter.of(context).go(Routes.settingsPage('hosts'));
+
+/// Turns a session's switch on or off, and says why it could not.
+Future<void> setSpawnSwitch(
+  BuildContext context,
+  WidgetRef ref,
+  AgentSession s,
+  bool enabled,
+) async {
+  final api = agentApi(ref);
+  if (api == null) return;
+  final c = ProviderScope.containerOf(context, listen: false);
+  try {
+    await api.setSpawn(s.id, enabled);
+    if (!enabled && context.mounted) {
+      _say(context, 'Starting agents is off for ${s.displayName}.');
+    }
+    if (enabled) c.read(spawnOnAskProvider(s.id).notifier).state = false;
+  } catch (e) {
+    if (context.mounted) {
+      final code = _code(e);
+      final why = code == null
+          ? null
+          : spawnRefusalText(code, providerLabel(s.provider));
+      _say(
+        context,
+        why == null
+            ? describeFailure(e)
+            : "Couldn't allow it: ${why.endsWith('.') ? why : '$why.'}",
+      );
+    }
+  } finally {
+    api.dispose();
+    spawnChanged(c, s.id);
+  }
+}
+
+/// Asks for the switch's Allow: in the desk strip, through
+/// [spawnOnAskProvider], or [inPlace] where there is no strip.
+void askSpawnOn(
+  BuildContext context,
+  WidgetRef ref,
+  AgentSession s, {
+  VoidCallback? inPlace,
+}) {
+  if (context.isExpanded || inPlace == null) {
+    ref.read(spawnOnAskProvider(s.id).notifier).state = true;
+  } else {
+    inPlace();
+  }
+}
+
+/// The Allow for turning the switch on, with what it allows (4t).
+class SpawnOnConfirm extends ConsumerStatefulWidget {
+  const SpawnOnConfirm({
+    super.key,
+    required this.session,
+    required this.host,
+    required this.onDone,
+  });
+
+  final AgentSession session;
+  final String host;
+  final VoidCallback onDone;
+
+  @override
+  ConsumerState<SpawnOnConfirm> createState() => _SpawnOnConfirmState();
+}
+
+class _SpawnOnConfirmState extends ConsumerState<SpawnOnConfirm> {
+  bool _busy = false;
+
+  Future<void> _allow() async {
+    setState(() => _busy = true);
+    await setSpawnSwitch(context, ref, widget.session, true);
+    if (!mounted) return;
+    setState(() => _busy = false);
+    if (widget.session.spawn.switchState?.enabled != true) widget.onDone();
+  }
+
+  @override
+  Widget build(BuildContext context) => _Banner(
+    key: const Key('spawn-on-confirm'),
+    title: spawnOnConfirmText(widget.session.displayName, widget.host),
+    action: 'Allow',
+    accent: true,
+    onAction: _busy ? null : _allow,
+    onCancel: widget.onDone,
+  );
+}
+
+/// "Starts agents ▾" in the session header (153j): an accent dot while on,
+/// and a menu to turn it on or off and to change the limits.
+class SpawnChip extends ConsumerStatefulWidget {
+  const SpawnChip({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  ConsumerState<SpawnChip> createState() => _SpawnChipState();
+}
+
+class _SpawnChipState extends ConsumerState<SpawnChip> {
+  final _anchor = GlobalKey();
+
+  Future<void> _menu() async {
+    final t = context.tokens;
+    final s = widget.session;
+    final sw = s.spawn.switchState!;
+    final canTurnOn = sw.refused == null;
+    final picked = await showStormPopover<String>(
+      context: context,
+      anchorKey: _anchor,
+      width: t.sp * 34,
+      builder: (popover) => StormPopover(
+        key: const Key('spawn-chip-menu'),
+        padding: t.sp * 0.75,
+        children: [
+          if (sw.enabled)
+            PopoverItem(
+              key: const Key('spawn-chip-toggle'),
+              label: 'Turn off',
+              onTap: () => Navigator.of(popover).pop('off'),
+            )
+          else
+            PopoverItem(
+              key: const Key('spawn-chip-toggle'),
+              label: 'Turn on',
+              subtitle: canTurnOn
+                  ? null
+                  : spawnRefusalText(sw.refused!, providerLabel(s.provider)),
+              tone: canTurnOn ? PopoverTone.normal : PopoverTone.muted,
+              onTap: canTurnOn ? () => Navigator.of(popover).pop('on') : null,
+            ),
+          PopoverItem(
+            key: const Key('spawn-chip-limits'),
+            label: 'Change limits in Agents & hosts ›',
+            tone: PopoverTone.accent,
+            onTap: () => Navigator.of(popover).pop('limits'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted) return;
+    switch (picked) {
+      case 'off':
+        await setSpawnSwitch(context, ref, s, false);
+      case 'on':
+        askSpawnOn(context, ref, s);
+      case 'limits':
+        openSpawnLimits(context);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final on = widget.session.spawn.switchState?.enabled ?? false;
+    return Semantics(
+      button: true,
+      label: 'Starts agents, ${on ? 'on' : 'off'}',
+      excludeSemantics: true,
+      onTap: _menu,
+      child: InkWell(
+        key: _anchor,
+        onTap: _menu,
+        borderRadius: BorderRadius.circular(999),
+        child: Container(
+          key: const Key('spawn-chip'),
+          padding: EdgeInsets.symmetric(
+            horizontal: t.sp * 1.125,
+            vertical: t.sp * 0.25,
+          ),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: t.border, width: t.bw),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                key: const Key('spawn-chip-dot'),
+                width: t.sp * 0.75,
+                height: t.sp * 0.75,
+                decoration: BoxDecoration(
+                  color: on ? t.accent : t.text3,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              SizedBox(width: t.sp * 0.75),
+              Text(
+                'Starts agents',
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  color: t.text2,
+                  height: 1.3,
+                ),
+              ),
+              SizedBox(width: t.sp * 0.5),
+              Icon(LucideIcons.chevron_down, size: t.labelSize, color: t.text3),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// About's Starts agents (153j): the state and limits, then Turn on or off
+/// and the limits' page. On a phone its Allow asks in place.
+class StartsAgentsAbout extends ConsumerStatefulWidget {
+  const StartsAgentsAbout({
+    super.key,
+    required this.session,
+    required this.host,
+  });
 
   final AgentSession session;
   final String host;
 
   @override
-  ConsumerState<SpawnSwitchRow> createState() => _SpawnSwitchRowState();
+  ConsumerState<StartsAgentsAbout> createState() => _StartsAgentsAboutState();
 }
 
-class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
+class _StartsAgentsAboutState extends ConsumerState<StartsAgentsAbout> {
   bool _confirm = false;
   bool _busy = false;
   final _confirmKey = GlobalKey();
 
-  /// Its Allow sits below the switch, often past the bottom of About.
-  void _ask() {
+  /// Its Allow sits below the row, often past the bottom of the sheet.
+  void _askHere() {
     setState(() => _confirm = true);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final at = _confirmKey.currentContext;
@@ -189,93 +435,63 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
     });
   }
 
-  Future<void> _set(bool enabled) async {
-    final api = agentApi(ref);
-    if (api == null) return;
+  Future<void> _off() async {
     setState(() => _busy = true);
-    final s = widget.session;
-    final c = ProviderScope.containerOf(context, listen: false);
-    try {
-      await api.setSpawn(s.id, enabled);
-      if (!enabled && mounted) {
-        _say(context, 'Starting agents is off for ${s.displayName}.');
-      }
-      if (mounted) setState(() => _confirm = false);
-    } catch (e) {
-      if (mounted) {
-        final code = _code(e);
-        final why = code == null
-            ? null
-            : spawnRefusalText(code, providerLabel(s.provider));
-        _say(
-          context,
-          why == null
-              ? describeFailure(e)
-              : "Couldn't allow it: ${why.endsWith('.') ? why : '$why.'}",
-        );
-      }
-    } finally {
-      api.dispose();
-      spawnChanged(c, s.id);
-      if (mounted) setState(() => _busy = false);
-    }
+    await setSpawnSwitch(context, ref, widget.session, false);
+    if (mounted) setState(() => _busy = false);
   }
 
   @override
   Widget build(BuildContext context) {
     final s = widget.session;
     final sw = s.spawn.switchState;
-    if (sw == null || s.ended) return const SizedBox.shrink();
+    if (sw == null) return const SizedBox.shrink();
     final t = context.tokens;
+    final live = !s.ended;
     final canTurnOn = sw.refused == null;
-    final row = Row(
-      children: [
-        StormToggle(
-          key: const Key('spawn-switch'),
-          value: sw.enabled,
-          enabled: !_busy && (sw.enabled || canTurnOn),
-          onChanged: (on) {
-            if (on) {
-              _ask();
-            } else if (_confirm) {
-              setState(() => _confirm = false);
-            } else {
-              _set(false);
-            }
-          },
-        ),
-        SizedBox(width: t.sp * 1.25),
-        Flexible(
-          child: Text(
-            'Allow this session to start agents',
-            style: agentSans(t),
-          ),
-        ),
-      ],
-    );
+    final o = ref.watch(agentOverviewProvider).value;
     return Column(
+      key: const Key('about-starts-agents'),
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        row,
-        SizedBox(height: t.sp * 0.5),
         Text(
-          spawnSwitchNote(sw, providerLabel(s.provider)),
+          startsAgentsText(s, o),
           key: const Key('spawn-switch-note'),
-          maxLines: 3,
-          overflow: TextOverflow.ellipsis,
-          style: agentMono(t),
+          style: agentSans(t),
         ),
-        if (_confirm && !sw.enabled) ...[
+        SizedBox(height: t.sp * 0.5),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            if (live && sw.enabled)
+              AccentLink(
+                key: const Key('spawn-switch'),
+                label: 'Turn off',
+                onTap: _busy ? null : _off,
+              )
+            else if (live && canTurnOn)
+              AccentLink(
+                key: const Key('spawn-switch'),
+                label: 'Turn on',
+                onTap: () => askSpawnOn(context, ref, s, inPlace: _askHere),
+              ),
+            if (live && (sw.enabled || canTurnOn))
+              Text(' · ', style: agentSans(t, color: t.text3)),
+            AccentLink(
+              key: const Key('spawn-limits'),
+              label: 'Change limits in Agents & hosts ›',
+              onTap: () => openSpawnLimits(context),
+            ),
+          ],
+        ),
+        if (_confirm && !sw.enabled && live) ...[
           SizedBox(height: t.sp),
           KeyedSubtree(
             key: _confirmKey,
-            child: _Banner(
-              key: const Key('spawn-on-confirm'),
-              title: spawnOnConfirmText(s.displayName, widget.host),
-              action: 'Allow',
-              accent: true,
-              onAction: _busy ? null : () => _set(true),
-              onCancel: () => setState(() => _confirm = false),
+            child: SpawnOnConfirm(
+              session: s,
+              host: widget.host,
+              onDone: () => setState(() => _confirm = false),
             ),
           ),
         ],
@@ -284,10 +500,54 @@ class _SpawnSwitchRowState extends ConsumerState<SpawnSwitchRow> {
   }
 }
 
+/// An accent text link in About and the Agents tab; [danger] for End all.
+class AccentLink extends StatelessWidget {
+  const AccentLink({
+    super.key,
+    required this.label,
+    required this.onTap,
+    this.danger = false,
+  });
+
+  final String label;
+  final VoidCallback? onTap;
+  final bool danger;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Semantics(
+      button: true,
+      enabled: onTap != null,
+      label: label,
+      excludeSemantics: true,
+      onTap: onTap,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(t.rControl),
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: t.sp * 0.25),
+          child: Text(
+            label,
+            style: agentSans(
+              t,
+              color: onTap == null
+                  ? t.text3
+                  : danger
+                  ? t.danger
+                  : t.accent,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 // ---- banners --------------------------------------------------------------
 
-/// The inline confirmation for turning the spawn switch on (4t), in About.
-/// Ending and dismissing ask in the decision strip (153g).
+/// The inline confirmation for turning the spawn switch on (4t). Ending
+/// and dismissing ask in the decision strip (153g).
 class _Banner extends StatelessWidget {
   const _Banner({
     super.key,
@@ -615,40 +875,6 @@ class _DismissTreeStripState extends ConsumerState<DismissTreeStrip> {
 
 // ---- what the agent did ------------------------------------------------
 
-/// Whether a session's view says its agent may have acts to show: its
-/// switch is on its view (141e).
-bool showsActs(AgentSession s) => s.spawn.switchState != null;
-
-/// "Started poet · haiku", "Message to poet · round 2", "Ended poet": an
-/// act in one line (145a). Rows from before 145 keep their outcome.
-String actTitle(AgentAct r, AgentOverview? o) {
-  String nameOf(String? id) =>
-      id == null ? 'a session' : o?.byId(id)?.displayName ?? id;
-  final child =
-      r.name ?? (r.session == null ? null : nameOf(r.session)) ?? 'a child';
-  final base = switch (r.kind) {
-    'start' => [
-      'Started $child',
-      if (r.agent != null) providerLabel(r.agent!),
-      ?r.model,
-    ].join(' · '),
-    'message' => [
-      'Message to ${nameOf(r.target)}',
-      if (r.round != null) 'round ${r.round}',
-    ].join(' · '),
-    'end' => 'Ended ${nameOf(r.target)}',
-    _ => r.kind,
-  };
-  final how = switch (r.outcome) {
-    'start_failed' => ' · couldn’t start',
-    'denied' => ' · denied',
-    'expired' => ' · expired',
-    'refused' => ' · refused: ${requestRefusalText(r.reason, r.cap)}',
-    _ => '',
-  };
-  return '$base$how';
-}
-
 /// What the act carried, exactly as the agent sent it: a start's task, a
 /// message's text.
 String? actText(AgentAct r) => switch (r.kind) {
@@ -656,111 +882,6 @@ String? actText(AgentAct r) => switch (r.kind) {
   'message' => r.text,
   _ => null,
 };
-
-/// What a session's agent started, messaged and ended, newest first: events
-/// for the person to read, never questions (145a).
-class ActsPanel extends ConsumerWidget {
-  const ActsPanel({super.key, required this.session, this.sheet = false});
-
-  final AgentSession session;
-  final bool sheet;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final list = ref.watch(sessionActsProvider(session.id)).value;
-    final o = ref.watch(agentOverviewProvider).value;
-    final denials = o == null
-        ? const <(AgentSession, ChildEvent)>[]
-        : deniedOf(o, session.id);
-    if ((list == null || list.isEmpty) && denials.isEmpty) {
-      return Padding(
-        padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
-        child: Text(
-          'Nothing yet. Each agent this session starts, messages or ends '
-          'shows here as it happens.',
-          key: const Key('acts-empty'),
-          style: agentSans(t, color: t.text3),
-        ),
-      );
-    }
-    return ListView(
-      key: const Key('acts-list'),
-      shrinkWrap: sheet,
-      physics: sheet ? const NeverScrollableScrollPhysics() : null,
-      padding: EdgeInsets.all(sheet ? 0 : t.sp * 2),
-      children: [
-        for (final (k, e) in denials)
-          Container(
-            key: Key('act-denied-${e.id}'),
-            padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: t.border, width: t.bw),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  [
-                    'DENIED',
-                    if (DateTime.tryParse(e.at) case final at?) clockAt(at),
-                  ].join(' · '),
-                  style: agentKey(t, color: t.text3),
-                ),
-                SizedBox(height: t.sp * 0.5),
-                Text(
-                  '${k.displayName}: ${deniedLabel(e)}',
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: agentSans(t),
-                ),
-                if ((e.detail ?? '').isNotEmpty)
-                  Padding(
-                    padding: EdgeInsets.only(top: t.sp * 0.5),
-                    child: DeniedDetail(event: e, lines: 4),
-                  ),
-              ],
-            ),
-          ),
-        for (final r in list ?? const <AgentAct>[])
-          Container(
-            key: Key('act-${r.id}'),
-            padding: EdgeInsets.symmetric(vertical: t.sp * 1.25),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: t.border, width: t.bw),
-              ),
-            ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(_actWhen(r), style: agentKey(t, color: t.text3)),
-                SizedBox(height: t.sp * 0.5),
-                Text(
-                  actTitle(r, o),
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: agentSans(t),
-                ),
-                if (actText(r) case final text?)
-                  Padding(
-                    padding: EdgeInsets.only(top: t.sp * 0.5),
-                    child: Text(
-                      text,
-                      maxLines: 4,
-                      overflow: TextOverflow.ellipsis,
-                      style: agentMono(t, color: t.text2),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-}
 
 /// What [parent]'s children were refused (decision 148b), newest first:
 /// a child never asks the person, so its denials come to its parent.
@@ -794,17 +915,6 @@ class DeniedDetail extends StatelessWidget {
   }
 }
 
-String _actWhen(AgentAct r) {
-  final when = DateTime.tryParse(r.decidedAt ?? r.createdAt);
-  final word = switch (r.kind) {
-    'start' => 'START',
-    'message' => 'MESSAGE',
-    'end' => 'END',
-    _ => r.kind.toUpperCase(),
-  };
-  return when == null ? word : '$word · ${clockAt(when)}';
-}
-
 // ---- About ----------------------------------------------------------------
 
 /// The session header's meta line, with a child's own workspace named for
@@ -814,254 +924,6 @@ String spawnMeta(String meta, AgentSession s, AgentOverview? o) {
   if (parent == null) return meta;
   final ws = o?.byId(parent)?.workspace ?? 'its parent’s workspace';
   return meta.replaceFirst(s.workspace, childWorkspaceLabel(s, parent: ws));
-}
-
-/// A child's workspace as About says it (137b, 137c): where its work is, and
-/// the commit a copy starts from.
-String childWorkspaceText(AgentSession s, String parentWorkspace, String host) {
-  if (!s.hasOwnWorkspace) {
-    final where = s.spawn.cwd ?? s.workspace;
-    return '$where on $host, beside the agent that started it '
-        '(no copy of its own)';
-  }
-  final w = s.spawn.childWorkspace;
-  if (w == null) return 'Its own workspace on $host, made when it starts';
-  if (w.clone) {
-    final from = w.commit == null ? '' : ' from ${shortCommit(w.commit)}';
-    final limits = [
-      if (w.submodules) 'submodules',
-      if (w.largeFiles) 'large-file pointers',
-    ];
-    final missing = limits.isEmpty
-        ? ''
-        : '. Its ${limits.join(' and ')} weren’t copied';
-    return 'Its own copy of $parentWorkspace$from on $host (committed work '
-        'only)$missing';
-  }
-  return 'A scratch folder on $host; it reads $parentWorkspace read-only';
-}
-
-/// About's spawning rows: who started it, and a resumed child's history
-/// (C7).
-List<(String, String)> spawnAboutRows(AgentSession s, AgentOverview? o) {
-  final parent = s.spawn.parentSession;
-  final from = s.resumedFrom == null ? null : o?.byId(s.resumedFrom!);
-  final oldParent = from?.spawn.parentSession;
-  return [
-    if (parent != null)
-      (
-        'Started by',
-        '${o?.byId(parent)?.displayName ?? parent}. It runs with no more '
-            'access than it, and ends when it is ended.',
-      ),
-    if (parent == null && oldParent != null)
-      (
-        'History',
-        'Was started by ${o?.byId(oldParent)?.displayName ?? oldParent} '
-            '(history). Resumed by you, so it runs on its own now.',
-      ),
-    if (s.spawn.switchState case final sw? when sw.launchedOn)
-      (
-        'Agents it starts',
-        sw.childrenWrite
-            ? 'Write to the same vault as this session.'
-            : 'Read only. They write to no vault.',
-      ),
-    if (s.spawn.switchState case final sw? when sw.launchedOn)
-      if (o?.hosts.where((h) => h.id == s.hostId).firstOrNull?.limits
-          case final l?)
-        ('Limits', spawnLimitsText(l)),
-  ];
-}
-
-/// About's Limits row (152g): the host's, as its owner set them.
-String spawnLimitsText(HostLimits l) =>
-    '${l.maxChildren} agents at a time, ${l.maxTree} running in its tree '
-    '(itself included). Depth: ${depthLine(l.depth)}.';
-
-/// About's children, with End all children while any runs (C5).
-class SpawnChildrenSection extends ConsumerStatefulWidget {
-  const SpawnChildrenSection({super.key, required this.session});
-
-  final AgentSession session;
-
-  @override
-  ConsumerState<SpawnChildrenSection> createState() =>
-      _SpawnChildrenSectionState();
-}
-
-class _SpawnChildrenSectionState extends ConsumerState<SpawnChildrenSection> {
-  bool _confirm = false;
-
-  @override
-  Widget build(BuildContext context) {
-    final o = ref.watch(agentOverviewProvider).value;
-    final s = widget.session;
-    final kids = o == null ? const <AgentSession>[] : childrenOf(o, s.id);
-    if (kids.isEmpty) return const SizedBox.shrink();
-    final t = context.tokens;
-    final running = kids.where((k) => !k.ended).toList();
-    return Column(
-      key: const Key('spawn-children'),
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SizedBox(height: t.sp * 2),
-        Text('CHILDREN', style: agentKey(t)),
-        SizedBox(height: t.sp * 0.5),
-        Text(
-          [
-            for (final k in running) '${k.displayName} (running)',
-            for (final k in kids)
-              if (k.ended) '${k.displayName} (ended)',
-          ].join(' · '),
-          style: agentSans(t),
-        ),
-        for (final k in kids)
-          if (k.spawn.childActivity != null ||
-              k.spawn.recentEvents.isNotEmpty ||
-              (k.spawn.pendingEvents ?? 0) > 0)
-            ChildEventsTile(child: k),
-        if (running.isNotEmpty) ...[
-          SizedBox(height: t.sp),
-          // At desk width it is asked in the strip under the header; in
-          // the phone's details sheet, in place.
-          if (_confirm && !context.isExpanded)
-            EndTreeStrip(
-              session: s,
-              children: true,
-              layout: DecisionLayout.sheet,
-              onDone: () => setState(() => _confirm = false),
-            )
-          else
-            Align(
-              alignment: Alignment.centerLeft,
-              child: StormButton.outline(
-                key: const Key('end-children'),
-                label: 'End all children…',
-                onPressed: () {
-                  ref.invalidate(sessionDescendantsProvider(s.id));
-                  if (context.isExpanded) {
-                    ref.read(sessionConfirmProvider(s.id).notifier).state =
-                        SessionConfirm.endChildren;
-                  } else {
-                    setState(() => _confirm = true);
-                  }
-                },
-              ),
-            ),
-        ],
-      ],
-    );
-  }
-}
-
-/// One child's health and latest events (144a, 144b): its activity as
-/// evidence says it ("Unknown" until a gated signal says more, never
-/// working), how many events its parent has not read, and each event with
-/// where it came from when that is less than certain.
-class ChildEventsTile extends StatelessWidget {
-  const ChildEventsTile({super.key, required this.child});
-
-  final AgentSession child;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final k = child;
-    final activity = k.ended ? null : activityLabel(k.spawn.childActivity);
-    final pending = k.spawn.pendingEvents ?? 0;
-    final events = k.spawn.recentEvents.reversed.toList();
-    return Padding(
-      key: Key('child-events-${k.id}'),
-      padding: EdgeInsets.only(top: t.sp),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Wrap(
-            spacing: t.sp,
-            runSpacing: t.sp * 0.5,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(k.displayName, style: agentSans(t, weight: FontWeight.w600)),
-              if (activity != null)
-                _Pill(
-                  key: Key('child-activity-${k.id}'),
-                  text: activity,
-                  color: activity == 'Working' ? t.accent : t.text3,
-                  fill: activity == 'Working' ? t.accentSoft : t.surface2,
-                ),
-              if (pending > 0)
-                _Pill(
-                  key: Key('child-pending-${k.id}'),
-                  text: pending == 1
-                      ? '1 unread event'
-                      : '$pending unread events',
-                  color: t.accent,
-                  fill: t.accentSoft,
-                ),
-            ],
-          ),
-          for (final e in events)
-            Padding(
-              key: Key('child-event-${e.id}'),
-              padding: EdgeInsets.only(top: t.sp * 0.5),
-              child: Wrap(
-                spacing: t.sp * 0.75,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Text(
-                    [
-                      childEventLabel(e),
-                      ?roundLabel(e),
-                      if (DateTime.tryParse(e.at) case final at?) clockAt(at),
-                    ].join(' · '),
-                    style: agentMono(t),
-                  ),
-                  if (evidenceLabel(e) case final evidence?)
-                    _Pill(
-                      key: Key('event-evidence-${e.id}'),
-                      text: evidence,
-                      color: t.amber,
-                      fill: t.amberSoft,
-                    ),
-                  if (e.kind == 'denied' && (e.detail ?? '').isNotEmpty)
-                    DeniedDetail(key: Key('event-detail-${e.id}'), event: e),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _Pill extends StatelessWidget {
-  const _Pill({
-    super.key,
-    required this.text,
-    required this.color,
-    required this.fill,
-  });
-
-  final String text;
-  final Color color;
-  final Color fill;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Container(
-      padding: EdgeInsets.symmetric(
-        horizontal: t.sp * 0.75,
-        vertical: t.sp * 0.125,
-      ),
-      decoration: BoxDecoration(
-        color: fill,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(text, maxLines: 1, style: agentMono(t, color: color)),
-    );
-  }
 }
 
 /// A child's "↳ started by gateway-impl ›" and any attention, under the

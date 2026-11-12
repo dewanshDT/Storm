@@ -7,7 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_state.dart';
-import 'package:storm/agent/session_inspector.dart';
+import 'package:storm/ui/tokens.dart';
 import 'package:storm/agent/spawn_models.dart';
 import 'package:storm/agent/spawn_widgets.dart';
 import 'package:storm/router.dart';
@@ -123,10 +123,14 @@ void main() {
         expect(find.text('Work'), findsNothing);
         expect(find.textContaining('↳'), findsNothing);
         expect(find.byType(AttentionTag), findsNothing);
-        // The labels 134 asks for are the host's own: identity, isolation.
+        expect(find.byKey(const Key('inspector-rail-agents')), findsNothing);
+        expect(find.byKey(const Key('details-agents')), findsNothing);
+        expect(find.byKey(const Key('spawn-chip')), findsNothing);
+        // Identity and isolation are the host's, on its row; About keeps
+        // no internals (153j).
         expect(
           find.textContaining('Session identity not verified'),
-          findsWidgets,
+          findsNothing,
         );
         // Nothing even asks for spawning's routes.
         expect(
@@ -144,10 +148,22 @@ void main() {
     }
   });
 
-  group('the spawn switch', () {
-    testWidgets('on asks first, with what it allows; off is at once', (
-      tester,
-    ) async {
+  group('the spawn switch: the header chip and About (153j)', () {
+    Future<void> chipMenu(WidgetTester tester) async {
+      await tester.tap(find.byKey(const Key('spawn-chip')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('spawn-chip-menu')), findsOneWidget);
+    }
+
+    Color dot(WidgetTester tester) =>
+        (tester
+                    .widget<Container>(find.byKey(const Key('spawn-chip-dot')))
+                    .decoration!
+                as BoxDecoration)
+            .color!;
+
+    testWidgets('Turn on asks in the strip, with what it allows; Turn off '
+        'is at once', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
@@ -155,12 +171,26 @@ void main() {
         ],
       );
       final spawning = FakeSpawning(agents);
-      final c = await about(tester, agents, 'ags_p');
-      expect(find.text('Allow this session to start agents'), findsOneWidget);
-      expect(find.byKey(const Key('spawn-switch-note')), findsOneWidget);
-      expect(find.text('Off'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('spawn-switch')));
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      final chip = find.descendant(
+        of: find.byKey(const Key('session-bar')),
+        matching: find.byKey(const Key('spawn-chip')),
+      );
+      expect(chip, findsOneWidget);
+      final ctx = tester.element(chip);
+      expect(dot(tester), ctx.tokens.text3);
+      await chipMenu(tester);
+      await tester.tap(find.byKey(const Key('spawn-chip-toggle')));
       await tester.pumpAndSettle();
+      final confirm = find.byKey(const Key('spawn-on-confirm'));
+      expect(confirm, findsOneWidget);
+      // In the strip under the header, above the terminal.
+      expect(
+        tester.getTopLeft(confirm).dy,
+        greaterThan(
+          tester.getBottomLeft(find.byKey(const Key('session-bar'))).dy - 1,
+        ),
+      );
       expect(
         find.text(
           'Allow gateway-impl to start agents? It can then start, message '
@@ -171,23 +201,18 @@ void main() {
         findsOneWidget,
       );
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
-      await tester.ensureVisible(find.byKey(const Key('banner-action')));
-      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('banner-action')));
       await tester.pumpAndSettle();
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
         {'enabled': true},
       ]);
-      expect(
-        find.text(
-          'On · it starts, messages and ends its own agents · Turn off any '
-          'time',
-        ),
-        findsOneWidget,
-      );
+      expect(confirm, findsNothing);
+      expect(dot(tester), ctx.tokens.accent);
 
       // Off is at once and says so (141e); nothing waits to be refused.
-      await tester.tap(find.byKey(const Key('spawn-switch')));
+      await chipMenu(tester);
+      expect(find.text('Turn off'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('spawn-chip-toggle')));
       await tester.pumpAndSettle();
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn').last, {
         'enabled': false,
@@ -197,6 +222,41 @@ void main() {
         findsOneWidget,
       );
       expect(spawning.acts, isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Cancel in the strip sends nothing', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': false}),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      await chipMenu(tester);
+      await tester.tap(find.byKey(const Key('spawn-chip-toggle')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('banner-cancel')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('spawn-on-confirm')), findsNothing);
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
+      await disposeShell(tester, c);
+    });
+
+    testWidgets('Change limits goes to the hosts page', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p', spawn: {'enabled': true, 'launched_on': true}),
+        ],
+      );
+      FakeSpawning(agents);
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      await chipMenu(tester);
+      await tester.tap(find.byKey(const Key('spawn-chip-limits')));
+      await tester.pumpAndSettle();
+      expect(where(c).path, Routes.settingsPage('hosts'));
       await disposeShell(tester, c);
     });
 
@@ -215,8 +275,17 @@ void main() {
         );
         FakeSpawning(agents);
         final c = await about(tester, agents, 'ags_p');
-        expect(find.text('Unavailable · $text'), findsOneWidget);
-        await tester.tap(find.byKey(const Key('spawn-switch')));
+        expect(find.text('Off. $text.'), findsOneWidget);
+        expect(find.byKey(const Key('spawn-switch')), findsNothing);
+        await chipMenu(tester);
+        expect(
+          find.descendant(
+            of: find.byKey(const Key('spawn-chip-menu')),
+            matching: find.text(text),
+          ),
+          findsOneWidget,
+        );
+        await tester.tap(find.byKey(const Key('spawn-chip-toggle')));
         await tester.pumpAndSettle();
         expect(find.byKey(const Key('spawn-on-confirm')), findsNothing);
         expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
@@ -249,23 +318,17 @@ void main() {
         ),
         findsOneWidget,
       );
-      final toggle = tester.widget<StormToggle>(
-        find.byKey(const Key('spawn-switch')),
-      );
-      expect(toggle.enabled, isFalse);
-      await tester.tap(find.byKey(const Key('spawn-switch')));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const Key('spawn-on-confirm')), findsNothing);
+      expect(find.byKey(const Key('spawn-switch')), findsNothing);
       expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isEmpty);
       await disposeShell(tester, c);
     });
 
-    testWidgets('turning it on shows Allow in sight, however short the '
-        'window', (tester) async {
+    testWidgets('turning it on from About shows Allow in sight, however '
+        'short the window', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
-          spawnSession('ags_p', spawn: {'enabled': false}),
+          spawnSession('ags_p', spawn: {'enabled': false, 'launched_on': true}),
         ],
       );
       final spawning = FakeSpawning(agents);
@@ -276,10 +339,16 @@ void main() {
         size: size,
         at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
       );
-      final toggle = find.byKey(const Key('spawn-switch'));
-      await tester.ensureVisible(toggle);
+      if (find.byKey(const Key('session-about')).evaluate().isEmpty) {
+        await tester.tap(find.byKey(const Key('inspector-toggle')));
+        await tester.pumpAndSettle();
+      }
+      expect(find.text('Off.'), findsOneWidget);
+      final turnOn = find.byKey(const Key('spawn-switch'));
+      await tester.ensureVisible(turnOn);
       await tester.pumpAndSettle();
-      await tester.tap(toggle);
+      expect(find.text('Turn on'), findsOneWidget);
+      await tester.tap(turnOn);
       await tester.pumpAndSettle();
       final allow = find.descendant(
         of: find.byKey(const Key('spawn-on-confirm')),
@@ -290,36 +359,14 @@ void main() {
       expect(r.top, greaterThanOrEqualTo(0));
       await tester.tap(allow);
       await tester.pumpAndSettle();
-      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), isNotEmpty);
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
+        {'enabled': true},
+      ]);
       expect(spawning.acts, isEmpty);
       await disposeShell(tester, c);
     });
 
-    testWidgets('141e: launched with it, off and on again from About', (
-      tester,
-    ) async {
-      final agents = FakeAgentServer(
-        hosts: [agentHost()],
-        sessions: [
-          spawnSession('ags_p', spawn: {'enabled': false, 'launched_on': true}),
-        ],
-      );
-      FakeSpawning(agents);
-      final c = await about(tester, agents, 'ags_p');
-      expect(find.text('Off'), findsOneWidget);
-      await tester.tap(find.byKey(const Key('spawn-switch')));
-      await tester.pumpAndSettle();
-      await tester.ensureVisible(find.byKey(const Key('banner-action')));
-      await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('banner-action')));
-      await tester.pumpAndSettle();
-      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
-        {'enabled': true},
-      ]);
-      await disposeShell(tester, c);
-    });
-
-    testWidgets('152g: About says the host’s limits, depth read-only', (
+    testWidgets('152g: About says it is on with the host’s limits', (
       tester,
     ) async {
       final agents = FakeAgentServer(
@@ -343,46 +390,46 @@ void main() {
       final c = await about(tester, agents, 'ags_p');
       expect(
         find.text(
-          '2 agents at a time, 5 running in its tree (itself included). '
-          'Depth: 1 level (agents can’t start their own agents yet).',
+          'On. It starts, messages and ends its own agents, up to 2 at once '
+          'and 5 in its tree. They are read only.',
         ),
         findsOneWidget,
       );
+      expect(find.text('Turn off'), findsOneWidget);
+      expect(find.text('Change limits in Agents & hosts ›'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('spawn-limits')));
+      await tester.pumpAndSettle();
+      expect(where(c).path, Routes.settingsPage('hosts'));
       await disposeShell(tester, c);
     });
 
-    testWidgets('141e: not in the session header', (tester) async {
+    testWidgets('the chip shows only where the switch would', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
           spawnSession('ags_p', spawn: {'enabled': true, 'launched_on': true}),
+          spawnSession(
+            'ags_e',
+            name: 'done',
+            status: 'completed',
+            spawn: {'enabled': true, 'launched_on': true},
+          ),
+          spawnSession('ags_n', name: 'plain'),
         ],
       );
       FakeSpawning(agents);
-      final c = await open(
-        tester,
-        agents,
-        at: Routes.agentSession('ags_p', tab: SessionTab.context.name),
-      );
-      expect(find.byKey(const Key('session-bar')), findsOneWidget);
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('session-bar')),
-          matching: find.byKey(const Key('spawn-switch')),
-        ),
-        findsNothing,
-      );
-      expect(
-        find.descendant(
-          of: find.byKey(const Key('session-bar')),
-          matching: find.text('Allow this session to start agents'),
-        ),
-        findsNothing,
-      );
+      final c = await open(tester, agents, at: Routes.agentSession('ags_p'));
+      expect(find.byKey(const Key('spawn-chip')), findsOneWidget);
+      for (final id in ['ags_e', 'ags_n']) {
+        c.read(routerProvider).go(Routes.agentSession(id));
+        await tester.pumpAndSettle();
+        expect(find.byKey(const Key('spawn-chip')), findsNothing, reason: id);
+      }
       await disposeShell(tester, c);
     });
 
-    testWidgets('phone: in the details sheet, below 900', (tester) async {
+    testWidgets('phone: no chip; About in the details sheet turns it on in '
+        'place', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
@@ -396,17 +443,34 @@ void main() {
         size: phone,
         at: Routes.agentSession('ags_p'),
       );
+      expect(find.byKey(const Key('spawn-chip')), findsNothing);
       expect(find.byKey(const Key('spawn-switch')), findsNothing);
       await tester.tap(find.byKey(const Key('session-header')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('spawn-switch')), findsOneWidget);
+      final turnOn = find.byKey(const Key('spawn-switch'));
+      await tester.ensureVisible(turnOn);
+      await tester.pumpAndSettle();
+      await tester.tap(turnOn);
+      await tester.pumpAndSettle();
+      final allow = find.descendant(
+        of: find.byKey(const Key('spawn-on-confirm')),
+        matching: find.byKey(const Key('banner-action')),
+      );
+      await tester.ensureVisible(allow);
+      await tester.pumpAndSettle();
+      await tester.tap(allow);
+      await tester.pumpAndSettle();
+      expect(sent(agents, 'PUT', '/v1/agent/sessions/ags_p/spawn'), [
+        {'enabled': true},
+      ]);
       await disposeShell(tester, c);
     });
   });
 
   group('what the agent did (145a)', () {
     testWidgets(
-      'A-145-1: acts are events in About, with no approve or deny anywhere',
+      'A-145-1: acts are events in the Agents tab, with no approve or deny '
+      'anywhere',
       (tester) async {
         final agents = FakeAgentServer(
           hosts: [agentHost()],
@@ -439,19 +503,25 @@ void main() {
         final c = await open(
           tester,
           agents,
-          at: Routes.agentSession('ags_p', tab: SessionTab.requests.name),
+          at: Routes.agentSession('ags_p', tab: SessionTab.agents.name),
         );
-        if (find.byKey(const Key('acts-list')).evaluate().isEmpty) {
+        if (find.byKey(const Key('agents-panel')).evaluate().isEmpty) {
           await tester.tap(find.byKey(const Key('inspector-toggle')));
           await tester.pumpAndSettle();
         }
-        expect(find.text('Activity'), findsOneWidget);
-        expect(find.byKey(const Key('acts-list')), findsOneWidget);
-        expect(find.text('Started poet · Claude Code · haiku'), findsWidgets);
+        expect(find.byKey(const Key('inspector-title')), findsOneWidget);
+        expect(
+          tester.widget<Text>(find.byKey(const Key('inspector-title'))).data,
+          'Agents',
+        );
+        expect(find.text('WHAT IT SENT THEM'), findsOneWidget);
+        expect(find.text('START poet'), findsWidgets);
+        expect(find.textContaining('· Claude Code · haiku'), findsWidgets);
         expect(find.text('write a haiku'), findsWidgets);
-        expect(find.text('Message to poet · round 2'), findsWidgets);
+        expect(find.text('MESSAGE poet'), findsWidgets);
         expect(find.text('now a limerick'), findsWidgets);
-        expect(find.text('Ended poet'), findsWidgets);
+        expect(find.text('round 2'), findsOneWidget);
+        expect(find.text('END poet'), findsWidgets);
         expect(find.textContaining('· denied'), findsWidgets);
         for (final k in [
           'approval-approve',
@@ -488,7 +558,7 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('A-145-3: a child’s model shows on its row and in About', (
+    testWidgets('A-145-3: a child’s model shows in its header, not its row', (
       tester,
     ) async {
       final agents = FakeAgentServer(
@@ -507,7 +577,7 @@ void main() {
         await tester.pumpAndSettle();
       }
       // The sidebar's rows say "workspace · age" only (153e); the model is
-      // in About.
+      // in the header's meta line, and About no longer repeats it (153j).
       expect(
         find.descendant(
           of: find.byKey(const Key('session-ags_c')),
@@ -515,7 +585,11 @@ void main() {
         ),
         findsNothing,
       );
-      expect(find.text('MODEL'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('session-meta'))).data,
+        contains('haiku'),
+      );
+      expect(find.text('MODEL'), findsNothing);
       await disposeShell(tester, c);
     });
   });
@@ -643,15 +717,16 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('153g: End all children from About asks in the strip at desk '
-        'width', (tester) async {
+    testWidgets('153g: End all of them from the Agents tab asks in the strip '
+        'at desk width', (tester) async {
       final agents = FakeAgentServer(hosts: [agentHost()], sessions: family());
       FakeSpawning(agents);
       final c = await open(
         tester,
         agents,
-        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+        at: Routes.agentSession('ags_p', tab: SessionTab.agents.name),
       );
+      expect(find.text('End all of them…'), findsOneWidget);
       await tester.ensureVisible(find.byKey(const Key('end-children')));
       await tester.tap(find.byKey(const Key('end-children')));
       await tester.pumpAndSettle();
@@ -663,7 +738,7 @@ void main() {
           matching: find.byKey(const Key('decision-strip')),
         ),
         findsOneWidget,
-        reason: 'the strip under the header, not a card in About',
+        reason: 'the strip under the header, not a card in the tab',
       );
       await disposeShell(tester, c);
     });
@@ -704,12 +779,10 @@ void main() {
       final c = await open(
         tester,
         agents,
-        at: Routes.agentSession('ags_p', tab: SessionTab.about.name),
+        at: Routes.agentSession('ags_p', tab: SessionTab.agents.name),
       );
-      expect(
-        find.text('test-gateway (running) · spike-notes (ended)'),
-        findsOneWidget,
-      );
+      expect(find.byKey(const Key('agent-child-ags_c')), findsOneWidget);
+      expect(find.byKey(const Key('agent-child-ags_d')), findsOneWidget);
       await tester.ensureVisible(find.byKey(const Key('end-children')));
       await tester.tap(find.byKey(const Key('end-children')));
       await tester.pumpAndSettle();
@@ -847,54 +920,39 @@ void main() {
       ),
     ];
 
-    for (final width in [kInspectorWidth, kInspectorMinWidth]) {
-      testWidgets(
-        'every tab of a child’s panel is in sight at a desktop width, '
-        'the inspector at ${width.toInt()}px',
-        (tester) async {
-          final agents = FakeAgentServer(
-            hosts: [agentHost()],
-            sessions: [
-              spawnSession('ags_p'),
-              spawnSession(
-                'ags_c',
-                name: 'test-gateway',
-                parent: 'ags_p',
-                depth: 1,
-                spawn: {'enabled': false},
-                childWorkspace: {'mode': 'clone', 'commit': 'abc1234def0000'},
-              ),
-            ],
-          );
-          FakeSpawning(agents).work['ags_c'] = cloneWork();
-          final c = await open(
-            tester,
-            agents,
-            size: const Size(1280, 800),
-            at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
-          );
-          c.read(sessionInspectorWidthProvider.notifier).state = width;
-          await tester.pumpAndSettle();
-          final close = tester.getRect(
-            find.byKey(const Key('inspector-close')),
-          );
-          for (final tab in SessionTab.values) {
-            final found = find.byKey(Key('panel-tab-$tab'));
-            if (tab == SessionTab.wrote || tab == SessionTab.context) {
-              expect(found, findsOneWidget);
-            }
-            if (found.evaluate().isEmpty) continue;
-            final r = tester.getRect(found);
-            expect(r.right, lessThanOrEqualTo(close.left), reason: '$tab');
-            expect(r.left, greaterThanOrEqualTo(1280 - width - 1));
-          }
-          await tester.tap(find.byKey(const Key('panel-tab-SessionTab.work')));
-          await tester.pumpAndSettle();
-          expect(where(c).queryParameters['tab'], SessionTab.work.name);
-          await disposeShell(tester, c);
-        },
+    testWidgets('a child with its own workspace has Work on the rail, in '
+        'sight; Work opens its tab', (tester) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          spawnSession('ags_p'),
+          spawnSession(
+            'ags_c',
+            name: 'test-gateway',
+            parent: 'ags_p',
+            depth: 1,
+            spawn: {'enabled': false},
+            childWorkspace: {'mode': 'clone', 'commit': 'abc1234def0000'},
+          ),
+        ],
       );
-    }
+      FakeSpawning(agents).work['ags_c'] = cloneWork();
+      final c = await open(
+        tester,
+        agents,
+        size: const Size(1280, 800),
+        at: Routes.agentSession('ags_c', tab: SessionTab.about.name),
+      );
+      for (final tab in SessionTab.values) {
+        final r = tester.getRect(find.byKey(Key('inspector-rail-${tab.name}')));
+        expect(r.bottom, lessThanOrEqualTo(800), reason: '$tab');
+        expect(r.right, lessThanOrEqualTo(1280), reason: '$tab');
+      }
+      await tester.tap(find.byKey(const Key('inspector-rail-work')));
+      await tester.pumpAndSettle();
+      expect(where(c).queryParameters['tab'], SessionTab.work.name);
+      await disposeShell(tester, c);
+    });
 
     testWidgets('a clone: its diff, Apply as storm/<child>, once', (
       tester,
@@ -1114,9 +1172,8 @@ void main() {
       });
     }
 
-    testWidgets('a child’s header names who started it, and About its copy', (
-      tester,
-    ) async {
+    testWidgets('a child’s header names who started it and its copy; About '
+        'says who started it', (tester) async {
       final agents = FakeAgentServer(
         hosts: [agentHost()],
         sessions: [
@@ -1138,11 +1195,12 @@ void main() {
       );
       expect(find.text('↳ started by gateway-impl ›'), findsOneWidget);
       expect(
-        find.text(
-          'Its own copy of storm from abc1234 on build-vm (committed work '
-          'only)',
-        ),
-        findsOneWidget,
+        tester.widget<Text>(find.byKey(const Key('session-meta'))).data,
+        contains('own copy of storm'),
+      );
+      expect(
+        tester.widget<Text>(find.byKey(const Key('about-started-by'))).data,
+        startsWith('gateway-impl, '),
       );
       await tester.tap(find.byKey(const Key('started-by')));
       await tester.pumpAndSettle();
