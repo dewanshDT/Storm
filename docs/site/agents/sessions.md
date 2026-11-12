@@ -109,25 +109,37 @@ bar has **⇧Tab**). Storm doesn't add or remove any.
 ### Deletes wait for you
 
 An agent that may write to a vault can ask to delete a note or a folder
-there, saying why. Nothing is deleted until you answer: a dialog opens on
-every device you're signed in on, with the agent, its session (and the note
-it started from), what would go (a note's path, size and last change, or a
-folder's note count and first paths) and the agent's reason, shown as plain
-text.
+there, saying why. Nothing is deleted until you answer. The request waits in
+a strip under the session's header, never in a pop-up: **NEEDS YOU · 1 OF 1**
+(or "1 of 2" when more is waiting), "*session* wants to delete *note*", the
+agent's reason word for word, what would go (a note's path, size and last
+change, or a folder's note count and first paths), and where it goes if you
+approve: the vault's Trash, kept for as long as that vault keeps deleted
+items.
 
-- **Approve** moves it to the vault's [Trash](/docs/notes/vaults/#trash);
-  **Decline** keeps it and tells the agent no. There is no "always allow",
-  and Auto mode does not skip the dialog.
-- **Later**, Esc or clicking outside only closes the dialog on that device:
-  the request keeps waiting and isn't declined. It doesn't pop up again
-  there on its own (a new request does); your other devices still show it.
-- The first answer wins; the dialog on your other devices closes and says
-  where it was answered. While it waits, the session shows **Needs you**,
-  and **Review** reopens the dialog.
+- **Move to Trash** moves it to the vault's [Trash](/docs/notes/vaults/#trash),
+  where you can restore it; **Decline** keeps it and tells the agent no.
+  There is no "always allow", and Auto mode does not skip it.
+- **Later** (or Esc, once the terminal doesn't have the key) folds the strip
+  to one line with **Review**: the request keeps waiting and isn't
+  declined.
+- On any other screen, or a device not showing that session, a request
+  raises one short message, "*session* wants to delete *note* · Review",
+  once per request on each device. **Review** opens the session. The
+  Agents button's count includes it while it waits.
+- On a phone the strip is one line under the header; **Review** opens the
+  whole request in a sheet with Move to Trash, Decline and Later.
+- The first answer wins; if the session is open on another device, its
+  strip goes and says where it was answered.
 - If the note is edited or moved, or the folder's notes change, before you
   approve, nothing is deleted and the agent is told to look again.
 - Unanswered, it times out after 10 minutes. An agent asks for one deletion
   at a time, and an agent another agent started can't delete at all.
+
+Ending a session that started agents, ending all of them, and dismissing a
+tree of sessions ask in the same strip: **CONFIRM**, with what is still
+running, what already ended (and any commits not yet applied), and the
+button that does it.
 
 ## When it ends
 

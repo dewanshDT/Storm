@@ -56,8 +56,8 @@ server keeps the last version it had.
 - **Restore** puts it back where it was, as the same note. If something new
   now has that name, the restored one is called `Name (restored).md` —
   nothing is overwritten. Attachments only that note used come back with it.
-- **Delete forever** and **Empty trash** ask first, then remove the files
-  and their history for good.
+- **Delete forever** and **Empty trash** ask first, in a strip at the top
+  of the Trash view, then remove the files and their history for good.
 - Items are kept for **30 days**, then removed automatically. Change this
   per vault in the Trash view (7, 30 or 90 days, or never); it is stored as
   `storm.trash.retention` in `_storm/vault.md`.

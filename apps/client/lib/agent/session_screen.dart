@@ -21,6 +21,8 @@ import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
+import '../ui/decision_strip.dart' show DecisionLayout;
+import '../ui/surfaces.dart' show showStormSheet;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
 import 'agent_models.dart';
@@ -70,11 +72,11 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
   bool _confirmEnd = false;
   bool _ending = false;
 
-  /// Ending a parent lists its children first (C1); dismissing one of a
-  /// tree dismisses the tree (C8).
-  bool _endTree = false;
-  bool _dismissTree = false;
   bool _reloadedAtEnd = false;
+
+  /// The delete request put aside here with Later (or Esc): its strip folds
+  /// to one line with Review until the next one.
+  String? _laterFor;
 
   /// A written note shown in the Wrote tab, with "‹ Wrote" back.
   NoteRef? _wroteNote;
@@ -94,9 +96,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     super.didUpdateWidget(old);
     if (old.sessionId != widget.sessionId) {
       _confirmEnd = false;
-      _endTree = false;
-      _dismissTree = false;
       _reloadedAtEnd = false;
+      _laterFor = null;
       _wroteNote = null;
     }
     if (old.tab != widget.tab) _wroteNote = null;
@@ -131,14 +132,54 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
   }
 
+  /// Ending a parent lists its children first (C1); dismissing one of a
+  /// tree dismisses the tree (C8). Both ask in the strip under the header
+  /// at desk width, and in a sheet on a phone (153g).
+  void _ask(SessionConfirm what) {
+    if (!mounted) return;
+    setState(() => _confirmEnd = false);
+    if (context.isExpanded) {
+      ref.read(sessionConfirmProvider(_id).notifier).state = what;
+      return;
+    }
+    final s =
+        ref.read(sessionDetailProvider(_id)).value ??
+        ref.read(agentOverviewProvider).value?.byId(_id);
+    if (s == null) return;
+    showStormSheet<void>(
+      context: context,
+      title: 'Confirm',
+      heightFactor: 0.85,
+      builder: (sheet) {
+        void done() {
+          if (!sheet.mounted) return;
+          final route = ModalRoute.of(sheet);
+          if (route != null && route.isCurrent) Navigator.of(sheet).pop();
+        }
+
+        return what == SessionConfirm.dismissTree
+            ? DismissTreeStrip(
+                session: s,
+                layout: DecisionLayout.sheet,
+                onDone: done,
+                onDismissed: () {
+                  done();
+                  _gone();
+                },
+              )
+            : EndTreeStrip(
+                session: s,
+                children: what == SessionConfirm.endChildren,
+                layout: DecisionLayout.sheet,
+                onDone: done,
+              );
+      },
+    );
+  }
+
   void _showEndTree() {
     ref.invalidate(sessionDescendantsProvider(_id));
-    if (mounted) {
-      setState(() {
-        _confirmEnd = false;
-        _endTree = true;
-      });
-    }
+    _ask(SessionConfirm.endTree);
   }
 
   /// End, or End with its children listed when it has any running.
@@ -159,7 +200,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   Future<void> _dismiss([AgentSession? s]) async {
     if (s != null && inTree(ref.read(agentOverviewProvider).value, s)) {
-      setState(() => _dismissTree = true);
+      _ask(SessionConfirm.dismissTree);
       return;
     }
     final api = agentApi(ref);
@@ -174,7 +215,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     } catch (e) {
       if (e is AgentRefusal &&
           (e.code == 'confirm_tree' || e.code == 'tree_live')) {
-        setState(() => _dismissTree = true);
+        _ask(SessionConfirm.dismissTree);
       } else {
         _say(describeFailure(e));
       }
@@ -183,31 +224,63 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     }
   }
 
-  /// The confirmations spawning adds below the header.
-  List<Widget> _spawnBanners(AgentSession s, {required EdgeInsets padding}) => [
-    if (s.deleteRequest case final r? when r.pending && !s.ended)
-      Padding(
-        padding: padding,
-        child: DeleteRequestCard(session: s),
-      ),
-    if (_endTree && !s.ended)
-      Padding(
-        padding: padding,
-        child: EndTreeBanner(
+  /// The one strip under the header at desk width (153g): a confirmation
+  /// the person asked for, else End's own, else what waits for them. Never
+  /// more than one, and never a dialog.
+  Widget? _deskStrip(AgentSession s, SessionController? c) {
+    final t = context.tokens;
+    void done() => ref.read(sessionConfirmProvider(_id).notifier).state = null;
+    switch (ref.watch(sessionConfirmProvider(_id))) {
+      case SessionConfirm.endTree || SessionConfirm.endChildren when !s.ended:
+        return EndTreeStrip(
           session: s,
-          onDone: () => setState(() => _endTree = false),
-        ),
-      ),
-    if (_dismissTree)
-      Padding(
-        padding: padding,
-        child: DismissTreeBanner(
+          children:
+              ref.read(sessionConfirmProvider(_id)) ==
+              SessionConfirm.endChildren,
+          onDone: done,
+        );
+      case SessionConfirm.dismissTree:
+        return DismissTreeStrip(
           session: s,
-          onDone: () => setState(() => _dismissTree = false),
-          onDismissed: _gone,
+          onDone: done,
+          onDismissed: () {
+            done();
+            _gone();
+          },
+        );
+      default:
+    }
+    if (_confirmEnd && !s.ended) {
+      return Padding(
+        padding: EdgeInsets.fromLTRB(
+          t.sp * 2,
+          t.sp * 1.5,
+          t.sp * 2,
+          t.sp * 1.5,
         ),
-      ),
-  ];
+        child: InlineConfirm(
+          key: const Key('end-confirm'),
+          title: 'End ${s.displayName}',
+          message:
+              'The agent and everything it started are stopped on the host.',
+          confirmLabel: 'End session',
+          onConfirm: _ending ? null : () => _end(c),
+          onCancel: () => setState(() => _confirmEnd = false),
+        ),
+      );
+    }
+    final d = deleteDecisionOf(s);
+    if (d == null) return null;
+    return DeleteDecisionStrip(
+      key: ValueKey('delete-${d.request.id}'),
+      session: s,
+      collapsed: _laterFor == d.request.id,
+      onLater: () => setState(() => _laterFor = d.request.id),
+      onReview: () => setState(() => _laterFor = null),
+      // The terminal's own Esc is the agent's (147b).
+      escapeAllowed: () => !_focus.hasFocus,
+    );
+  }
 
   void _runAgain(AgentSession s) =>
       launchAgentSession(context, ref, runAgain: s);
@@ -390,24 +463,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _header(context, s, host, inspectorOpen: open),
-            if (_confirmEnd && !s.ended)
-              Padding(
-                padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
-                child: InlineConfirm(
-                  key: const Key('end-confirm'),
-                  title: 'End ${s.displayName}',
-                  message:
-                      'The agent and everything it started are stopped on '
-                      'the host.',
-                  confirmLabel: 'End session',
-                  onConfirm: _ending ? null : () => _end(c),
-                  onCancel: () => setState(() => _confirmEnd = false),
-                ),
-              ),
-            ..._spawnBanners(
-              s,
-              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp * 1.5, t.sp * 2, 0),
-            ),
+            ?_deskStrip(s, c),
             _Trouble(controller: c),
             Expanded(
               child: open
@@ -679,10 +735,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            ..._spawnBanners(
-              s,
-              padding: EdgeInsets.fromLTRB(t.sp * 2, t.sp, t.sp * 2, t.sp),
-            ),
+            PhoneDeleteStrip(session: s),
             _Trouble(controller: c),
             Expanded(
               child: DecoratedBox(
@@ -981,7 +1034,7 @@ class _PhoneHeader extends ConsumerWidget {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontFamily: StormTokens.sansFamily,
-                      fontSize: 15,
+                      fontSize: t.bodySize * 0.94,
                       fontWeight: FontWeight.w600,
                       height: 1.25,
                       color: t.text,
@@ -991,7 +1044,11 @@ class _PhoneHeader extends ConsumerWidget {
                 SizedBox(width: t.sp * 0.75),
                 Text(
                   '▾',
-                  style: TextStyle(fontSize: 11, height: 1, color: t.text3),
+                  style: TextStyle(
+                    fontSize: t.labelSize,
+                    height: 1,
+                    color: t.text3,
+                  ),
                 ),
               ],
             ),
@@ -1573,7 +1630,7 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
             key: const Key('details-name'),
             style: TextStyle(
               fontFamily: StormTokens.sansFamily,
-              fontSize: 17,
+              fontSize: t.bodySize * 1.06,
               fontWeight: FontWeight.w600,
               height: 1.3,
               color: t.text,
@@ -1711,8 +1768,9 @@ class _DetailsState extends ConsumerState<SessionDetailsSheet> {
       SpawnChildrenSection(session: s),
       if (!s.ended) ...[
         if (_endTree)
-          EndTreeBanner(
+          EndTreeStrip(
             session: s,
+            layout: DecisionLayout.sheet,
             onDone: () => setState(() => _endTree = false),
           )
         else if (_confirm) ...[
