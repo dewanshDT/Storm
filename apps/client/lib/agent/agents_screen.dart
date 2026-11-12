@@ -12,6 +12,7 @@ import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/panels.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
+import '../ui/shell/app_bar.dart' show pageTopInset;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
 import 'agent_models.dart';
@@ -45,7 +46,7 @@ class AgentsScreen extends ConsumerWidget {
       final Widget body;
       if (o == null) {
         body = Padding(
-          padding: EdgeInsets.fromLTRB(t.sp * 5, t.sp * 3.5, t.sp * 5, 0),
+          padding: EdgeInsets.fromLTRB(t.sp * 5, pageTopInset(t), t.sp * 5, 0),
           child: const SkeletonRows(rows: 4),
         );
       } else if (o.unreachable) {
@@ -678,7 +679,7 @@ class _Overview extends ConsumerWidget {
           child: Padding(
             padding: EdgeInsets.fromLTRB(
               t.sp * 5,
-              t.sp * 3.5,
+              pageTopInset(t),
               t.sp * 5,
               t.sp * 7.5,
             ),

@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
+import '../ui/shell/app_bar.dart' show pageTopInset;
 import '../ui/states.dart';
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
@@ -83,7 +84,7 @@ class _CrewScreenState extends ConsumerState<CrewScreen> {
                 child: Padding(
                   padding: EdgeInsets.fromLTRB(
                     t.sp * 5,
-                    t.sp * 3.5,
+                    pageTopInset(t),
                     t.sp * 5,
                     t.sp * 7.5,
                   ),

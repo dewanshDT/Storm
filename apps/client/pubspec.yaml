@@ -70,6 +70,7 @@ dependencies:
   desktop_drop: ^0.8.4
   bonsoir: ^7.1.5
   device_info_plus: ^13.3.0
+  window_manager: ^0.5.2
 dev_dependencies:
   # Used by test/cache_migration_test.dart to build a pre-migration schema
   # by hand — the only way to exercise the upgrade path for real.

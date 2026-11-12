@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
@@ -18,6 +19,25 @@ Map<ShortcutActivator, Intent> stormGlobalShortcuts() => {
   stormActivator(LogicalKeyboardKey.backslash):
       const StormToggleSidebarIntent(),
 };
+
+/// The app bar's back and forward (153c): ⌘[ and ⌘] on macOS, Alt+← and
+/// Alt+→ elsewhere. None on the web, where the browser's own keys already
+/// move its history and the bar follows it.
+Map<ShortcutActivator, Intent> stormNavShortcuts() => kIsWeb
+    ? const {}
+    : stormUsesMetaModifier
+    ? {
+        const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):
+            const StormBackIntent(),
+        const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
+            const StormForwardIntent(),
+      }
+    : {
+        const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true):
+            const StormBackIntent(),
+        const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
+            const StormForwardIntent(),
+      };
 
 Map<ShortcutActivator, Intent> stormNoteShortcuts() => {
   stormActivator(LogicalKeyboardKey.keyE): const StormToggleReadEditIntent(),

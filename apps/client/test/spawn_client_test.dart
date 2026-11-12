@@ -927,6 +927,11 @@ void main() {
         findsOneWidget,
       );
       expect(spawning.deleted, isEmpty);
+      // The app bar takes the top 45, so the panel scrolls to its foot.
+      await tester.ensureVisible(
+        find.byKey(const Key('work-delete-confirmed')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('work-delete-confirmed')));
       await tester.pumpAndSettle();
       expect(spawning.deleted, ['ags_c']);

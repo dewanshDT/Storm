@@ -23,6 +23,14 @@ class StormToggleSidebarIntent extends Intent {
   const StormToggleSidebarIntent();
 }
 
+class StormBackIntent extends Intent {
+  const StormBackIntent();
+}
+
+class StormForwardIntent extends Intent {
+  const StormForwardIntent();
+}
+
 // --- Note open ------------------------------------------------------------
 
 class StormToggleReadEditIntent extends Intent {

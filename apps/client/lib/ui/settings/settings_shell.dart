@@ -8,12 +8,14 @@ import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
 import '../../agent/claude_login_screen.dart';
 import '../../agent/hosts_screen.dart';
 import '../../agent/integrations_screen.dart';
+import '../../keyboard/storm_activators.dart' show stormHasKeyboard;
 import '../../router.dart';
 import '../../state/app_state.dart' show serverConfigProvider;
 import '../../state/health.dart' show integrationsAttentionProvider;
 import '../breakpoints.dart';
 import '../controls.dart';
 import '../shell/sidebar_frame.dart';
+import '../shell/app_bar.dart' show sidebarTopInset;
 import '../shell/storm_scaffold.dart';
 import '../tokens.dart';
 import 'access_page.dart';
@@ -144,21 +146,26 @@ class SettingsShell extends StatelessWidget {
   Widget build(BuildContext context) {
     if (!context.isExpanded) return child;
     final selected = page ?? 'device';
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        SidebarFrame(
-          body: SettingsNav(
-            selected: selected,
-            onOpen: (id) => context.go(Routes.settingsPage(id)),
+    // Focus so the app bar's ⌘[ / ⌘] work before anything is clicked.
+    return Focus(
+      autofocus: stormHasKeyboard,
+      skipTraversal: true,
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SidebarFrame(
+            body: SettingsNav(
+              selected: selected,
+              onOpen: (id) => context.go(Routes.settingsPage(id)),
+            ),
           ),
-        ),
-        Expanded(
-          child: PaneSemantics(
-            child: page == null ? settingsPageFor(selected) : child,
+          Expanded(
+            child: PaneSemantics(
+              child: page == null ? settingsPageFor(selected) : child,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
@@ -208,10 +215,22 @@ class SettingsNav extends StatelessWidget {
     }
 
     return ListView(
-      padding: EdgeInsets.fromLTRB(t.sp * 1.5, t.sp * 2.75, t.sp * 1.5, t.sp),
+      padding: EdgeInsets.fromLTRB(
+        t.sp * 1.5,
+        sidebarTopInset(t),
+        t.sp * 1.5,
+        t.sp,
+      ),
       children: [
+        // The heading is a row's height, as the Agents sidebar's is, so the
+        // two titles sit on one line.
         Padding(
-          padding: EdgeInsets.only(left: t.sp * 1.25, bottom: t.sp * 1.5),
+          padding: EdgeInsets.fromLTRB(
+            t.sp * 1.25,
+            t.sp * 0.75,
+            0,
+            t.sp * 0.75,
+          ),
           child: Text(
             'Settings',
             style: TextStyle(
