@@ -294,13 +294,14 @@ impl FakeRelay {
         let status = head["status"].as_u64().unwrap() as u16;
         let headers = head["headers"].clone();
 
-        let mut body = Vec::new();
+        let (mut body, mut largest_frame) = (Vec::new(), 0);
         loop {
             match self.next_event().await {
                 Event::Binary(frame) => {
                     let (kind, id, payload) = proto::decode_body_frame(&frame).unwrap();
                     assert_eq!(kind, proto::FRAME_RESPONSE_BODY);
                     assert_eq!(id, stream_id);
+                    largest_frame = largest_frame.max(payload.len());
                     body.extend_from_slice(payload);
                 }
                 Event::Text(value) if value["type"] == "PING" => continue,
@@ -316,6 +317,7 @@ impl FakeRelay {
             status,
             headers,
             body,
+            largest_frame,
         }
     }
 }
@@ -352,6 +354,8 @@ struct TunnelResponse {
     status: u16,
     headers: serde_json::Value,
     body: Vec<u8>,
+    /// The largest response body frame's payload.
+    largest_frame: usize,
 }
 
 impl TunnelResponse {
@@ -1523,7 +1527,8 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
     let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
 
     // A session that has ended, with output, so the stream sends everything
-    // and closes — what lets the fake relay read the whole response.
+    // and closes — what lets the fake relay read the whole response. The
+    // output fills one 256 KiB catch-up event, ~341 KiB of base64 (154-S1).
     let (_generation, _rx) = state.agent.connect_host("hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X");
     state
         .agent
@@ -1555,9 +1560,11 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         .unwrap()
         .0;
     let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+    let mut output = b"over the relay".to_vec();
+    output.extend((0..256 * 1024 - output.len()).map(|i| (i % 251) as u8));
     state
         .agent
-        .host_output(host, &record.id, 0, b"over the relay")
+        .host_output(host, &record.id, 0, &output)
         .unwrap();
     state
         .agent
@@ -1599,9 +1606,21 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
     let body = String::from_utf8_lossy(&streamed.body);
     assert!(body.starts_with("event: status"), "status first: {body}");
     assert!(body.contains("event: output"), "{body}");
+    let events: Vec<&str> = body.split("\n\n").filter(|e| !e.is_empty()).collect();
+    assert_eq!(events.len(), 2, "status, then one output event");
+    let data = events[1]
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap();
+    assert!(data.len() > 340 * 1024, "one event of {} bytes", data.len());
     assert!(
-        body.contains(&data_encoding::BASE64.encode(b"over the relay")),
-        "{body}"
+        data_encoding::BASE64.decode(data.as_bytes()).unwrap() == output,
+        "the event arrives whole"
+    );
+    assert!(
+        streamed.largest_frame <= proto::MAX_BODY_FRAME_PAYLOAD,
+        "a frame carried {} bytes",
+        streamed.largest_frame
     );
 
     // And the host tier is the host tier over the relay too.
