@@ -6,10 +6,11 @@ import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/nav_memory.dart';
-import '../../keyboard/storm_nav_shortcuts.dart';
+import '../../keyboard/storm_app_shortcuts.dart';
 import '../breakpoints.dart';
 import 'activity_rail.dart';
 import 'app_bar.dart';
+import 'create_here.dart' show pageArrivalProvider;
 import 'nav_history.dart';
 import 'sidebar_frame.dart';
 import 'window_buttons.dart';
@@ -145,6 +146,7 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
+    ref.read(pageArrivalProvider).visit(Uri.parse(widget.location));
     final child = BackButtonListener(
       onBackButtonPressed: _back,
       child: widget.child,
@@ -182,11 +184,7 @@ class _AppShellState extends ConsumerState<AppShell> {
     // watch (decision 149c).
     return DeleteRequestWatcher(
       location: widget.location,
-      child: StormNavShortcuts(
-        onBack: () => goBack(context, ref),
-        onForward: () => goForward(context, ref),
-        child: body,
-      ),
+      child: StormAppShortcuts(child: body),
     );
   }
 }

@@ -4,10 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
-import '../keyboard/storm_activators.dart' show stormHasKeyboard;
-import '../keyboard/storm_intents.dart' show StormNewSessionIntent;
-import '../keyboard/storm_shortcut_maps.dart'
-    show stormAgentsShortcuts, stormNewSessionChord;
+import '../state/app_state.dart' show sidebarCollapsedProvider;
+import '../keyboard/storm_shortcut_maps.dart' show stormNewSessionChord;
 import '../ui/breakpoints.dart';
 import '../ui/shell/sidebar_frame.dart';
 import '../ui/shell/app_bar.dart' show sidebarTopInset;
@@ -54,37 +52,18 @@ class AgentsShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!context.isExpanded) return child;
-    // Focus so the app bar's ⌘[ / ⌘] and ⇧⌘N work before anything is
-    // clicked, as VaultShell's does for the Notes chords.
-    return Shortcuts(
-      shortcuts: stormAgentsShortcuts(),
-      child: Actions(
-        actions: {
-          StormNewSessionIntent: CallbackAction<StormNewSessionIntent>(
-            onInvoke: (_) {
-              if (newSessionBlocker(ref.read(agentOverviewProvider)) == null) {
-                launchAgentSession(context, ref);
-              }
-              return null;
-            },
-          ),
-        },
-        child: Focus(
-          autofocus: stormHasKeyboard,
-          skipTraversal: true,
-          child: Scaffold(
-            body: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                AgentsSidebar(
-                  selected: sessionIdOf(location),
-                  selectedCrew: crewIdOf(location),
-                ),
-                Expanded(child: PaneSemantics(child: child)),
-              ],
+    final collapsed = ref.watch(sidebarCollapsedProvider);
+    return Scaffold(
+      body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!collapsed)
+            AgentsSidebar(
+              selected: sessionIdOf(location),
+              selectedCrew: crewIdOf(location),
             ),
-          ),
-        ),
+          Expanded(child: PaneSemantics(child: child)),
+        ],
       ),
     );
   }

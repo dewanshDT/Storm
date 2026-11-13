@@ -251,19 +251,27 @@ preset change applies at once and persists on this device.
 
 ## 8. Keyboard (desktop, M18)
 
-Platform-aware (⌘ on macOS / Mac web, Ctrl elsewhere).
+Platform-aware (⌘ on macOS / Mac web, Ctrl elsewhere). One app-wide layer
+in `AppShell` (decision 156), armed on every signed-in screen at every width
+wherever there is a physical keyboard; phones arm nothing. The chords come
+from one command registry (`lib/keyboard/storm_commands.dart`).
 
 | Action | macOS | Win / Linux |
 |---|---|---|
-| Search | ⌘ K | Ctrl K |
-| New note | ⌘ N | Ctrl N |
-| New folder | ⌘ ⇧ N | Ctrl ⇧ N |
-| Toggle sidebar | ⌘ \\ | Ctrl \\ |
+| Search (the open vault's) | ⌘ K, ⌘ P, ⌘ ⇧ P | Ctrl K, Ctrl P, Ctrl ⇧ K, Ctrl ⇧ P |
+| New note (any screen, active vault) | ⌘ N | Ctrl N |
+| New folder (Notes) | ⌘ ⇧ N | Ctrl ⇧ N |
+| New session (Agents) | ⌘ ⇧ N | Ctrl ⇧ N |
+| Toggle sidebar (≥900, any activity) | ⌘ \\ | Ctrl \\ |
+| Back / Forward (not on web) | ⌘ [ / ⌘ ] | Alt ← / Alt → |
 | Read ↔ Edit | ⌘ E | Ctrl E |
 | Save | ⌘ S | Ctrl S |
 | Find in note | ⌘ F | Ctrl F |
 | Bold / Italic | ⌘ B / I | Ctrl B / I |
 | Dismiss / leave | Esc | Esc |
+
+With the terminal focused, every app chord stops there except ⌘K, ⌘P, ⇧⌘P,
+⌘[ and ⌘] on macOS and Ctrl ⇧ K / Ctrl ⇧ P elsewhere (AM111).
 
 ---
 
