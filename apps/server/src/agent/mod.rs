@@ -20,6 +20,7 @@ pub mod acts;
 pub mod attention;
 pub mod cache;
 pub mod cascade;
+pub mod changes;
 pub mod credential;
 pub mod deletes;
 pub mod events;
@@ -973,8 +974,9 @@ impl SessionLive {
         }
     }
 
-    fn bump(&self) {
+    fn bump(&self, changes: &changes::Changes) {
         self.version.send_modify(|v| *v += 1);
+        changes.touch();
     }
 }
 
@@ -1049,6 +1051,7 @@ pub struct AgentManager {
     pub(crate) wake_poke: tokio::sync::Notify,
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
+    changes: changes::Changes,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
 }
@@ -1181,6 +1184,7 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
+            changes: changes::Changes::new(),
             #[cfg(test)]
             record_reads: Default::default(),
         })
@@ -1250,6 +1254,7 @@ impl AgentManager {
             }
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
+        self.views_changed();
         // A start that went down this link and was never reported has
         // failed: the host may still read it from a stale connection, and
         // must not run it then.
@@ -1529,7 +1534,7 @@ impl AgentManager {
         live.sessions
             .entry(session_id.to_string())
             .or_insert_with(SessionLive::new)
-            .bump();
+            .bump(&self.changes);
     }
 
     /// Reconciles from a host's `hello` (freeze §13):
@@ -2160,7 +2165,7 @@ impl AgentManager {
                 .entry(session_id.to_string())
                 .or_insert_with(SessionLive::new);
             s.cache.insert(offset, bytes);
-            s.bump();
+            s.bump(&self.changes);
         }
         // Throttled: one activity write per second is plenty for a list view.
         let stamp = now();
