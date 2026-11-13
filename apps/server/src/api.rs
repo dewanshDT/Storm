@@ -445,6 +445,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/keys", get(list_keys).post(create_key))
         .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/recents", get(recents))
+        .route("/v1/search", get(search_all))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
         .route(
@@ -3470,6 +3471,16 @@ async fn recents(
     Ok(Json(serde_json::json!({ "recents": recents })))
 }
 
+async fn search_all(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(q): Query<SearchQuery>,
+) -> ApiResult<Json<crate::ops::CrossSearch>> {
+    Ok(Json(
+        crate::ops::search_all(&state, &actor, &q.q, q.limit).await?,
+    ))
+}
+
 async fn tree(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
@@ -4817,6 +4828,75 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn cross_vault_search_answers_a_session_and_refuses_the_unauthenticated() {
+        let dir = tempdir::TempDir::new("storm-search-all").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let actor = Actor::Session {
+            user_id: owner.clone(),
+        };
+        for name in ["home", "work"] {
+            let Ok(vault) = crate::ops::create_vault(&state, name).await else {
+                panic!("create_vault {name}");
+            };
+            let created =
+                crate::ops::create_note(&state, &actor, &vault.id, "Plan.md", "# Plan\n\nbudget\n")
+                    .await;
+            assert!(created.is_ok());
+        }
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=pla", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let hits = body["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0]["vault_name"], "home");
+        assert_eq!(hits[0]["title"], "Plan");
+        assert_eq!(hits[0]["tier"], 1);
+        for key in ["vault_id", "id", "path", "snippet"] {
+            assert!(hits[0][key].is_string(), "{key}");
+        }
+        assert_eq!(body["skipped"], serde_json::json!([]));
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=%20%20&limit=5", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"], serde_json::json!([]));
+
+        let (status, _) = send(&app, get("/v1/search?q=plan")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn cross_vault_search_filters_where_a_named_vault_refuses() {
+        let dir = tempdir::TempDir::new("storm-search-all-filter").unwrap();
+        let (app, _, state) = test_router_with_policy(dir.path(), Arc::new(DenyAll));
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        register_vault(&state, "Notes").await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=plan", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a collection is filtered, never refused"
+        );
+        assert_eq!(body["hits"], serde_json::json!([]));
+        assert_eq!(body["skipped"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
     async fn the_shipped_policy_changes_nothing_for_an_ordinary_caller() {
         // The other direction, and the reason this slice is safe to merge:
         // with `StormPolicy` the boundary is invisible. A vault that is
@@ -5960,6 +6040,7 @@ pub(crate) mod tests {
                 ("GET", "/v1/vaults"),
                 ("GET", "/v1/config"),
                 ("GET", "/v1/recents"),
+                ("GET", "/v1/search?q=x"),
                 ("GET", "/v1/keys"),
             ] {
                 let (status, _) = send(
@@ -6111,6 +6192,7 @@ pub(crate) mod tests {
             ("GET", "/v1/vaults"),
             ("GET", "/v1/config"),
             ("GET", "/v1/recents"),
+            ("GET", "/v1/search?q=x"),
             ("GET", "/v1/keys"),
         ] {
             let (status, _) = send(

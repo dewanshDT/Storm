@@ -195,6 +195,28 @@ class FakeServer {
   void markOpened(String vaultId, String noteId, String at) =>
       (opened[vaultId] ??= {})[noteId] = at;
 
+  /// Vaults `/v1/search` reports in `skipped` instead of searching.
+  final Set<String> searchSkipped = {};
+
+  /// Answers `/v1/search` with 404, as a server older than decision 156 does.
+  bool noCrossSearch = false;
+
+  /// A case-insensitive substring match over title and content, standing in
+  /// for FTS5. [q] is already lowercased.
+  List<Map<String, dynamic>> _searchVault(String vaultId, String q) => [
+    for (final note
+        in (byVault[vaultId] ?? const <String, ServerNote>{}).values)
+      if (!note.path.startsWith('_storm/') &&
+          ((note.meta['title'] as String).toLowerCase().contains(q) ||
+              note.content.toLowerCase().contains(q)))
+        {
+          'id': note.id,
+          'path': note.path,
+          'title': note.meta['title'],
+          'snippet': note.content,
+        },
+  ];
+
   /// Folders derived from note paths, union the explicitly created ones —
   /// what the real `tree` handler returns.
   List<String> _foldersOf(String vaultId) {
@@ -426,6 +448,53 @@ class FakeServer {
       return http.Response(jsonEncode({'recents': out}), 200, headers: j(''));
     }
 
+    if (path == '/v1/search') {
+      if (noCrossSearch) {
+        return http.Response('{"error":"not found"}', 404, headers: j(''));
+      }
+      final q = (request.url.queryParameters['q'] ?? '').trim().toLowerCase();
+      final hits = <Map<String, dynamic>>[];
+      final skipped = <Map<String, dynamic>>[];
+      if (q.isNotEmpty) {
+        for (final v in vaults) {
+          if (v.missing) continue;
+          if (searchSkipped.contains(v.id)) {
+            skipped.add({
+              'vault_id': v.id,
+              'vault_name': v.name,
+              'reason': 'busy',
+            });
+            continue;
+          }
+          for (final hit in _searchVault(v.id, q)) {
+            final title = (hit['title'] as String).toLowerCase();
+            hits.add({
+              'vault_id': v.id,
+              'vault_name': v.name,
+              ...hit,
+              'tier': title == q
+                  ? 0
+                  : title.startsWith(q)
+                  ? 1
+                  : title.contains(q)
+                  ? 2
+                  : 3,
+            });
+          }
+        }
+        hits.sort((a, b) => (a['tier'] as int).compareTo(b['tier'] as int));
+      }
+      final limit = int.tryParse(request.url.queryParameters['limit'] ?? '');
+      return http.Response(
+        jsonEncode({
+          'hits': hits.take((limit ?? 50).clamp(1, 200)).toList(),
+          'skipped': skipped,
+        }),
+        200,
+        headers: j(''),
+      );
+    }
+
     // ---- vault-scoped routes -------------------------------------------
     //
     // The prefix is stripped once here so the note handlers below stay the
@@ -537,6 +606,15 @@ class FakeServer {
               .toList(),
           'seq': seq,
         }),
+        200,
+        headers: j(''),
+      );
+    }
+
+    if (path == '/v1/search') {
+      final q = (request.url.queryParameters['q'] ?? '').trim().toLowerCase();
+      return http.Response(
+        jsonEncode({'hits': q.isEmpty ? const [] : _searchVault(vaultId, q)}),
         200,
         headers: j(''),
       );

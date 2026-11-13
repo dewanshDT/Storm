@@ -1055,12 +1055,29 @@ pub async fn search(
 
 /// Quotes each term so FTS5 special characters can't produce a syntax error.
 pub fn sanitize_fts_query(raw: &str) -> String {
-    raw.split_whitespace()
-        .map(|term| term.replace('"', ""))
-        .filter(|t| !t.is_empty())
+    query_terms(raw)
+        .iter()
         .map(|t| format!("\"{t}\""))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// As [`sanitize_fts_query`], with the last term matched as a prefix so a
+/// half-typed word finds something. Only `GET /v1/search` uses it (156k, Q4).
+pub fn sanitize_fts_query_prefix(raw: &str) -> String {
+    let quoted = sanitize_fts_query(raw);
+    if quoted.is_empty() {
+        quoted
+    } else {
+        format!("{quoted}*")
+    }
+}
+
+fn query_terms(raw: &str) -> Vec<String> {
+    raw.split_whitespace()
+        .map(|term| term.replace('"', ""))
+        .filter(|t| !t.is_empty())
+        .collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1138,6 +1155,180 @@ pub async fn recents(state: &Shared, actor: &Actor, limit: i64) -> ApiResult<Vec
     all.sort_by(|a, b| b.opened_at.cmp(&a.opened_at));
     all.truncate(limit as usize);
     Ok(all)
+}
+
+// ---- cross-vault search (decision 156k) ---------------------------------
+
+/// Hits each vault contributes before the merge.
+pub const CROSS_SEARCH_PER_VAULT: i64 = 20;
+
+/// How long one vault's indexer may stay busy before that vault is skipped.
+pub const CROSS_SEARCH_LOCK_BUDGET: std::time::Duration = std::time::Duration::from_millis(300);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CrossSearchHit {
+    pub vault_id: String,
+    pub vault_name: String,
+    pub id: String,
+    pub path: String,
+    pub title: String,
+    pub snippet: String,
+    /// 0 exact title, 1 title prefix, 2 title contains, 3 otherwise.
+    pub tier: u8,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SkippedVault {
+    pub vault_id: String,
+    pub vault_name: String,
+    /// `busy` (the indexer stayed locked past the budget) or `failed`.
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CrossSearch {
+    pub hits: Vec<CrossSearchHit>,
+    pub skipped: Vec<SkippedVault>,
+}
+
+/// Full-text search across every vault the caller may see.
+///
+/// One slow or failing vault is reported in `skipped` rather than failing or
+/// stalling the whole answer, because the palette types against it.
+pub async fn search_all(
+    state: &Shared,
+    actor: &Actor,
+    query: &str,
+    limit: i64,
+) -> ApiResult<CrossSearch> {
+    let limit = limit.clamp(1, 200) as usize;
+    let fts = sanitize_fts_query_prefix(query);
+    if fts.is_empty() {
+        return Ok(CrossSearch::default());
+    }
+    let needle = query_terms(query).join(" ").to_lowercase();
+
+    let targets: Vec<(String, String, Arc<crate::api::VaultHandle>)> = {
+        let vaults = state.vaults.read().await;
+        vaults
+            .registry
+            .vaults
+            .iter()
+            .filter(|entry| crate::api::may_see_vault(state, actor, &entry.id))
+            .filter_map(|entry| {
+                vaults
+                    .get(&entry.id)
+                    .map(|handle| (entry.id.clone(), entry.name.clone(), handle))
+            })
+            .collect()
+    };
+
+    let searches = targets.into_iter().map(|(vault_id, vault_name, handle)| {
+        let fts = fts.clone();
+        let id = vault_id.clone();
+        async move {
+            let outcome = tokio::task::spawn_blocking(move || search_one(&id, &handle, &fts)).await;
+            (vault_id, vault_name, outcome)
+        }
+    });
+    let results = futures_util::future::join_all(searches).await;
+
+    let mut ranked: Vec<(u8, usize, usize, usize, CrossSearchHit)> = Vec::new();
+    let mut skipped = Vec::new();
+    for (order, (vault_id, vault_name, outcome)) in results.into_iter().enumerate() {
+        let hits = match outcome {
+            Ok(Ok(hits)) => hits,
+            Ok(Err(reason)) => {
+                skipped.push(SkippedVault {
+                    vault_id,
+                    vault_name,
+                    reason: reason.into(),
+                });
+                continue;
+            }
+            Err(e) => {
+                tracing::warn!(vault = vault_id, error = %e, "cross-vault search task failed");
+                skipped.push(SkippedVault {
+                    vault_id,
+                    vault_name,
+                    reason: "failed".into(),
+                });
+                continue;
+            }
+        };
+        let count = hits.len();
+        for (rank, hit) in hits.into_iter().enumerate() {
+            let tier = title_tier(&hit.title, &needle);
+            ranked.push((
+                tier,
+                rank,
+                count,
+                order,
+                CrossSearchHit {
+                    vault_id: vault_id.clone(),
+                    vault_name: vault_name.clone(),
+                    id: hit.id,
+                    path: hit.path,
+                    title: hit.title,
+                    snippet: hit.snippet,
+                    tier,
+                },
+            ));
+        }
+    }
+
+    // bm25 scores are not comparable across indexes, so a hit's place within
+    // its own vault (rank / count, compared by cross-multiplying) stands in.
+    ranked.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| (a.1 * b.2).cmp(&(b.1 * a.2)))
+            .then_with(|| a.3.cmp(&b.3))
+    });
+    Ok(CrossSearch {
+        hits: ranked
+            .into_iter()
+            .take(limit)
+            .map(|(.., hit)| hit)
+            .collect(),
+        skipped,
+    })
+}
+
+fn search_one(
+    vault_id: &str,
+    handle: &crate::api::VaultHandle,
+    fts: &str,
+) -> Result<Vec<SearchHit>, &'static str> {
+    let deadline = std::time::Instant::now() + CROSS_SEARCH_LOCK_BUDGET;
+    let ix = loop {
+        if let Ok(ix) = handle.indexer.try_lock() {
+            break ix;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("busy");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    ix.db
+        .search_ranked(fts, CROSS_SEARCH_PER_VAULT)
+        .map_err(|e| {
+            tracing::warn!(vault = vault_id, error = %e, "cross-vault search failed");
+            "failed"
+        })
+}
+
+/// How closely a note's title matches the whole query, case-insensitively.
+fn title_tier(title: &str, needle: &str) -> u8 {
+    let title = title.trim().to_lowercase();
+    if title == needle {
+        0
+    } else if title.starts_with(needle) {
+        1
+    } else if title.contains(needle) {
+        2
+    } else {
+        3
+    }
 }
 
 // ---- scripts (kit vault) ------------------------------------------------
@@ -8987,5 +9178,304 @@ mod tests {
                 .collect::<Vec<_>>(),
             "the QR and GET /v1/server advertise the same set"
         );
+    }
+
+    // ---- cross-vault search (decision 156k) ------------------------------
+
+    #[test]
+    fn prefix_fts_queries_are_sanitized() {
+        assert_eq!(sanitize_fts_query_prefix("foo ba"), "\"foo\" \"ba\"*");
+        assert_eq!(sanitize_fts_query_prefix("foo-ba"), "\"foo-ba\"*");
+        assert_eq!(sanitize_fts_query_prefix("NEAR(a b)"), "\"NEAR(a\" \"b)\"*");
+        assert_eq!(sanitize_fts_query_prefix("say \"hi\""), "\"say\" \"hi\"*");
+        assert_eq!(
+            sanitize_fts_query_prefix("naïve 日本"),
+            "\"naïve\" \"日本\"*"
+        );
+        assert_eq!(sanitize_fts_query_prefix("\"\" \""), "");
+        assert_eq!(sanitize_fts_query_prefix("  \t\n"), "");
+        assert_eq!(sanitize_fts_query_prefix(""), "");
+        // The per-vault route and MCP keep whole-term matching.
+        assert_eq!(sanitize_fts_query("foo ba"), "\"foo\" \"ba\"");
+    }
+
+    #[test]
+    fn a_title_tier_says_how_the_title_matched() {
+        assert_eq!(title_tier("Meeting Notes", "meeting notes"), 0);
+        assert_eq!(title_tier("Meeting Notes", "meet"), 1);
+        assert_eq!(title_tier("Weekly Meeting", "meet"), 2);
+        assert_eq!(title_tier("Groceries", "meet"), 3);
+        assert_eq!(title_tier("ÉCOLE", "école"), 0);
+    }
+
+    fn titles(found: &CrossSearch) -> Vec<(String, u8)> {
+        found
+            .hits
+            .iter()
+            .map(|h| (h.title.clone(), h.tier))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn search_all_merges_by_tier_then_rank_fraction_then_vault_order() {
+        let dir = tempdir::TempDir::new("storm-ops-search-merge").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        for (vault, path, body) in [
+            (&work, "Garden.md", "# Garden\n\nplanting plan\n"),
+            (&work, "Garden Beds.md", "# Garden Beds\n\nraised\n"),
+            (&work, "Spring.md", "# Spring\n\nthe garden in april\n"),
+            (&home, "My Garden.md", "# My Garden\n\nroses\n"),
+            (&home, "Gardening.md", "# Gardening\n\ntools\n"),
+            (&home, "Chores.md", "# Chores\n\nweed the garden\n"),
+        ] {
+            must(create_note(&state, &owner(), vault, path, body).await);
+        }
+
+        let found = must(search_all(&state, &owner(), "garden", 50).await);
+        assert!(found.skipped.is_empty());
+        let got = titles(&found);
+        assert_eq!(&got[0], &("Garden".to_string(), 0));
+        let tiers: Vec<u8> = got.iter().map(|(_, t)| *t).collect();
+        let mut sorted = tiers.clone();
+        sorted.sort();
+        assert_eq!(tiers, sorted, "hits are grouped by tier: {got:?}");
+        assert_eq!(
+            got.iter().filter(|(_, t)| *t == 1).count(),
+            2,
+            "Garden Beds and Gardening: {got:?}"
+        );
+        assert_eq!(&got[3], &("My Garden".to_string(), 2));
+        let body_only: Vec<&str> = got[4..].iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(body_only.len(), 2);
+        assert!(body_only.contains(&"Spring") && body_only.contains(&"Chores"));
+        let vault_of_hit = |title: &str| {
+            found
+                .hits
+                .iter()
+                .find(|h| h.title == title)
+                .unwrap()
+                .vault_name
+                .clone()
+        };
+        assert_eq!(vault_of_hit("Garden"), "work");
+        assert_eq!(vault_of_hit("Chores"), "home");
+    }
+
+    #[tokio::test]
+    async fn search_all_breaks_ties_by_rank_fraction_before_vault_order() {
+        let dir = tempdir::TempDir::new("storm-ops-search-fraction").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        // The registry lists vaults by name, so home comes first. home has
+        // four hits and work one: work's 0/1 ties home's 0/4 and loses on
+        // vault order, but beats home's 1/4 though home is the earlier vault.
+        for i in 0..4 {
+            let body = format!("# H{i}\n\n{}\n", "kiwi ".repeat(4 - i));
+            must(create_note(&state, &owner(), &home, &format!("H{i}.md"), &body).await);
+        }
+        must(create_note(&state, &owner(), &work, "W.md", "# W\n\nkiwi\n").await);
+
+        let found = must(search_all(&state, &owner(), "kiwi", 50).await);
+        let order: Vec<&str> = found.hits.iter().map(|h| h.vault_name.as_str()).collect();
+        assert_eq!(order, ["home", "work", "home", "home", "home"]);
+    }
+
+    #[tokio::test]
+    async fn a_title_match_outranks_a_body_match_within_a_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-search-weight").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(
+            create_note(
+                &state,
+                &owner(),
+                &work,
+                "A.md",
+                "# Notes\n\nquince quince quince quince\n",
+            )
+            .await,
+        );
+        must(
+            create_note(
+                &state,
+                &owner(),
+                &work,
+                "B.md",
+                "# Quince jam recipe\n\nsugar\n",
+            )
+            .await,
+        );
+        let hits = state
+            .vaults
+            .read()
+            .await
+            .get(&work)
+            .unwrap()
+            .indexer
+            .lock()
+            .await
+            .db
+            .search_ranked("\"quince\"", 20)
+            .unwrap();
+        assert_eq!(hits[0].title, "Quince jam recipe");
+    }
+
+    #[tokio::test]
+    async fn search_all_matches_the_last_term_as_a_prefix() {
+        let dir = tempdir::TempDir::new("storm-ops-search-prefix").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(
+            create_note(
+                &state,
+                &owner(),
+                &work,
+                "P.md",
+                "# Project plan\n\nbudget\n",
+            )
+            .await,
+        );
+
+        let found = must(search_all(&state, &owner(), "project pl", 50).await);
+        assert_eq!(titles(&found), [("Project plan".to_string(), 1)]);
+        // The per-vault route keeps whole terms.
+        assert!(must(search(&state, &owner(), &work, "project pl", 50).await).is_empty());
+    }
+
+    #[tokio::test]
+    async fn hostile_queries_never_fail_a_vault() {
+        let dir = tempdir::TempDir::new("storm-ops-search-hostile").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(
+            create_note(
+                &state,
+                &owner(),
+                &work,
+                "N.md",
+                "# naïve café\n\n日本語 text\n",
+            )
+            .await,
+        );
+        for q in [
+            "-",
+            "foo -",
+            "*",
+            "a*",
+            "NEAR(",
+            "^x",
+            "x OR",
+            "AND",
+            "(",
+            "\"",
+            "'",
+            ":",
+            "日本語",
+            "naïve",
+            "{col}:x",
+            "a + b",
+        ] {
+            let found = must(search_all(&state, &owner(), q, 50).await);
+            assert!(found.skipped.is_empty(), "{q:?} put a vault in skipped");
+        }
+        let found = must(search_all(&state, &owner(), "caf", 50).await);
+        assert_eq!(found.hits.len(), 1, "unicode prefix");
+        let found = must(search_all(&state, &owner(), "   ", 50).await);
+        assert!(found.hits.is_empty() && found.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn search_all_excludes_storm_config_notes() {
+        let dir = tempdir::TempDir::new("storm-ops-search-config").unwrap();
+        let (state, work, _) = two_vaults(dir.path()).await;
+        must(
+            create_note(
+                &state,
+                &owner(),
+                &work,
+                "_storm/vault.md",
+                "# Config\n\nzebra\n",
+            )
+            .await,
+        );
+        must(create_note(&state, &owner(), &work, "astorm/Z.md", "# Z\n\nzebra\n").await);
+
+        let found = must(search_all(&state, &owner(), "zebra", 50).await);
+        let paths: Vec<&str> = found.hits.iter().map(|h| h.path.as_str()).collect();
+        assert_eq!(paths, ["astorm/Z.md"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_vault_is_left_out() {
+        let dir = tempdir::TempDir::new("storm-ops-search-missing").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "A.md", "# A\n\nmango\n").await);
+        must(create_note(&state, &owner(), &home, "B.md", "# B\n\nmango\n").await);
+        state.vaults.write().await.open.remove(&home);
+
+        let found = must(search_all(&state, &owner(), "mango", 50).await);
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].vault_id, work);
+        assert!(found.skipped.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_busy_vault_is_skipped_within_the_budget() {
+        let dir = tempdir::TempDir::new("storm-ops-search-busy").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "A.md", "# A\n\nlemon\n").await);
+        must(create_note(&state, &owner(), &home, "B.md", "# B\n\nlemon\n").await);
+        let handle = state.vaults.read().await.get(&home).unwrap();
+        let held = handle.indexer.lock().await;
+
+        let started = std::time::Instant::now();
+        let found = must(search_all(&state, &owner(), "lemon", 50).await);
+        let took = started.elapsed();
+        drop(held);
+
+        assert_eq!(found.hits.len(), 1);
+        assert_eq!(found.hits[0].vault_id, work);
+        assert_eq!(found.skipped.len(), 1);
+        assert_eq!(found.skipped[0].vault_id, home);
+        assert_eq!(found.skipped[0].vault_name, "home");
+        assert_eq!(found.skipped[0].reason, "busy");
+        assert!(took >= CROSS_SEARCH_LOCK_BUDGET, "gave up early: {took:?}");
+        assert!(
+            took < std::time::Duration::from_secs(2),
+            "overran: {took:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_all_clamps_its_limits() {
+        let dir = tempdir::TempDir::new("storm-ops-search-limit").unwrap();
+        let state = server_state(dir.path());
+        for v in 0..11 {
+            let vault = must(create_vault(&state, &format!("v{v}")).await).id;
+            for n in 0..21 {
+                let body = format!("# N{n}\n\nolive\n");
+                must(create_note(&state, &owner(), &vault, &format!("N{n}.md"), &body).await);
+            }
+        }
+        let count = |limit| {
+            let state = state.clone();
+            async move {
+                must(search_all(&state, &owner(), "olive", limit).await)
+                    .hits
+                    .len()
+            }
+        };
+        assert_eq!(count(0).await, 1);
+        assert_eq!(count(-3).await, 1);
+        assert_eq!(count(5).await, 5);
+        // 11 vaults × 20 per vault = 220 candidates, capped at 200.
+        assert_eq!(count(1_000).await, 200);
+    }
+
+    #[tokio::test]
+    async fn an_agent_searches_every_vault_it_may_read() {
+        let dir = tempdir::TempDir::new("storm-ops-search-agent").unwrap();
+        let (state, work, home) = two_vaults(dir.path()).await;
+        must(create_note(&state, &owner(), &work, "A.md", "# A\n\npeach\n").await);
+        must(create_note(&state, &owner(), &home, "B.md", "# B\n\npeach\n").await);
+
+        let found = must(search_all(&state, &agent_writing_to(&work), "peach", 50).await);
+        assert_eq!(found.hits.len(), 2);
     }
 }
