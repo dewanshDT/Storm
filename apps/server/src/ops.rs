@@ -5733,6 +5733,7 @@ pub async fn dismiss_session(
 ) -> ApiResult<Dismissed> {
     let (owner, _) = owners_session(state, actor, id)?;
     let d = state.agent.dismiss_session(id, tree).map_err(agent_error)?;
+    state.agent.views_changed();
     dispose_dismissed(state, actor, d.children);
     let is_tree = d.sessions.len() > 1;
     if is_tree {
@@ -5838,6 +5839,7 @@ pub async fn create_crew(state: &Shared, actor: &Actor, req: CreateCrew) -> ApiR
         .agent
         .create_crew(owner, &name, color, &req.session_ids)
         .map_err(agent_error)?;
+    state.agent.views_changed();
     Ok(CrewChange {
         crew: Some(crew),
         removed_crews,
@@ -5885,12 +5887,16 @@ pub async fn reorder_crew_members(
     state
         .agent
         .reorder_members(id, &req.ids)
-        .map_err(agent_error)
+        .map_err(agent_error)?;
+    state.agent.views_changed();
+    Ok(())
 }
 
 pub async fn delete_crew(state: &Shared, actor: &Actor, id: &str) -> ApiResult<()> {
     crews_owner(actor)?;
-    state.agent.delete_crew(id).map_err(agent_error)
+    state.agent.delete_crew(id).map_err(agent_error)?;
+    state.agent.views_changed();
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -5912,6 +5918,7 @@ pub async fn move_session_to_crew(
         .agent
         .move_session(session_id, req.crew_id.as_deref(), req.before.as_deref())
         .map_err(agent_error)?;
+    state.agent.views_changed();
     let crew = match req.crew_id.as_deref() {
         Some(id) => state
             .agent
@@ -6071,7 +6078,9 @@ pub async fn set_session_role(
     state
         .agent
         .set_role(session_id, label.as_ref())
-        .map_err(agent_error)
+        .map_err(agent_error)?;
+    state.agent.views_changed();
+    Ok(())
 }
 
 pub async fn session_input(state: &Shared, id: &str, bytes: &[u8]) -> ApiResult<()> {

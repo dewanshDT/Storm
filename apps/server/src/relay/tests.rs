@@ -2717,3 +2717,109 @@ async fn a_relay_that_answers_heartbeats_is_kept_past_the_deadline() {
     );
     tunnels.shutdown().await;
 }
+
+#[tokio::test]
+async fn the_agent_events_stream_crosses_the_relay_as_sse() {
+    // Decision 154, AM109 (SRP §5.3): an ordinary §5.2 request under the
+    // same `require_auth`, answered as SSE with no `id:`, and kept open.
+    let dir = tempdir::TempDir::new("storm-relay-agent-events").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+    let (_generation, _rx) = state.agent.connect_host(host);
+    state
+        .agent
+        .hello(
+            host,
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 4,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let owner = crate::api::tests::seed_owner(&state).await;
+    let id = state
+        .agent
+        .launch(
+            &owner,
+            serde_json::from_value(serde_json::json!({
+                "host_id": host, "workspace": "storm", "provider": "fake",
+                "terminal": {"cols": 80, "rows": 24},
+            }))
+            .unwrap(),
+            Default::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .0
+        .id;
+    let report = |status: serde_json::Value| {
+        state
+            .agent
+            .host_status(host, &id, &serde_json::from_value(status).unwrap())
+            .unwrap();
+    };
+    report(serde_json::json!({"status": "running"}));
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let anonymous = relay
+        .request(1, TunnelRequest::get("/v1/agent/events"))
+        .await;
+    assert_eq!(anonymous.status, 401);
+
+    let token = crate::api::tests::session_token(&state, &owner).await;
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":2}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":2,"method":"GET",
+        "path":"/v1/agent/events",
+        "headers": {"authorization": format!("Bearer {token}")},
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200);
+    assert!(
+        head["headers"]["content-type"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "{head}"
+    );
+
+    let mut body = String::new();
+    let mut read_until = async |relay: &mut FakeRelay, done: &dyn Fn(&str) -> bool| {
+        while !done(&body) {
+            match relay.next_event().await {
+                Event::Binary(frame) => {
+                    let (kind, stream, payload) = proto::decode_body_frame(&frame).unwrap();
+                    assert_eq!((kind, stream), (proto::FRAME_RESPONSE_BODY, 2));
+                    body.push_str(std::str::from_utf8(payload).unwrap());
+                }
+                Event::Text(value) if value["type"] == "PING" => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        body.clone()
+    };
+    let seen = read_until(&mut relay, &|b| b.contains("\n\n")).await;
+    assert!(seen.starts_with("event: snapshot\ndata: {"), "{seen}");
+    assert!(seen.contains(&id), "{seen}");
+
+    report(serde_json::json!({"status": "running", "activity": "working"}));
+    let seen = read_until(&mut relay, &|b| {
+        b.split("event: session\n")
+            .nth(1)
+            .is_some_and(|s| s.contains("\n\n"))
+    })
+    .await;
+    let session = seen.split("event: session\n").nth(1).unwrap();
+    assert!(session.contains(r#""activity":"working""#), "{session}");
+    assert!(!seen.lines().any(|l| l.starts_with("id:")), "no id: {seen}");
+
+    relay.send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":2}));
+    tunnels.shutdown().await;
+}

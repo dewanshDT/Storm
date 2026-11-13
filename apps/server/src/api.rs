@@ -26,6 +26,8 @@ use crate::index::Indexer;
 use crate::registry::Registry;
 use crate::vault::Vault;
 
+mod agent_events;
+
 /// One open vault's index.
 ///
 /// The `Mutex` is per vault rather than global, so two vaults can be worked on
@@ -544,6 +546,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/sessions",
             get(agent_list_sessions).post(agent_launch),
         )
+        // Pushed session state (decision 154, AM109): owner only.
+        .route("/v1/agent/events", get(agent_events::agent_events))
         .route(
             "/v1/agent/sessions/{id}",
             get(agent_get_session).delete(agent_dismiss_session),

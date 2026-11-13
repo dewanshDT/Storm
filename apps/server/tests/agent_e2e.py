@@ -290,12 +290,26 @@ args = ["-i"]
         check("input is accepted", write(owner, sid, "hello\r") == 204)
         text, _, _ = s.until(lambda e, i, d, t: "hello\r" in t)
         check("input comes back as output", "hello" in text, text)
+        ev = Stream("/v1/agent/events", owner)
+        snap = ev.next()
+        check("/v1/agent/events opens with a snapshot holding the session, no id (AM109)",
+              ev.status == 200 and snap and snap[0] == "snapshot" and snap[1] is None
+              and any(v["id"] == sid for v in json.loads(snap[2])["sessions"]), snap and snap[:2])
+        titled_at = time.monotonic()
         write(owner, sid, "\x1b]0;\u25d0 Fix the login\x07")
         seen = []
         _, _, closed = s.until(lambda e, i, d, t: e == "status" and seen.append(json.loads(d))
                                or (seen and seen[-1].get("title") == "Fix the login"))
         check("the agent's title reaches the stream as a status (D15 AM42)",
               not closed and seen[-1]["activity"] == "working", seen[-1:])
+        pushed = []
+        ev.until(lambda e, i, d, t: e == "session" and pushed.append(json.loads(d))
+                 or (pushed and pushed[-1]["id"] == sid and pushed[-1].get("title") == "Fix the login"))
+        took = time.monotonic() - titled_at
+        check("and is pushed to /v1/agent/events as the whole view within 2 s (A-154-4)",
+              pushed[-1]["activity"] == "working" and "output_end" in pushed[-1] and took <= 2,
+              f"{took:.2f}s")
+        ev.close()
         check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
         check("a working agent needs no attention (134p)", session(owner, sid)["needs_attention"] is None)
         write(owner, sid, "\x1b]0;\u2733 Fix the login\x07")
