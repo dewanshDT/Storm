@@ -2550,6 +2550,10 @@ async fn agent_resize(
 struct StreamQuery {
     #[serde(default)]
     offset: u64,
+    /// `snapshot` asks for the screen instead of the history (AM110); any
+    /// other value is ignored.
+    #[serde(default)]
+    attach: Option<String>,
 }
 
 /// Output event size while a stream replays what the cache already holds
@@ -2571,6 +2575,10 @@ struct TerminalStream {
     rx: tokio::sync::watch::Receiver<u64>,
     done: bool,
     live_sent: bool,
+    /// `attach=snapshot`, not yet decided.
+    snapshot: bool,
+    /// The PTY size, from the last record read.
+    size: (u16, u16),
 }
 
 /// GET …/terminal/stream?offset=N — the terminal as SSE (freeze §11.2).
@@ -2590,6 +2598,11 @@ struct TerminalStream {
 /// read only every 250 ms, after a gap, and before deciding the stream has
 /// caught up; once live, 32 KiB and every pass (decision 154). A status that
 /// is sent is always the whole record.
+///
+/// `attach=snapshot` (AM110): when `offset` is 0 or below the floor and the
+/// cache holds more than 64 KiB, the first `status` is followed by `event:
+/// snapshot`, `id:` S, a rendering of the screen at S, and the stream goes on
+/// from S. Otherwise, and for any other `attach`, the stream is as above.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -2611,6 +2624,8 @@ async fn agent_terminal_stream(
         read_at: std::time::Instant::now(),
         done: false,
         live_sent: false,
+        snapshot: q.attach.as_deref() == Some("snapshot"),
+        size: (80, 24),
     };
     let stream = futures_util::stream::unfold(start, |mut st| async move {
         loop {
@@ -2629,6 +2644,7 @@ async fn agent_terminal_stream(
                 };
                 st.stale = false;
                 st.read_at = std::time::Instant::now();
+                st.size = (record.cols, record.rows);
                 let json = serde_json::to_string(&record).unwrap_or_default();
                 if st.last_status.as_ref() != Some(&json) {
                     st.last_status = Some(json.clone());
@@ -2638,6 +2654,28 @@ async fn agent_terminal_stream(
             } else {
                 None
             };
+            if std::mem::take(&mut st.snapshot)
+                && let Some(snap) = st.agent.terminal_snapshot(&st.id, st.cursor, st.size).await
+            {
+                st.cursor = snap.offset;
+                let r = &snap.rendered;
+                let data = serde_json::json!({
+                    "offset": snap.offset,
+                    "floor": snap.floor,
+                    "cols": snap.cols,
+                    "rows": snap.rows,
+                    "alt": r.alt,
+                    "complete": snap.floor == 0,
+                    "modes": r.modes,
+                    "history_rows": r.history_rows,
+                    "data": data_encoding::BASE64.encode(&r.data),
+                });
+                let event = Event::default()
+                    .event("snapshot")
+                    .id(snap.offset.to_string())
+                    .data(data.to_string());
+                return Some((Ok(event), st));
+            }
             let chunk = if catching_up {
                 CATCH_UP_CHUNK
             } else {
@@ -21104,14 +21142,15 @@ pub(crate) mod tests {
 
     impl EventReader {
         async fn open(f: &TerminalFixture, offset: u64) -> Self {
+            Self::open_query(f, &format!("offset={offset}")).await
+        }
+
+        async fn open_query(f: &TerminalFixture, query: &str) -> Self {
             let response = f
                 .app
                 .clone()
                 .oneshot(get_with_auth(
-                    &format!(
-                        "/v1/agent/sessions/{}/terminal/stream?offset={offset}",
-                        f.id
-                    ),
+                    &format!("/v1/agent/sessions/{}/terminal/stream?{query}", f.id),
                     &f.bearer,
                 ))
                 .await
@@ -21319,5 +21358,202 @@ pub(crate) mod tests {
             seen.push(event.event);
         }
         assert_eq!(seen, ["output", "output", "output", "status"], "{seen:?}");
+    }
+
+    // ---- snapshot attach (decision 154, AM110, 154-S3) ----
+
+    /// Claude Code's capture repeated to `len`: the alt screen, kitty and the
+    /// rest set in the first copy only, as a real session sends them.
+    fn alt_screen_output(len: usize) -> Vec<u8> {
+        let capture: &[u8] = include_bytes!("agent/claude_code_screen.bin");
+        let once = b"\x1b[?1049h";
+        let at = capture.windows(once.len()).position(|w| w == once).unwrap();
+        let mut rest = capture.to_vec();
+        rest.drain(at..at + once.len());
+        let mut out = capture.to_vec();
+        while out.len() < len {
+            out.extend_from_slice(&rest);
+        }
+        out.truncate(len);
+        out
+    }
+
+    fn snapshot_of(event: &SseEvent) -> (serde_json::Value, Vec<u8>) {
+        let body: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+        let data = data_encoding::BASE64
+            .decode(body["data"].as_str().unwrap().as_bytes())
+            .unwrap();
+        (body, data)
+    }
+
+    #[tokio::test]
+    async fn a_cold_attach_with_snapshot_is_status_snapshot_then_output_from_s_then_live() {
+        let dir = tempdir::TempDir::new("storm-154-snap").unwrap();
+        let output = alt_screen_output(1024 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+
+        stream.expect("status").await;
+        let snapshot = stream.expect("snapshot").await;
+        let s = output.len() as u64;
+        assert_eq!(snapshot.id, Some(s.to_string()));
+        let (body, data) = snapshot_of(&snapshot);
+        assert_eq!(body["offset"], s);
+        assert_eq!(body["floor"], 0);
+        assert_eq!(
+            (body["cols"].as_u64(), body["rows"].as_u64()),
+            (Some(80), Some(24))
+        );
+        assert_eq!(body["alt"], true);
+        assert_eq!(body["complete"], true);
+        assert_eq!(body["history_rows"], 0);
+        assert_eq!(body["modes"]["kitty_flags"], 5);
+        assert_eq!(body["modes"]["alt_screen"], true);
+        assert!(data.starts_with(b"\x1bc\x1b[?1049h"));
+        assert!(data.len() < 8 * 1024, "{} bytes", data.len());
+
+        // What arrives after the copy is output from S, then the stream is live.
+        let more = b"\x1b[1;1Hafter the snapshot".to_vec();
+        f.state
+            .agent
+            .host_output(STREAM_HOST, &f.id, s, &more)
+            .unwrap();
+        // The upload stamps last_activity, so a status may come between.
+        let mut after: Vec<SseEvent> = Vec::new();
+        while after.last().is_none_or(|e| e.event != "live") {
+            let event = stream.next().await.expect("the stream ended early");
+            if event.event != "status" {
+                after.push(event);
+            }
+        }
+        let names: Vec<&str> = after.iter().map(|e| e.event.as_str()).collect();
+        assert_eq!(names, ["output", "live"], "{after:?}");
+        assert_eq!(after[0].id, Some((s + more.len() as u64).to_string()));
+        assert_eq!(
+            data_encoding::BASE64
+                .decode(after[0].data.as_bytes())
+                .unwrap(),
+            more
+        );
+        assert_eq!(after[1].data, (s + more.len() as u64).to_string());
+    }
+
+    #[tokio::test]
+    async fn a_cold_open_of_a_full_4_mib_alt_screen_session_sends_at_most_16_kib_before_live() {
+        // A-154-8.
+        let dir = tempdir::TempDir::new("storm-154-a8").unwrap();
+        let output = alt_screen_output(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let response = f
+            .app
+            .clone()
+            .oneshot(get_with_auth(
+                &format!(
+                    "/v1/agent/sessions/{}/terminal/stream?offset=0&attach=snapshot",
+                    f.id
+                ),
+                &f.bearer,
+            ))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut sent = String::new();
+        while !sent.contains("event: live") {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                futures_util::StreamExt::next(&mut body),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            sent.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        let before_live = &sent[..sent.find("event: live").unwrap()];
+        assert!(before_live.contains("event: snapshot"));
+        assert!(
+            !before_live.contains("event: output"),
+            "nothing was replayed"
+        );
+        eprintln!("A-154-8: {} bytes before live", before_live.len());
+        assert!(
+            before_live.len() <= 16 * 1024,
+            "{} bytes before live",
+            before_live.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attach_below_the_floor_gets_an_incomplete_snapshot_instead_of_a_gap() {
+        let dir = tempdir::TempDir::new("storm-154-floor").unwrap();
+        let output = alt_screen_output(crate::agent::cache::DEFAULT_CAPACITY + 512 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let floor = 512 * 1024;
+
+        let mut stream = EventReader::open_query(&f, "offset=100&attach=snapshot").await;
+        stream.expect("status").await;
+        let (body, _) = snapshot_of(&stream.expect("snapshot").await);
+        assert_eq!(body["floor"], floor);
+        assert_eq!(body["complete"], false, "bytes before the floor are gone");
+        assert_eq!(
+            body["alt"], true,
+            "the floor-mode tracker saw ?1049h evicted"
+        );
+        assert_eq!(body["modes"]["kitty_flags"], 5);
+        assert_eq!(stream.expect("live").await.data, output.len().to_string());
+
+        // Without the parameter, the same request is a gap, as before.
+        let mut plain = EventReader::open(&f, 100).await;
+        plain.expect("status").await;
+        let gap = plain.expect("gap").await;
+        assert_eq!(gap.data, format!("{{\"from\":100,\"to\":{floor}}}"));
+    }
+
+    #[tokio::test]
+    async fn a_resume_above_the_floor_a_small_cache_or_another_attach_value_replays() {
+        let dir = tempdir::TempDir::new("storm-154-nosnap").unwrap();
+        let output = alt_screen_output(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        for query in [
+            "offset=4096&attach=snapshot".to_string(),
+            "offset=0&attach=screen".to_string(),
+            "offset=0".to_string(),
+        ] {
+            let mut stream = EventReader::open_query(&f, &query).await;
+            stream.expect("status").await;
+            let first = stream.expect("output").await;
+            let start = if query.starts_with("offset=4096") {
+                4096
+            } else {
+                0
+            };
+            let bytes = data_encoding::BASE64.decode(first.data.as_bytes()).unwrap();
+            assert_eq!(first.id, Some((start + bytes.len()).to_string()), "{query}");
+        }
+
+        let small = tempdir::TempDir::new("storm-154-small").unwrap();
+        let f = terminal_fixture(small.path(), &alt_screen_output(64 * 1024)).await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        stream.expect("status").await;
+        stream.expect("output").await;
+        stream.expect("live").await;
+    }
+
+    #[tokio::test]
+    async fn an_ended_sessions_snapshot_closes_after_the_rest_of_its_output() {
+        let dir = tempdir::TempDir::new("storm-154-snap-ended").unwrap();
+        let output = alt_screen_output(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        stream.expect("status").await;
+        let snapshot = stream.expect("snapshot").await;
+        assert_eq!(snapshot.id, Some(output.len().to_string()));
+        let end = stream.next().await;
+        assert!(end.is_none(), "no live once ended: {end:?}");
     }
 }

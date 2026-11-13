@@ -1623,6 +1623,42 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         streamed.largest_frame
     );
 
+    // A cold open asking for the screen gets it over the relay too
+    // (decision 154, AM110): status, then the snapshot at the end, then the
+    // stream closes, the session having ended.
+    let snapshot = relay
+        .request(
+            3,
+            TunnelRequest::get(&format!("{path}&attach=snapshot"))
+                .header("authorization", &format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(snapshot.status, 200);
+    let body = String::from_utf8_lossy(&snapshot.body);
+    let events: Vec<&str> = body.split("\n\n").filter(|e| !e.is_empty()).collect();
+    assert_eq!(events.len(), 2, "status, then the snapshot: {body}");
+    assert!(events[0].starts_with("event: status"));
+    assert!(events[1].starts_with("event: snapshot\n"), "{}", events[1]);
+    assert!(events[1].contains(&format!("\nid: {}\n", output.len())));
+    let data: serde_json::Value = serde_json::from_str(
+        events[1]
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["offset"], output.len());
+    assert_eq!(data["complete"], true);
+    let screen = data_encoding::BASE64
+        .decode(data["data"].as_str().unwrap().as_bytes())
+        .unwrap();
+    assert!(screen.starts_with(b"\x1bc"), "a reset, then the screen");
+    assert!(
+        snapshot.body.len() < 64 * 1024,
+        "{} bytes",
+        snapshot.body.len()
+    );
+
     // And the host tier is the host tier over the relay too.
     let whoami = relay
         .request(

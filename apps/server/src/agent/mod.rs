@@ -32,6 +32,7 @@ pub mod permission;
 pub mod round;
 pub mod said;
 pub mod scope;
+pub mod snapshot;
 pub mod store;
 pub mod typed;
 pub mod wake;
@@ -3428,6 +3429,53 @@ impl AgentManager {
         };
         screen_lines(&bytes, size, lines)
     }
+
+    /// Decision 154 (AM110): the screen at the cache's end, for a stream
+    /// that asked with `attach=snapshot` at `requested`. `None` means replay
+    /// as before: a resume at or above the floor, an empty cache, or one
+    /// small enough to replay exactly. The copy is taken under the lock and
+    /// rendered off the async runtime.
+    pub async fn terminal_snapshot(
+        &self,
+        id: &str,
+        requested: u64,
+        size: (u16, u16),
+    ) -> Option<TerminalSnapshot> {
+        let (bytes, floor, seed) = {
+            let live = self.live.lock().unwrap();
+            let cache = &live.sessions.get(id)?.cache;
+            let floor = cache.floor();
+            if !cache.initialized()
+                || (requested != 0 && requested >= floor)
+                || cache.end() - floor <= snapshot::MIN_RETAINED
+            {
+                return None;
+            }
+            (cache.retained(), floor, cache.floor_modes().clone())
+        };
+        let offset = floor + bytes.len() as u64;
+        let rendered =
+            tokio::task::spawn_blocking(move || snapshot::render(&bytes, floor, &seed, size))
+                .await
+                .ok()?;
+        Some(TerminalSnapshot {
+            offset,
+            floor,
+            cols: size.0,
+            rows: size.1,
+            rendered,
+        })
+    }
+}
+
+/// What [`AgentManager::terminal_snapshot`] rendered, at `offset`.
+#[derive(Debug)]
+pub struct TerminalSnapshot {
+    pub offset: u64,
+    pub floor: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub rendered: snapshot::Rendered,
 }
 
 /// How much of the end of a session's output a peek reads (145g).

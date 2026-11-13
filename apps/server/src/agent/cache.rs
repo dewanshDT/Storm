@@ -10,8 +10,13 @@
 //! The last rule is what makes recovery after a server restart work. The
 //! cache comes back empty, `hello` asks the host to replay from 0, and the
 //! host's first post, from its own floor, becomes this cache's floor.
+//!
+//! What it evicts goes to a mode tracker, so a snapshot knows the modes in
+//! force at the floor (decision 154, AM110).
 
 use std::collections::VecDeque;
+
+use super::snapshot::{ModeTracker, Modes};
 
 pub const DEFAULT_CAPACITY: usize = 4 * 1024 * 1024;
 
@@ -21,6 +26,7 @@ pub struct OutputCache {
     capacity: usize,
     floor: u64,
     initialized: bool,
+    floor_modes: ModeTracker,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -46,6 +52,7 @@ impl OutputCache {
             capacity: capacity.max(1),
             floor: 0,
             initialized: false,
+            floor_modes: ModeTracker::default(),
         }
     }
 
@@ -65,7 +72,8 @@ impl OutputCache {
     /// Accepts `bytes` that start at `offset`, in order only (see the module).
     pub fn insert(&mut self, offset: u64, bytes: &[u8]) {
         if !self.initialized || offset > self.end() {
-            self.buf.clear();
+            // Across a jump, the modes at the old end are the best guess.
+            self.evict(self.buf.len());
             self.floor = offset;
             self.initialized = true;
         }
@@ -76,15 +84,39 @@ impl OutputCache {
         }
         let fresh = &bytes[(end - offset) as usize..];
         let keep = &fresh[fresh.len().saturating_sub(self.capacity)..];
-        let skipped = (fresh.len() - keep.len()) as u64;
+        let skipped = fresh.len() - keep.len();
         if skipped > 0 {
-            self.floor += self.buf.len() as u64 + skipped;
-            self.buf.clear();
+            self.evict(self.buf.len());
+            self.floor_modes.feed(&fresh[..skipped]);
+            self.floor += skipped as u64;
         }
         let overflow = (self.buf.len() + keep.len()).saturating_sub(self.capacity);
-        self.buf.drain(..overflow);
-        self.floor += overflow as u64;
+        self.evict(overflow);
         self.buf.extend(keep);
+    }
+
+    /// Drops the oldest `n` bytes, through the mode tracker.
+    fn evict(&mut self, n: usize) {
+        let (a, b) = self.buf.as_slices();
+        let from_a = n.min(a.len());
+        self.floor_modes.feed(&a[..from_a]);
+        self.floor_modes.feed(&b[..n - from_a]);
+        self.buf.drain(..n);
+        self.floor += n as u64;
+    }
+
+    /// The modes in force at the floor, as far as the evicted bytes say.
+    pub fn floor_modes(&self) -> &Modes {
+        self.floor_modes.modes()
+    }
+
+    /// Everything retained, from the floor.
+    pub fn retained(&self) -> Vec<u8> {
+        let (a, b) = self.buf.as_slices();
+        let mut out = Vec::with_capacity(self.buf.len());
+        out.extend_from_slice(a);
+        out.extend_from_slice(b);
+        out
     }
 
     pub fn read(&self, from: u64, max: usize) -> Read {
