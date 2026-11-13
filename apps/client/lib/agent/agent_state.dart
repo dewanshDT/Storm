@@ -10,6 +10,7 @@ import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
 import 'agent_api.dart';
+import 'agent_events.dart';
 import 'agent_models.dart';
 import 'session_controller.dart';
 import 'session_keep_alive.dart';
@@ -208,40 +209,75 @@ class AgentOverview {
       s.ended && s.hasConversation && resumeBlocker(s) == null;
 }
 
-/// How often a visible list re-asks the server.
-///
-/// An open session does not depend on this — its own stream carries every
-/// status change — so this only has to keep a *list* from going stale.
+/// How often a visible list re-asks the server while `/v1/agent/events` is
+/// not open: before its first snapshot, between reconnects, or on a server
+/// before decision 154.
 const agentRefreshInterval = Duration(seconds: 15);
 
-/// How often an open, live session re-reads its record, for its Wrote count.
+/// While the stream is open the sessions follow it, and the list re-asks
+/// only for what is not pushed (hosts, crews' names, colours and order) and
+/// as a safety net (decision 154, Q6).
+const agentRefreshWhileStreaming = Duration(seconds: 60);
+
+/// How often an open, live session re-reads its record, for its Wrote count,
+/// while the stream is not open.
 const sessionRefreshInterval = Duration(seconds: 4);
 
+/// While the stream is open its record follows the pushed view.
+const sessionRefreshWhileStreaming = Duration(seconds: 30);
+
 /// Re-runs the provider after [every] while it is listened to and the app is
-/// in front.
+/// in front; with [events], after [whileOpen] instead while their stream is
+/// open, and at once when it closes after [every] has already passed.
 ///
 /// Two things stop the polling, and neither is `autoDispose` alone. Riverpod
 /// pauses a provider whose only listeners are under `TickerMode(false)` — a
 /// covered route — and a paused provider skips its refresh. And a tick that
 /// lands while the app is backgrounded is skipped here, then made up the
 /// moment the app resumes, rather than polling a phone in a pocket.
-void _refreshEvery(Ref ref, Duration every) {
+void _refreshEvery(
+  Ref ref,
+  Duration every, {
+  AgentEvents? events,
+  Duration? whileOpen,
+}) {
   var due = false;
-  final timer = Timer(every, () {
+  var fired = false;
+  void fire() {
+    if (fired) return;
     final state = WidgetsBinding.instance.lifecycleState;
     if (state == null || state == AppLifecycleState.resumed) {
+      fired = true;
       ref.invalidateSelf();
     } else {
       due = true;
     }
-  });
+  }
+
+  final streaming = events != null && whileOpen != null;
+  var short = false;
+  final timers = [
+    Timer(every, () {
+      short = true;
+      if (!streaming || !events.isOpen) fire();
+    }),
+    if (streaming) Timer(whileOpen, fire),
+  ];
+  void streamChanged() {
+    if (short && !events!.isOpen) fire();
+  }
+
+  if (streaming) events.state.addListener(streamChanged);
   final lifecycle = AppLifecycleListener(
     onResume: () {
       if (due) ref.invalidateSelf();
     },
   );
   ref.onDispose(() {
-    timer.cancel();
+    for (final t in timers) {
+      t.cancel();
+    }
+    if (streaming) events.state.removeListener(streamChanged);
     lifecycle.dispose();
   });
 }
@@ -290,18 +326,38 @@ class AgentOverviewNotifier extends AsyncNotifier<AgentOverview> {
 
   @override
   Future<AgentOverview> build() async {
-    _refreshEvery(ref, agentRefreshInterval);
+    final events = ref.watch(agentEventsProvider);
+    _refreshEvery(
+      ref,
+      agentRefreshInterval,
+      events: events,
+      whileOpen: agentRefreshWhileStreaming,
+    );
     ref.listen(crewPatchesProvider, (_, patches) {
       final server = _server;
       if (server != null) state = AsyncData(_patched(server, patches));
     });
     final askedAt = DateTime.now();
-    final o = await _fetch();
-    _server = o;
-    if (!o.unreachable) {
-      ref.read(sessionKeepAliveProvider).overviewSeen(o.sessions, askedAt);
+    final asked = events?.now ?? 0;
+    AgentOverview? read;
+    AgentOverview merged(AgentOverview o) => events == null || o.unreachable
+        ? o
+        : o.copyWith(sessions: events.merge(o.sessions, asked));
+    if (events != null) {
+      final sub = events.updates.listen((_) {
+        final o = read;
+        if (o == null) return;
+        final server = _server = merged(o);
+        state = AsyncData(_patched(server, ref.read(crewPatchesProvider)));
+      });
+      ref.onDispose(sub.cancel);
     }
-    return _patched(o, ref.read(crewPatchesProvider));
+    final o = read = await _fetch();
+    final server = _server = merged(o);
+    if (!o.unreachable) {
+      ref.read(sessionKeepAliveProvider).overviewSeen(server.sessions, askedAt);
+    }
+    return _patched(server, ref.read(crewPatchesProvider));
   }
 
   Future<AgentOverview> _fetch() async {
@@ -417,26 +473,63 @@ final sessionControllerProvider = ChangeNotifierProvider.autoDispose
       return c;
     });
 
-/// A session's record as the server has it now, re-read while it is live and
-/// on screen; null when there is no such session or the server cannot be
-/// asked. Its `wrote_count` is what [sessionWritesProvider] follows.
-final sessionDetailProvider = FutureProvider.autoDispose
-    .family<AgentSession?, String>((ref, id) async {
-      final api = ref.watch(agentApiFactoryProvider)?.call();
-      if (api == null) return null;
-      try {
-        final s = await api.session(id);
-        if (!s.ended) _refreshEvery(ref, sessionRefreshInterval);
-        return s;
-      } catch (e) {
-        if (!(e is StormApiException && e.statusCode == 404)) {
-          _refreshEvery(ref, sessionRefreshInterval);
+/// A session's record as the server has it now, following its pushed view
+/// and re-read while it is live and on screen; null when there is no such
+/// session or the server cannot be asked. Its `wrote_count` is what
+/// [sessionWritesProvider] follows.
+final sessionDetailProvider = AsyncNotifierProvider.autoDispose
+    .family<SessionDetailNotifier, AgentSession?, String>(
+      SessionDetailNotifier.new,
+    );
+
+class SessionDetailNotifier extends AsyncNotifier<AgentSession?> {
+  SessionDetailNotifier(this.id);
+
+  final String id;
+
+  @override
+  Future<AgentSession?> build() async {
+    final events = ref.watch(agentEventsProvider);
+    final api = ref.watch(agentApiFactoryProvider)?.call();
+    if (api == null) return null;
+    void poll() => _refreshEvery(
+      ref,
+      sessionRefreshInterval,
+      events: events,
+      whileOpen: sessionRefreshWhileStreaming,
+    );
+    final asked = events?.now ?? 0;
+    var read = false;
+    if (events != null) {
+      final sub = events.updates.listen((u) {
+        if (!read) return;
+        switch (u.event) {
+          case AgentSessionChanged(:final session) when session.id == id:
+            state = AsyncData(session);
+          case AgentSessionRemoved(id: final gone) when gone == id:
+            state = const AsyncData(null);
+          case AgentSnapshot():
+            state = AsyncData(events.byId(id));
+          default:
+            break;
         }
-        return null;
-      } finally {
-        api.dispose();
-      }
-    });
+      });
+      ref.onDispose(sub.cancel);
+    }
+    try {
+      final fetched = await api.session(id);
+      final s = events == null ? fetched : events.resolve(id, fetched, asked);
+      if (s != null && !s.ended) poll();
+      return s;
+    } catch (e) {
+      if (!(e is StormApiException && e.statusCode == 404)) poll();
+      return events?.resolve(id, null, asked);
+    } finally {
+      read = true;
+      api.dispose();
+    }
+  }
+}
 
 /// What a session wrote, newest first. Fetched again only when its record's
 /// `wrote_count` moves, so a live session costs one small read per tick and

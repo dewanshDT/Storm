@@ -86,6 +86,11 @@ On a desktop, each row in the Agents sidebar says one thing per signal:
   apply or delete it.
 - **A dot after the name** means output you haven't seen on this device.
 
+Rows follow the server as sessions change, open or not: a session that
+starts waiting for you, stops working or ends shows within a second or two
+on every device that has Storm in front. A server older than the app
+refreshes them every 15 seconds instead.
+
 Sessions waiting for you, blocked, failed in the last hour or on an offline
 host move to the top of their crew or section, and crews with one move up
 too; everything else keeps your order. Nothing moves while the pointer is

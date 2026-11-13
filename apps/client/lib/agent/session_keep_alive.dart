@@ -196,6 +196,24 @@ class SessionKeepAlive {
     }
   }
 
+  /// A pushed view of one session (`/v1/agent/events`), as fresh as a list
+  /// read at [at]: after a server restart its `output_end` is what tells a
+  /// kept terminal its offsets were renumbered.
+  void pushed(AgentSession s, DateTime at) {
+    final k = _kept[s.id];
+    if (k == null) return;
+    k.missing = 0;
+    k.controller.checkOutputEnd(s.outputEnd, at);
+  }
+
+  /// The server said [id] is gone: no second list read is waited for.
+  void removed(String id) {
+    final k = _kept[id];
+    if (k == null) return;
+    k.missing = 2;
+    if (!k.controller.visible) _evict(k);
+  }
+
   @visibleForTesting
   Set<String> get keptIds => {
     for (final MapEntry(key: id, value: k) in _kept.entries)

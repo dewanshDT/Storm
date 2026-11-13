@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 import 'package:storm/agent/agent_api.dart';
+import 'package:storm/agent/agent_events.dart';
 import 'package:storm/agent/agent_state.dart';
 import 'package:storm/agent/claude_login_api.dart'
     show claudeLoginApiFactoryProvider;
@@ -64,6 +65,7 @@ ProviderContainer shellContainer({
   http.Client? agentClient,
   Stream<TerminalEvent> Function(String sessionId, int offset, bool snapshot)?
   terminalStream,
+  AgentEventsOpen? agentEvents,
   OAuthLinks? oauthLinks,
   KeepAliveBudget keepAlive = harnessKeepAlive,
 }) {
@@ -140,6 +142,9 @@ ProviderContainer shellContainer({
         terminalStream ?? (_, _, _) => StreamController<TerminalEvent>().stream,
       ),
       sessionKeepAliveBudgetProvider.overrideWithValue(keepAlive),
+      // No pushed status unless the test scripts it: lists poll, as against
+      // a server before decision 154.
+      agentEventsTransportProvider.overrideWithValue(agentEvents),
       // Detached, so no suite reaches the native link channel.
       oauthLinksProvider.overrideWithValue(oauthLinks ?? OAuthLinks.detached()),
       // No suite browses the real network; LAN discovery has its own tests.
