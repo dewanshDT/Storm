@@ -9,7 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm2/xterm.dart';
 
-import '../keyboard/storm_shortcut_maps.dart';
+import '../keyboard/storm_commands.dart';
 import '../state/terminal_prefs.dart';
 import '../ui/controls.dart';
 import '../ui/surfaces.dart';
@@ -526,14 +526,12 @@ class StormTerminalView extends StatelessWidget {
     final base = EdgeInsets.all(t.sp * 1.25 * prefs.padding.scale);
     final cell = terminalCellHeight(style, MediaQuery.textScalerOf(context));
     // **The app's chords stop here while the terminal has focus** (freeze
-    // §10). The terminal handles the keys it understands before they bubble;
-    // this catches the ones it leaves, so Ctrl+K reaches the agent's world or
-    // nobody, never Storm's search.
+    // §10, AM111). The terminal handles the keys it understands before they
+    // bubble; this catches the ones it leaves, so Ctrl+K reaches the agent's
+    // world or nobody, never Storm's search. Terminal-safe chords are taken
+    // for the app before the terminal sees them.
     return Shortcuts(
-      shortcuts: {
-        for (final activator in stormGlobalShortcuts().keys)
-          activator: const DoNothingAndStopPropagationIntent(),
-      },
+      shortcuts: stormTerminalBlockList(),
       // Tab is the agent's here, so the way out is said (147b, WCAG 2.1.2).
       child: Semantics(
         container: true,
@@ -548,7 +546,13 @@ class StormTerminalView extends StatelessWidget {
                 ? null
                 : terminal._insertion,
             // Asked first; whatever it leaves goes to xterm2's own encoding.
-            onKeyEvent: readOnly ? null : terminal._onKeyEvent,
+            onKeyEvent: (node, event) {
+              final app = stormTerminalSafeKey(context, event);
+              if (app != null) return app;
+              return readOnly
+                  ? KeyEventResult.ignored
+                  : terminal._onKeyEvent(node, event);
+            },
             theme: theme,
             padding: evenTerminalPadding(base, box.maxHeight, cell),
             textStyle: style,

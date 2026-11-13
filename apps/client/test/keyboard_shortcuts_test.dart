@@ -8,7 +8,6 @@ import 'package:storm/editor/markdown_theme.dart';
 import 'package:storm/editor/storm_markdown_controller.dart';
 import 'package:storm/keyboard/storm_activators.dart';
 import 'package:storm/keyboard/storm_editor_shortcuts.dart';
-import 'package:storm/keyboard/storm_global_shortcuts.dart';
 import 'package:storm/keyboard/storm_intents.dart';
 import 'package:storm/router.dart';
 import 'package:storm/state/app_state.dart';
@@ -43,20 +42,23 @@ void main() {
     });
   });
 
-  /// A context *inside* the global shortcuts' Actions subtree.
-  ///
-  /// The chords live in `VaultShell`, above the pane. `Actions.invoke` walks
-  /// *up* from the given context, so a context from the shortcuts widget
-  /// itself — or from anywhere above them — misses the handler; a Scaffold
-  /// below them is the reliable way in.
-  BuildContext globalContext(WidgetTester tester) => tester.element(
-    find
-        .descendant(
-          of: find.byType(StormGlobalShortcuts),
-          matching: find.byType(Scaffold),
-        )
-        .first,
-  );
+  /// [key] with the platform's modifier, as a person presses it: the app
+  /// layer in `AppShell` hears it from wherever focus is.
+  Future<void> chord(
+    WidgetTester tester,
+    LogicalKeyboardKey key, {
+    bool shift = false,
+  }) async {
+    final modifier = stormUsesMetaModifier
+        ? LogicalKeyboardKey.metaLeft
+        : LogicalKeyboardKey.controlLeft;
+    await tester.sendKeyDownEvent(modifier);
+    if (shift) await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(key);
+    if (shift) await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyUpEvent(modifier);
+    await tester.pumpAndSettle();
+  }
 
   /// A context inside the note-level shortcuts, which wrap the editor chrome.
   BuildContext noteContext(WidgetTester tester) =>
@@ -64,86 +66,105 @@ void main() {
 
   group('sidebar toggle', () {
     const desk = Size(1280, 900);
-    const phone = Size(411, 900);
 
     testWidgets('hides the rail at desk width', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       final c = shellContainer();
       await pumpShell(tester, c, size: desk);
       await openVault(tester, c);
       expect(find.byType(VaultSidebar), findsOneWidget);
       expect(c.read(sidebarCollapsedProvider), isFalse);
 
-      final ctx = globalContext(tester);
-      Actions.invoke(ctx, const StormToggleSidebarIntent());
-      await tester.pumpAndSettle();
-
+      await chord(tester, LogicalKeyboardKey.backslash);
       expect(c.read(sidebarCollapsedProvider), isTrue);
       expect(find.byType(VaultSidebar), findsNothing);
 
-      Actions.invoke(ctx, const StormToggleSidebarIntent());
-      await tester.pumpAndSettle();
+      await chord(tester, LogicalKeyboardKey.backslash);
       expect(find.byType(VaultSidebar), findsOneWidget);
 
       await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
     });
 
-    testWidgets('is a no-op at phone width', (tester) async {
+    testWidgets('is a no-op in a narrow desktop window', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       final c = shellContainer();
-      await pumpShell(tester, c, size: phone);
+      await pumpShell(tester, c, size: const Size(899, 900));
       await openVault(tester, c);
       expect(find.byType(VaultSidebar), findsNothing);
 
-      final ctx = globalContext(tester);
-      Actions.invoke(ctx, const StormToggleSidebarIntent());
-      await tester.pumpAndSettle();
-
+      await chord(tester, LogicalKeyboardKey.backslash);
       expect(c.read(sidebarCollapsedProvider), isFalse);
       expect(find.byType(VaultSidebar), findsNothing);
       await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 
   group('global shortcuts', () {
     testWidgets('K opens vault search', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
-      final ctx = globalContext(tester);
-      Actions.invoke(ctx, const StormSearchIntent());
-      await tester.pumpAndSettle();
-
+      await chord(tester, LogicalKeyboardKey.keyK);
       final path = c.read(routerProvider).state.uri.path;
       expect(path, Routes.search(FakeServer.primaryVault));
       await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
     });
 
-    testWidgets('N invokes the same create path as the nav pill', (
-      tester,
-    ) async {
+    testWidgets('N runs the same create path as the nav pill', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
-      // The chord reaches NewNoteRequest, which is what the pill and the
-      // sidebar toolbar call — the dialog appearing is the proof.
-      final ctx = globalContext(tester);
-      Actions.invoke(ctx, const StormNewNoteIntent());
-      await tester.pumpAndSettle();
+      await chord(tester, LogicalKeyboardKey.keyN);
       expect(find.widgetWithText(AlertDialog, 'New note'), findsOneWidget);
       await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
     });
 
-    testWidgets('⇧N invokes the new-folder path', (tester) async {
+    testWidgets('⇧N runs the new-folder path', (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
-      final ctx = globalContext(tester);
-      Actions.invoke(ctx, const StormNewFolderIntent());
-      await tester.pumpAndSettle();
+      await chord(tester, LogicalKeyboardKey.keyN, shift: true);
       expect(find.text('New folder'), findsOneWidget);
       await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    testWidgets('a note made from N opens, in the folder it was made in', (
+      tester,
+    ) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      final c = shellContainer();
+      await pumpShell(tester, c, size: const Size(1280, 900));
+      c
+          .read(routerProvider)
+          .go(Routes.folder(FakeServer.primaryVault, 'Daily'));
+      await tester.pumpAndSettle();
+
+      await chord(tester, LogicalKeyboardKey.keyN);
+      await tester.enterText(find.byType(TextField).last, 'From the chord');
+      await tester.tap(find.text('Create'));
+      await tester.pumpAndSettle();
+
+      final made = serverOf(
+        c,
+      ).notes.values.where((n) => n.path == 'Daily/From the chord.md');
+      expect(made, hasLength(1));
+      expect(
+        c.read(routerProvider).state.uri.path,
+        Routes.note(FakeServer.primaryVault, made.single.id),
+      );
+      await disposeShell(tester, c);
+      debugDefaultTargetPlatformOverride = null;
     });
   });
 
