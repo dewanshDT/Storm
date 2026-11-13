@@ -46,6 +46,7 @@ Stream<TerminalEvent> openTerminalStream(
     listen('status');
     listen('output');
     listen('gap');
+    listen('live');
     // The browser would reconnect by itself, with the spent ticket and
     // `Last-Event-ID`. Neither is how this stream resumes, so any error or
     // close ends it here, and the session controller reconnects by offset

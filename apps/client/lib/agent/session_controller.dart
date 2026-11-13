@@ -42,6 +42,10 @@ class SessionController extends ChangeNotifier {
   String? inputError;
   bool connected = false;
 
+  /// The server no longer has this session (a 404 on open), so the stream
+  /// is never reopened.
+  bool gone = false;
+
   int _offset = 0;
   bool _disposed = false;
 
@@ -111,7 +115,7 @@ class SessionController extends ChangeNotifier {
   }
 
   void _connect() {
-    if (_disposed) return;
+    if (_disposed || gone) return;
     final open = _open ?? (o) => openTerminalStream(api, sessionId, o);
     _live = false;
     _armQuiet();
@@ -120,14 +124,18 @@ class SessionController extends ChangeNotifier {
     _sub = open(_offset).listen(
       _onEvent,
       onError: (Object e) {
-        connected = false;
-        streamError = describeFailure(e);
-        _notify();
+        if (e is StormApiException && e.isNotFound) {
+          gone = true;
+          connected = false;
+          streamError = null;
+          _notify();
+          return;
+        }
+        _setStream(connected: false, error: describeFailure(e));
         _scheduleReconnect();
       },
       onDone: () {
-        connected = false;
-        _notify();
+        _setStream(connected: false, error: streamError);
         // The server closes the stream once the session has ended; anything
         // else is a drop to recover from.
         if (session?.ended != true) _scheduleReconnect();
@@ -136,8 +144,15 @@ class SessionController extends ChangeNotifier {
     );
   }
 
+  void _setStream({required bool connected, required String? error}) {
+    if (this.connected == connected && streamError == error) return;
+    this.connected = connected;
+    streamError = error;
+    _notify();
+  }
+
   void _scheduleReconnect() {
-    if (_disposed) return;
+    if (_disposed || gone) return;
     _retry?.cancel();
     _retry = Timer(_backoff, _connect);
     _backoff = _backoff * 2 > const Duration(seconds: 30)
@@ -145,6 +160,8 @@ class SessionController extends ChangeNotifier {
         : _backoff * 2;
   }
 
+  /// Only a status rebuilds the screen around the terminal. Output, gap and
+  /// live change nothing it shows, and the terminal repaints itself.
   void _onEvent(TerminalEvent event) {
     switch (event) {
       case StatusEvent(:final session):
@@ -159,6 +176,7 @@ class SessionController extends ChangeNotifier {
         connected = true;
         streamError = null;
         _backoff = const Duration(seconds: 1);
+        _notify();
       case LiveEvent():
         _quiet?.cancel();
         _quietCap?.cancel();
@@ -181,7 +199,6 @@ class SessionController extends ChangeNotifier {
         terminal.note('Earlier output is no longer retained.');
         _offset = to;
     }
-    _notify();
   }
 
   void _armQuiet() {
