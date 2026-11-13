@@ -444,6 +444,81 @@ class SearchHit {
   );
 }
 
+/// One hit from `GET /v1/search`, which searches every vault at once.
+class CrossSearchHit {
+  const CrossSearchHit({
+    required this.vaultId,
+    required this.vaultName,
+    required this.id,
+    required this.path,
+    required this.title,
+    required this.snippet,
+    required this.tier,
+  });
+
+  final String vaultId;
+  final String vaultName;
+  final String id;
+  final String path;
+  final String title;
+  final String snippet;
+
+  /// 0 exact title, 1 title prefix, 2 title contains, 3 otherwise.
+  final int tier;
+
+  factory CrossSearchHit.fromJson(Map<String, dynamic> j) => CrossSearchHit(
+    vaultId: j['vault_id'] as String,
+    vaultName: j['vault_name'] as String? ?? '',
+    id: j['id'] as String,
+    path: j['path'] as String,
+    title: j['title'] as String? ?? '',
+    snippet: j['snippet'] as String? ?? '',
+    tier: (j['tier'] as num?)?.toInt() ?? 3,
+  );
+}
+
+/// A vault `GET /v1/search` could not search this time.
+class SkippedVault {
+  const SkippedVault({
+    required this.vaultId,
+    required this.vaultName,
+    required this.reason,
+  });
+
+  final String vaultId;
+  final String vaultName;
+
+  /// `busy` or `failed`.
+  final String reason;
+
+  factory SkippedVault.fromJson(Map<String, dynamic> j) => SkippedVault(
+    vaultId: j['vault_id'] as String,
+    vaultName: j['vault_name'] as String? ?? '',
+    reason: j['reason'] as String? ?? '',
+  );
+}
+
+class CrossSearchResult {
+  const CrossSearchResult({required this.hits, required this.skipped});
+
+  static const empty = CrossSearchResult(hits: [], skipped: []);
+
+  final List<CrossSearchHit> hits;
+  final List<SkippedVault> skipped;
+
+  factory CrossSearchResult.fromJson(Map<String, dynamic> j) =>
+      CrossSearchResult(
+        hits: [
+          for (final h in (j['hits'] as List? ?? const []))
+            CrossSearchHit.fromJson(h as Map<String, dynamic>),
+        ],
+        skipped: [
+          for (final s in (j['skipped'] as List? ?? const []))
+            SkippedVault.fromJson(s as Map<String, dynamic>),
+        ],
+      );
+}
+
 /// A tag and how many notes carry it.
 class TagCount {
   const TagCount({required this.tag, required this.count});

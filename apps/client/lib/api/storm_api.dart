@@ -492,6 +492,20 @@ class StormApi {
         .toList();
   }
 
+  /// Full-text search across every vault (decision 156k). The last word
+  /// matches as a prefix; a vault the server could not search in time is in
+  /// `skipped` rather than failing the call.
+  Future<CrossSearchResult> searchAll(String query, {int limit = 50}) async {
+    if (query.trim().isEmpty) return CrossSearchResult.empty;
+    final json = _decode(
+      await _client.get(
+        _uri('/v1/search', {'q': query, 'limit': '$limit'}),
+        headers: _headers,
+      ),
+    );
+    return CrossSearchResult.fromJson(json as Map<String, dynamic>);
+  }
+
   /// Uploads an attachment. Binary, opaque, last-write-wins on the server.
   Future<void> uploadAttachment(
     String vaultId,

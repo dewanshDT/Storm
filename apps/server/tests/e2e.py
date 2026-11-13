@@ -314,6 +314,15 @@ if mine:
 
 st, _ = call("POST", vp("/notes/does-not-exist/opened"))
 check("opening an unknown note is a 404", st == 404)
+
+st, found = call("GET", "/v1/search?q=opene&limit=10")
+check("cross-vault search answers", st == 200, found)
+mine = [h for h in found.get("hits", []) if h["id"] == opened_id]
+check("cross-vault search matches a prefix", len(mine) == 1, found)
+if mine:
+    check("a cross-vault hit carries its vault", mine[0]["vault_id"] == VAULT_ID)
+    check("a title prefix is tier 1", mine[0]["tier"] == 1, mine[0])
+check("nothing skipped", found.get("skipped") == [], found)
 call("DELETE", vp(f"/notes/{opened_id}"))
 
 print("\n=== a second vault is genuinely separate ===")
