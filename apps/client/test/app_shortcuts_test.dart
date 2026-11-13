@@ -69,6 +69,12 @@ void main() {
       c.read(routerProvider).state.uri.toString();
 
   final newNoteDialog = find.widgetWithText(AlertDialog, 'New note');
+
+  /// What the open palette's field holds; fails when none is open.
+  String paletteQuery(WidgetTester t) => t
+      .widget<TextField>(find.byKey(const Key('palette-field')))
+      .controller!
+      .text;
   final newFolderDialog = find.text('New folder');
   final launcher = find.byKey(const Key('launcher-chips'));
 
@@ -355,17 +361,19 @@ void main() {
       await close(t, c);
     });
 
-    testWidgets('Linux: Ctrl+Shift+K gets through', (t) async {
+    testWidgets('Linux: Ctrl+Shift+K opens the palette', (t) async {
       final c = await focusedTerminal(t, TargetPlatform.linux);
       await press(t, LogicalKeyboardKey.keyK, shift: true);
-      expect(location(c), Routes.search(v));
+      expect(paletteQuery(t), '');
+      await closeRoute(t);
       await close(t, c);
     });
 
-    testWidgets('Linux: Ctrl+Shift+P gets through', (t) async {
+    testWidgets('Linux: Ctrl+Shift+P opens it in command mode', (t) async {
       final c = await focusedTerminal(t, TargetPlatform.linux);
       await press(t, LogicalKeyboardKey.keyP, shift: true);
-      expect(location(c), Routes.search(v));
+      expect(paletteQuery(t), '>');
+      await closeRoute(t);
       await close(t, c);
     });
 
@@ -386,10 +394,12 @@ void main() {
       ('⌘P', LogicalKeyboardKey.keyP, false),
       ('⇧⌘P', LogicalKeyboardKey.keyP, true),
     ]) {
-      testWidgets('macOS: $label gets through', (t) async {
+      testWidgets('macOS: $label opens the palette', (t) async {
         final c = await focusedTerminal(t, TargetPlatform.macOS);
         await press(t, key, shift: shift);
-        expect(location(c), Routes.search(v));
+        expect(paletteQuery(t), shift ? '>' : '');
+        expect(location(c), Routes.agentSession('ags_1'));
+        await closeRoute(t);
         await close(t, c);
       });
     }

@@ -22,10 +22,11 @@ class NewNote {
 Future<NewNote?> promptForNewNote(
   BuildContext context, {
   String folder = '',
+  String name = '',
   Future<String?> Function(NewNote note)? create,
 }) => showDialog<NewNote>(
   context: context,
-  builder: (_) => _NewNoteDialog(folder: folder, create: create),
+  builder: (_) => _NewNoteDialog(folder: folder, name: name, create: create),
 );
 
 /// Turns a note's name into a vault-relative path.
@@ -78,9 +79,12 @@ String? newNoteNameError(String name) {
 /// disposing it as `showDialog` returns kills it mid-animation, which is the
 /// red screen that once appeared right after naming a note.
 class _NewNoteDialog extends StatefulWidget {
-  const _NewNoteDialog({required this.folder, this.create});
+  const _NewNoteDialog({required this.folder, this.name = '', this.create});
 
   final String folder;
+
+  /// What the name starts as: the palette's query, say.
+  final String name;
   final Future<String?> Function(NewNote note)? create;
 
   @override
@@ -88,7 +92,7 @@ class _NewNoteDialog extends StatefulWidget {
 }
 
 class _NewNoteDialogState extends State<_NewNoteDialog> {
-  final _controller = TextEditingController();
+  late final _controller = TextEditingController(text: widget.name);
   Accent _accent = Accent.none;
 
   @override

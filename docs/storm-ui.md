@@ -115,8 +115,8 @@ a note (Q5). Content starts at the 20 inset the bubbles sit on.
 ### Sidebar (desktop)
 
 Vault header (tile, name, sync line) → **vault switcher** popover (vaults with
-counts and ✓, "Synced … · Sync now", Manage vaults ›). "Search {vault}" with
-⌘K / Ctrl K. **RECENT**: the four newest notes across vaults, each with a vault
+counts and ✓, "Synced … · Sync now", Manage vaults ›). "Search {vault}"
+(the old per-vault search, until 156-3; ⌘K opens the palette). **RECENT**: the four newest notes across vaults, each with a vault
 tag. **FOLDERS**: the tree (notes by name, drawn twisties). A note an agent
 changed carries a 6px `accent` **unseen dot**, and so does a *collapsed*
 folder holding one; screen readers hear the name, then "Changed by an agent
@@ -258,7 +258,8 @@ from one command registry (`lib/keyboard/storm_commands.dart`).
 
 | Action | macOS | Win / Linux |
 |---|---|---|
-| Search (the open vault's) | ⌘ K, ⌘ P, ⌘ ⇧ P | Ctrl K, Ctrl P, Ctrl ⇧ K, Ctrl ⇧ P |
+| Command palette | ⌘ K, ⌘ P | Ctrl K, Ctrl P, Ctrl ⇧ K |
+| Palette, commands only (`>`) | ⌘ ⇧ P | Ctrl ⇧ P |
 | New note (any screen, active vault) | ⌘ N | Ctrl N |
 | New folder (Notes) | ⌘ ⇧ N | Ctrl ⇧ N |
 | New session (Agents) | ⌘ ⇧ N | Ctrl ⇧ N |
@@ -272,6 +273,36 @@ from one command registry (`lib/keyboard/storm_commands.dart`).
 
 With the terminal focused, every app chord stops there except ⌘K, ⌘P, ⇧⌘P,
 ⌘[ and ⌘] on macOS and Ctrl ⇧ K / Ctrl ⇧ P elsewhere (AM111).
+
+### Command palette (decision 156)
+
+`lib/ui/palette/`. At ≥900 a top-aligned dialog on the root navigator, 640
+wide; below 900 a full-screen route. Focus stays in the field; closing gives
+focus back, or leaves it to the destination.
+
+- **Groups**, in a fixed order, empty ones hidden, five rows each and then
+  "Show all n": Notes (titles in every vault, the active vault first, a
+  vault tag on each), Sessions (needs you, then running, then ended; the
+  status in words), Commands (the registry's, with their chord on the
+  right), Settings, Folders & tags (tags in amber, the active vault's only),
+  Hosts, then **Create note "{q}" in {vault}** last when no title matches
+  exactly.
+- **Empty query**: NEEDS YOU, RECENT (every vault), SUGGESTED (three
+  commands). **No match**: "No matches for '{q}'" and the create row.
+  **Offline**: one `text3` line, "Offline · searching this device", over
+  cached notes and recents.
+- **Keys**: ↑/↓ move and wrap; Enter runs the row; ⇧Enter creates a note
+  from the query; ⌘Enter / Ctrl Enter on a note opens the launcher with it
+  as context; Esc clears, then closes. Enter and the arrows wait while an
+  IME composes.
+- **Prefixes**: `>` commands, `@` sessions, `#` tags, `/` folders, `?` the
+  list of prefixes.
+- **Rows**: `surface`, or `surface2` when selected, where every quiet word
+  steps up from `text3` to `text2`. Screen readers hear a button with its
+  selected state and the chord as its hint, and a polite "{n} results".
+
+The sidebar's "Search {vault}" field and `/v/:vault/search` stay until
+156-3 retires them; nothing new links to them.
 
 ---
 

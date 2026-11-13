@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/frecency.dart';
 import '../../state/nav_memory.dart';
 import '../../keyboard/storm_app_shortcuts.dart';
 import '../breakpoints.dart';
@@ -127,10 +128,14 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   void _remember() {
     final location = widget.location;
+    ref.read(pageArrivalProvider).visit(Uri.parse(location));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(navMemoryProvider.notifier).visit(location);
       ref.read(navHistoryProvider.notifier).visit(location);
+      if (frecencyIdOf(location) case final id?) {
+        ref.read(frecencyProvider.notifier).opened(id);
+      }
     });
   }
 
@@ -146,7 +151,6 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    ref.read(pageArrivalProvider).visit(Uri.parse(widget.location));
     final child = BackButtonListener(
       onBackButtonPressed: _back,
       child: widget.child,

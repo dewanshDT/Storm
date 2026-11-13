@@ -49,8 +49,12 @@ String newItemFolder(WidgetRef ref, Uri uri, String vaultId) {
   return Routes.folderOf(uri);
 }
 
-/// New note in the active vault, from any screen.
-Future<void> createNote(BuildContext context, WidgetRef ref) async {
+/// New note in the active vault, from any screen; [name] prefills it.
+Future<void> createNote(
+  BuildContext context,
+  WidgetRef ref, {
+  String name = '',
+}) async {
   final vaultId = ref.read(activeVaultProvider);
   if (vaultId.isEmpty) return;
   final router = GoRouter.of(context);
@@ -60,6 +64,7 @@ Future<void> createNote(BuildContext context, WidgetRef ref) async {
   final wanted = await promptForNewNote(
     context,
     folder: here,
+    name: name,
     create: (note) async {
       final path = noteFileName(note.name, folder: here);
       final notes = ref.read(treeProvider).value ?? const <NoteMeta>[];
