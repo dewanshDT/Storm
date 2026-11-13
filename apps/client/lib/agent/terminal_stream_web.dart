@@ -5,8 +5,17 @@ import 'package:web/web.dart' as web;
 
 import '../api/connection_client.dart';
 import 'agent_api.dart';
+import 'session_controller.dart';
 import 'terminal_events.dart';
 import 'terminal_stream_http.dart';
+
+/// How long a hidden session keeps its stream open (decision 154): none on
+/// web-direct, where each `EventSource` holds one of the browser's six
+/// HTTP/1.1 sockets to the origin, shared by every tab.
+Duration hiddenStreamGrace(AgentApi api) => switch (api.client) {
+  ConnectionClient(isRelayed: true) => SessionController.streamGrace,
+  _ => Duration.zero,
+};
 
 /// `EventSource` to the page's own server; over the relay, the streamed GET
 /// instead, since `EventSource` cannot ride the tunnel and the tunnel, unlike

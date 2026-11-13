@@ -723,6 +723,23 @@ void main() {
         o.c.dispose();
       });
 
+      test('a hidden terminal never answers, even live and in front '
+          '(decision 154, Q3)', () async {
+        final o = open();
+        o.stream.add(LiveEvent());
+        await pumpEventQueue();
+        o.c.hide();
+        o.stream.add(OutputEvent(3, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, isEmpty);
+
+        o.c.show();
+        o.stream.add(OutputEvent(6, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, hasLength(1));
+        o.c.dispose();
+      });
+
       test('a keystroke is still sent at once', () async {
         final o = open();
         o.c.terminal.typeForTest('x');

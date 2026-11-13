@@ -18,13 +18,25 @@ import 'terminal_surface.dart';
 /// The stream resumes by offset: on a drop it reconnects from the last byte it
 /// rendered, with backoff, never `Last-Event-ID`. Input is coalesced briefly
 /// and sent as serial POSTs, at most once and never retried (freeze §11.3).
+///
+/// A session left for another is kept, hidden, with its terminal (decision
+/// 154): its stream closes after [hiddenGrace] and resumes from the kept
+/// offset when it is shown again. **A hidden terminal never answers, resizes
+/// or focuses**, so it cannot speak for a device the person has left.
 class SessionController extends ChangeNotifier {
   SessionController({
     required this.api,
     required this.sessionId,
     this._open,
     bool Function()? isForeground,
-  }) : _isForeground = isForeground ?? _appInForeground;
+    Duration Function()? hiddenGrace,
+    this.onGone,
+  }) : _isForeground = isForeground ?? _appInForeground,
+       _hiddenGrace = hiddenGrace ?? (() => streamGrace);
+
+  /// How long a hidden session's stream stays open on native and relayed
+  /// connections, so flipping between two sessions reopens nothing.
+  static const streamGrace = Duration(seconds: 30);
 
   final AgentApi api;
   final String sessionId;
@@ -46,8 +58,32 @@ class SessionController extends ChangeNotifier {
   /// is never reopened.
   bool gone = false;
 
+  /// Told once when [gone] becomes true, so a kept controller is let go.
+  final VoidCallback? onGone;
+
   int _offset = 0;
   bool _disposed = false;
+
+  bool _visible = true;
+  bool get visible => _visible;
+
+  /// The app is hidden or paused: no stream is open, the visible one's
+  /// included, until it comes back.
+  bool _background = false;
+
+  final Duration Function() _hiddenGrace;
+  Timer? _grace;
+
+  /// A subscription is open (or opening).
+  bool _streaming = false;
+
+  /// The next output or gap starts a view: the first after opening, or after
+  /// a kept terminal was resumed.
+  bool _viewStart = true;
+
+  /// When the stream was last closed by a hide or a background, so a list
+  /// read from before then is not taken as news about the kept offset.
+  DateTime? _pausedAt;
 
   /// Whether this stream has caught up: before it, output is replay, and the
   /// terminal's replies to queries in it are dropped (decision 132, fix b).
@@ -115,26 +151,32 @@ class SessionController extends ChangeNotifier {
   }
 
   void _connect() {
-    if (_disposed || gone) return;
+    if (_disposed || gone || _background) return;
+    _retry?.cancel();
+    _retry = null;
     final open = _open ?? (o) => openTerminalStream(api, sessionId, o);
     _live = false;
     _armQuiet();
     _quietCap?.cancel();
     _quietCap = Timer(liveAfterAtMost, () => _live = true);
+    _streaming = true;
     _sub = open(_offset).listen(
       _onEvent,
       onError: (Object e) {
+        _streaming = false;
         if (e is StormApiException && e.isNotFound) {
           gone = true;
           connected = false;
           streamError = null;
           _notify();
+          onGone?.call();
           return;
         }
         _setStream(connected: false, error: describeFailure(e));
         _scheduleReconnect();
       },
       onDone: () {
+        _streaming = false;
         _setStream(connected: false, error: streamError);
         // The server closes the stream once the session has ended; anything
         // else is a drop to recover from.
@@ -152,7 +194,7 @@ class SessionController extends ChangeNotifier {
   }
 
   void _scheduleReconnect() {
-    if (_disposed || gone) return;
+    if (_disposed || gone || _background) return;
     _retry?.cancel();
     _retry = Timer(_backoff, _connect);
     _backoff = _backoff * 2 > const Duration(seconds: 30)
@@ -169,7 +211,7 @@ class SessionController extends ChangeNotifier {
         _hostSize = (session.cols, session.rows);
         // Opening a session is using it. Another device may have sized the
         // PTY since, and its agent would draw for that height on this screen.
-        if (!_claimedOnOpen) {
+        if (!_claimedOnOpen && _visible) {
           _claimedOnOpen = true;
           _claimIfSizeDiffers();
         }
@@ -177,12 +219,18 @@ class SessionController extends ChangeNotifier {
         streamError = null;
         _backoff = const Duration(seconds: 1);
         _notify();
+        // An end below what was rendered is another stream: the host
+        // restarted and numbers from 0 again.
+        final end = session.outputEnd;
+        if (end != null && end < _offset) _restartFromZero();
       case LiveEvent():
         _quiet?.cancel();
         _quietCap?.cancel();
         _live = true;
+        _viewStart = false;
       case OutputEvent(:final end, :final bytes):
         if (!_live) _armQuiet();
+        _viewStart = false;
         // A resumed stream never repeats bytes, but a reconnect racing a
         // replay could; the offset is what decides.
         final start = end - bytes.length;
@@ -191,29 +239,139 @@ class SessionController extends ChangeNotifier {
         terminal.write(fresh);
         _offset = end;
       case GapEvent(:final to):
-        // At the start of a view: clear and render from the oldest retained
-        // byte (freeze §14). Mid-view: say so, then carry on.
-        if (_offset == 0) {
+        // At the start of a view — a kept terminal shown again included —
+        // clear and render from the oldest retained byte (freeze §14), or
+        // new bytes paint over a screen missing what drew it. Mid-view: say
+        // so, then carry on.
+        if (_offset == 0 || _viewStart) {
           terminal.reset();
         }
+        _viewStart = false;
         terminal.note('Earlier output is no longer retained.');
         _offset = to;
     }
   }
+
+  void _restartFromZero() {
+    _closeStream();
+    terminal.reset();
+    _offset = 0;
+    _viewStart = true;
+    _connect();
+  }
+
+  void _closeStream() {
+    _retry?.cancel();
+    _retry = null;
+    _quiet?.cancel();
+    _quietCap?.cancel();
+    _live = false;
+    unawaited(_sub?.cancel());
+    _sub = null;
+    _streaming = false;
+  }
+
+  /// Nothing shows this session any more. Its stream stays open for the
+  /// grace (none on web-direct, where every open `EventSource` holds one of
+  /// the browser's six sockets), then closes, keeping the offset.
+  void hide() {
+    if (!_visible || _disposed) return;
+    _visible = false;
+    _resizeTimer?.cancel();
+    _focusPending = false;
+    _grace?.cancel();
+    final grace = _hiddenGrace();
+    if (grace <= Duration.zero) {
+      _pause();
+    } else {
+      _grace = Timer(grace, _pause);
+    }
+  }
+
+  /// Shown again: the stream resumes from the kept offset if it closed, and
+  /// the PTY is claimed if another device sized it meanwhile.
+  void show() {
+    if (_visible || _disposed) return;
+    _visible = true;
+    _grace?.cancel();
+    _grace = null;
+    _claimedOnOpen = false;
+    _resume();
+  }
+
+  void _resume() {
+    if (_streaming || (_retry?.isActive ?? false)) {
+      if (_hostSize != null) {
+        _claimedOnOpen = true;
+        _claimIfSizeDiffers();
+      }
+      return;
+    }
+    // The server closed an ended session's stream after the last byte.
+    if (session?.ended ?? false) return;
+    _viewStart = true;
+    _connect();
+  }
+
+  void _pause() {
+    _grace?.cancel();
+    _grace = null;
+    _closeStream();
+    connected = false;
+    _pausedAt = DateTime.now();
+  }
+
+  /// The app is hidden or paused: every stream closes.
+  void background() {
+    if (_disposed) return;
+    _background = true;
+    _pause();
+  }
+
+  /// The app is back: only a visible session reconnects; a hidden one waits
+  /// to be shown.
+  void foreground() {
+    if (!_background || _disposed) return;
+    _background = false;
+    if (_visible) {
+      _claimedOnOpen = false;
+      _resume();
+    }
+  }
+
+  /// A list read at [askedAt] says the server's output for this session ends
+  /// at [end]. Below the kept offset, the host has renumbered its stream, so
+  /// the next open starts again from 0. Only a closed stream is judged: an
+  /// open one is ahead of any list.
+  void checkOutputEnd(int? end, DateTime askedAt) {
+    final pausedAt = _pausedAt;
+    if (end == null || _streaming || pausedAt == null) return;
+    if (!askedAt.isAfter(pausedAt) || end >= _offset) return;
+    terminal.reset();
+    _offset = 0;
+    _viewStart = true;
+  }
+
+  /// Roughly what the kept terminal holds, for the keep-alive budget.
+  int get estimatedBytes => terminal.estimatedBytes;
 
   void _armQuiet() {
     _quiet?.cancel();
     _quiet = Timer(liveAfterQuiet, () => _live = true);
   }
 
+  /// Visible, in front and live (decision 154, Q3): a hidden one inside its
+  /// grace would otherwise answer for a session in use elsewhere, the double
+  /// answer 132 fix b removed.
   void _queueReply(Uint8List bytes) {
-    if (!_live || !_isForeground() || (session?.ended ?? false)) return;
+    if (!_visible || !_live || !_isForeground()) return;
+    if (session?.ended ?? false) return;
     _pending.add(bytes);
     _flush ??= Timer(coalesce, _send);
   }
 
   void _queueInput(Uint8List bytes) {
-    if (session?.ended ?? false) return;
+    if (!_visible || (session?.ended ?? false)) return;
     // Typing here is using this device, so the PTY follows it (freeze §11.4).
     // Only the device being typed on claims, so two open ones never fight.
     _claimIfSizeDiffers();
@@ -246,6 +404,7 @@ class SessionController extends ChangeNotifier {
   /// This client is now the one the person is using: the PTY follows it
   /// (freeze §11.4).
   void focus() {
+    if (!_visible) return;
     _focusPending = true;
     _queueResize();
   }
@@ -259,11 +418,15 @@ class SessionController extends ChangeNotifier {
     if (_hostSize != (cols, rows) && _resizeTimer?.isActive != true) focus();
   }
 
+  /// A hidden terminal re-fits locally and tells the host nothing: the PTY
+  /// follows the device in use (freeze §11.4), and [show] claims it back.
   void _queueResize() {
     _resizeTimer?.cancel();
+    if (!_visible) return;
     _resizeTimer = Timer(const Duration(milliseconds: 150), () async {
       final cols = terminal.cols, rows = terminal.rows;
-      if (cols <= 0 || rows <= 0 || (session?.ended ?? true)) return;
+      if (!_visible || cols <= 0 || rows <= 0) return;
+      if (session?.ended ?? true) return;
       final focus = _focusPending;
       _focusPending = false;
       try {
@@ -332,6 +495,7 @@ class SessionController extends ChangeNotifier {
     imagePaste.dispose();
     _sub?.cancel();
     _retry?.cancel();
+    _grace?.cancel();
     _flush?.cancel();
     _resizeTimer?.cancel();
     _quiet?.cancel();
