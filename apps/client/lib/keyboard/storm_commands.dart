@@ -13,6 +13,7 @@ import '../state/app_state.dart'
 import '../state/nav_memory.dart';
 import '../ui/breakpoints.dart';
 import '../ui/shell/app_bar.dart' show goBack, goForward;
+import '../ui/palette/palette.dart' show openPalette;
 import '../ui/shell/create_here.dart';
 import 'storm_activators.dart';
 import 'storm_intents.dart';
@@ -74,8 +75,8 @@ String _keyLabel(LogicalKeyboardKey key) => switch (key) {
   _ => key.keyLabel.toUpperCase(),
 };
 
-/// An app command: what the shortcut layer arms, the terminal stops and,
-/// later, what the palette lists.
+/// An app command: what the shortcut layer arms, the terminal stops and
+/// the palette lists.
 @immutable
 class StormCommand {
   const StormCommand({
@@ -127,12 +128,6 @@ bool _hasVault(WidgetRef ref) => ref.read(activeVaultProvider).isNotEmpty;
 bool _inTextField() =>
     primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>() !=
     null;
-
-void _search(BuildContext context, WidgetRef ref) {
-  final vaultId = ref.read(activeVaultProvider);
-  if (vaultId.isEmpty) return;
-  context.go(Routes.search(vaultId));
-}
 
 /// Back and forward (153c): ⌘[ and ⌘] on macOS, Alt+← and Alt+→ elsewhere,
 /// none on the web, where the browser's own keys move its history.
@@ -194,8 +189,7 @@ List<StormCommand> stormCommands() => [
     synonyms: const ['find', 'go to', 'open'],
     group: StormCommandGroup.navigate,
     chords: _searchChords(),
-    when: (_, ref) => _hasVault(ref),
-    run: _search,
+    run: (context, ref) => openPalette(context, ref),
   ),
   StormCommand(
     id: 'commands',
@@ -203,9 +197,7 @@ List<StormCommand> stormCommands() => [
     synonyms: const ['command palette', 'actions'],
     group: StormCommandGroup.navigate,
     chords: _commandModeChords(),
-    when: (_, ref) => _hasVault(ref),
-    // The palette's command mode, once there is a palette (156-2).
-    run: _search,
+    run: (context, ref) => openPalette(context, ref, initial: '>'),
   ),
   StormCommand(
     id: 'new-note',

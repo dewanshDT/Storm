@@ -16,6 +16,7 @@ class ServerNote {
     required this.path,
     required this.content,
     required this.version,
+    this.title,
   });
 
   final String id;
@@ -23,18 +24,22 @@ class ServerNote {
   final String content;
   final int version;
 
+  /// The indexed title; the id when unset, as these fakes always had.
+  final String? title;
+
   ServerNote copyWith({String? content, int? version, String? path}) =>
       ServerNote(
         id: id,
         path: path ?? this.path,
         content: content ?? this.content,
         version: version ?? this.version,
+        title: title,
       );
 
   Map<String, dynamic> get meta => {
     'id': id,
     'path': path,
-    'title': id,
+    'title': title ?? id,
     'version': version,
     'content_hash': 'h',
     'created': '2026-08-05T10:00:00Z',
@@ -91,6 +96,9 @@ class FakeServer {
     'version': version,
     'at': at ?? DateTime.now().toUtc().toIso8601String(),
   };
+
+  /// Each vault's tags and their counts, as `…/tags` lists them.
+  final Map<String, Map<String, int>> tags = {};
 
   /// Server-recorded opens, per vault: note id -> ISO timestamp.
   final Map<String, Map<String, String>> opened = {};
@@ -528,6 +536,19 @@ class FakeServer {
       }
     }
     final vaultNotes = byVault[vaultId]!;
+
+    if (path == '/v1/tags' && request.method == 'GET') {
+      return http.Response(
+        jsonEncode({
+          'tags': [
+            for (final e in (tags[vaultId] ?? const <String, int>{}).entries)
+              {'tag': e.key, 'count': e.value},
+          ],
+        }),
+        200,
+        headers: j(''),
+      );
+    }
 
     if (path == '/v1/folders' && request.method == 'POST') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;

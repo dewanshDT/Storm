@@ -102,15 +102,19 @@ void main() {
   });
 
   group('global shortcuts', () {
-    testWidgets('K opens vault search', (tester) async {
+    testWidgets('K opens the palette', (tester) async {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final c = shellContainer();
       await pumpShell(tester, c, size: const Size(1280, 900));
       await openVault(tester, c);
 
       await chord(tester, LogicalKeyboardKey.keyK);
+      expect(find.byKey(const Key('palette-field')), findsOneWidget);
       final path = c.read(routerProvider).state.uri.path;
-      expect(path, Routes.search(FakeServer.primaryVault));
+      expect(path, Routes.browse(FakeServer.primaryVault));
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('palette-field')), findsNothing);
       await disposeShell(tester, c);
       debugDefaultTargetPlatformOverride = null;
     });

@@ -895,21 +895,63 @@ final vaultsProvider = FutureProvider<List<VaultInfo>>((ref) async {
   return vaults;
 });
 
+/// Every vault's tree, fetched once for whoever asks within a revision and
+/// [maxAge]: the accents and the palette's titles (decision 156j) both read
+/// every vault, and would otherwise each fetch it.
+class VaultTreeFetcher {
+  VaultTreeFetcher(this.api);
+
+  final StormApi api;
+  final _held =
+      <String, ({int revision, DateTime at, Future<VaultTree> tree})>{};
+
+  Future<VaultTree> tree(
+    String vaultId, {
+    required int revision,
+    Duration maxAge = const Duration(seconds: 60),
+  }) {
+    final held = _held[vaultId];
+    final now = DateTime.now();
+    if (held != null &&
+        held.revision == revision &&
+        now.difference(held.at) < maxAge) {
+      return held.tree;
+    }
+    final tree = api.tree(vaultId);
+    final entry = (revision: revision, at: now, tree: tree);
+    _held[vaultId] = entry;
+    tree.then<void>(
+      (_) {},
+      onError: (Object _) {
+        // A failure is never served again; the next ask tries afresh.
+        if (identical(_held[vaultId], entry)) _held.remove(vaultId);
+      },
+    );
+    return tree;
+  }
+}
+
+final vaultTreeFetcherProvider = Provider<VaultTreeFetcher?>((ref) {
+  final api = ref.watch(apiProvider);
+  return api == null ? null : VaultTreeFetcher(api);
+});
+
 /// Each vault's accent, read from its own `_storm/vault.md`.
 ///
 /// The dashboard shows every vault at once, so it cannot use
 /// [vaultConfigProvider], which only serves the *active* vault.
 final vaultAccentsProvider = FutureProvider<Map<String, Accent>>((ref) async {
-  ref.watch(vaultRevisionProvider);
+  final revision = ref.watch(vaultRevisionProvider);
   final api = ref.watch(apiProvider);
+  final trees = ref.watch(vaultTreeFetcherProvider);
   final vaults = ref.watch(vaultsProvider).value ?? const <VaultInfo>[];
-  if (api == null) return const {};
+  if (api == null || trees == null) return const {};
 
   final out = <String, Accent>{};
   for (final vault in vaults) {
     if (vault.missing) continue;
     try {
-      final tree = await api.tree(vault.id);
+      final tree = await trees.tree(vault.id, revision: revision);
       final config = tree.notes
           .where((n) => n.path == kVaultConfigPath)
           .firstOrNull;
