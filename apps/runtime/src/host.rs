@@ -2424,6 +2424,7 @@ impl Host {
     /// and everything has been acknowledged.
     async fn upload(self: Arc<Self>, s: Arc<HostSession>) {
         let mut retry = Duration::from_millis(250);
+        let mut status_retry_at: Option<std::time::Instant> = None;
         loop {
             // A shutdown ends this session itself, and says so in the next
             // `hello`, not here (AM37).
@@ -2457,7 +2458,7 @@ impl Host {
 
             let from = *s.sent.lock().unwrap();
             let read = s.events.ring.lock().unwrap().read(from, BATCH);
-            match read {
+            let drained = match read {
                 Read::Data { from, bytes } => {
                     let body = json!({ "offset": from, "data": BASE64.encode(&bytes) });
                     match self
@@ -2474,16 +2475,17 @@ impl Host {
                         _ => {
                             tokio::time::sleep(retry).await;
                             retry = (retry * 2).min(Duration::from_secs(5));
+                            continue;
                         }
                     }
-                    continue;
+                    false
                 }
                 Read::Gap { to, .. } => {
                     *s.sent.lock().unwrap() = to;
                     continue;
                 }
-                Read::UpToDate | Read::Beyond { .. } => {}
-            }
+                Read::UpToDate | Read::Beyond { .. } => true,
+            };
 
             let title = s.events.title.lock().unwrap().current().clone();
             let harness = s.events.harness.lock().unwrap().clone();
@@ -2498,12 +2500,19 @@ impl Host {
             if end.is_none()
                 && (title != sent || harness_changed || attention_changed || activity_changed)
             {
-                let wait =
-                    posted_at.map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()));
+                let wait = posted_at
+                    .map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()))
+                    .max(status_retry_at.map_or(Duration::ZERO, |t| {
+                        t.saturating_duration_since(std::time::Instant::now())
+                    }));
                 if !wait.is_zero() {
-                    tokio::select! {
-                        _ = s.events.wake.notified() => {}
-                        _ = tokio::time::sleep(wait) => {}
+                    // 154-R1: output still waiting goes on; only a drained
+                    // ring sleeps out the rate limit.
+                    if drained {
+                        tokio::select! {
+                            _ = s.events.wake.notified() => {}
+                            _ = tokio::time::sleep(wait) => {}
+                        }
                     }
                     continue;
                 }
@@ -2523,13 +2532,22 @@ impl Host {
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
                         *s.activity_sent.lock().unwrap() = activity;
+                        status_retry_at = None;
                         retry = Duration::from_millis(250);
                     }
                     _ => {
-                        tokio::time::sleep(retry).await;
+                        // A refused status must not hold back output.
+                        if drained {
+                            tokio::time::sleep(retry).await;
+                        } else {
+                            status_retry_at = Some(std::time::Instant::now() + retry);
+                        }
                         retry = (retry * 2).min(Duration::from_secs(5));
                     }
                 }
+                continue;
+            }
+            if !drained {
                 continue;
             }
             if let Some(end) = end {
@@ -3810,6 +3828,8 @@ mod tests {
     /// Sessions (lowercased, as the recording server sees paths) whose
     /// start the recording server answers as Storm does one it gave up on.
     static UNWANTED_STARTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// Sessions (lowercased) whose output posts are answered 100 ms late.
+    static SLOW_OUTPUT: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
     async fn recording_server() -> (String, Arc<Mutex<Vec<(String, serde_json::Value)>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -3860,7 +3880,14 @@ mod tests {
                                 .unwrap()
                                 .iter()
                                 .any(|id| path.ends_with(&format!("/sessions/{id}/status")));
+                        let slow =
+                            SLOW_OUTPUT.lock().unwrap().iter().any(|id| {
+                                path.ends_with(&format!("/sessions/{id}/terminal/output"))
+                            });
                         record.lock().unwrap().push((path, body));
+                        if slow {
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                        }
                         let reply: &[u8] = if unwanted {
                             b"HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: 26\r\n\r\n{\"error\":\"start_unwanted\"}"
                         } else {
@@ -5958,6 +5985,128 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         let entry = &hello["sessions"][0];
         assert_eq!(entry["title"], "Fix the login");
         assert_eq!(entry["activity"], "idle");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 154-R1: under output that never lets the ring drain, a title change
+    /// is still posted within 1.2 s, at most once a second, and the output
+    /// still goes up in order.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(unix)]
+    async fn a_title_change_is_posted_under_continuous_output() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        SLOW_OUTPUT.lock().unwrap().push("ags_busy".into());
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let script = r#"t() { printf '\033]0;%s\007' "$1"; }
+            t '✳ Claude Code'; (while :; do echo tick; sleep 0.01; done) &
+            sleep 1.5; t '◐ Fix the login'; sleep 0.2; t '✳ Fix the login'; exec sleep 1000"#;
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", {:?}]\n",
+            roots.path().display().to_string(),
+            script,
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        host.clone()
+            .handle(Command::Start {
+                session: "ags_BUSY".into(),
+                workspace: "w".into(),
+                provider: "shell".into(),
+                interaction: Some("terminal".into()),
+                terminal: Size { cols: 80, rows: 24 },
+                mcp: Vec::new(),
+                context: false,
+                resume: None,
+                provider_credential: None,
+                model: None,
+                permission_mode: None,
+                spawn: false,
+                resumed_from: None,
+                child_of: None,
+                cwd: None,
+                typed_input: None,
+            })
+            .await;
+        let s = host.session("ags_BUSY").expect("the session started");
+
+        async fn when(what: &str, mut ok: impl FnMut() -> bool) -> std::time::Instant {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !ok() {
+                assert!(std::time::Instant::now() < deadline, "never saw {what}");
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            std::time::Instant::now()
+        }
+        use crate::terminal::Activity;
+        let shown = |activity: Activity| {
+            let title = s.events.title.lock().unwrap().current().clone();
+            title.name.as_deref() == Some("Fix the login") && title.activity == Some(activity)
+        };
+        let posted = |activity: &str| {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/ags_busy/status")
+                    && b["title"] == "Fix the login"
+                    && b["activity"] == activity
+            })
+        };
+
+        let working_seen = when("the working title", || shown(Activity::Working)).await;
+        let working_posted = when("working posted", || posted("working")).await;
+        assert!(
+            working_posted - working_seen <= Duration::from_millis(1200),
+            "took {:?}",
+            working_posted - working_seen
+        );
+        let behind = || {
+            let sent = *s.sent.lock().unwrap();
+            matches!(
+                s.events.ring.lock().unwrap().read(sent, 1),
+                Read::Data { .. }
+            )
+        };
+        assert!(behind(), "the output was meant to be still flowing");
+        let idle_posted = when("idle posted", || posted("idle")).await;
+        assert!(
+            idle_posted - working_posted >= Duration::from_millis(900),
+            "two title posts {:?} apart",
+            idle_posted - working_posted
+        );
+        assert!(
+            idle_posted - working_posted <= Duration::from_millis(1200),
+            "the second change took {:?}",
+            idle_posted - working_posted
+        );
+
+        let mut next = 0;
+        for (_, b) in seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/ags_busy/terminal/output"))
+        {
+            assert_eq!(b["offset"], next, "the output is in order and whole");
+            next += BASE64
+                .decode(b["data"].as_str().unwrap().as_bytes())
+                .unwrap()
+                .len() as u64;
+        }
+        assert!(next > 0);
         host.shutdown(Duration::from_millis(200)).await;
     }
 
