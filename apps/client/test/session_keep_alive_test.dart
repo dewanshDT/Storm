@@ -70,7 +70,7 @@ void main() {
       final c = SessionController(
         api: api(onRequest: onRequest),
         sessionId: 'ags_1',
-        open: (offset) {
+        open: (offset, _) {
           final i = opened.length;
           opened.add(offset);
           current = StreamController<TerminalEvent>(
@@ -195,7 +195,7 @@ void main() {
       final c = SessionController(
         api: api(),
         sessionId: 'ags_1',
-        open: (_) {
+        open: (_, _) {
           opens++;
           return Stream.error(StormApiException(404, 'not found'));
         },
@@ -307,7 +307,7 @@ void main() {
           },
         ),
         sessionId: 'ags_1',
-        open: (_) => stream.stream,
+        open: (_, _) => stream.stream,
         isForeground: () => true,
         hiddenGrace: () => const Duration(seconds: 30),
       )..start();
@@ -359,7 +359,8 @@ void main() {
     })
     harness(
       KeepAliveBudget budget, {
-      Stream<TerminalEvent> Function(String id, int offset)? custom,
+      Stream<TerminalEvent> Function(String id, int offset, bool snapshot)?
+      custom,
     }) {
       final opens = <(String, int)>[];
       final cancelled = <String>[];
@@ -380,7 +381,7 @@ void main() {
           }),
           terminalStreamFactoryProvider.overrideWithValue(
             custom ??
-                (id, offset) {
+                (id, offset, _) {
                   opens.add((id, offset));
                   final s = StreamController<TerminalEvent>(
                     onCancel: () => cancelled.add(id),
@@ -561,7 +562,7 @@ void main() {
       final opens = <int>[];
       final h = harness(
         budget,
-        custom: (id, offset) {
+        custom: (id, offset, _) {
           opens.add(offset);
           return Stream.fromIterable([
             StatusEvent(record(id: id, status: 'completed')),
@@ -585,7 +586,7 @@ void main() {
       () async {
         final h = harness(
           budget,
-          custom: (id, offset) => id == 'gone'
+          custom: (id, offset, _) => id == 'gone'
               ? Stream.error(StormApiException(404, 'not found'))
               : StreamController<TerminalEvent>().stream,
         );
@@ -671,13 +672,13 @@ void main() {
 
     ({
       List<(String, int)> opens,
-      Stream<TerminalEvent> Function(String, int) open,
+      Stream<TerminalEvent> Function(String, int, bool) open,
     })
     scripted() {
       final opens = <(String, int)>[];
       return (
         opens: opens,
-        open: (id, offset) {
+        open: (id, offset, _) {
           opens.add((id, offset));
           final s = StreamController<TerminalEvent>();
           s.add(StatusEvent(record(id: id)));

@@ -39,7 +39,7 @@ void main() {
     final statuses = <String>[];
     var live = false;
     final done = Completer<void>();
-    final sub = openTerminalStream(api, s.id, 0).listen((e) {
+    final sub = openTerminalStream(api, s.id, 0, false).listen((e) {
       switch (e) {
         case StatusEvent(:final session):
           statuses.add(session.status);
@@ -48,7 +48,7 @@ void main() {
           last = end;
         case LiveEvent():
           live = true;
-        case GapEvent():
+        case GapEvent() || SnapshotEvent():
           break;
       }
     }, onDone: () => done.complete());
@@ -70,7 +70,7 @@ void main() {
 
     // Resume from an offset: exactly what followed, nothing earlier.
     final resumed = StringBuffer();
-    final sub2 = openTerminalStream(api, s.id, last).listen((e) {
+    final sub2 = openTerminalStream(api, s.id, last, false).listen((e) {
       if (e is OutputEvent) resumed.write(utf8.decode(e.bytes));
     });
     await api.input(s.id, Uint8List.fromList(utf8.encode('after')));

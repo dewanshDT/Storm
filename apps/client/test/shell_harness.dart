@@ -62,7 +62,8 @@ ProviderContainer shellContainer({
   NavMemory nav = const NavMemory(),
   http.Client? integrationsClient,
   http.Client? agentClient,
-  Stream<TerminalEvent> Function(String sessionId, int offset)? terminalStream,
+  Stream<TerminalEvent> Function(String sessionId, int offset, bool snapshot)?
+  terminalStream,
   OAuthLinks? oauthLinks,
   KeepAliveBudget keepAlive = harnessKeepAlive,
 }) {
@@ -136,7 +137,7 @@ ProviderContainer shellContainer({
       ),
       claudeLoginApiFactoryProvider.overrideWithValue(null),
       terminalStreamFactoryProvider.overrideWithValue(
-        terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
+        terminalStream ?? (_, _, _) => StreamController<TerminalEvent>().stream,
       ),
       sessionKeepAliveBudgetProvider.overrideWithValue(keepAlive),
       // Detached, so no suite reaches the native link channel.
