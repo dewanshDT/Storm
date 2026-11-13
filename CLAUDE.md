@@ -257,6 +257,12 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   reports the colour scheme to the agent on every non-identical theme while
   DEC 2031 is on; a report after the agent restored echo prints as
   `^[[?997;1n` in the scrollback.
+- **A hidden terminal never answers, resizes or focuses** (decision 154).
+  A session left for another stays in a bounded LRU with its stream open
+  for a short grace; its replies (2031 reports included) go out only while
+  visible, in front and live, and it re-fits locally without telling the
+  host, so it never speaks for a device the person has left
+  (`session_keep_alive_test.dart`).
 - **Tab and Shift+Tab are the agent's while the terminal has focus**
   (decision 147b): `StormTerminal` sends `\t` and `ESC [ Z` itself, before
   xterm2's encoding or Flutter's focus traversal, on every platform; the

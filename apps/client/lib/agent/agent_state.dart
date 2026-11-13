@@ -12,7 +12,9 @@ import '../state/app_state.dart';
 import 'agent_api.dart';
 import 'agent_models.dart';
 import 'session_controller.dart';
+import 'session_keep_alive.dart';
 import 'terminal_events.dart';
+import 'terminal_stream.dart' show hiddenStreamGrace;
 
 /// How a session's terminal stream is opened, when a test supplies one.
 final terminalStreamFactoryProvider =
@@ -289,8 +291,12 @@ class AgentOverviewNotifier extends AsyncNotifier<AgentOverview> {
       final server = _server;
       if (server != null) state = AsyncData(_patched(server, patches));
     });
+    final askedAt = DateTime.now();
     final o = await _fetch();
     _server = o;
+    if (!o.unreachable) {
+      ref.read(sessionKeepAliveProvider).overviewSeen(o.sessions, askedAt);
+    }
     return _patched(o, ref.read(crewPatchesProvider));
   }
 
@@ -348,21 +354,62 @@ Future<void> reloadAgents(WidgetRef ref) async {
   await ref.read(agentOverviewProvider.future);
 }
 
+/// How many hidden sessions this device keeps (decision 154). Tests
+/// override it.
+final sessionKeepAliveBudgetProvider = Provider<KeepAliveBudget>(
+  (ref) => KeepAliveBudget.forPlatform(),
+);
+
+/// The kept sessions. Only ever read, and it hears credential changes
+/// through the container: a hidden controller's own subscriptions are
+/// paused, so a `ref.watch` here would not see a logout until something
+/// read it again.
+final sessionKeepAliveProvider = Provider<SessionKeepAlive>((ref) {
+  final keep = SessionKeepAlive(ref.read(sessionKeepAliveBudgetProvider));
+  final sub = ref.container.listen(
+    sessionCredentialsProvider,
+    (_, next) => keep.credentialsChanged(next),
+  );
+  ref.onDispose(() {
+    sub.close();
+    keep.dispose();
+  });
+  return keep;
+});
+
 /// One session's stream, terminal and input, shared by whatever shows the
 /// session — the desk split and the phone screen are the same route — and
-/// closed when nothing does (plan §6.1).
+/// kept alive in a bounded LRU once nothing does (decision 154, plan §6.1):
+/// hidden, its stream closes after a grace and resumes by offset.
 final sessionControllerProvider = ChangeNotifierProvider.autoDispose
     .family<SessionController?, String>((ref, id) {
+      final credentials = ref.watch(sessionCredentialsProvider);
       final api = ref.watch(agentApiFactoryProvider)?.call();
       if (api == null) return null;
       final open = ref.watch(terminalStreamFactoryProvider);
+      final keep = ref.read(sessionKeepAliveProvider);
+      final grace = keep.budget.grace;
       final c = SessionController(
         api: api,
         sessionId: id,
         open: open == null ? null : (offset) => open(id, offset),
+        hiddenGrace: () => grace ?? hiddenStreamGrace(api),
+        onGone: () => keep.gone(id),
       )..start();
+      keep.track(id, c, credentials, ref.keepAlive);
+      ref.onCancel(() {
+        c.hide();
+        keep.hidden(id);
+      });
+      ref.onResume(() {
+        c.show();
+        keep.shown(id);
+      });
       // The provider disposes the controller itself.
-      ref.onDispose(api.dispose);
+      ref.onDispose(() {
+        keep.forget(id, c);
+        api.dispose();
+      });
       return c;
     });
 

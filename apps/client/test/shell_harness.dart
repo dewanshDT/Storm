@@ -14,6 +14,7 @@ import 'package:storm/agent/integrations_api.dart';
 import 'package:storm/agent/integrations_screen.dart'
     show integrationsApiFactoryProvider, oauthSupportedProvider;
 import 'package:storm/agent/oauth_links.dart';
+import 'package:storm/agent/session_keep_alive.dart';
 import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/api/models.dart';
 import 'package:storm/api/storm_connection.dart';
@@ -63,6 +64,7 @@ ProviderContainer shellContainer({
   http.Client? agentClient,
   Stream<TerminalEvent> Function(String sessionId, int offset)? terminalStream,
   OAuthLinks? oauthLinks,
+  KeepAliveBudget keepAlive = harnessKeepAlive,
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -136,6 +138,7 @@ ProviderContainer shellContainer({
       terminalStreamFactoryProvider.overrideWithValue(
         terminalStream ?? (_, _) => StreamController<TerminalEvent>().stream,
       ),
+      sessionKeepAliveBudgetProvider.overrideWithValue(keepAlive),
       // Detached, so no suite reaches the native link channel.
       oauthLinksProvider.overrideWithValue(oauthLinks ?? OAuthLinks.detached()),
       // No suite browses the real network; LAN discovery has its own tests.
@@ -146,6 +149,15 @@ ProviderContainer shellContainer({
   _servers[container] = server;
   return container;
 }
+
+/// The phone's budget with no grace or expiry, so a test ends with no keep-
+/// alive timer pending: a hidden session's stream closes at once.
+const harnessKeepAlive = KeepAliveBudget(
+  hidden: 3,
+  bytes: 48 << 20,
+  ttl: null,
+  grace: Duration.zero,
+);
 
 /// The fake server behind a container, for asserting what actually reached it.
 final _servers = <ProviderContainer, FakeServer>{};

@@ -26,8 +26,14 @@ class StormTerminal {
     _bytes = const Utf8Decoder(allowMalformed: true).startChunkedConversion(
       StringConversionSink.fromStringSink(_TerminalWriter(_terminal)),
     );
-    _terminal.onOutput = (data) => _writingOutput ? _reply(data) : _emit(data);
-    _terminal.onResize = (cols, rows, _, _) => onResize?.call(cols, rows);
+    _terminal.onOutput = (data) =>
+        _writingOutput || _schemeReport.hasMatch(data)
+        ? _reply(data)
+        : _emit(data);
+    _terminal.onResize = (cols, rows, _, _) {
+      if (cols > _widest) _widest = cols;
+      onResize?.call(cols, rows);
+    };
     _terminal.onTitleChange = (t) => title.value = t;
   }
 
@@ -54,6 +60,10 @@ class StormTerminal {
   /// True while output is being drawn: whatever the emulator sends then is a
   /// reply, never a keystroke.
   bool _writingOutput = false;
+
+  /// A DEC 2031 colour-scheme report, sent on a theme change outside any
+  /// output: still a reply, never a keystroke, so it is gated like one.
+  static final _schemeReport = RegExp(r'^\x1b\[\?997;[12]n$');
 
   void _reply(String data) {
     final bytes = Uint8List.fromList(utf8.encode(data));
@@ -108,6 +118,35 @@ class StormTerminal {
 
   int get cols => _terminal.viewWidth;
   int get rows => _terminal.viewHeight;
+
+  /// The widest this terminal has been: xterm2 never shrinks a line's cells.
+  int _widest = 0;
+
+  /// Roughly the bytes its cells hold: 16 a cell, at the line capacity of
+  /// the widest it has been, over both buffers.
+  int get estimatedBytes {
+    final lines =
+        _terminal.mainBuffer.lines.length + _terminal.altBuffer.lines.length;
+    final widest = _widest > cols ? _widest : cols;
+    return lines * 16 * lineCapacity(widest);
+  }
+
+  /// xterm2's `BufferLine` capacity for [cols]: 64, doubling below 256, then
+  /// 256 in steps of 32.
+  static int lineCapacity(int cols) {
+    var capacity = 64;
+    if (cols < 256) {
+      while (capacity < cols) {
+        capacity *= 2;
+      }
+    } else {
+      capacity = 256;
+      while (capacity < cols) {
+        capacity += 32;
+      }
+    }
+    return capacity;
+  }
 
   void write(Uint8List bytes) {
     _writingOutput = true;
