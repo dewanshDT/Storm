@@ -2551,11 +2551,22 @@ struct StreamQuery {
     offset: u64,
 }
 
+/// Output event size while a stream replays what the cache already holds
+/// (decision 154): 16 events for a full 4 MiB cache instead of 128.
+const CATCH_UP_CHUNK: usize = 256 * 1024;
+/// Output event size once a stream is live; host uploads are smaller anyway.
+const LIVE_CHUNK: usize = 32 * 1024;
+/// While replaying, the session record is read at most this far apart.
+const STATUS_WHILE_BEHIND: std::time::Duration = std::time::Duration::from_millis(250);
+
 struct TerminalStream {
     agent: Arc<crate::agent::AgentManager>,
     id: String,
     cursor: u64,
     last_status: Option<String>,
+    /// The next pass must read the record, whatever the clock says.
+    stale: bool,
+    read_at: std::time::Instant,
     rx: tokio::sync::watch::Receiver<u64>,
     done: bool,
     live_sent: bool,
@@ -2573,6 +2584,11 @@ struct TerminalStream {
 /// everything retained: what came before it is replay, and a client's
 /// terminal must not answer the queries in it again (decision 132, fix b).
 /// Older clients ignore it.
+///
+/// Until `live`, output goes in events of up to 256 KiB and the record is
+/// read only every 250 ms, after a gap, and before deciding the stream has
+/// caught up; once live, 32 KiB and every pass (decision 154). A status that
+/// is sent is always the whole record.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -2590,6 +2606,8 @@ async fn agent_terminal_stream(
         id,
         cursor: q.offset,
         last_status: None,
+        stale: true,
+        read_at: std::time::Instant::now(),
         done: false,
         live_sent: false,
     };
@@ -2601,16 +2619,30 @@ async fn agent_terminal_stream(
             // Mark the current version seen *before* reading, so a change
             // landing between the read and the wait still wakes us.
             st.rx.borrow_and_update();
-            let record = match st.agent.get(&st.id) {
-                Ok(r) => r,
-                Err(_) => return None,
+            let catching_up = !st.live_sent;
+            let record = if !catching_up || st.stale || st.read_at.elapsed() >= STATUS_WHILE_BEHIND
+            {
+                let record = match st.agent.get(&st.id) {
+                    Ok(r) => r,
+                    Err(_) => return None,
+                };
+                st.stale = false;
+                st.read_at = std::time::Instant::now();
+                let json = serde_json::to_string(&record).unwrap_or_default();
+                if st.last_status.as_ref() != Some(&json) {
+                    st.last_status = Some(json.clone());
+                    return Some((Ok(Event::default().event("status").data(json)), st));
+                }
+                Some(record)
+            } else {
+                None
             };
-            let json = serde_json::to_string(&record).unwrap_or_default();
-            if st.last_status.as_ref() != Some(&json) {
-                st.last_status = Some(json.clone());
-                return Some((Ok(Event::default().event("status").data(json)), st));
-            }
-            match st.agent.read_output(&st.id, st.cursor, 32 * 1024) {
+            let chunk = if catching_up {
+                CATCH_UP_CHUNK
+            } else {
+                LIVE_CHUNK
+            };
+            match st.agent.read_output(&st.id, st.cursor, chunk) {
                 crate::agent::cache::Read::Data { from, bytes } => {
                     st.cursor = from + bytes.len() as u64;
                     let event = Event::default()
@@ -2621,12 +2653,18 @@ async fn agent_terminal_stream(
                 }
                 crate::agent::cache::Read::Gap { from, to } => {
                     st.cursor = to;
+                    st.stale = true;
                     let event = Event::default()
                         .event("gap")
                         .data(serde_json::json!({ "from": from, "to": to }).to_string());
                     return Some((Ok(event), st));
                 }
                 crate::agent::cache::Read::UpToDate | crate::agent::cache::Read::Ahead => {
+                    // Whether to go live or end is decided on a fresh record.
+                    let Some(record) = record else {
+                        st.stale = true;
+                        continue;
+                    };
                     if !st.live_sent && !record.is_ended() {
                         st.live_sent = true;
                         let event = Event::default().event("live").data(st.cursor.to_string());
@@ -20892,5 +20930,312 @@ pub(crate) mod tests {
                 "no reason text in the audit: {detail}"
             );
         }
+    }
+
+    // ---- the terminal stream's replay (decision 154, 154-S1) ----
+
+    const STREAM_HOST: &str = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+
+    struct TerminalFixture {
+        app: Router,
+        state: Shared,
+        bearer: String,
+        id: String,
+        _link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+    }
+
+    /// A running session on an online host whose cache holds `output`.
+    async fn terminal_fixture(dir: &FsPath, output: &[u8]) -> TerminalFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let (_generation, link) = state.agent.connect_host(STREAM_HOST);
+        state
+            .agent
+            .hello(
+                STREAM_HOST,
+                serde_json::from_value(serde_json::json!({
+                    "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                    "workspaces": ["storm"],
+                    "max_sessions": 4,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let owner = seed_owner(&state).await;
+        let id = state
+            .agent
+            .launch(
+                &owner,
+                serde_json::from_value(serde_json::json!({
+                    "host_id": STREAM_HOST, "workspace": "storm", "provider": "fake",
+                    "terminal": {"cols": 80, "rows": 24},
+                }))
+                .unwrap(),
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap()
+            .0
+            .id;
+        report(&state, &id, serde_json::json!({"status": "running"}));
+        for (n, piece) in output.chunks(64 * 1024).enumerate() {
+            state
+                .agent
+                .host_output(STREAM_HOST, &id, (n * 64 * 1024) as u64, piece)
+                .unwrap();
+        }
+        let bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        TerminalFixture {
+            app,
+            state,
+            bearer,
+            id,
+            _link: link,
+        }
+    }
+
+    fn report(state: &Shared, id: &str, status: serde_json::Value) {
+        state
+            .agent
+            .host_status(STREAM_HOST, id, &serde_json::from_value(status).unwrap())
+            .unwrap();
+    }
+
+    fn replay_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[derive(Debug)]
+    struct SseEvent {
+        event: String,
+        id: Option<String>,
+        data: String,
+    }
+
+    /// Reads a terminal stream one event at a time, pulling the body only
+    /// when it needs more, so the server produces each event on demand.
+    struct EventReader {
+        body: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+        buffer: String,
+    }
+
+    impl EventReader {
+        async fn open(f: &TerminalFixture, offset: u64) -> Self {
+            let response = f
+                .app
+                .clone()
+                .oneshot(get_with_auth(
+                    &format!(
+                        "/v1/agent/sessions/{}/terminal/stream?offset={offset}",
+                        f.id
+                    ),
+                    &f.bearer,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            Self {
+                body: Box::pin(response.into_body().into_data_stream()),
+                buffer: String::new(),
+            }
+        }
+
+        /// The next event, or `None` once the stream has ended.
+        async fn next(&mut self) -> Option<SseEvent> {
+            loop {
+                if let Some(at) = self.buffer.find("\n\n") {
+                    let block: String = self.buffer.drain(..at + 2).collect();
+                    let mut event = SseEvent {
+                        event: String::new(),
+                        id: None,
+                        data: String::new(),
+                    };
+                    for line in block.lines() {
+                        if let Some(v) = line.strip_prefix("event: ") {
+                            event.event = v.into();
+                        } else if let Some(v) = line.strip_prefix("id: ") {
+                            event.id = Some(v.into());
+                        } else if let Some(v) = line.strip_prefix("data: ") {
+                            event.data.push_str(v);
+                        }
+                    }
+                    if event.event.is_empty() {
+                        continue; // a keepalive comment
+                    }
+                    return Some(event);
+                }
+                let chunk = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    futures_util::StreamExt::next(&mut self.body),
+                )
+                .await
+                .expect("the stream sent nothing before the timeout")?;
+                self.buffer
+                    .push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            }
+        }
+
+        async fn expect(&mut self, name: &str) -> SseEvent {
+            let event = self.next().await.expect("the stream ended early");
+            assert_eq!(event.event, name, "{event:?}");
+            event
+        }
+    }
+
+    fn record_reads(state: &Shared) -> usize {
+        state
+            .agent
+            .record_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn a_cold_replay_catches_up_in_256_kib_events_with_exact_offsets_then_goes_live() {
+        let dir = tempdir::TempDir::new("storm-154-replay").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["status"], "running");
+        let mut replayed = Vec::new();
+        for end in [256, 512, 768, 800] {
+            let event = stream.expect("output").await;
+            assert_eq!(event.id, Some((end * 1024).to_string()));
+            replayed.extend(data_encoding::BASE64.decode(event.data.as_bytes()).unwrap());
+            assert_eq!(replayed.len(), end * 1024);
+        }
+        assert!(replayed == output, "the replay is the cache, in order");
+        assert_eq!(stream.expect("live").await.data, (800 * 1024).to_string());
+
+        // Live output goes in the smaller events, from where the replay ended.
+        let more = replay_bytes(40 * 1024);
+        f.state
+            .agent
+            .host_output(STREAM_HOST, &f.id, 800 * 1024, &more)
+            .unwrap();
+        let mut live = Vec::new();
+        while live.len() < more.len() {
+            let event = stream.next().await.expect("the stream ended early");
+            if event.event == "status" {
+                continue; // the upload stamps last_activity
+            }
+            assert_eq!(event.event, "output", "{event:?}");
+            let bytes = data_encoding::BASE64.decode(event.data.as_bytes()).unwrap();
+            assert!(
+                bytes.len() <= LIVE_CHUNK,
+                "a live event carried {}",
+                bytes.len()
+            );
+            live.extend(bytes);
+            assert_eq!(event.id, Some((800 * 1024 + live.len()).to_string()));
+        }
+        assert!(live == more);
+    }
+
+    #[tokio::test]
+    async fn a_full_4_mib_cold_replay_is_16_events_and_at_most_3_record_reads() {
+        let dir = tempdir::TempDir::new("storm-154-full").unwrap();
+        let output = replay_bytes(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        let (before, started) = (record_reads(&f.state), std::time::Instant::now());
+
+        stream.expect("status").await;
+        let (mut events, mut bytes) = (0, 0);
+        let live = loop {
+            let event = stream.next().await.expect("the stream ended early");
+            match event.event.as_str() {
+                "output" => {
+                    events += 1;
+                    bytes += event.data.len() / 4 * 3 - event.data.matches('=').count();
+                }
+                "live" => break event,
+                other => panic!("unexpected {other}: {}", event.data),
+            }
+        };
+        assert_eq!(events, 16);
+        assert_eq!(bytes, output.len());
+        assert_eq!(live.data, output.len().to_string());
+        // The first status, and the fresh read that decides `live`; a slow
+        // (debug) run also re-reads once per 250 ms it spends behind.
+        let reads = record_reads(&f.state) - before;
+        let timed = (started.elapsed().as_millis() / STATUS_WHILE_BEHIND.as_millis()) as usize;
+        assert!(
+            reads <= 2 + timed,
+            "the replay read the record {reads} times in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_change_during_catch_up_arrives_within_250_ms() {
+        let dir = tempdir::TempDir::new("storm-154-status").unwrap();
+        let output = replay_bytes(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        stream.expect("status").await;
+        let first = stream.expect("output").await;
+
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "running", "title": "renamed mid-replay"}),
+        );
+        tokio::time::sleep(STATUS_WHILE_BEHIND).await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["title"], "renamed mid-replay");
+        assert_eq!(record["id"], f.id, "a status is the whole record");
+
+        // The replay carries on exactly where it was.
+        let next = stream.expect("output").await;
+        let at: u64 = first.id.unwrap().parse().unwrap();
+        let bytes = data_encoding::BASE64.decode(next.data.as_bytes()).unwrap();
+        assert_eq!(next.id, Some((at + bytes.len() as u64).to_string()));
+        assert!(bytes[..] == output[at as usize..at as usize + bytes.len()]);
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_still_closes_after_its_replay() {
+        let dir = tempdir::TempDir::new("storm-154-ended").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut stream = EventReader::open(&f, 0).await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["status"], "completed");
+        for _ in 0..4 {
+            stream.expect("output").await;
+        }
+        let end = stream.next().await;
+        assert!(end.is_none(), "no live and no wait once ended: {end:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_that_ends_during_catch_up_closes_without_going_live() {
+        let dir = tempdir::TempDir::new("storm-154-ends").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        stream.expect("status").await;
+        stream.expect("output").await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut seen = Vec::new();
+        while let Some(event) = stream.next().await {
+            seen.push(event.event);
+        }
+        assert_eq!(seen, ["output", "output", "output", "status"], "{seen:?}");
     }
 }

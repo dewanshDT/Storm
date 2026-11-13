@@ -1048,6 +1048,8 @@ pub struct AgentManager {
     pub(crate) wake_poke: tokio::sync::Notify,
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
+    #[cfg(test)]
+    pub(crate) record_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// How soon a person's refresh may ask the same host again (153-S4).
@@ -1178,6 +1180,8 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
+            #[cfg(test)]
+            record_reads: Default::default(),
         })
     }
 
@@ -2834,6 +2838,9 @@ impl AgentManager {
     }
 
     pub fn get(&self, id: &str) -> AgentResult<SessionRecord> {
+        #[cfg(test)]
+        self.record_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let r = self
             .store
             .lock()
