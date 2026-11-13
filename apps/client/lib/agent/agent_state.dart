@@ -18,9 +18,13 @@ import 'terminal_stream.dart' show hiddenStreamGrace;
 
 /// How a session's terminal stream is opened, when a test supplies one.
 final terminalStreamFactoryProvider =
-    Provider<Stream<TerminalEvent> Function(String sessionId, int offset)?>(
-      (ref) => null,
-    );
+    Provider<
+      Stream<TerminalEvent> Function(
+        String sessionId,
+        int offset,
+        bool snapshot,
+      )?
+    >((ref) => null);
 
 /// The signed-in session's address and token, or null without a session:
 /// what every owner-only REST client here is built from.
@@ -392,7 +396,7 @@ final sessionControllerProvider = ChangeNotifierProvider.autoDispose
       final c = SessionController(
         api: api,
         sessionId: id,
-        open: open == null ? null : (offset) => open(id, offset),
+        open: open == null ? null : (o, snapshot) => open(id, o, snapshot),
         hiddenGrace: () => grace ?? hiddenStreamGrace(api),
         onGone: () => keep.gone(id),
       )..start();

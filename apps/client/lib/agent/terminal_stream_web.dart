@@ -24,19 +24,23 @@ Stream<TerminalEvent> openTerminalStream(
   AgentApi api,
   String sessionId,
   int offset,
+  bool snapshot,
 ) {
   if (api.client case ConnectionClient(isRelayed: true)) {
-    return openStreamedTerminal(api, sessionId, offset);
+    return openStreamedTerminal(api, sessionId, offset, snapshot);
   }
   late final StreamController<TerminalEvent> controller;
   web.EventSource? source;
 
   Future<void> open() async {
     final ticket = await api.streamTicket();
-    final url = Uri.parse(
-      '${api.baseUrl}/v1/agent/sessions/${Uri.encodeComponent(sessionId)}'
-      '/terminal/stream',
-    ).replace(queryParameters: {'offset': '$offset', 'ticket': ticket});
+    final url =
+        Uri.parse(
+          '${api.baseUrl}/v1/agent/sessions/${Uri.encodeComponent(sessionId)}'
+          '/terminal/stream',
+        ).replace(
+          queryParameters: {...streamQuery(offset, snapshot), 'ticket': ticket},
+        );
     final es = web.EventSource(url.toString());
     source = es;
 
@@ -52,10 +56,7 @@ Stream<TerminalEvent> openTerminalStream(
       );
     }
 
-    listen('status');
-    listen('output');
-    listen('gap');
-    listen('live');
+    SseParser.eventNames.forEach(listen);
     // The browser would reconnect by itself, with the spent ticket and
     // `Last-Event-ID`. Neither is how this stream resumes, so any error or
     // close ends it here, and the session controller reconnects by offset

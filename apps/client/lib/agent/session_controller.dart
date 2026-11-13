@@ -41,8 +41,9 @@ class SessionController extends ChangeNotifier {
   final AgentApi api;
   final String sessionId;
 
-  /// How the stream is opened from an offset. Tests inject one.
-  final Stream<TerminalEvent> Function(int offset)? _open;
+  /// How the stream is opened from an offset, asking for a snapshot or not.
+  /// Tests inject one.
+  final Stream<TerminalEvent> Function(int offset, bool snapshot)? _open;
   final terminal = StormTerminal();
 
   AgentSession? session;
@@ -64,6 +65,10 @@ class SessionController extends ChangeNotifier {
   int _offset = 0;
   bool _disposed = false;
 
+  /// The oldest byte the server still held when it sent the last snapshot;
+  /// null until one arrives.
+  int? snapshotFloor;
+
   bool _visible = true;
   bool get visible => _visible;
 
@@ -77,8 +82,10 @@ class SessionController extends ChangeNotifier {
   /// A subscription is open (or opening).
   bool _streaming = false;
 
-  /// The next output or gap starts a view: the first after opening, or after
-  /// a kept terminal was resumed.
+  /// The next output, gap or snapshot starts a view: the first after
+  /// opening, or after a kept terminal was resumed. Such an open asks for a
+  /// snapshot (AM110), which the server sends only from 0 or below its floor,
+  /// so a kept terminal it still has every byte for resumes exactly.
   bool _viewStart = true;
 
   /// When the stream was last closed by a hide or a background, so a list
@@ -154,13 +161,15 @@ class SessionController extends ChangeNotifier {
     if (_disposed || gone || _background) return;
     _retry?.cancel();
     _retry = null;
-    final open = _open ?? (o) => openTerminalStream(api, sessionId, o);
+    final open =
+        _open ??
+        (o, snapshot) => openTerminalStream(api, sessionId, o, snapshot);
     _live = false;
     _armQuiet();
     _quietCap?.cancel();
     _quietCap = Timer(liveAfterAtMost, () => _live = true);
     _streaming = true;
-    _sub = open(_offset).listen(
+    _sub = open(_offset, _viewStart).listen(
       _onEvent,
       onError: (Object e) {
         _streaming = false;
@@ -202,8 +211,9 @@ class SessionController extends ChangeNotifier {
         : _backoff * 2;
   }
 
-  /// Only a status rebuilds the screen around the terminal. Output, gap and
-  /// live change nothing it shows, and the terminal repaints itself.
+  /// Only a status rebuilds the screen around the terminal. Output, gap,
+  /// snapshot and live change nothing it shows, and the terminal repaints
+  /// itself.
   void _onEvent(TerminalEvent event) {
     switch (event) {
       case StatusEvent(:final session):
@@ -238,6 +248,17 @@ class SessionController extends ChangeNotifier {
         final fresh = start < _offset ? bytes.sublist(_offset - start) : bytes;
         terminal.write(fresh);
         _offset = end;
+      case SnapshotEvent(:final offset, :final floor, :final complete):
+        // Always before `live`: whatever the terminal answers while drawing
+        // it is dropped, as for replay.
+        _live = false;
+        _armQuiet();
+        _viewStart = false;
+        terminal.reset();
+        if (!complete) terminal.note('Earlier output is no longer retained.');
+        terminal.write(_afterReset(event.data));
+        _offset = offset;
+        snapshotFloor = floor;
       case GapEvent(:final to):
         // At the start of a view — a kept terminal shown again included —
         // clear and render from the oldest retained byte (freeze §14), or
@@ -251,6 +272,13 @@ class SessionController extends ChangeNotifier {
         _offset = to;
     }
   }
+
+  /// The snapshot's own leading `ESC c` would wipe the note above it; the
+  /// terminal was reset already.
+  static Uint8List _afterReset(Uint8List data) =>
+      data.length >= 2 && data[0] == 0x1b && data[1] == 0x63
+      ? Uint8List.sublistView(data, 2)
+      : data;
 
   void _restartFromZero() {
     _closeStream();

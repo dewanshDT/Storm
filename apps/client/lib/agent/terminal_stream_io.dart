@@ -11,4 +11,5 @@ Stream<TerminalEvent> openTerminalStream(
   AgentApi api,
   String sessionId,
   int offset,
-) => openStreamedTerminal(api, sessionId, offset);
+  bool snapshot,
+) => openStreamedTerminal(api, sessionId, offset, snapshot);

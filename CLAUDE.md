@@ -263,6 +263,12 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   visible, in front and live, and it re-fits locally without telling the
   host, so it never speaks for a device the person has left
   (`session_keep_alive_test.dart`).
+- **A view starts from the server's snapshot when it has one** (decision
+  154, AM110). An open at the start of a view asks `attach=snapshot`; the
+  server answers only from 0 or below its floor, so a kept terminal resumes
+  exactly. The snapshot resets the terminal, is drawn as replay (nothing it
+  provokes is answered), and output goes on from its offset; a server that
+  sends none is replayed as before (`snapshot_attach_test.dart`).
 - **Tab and Shift+Tab are the agent's while the terminal has focus**
   (decision 147b): `StormTerminal` sends `\t` and `ESC [ Z` itself, before
   xterm2's encoding or Flutter's focus traversal, on every platform; the

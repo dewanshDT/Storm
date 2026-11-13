@@ -24,6 +24,29 @@ class OutputEvent extends TerminalEvent {
 /// (decision 132, fix b). An older server never sends it.
 class LiveEvent extends TerminalEvent {}
 
+/// The screen at [offset], rendered by the server from its cache, in place of
+/// the history before it (AM110): VT bytes that restore the grid, cursor and
+/// modes, and ask nothing. Output resumes from [offset]. [complete] is false
+/// when the cache had already dropped output from before [floor].
+class SnapshotEvent extends TerminalEvent {
+  SnapshotEvent({
+    required this.offset,
+    required this.floor,
+    required this.complete,
+    required this.alt,
+    required this.historyRows,
+    required this.modes,
+    required this.data,
+  });
+  final int offset;
+  final int floor;
+  final bool complete;
+  final bool alt;
+  final int historyRows;
+  final Map<String, Object?> modes;
+  final Uint8List data;
+}
+
 /// `from..to` is no longer retained. Resume from [to].
 class GapEvent extends TerminalEvent {
   GapEvent(this.from, this.to);
@@ -109,6 +132,10 @@ class SseParser {
     return fromParts(name, id, data.join('\n'));
   }
 
+  /// Every event name [fromParts] decodes: what the web's `EventSource`
+  /// listens for, since it delivers only named events it was asked for.
+  static const eventNames = ['status', 'output', 'gap', 'live', 'snapshot'];
+
   static TerminalEvent? fromParts(String name, String? id, String data) {
     switch (name) {
       case 'status':
@@ -124,6 +151,18 @@ class SseParser {
       case 'gap':
         final j = jsonDecode(data) as Map<String, dynamic>;
         return GapEvent((j['from'] as num).toInt(), (j['to'] as num).toInt());
+      case 'snapshot':
+        final j = jsonDecode(data) as Map<String, dynamic>;
+        final floor = (j['floor'] as num?)?.toInt() ?? 0;
+        return SnapshotEvent(
+          offset: (j['offset'] as num).toInt(),
+          floor: floor,
+          complete: j['complete'] as bool? ?? floor == 0,
+          alt: j['alt'] as bool? ?? false,
+          historyRows: (j['history_rows'] as num?)?.toInt() ?? 0,
+          modes: (j['modes'] as Map<String, dynamic>?) ?? const {},
+          data: base64.decode(j['data'] as String),
+        );
     }
     return null;
   }

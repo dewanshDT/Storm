@@ -107,14 +107,14 @@ void main() {
     final text = StringBuffer();
     final statuses = <String>[];
     final done = Completer<void>();
-    final sub = openTerminalStream(api, s.id, 0).listen(
+    final sub = openTerminalStream(api, s.id, 0, false).listen(
       (e) {
         switch (e) {
           case StatusEvent(:final session):
             statuses.add(session.status);
           case OutputEvent(:final bytes):
             text.write(utf8.decode(bytes));
-          case GapEvent() || LiveEvent():
+          case GapEvent() || LiveEvent() || SnapshotEvent():
             break;
         }
       },

@@ -75,6 +75,7 @@ void main() {
       OutputEvent(:final end, :final bytes) => 'output $end ${bytes.length}',
       LiveEvent() => 'live',
       GapEvent(:final from, :final to) => 'gap $from $to',
+      SnapshotEvent(:final offset) => 'snapshot $offset',
     };
 
     test('a CRLF split between chunks is one line end', () {
@@ -564,7 +565,7 @@ void main() {
         final c = SessionController(
           api: api(MockClient((_) async => http.Response('', 204))),
           sessionId: 'ags_1',
-          open: (offset) {
+          open: (offset, _) {
             opened.add(offset);
             stream = StreamController<TerminalEvent>();
             return stream.stream;
@@ -591,7 +592,7 @@ void main() {
         final c = SessionController(
           api: api(MockClient((_) async => http.Response('', 204))),
           sessionId: 'ags_1',
-          open: (_) => stream.stream,
+          open: (_, _) => stream.stream,
         )..start();
         var calls = 0;
         c.addListener(() => calls++);
@@ -628,7 +629,7 @@ void main() {
       final c = SessionController(
         api: api(MockClient((_) async => http.Response('', 204))),
         sessionId: 'ags_1',
-        open: (_) {
+        open: (_, _) {
           opens++;
           return Stream.error(StormApiException(404, 'not found'));
         },
@@ -648,7 +649,7 @@ void main() {
       final c = SessionController(
         api: api(MockClient((_) async => http.Response('', 204))),
         sessionId: 'ags_1',
-        open: (_) => stream.stream,
+        open: (_, _) => stream.stream,
       )..start();
       stream.add(GapEvent(0, 4096));
       stream.add(OutputEvent(4100, Uint8List.fromList(utf8.encode('tail'))));
@@ -677,7 +678,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => stream.stream,
+          open: (_, _) => stream.stream,
           isForeground: () => foreground,
         )..start();
         stream.add(StatusEvent(AgentSession.fromJson(session())));
@@ -774,7 +775,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => stream.stream,
+          open: (_, _) => stream.stream,
         )..start();
         return (c: c, stream: stream, resizes: resizes);
       }
@@ -829,7 +830,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => const Stream.empty(),
+          open: (_, _) => const Stream.empty(),
         )..start();
         c.terminal.typeForTest('l');
         c.terminal.typeForTest('s');

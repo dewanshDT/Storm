@@ -427,6 +427,10 @@ class StormTerminal {
   @visibleForTesting
   String get textForTest => _terminal.buffer.getText();
 
+  /// The emulator itself, for tests that check its modes.
+  @visibleForTesting
+  Terminal get emulatorForTest => _terminal;
+
   /// The link at [column] of buffer row [row], for tests.
   @visibleForTesting
   Uri? linkAtForTest(int column, int row) =>
