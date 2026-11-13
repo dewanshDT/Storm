@@ -1176,18 +1176,6 @@ final pinnedNotesProvider = FutureProvider<Set<String>>((ref) async {
   return ref.read(syncEngineProvider).pinnedIds();
 });
 
-final searchQueryProvider = StateProvider<String>((ref) => '');
-
-final searchResultsProvider = FutureProvider<List<SearchHit>>((ref) async {
-  final api = ref.watch(apiProvider);
-  final vaultId = ref.watch(activeVaultProvider);
-  final query = ref.watch(searchQueryProvider);
-  if (api == null || vaultId.isEmpty || query.trim().isEmpty) return const [];
-  final hits = await api.search(vaultId, query);
-  // Storm's own config note is not a search result.
-  return hits.where((h) => !isVaultConfigPath(h.path)).toList();
-});
-
 /// Backlinks for a note — the "linked mentions" panel.
 ///
 /// Server-only: resolving these needs the whole vault's link index, which the

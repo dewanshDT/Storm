@@ -1,9 +1,12 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../keyboard/storm_activators.dart';
 import '../../state/health.dart';
+import '../palette/palette.dart' show openPalette;
 import '../surfaces.dart';
 import '../tokens.dart';
 import 'nav_history.dart';
@@ -28,9 +31,9 @@ double _trafficLightsEnd(StormTokens t) => t.sp * 11.5;
 /// the window's frame, for screens outside the signed-in shell and for a
 /// desktop window narrower than the breakpoint.
 ///
-/// Three regions: the window's buttons and back/forward, the blank middle
-/// (where the ⌘K field will go; hidden for now, 153b), and the health dot
-/// with the caption buttons.
+/// Three regions: the window's buttons and back/forward, the search field
+/// centred in the middle (156n), and the health dot with the caption
+/// buttons. The blank bar either side of the field still moves the window.
 class StormAppBar extends ConsumerWidget {
   const StormAppBar({super.key, this.full = true});
 
@@ -73,20 +76,44 @@ class StormAppBar extends ConsumerWidget {
                     onDoubleTap: controls.toggleMaximized,
                   ),
                 ),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (layout.left.isNotEmpty)
-                    CaptionButtons(buttons: layout.left),
-                  Expanded(
-                    child: Padding(
+              // Centres the field on the whole bar, sliding it aside only
+              // when the ends would overlap it.
+              NavigationToolbar(
+                middleSpacing: t.sp * 2,
+                leading: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (layout.left.isNotEmpty)
+                      CaptionButtons(buttons: layout.left),
+                    Padding(
                       // Content sits 2px below centre.
                       padding: EdgeInsets.only(top: t.sp * 0.25),
                       child: Row(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
                           SizedBox(width: lead),
                           if (full) _NavButtons(focused: window.focused),
-                          const Spacer(),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                middle: full
+                    ? Padding(
+                        padding: EdgeInsets.only(top: t.sp * 0.25),
+                        child: BarSearchField(focused: window.focused),
+                      )
+                    : null,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Padding(
+                      padding: EdgeInsets.only(top: t.sp * 0.25),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
                           if (full) const BarHealthDot(),
                           SizedBox(
                             width: layout.right.isEmpty
@@ -96,10 +123,10 @@ class StormAppBar extends ConsumerWidget {
                         ],
                       ),
                     ),
-                  ),
-                  if (layout.right.isNotEmpty)
-                    CaptionButtons(buttons: layout.right),
-                ],
+                    if (layout.right.isNotEmpty)
+                      CaptionButtons(buttons: layout.right),
+                  ],
+                ),
               ),
             ],
           ),
@@ -126,6 +153,83 @@ class WindowFrame extends StatelessWidget {
         const StormAppBar(full: false),
         Expanded(child: child),
       ],
+    );
+  }
+}
+
+/// The bar's search (156n, restoring 153b): it looks like a field and
+/// opens the palette. Not a text field, so there is one query, the
+/// palette's.
+class BarSearchField extends ConsumerWidget {
+  const BarSearchField({super.key, required this.focused});
+
+  final bool focused;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    final ink = focused ? t.text2 : t.text3;
+    final style = TextStyle(
+      fontFamily: StormTokens.sansFamily,
+      fontSize: t.codeSize,
+      color: ink,
+    );
+    final radius = BorderRadius.circular(t.rControl);
+    // The palette's hints are hidden on the web, where browsers keep chords.
+    final chord = stormHasKeyboard && !kIsWeb ? stormChordLabel('K') : null;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        if (constraints.maxWidth < t.sp * 35) return const SizedBox.shrink();
+        return SizedBox(
+          width: t.sp * 52.5,
+          height: t.sp * 3.5,
+          child: Semantics(
+            button: true,
+            label: 'Search notes, sessions, commands',
+            hint: chord,
+            excludeSemantics: true,
+            onTap: () => openPalette(context, ref),
+            child: Material(
+              color: t.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: radius,
+                side: BorderSide(color: t.border, width: t.bw),
+              ),
+              child: InkWell(
+                key: const Key('app-bar-search'),
+                borderRadius: radius,
+                canRequestFocus: false,
+                onTap: () => openPalette(context, ref),
+                child: Padding(
+                  padding: EdgeInsets.symmetric(horizontal: t.sp * 1.25),
+                  child: Row(
+                    children: [
+                      Icon(LucideIcons.search, size: t.uiSize, color: ink),
+                      SizedBox(width: t.sp),
+                      Expanded(
+                        child: Text(
+                          'Search notes, sessions, commands…',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: style,
+                        ),
+                      ),
+                      if (chord != null)
+                        Text(
+                          chord,
+                          style: style.copyWith(
+                            fontFamily: StormTokens.monoFamily,
+                            fontSize: t.labelSize,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

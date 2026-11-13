@@ -1,7 +1,8 @@
 import '../../agent/agent_models.dart';
 import '../../agent/agent_state.dart' show AgentOverview;
 import '../../agent/sidebar_rules.dart';
-import '../../api/models.dart' show RecentNote, TagCount;
+import '../../api/models.dart'
+    show CrossSearchHit, RecentNote, SkippedVault, TagCount;
 import '../../keyboard/storm_commands.dart' show StormCommand;
 import '../../state/frecency.dart';
 import '../../state/match.dart';
@@ -34,7 +35,7 @@ const kPalettePrefixes = {
 }
 
 /// The groups, in the order they are drawn: the empty query's three, then
-/// the fixed order of 156g. In note text (7) arrives with 156-3.
+/// the fixed order of 156g.
 enum PaletteGroup {
   needsYou('Needs you'),
   recent('Recent'),
@@ -46,6 +47,7 @@ enum PaletteGroup {
   settings('Settings'),
   foldersTags('Folders & tags'),
   hosts('Hosts'),
+  text('In note text'),
   create('');
 
   const PaletteGroup(this.title);
@@ -122,6 +124,7 @@ class PaletteRow {
     this.sub,
     this.vault,
     this.hint,
+    this.snippet,
     this.tone = PaletteTone.plain,
   });
 
@@ -137,6 +140,9 @@ class PaletteRow {
 
   /// The chord, right-aligned.
   final String? hint;
+
+  /// A server snippet with `<<match>>` markers, drawn in place of [sub].
+  final String? snippet;
   final PaletteTone tone;
   final PaletteTarget target;
 
@@ -155,7 +161,14 @@ class PaletteRow {
 }
 
 class PaletteSection {
-  const PaletteSection(this.group, this.rows, {this.total, this.title});
+  const PaletteSection(
+    this.group,
+    this.rows, {
+    this.total,
+    this.title,
+    this.pending = false,
+    this.lines = const [],
+  });
 
   final PaletteGroup group;
 
@@ -163,6 +176,14 @@ class PaletteSection {
   final List<PaletteRow> rows;
   final int? total;
   final String? title;
+
+  /// A request is out: a skeleton row holds the slot. It is not a row, so
+  /// the selection never lands on it.
+  final bool pending;
+
+  /// Quiet lines under the rows: a vault that couldn't be searched, a
+  /// server error.
+  final List<String> lines;
 
   String get heading => title ?? group.title;
 }
@@ -190,6 +211,35 @@ class PaletteView {
   ].length;
 }
 
+/// The In note text slot's state for one query (156l).
+class PaletteText {
+  const PaletteText({
+    required this.query,
+    this.pending = false,
+    this.hits = const [],
+    this.skipped = const [],
+    this.failed = false,
+  });
+
+  /// What it was asked for, after the prefix: a state for another query is
+  /// never drawn.
+  final String query;
+  final bool pending;
+  final List<CrossSearchHit> hits;
+  final List<SkippedVault> skipped;
+  final bool failed;
+}
+
+/// The text slot asks the server only from this many characters (156l).
+const kPaletteTextMinLength = 2;
+
+/// Whether [raw] asks the server for note text.
+String? paletteTextQuery(String raw) {
+  final (mode, q) = parsePaletteQuery(raw);
+  if (mode != PaletteMode.all || q.length < kPaletteTextMinLength) return null;
+  return q;
+}
+
 /// Everything the palette searches, as it stands.
 class PaletteSources {
   const PaletteSources({
@@ -202,6 +252,7 @@ class PaletteSources {
     this.activeVault = '',
     this.activeVaultName = '',
     this.frecency = const Frecency(),
+    this.text,
     required this.now,
   });
 
@@ -216,6 +267,7 @@ class PaletteSources {
   final String activeVault;
   final String activeVaultName;
   final Frecency frecency;
+  final PaletteText? text;
   final DateTime now;
 
   List<AgentSession> get sessions => overview?.sessions ?? const [];
@@ -269,15 +321,26 @@ PaletteRow noteRow(PaletteNote n, {PaletteGroup group = PaletteGroup.notes}) =>
       target: NoteTarget(n.vaultId, n.meta.id),
     );
 
+String _nameOf(String title, String path) {
+  if (title.isNotEmpty) return title;
+  final file = path.split('/').last;
+  return file.endsWith('.md') ? file.substring(0, file.length - 3) : file;
+}
+
+PaletteRow textRow(CrossSearchHit h) => PaletteRow(
+  id: 'text:${h.vaultId}/${h.id}',
+  group: PaletteGroup.text,
+  label: _nameOf(h.title, h.path),
+  snippet: h.snippet,
+  vault: h.vaultName,
+  target: NoteTarget(h.vaultId, h.id),
+);
+
 PaletteRow recentRow(RecentNote r) {
-  final file = r.path.split('/').last;
-  final name = r.title.isNotEmpty
-      ? r.title
-      : (file.endsWith('.md') ? file.substring(0, file.length - 3) : file);
   return PaletteRow(
     id: 'recent:${r.vaultId}/${r.noteId}',
     group: PaletteGroup.recent,
-    label: name,
+    label: _nameOf(r.title, r.path),
     sub: _folderOf(r.path),
     vault: r.vaultName,
     target: NoteTarget(r.vaultId, r.noteId),
@@ -389,6 +452,7 @@ PaletteView buildPaletteView(
   }
 
   int byPick(String a, String b) => src.frecency.compare(a, b);
+  final titled = <String>{};
 
   if (mode == PaletteMode.help) {
     add(PaletteGroup.prefixes, [
@@ -438,6 +502,7 @@ PaletteView buildPaletteView(
         );
       },
     );
+    titled.addAll([for (final n in notes) '${n.vaultId}/${n.meta.id}']);
     add(PaletteGroup.notes, [for (final n in notes) noteRow(n)]);
   }
 
@@ -543,7 +608,49 @@ PaletteView buildPaletteView(
     add(PaletteGroup.hosts, [for (final h in hosts) hostRow(h)]);
   }
 
-  final matched = sections.isNotEmpty;
+  var pending = false;
+  if (src.text case final text?
+      when !offline && text.query == q && paletteTextQuery(raw) != null) {
+    // A note the Notes group already found by title isn't listed twice.
+    final rows = [
+      for (final h in text.hits)
+        if (!titled.contains('${h.vaultId}/${h.id}')) textRow(h),
+    ];
+    final skipped = [
+      for (final s in text.skipped)
+        s.vaultName.isEmpty ? s.vaultId : s.vaultName,
+    ];
+    final lines = [
+      if (text.failed) 'Couldn’t search note text',
+      if (skipped.isNotEmpty) 'Couldn’t search ${skipped.join(', ')}',
+    ];
+    pending = text.pending;
+    if (rows.isNotEmpty) {
+      add(PaletteGroup.text, rows);
+      if (lines.isNotEmpty) {
+        final last = sections.removeLast();
+        sections.add(
+          PaletteSection(
+            last.group,
+            last.rows,
+            total: last.total,
+            lines: lines,
+          ),
+        );
+      }
+    } else if (pending || lines.isNotEmpty) {
+      sections.add(
+        PaletteSection(
+          PaletteGroup.text,
+          const [],
+          pending: pending,
+          lines: lines,
+        ),
+      );
+    }
+  }
+
+  final matched = sections.any((s) => s.rows.isNotEmpty);
   if (mode == PaletteMode.all && src.activeVault.isNotEmpty) {
     final exact = src.titles.notes.any(
       (n) => n.vaultId == src.activeVault && n.name.toLowerCase() == want,
@@ -567,6 +674,6 @@ PaletteView buildPaletteView(
   return PaletteView(
     sections: sections,
     offline: offline,
-    noMatch: matched || want.isEmpty ? null : 'No matches for ‘$q’',
+    noMatch: matched || pending || want.isEmpty ? null : 'No matches for ‘$q’',
   );
 }

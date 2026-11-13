@@ -209,6 +209,19 @@ class FakeServer {
   /// Answers `/v1/search` with 404, as a server older than decision 156 does.
   bool noCrossSearch = false;
 
+  /// Answers `/v1/search` with this status instead of searching.
+  int? crossSearchStatus;
+
+  /// Awaited before `/v1/search` answers [q], so a test can hold one
+  /// request while another is answered.
+  Future<void> Function(String q)? crossSearchHold;
+
+  /// The queries `/v1/search` was asked, in order.
+  final List<String> crossSearches = [];
+
+  /// The vaults `/v1/vaults/{v}/search` was asked about, in order.
+  final List<String> vaultSearches = [];
+
   /// A case-insensitive substring match over title and content, standing in
   /// for FTS5. [q] is already lowercased.
   List<Map<String, dynamic>> _searchVault(String vaultId, String q) => [
@@ -221,9 +234,19 @@ class FakeServer {
           'id': note.id,
           'path': note.path,
           'title': note.meta['title'],
-          'snippet': note.content,
+          'snippet': _marked(note.content, q),
         },
   ];
+
+  /// FTS5's `<<match>>` markers around the first match, as the server's
+  /// snippet draws them.
+  static String _marked(String content, String q) {
+    final at = content.toLowerCase().indexOf(q);
+    if (at < 0) return content;
+    final end = at + q.length;
+    return '${content.substring(0, at)}<<${content.substring(at, end)}>>'
+        '${content.substring(end)}';
+  }
 
   /// Folders derived from note paths, union the explicitly created ones —
   /// what the real `tree` handler returns.
@@ -460,7 +483,13 @@ class FakeServer {
       if (noCrossSearch) {
         return http.Response('{"error":"not found"}', 404, headers: j(''));
       }
-      final q = (request.url.queryParameters['q'] ?? '').trim().toLowerCase();
+      final asked = request.url.queryParameters['q'] ?? '';
+      crossSearches.add(asked);
+      await crossSearchHold?.call(asked);
+      if (crossSearchStatus case final status?) {
+        return http.Response('{"error":"failed"}', status, headers: j(''));
+      }
+      final q = asked.trim().toLowerCase();
       final hits = <Map<String, dynamic>>[];
       final skipped = <Map<String, dynamic>>[];
       if (q.isNotEmpty) {
@@ -633,6 +662,7 @@ class FakeServer {
     }
 
     if (path == '/v1/search') {
+      vaultSearches.add(vaultId);
       final q = (request.url.queryParameters['q'] ?? '').trim().toLowerCase();
       return http.Response(
         jsonEncode({'hits': q.isEmpty ? const [] : _searchVault(vaultId, q)}),

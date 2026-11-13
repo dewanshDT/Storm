@@ -17,6 +17,7 @@ import '../../keyboard/storm_commands.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
 import '../../state/frecency.dart';
+import '../../state/palette_text.dart';
 import '../../state/palette_titles.dart';
 import '../breakpoints.dart';
 import '../settings/settings_shell.dart' show kSettingsPages;
@@ -232,15 +233,24 @@ class _StormPaletteState extends ConsumerState<StormPalette> {
   int? _counted;
   String _announced = '';
 
+  /// The In note text slot (156l): debounced, and numbered so an answer
+  /// to an older query is dropped.
+  static const _textDebounce = Duration(milliseconds: 150);
+  Timer? _textTimer;
+  int _textSeq = 0;
+  PaletteText? _text;
+
   @override
   void initState() {
     super.initState();
     _query = widget.initial;
     _controller.addListener(_onText);
+    _askText();
   }
 
   @override
   void dispose() {
+    _textTimer?.cancel();
     _announce?.cancel();
     _controller.dispose();
     _field.dispose();
@@ -254,6 +264,36 @@ class _StormPaletteState extends ConsumerState<StormPalette> {
       _query = _controller.text;
       _selected = null;
       _expanded.clear();
+      _askText();
+    });
+  }
+
+  void _askText() {
+    final q = paletteTextQuery(_query);
+    if (q != null && q == _text?.query) return;
+    _textTimer?.cancel();
+    final seq = ++_textSeq;
+    final offline = ref.read(paletteTitlesProvider).value?.offline ?? false;
+    final search = ref.read(paletteTextSearchProvider);
+    if (q == null || offline || search == null) {
+      _text = null;
+      return;
+    }
+    _text = PaletteText(query: q, pending: true);
+    _textTimer = Timer(_textDebounce, () async {
+      PaletteText answer;
+      try {
+        final found = await search(q);
+        answer = PaletteText(
+          query: q,
+          hits: found.hits,
+          skipped: found.skipped,
+        );
+      } catch (_) {
+        answer = PaletteText(query: q, failed: true);
+      }
+      if (!mounted || seq != _textSeq) return;
+      setState(() => _text = answer);
     });
   }
 
@@ -348,6 +388,7 @@ class _StormPaletteState extends ConsumerState<StormPalette> {
       activeVaultName:
           vaults.where((v) => v.id == active).firstOrNull?.name ?? '',
       frecency: ref.watch(frecencyProvider).value ?? const Frecency(),
+      text: _text,
       now: DateTime.now(),
     );
   }
@@ -441,6 +482,12 @@ class _StormPaletteState extends ConsumerState<StormPalette> {
             onTap: () => _run(row),
           ),
         );
+      }
+      if (section.pending) {
+        list.add(const PalettePendingRow(key: Key('palette-text-pending')));
+      }
+      for (final line in section.lines) {
+        list.add(PaletteQuietLine(line, key: ValueKey('palette-line:$line')));
       }
     }
 

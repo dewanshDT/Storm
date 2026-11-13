@@ -70,7 +70,7 @@ Every route is also the web client's URL.
 /notes                     the last vault, or "No vaults yet"
 /v/:vault/browse[/path]    vault root / folder (phone); "Select a note" (desk)
 /v/:vault/note/:id         a note   (?session=<id>: pushed from a phone session)
-/v/:vault/search · /tags   search · tags
+/v/:vault/tags             tags
 /agents                    overview (desk) · Running/Ended list (phone)
 /agents/s/:id?tab=…        a session; tab = context | wrote | about
 /settings                  the list (phone) · This device (desk)
@@ -82,7 +82,8 @@ Every route is also the web client's URL.
 ```
 
 Retired routes redirect: `/settings/server`, `/settings/client`,
-`/v/:vault/settings/*`, `/settings/mcp-keys`, `/agents/hosts`. The OAuth
+`/v/:vault/settings/*`, `/settings/mcp-keys`, `/agents/hosts`, and
+`/v/:vault/search` (retired in 156-3) to the vault's browse root. The OAuth
 return still lands on `/settings/integrations`.
 
 **Back (Q2):** the router pops first; then a note goes to its folder, a folder
@@ -103,7 +104,9 @@ rail's axis, 8 apart and 8 from the bottom.
 **Phone: two corner bubbles** (44 × 44 at 20 / 20). Left opens the **place
 picker** — the vaults (tile, name, count, ✓), Agents with "{n} running", and
 the sync line; long-press a vault to colour it. Right opens Settings (`accent`
-while in Settings). The **pill** at the bottom is Directory · Search · ＋ New
+while in Settings). In Agents and Settings a **search bubble** sits left of
+the Settings bubble and opens the palette full screen. The **pill** at the
+bottom is Directory · Search (the palette, full screen) · ＋ New
 note · Tags on Notes screens (long-press ＋ for a folder; Lucide outlines, as
 the prototype draws them), "＋ New session" on the Agents list, and absent on
 a note (Q5). Content starts at the 20 inset the bubbles sit on.
@@ -115,8 +118,8 @@ a note (Q5). Content starts at the 20 inset the bubbles sit on.
 ### Sidebar (desktop)
 
 Vault header (tile, name, sync line) → **vault switcher** popover (vaults with
-counts and ✓, "Synced … · Sync now", Manage vaults ›). "Search {vault}"
-(the old per-vault search, until 156-3; ⌘K opens the palette). **RECENT**: the four newest notes across vaults, each with a vault
+counts and ✓, "Synced … · Sync now", Manage vaults ›). No search field:
+search is the app bar's field and ⌘K (156-3). **RECENT**: the four newest notes across vaults, each with a vault
 tag. **FOLDERS**: the tree (notes by name, drawn twisties). A note an agent
 changed carries a 6px `accent` **unseen dot**, and so does a *collapsed*
 folder holding one; screen readers hear the name, then "Changed by an agent
@@ -159,10 +162,10 @@ to edit frontmatter.
 **States:** `Unsaved` · `Saving…` · `Saved` · `Queued — offline` · `Failed` ·
 merged · conflict (markers in the body) · not available offline yet.
 
-### Search, Tags
+### Tags
 
-Full-text search in the current vault (title, path, snippet with marks); tags
-with counts, nested under their parents.
+Tags with counts, nested under their parents. Full-text search is the
+palette's In note text group (§8).
 
 ---
 
@@ -285,8 +288,24 @@ focus back, or leaves it to the destination.
   vault tag on each), Sessions (needs you, then running, then ended; the
   status in words), Commands (the registry's, with their chord on the
   right), Settings, Folders & tags (tags in amber, the active vault's only),
-  Hosts, then **Create note "{q}" in {vault}** last when no title matches
-  exactly.
+  Hosts, **In note text**, then **Create note "{q}" in {vault}** last when
+  no title matches exactly.
+- **In note text** (156-3): `GET /v1/search` across every vault, debounced
+  150 ms, from two characters, with no prefix. A skeleton row holds the slot
+  while it waits; results land only there, so nothing above moves, and the
+  selection is held by row id. Answers carry a sequence number and an older
+  one is dropped. Each row is the title, the snippet with its `<<marks>>` in
+  `accent` (`text` on the selected row) and a vault tag; Enter opens the
+  note. A note the Notes group already lists by title is left out. Skipped
+  vaults are one line, "Couldn't search {vault}"; a server error keeps the
+  local rows and adds "Couldn't search note text". A server without
+  `/v1/search` (404) is searched vault by vault. Offline the slot is hidden.
+- **Bar field** (156-3): centred in the app bar at ≥900, 420 wide and
+  shrinking to 280 (gone below), "Search notes, sessions, commands…" with
+  the chord on the right (not on the web). It is a button, not a text
+  field: a click opens the palette, and blank bar either side still drags
+  and double-click zooms. `text2`, `text3` while the window is unfocused,
+  on `surface`.
 - **Empty query**: NEEDS YOU, RECENT (every vault), SUGGESTED (three
   commands). **No match**: "No matches for '{q}'" and the create row.
   **Offline**: one `text3` line, "Offline · searching this device", over
@@ -301,8 +320,9 @@ focus back, or leaves it to the destination.
   steps up from `text3` to `text2`. Screen readers hear a button with its
   selected state and the chord as its hint, and a polite "{n} results".
 
-The sidebar's "Search {vault}" field and `/v/:vault/search` stay until
-156-3 retires them; nothing new links to them.
+The sidebar's "Search {vault}" field, `SearchScreen`/`SearchPanel` and
+`/v/:vault/search` were retired in 156-3; the route redirects to the
+vault's browse root.
 
 ---
 

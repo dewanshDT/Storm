@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../state/app_state.dart';
+import '../../state/nav_memory.dart' show Activity, activityOf;
 import '../breakpoints.dart';
 import '../tokens.dart';
 import 'corner_bubbles.dart';
@@ -130,6 +132,13 @@ class StormChrome extends StatelessWidget {
   /// What every scrolling child leaves at the bottom for the nav pill.
   static double navClearance(BuildContext context) => context.tokens.sp * 14;
 
+  /// Agents and Settings: no pill, so search gets a bubble of its own.
+  static bool _withoutPill(BuildContext context) =>
+      switch (activityOf(GoRouterState.of(context).uri.path)) {
+        Activity.agents || Activity.settings => true,
+        _ => false,
+      };
+
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
@@ -195,6 +204,15 @@ class StormChrome extends StatelessWidget {
               right: contentInset(context),
               child: const SettingsBubble(),
             ),
+            if (!inBar && _withoutPill(context))
+              Positioned(
+                top: bubbleTopInset(context),
+                right:
+                    contentInset(context) +
+                    bubbleSide(context) +
+                    context.tokens.sp * 1.5,
+                child: const SearchBubble(),
+              ),
           ],
           if (showNav)
             const Positioned(left: 0, right: 0, bottom: 0, child: NavBubble()),

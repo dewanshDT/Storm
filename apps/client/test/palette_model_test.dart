@@ -191,6 +191,7 @@ void main() {
     List<RecentNote> recents = const [],
     bool offline = false,
     Frecency frecency = const Frecency(),
+    PaletteText? text,
   }) => PaletteSources(
     titles: PaletteTitles(
       notes: notes,
@@ -209,6 +210,7 @@ void main() {
     activeVault: 'v1',
     activeVaultName: 'Primary',
     frecency: frecency,
+    text: text,
     now: DateTime.now(),
   );
 
@@ -438,6 +440,135 @@ void main() {
     test('offline is said', () {
       expect(buildPaletteView(sources(offline: true), 'x').offline, isTrue);
       expect(buildPaletteView(sources(), 'x').offline, isFalse);
+    });
+  });
+
+  group('in note text (156l)', () {
+    CrossSearchHit hit(String vault, String id, String title, String snip) =>
+        CrossSearchHit(
+          vaultId: vault,
+          vaultName: vault == 'v1' ? 'Primary' : 'Work',
+          id: id,
+          path: '$title.md',
+          title: title,
+          snippet: snip,
+          tier: 3,
+        );
+    final notes = [note('v1', 'n1', 'Design Doc.md')];
+
+    test('below every other group, and above only the create row', () {
+      final view = buildPaletteView(
+        sources(
+          notes: notes,
+          text: PaletteText(
+            query: 'design',
+            hits: [hit('v2', 'w9', 'Meeting', 'the <<design>> call')],
+          ),
+        ),
+        'design',
+      );
+      final groups = [for (final s in view.sections) s.group];
+      expect(groups.first, PaletteGroup.notes);
+      expect(groups.sublist(groups.length - 2), [
+        PaletteGroup.text,
+        PaletteGroup.create,
+      ]);
+      final row = view.rows.firstWhere((r) => r.group == PaletteGroup.text);
+      expect(row.label, 'Meeting');
+      expect(row.snippet, 'the <<design>> call');
+      expect(row.vault, 'Work');
+      expect(row.target, isA<NoteTarget>());
+      expect(view.count, 2);
+    });
+
+    test('a note the Notes group found by title is not listed again', () {
+      final view = buildPaletteView(
+        sources(
+          notes: notes,
+          text: PaletteText(
+            query: 'design',
+            hits: [hit('v1', 'n1', 'Design Doc', '<<Design>> Doc')],
+          ),
+        ),
+        'design',
+      );
+      expect(
+        view.sections.map((s) => s.group),
+        isNot(contains(PaletteGroup.text)),
+      );
+    });
+
+    test('pending is a skeleton, not a row; it holds back "No matches"', () {
+      final view = buildPaletteView(
+        sources(text: const PaletteText(query: 'zzz', pending: true)),
+        'zzz',
+      );
+      final text = view.sections.firstWhere(
+        (s) => s.group == PaletteGroup.text,
+      );
+      expect(text.pending, isTrue);
+      expect(text.rows, isEmpty);
+      expect(view.noMatch, isNull);
+      final done = buildPaletteView(
+        sources(text: const PaletteText(query: 'zzz')),
+        'zzz',
+      );
+      expect(done.noMatch, isNotNull);
+      expect(
+        done.sections.map((s) => s.group),
+        isNot(contains(PaletteGroup.text)),
+      );
+    });
+
+    test('skipped vaults are one line; a failure is one quiet line', () {
+      final skipped = buildPaletteView(
+        sources(
+          text: PaletteText(
+            query: 'plan',
+            hits: [hit('v1', 'p1', 'Plan', '<<plan>>')],
+            skipped: const [
+              SkippedVault(vaultId: 'v2', vaultName: 'Work', reason: 'busy'),
+              SkippedVault(vaultId: 'v3', vaultName: 'Home', reason: 'busy'),
+            ],
+          ),
+        ),
+        'plan',
+      );
+      final text = skipped.sections.firstWhere(
+        (s) => s.group == PaletteGroup.text,
+      );
+      expect(text.rows.single.label, 'Plan');
+      expect(text.lines, ['Couldn’t search Work, Home']);
+
+      final failed = buildPaletteView(
+        sources(
+          notes: notes,
+          text: const PaletteText(query: 'design', failed: true),
+        ),
+        'design',
+      );
+      expect(failed.sections.first.group, PaletteGroup.notes);
+      expect(
+        failed.sections.firstWhere((s) => s.group == PaletteGroup.text).lines,
+        ['Couldn’t search note text'],
+      );
+    });
+
+    test('hidden offline, for another query, a prefix or one letter', () {
+      final text = PaletteText(
+        query: 'design',
+        hits: [hit('v2', 'w9', 'Meeting', '<<design>>')],
+      );
+      bool shown(PaletteSources src, String raw) => buildPaletteView(
+        src,
+        raw,
+      ).sections.any((s) => s.group == PaletteGroup.text);
+      expect(shown(sources(text: text), 'design'), isTrue);
+      expect(shown(sources(text: text, offline: true), 'design'), isFalse);
+      expect(shown(sources(text: text), 'designs'), isFalse);
+      expect(paletteTextQuery('>design'), isNull);
+      expect(paletteTextQuery('d'), isNull);
+      expect(paletteTextQuery('  de '), 'de');
     });
   });
 }
