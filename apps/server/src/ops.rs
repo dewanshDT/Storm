@@ -3099,8 +3099,8 @@ pub struct AgentView {
     /// otherwise while it is live; absent once ended.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub activity: Option<String>,
-    /// `approval`, `permission_prompt`, `usage_limit` or `blocked` (134p,
-    /// 144b).
+    /// `approval`, `permission_prompt`, `usage_limit`, `question`,
+    /// `sign_in` or `blocked` (134p, 144b, 155).
     pub needs_attention: Option<&'static str>,
     /// Its events in the caller's queue not yet acknowledged (144a).
     pub pending_events: i64,
@@ -4828,8 +4828,8 @@ pub struct SessionView {
     /// session from before, which Details calls not recorded.
     pub ran_as: Option<crate::agent::RanAs>,
     /// Whether it waits for a person (134p): `approval`, `permission_prompt`,
-    /// `usage_limit` (144b) or `blocked`. Beside `activity`, never a status,
-    /// never from idle.
+    /// `usage_limit` (144b), `question` or `sign_in` (155) or `blocked`.
+    /// Beside `activity`, never a status, never from idle.
     pub needs_attention: Option<&'static str>,
     /// A child's evidence-based activity (144b): `working` or `idle` only
     /// from a gated signal, else `unknown` while live. Only on a child.
@@ -4865,6 +4865,10 @@ pub struct SessionView {
     pub delete_request: Option<crate::agent::deletes::DeleteRequest>,
     /// `needs_attention` with its reason (153a); `null` when it is.
     pub attention: Option<crate::agent::attention::Attention>,
+    /// The program's own status (decision 155, AM113): `{state, kind?,
+    /// since}`, `state` one of `idle`, `working`, `done`, `blocked` or
+    /// `error`, while it runs and its program reports one; `null` otherwise.
+    pub program_status: Option<crate::agent::program::ProgramStatus>,
     /// Its host's last request, while the host is offline and the session
     /// has not ended (153a); `null` otherwise.
     pub host_last_seen: Option<String>,
@@ -5001,6 +5005,7 @@ fn session_view(
         needs_attention
     };
     let attention = state.agent.attention(&session).map_err(agent_error)?;
+    let program_status = state.agent.program_status(&session);
     let pending_decisions = delete_request
         .iter()
         .map(|d| PendingDecision {
@@ -5040,6 +5045,7 @@ fn session_view(
         cwd,
         delete_request,
         attention,
+        program_status,
         host_last_seen: None,
         pending_decisions,
         output_end,
@@ -5399,6 +5405,7 @@ pub async fn launch_session(
         cwd: launch.cwd.clone(),
         delete_request: None,
         attention: None,
+        program_status: None,
         host_last_seen: None,
         pending_decisions: Vec::new(),
         output_end: None,
