@@ -290,12 +290,26 @@ args = ["-i"]
         check("input is accepted", write(owner, sid, "hello\r") == 204)
         text, _, _ = s.until(lambda e, i, d, t: "hello\r" in t)
         check("input comes back as output", "hello" in text, text)
+        ev = Stream("/v1/agent/events", owner)
+        snap = ev.next()
+        check("/v1/agent/events opens with a snapshot holding the session, no id (AM109)",
+              ev.status == 200 and snap and snap[0] == "snapshot" and snap[1] is None
+              and any(v["id"] == sid for v in json.loads(snap[2])["sessions"]), snap and snap[:2])
+        titled_at = time.monotonic()
         write(owner, sid, "\x1b]0;\u25d0 Fix the login\x07")
         seen = []
         _, _, closed = s.until(lambda e, i, d, t: e == "status" and seen.append(json.loads(d))
                                or (seen and seen[-1].get("title") == "Fix the login"))
         check("the agent's title reaches the stream as a status (D15 AM42)",
               not closed and seen[-1]["activity"] == "working", seen[-1:])
+        pushed = []
+        ev.until(lambda e, i, d, t: e == "session" and pushed.append(json.loads(d))
+                 or (pushed and pushed[-1]["id"] == sid and pushed[-1].get("title") == "Fix the login"))
+        took = time.monotonic() - titled_at
+        check("and is pushed to /v1/agent/events as the whole view within 2 s (A-154-4)",
+              pushed[-1]["activity"] == "working" and "output_end" in pushed[-1] and took <= 2,
+              f"{took:.2f}s")
+        ev.close()
         check("and the record carries it", session(owner, sid)["title"] == "Fix the login")
         check("a working agent needs no attention (134p)", session(owner, sid)["needs_attention"] is None)
         write(owner, sid, "\x1b]0;\u2733 Fix the login\x07")
@@ -455,6 +469,34 @@ args = ["-i"]
         check("a stream marks where its replay ends (decision 132, fix b)",
               not closed and text.endswith("abc"), repr(text[-20:]))
         s.close()
+
+        def snapshot_attach(offset=0):
+            """Opens with attach=snapshot: (snapshot body or None, the next
+            event after it, the stream)."""
+            s = Stream(f"/v1/agent/sessions/{sid2}/terminal/stream?offset={offset}&attach=snapshot", owner)
+            s.next()
+            ev = s.next()
+            if ev and ev[0] == "snapshot":
+                body = json.loads(ev[2])
+                body["id"], body["bytes"] = ev[1], base64.b64decode(body["data"])
+                return body, s.next(), s
+            return None, ev, s
+
+        for _ in range(2):
+            write(owner, sid2, "y" * 65536)
+        def snapshotted():
+            snap, after, s = snapshot_attach()
+            s.close()
+            return (snap, after) if snap else None
+
+        snap, after = wait(snapshotted, "the cache past 64 KiB", timeout=30)
+        check("a cold attach with attach=snapshot gets the screen (decision 154, AM110)",
+              snap is not None and snap["complete"] is True and snap["floor"] == 0
+              and snap["id"] == str(snap["offset"]) and b"yyyy" in snap["bytes"], snap and {
+                  k: v for k, v in snap.items() if k not in ("data", "bytes")})
+        check("then the stream is live at the snapshot's offset",
+              after and after[0] == "live" and int(after[2]) == snap["offset"], after)
+
         chunk = "x" * 65536
         for _ in range(70):
             if write(owner, sid2, chunk) != 204:
@@ -468,6 +510,31 @@ args = ["-i"]
         gap = wait(past_capacity, "the cache to pass its capacity", timeout=60)
         g = json.loads(gap[2])
         check("a reader below the floor gets an explicit gap", g["from"] == 0 and g["to"] > 0, g)
+        settled = []
+
+        def output_settled():
+            time.sleep(0.5)
+            snap, _, s = snapshot_attach()
+            s.close()
+            settled.append(snap)
+            return len(settled) > 1 and snap and settled[-2] and settled[-2]["offset"] == snap["offset"]
+
+        wait(output_settled, "the echo to finish", timeout=60)
+        snap = settled[-1]
+        check("below the floor, attach=snapshot gets an incomplete screen instead",
+              snap is not None and snap["complete"] is False and snap["floor"] > 0
+              and snap["alt"] is False and snap["history_rows"] > 0 and b"xxxx" in snap["bytes"],
+              snap and {k: v for k, v in snap.items() if k not in ("data", "bytes")})
+        at = snap["offset"]
+        resumed, ev, s = snapshot_attach(at)
+        check("a reconnect at the snapshot's offset resumes exactly, with no snapshot",
+              resumed is None and ev and ev[0] == "live" and int(ev[2]) == at, ev)
+        time.sleep(1)
+        write(owner, sid2, "tail")
+        text, last, _ = s.until(lambda e, i, d, t: "tail" in t)
+        s.close()
+        check("and nothing reached the agent's input during the attach: the next output is the next input",
+              text == "tail" and last == at + 4, (repr(text[:40]), last, at))
         status, made = call("POST", "/v1/agent/crews",
                             {"name": "E2E crew", "session_ids": [sid2]}, auth=owner)
         check("a crew is made around a session (decision 138)", status == 201, (status, made))

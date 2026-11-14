@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../router.dart';
+import '../palette/palette.dart' show openPalette;
 import 'nav_bubble.dart' show NewFolderRequest, NewNoteRequest;
 
 /// One slot of the phone pill.
@@ -40,7 +41,7 @@ List<VaultAction> vaultActions(BuildContext context, WidgetRef ref, Uri uri) {
     VaultAction(
       icon: LucideIcons.search,
       tooltip: 'Search',
-      onTap: () => context.go(Routes.search(vaultId)),
+      onTap: () => openPalette(context, ref),
     ),
     VaultAction(
       icon: LucideIcons.plus,

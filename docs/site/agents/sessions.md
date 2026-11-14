@@ -72,19 +72,52 @@ Sessions working toward one goal can be grouped into a
 On a desktop, each row in the Agents sidebar says one thing per signal:
 
 - **A red outline** means the session is waiting for you: a permission
-  prompt, a question or a delete request. It is the only thing counted on
+  prompt, a question, a sign-in or a delete request. It is the only thing counted on
   the Agents icon in the rail.
 - **The badge on the agent's mark** says what it is doing: a pulsing dot
   while it works, a ring while it's idle, grey while it starts, red once it
   failed. A parked session, one out of usage and one whose host is offline
   have none, and their names are dimmed.
 - **The line under the name** says why, in words — "permission prompt ·
-  3m", "blocked · waiting on test-gateway", "failed · host restarted", "out
-  of usage · resets 15:00", "host offline · last seen 9m" — and otherwise
+  3m", "question · 1m", "sign in · 2m", "hit an error · 4m", "blocked ·
+  waiting on test-gateway", "failed · host restarted", "out of usage ·
+  resets 15:00", "host offline · last seen 9m" — and otherwise
   the workspace and how long it has run. A child whose work you haven't
   applied says "2 commits to apply" and stays out of **ENDED** until you
   apply or delete it.
 - **A dot after the name** means output you haven't seen on this device.
+
+Rows follow the server as sessions change, open or not: a session that
+starts waiting for you, stops working or ends shows within a second or two
+on every device that has Storm in front. A server older than the app
+refreshes them every 15 seconds instead.
+
+When it happens while you're looking elsewhere, Storm also says so once, in
+a short message at the bottom of the window, on any screen:
+
+- "*session* **needs you** · Open" when a session starts waiting for you:
+  a permission prompt, a question or a sign-in (a delete request has its
+  own message, below).
+- "*session* **finished its turn** · Open" when the agent itself reports
+  that its turn is done. It says "its turn": a command the agent left
+  running in the background may still be going.
+- "*session* **hit an error** · Open" when the agent reports an error. While
+  it retries a failing connection it still reads as working, which can last
+  a few minutes.
+- "*session* **stopped working** · Open" when a working session goes idle
+  without finishing (you pressed Esc or Ctrl+C), or ends. An agent that
+  doesn't report its own state (Claude Code does; most others don't yet)
+  gets this one instead of the two above: Storm can't tell from its title
+  whether it finished or is waiting at a prompt.
+
+The last three come only with output you haven't seen on that device, and
+none comes while Storm doesn't know what a session is doing.
+
+**Open** goes to the session. Nothing is said for the session you have
+open, for changes that happened while Storm was in the background or
+offline, or twice for the same change on one device. A newer message takes
+the place of the one showing. These are messages inside the app only: Storm
+sends no system notifications.
 
 Sessions waiting for you, blocked, failed in the last hour or on an offline
 host move to the top of their crew or section, and crews with one move up

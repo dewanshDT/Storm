@@ -419,7 +419,21 @@ class _SelectionBarState extends ConsumerState<SelectionBar> {
     if (e is! KeyDownEvent || e.logicalKey != LogicalKeyboardKey.escape) {
       return false;
     }
+    if (!mounted || !_onTop(context)) return false;
     _clear();
+    return true;
+  }
+
+  /// No dialog or menu is above this, on its own navigator or on any
+  /// navigator around it: one that is owns its own Esc.
+  static bool _onTop(BuildContext context) {
+    BuildContext? at = context;
+    while (at != null && at.mounted) {
+      final route = ModalRoute.of(at);
+      if (route == null) return true;
+      if (!route.isCurrent) return false;
+      at = route.navigator?.context;
+    }
     return true;
   }
 

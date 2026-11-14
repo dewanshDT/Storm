@@ -1,55 +1,19 @@
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'storm_activators.dart';
 import 'storm_intents.dart';
 
-/// Shortcut maps for the three nesting levels in M18.
+/// The note's and the editor's chord maps; the app layer's come from the
+/// command registry (`storm_commands.dart`).
 ///
 /// Undo/redo and select-all stay with Flutter's
 /// [DefaultTextEditingShortcuts] when a [TextField] has focus — do not add
 /// them here or they fight the editor.
 
-Map<ShortcutActivator, Intent> stormGlobalShortcuts() => {
-  stormActivator(LogicalKeyboardKey.keyK): const StormSearchIntent(),
-  stormActivator(LogicalKeyboardKey.keyN): const StormNewNoteIntent(),
-  stormActivator(LogicalKeyboardKey.keyN, shift: true):
-      const StormNewFolderIntent(),
-  stormActivator(LogicalKeyboardKey.backslash):
-      const StormToggleSidebarIntent(),
-};
-
-/// The Agents activity's chords (153f): ⇧⌘N (Ctrl+Shift+N off macOS) is a
-/// new session there, as it is New folder in Notes; the two never share a
-/// shell, so neither shadows the other.
-Map<ShortcutActivator, Intent> stormAgentsShortcuts() => {
-  stormActivator(LogicalKeyboardKey.keyN, shift: true):
-      const StormNewSessionIntent(),
-};
-
 /// How ⇧⌘N is written on this platform, for the ＋'s tooltip.
 String get stormNewSessionChord =>
     stormUsesMetaModifier ? '⇧⌘N' : 'Ctrl+Shift+N';
-
-/// The app bar's back and forward (153c): ⌘[ and ⌘] on macOS, Alt+← and
-/// Alt+→ elsewhere. None on the web, where the browser's own keys already
-/// move its history and the bar follows it.
-Map<ShortcutActivator, Intent> stormNavShortcuts() => kIsWeb
-    ? const {}
-    : stormUsesMetaModifier
-    ? {
-        const SingleActivator(LogicalKeyboardKey.bracketLeft, meta: true):
-            const StormBackIntent(),
-        const SingleActivator(LogicalKeyboardKey.bracketRight, meta: true):
-            const StormForwardIntent(),
-      }
-    : {
-        const SingleActivator(LogicalKeyboardKey.arrowLeft, alt: true):
-            const StormBackIntent(),
-        const SingleActivator(LogicalKeyboardKey.arrowRight, alt: true):
-            const StormForwardIntent(),
-      };
 
 Map<ShortcutActivator, Intent> stormNoteShortcuts() => {
   stormActivator(LogicalKeyboardKey.keyE): const StormToggleReadEditIntent(),

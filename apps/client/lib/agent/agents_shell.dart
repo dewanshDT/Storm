@@ -4,10 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
-import '../keyboard/storm_activators.dart' show stormHasKeyboard;
-import '../keyboard/storm_intents.dart' show StormNewSessionIntent;
-import '../keyboard/storm_shortcut_maps.dart'
-    show stormAgentsShortcuts, stormNewSessionChord;
+import '../state/app_state.dart' show sidebarCollapsedProvider;
+import '../keyboard/storm_shortcut_maps.dart' show stormNewSessionChord;
 import '../ui/breakpoints.dart';
 import '../ui/shell/sidebar_frame.dart';
 import '../ui/shell/app_bar.dart' show sidebarTopInset;
@@ -54,37 +52,18 @@ class AgentsShell extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!context.isExpanded) return child;
-    // Focus so the app bar's ⌘[ / ⌘] and ⇧⌘N work before anything is
-    // clicked, as VaultShell's does for the Notes chords.
-    return Shortcuts(
-      shortcuts: stormAgentsShortcuts(),
-      child: Actions(
-        actions: {
-          StormNewSessionIntent: CallbackAction<StormNewSessionIntent>(
-            onInvoke: (_) {
-              if (newSessionBlocker(ref.read(agentOverviewProvider)) == null) {
-                launchAgentSession(context, ref);
-              }
-              return null;
-            },
-          ),
-        },
-        child: Focus(
-          autofocus: stormHasKeyboard,
-          skipTraversal: true,
-          child: Scaffold(
-            body: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                AgentsSidebar(
-                  selected: sessionIdOf(location),
-                  selectedCrew: crewIdOf(location),
-                ),
-                Expanded(child: PaneSemantics(child: child)),
-              ],
+    final collapsed = ref.watch(sidebarCollapsedProvider);
+    return Scaffold(
+      body: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (!collapsed)
+            AgentsSidebar(
+              selected: sessionIdOf(location),
+              selectedCrew: crewIdOf(location),
             ),
-          ),
-        ),
+          Expanded(child: PaneSemantics(child: child)),
+        ],
       ),
     );
   }
@@ -150,6 +129,19 @@ class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
     final renaming = ref.watch(crewRenameProvider);
     final overview = selected == null && selectedCrew == null;
     final showHost = namesHosts(o);
+    // The open session's row shows what its screen shows: its own stream is
+    // ahead of any list.
+    final openLive = selected == null
+        ? null
+        : ref.watch(
+            sessionControllerProvider(selected).select((c) => c?.session),
+          );
+    final openRecord = selected == null
+        ? null
+        : ref.watch(sessionDetailProvider(selected)).value;
+    AgentSession drawn(AgentSession s) => s.id != selected || o == null
+        ? s
+        : o.labelsOf((openRecord ?? s).withLive(openLive));
 
     final (running: live, ended: ended) = looseSections(o);
     final crews = o?.crews ?? const <Crew>[];
@@ -191,14 +183,15 @@ class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
     Widget row(AgentSession s, List<AgentSession> listed) {
       final kids = descendantsIn(listed, s.id);
       final folded = prefs.treeCollapsed(s.id);
-      final drawn = SnapBackOutline(
+      final record = drawn(s);
+      final outlined = SnapBackOutline(
         id: s.id,
         child: SessionRow(
-          session: s,
+          session: record,
           host: o?.hostName(s.hostId) ?? 'host',
           selected: s.id == selected || selection.contains(s.id),
           overview: o,
-          tier: shown(s),
+          tier: shown(record),
           now: now,
           fromParent: parentApart(s, listed, o),
           showHost: showHost,
@@ -228,9 +221,9 @@ class _AgentsSidebarState extends ConsumerState<AgentsSidebar> {
       );
       // A child moves only with the agent that started it (145i).
       if (s.spawn.isChild) {
-        return Tooltip(message: kMovesWithParent, child: drawn);
+        return Tooltip(message: kMovesWithParent, child: outlined);
       }
-      return CrewDraggable<SessionDrag>(data: SessionDrag(s), child: drawn);
+      return CrewDraggable<SessionDrag>(data: SessionDrag(s), child: outlined);
     }
 
     // A child under its parent sits on the dashed indent; one listed apart

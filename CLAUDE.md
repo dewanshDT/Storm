@@ -257,6 +257,18 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   reports the colour scheme to the agent on every non-identical theme while
   DEC 2031 is on; a report after the agent restored echo prints as
   `^[[?997;1n` in the scrollback.
+- **A hidden terminal never answers, resizes or focuses** (decision 154).
+  A session left for another stays in a bounded LRU with its stream open
+  for a short grace; its replies (2031 reports included) go out only while
+  visible, in front and live, and it re-fits locally without telling the
+  host, so it never speaks for a device the person has left
+  (`session_keep_alive_test.dart`).
+- **A view starts from the server's snapshot when it has one** (decision
+  154, AM110). An open at the start of a view asks `attach=snapshot`; the
+  server answers only from 0 or below its floor, so a kept terminal resumes
+  exactly. The snapshot resets the terminal, is drawn as replay (nothing it
+  provokes is answered), and output goes on from its offset; a server that
+  sends none is replayed as before (`snapshot_attach_test.dart`).
 - **Tab and Shift+Tab are the agent's while the terminal has focus**
   (decision 147b): `StormTerminal` sends `\t` and `ESC [ Z` itself, before
   xterm2's encoding or Flutter's focus traversal, on every platform; the
@@ -522,6 +534,19 @@ decision 77):
   while the host is offline and never queued on the server. On the host, each
   session has its own ordered writer, and every PTY write is bounded, so a hung
   agent can never hold the session against the owner's `end`.
+- **The host answers exactly one terminal query, `OSC 7501 ; ?`, once per
+  process; every other reply is the client's** (decision 155, AM112). The
+  session's input channel exists before `start`, and `Events::output`
+  queues the reply before the bytes reach the ring, so it is ahead of any
+  client's DA1 reply (Claude Code takes none after DA1); a resize, replay or
+  re-attach never sends another. Records count only after the reply
+  (`program_status.rs`, AM113): no record within 2 s of first output leaves
+  the title's activity; one that does not parse posts activity `null`,
+  never idle; 3 failures on a host and its new sessions go unanswered until
+  it restarts; `msg=` and `title=` never leave the host. `runtime.toml`
+  `program_status = false` is the kill switch, and Windows never answers.
+  `docs/program-status-vectors.json` holds both crates to the captured
+  records.
 - **A start runs only while Storm still wants it** (round 4's stray launch).
   A launch refused because its host is offline writes nothing and is never
   queued. A `start` its host has not reported when the link it went down

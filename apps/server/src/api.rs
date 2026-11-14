@@ -26,6 +26,8 @@ use crate::index::Indexer;
 use crate::registry::Registry;
 use crate::vault::Vault;
 
+mod agent_events;
+
 /// One open vault's index.
 ///
 /// The `Mutex` is per vault rather than global, so two vaults can be worked on
@@ -445,6 +447,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route("/v1/keys", get(list_keys).post(create_key))
         .route("/v1/keys/{id}", delete(revoke_key))
         .route("/v1/recents", get(recents))
+        .route("/v1/search", get(search_all))
         .route("/v1/vaults/{vault}/tree", get(tree))
         .route("/v1/vaults/{vault}/sync", get(sync))
         .route(
@@ -543,6 +546,8 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/sessions",
             get(agent_list_sessions).post(agent_launch),
         )
+        // Pushed session state (decision 154, AM109): owner only.
+        .route("/v1/agent/events", get(agent_events::agent_events))
         .route(
             "/v1/agent/sessions/{id}",
             get(agent_get_session).delete(agent_dismiss_session),
@@ -2549,16 +2554,35 @@ async fn agent_resize(
 struct StreamQuery {
     #[serde(default)]
     offset: u64,
+    /// `snapshot` asks for the screen instead of the history (AM110); any
+    /// other value is ignored.
+    #[serde(default)]
+    attach: Option<String>,
 }
+
+/// Output event size while a stream replays what the cache already holds
+/// (decision 154): 16 events for a full 4 MiB cache instead of 128.
+const CATCH_UP_CHUNK: usize = 256 * 1024;
+/// Output event size once a stream is live; host uploads are smaller anyway.
+const LIVE_CHUNK: usize = 32 * 1024;
+/// While replaying, the session record is read at most this far apart.
+const STATUS_WHILE_BEHIND: std::time::Duration = std::time::Duration::from_millis(250);
 
 struct TerminalStream {
     agent: Arc<crate::agent::AgentManager>,
     id: String,
     cursor: u64,
     last_status: Option<String>,
+    /// The next pass must read the record, whatever the clock says.
+    stale: bool,
+    read_at: std::time::Instant,
     rx: tokio::sync::watch::Receiver<u64>,
     done: bool,
     live_sent: bool,
+    /// `attach=snapshot`, not yet decided.
+    snapshot: bool,
+    /// The PTY size, from the last record read.
+    size: (u16, u16),
 }
 
 /// GET …/terminal/stream?offset=N — the terminal as SSE (freeze §11.2).
@@ -2573,6 +2597,16 @@ struct TerminalStream {
 /// everything retained: what came before it is replay, and a client's
 /// terminal must not answer the queries in it again (decision 132, fix b).
 /// Older clients ignore it.
+///
+/// Until `live`, output goes in events of up to 256 KiB and the record is
+/// read only every 250 ms, after a gap, and before deciding the stream has
+/// caught up; once live, 32 KiB and every pass (decision 154). A status that
+/// is sent is always the whole record.
+///
+/// `attach=snapshot` (AM110): when `offset` is 0 or below the floor and the
+/// cache holds more than 64 KiB, the first `status` is followed by `event:
+/// snapshot`, `id:` S, a rendering of the screen at S, and the stream goes on
+/// from S. Otherwise, and for any other `attach`, the stream is as above.
 async fn agent_terminal_stream(
     State(state): State<Shared>,
     Path(id): Path<String>,
@@ -2590,8 +2624,12 @@ async fn agent_terminal_stream(
         id,
         cursor: q.offset,
         last_status: None,
+        stale: true,
+        read_at: std::time::Instant::now(),
         done: false,
         live_sent: false,
+        snapshot: q.attach.as_deref() == Some("snapshot"),
+        size: (80, 24),
     };
     let stream = futures_util::stream::unfold(start, |mut st| async move {
         loop {
@@ -2601,16 +2639,53 @@ async fn agent_terminal_stream(
             // Mark the current version seen *before* reading, so a change
             // landing between the read and the wait still wakes us.
             st.rx.borrow_and_update();
-            let record = match st.agent.get(&st.id) {
-                Ok(r) => r,
-                Err(_) => return None,
+            let catching_up = !st.live_sent;
+            let record = if !catching_up || st.stale || st.read_at.elapsed() >= STATUS_WHILE_BEHIND
+            {
+                let record = match st.agent.get(&st.id) {
+                    Ok(r) => r,
+                    Err(_) => return None,
+                };
+                st.stale = false;
+                st.read_at = std::time::Instant::now();
+                st.size = (record.cols, record.rows);
+                let json = serde_json::to_string(&record).unwrap_or_default();
+                if st.last_status.as_ref() != Some(&json) {
+                    st.last_status = Some(json.clone());
+                    return Some((Ok(Event::default().event("status").data(json)), st));
+                }
+                Some(record)
+            } else {
+                None
             };
-            let json = serde_json::to_string(&record).unwrap_or_default();
-            if st.last_status.as_ref() != Some(&json) {
-                st.last_status = Some(json.clone());
-                return Some((Ok(Event::default().event("status").data(json)), st));
+            if std::mem::take(&mut st.snapshot)
+                && let Some(snap) = st.agent.terminal_snapshot(&st.id, st.cursor, st.size).await
+            {
+                st.cursor = snap.offset;
+                let r = &snap.rendered;
+                let data = serde_json::json!({
+                    "offset": snap.offset,
+                    "floor": snap.floor,
+                    "cols": snap.cols,
+                    "rows": snap.rows,
+                    "alt": r.alt,
+                    "complete": snap.floor == 0,
+                    "modes": r.modes,
+                    "history_rows": r.history_rows,
+                    "data": data_encoding::BASE64.encode(&r.data),
+                });
+                let event = Event::default()
+                    .event("snapshot")
+                    .id(snap.offset.to_string())
+                    .data(data.to_string());
+                return Some((Ok(event), st));
             }
-            match st.agent.read_output(&st.id, st.cursor, 32 * 1024) {
+            let chunk = if catching_up {
+                CATCH_UP_CHUNK
+            } else {
+                LIVE_CHUNK
+            };
+            match st.agent.read_output(&st.id, st.cursor, chunk) {
                 crate::agent::cache::Read::Data { from, bytes } => {
                     st.cursor = from + bytes.len() as u64;
                     let event = Event::default()
@@ -2621,12 +2696,18 @@ async fn agent_terminal_stream(
                 }
                 crate::agent::cache::Read::Gap { from, to } => {
                     st.cursor = to;
+                    st.stale = true;
                     let event = Event::default()
                         .event("gap")
                         .data(serde_json::json!({ "from": from, "to": to }).to_string());
                     return Some((Ok(event), st));
                 }
                 crate::agent::cache::Read::UpToDate | crate::agent::cache::Read::Ahead => {
+                    // Whether to go live or end is decided on a fresh record.
+                    let Some(record) = record else {
+                        st.stale = true;
+                        continue;
+                    };
                     if !st.live_sent && !record.is_ended() {
                         st.live_sent = true;
                         let event = Event::default().event("live").data(st.cursor.to_string());
@@ -3430,6 +3511,16 @@ async fn recents(
 ) -> ApiResult<Json<serde_json::Value>> {
     let recents = crate::ops::recents(&state, &actor, q.limit).await?;
     Ok(Json(serde_json::json!({ "recents": recents })))
+}
+
+async fn search_all(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(q): Query<SearchQuery>,
+) -> ApiResult<Json<crate::ops::CrossSearch>> {
+    Ok(Json(
+        crate::ops::search_all(&state, &actor, &q.q, q.limit).await?,
+    ))
 }
 
 async fn tree(
@@ -4779,6 +4870,75 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn cross_vault_search_answers_a_session_and_refuses_the_unauthenticated() {
+        let dir = tempdir::TempDir::new("storm-search-all").unwrap();
+        let (app, _, state) = test_router_with_state(dir.path());
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        let actor = Actor::Session {
+            user_id: owner.clone(),
+        };
+        for name in ["home", "work"] {
+            let Ok(vault) = crate::ops::create_vault(&state, name).await else {
+                panic!("create_vault {name}");
+            };
+            let created =
+                crate::ops::create_note(&state, &actor, &vault.id, "Plan.md", "# Plan\n\nbudget\n")
+                    .await;
+            assert!(created.is_ok());
+        }
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=pla", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let hits = body["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0]["vault_name"], "home");
+        assert_eq!(hits[0]["title"], "Plan");
+        assert_eq!(hits[0]["tier"], 1);
+        for key in ["vault_id", "id", "path", "snippet"] {
+            assert!(hits[0][key].is_string(), "{key}");
+        }
+        assert_eq!(body["skipped"], serde_json::json!([]));
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=%20%20&limit=5", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["hits"], serde_json::json!([]));
+
+        let (status, _) = send(&app, get("/v1/search?q=plan")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn cross_vault_search_filters_where_a_named_vault_refuses() {
+        let dir = tempdir::TempDir::new("storm-search-all-filter").unwrap();
+        let (app, _, state) = test_router_with_policy(dir.path(), Arc::new(DenyAll));
+        let owner = seed_owner(&state).await;
+        let token = session_token(&state, &owner).await;
+        register_vault(&state, "Notes").await;
+
+        let (status, body) = send(
+            &app,
+            get_with_auth("/v1/search?q=plan", &format!("Bearer {token}")),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a collection is filtered, never refused"
+        );
+        assert_eq!(body["hits"], serde_json::json!([]));
+        assert_eq!(body["skipped"], serde_json::json!([]));
+    }
+
+    #[tokio::test]
     async fn the_shipped_policy_changes_nothing_for_an_ordinary_caller() {
         // The other direction, and the reason this slice is safe to merge:
         // with `StormPolicy` the boundary is invisible. A vault that is
@@ -5922,6 +6082,7 @@ pub(crate) mod tests {
                 ("GET", "/v1/vaults"),
                 ("GET", "/v1/config"),
                 ("GET", "/v1/recents"),
+                ("GET", "/v1/search?q=x"),
                 ("GET", "/v1/keys"),
             ] {
                 let (status, _) = send(
@@ -6073,6 +6234,7 @@ pub(crate) mod tests {
             ("GET", "/v1/vaults"),
             ("GET", "/v1/config"),
             ("GET", "/v1/recents"),
+            ("GET", "/v1/search?q=x"),
             ("GET", "/v1/keys"),
         ] {
             let (status, _) = send(
@@ -20892,5 +21054,510 @@ pub(crate) mod tests {
                 "no reason text in the audit: {detail}"
             );
         }
+    }
+
+    // ---- the terminal stream's replay (decision 154, 154-S1) ----
+
+    const STREAM_HOST: &str = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+
+    struct TerminalFixture {
+        app: Router,
+        state: Shared,
+        bearer: String,
+        id: String,
+        _link: tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+    }
+
+    /// A running session on an online host whose cache holds `output`.
+    async fn terminal_fixture(dir: &FsPath, output: &[u8]) -> TerminalFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let (_generation, link) = state.agent.connect_host(STREAM_HOST);
+        state
+            .agent
+            .hello(
+                STREAM_HOST,
+                serde_json::from_value(serde_json::json!({
+                    "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                    "workspaces": ["storm"],
+                    "max_sessions": 4,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let owner = seed_owner(&state).await;
+        let id = state
+            .agent
+            .launch(
+                &owner,
+                serde_json::from_value(serde_json::json!({
+                    "host_id": STREAM_HOST, "workspace": "storm", "provider": "fake",
+                    "terminal": {"cols": 80, "rows": 24},
+                }))
+                .unwrap(),
+                Default::default(),
+                Vec::new(),
+            )
+            .unwrap()
+            .0
+            .id;
+        report(&state, &id, serde_json::json!({"status": "running"}));
+        for (n, piece) in output.chunks(64 * 1024).enumerate() {
+            state
+                .agent
+                .host_output(STREAM_HOST, &id, (n * 64 * 1024) as u64, piece)
+                .unwrap();
+        }
+        let bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        TerminalFixture {
+            app,
+            state,
+            bearer,
+            id,
+            _link: link,
+        }
+    }
+
+    fn report(state: &Shared, id: &str, status: serde_json::Value) {
+        state
+            .agent
+            .host_status(STREAM_HOST, id, &serde_json::from_value(status).unwrap())
+            .unwrap();
+    }
+
+    fn replay_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8).collect()
+    }
+
+    #[derive(Debug)]
+    struct SseEvent {
+        event: String,
+        id: Option<String>,
+        data: String,
+    }
+
+    /// Reads a terminal stream one event at a time, pulling the body only
+    /// when it needs more, so the server produces each event on demand.
+    struct EventReader {
+        body: std::pin::Pin<
+            Box<dyn futures_util::Stream<Item = Result<axum::body::Bytes, axum::Error>> + Send>,
+        >,
+        buffer: String,
+    }
+
+    impl EventReader {
+        async fn open(f: &TerminalFixture, offset: u64) -> Self {
+            Self::open_query(f, &format!("offset={offset}")).await
+        }
+
+        async fn open_query(f: &TerminalFixture, query: &str) -> Self {
+            let response = f
+                .app
+                .clone()
+                .oneshot(get_with_auth(
+                    &format!("/v1/agent/sessions/{}/terminal/stream?{query}", f.id),
+                    &f.bearer,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            Self {
+                body: Box::pin(response.into_body().into_data_stream()),
+                buffer: String::new(),
+            }
+        }
+
+        /// The next event, or `None` once the stream has ended.
+        async fn next(&mut self) -> Option<SseEvent> {
+            loop {
+                if let Some(at) = self.buffer.find("\n\n") {
+                    let block: String = self.buffer.drain(..at + 2).collect();
+                    let mut event = SseEvent {
+                        event: String::new(),
+                        id: None,
+                        data: String::new(),
+                    };
+                    for line in block.lines() {
+                        if let Some(v) = line.strip_prefix("event: ") {
+                            event.event = v.into();
+                        } else if let Some(v) = line.strip_prefix("id: ") {
+                            event.id = Some(v.into());
+                        } else if let Some(v) = line.strip_prefix("data: ") {
+                            event.data.push_str(v);
+                        }
+                    }
+                    if event.event.is_empty() {
+                        continue; // a keepalive comment
+                    }
+                    return Some(event);
+                }
+                let chunk = tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    futures_util::StreamExt::next(&mut self.body),
+                )
+                .await
+                .expect("the stream sent nothing before the timeout")?;
+                self.buffer
+                    .push_str(std::str::from_utf8(&chunk.unwrap()).unwrap());
+            }
+        }
+
+        async fn expect(&mut self, name: &str) -> SseEvent {
+            let event = self.next().await.expect("the stream ended early");
+            assert_eq!(event.event, name, "{event:?}");
+            event
+        }
+    }
+
+    fn record_reads(state: &Shared) -> usize {
+        state
+            .agent
+            .record_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[tokio::test]
+    async fn a_cold_replay_catches_up_in_256_kib_events_with_exact_offsets_then_goes_live() {
+        let dir = tempdir::TempDir::new("storm-154-replay").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["status"], "running");
+        let mut replayed = Vec::new();
+        for end in [256, 512, 768, 800] {
+            let event = stream.expect("output").await;
+            assert_eq!(event.id, Some((end * 1024).to_string()));
+            replayed.extend(data_encoding::BASE64.decode(event.data.as_bytes()).unwrap());
+            assert_eq!(replayed.len(), end * 1024);
+        }
+        assert!(replayed == output, "the replay is the cache, in order");
+        assert_eq!(stream.expect("live").await.data, (800 * 1024).to_string());
+
+        // Live output goes in the smaller events, from where the replay ended.
+        let more = replay_bytes(40 * 1024);
+        f.state
+            .agent
+            .host_output(STREAM_HOST, &f.id, 800 * 1024, &more)
+            .unwrap();
+        let mut live = Vec::new();
+        while live.len() < more.len() {
+            let event = stream.next().await.expect("the stream ended early");
+            if event.event == "status" {
+                continue; // the upload stamps last_activity
+            }
+            assert_eq!(event.event, "output", "{event:?}");
+            let bytes = data_encoding::BASE64.decode(event.data.as_bytes()).unwrap();
+            assert!(
+                bytes.len() <= LIVE_CHUNK,
+                "a live event carried {}",
+                bytes.len()
+            );
+            live.extend(bytes);
+            assert_eq!(event.id, Some((800 * 1024 + live.len()).to_string()));
+        }
+        assert!(live == more);
+    }
+
+    #[tokio::test]
+    async fn a_full_4_mib_cold_replay_is_16_events_and_at_most_3_record_reads() {
+        let dir = tempdir::TempDir::new("storm-154-full").unwrap();
+        let output = replay_bytes(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        let (before, started) = (record_reads(&f.state), std::time::Instant::now());
+
+        stream.expect("status").await;
+        let (mut events, mut bytes) = (0, 0);
+        let live = loop {
+            let event = stream.next().await.expect("the stream ended early");
+            match event.event.as_str() {
+                "output" => {
+                    events += 1;
+                    bytes += event.data.len() / 4 * 3 - event.data.matches('=').count();
+                }
+                "live" => break event,
+                other => panic!("unexpected {other}: {}", event.data),
+            }
+        };
+        assert_eq!(events, 16);
+        assert_eq!(bytes, output.len());
+        assert_eq!(live.data, output.len().to_string());
+        // The first status, and the fresh read that decides `live`; a slow
+        // (debug) run also re-reads once per 250 ms it spends behind.
+        let reads = record_reads(&f.state) - before;
+        let timed = (started.elapsed().as_millis() / STATUS_WHILE_BEHIND.as_millis()) as usize;
+        assert!(
+            reads <= 2 + timed,
+            "the replay read the record {reads} times in {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_status_change_during_catch_up_arrives_within_250_ms() {
+        let dir = tempdir::TempDir::new("storm-154-status").unwrap();
+        let output = replay_bytes(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        stream.expect("status").await;
+        let first = stream.expect("output").await;
+
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "running", "title": "renamed mid-replay"}),
+        );
+        tokio::time::sleep(STATUS_WHILE_BEHIND).await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["title"], "renamed mid-replay");
+        assert_eq!(record["id"], f.id, "a status is the whole record");
+
+        // The replay carries on exactly where it was.
+        let next = stream.expect("output").await;
+        let at: u64 = first.id.unwrap().parse().unwrap();
+        let bytes = data_encoding::BASE64.decode(next.data.as_bytes()).unwrap();
+        assert_eq!(next.id, Some((at + bytes.len() as u64).to_string()));
+        assert!(bytes[..] == output[at as usize..at as usize + bytes.len()]);
+    }
+
+    #[tokio::test]
+    async fn an_ended_session_still_closes_after_its_replay() {
+        let dir = tempdir::TempDir::new("storm-154-ended").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut stream = EventReader::open(&f, 0).await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["status"], "completed");
+        for _ in 0..4 {
+            stream.expect("output").await;
+        }
+        let end = stream.next().await;
+        assert!(end.is_none(), "no live and no wait once ended: {end:?}");
+    }
+
+    #[tokio::test]
+    async fn a_session_that_ends_during_catch_up_closes_without_going_live() {
+        let dir = tempdir::TempDir::new("storm-154-ends").unwrap();
+        let output = replay_bytes(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open(&f, 0).await;
+        stream.expect("status").await;
+        stream.expect("output").await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut seen = Vec::new();
+        while let Some(event) = stream.next().await {
+            seen.push(event.event);
+        }
+        assert_eq!(seen, ["output", "output", "output", "status"], "{seen:?}");
+    }
+
+    // ---- snapshot attach (decision 154, AM110, 154-S3) ----
+
+    /// Claude Code's capture repeated to `len`: the alt screen, kitty and the
+    /// rest set in the first copy only, as a real session sends them.
+    fn alt_screen_output(len: usize) -> Vec<u8> {
+        let capture: &[u8] = include_bytes!("agent/claude_code_screen.bin");
+        let once = b"\x1b[?1049h";
+        let at = capture.windows(once.len()).position(|w| w == once).unwrap();
+        let mut rest = capture.to_vec();
+        rest.drain(at..at + once.len());
+        let mut out = capture.to_vec();
+        while out.len() < len {
+            out.extend_from_slice(&rest);
+        }
+        out.truncate(len);
+        out
+    }
+
+    fn snapshot_of(event: &SseEvent) -> (serde_json::Value, Vec<u8>) {
+        let body: serde_json::Value = serde_json::from_str(&event.data).unwrap();
+        let data = data_encoding::BASE64
+            .decode(body["data"].as_str().unwrap().as_bytes())
+            .unwrap();
+        (body, data)
+    }
+
+    #[tokio::test]
+    async fn a_cold_attach_with_snapshot_is_status_snapshot_then_output_from_s_then_live() {
+        let dir = tempdir::TempDir::new("storm-154-snap").unwrap();
+        let output = alt_screen_output(1024 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+
+        stream.expect("status").await;
+        let snapshot = stream.expect("snapshot").await;
+        let s = output.len() as u64;
+        assert_eq!(snapshot.id, Some(s.to_string()));
+        let (body, data) = snapshot_of(&snapshot);
+        assert_eq!(body["offset"], s);
+        assert_eq!(body["floor"], 0);
+        assert_eq!(
+            (body["cols"].as_u64(), body["rows"].as_u64()),
+            (Some(80), Some(24))
+        );
+        assert_eq!(body["alt"], true);
+        assert_eq!(body["complete"], true);
+        assert_eq!(body["history_rows"], 0);
+        assert_eq!(body["modes"]["kitty_flags"], 5);
+        assert_eq!(body["modes"]["alt_screen"], true);
+        assert!(data.starts_with(b"\x1bc\x1b[?1049h"));
+        assert!(data.len() < 8 * 1024, "{} bytes", data.len());
+
+        // What arrives after the copy is output from S, then the stream is live.
+        let more = b"\x1b[1;1Hafter the snapshot".to_vec();
+        f.state
+            .agent
+            .host_output(STREAM_HOST, &f.id, s, &more)
+            .unwrap();
+        // The upload stamps last_activity, so a status may come between.
+        let mut after: Vec<SseEvent> = Vec::new();
+        while after.last().is_none_or(|e| e.event != "live") {
+            let event = stream.next().await.expect("the stream ended early");
+            if event.event != "status" {
+                after.push(event);
+            }
+        }
+        let names: Vec<&str> = after.iter().map(|e| e.event.as_str()).collect();
+        assert_eq!(names, ["output", "live"], "{after:?}");
+        assert_eq!(after[0].id, Some((s + more.len() as u64).to_string()));
+        assert_eq!(
+            data_encoding::BASE64
+                .decode(after[0].data.as_bytes())
+                .unwrap(),
+            more
+        );
+        assert_eq!(after[1].data, (s + more.len() as u64).to_string());
+    }
+
+    #[tokio::test]
+    async fn a_cold_open_of_a_full_4_mib_alt_screen_session_sends_at_most_16_kib_before_live() {
+        // A-154-8.
+        let dir = tempdir::TempDir::new("storm-154-a8").unwrap();
+        let output = alt_screen_output(crate::agent::cache::DEFAULT_CAPACITY);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let response = f
+            .app
+            .clone()
+            .oneshot(get_with_auth(
+                &format!(
+                    "/v1/agent/sessions/{}/terminal/stream?offset=0&attach=snapshot",
+                    f.id
+                ),
+                &f.bearer,
+            ))
+            .await
+            .unwrap();
+        let mut body = response.into_body().into_data_stream();
+        let mut sent = String::new();
+        while !sent.contains("event: live") {
+            let chunk = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                futures_util::StreamExt::next(&mut body),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            sent.push_str(std::str::from_utf8(&chunk).unwrap());
+        }
+        let before_live = &sent[..sent.find("event: live").unwrap()];
+        assert!(before_live.contains("event: snapshot"));
+        assert!(
+            !before_live.contains("event: output"),
+            "nothing was replayed"
+        );
+        eprintln!("A-154-8: {} bytes before live", before_live.len());
+        assert!(
+            before_live.len() <= 16 * 1024,
+            "{} bytes before live",
+            before_live.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_attach_below_the_floor_gets_an_incomplete_snapshot_instead_of_a_gap() {
+        let dir = tempdir::TempDir::new("storm-154-floor").unwrap();
+        let output = alt_screen_output(crate::agent::cache::DEFAULT_CAPACITY + 512 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        let floor = 512 * 1024;
+
+        let mut stream = EventReader::open_query(&f, "offset=100&attach=snapshot").await;
+        stream.expect("status").await;
+        let (body, _) = snapshot_of(&stream.expect("snapshot").await);
+        assert_eq!(body["floor"], floor);
+        assert_eq!(body["complete"], false, "bytes before the floor are gone");
+        assert_eq!(
+            body["alt"], true,
+            "the floor-mode tracker saw ?1049h evicted"
+        );
+        assert_eq!(body["modes"]["kitty_flags"], 5);
+        assert_eq!(stream.expect("live").await.data, output.len().to_string());
+
+        // Without the parameter, the same request is a gap, as before.
+        let mut plain = EventReader::open(&f, 100).await;
+        plain.expect("status").await;
+        let gap = plain.expect("gap").await;
+        assert_eq!(gap.data, format!("{{\"from\":100,\"to\":{floor}}}"));
+    }
+
+    #[tokio::test]
+    async fn a_resume_above_the_floor_a_small_cache_or_another_attach_value_replays() {
+        let dir = tempdir::TempDir::new("storm-154-nosnap").unwrap();
+        let output = alt_screen_output(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        for query in [
+            "offset=4096&attach=snapshot".to_string(),
+            "offset=0&attach=screen".to_string(),
+            "offset=0".to_string(),
+        ] {
+            let mut stream = EventReader::open_query(&f, &query).await;
+            stream.expect("status").await;
+            let first = stream.expect("output").await;
+            let start = if query.starts_with("offset=4096") {
+                4096
+            } else {
+                0
+            };
+            let bytes = data_encoding::BASE64.decode(first.data.as_bytes()).unwrap();
+            assert_eq!(first.id, Some((start + bytes.len()).to_string()), "{query}");
+        }
+
+        let small = tempdir::TempDir::new("storm-154-small").unwrap();
+        let f = terminal_fixture(small.path(), &alt_screen_output(64 * 1024)).await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        stream.expect("status").await;
+        stream.expect("output").await;
+        stream.expect("live").await;
+    }
+
+    #[tokio::test]
+    async fn an_ended_sessions_snapshot_closes_after_the_rest_of_its_output() {
+        let dir = tempdir::TempDir::new("storm-154-snap-ended").unwrap();
+        let output = alt_screen_output(800 * 1024);
+        let f = terminal_fixture(dir.path(), &output).await;
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "completed", "exit_code": 0}),
+        );
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        stream.expect("status").await;
+        let snapshot = stream.expect("snapshot").await;
+        assert_eq!(snapshot.id, Some(output.len().to_string()));
+        let end = stream.next().await;
+        assert!(end.is_none(), "no live once ended: {end:?}");
     }
 }

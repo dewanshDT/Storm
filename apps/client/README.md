@@ -148,7 +148,8 @@ from `storm_icon.png`; the window loads `storm_icon.png` from the bundle.
   `lib/editor/`)
 - Wikilink following and autocomplete
 - Create, rename/move, delete — all of which work offline
-- Full-text search with highlighted snippets
+- A ⌘K command palette: titles, sessions, commands and full-text search
+  across every vault, with highlighted snippets
 - Debounced autosave with merge/conflict handling
 - Offline editing with an outbox that replays on reconnect
 - Live updates pushed from other devices over a WebSocket
@@ -275,7 +276,7 @@ make serve-web            # from the repo root
 - The token is stored in plain `shared_preferences`. Acceptable only while the
   server is LAN-only; `flutter_secure_storage` is a prerequisite for anything
   wider.
-- Search, tags and backlinks are per vault. Each vault has its own index on the
-  server, and a merged search is a separate feature.
+- Tags and backlinks are per vault. Each vault has its own index on the
+  server; full-text search merges them through `GET /v1/search`.
 - Only one vault is live at a time. Opening a second replaces the first rather
   than running both.

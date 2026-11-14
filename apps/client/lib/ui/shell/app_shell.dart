@@ -2,14 +2,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/agent_notices.dart';
 import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
+import '../../state/frecency.dart';
 import '../../state/nav_memory.dart';
-import '../../keyboard/storm_nav_shortcuts.dart';
+import '../../keyboard/storm_app_shortcuts.dart';
 import '../breakpoints.dart';
 import 'activity_rail.dart';
 import 'app_bar.dart';
+import 'create_here.dart' show pageArrivalProvider;
 import 'nav_history.dart';
 import 'sidebar_frame.dart';
 import 'window_buttons.dart';
@@ -126,10 +129,14 @@ class _AppShellState extends ConsumerState<AppShell> {
 
   void _remember() {
     final location = widget.location;
+    ref.read(pageArrivalProvider).visit(Uri.parse(location));
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       ref.read(navMemoryProvider.notifier).visit(location);
       ref.read(navHistoryProvider.notifier).visit(location);
+      if (frecencyIdOf(location) case final id?) {
+        ref.read(frecencyProvider.notifier).opened(id);
+      }
     });
   }
 
@@ -179,13 +186,12 @@ class _AppShellState extends ConsumerState<AppShell> {
       body = child;
     }
     // Outermost on both sides of the breakpoint, so crossing it keeps the
-    // watch (decision 149c).
+    // watches (decisions 149c, 154).
     return DeleteRequestWatcher(
       location: widget.location,
-      child: StormNavShortcuts(
-        onBack: () => goBack(context, ref),
-        onForward: () => goForward(context, ref),
-        child: body,
+      child: AgentNoticeWatcher(
+        location: widget.location,
+        child: StormAppShortcuts(child: body),
       ),
     );
   }

@@ -27,6 +27,7 @@ void main() {
     String hostId = 'hst_1',
     String workspace = 'storm',
     (String, int)? crew,
+    Map<String, dynamic>? program,
   }) => AgentSession.fromJson({
     'id': id,
     'host_id': hostId,
@@ -53,6 +54,7 @@ void main() {
     'work_to_take': workToTake,
     'unapplied_commits': commits,
     if (crew != null) 'crew': {'id': crew.$1, 'order': crew.$2},
+    'program_status': program,
   });
 
   TierOf tiers([Map<String, SidebarTier>? held]) => tierLookup(now, held);
@@ -446,6 +448,48 @@ void main() {
       expect(line(s('a', status: 'completed', workToTake: false)), isNull);
     });
 
+    test('decision 155: a question, a sign-in and an error in words', () {
+      final since = ago(const Duration(minutes: 3));
+      expect(
+        line(
+          s(
+            'a',
+            attention: 'sign_in',
+            reason: {'kind': 'sign_in', 'since': since},
+          ),
+        )!.text,
+        'sign in · 3m',
+      );
+      expect(
+        line(
+          s(
+            'a',
+            attention: 'question',
+            reason: {'kind': 'question', 'since': since},
+          ),
+        )!.text,
+        'question · 3m',
+      );
+      final error = line(
+        s('a', activity: 'idle', program: {'state': 'error', 'since': since}),
+      )!;
+      expect(error, const SubLine('hit an error · 3m', SubTone.quiet));
+      expect(
+        line(
+          s('a', activity: 'idle', program: {'state': 'done', 'since': since}),
+        ),
+        isNull,
+        reason: 'a finished turn keeps the plain line',
+      );
+      expect(
+        tierOf(
+          s('a', activity: 'idle', program: {'state': 'error', 'since': since}),
+          now,
+        ),
+        SidebarTier.idle,
+      );
+    });
+
     test('otherwise none: the row says workspace · age', () {
       expect(line(s('a')), isNull);
       expect(line(s('a', activity: 'working')), isNull);
@@ -494,8 +538,11 @@ void main() {
       );
     });
 
-    test('needs you: a prompt, a question or a delete approval only', () {
+    test('needs you: a prompt, a question, a sign-in or a delete approval '
+        'only', () {
       expect(needsYou(s('a', attention: 'permission_prompt')), isTrue);
+      expect(needsYou(s('a', attention: 'question')), isTrue);
+      expect(needsYou(s('a', attention: 'sign_in')), isTrue);
       expect(needsYou(s('a', attention: 'blocked')), isFalse);
       expect(needsYou(s('a', attention: 'usage_limit')), isFalse);
       expect(

@@ -82,6 +82,8 @@ tokio = { version = "1.53.1", features = ["full"] }
 # Code draws by cursor position, so its bytes read as lines are its spinner.
 # Pure Rust, on the vte the runtime already uses.
 vt100 = "0.18"
+# The snapshot's floor-mode tracker (decision 154): the vte vt100 parses with.
+vte = "0.15"
 # `ReceiverStream` only — the adapter that turns the SSE feed's channel into
 # the `Stream` `Body::from_stream` wants. Already in the tree via tokio-util.
 tokio-stream = "0.1.19"

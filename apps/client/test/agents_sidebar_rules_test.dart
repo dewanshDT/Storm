@@ -764,6 +764,36 @@ void main() {
       expect(badge, findsNothing);
       await disposeShell(t, c);
     });
+
+    testWidgets('decision 155: a question and a sign-in count too, each '
+        'outlined and saying why', (t) async {
+      final agents = FakeAgentServer(
+        hosts: [agentHost()],
+        sessions: [
+          session('ags_q', attention: 'question'),
+          session('ags_s', attention: 'sign_in'),
+          session('ags_p', attention: 'permission_prompt'),
+          session('ags_i', activity: 'idle'),
+        ],
+      );
+      final c = await open(t, agents);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('rail-needs-count')),
+          matching: find.text('3'),
+        ),
+        findsOneWidget,
+      );
+      expect(sub(t, 'ags_q'), 'question');
+      expect(sub(t, 'ags_s'), 'sign in');
+      expect(sub(t, 'ags_p'), 'permission prompt');
+      expect(top(t, 'ags_i'), greaterThan(top(t, 'ags_s')));
+      for (final id in ['ags_q', 'ags_s']) {
+        final side = (rowMaterial(t, id).shape as RoundedRectangleBorder).side;
+        expect(side.color, tokens(t).danger, reason: id);
+      }
+      await disposeShell(t, c);
+    });
   });
 
   group('⇧⌘N (153f)', () {

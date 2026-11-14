@@ -7,9 +7,9 @@ import '../../agent/agents_hosts_screen.dart';
 import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
 import '../../agent/claude_login_screen.dart';
 import '../../agent/integrations_screen.dart';
-import '../../keyboard/storm_activators.dart' show stormHasKeyboard;
 import '../../router.dart';
-import '../../state/app_state.dart' show serverConfigProvider;
+import '../../state/app_state.dart'
+    show serverConfigProvider, sidebarCollapsedProvider;
 import '../../state/health.dart' show integrationsAttentionProvider;
 import '../breakpoints.dart';
 import '../controls.dart';
@@ -126,36 +126,33 @@ class _AttentionDot extends ConsumerWidget {
 
 /// Settings navigation beside the page at desk width; on a phone the list
 /// and each page are separate screens.
-class SettingsShell extends StatelessWidget {
+class SettingsShell extends ConsumerWidget {
   const SettingsShell({super.key, required this.page, required this.child});
 
   final String? page;
   final Widget child;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     if (!context.isExpanded) return child;
     final selected = page ?? 'device';
-    // Focus so the app bar's ⌘[ / ⌘] work before anything is clicked.
-    return Focus(
-      autofocus: stormHasKeyboard,
-      skipTraversal: true,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
+    final collapsed = ref.watch(sidebarCollapsedProvider);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!collapsed)
           SidebarFrame(
             body: SettingsNav(
               selected: selected,
               onOpen: (id) => context.go(Routes.settingsPage(id)),
             ),
           ),
-          Expanded(
-            child: PaneSemantics(
-              child: page == null ? settingsPageFor(selected) : child,
-            ),
+        Expanded(
+          child: PaneSemantics(
+            child: page == null ? settingsPageFor(selected) : child,
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

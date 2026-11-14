@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'agent_models.dart';
 import 'agent_state.dart';
 
 /// The output end (153c) each session had when this device last showed it,
@@ -73,8 +74,16 @@ final seenOutputProvider = AsyncNotifierProvider<SeenOutput, Map<String, int>>(
   SeenOutput.new,
 );
 
-/// Sessions with output past what this device last showed. A session with
-/// no output end (an older server, or nothing yet) is never unread.
+/// Whether [s] has output past what [seen] says this device last showed.
+/// Nothing is unread before the device has baselined, and a session with no
+/// output end (an older server, or nothing yet) never is.
+bool outputUnread(Map<String, int>? seen, AgentSession s) {
+  if (seen == null || !seen.containsKey(SeenOutput.marker)) return false;
+  final end = s.outputEnd;
+  return end != null && end > (seen[s.id] ?? 0);
+}
+
+/// Sessions with output past what this device last showed ([outputUnread]).
 final unreadSessionsProvider = Provider<Set<String>>((ref) {
   final seen = ref.watch(seenOutputProvider).value;
   final o = ref.watch(agentOverviewProvider).value;
@@ -87,6 +96,6 @@ final unreadSessionsProvider = Provider<Set<String>>((ref) {
   }
   return {
     for (final s in o.sessions)
-      if (s.outputEnd case final end? when end > (seen[s.id] ?? 0)) s.id,
+      if (outputUnread(seen, s)) s.id,
   };
 });

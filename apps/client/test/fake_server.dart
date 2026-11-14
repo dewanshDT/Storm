@@ -16,6 +16,7 @@ class ServerNote {
     required this.path,
     required this.content,
     required this.version,
+    this.title,
   });
 
   final String id;
@@ -23,18 +24,22 @@ class ServerNote {
   final String content;
   final int version;
 
+  /// The indexed title; the id when unset, as these fakes always had.
+  final String? title;
+
   ServerNote copyWith({String? content, int? version, String? path}) =>
       ServerNote(
         id: id,
         path: path ?? this.path,
         content: content ?? this.content,
         version: version ?? this.version,
+        title: title,
       );
 
   Map<String, dynamic> get meta => {
     'id': id,
     'path': path,
-    'title': id,
+    'title': title ?? id,
     'version': version,
     'content_hash': 'h',
     'created': '2026-08-05T10:00:00Z',
@@ -91,6 +96,9 @@ class FakeServer {
     'version': version,
     'at': at ?? DateTime.now().toUtc().toIso8601String(),
   };
+
+  /// Each vault's tags and their counts, as `…/tags` lists them.
+  final Map<String, Map<String, int>> tags = {};
 
   /// Server-recorded opens, per vault: note id -> ISO timestamp.
   final Map<String, Map<String, String>> opened = {};
@@ -194,6 +202,51 @@ class FakeServer {
   /// Marks a note as opened, feeding `/v1/recents`.
   void markOpened(String vaultId, String noteId, String at) =>
       (opened[vaultId] ??= {})[noteId] = at;
+
+  /// Vaults `/v1/search` reports in `skipped` instead of searching.
+  final Set<String> searchSkipped = {};
+
+  /// Answers `/v1/search` with 404, as a server older than decision 156 does.
+  bool noCrossSearch = false;
+
+  /// Answers `/v1/search` with this status instead of searching.
+  int? crossSearchStatus;
+
+  /// Awaited before `/v1/search` answers [q], so a test can hold one
+  /// request while another is answered.
+  Future<void> Function(String q)? crossSearchHold;
+
+  /// The queries `/v1/search` was asked, in order.
+  final List<String> crossSearches = [];
+
+  /// The vaults `/v1/vaults/{v}/search` was asked about, in order.
+  final List<String> vaultSearches = [];
+
+  /// A case-insensitive substring match over title and content, standing in
+  /// for FTS5. [q] is already lowercased.
+  List<Map<String, dynamic>> _searchVault(String vaultId, String q) => [
+    for (final note
+        in (byVault[vaultId] ?? const <String, ServerNote>{}).values)
+      if (!note.path.startsWith('_storm/') &&
+          ((note.meta['title'] as String).toLowerCase().contains(q) ||
+              note.content.toLowerCase().contains(q)))
+        {
+          'id': note.id,
+          'path': note.path,
+          'title': note.meta['title'],
+          'snippet': _marked(note.content, q),
+        },
+  ];
+
+  /// FTS5's `<<match>>` markers around the first match, as the server's
+  /// snippet draws them.
+  static String _marked(String content, String q) {
+    final at = content.toLowerCase().indexOf(q);
+    if (at < 0) return content;
+    final end = at + q.length;
+    return '${content.substring(0, at)}<<${content.substring(at, end)}>>'
+        '${content.substring(end)}';
+  }
 
   /// Folders derived from note paths, union the explicitly created ones —
   /// what the real `tree` handler returns.
@@ -426,6 +479,59 @@ class FakeServer {
       return http.Response(jsonEncode({'recents': out}), 200, headers: j(''));
     }
 
+    if (path == '/v1/search') {
+      if (noCrossSearch) {
+        return http.Response('{"error":"not found"}', 404, headers: j(''));
+      }
+      final asked = request.url.queryParameters['q'] ?? '';
+      crossSearches.add(asked);
+      await crossSearchHold?.call(asked);
+      if (crossSearchStatus case final status?) {
+        return http.Response('{"error":"failed"}', status, headers: j(''));
+      }
+      final q = asked.trim().toLowerCase();
+      final hits = <Map<String, dynamic>>[];
+      final skipped = <Map<String, dynamic>>[];
+      if (q.isNotEmpty) {
+        for (final v in vaults) {
+          if (v.missing) continue;
+          if (searchSkipped.contains(v.id)) {
+            skipped.add({
+              'vault_id': v.id,
+              'vault_name': v.name,
+              'reason': 'busy',
+            });
+            continue;
+          }
+          for (final hit in _searchVault(v.id, q)) {
+            final title = (hit['title'] as String).toLowerCase();
+            hits.add({
+              'vault_id': v.id,
+              'vault_name': v.name,
+              ...hit,
+              'tier': title == q
+                  ? 0
+                  : title.startsWith(q)
+                  ? 1
+                  : title.contains(q)
+                  ? 2
+                  : 3,
+            });
+          }
+        }
+        hits.sort((a, b) => (a['tier'] as int).compareTo(b['tier'] as int));
+      }
+      final limit = int.tryParse(request.url.queryParameters['limit'] ?? '');
+      return http.Response(
+        jsonEncode({
+          'hits': hits.take((limit ?? 50).clamp(1, 200)).toList(),
+          'skipped': skipped,
+        }),
+        200,
+        headers: j(''),
+      );
+    }
+
     // ---- vault-scoped routes -------------------------------------------
     //
     // The prefix is stripped once here so the note handlers below stay the
@@ -459,6 +565,19 @@ class FakeServer {
       }
     }
     final vaultNotes = byVault[vaultId]!;
+
+    if (path == '/v1/tags' && request.method == 'GET') {
+      return http.Response(
+        jsonEncode({
+          'tags': [
+            for (final e in (tags[vaultId] ?? const <String, int>{}).entries)
+              {'tag': e.key, 'count': e.value},
+          ],
+        }),
+        200,
+        headers: j(''),
+      );
+    }
 
     if (path == '/v1/folders' && request.method == 'POST') {
       final body = jsonDecode(request.body) as Map<String, dynamic>;
@@ -537,6 +656,16 @@ class FakeServer {
               .toList(),
           'seq': seq,
         }),
+        200,
+        headers: j(''),
+      );
+    }
+
+    if (path == '/v1/search') {
+      vaultSearches.add(vaultId);
+      final q = (request.url.queryParameters['q'] ?? '').trim().toLowerCase();
+      return http.Response(
+        jsonEncode({'hits': q.isEmpty ? const [] : _searchVault(vaultId, q)}),
         200,
         headers: j(''),
       );

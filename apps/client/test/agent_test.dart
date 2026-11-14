@@ -20,6 +20,7 @@ import 'package:storm/agent/hosts_screen.dart';
 import 'package:storm/agent/session_controller.dart';
 import 'package:storm/agent/terminal_events.dart';
 import 'package:storm/agent/terminal_surface.dart';
+import 'package:storm/api/models.dart';
 import 'package:storm/ui/theme.dart';
 
 /// Agent Runtime V1, client side (decision 77d).
@@ -67,6 +68,66 @@ void main() {
       );
       final gap = e.single as GapEvent;
       expect((gap.from, gap.to), (0, 900));
+    });
+
+    String describe(TerminalEvent e) => switch (e) {
+      StatusEvent(:final session) => 'status ${session.status}',
+      OutputEvent(:final end, :final bytes) => 'output $end ${bytes.length}',
+      LiveEvent() => 'live',
+      GapEvent(:final from, :final to) => 'gap $from $to',
+      SnapshotEvent(:final offset) => 'snapshot $offset',
+    };
+
+    test('a CRLF split between chunks is one line end', () {
+      final p = SseParser();
+      final events = [
+        ...p.feed('event: gap\r'),
+        ...p.feed('\ndata: {"from":0,"to":900}\r\n\r'),
+        ...p.feed('\n'),
+      ];
+      expect(events.map(describe), ['gap 0 900']);
+    });
+
+    test('every split of the stream parses as the whole does', () {
+      final big = base64.encode(List.filled(300 * 1024, 7));
+      final all = [
+        ': keepalive\r\n\r\n',
+        'event: status\r\ndata: ${jsonEncode(session())}\r\n\r\n',
+        'event: output\nid: 5\ndata: ${base64.encode(utf8.encode('hello'))}\n\n',
+        '\n',
+        'event: gap\r\ndata: {"from":5,"to":900}\n\r\n',
+        'event: output\nid: ${900 + 300 * 1024}\ndata: $big\n\n',
+        'event: live\ndata:\r\n\r\n',
+        'event: unknown\ndata: x\n\n',
+        'event: output\nid: 9',
+      ].join();
+      final whole = SseParser().feed(all).map(describe).toList();
+      expect(whole, [
+        'status running',
+        'output 5 5',
+        'gap 5 900',
+        'output ${900 + 300 * 1024} ${300 * 1024}',
+        'live',
+      ]);
+      for (final size in [1, 2, 3, 7, 1024, 64 * 1024]) {
+        final p = SseParser();
+        final events = <TerminalEvent>[];
+        for (var i = 0; i < all.length; i += size) {
+          events.addAll(
+            p.feed(all.substring(i, (i + size).clamp(0, all.length))),
+          );
+        }
+        expect(events.map(describe), whole, reason: 'chunks of $size');
+      }
+      final head = all.substring(0, all.indexOf(big));
+      for (var i = 0; i <= head.length; i++) {
+        final p = SseParser();
+        final events = [
+          ...p.feed(all.substring(0, i)),
+          ...p.feed(all.substring(i)),
+        ];
+        expect(events.map(describe), whole, reason: 'split at $i');
+      }
     });
   });
 
@@ -504,7 +565,7 @@ void main() {
         final c = SessionController(
           api: api(MockClient((_) async => http.Response('', 204))),
           sessionId: 'ags_1',
-          open: (offset) {
+          open: (offset, _) {
             opened.add(offset);
             stream = StreamController<TerminalEvent>();
             return stream.stream;
@@ -524,12 +585,71 @@ void main() {
       },
     );
 
+    test(
+      'output, gap and live never rebuild the screen; a status does',
+      () async {
+        final stream = StreamController<TerminalEvent>();
+        final c = SessionController(
+          api: api(MockClient((_) async => http.Response('', 204))),
+          sessionId: 'ags_1',
+          open: (_, _) => stream.stream,
+        )..start();
+        var calls = 0;
+        c.addListener(() => calls++);
+        stream.add(StatusEvent(AgentSession.fromJson(session())));
+        await pumpEventQueue();
+        expect(calls, 1);
+
+        calls = 0;
+        for (var i = 1; i <= 100; i++) {
+          stream.add(OutputEvent(i, Uint8List.fromList([0x61])));
+        }
+        stream.add(GapEvent(100, 200));
+        stream.add(LiveEvent());
+        await pumpEventQueue();
+        expect(calls, lessThanOrEqualTo(1));
+        expect(
+          c.terminal.textForTest.replaceAll(RegExp(r'\s'), ''),
+          contains('a' * 100),
+        );
+
+        calls = 0;
+        stream.add(
+          StatusEvent(AgentSession.fromJson(session(status: 'completed'))),
+        );
+        await pumpEventQueue();
+        expect(calls, 1);
+        expect(c.session?.ended, isTrue);
+        c.dispose();
+      },
+    );
+
+    test('a session the server no longer has is opened once', () async {
+      var opens = 0;
+      final c = SessionController(
+        api: api(MockClient((_) async => http.Response('', 204))),
+        sessionId: 'ags_1',
+        open: (_, _) {
+          opens++;
+          return Stream.error(StormApiException(404, 'not found'));
+        },
+      )..start();
+      var calls = 0;
+      c.addListener(() => calls++);
+      await Future<void>.delayed(const Duration(milliseconds: 2500));
+      expect(opens, 1, reason: 'no retry after the backoff');
+      expect(c.gone, isTrue);
+      expect((c.connected, c.streamError), (false, null));
+      expect(calls, 1);
+      c.dispose();
+    });
+
     test('a gap at the start clears and says so', () async {
       final stream = StreamController<TerminalEvent>();
       final c = SessionController(
         api: api(MockClient((_) async => http.Response('', 204))),
         sessionId: 'ags_1',
-        open: (_) => stream.stream,
+        open: (_, _) => stream.stream,
       )..start();
       stream.add(GapEvent(0, 4096));
       stream.add(OutputEvent(4100, Uint8List.fromList(utf8.encode('tail'))));
@@ -558,7 +678,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => stream.stream,
+          open: (_, _) => stream.stream,
           isForeground: () => foreground,
         )..start();
         stream.add(StatusEvent(AgentSession.fromJson(session())));
@@ -604,6 +724,23 @@ void main() {
         o.c.dispose();
       });
 
+      test('a hidden terminal never answers, even live and in front '
+          '(decision 154, Q3)', () async {
+        final o = open();
+        o.stream.add(LiveEvent());
+        await pumpEventQueue();
+        o.c.hide();
+        o.stream.add(OutputEvent(3, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, isEmpty);
+
+        o.c.show();
+        o.stream.add(OutputEvent(6, query));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        expect(o.sent, hasLength(1));
+        o.c.dispose();
+      });
+
       test('a keystroke is still sent at once', () async {
         final o = open();
         o.c.terminal.typeForTest('x');
@@ -638,7 +775,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => stream.stream,
+          open: (_, _) => stream.stream,
         )..start();
         return (c: c, stream: stream, resizes: resizes);
       }
@@ -693,7 +830,7 @@ void main() {
             }),
           ),
           sessionId: 'ags_1',
-          open: (_) => const Stream.empty(),
+          open: (_, _) => const Stream.empty(),
         )..start();
         c.terminal.typeForTest('l');
         c.terminal.typeForTest('s');

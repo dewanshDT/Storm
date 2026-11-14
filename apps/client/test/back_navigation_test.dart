@@ -90,11 +90,11 @@ void main() {
     await disposeShell(tester, c);
   });
 
-  testWidgets('search and tags go back to the vault root', (tester) async {
+  testWidgets('tags go back to the vault root', (tester) async {
     final c = shellContainer();
     await pumpShell(tester, c);
 
-    for (final location in [Routes.search(v), Routes.tags(v)]) {
+    for (final location in [Routes.tags(v)]) {
       go(c, location);
       await tester.pumpAndSettle();
       expect(await systemBack(tester), isTrue);

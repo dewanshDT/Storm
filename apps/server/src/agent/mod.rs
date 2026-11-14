@@ -20,6 +20,7 @@ pub mod acts;
 pub mod attention;
 pub mod cache;
 pub mod cascade;
+pub mod changes;
 pub mod credential;
 pub mod deletes;
 pub mod events;
@@ -29,9 +30,11 @@ pub mod jobs;
 pub mod model;
 pub mod park;
 pub mod permission;
+pub mod program;
 pub mod round;
 pub mod said;
 pub mod scope;
+pub mod snapshot;
 pub mod store;
 pub mod typed;
 pub mod wake;
@@ -666,6 +669,10 @@ pub struct StatusReport {
     /// AM42's terminal title reports it) or `provider_hook`.
     #[serde(default)]
     pub activity_source: Option<String>,
+    /// The program's own OSC 7501 root record (decision 155, AM113):
+    /// `Some(None)` when none is live, `None` when the report does not say.
+    #[serde(default, deserialize_with = "program::lenient")]
+    pub program_status: Option<Option<program::ProgramReport>>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -934,6 +941,8 @@ struct SessionLive {
     /// When `attention` last changed to what it is (153a). Not kept across
     /// a server restart: the host's next report starts it again.
     attention_since: Option<String>,
+    /// The program's own root record (decision 155), as the host last said.
+    program: Option<program::ProgramStatus>,
     /// `working` / `idle` from a gated idle signal only (144b), and its
     /// source.
     health: Option<String>,
@@ -963,6 +972,7 @@ impl SessionLive {
             activity: None,
             attention: None,
             attention_since: None,
+            program: None,
             health: None,
             health_source: None,
             idle_since: None,
@@ -972,8 +982,9 @@ impl SessionLive {
         }
     }
 
-    fn bump(&self) {
+    fn bump(&self, changes: &changes::Changes) {
         self.version.send_modify(|v| *v += 1);
+        changes.touch();
     }
 }
 
@@ -1048,6 +1059,9 @@ pub struct AgentManager {
     pub(crate) wake_poke: tokio::sync::Notify,
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
+    changes: changes::Changes,
+    #[cfg(test)]
+    pub(crate) record_reads: std::sync::atomic::AtomicUsize,
 }
 
 /// How soon a person's refresh may ask the same host again (153-S4).
@@ -1178,6 +1192,9 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
+            changes: changes::Changes::new(),
+            #[cfg(test)]
+            record_reads: Default::default(),
         })
     }
 
@@ -1245,6 +1262,7 @@ impl AgentManager {
             }
         }
         tracing::info!(host = host_id, generation, "runtime host disconnected");
+        self.views_changed();
         // A start that went down this link and was never reported has
         // failed: the host may still read it from a stale connection, and
         // must not run it then.
@@ -1524,7 +1542,7 @@ impl AgentManager {
         live.sessions
             .entry(session_id.to_string())
             .or_insert_with(SessionLive::new)
-            .bump();
+            .bump(&self.changes);
     }
 
     /// Reconciles from a host's `hello` (freeze §13):
@@ -2155,7 +2173,7 @@ impl AgentManager {
                 .entry(session_id.to_string())
                 .or_insert_with(SessionLive::new);
             s.cache.insert(offset, bytes);
-            s.bump();
+            s.bump(&self.changes);
         }
         // Throttled: one activity write per second is plenty for a list view.
         let stamp = now();
@@ -2834,6 +2852,9 @@ impl AgentManager {
     }
 
     pub fn get(&self, id: &str) -> AgentResult<SessionRecord> {
+        #[cfg(test)]
+        self.record_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let r = self
             .store
             .lock()
@@ -3421,6 +3442,53 @@ impl AgentManager {
         };
         screen_lines(&bytes, size, lines)
     }
+
+    /// Decision 154 (AM110): the screen at the cache's end, for a stream
+    /// that asked with `attach=snapshot` at `requested`. `None` means replay
+    /// as before: a resume at or above the floor, an empty cache, or one
+    /// small enough to replay exactly. The copy is taken under the lock and
+    /// rendered off the async runtime.
+    pub async fn terminal_snapshot(
+        &self,
+        id: &str,
+        requested: u64,
+        size: (u16, u16),
+    ) -> Option<TerminalSnapshot> {
+        let (bytes, floor, seed) = {
+            let live = self.live.lock().unwrap();
+            let cache = &live.sessions.get(id)?.cache;
+            let floor = cache.floor();
+            if !cache.initialized()
+                || (requested != 0 && requested >= floor)
+                || cache.end() - floor <= snapshot::MIN_RETAINED
+            {
+                return None;
+            }
+            (cache.retained(), floor, cache.floor_modes().clone())
+        };
+        let offset = floor + bytes.len() as u64;
+        let rendered =
+            tokio::task::spawn_blocking(move || snapshot::render(&bytes, floor, &seed, size))
+                .await
+                .ok()?;
+        Some(TerminalSnapshot {
+            offset,
+            floor,
+            cols: size.0,
+            rows: size.1,
+            rendered,
+        })
+    }
+}
+
+/// What [`AgentManager::terminal_snapshot`] rendered, at `offset`.
+#[derive(Debug)]
+pub struct TerminalSnapshot {
+    pub offset: u64,
+    pub floor: u64,
+    pub cols: u16,
+    pub rows: u16,
+    pub rendered: snapshot::Rendered,
 }
 
 /// How much of the end of a session's output a peek reads (145g).
@@ -3777,6 +3845,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3912,6 +3981,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4539,6 +4609,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4560,6 +4631,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4586,6 +4658,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4683,6 +4756,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4951,6 +5025,7 @@ mod tests {
                         attention: None,
                         attention_source: None,
                         activity_source: None,
+                        program_status: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -4988,6 +5063,7 @@ mod tests {
             attention: None,
             attention_source: None,
             activity_source: None,
+            program_status: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -5318,6 +5394,7 @@ mod tests {
                     attention: None,
                     attention_source: None,
                     activity_source: None,
+                    program_status: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,

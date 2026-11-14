@@ -11,6 +11,7 @@ import '../../state/app_state.dart';
 import '../../state/nav_memory.dart';
 import '../../sync/sync_engine.dart';
 import '../accents.dart';
+import '../palette/palette.dart' show openPalette;
 import '../widgets.dart';
 import '../surfaces.dart';
 import '../theme.dart';
@@ -334,6 +335,23 @@ class SettingsBubble extends StatelessWidget {
         size: t.sp * 2.5,
         color: here ? t.accent : t.text2,
       ),
+    );
+  }
+}
+
+/// Beside the settings bubble in Agents and Settings, which have no pill:
+/// the phone's way into the palette there (156n).
+class SearchBubble extends ConsumerWidget {
+  const SearchBubble({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final t = context.tokens;
+    return StormBubble(
+      key: const Key('search-bubble'),
+      tooltip: 'Search',
+      onTap: () => openPalette(context, ref),
+      child: Icon(LucideIcons.search, size: t.sp * 2.5, color: t.text2),
     );
   }
 }

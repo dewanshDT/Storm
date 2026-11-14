@@ -833,6 +833,28 @@ impl Db {
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
+    /// As [`Db::search`], ordered by bm25 with a title match weighing ten times
+    /// a body match. The leading 0.0 is `note_id`'s weight: bm25 takes one
+    /// weight per column, UNINDEXED ones included.
+    pub fn search_ranked(&self, query: &str, limit: i64) -> Result<Vec<SearchHit>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT n.id, n.path, n.title,
+                    snippet(notes_fts, 2, '<<', '>>', ' … ', 16)
+             FROM notes_fts f JOIN notes n ON n.id = f.note_id
+             WHERE notes_fts MATCH ?1 AND n.{NOT_CONFIG}
+             ORDER BY bm25(notes_fts, 0.0, 10.0, 1.0) LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![query, limit], |row| {
+            Ok(SearchHit {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                title: row.get(2)?,
+                snippet: row.get(3)?,
+            })
+        })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
+
     /// Notes linking *to* `title` — the "linked mentions" panel.
     pub fn backlinks(&self, title: &str) -> Result<Vec<NoteRow>> {
         let mut stmt = self.conn.prepare(

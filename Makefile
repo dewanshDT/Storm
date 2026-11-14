@@ -39,6 +39,10 @@ RELAY_IMPL ?= rust
 # Its §4.1 mode: empty is each relay's own (TOFU for storm-relay, allowlist for
 # the Worker); `open` runs every relayed suite key-addressed (decision 116n).
 RELAY_MODE ?=
+# Its per-IP HELLO limit. Every relayed suite dials it from 127.0.0.1, and the
+# client suite's files open a dozen trunks within seconds of each other, so
+# the default (10 a minute) refused whichever HELLO came last.
+RELAY_HELLO_RATE_LIMIT ?= 1000
 # Four ports from here for the throttled-link relay test, which starts its own
 # server and storm-relay behind a slow link (decision 116b).
 THROTTLE_PORT ?= 18890
@@ -319,10 +323,12 @@ test-live:
 			> "$$ROOT/.dev/live-relay-allowlist"; \
 		"$$ROOT/$(RELAY_CF)/scripts/dev-relay.sh" $(RELAY_PORT) $(or $(RELAY_MODE),allowlist) \
 			"$$ROOT/.dev/live-relay-allowlist" "$$ROOT/.dev/live-relay-cf" \
+			STORM_RELAY_HELLO_RATE_LIMIT=$(RELAY_HELLO_RATE_LIMIT) \
 			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
 	else \
 		"$$ROOT/$(RELAY)/target/debug/storm-relay" --bind 127.0.0.1:$(RELAY_PORT) \
 			$(if $(RELAY_MODE),--mode $(RELAY_MODE)) \
+			--hello-rate-limit $(RELAY_HELLO_RATE_LIMIT) \
 			> "$$ROOT/.dev/live-relay.log" 2>&1 & \
 	fi; \
 	RELAY_PID=$$!; \

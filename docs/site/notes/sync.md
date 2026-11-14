@@ -13,7 +13,8 @@ changes queue on the device and are sent, in order, when the server is back.
 The status bar shows **Offline**, or **N unsent**, whenever the server does
 not have everything — check it before closing an app you edited offline.
 
-Search needs the server; notes this device has cached stay readable.
+Searching note text needs the server; offline, the palette still finds
+cached notes by title, and notes this device has cached stay readable.
 
 ## When two devices edit the same note
 

@@ -24,7 +24,7 @@ import 'vault_header.dart';
 /// The sidebar's floor; its width is `context.sidebarWidth`.
 const kSidebarWidth = 260.0;
 
-/// The desktop Notes sidebar (handoff §2.2): vault header, search, the
+/// The desktop Notes sidebar (handoff §2.2): vault header, the
 /// cross-vault RECENT rows, the FOLDERS tree, and the create footer.
 class VaultSidebar extends ConsumerWidget {
   const VaultSidebar({super.key, this.unseen});
@@ -40,12 +40,6 @@ class VaultSidebar extends ConsumerWidget {
     final known = ref.watch(vaultFoldersProvider);
     final vaultId = ref.watch(activeVaultProvider);
     final unseenIds = ref.watch(unseenNotesProvider(vaultId));
-    final vaultName =
-        (ref.watch(vaultsProvider).value ?? const <VaultInfo>[])
-            .where((v) => v.id == vaultId)
-            .firstOrNull
-            ?.name ??
-        '';
 
     return SidebarFrame(
       body: Column(
@@ -58,14 +52,7 @@ class VaultSidebar extends ConsumerWidget {
               t.sp * 1.5,
               t.sp,
             ),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              spacing: t.sp,
-              children: [
-                const VaultHeader(),
-                _SearchField(vaultId: vaultId, vaultName: vaultName),
-              ],
-            ),
+            child: const VaultHeader(),
           ),
           Expanded(
             child: ListView(
@@ -176,58 +163,6 @@ class _Recents extends ConsumerWidget {
 String? openNoteIdOf(Uri uri) {
   final s = uri.pathSegments;
   return s.length > 3 && s[2] == 'note' ? s[3] : null;
-}
-
-/// Opens the search screen; not a live field, so the query lives in one place.
-class _SearchField extends StatelessWidget {
-  const _SearchField({required this.vaultId, required this.vaultName});
-
-  final String vaultId;
-  final String vaultName;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final style = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.codeSize,
-      color: t.text3,
-    );
-    return InkWell(
-      key: const Key('sidebar-search'),
-      borderRadius: BorderRadius.circular(t.rControl),
-      onTap: vaultId.isEmpty ? null : () => context.go(Routes.search(vaultId)),
-      child: Container(
-        padding: EdgeInsets.symmetric(horizontal: t.sp * 1.25, vertical: t.sp),
-        decoration: BoxDecoration(
-          color: t.surface2,
-          borderRadius: BorderRadius.circular(t.rControl),
-          border: Border.all(color: t.border, width: t.bw),
-        ),
-        child: Row(
-          children: [
-            Icon(LucideIcons.search, size: t.uiSize, color: t.text3),
-            SizedBox(width: t.sp),
-            Expanded(
-              child: Text(
-                vaultName.isEmpty ? 'Search' : 'Search $vaultName',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: style,
-              ),
-            ),
-            Text(
-              stormChordLabel('K'),
-              style: style.copyWith(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }
 
 /// New note, plus the folder and tags squares beside it.

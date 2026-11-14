@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'package:storm/router.dart';
+import 'package:storm/state/app_state.dart';
 import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/browse_screen.dart';
 import 'package:storm/ui/note_header.dart';
@@ -53,16 +54,17 @@ void main() {
       Finder inSidebar(Finder f) => find.descendant(of: sidebar, matching: f);
       expect(inSidebar(find.text('Primary')), findsOneWidget);
       expect(inSidebar(find.byKey(const Key('vault-sync-line'))), findsOne);
-      expect(inSidebar(find.text('Search Primary')), findsOneWidget);
+      expect(
+        inSidebar(find.byKey(const Key('sidebar-search'))),
+        findsNothing,
+        reason: 'the palette and the bar field took over (156o)',
+      );
+      expect(inSidebar(find.textContaining('Search')), findsNothing);
       for (final action in ['New note', 'New folder', 'Tags']) {
         expect(inSidebar(find.byTooltip(action)), findsOneWidget);
       }
       expect(inSidebar(find.byTooltip('Mentions')), findsNothing);
       expect(inSidebar(find.byTooltip('Settings')), findsNothing);
-
-      await tester.tap(find.byKey(const Key('sidebar-search')));
-      await tester.pumpAndSettle();
-      expect(locationOf(c), Routes.search(primary));
       await disposeShell(tester, c);
     });
 
@@ -101,7 +103,7 @@ void main() {
       await tester.tap(find.byKey(const Key('recent:w1')));
       await tester.pumpAndSettle();
       expect(locationOf(c), Routes.note('v-work', 'w1'));
-      expect(find.text('Search work'), findsOneWidget);
+      expect(c.read(activeVaultProvider), 'v-work');
       await disposeShell(tester, c);
     });
 

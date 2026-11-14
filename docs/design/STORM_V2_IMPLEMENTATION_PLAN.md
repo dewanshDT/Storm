@@ -584,8 +584,9 @@ MaterialApp.router
 - **Removed:** `agentAccessProvider`, `agentTabsProvider`,
   `activeAgentTabProvider`, `agentTitlesProvider`, dashboard providers.
 - **Session controllers** move from `_AgentsScreenState` to a
-  `sessionControllerProvider.family(id)` (autoDispose) so the route-built
-  detail view and the phone screen share one stream per session.
+  `sessionControllerProvider.family(id)`, kept alive in a bounded LRU
+  (decision 154), so the route-built detail view and the phone screen share
+  one stream per session.
 
 ### 6.2 Server
 

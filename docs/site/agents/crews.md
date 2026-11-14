@@ -96,8 +96,9 @@ that started it, it looks idle; nothing shows **Needs you**. Its terminal
 still shows the prompt, so open it from the crew and answer it there.
 
 Collapsing a crew, or the whole CREWS section, is remembered on each device
-separately. Everything else about a crew is kept on your server, so your
-other devices show a change within about 15 seconds.
+separately. Everything else about a crew is kept on your server: your other
+devices show a session joining, leaving or moving in a crew within a second
+or two, and a crew's new name, colour or place within about a minute.
 
 ## When a crew empties
 

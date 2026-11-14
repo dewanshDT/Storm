@@ -1,4 +1,5 @@
 import '../api/models.dart';
+import 'match.dart';
 import 'vault_config.dart';
 
 /// Resolves `[[target]]` to a note, the way a vault of files implies.
@@ -52,11 +53,10 @@ bool _caseless(String a, String b) => a.toLowerCase() == b.toLowerCase();
 
 /// Notes worth offering for a half-typed `[[query`.
 ///
-/// Ranked so the thing you meant is first: names that *start* with what you
-/// typed beat names that merely contain it, and a shorter name beats a longer
-/// one, because a query is a prefix of the short name more often than of the
-/// long one. Ties break alphabetically so the order never jitters between
-/// keystrokes.
+/// Ranked by the shared scorer ([rankMatches]): a name that *starts* with
+/// what you typed beats one that merely contains it, and a shorter name beats
+/// a longer one, because a query is a prefix of the short name more often
+/// than of the long one. A folder in the path matches too, below every name.
 ///
 /// An empty query lists recent notes rather than nothing — opening `[[` on a
 /// phone should show you somewhere to go, not an empty box.
@@ -65,38 +65,22 @@ List<NoteMeta> suggestWikilinks(
   String query, {
   int limit = 8,
 }) {
-  final want = query.trim().toLowerCase();
   // Never suggest Storm's own config note.
   final visible = notes.where((n) => !isVaultConfigPath(n.path)).toList();
-  if (want.isEmpty) {
+  if (query.trim().isEmpty) {
     final recent = [...visible]
       ..sort((a, b) => b.modified.compareTo(a.modified));
     return recent.take(limit).toList();
   }
-
-  final scored = <(int, String, NoteMeta)>[];
-  for (final note in visible) {
-    final name = wikilinkDisplayName(note);
-    final haystack = name.toLowerCase();
-    final inPath = note.path.toLowerCase();
-
-    final rank = haystack.startsWith(want)
-        ? 0
-        : haystack.contains(want)
-        ? 1
-        : inPath.contains(want)
-        ? 2
-        : -1;
-    if (rank < 0) continue;
-    scored.add((rank, name, note));
-  }
-
-  scored.sort((a, b) {
-    if (a.$1 != b.$1) return a.$1.compareTo(b.$1);
-    if (a.$2.length != b.$2.length) return a.$2.length.compareTo(b.$2.length);
-    return a.$2.toLowerCase().compareTo(b.$2.toLowerCase());
-  });
-  return [for (final s in scored.take(limit)) s.$3];
+  return rankMatches(
+    visible,
+    query,
+    (note) => [
+      MatchField(wikilinkDisplayName(note)),
+      MatchField(note.path, worst: MatchTier.substring),
+    ],
+    limit: limit,
+  );
 }
 
 /// What to call a note in the suggestion list.

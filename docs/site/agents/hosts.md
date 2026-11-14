@@ -157,6 +157,22 @@ applies to the next start. Only you can change them, signed in on a paired
 device: no MCP key, host credential or agent can. Every change is recorded
 on your server, with the old and new values.
 
+## Status from the agent itself
+
+A host reads an agent's own report of what it is doing (the OSC 7501
+Program Status protocol, which Claude Code 2.1.295 and later sends to a
+terminal that asks for it) and passes it to your server: working, waiting
+for you, finished its turn or hit an error. The host asks for it itself,
+once per session; every other reply to the agent's terminal still comes from
+your app. An agent that never asks, a Windows host (its console answers
+first), and a Claude Code session after you move its conversation to the
+background (← on an empty prompt) or resume one from another folder show
+what the terminal title says, as before.
+
+To turn it off on a host, add `program_status = false` to its
+`runtime.toml` and restart it. An older storm-runtime refuses the unknown
+key, so upgrade first.
+
 ## Revoking, removing and re-enrolling
 
 Click a host in **Settings › Agents & hosts**, then **Revoke…**, and confirm

@@ -690,6 +690,7 @@ class AgentSession {
     this.credential,
     this.title,
     this.activity,
+    this.programStatus,
     this.harnessSession,
     this.resumedFrom,
     this.mcpSkipped = const [],
@@ -739,8 +740,13 @@ class AgentSession {
   /// AM42); kept after it ends.
   final String? title;
 
-  /// `working` or `idle` while running, when the agent says.
+  /// `working` or `idle` while running, when the agent says; null is
+  /// unknown, never idle.
   final String? activity;
+
+  /// The program's own report of its state (decision 155), while it runs;
+  /// null for a session known only by its title, or from an older server.
+  final ProgramStatus? programStatus;
 
   /// What every surface calls the session. A child goes by the name its
   /// parent gave it (145b), never by its agent's terminal title.
@@ -952,6 +958,7 @@ class AgentSession {
     credential: credential == _keep ? this.credential : credential as String?,
     title: title ?? this.title,
     activity: activity == _keep ? this.activity : activity as String?,
+    programStatus: programStatus,
     harnessSession: harnessSession ?? this.harnessSession,
     resumedFrom: resumedFrom,
     mcpSkipped: mcpSkipped,
@@ -1008,6 +1015,7 @@ class AgentSession {
     credential: j['credential'] as String?,
     title: j['title'] as String?,
     activity: j['activity'] as String?,
+    programStatus: ProgramStatus.tryParse(j['program_status']),
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
     mcpSkipped: [
@@ -1042,6 +1050,32 @@ class AgentSession {
         : null,
     outputEnd: j['output_end'] is num ? (j['output_end'] as num).toInt() : null,
   );
+}
+
+/// A program's own OSC 7501 report of its state (decision 155, AM113):
+/// `idle`, `working`, `done`, `blocked` or `error`, with `kind` on `blocked`
+/// and when it began.
+class ProgramStatus {
+  const ProgramStatus({required this.state, this.kind, this.since});
+
+  final String state;
+  final String? kind;
+  final DateTime? since;
+
+  static const states = {'idle', 'working', 'done', 'blocked', 'error'};
+
+  static ProgramStatus? tryParse(Object? j) {
+    if (j is! Map<String, dynamic>) return null;
+    final state = j['state'];
+    if (state is! String || !states.contains(state)) return null;
+    return ProgramStatus(
+      state: state,
+      kind: j['kind'] is String ? j['kind'] as String : null,
+      since: j['since'] is String
+          ? DateTime.tryParse(j['since'] as String)
+          : null,
+    );
+  }
 }
 
 /// An agent's deletion waiting for the person (decision 149). The reason is

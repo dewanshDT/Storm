@@ -16,7 +16,7 @@ String stormChordLabel(String key) =>
 ///
 /// Desktop and desktop-class web only. On a phone the global Focus would grab
 /// primary focus to arm nothing, and could fight a field that autofocuses when
-/// its screen opens (the search field does).
+/// its screen opens (the palette's does).
 bool get stormHasKeyboard => switch (defaultTargetPlatform) {
   TargetPlatform.macOS ||
   TargetPlatform.linux ||

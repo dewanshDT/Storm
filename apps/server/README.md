@@ -109,6 +109,7 @@ since browsers can't set headers on a handshake.
 | `PUT /v1/config` | `{vault_root, orphan_ok?}` — see below |
 | `PUT /v1/config/mcp` | `{enabled, writable?}` — persisted, see MCP below |
 | `GET /v1/recents?limit=` | recently opened notes, across every vault |
+| `GET /v1/search?q=&limit=` | full-text search across every vault, last word as a prefix; `{hits, skipped}` (decision 156k) |
 | `WS /v1/stream` | change events for every vault, each tagged `vault_id` |
 
 Everything note-shaped is scoped to a vault:

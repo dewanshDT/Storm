@@ -72,7 +72,7 @@ void main() {
       );
       expect(parent(Routes.folder(v, 'Projects')), Routes.browse(v));
       expect(parent(Routes.browse(v)), isNull);
-      expect(parent(Routes.search(v)), Routes.browse(v));
+      expect(parent(Routes.tags(v)), Routes.browse(v));
     });
 
     test('Agents and Settings return to the last Notes location', () {

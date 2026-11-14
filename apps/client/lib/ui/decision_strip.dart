@@ -114,8 +114,9 @@ class _DecisionStripState extends State<DecisionStrip> {
   }
 
   /// Esc anywhere on this route, unless something above it or a focused
-  /// terminal owns the key. Run after the key has gone through the focus
-  /// tree, so nothing beneath sees it as its own.
+  /// terminal owns the key. A [HardwareKeyboard] handler runs before the
+  /// focus tree sees the key, so claiming it here keeps it from everything
+  /// beneath.
   bool _key(KeyEvent e) {
     final escape = widget.onEscape;
     if (escape == null ||

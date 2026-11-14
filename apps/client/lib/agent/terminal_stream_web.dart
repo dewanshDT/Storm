@@ -5,8 +5,17 @@ import 'package:web/web.dart' as web;
 
 import '../api/connection_client.dart';
 import 'agent_api.dart';
+import 'session_controller.dart';
 import 'terminal_events.dart';
 import 'terminal_stream_http.dart';
+
+/// How long a hidden session keeps its stream open (decision 154): none on
+/// web-direct, where each `EventSource` holds one of the browser's six
+/// HTTP/1.1 sockets to the origin, shared by every tab.
+Duration hiddenStreamGrace(AgentApi api) => switch (api.client) {
+  ConnectionClient(isRelayed: true) => SessionController.streamGrace,
+  _ => Duration.zero,
+};
 
 /// `EventSource` to the page's own server; over the relay, the streamed GET
 /// instead, since `EventSource` cannot ride the tunnel and the tunnel, unlike
@@ -15,19 +24,23 @@ Stream<TerminalEvent> openTerminalStream(
   AgentApi api,
   String sessionId,
   int offset,
+  bool snapshot,
 ) {
   if (api.client case ConnectionClient(isRelayed: true)) {
-    return openStreamedTerminal(api, sessionId, offset);
+    return openStreamedTerminal(api, sessionId, offset, snapshot);
   }
   late final StreamController<TerminalEvent> controller;
   web.EventSource? source;
 
   Future<void> open() async {
     final ticket = await api.streamTicket();
-    final url = Uri.parse(
-      '${api.baseUrl}/v1/agent/sessions/${Uri.encodeComponent(sessionId)}'
-      '/terminal/stream',
-    ).replace(queryParameters: {'offset': '$offset', 'ticket': ticket});
+    final url =
+        Uri.parse(
+          '${api.baseUrl}/v1/agent/sessions/${Uri.encodeComponent(sessionId)}'
+          '/terminal/stream',
+        ).replace(
+          queryParameters: {...streamQuery(offset, snapshot), 'ticket': ticket},
+        );
     final es = web.EventSource(url.toString());
     source = es;
 
@@ -43,9 +56,7 @@ Stream<TerminalEvent> openTerminalStream(
       );
     }
 
-    listen('status');
-    listen('output');
-    listen('gap');
+    SseParser.eventNames.forEach(listen);
     // The browser would reconnect by itself, with the spent ticket and
     // `Last-Event-ID`. Neither is how this stream resumes, so any error or
     // close ends it here, and the session controller reconnects by offset

@@ -6,6 +6,12 @@
 //!   for a child, whose parent's event says `permission_prompt` too (151
 //!   N5): the person answers it in the child's terminal;
 //! - `usage_limit` (144b): the agent's account is out of usage, the same way;
+//! - `permission_prompt`, `question` and `sign_in` from the program's own
+//!   OSC 7501 `blocked` (decision 155, AM114), for every session whose
+//!   program reports one, by capability and not by provider. While a record
+//!   is live it decides: any other state clears what it set, and a hook's
+//!   permission prompt is not taken (Q10), so a prompt refused with Esc
+//!   clears;
 //! - `blocked`: the session reported a result whose outcome is `blocked`
 //!   (134h) and is still live.
 //!
@@ -19,7 +25,8 @@
 
 use serde::Serialize;
 
-use super::events::{self, Extra, LiveSignals, OUTPUT_PATTERN, PROVIDER_HOOK};
+use super::events::{self, Extra, LiveSignals, OUTPUT_PATTERN, PROGRAM_STATUS, PROVIDER_HOOK};
+use super::program::{Program, ProgramStatus};
 use super::store::SessionRecord;
 use super::{AgentManager, AgentResult, StatusReport};
 
@@ -65,6 +72,11 @@ pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
 pub const PERMISSION_PROMPT: &str = "permission_prompt";
 pub const USAGE_LIMIT: &str = "usage_limit";
 pub const BLOCKED: &str = "blocked";
+/// Decision 155 (AM114): the program asks the person something, or is
+/// blocked on a dialog it did not name.
+pub const QUESTION: &str = "question";
+/// Decision 155 (AM114): the program needs the person to sign in again.
+pub const SIGN_IN: &str = "sign_in";
 /// 149c: a top-level session's deletion waits for the person's Approve.
 /// Only on its view; never a child's, so never in an event.
 pub const DELETE_APPROVAL: &str = "delete_approval";
@@ -115,6 +127,7 @@ fn source_of(reported: Option<&str>, default: &'static str) -> Option<&'static s
         None => Some(default),
         Some(PROVIDER_HOOK) => Some(PROVIDER_HOOK),
         Some(OUTPUT_PATTERN) => Some(OUTPUT_PATTERN),
+        Some(PROGRAM_STATUS) => Some(PROGRAM_STATUS),
         Some(_) => None,
     }
 }
@@ -137,13 +150,23 @@ impl AgentManager {
     pub(super) fn take_signals(&self, r: &SessionRecord, report: &StatusReport) -> Taken {
         // A parked child (145e) has no process to say anything of.
         let live_session = !r.is_ended() && r.status != "parked";
+        let program = match &report.program_status {
+            _ if !live_session => None,
+            Some(said) => said.as_ref().and_then(Program::of),
+            None => self.program_status_of(&r.id).map(|p| Program {
+                state: p.state,
+                kind: p.kind,
+            }),
+        };
+        // The host's activity as it is: it already took the record's, and
+        // its live children's (155-R1), and a null is its unknown.
         let display = report
             .activity
             .as_deref()
             .filter(|a| live_session && matches!(*a, "working" | "idle"))
             .map(str::to_owned);
         let attention_source = source_of(report.attention_source.as_deref(), PROVIDER_HOOK);
-        let attention = report
+        let hooked = report
             .attention
             .as_deref()
             .filter(|a| {
@@ -152,11 +175,19 @@ impl AgentManager {
                     && self.gated(&r.provider, a, attention_source)
             })
             .map(str::to_owned);
+        let (attention, attention_source) = match program {
+            Some(p) => match p.attention() {
+                Some(a) => (Some(a.to_owned()), Some(PROGRAM_STATUS)),
+                None => (hooked.filter(|a| a == USAGE_LIMIT), attention_source),
+            },
+            None => (hooked, attention_source),
+        };
         let activity_source = source_of(report.activity_source.as_deref(), OUTPUT_PATTERN);
         let health = display
             .clone()
             .filter(|_| self.gated(&r.provider, IDLE, activity_source));
         let at = self.clock();
+        let stamp = super::now();
         let mut live = self.live.lock().unwrap();
         let s = live
             .sessions
@@ -166,10 +197,10 @@ impl AgentManager {
         if let Some(a) = attention.as_deref()
             && s.attention.as_deref() != Some(a)
         {
-            let kind = if a == PERMISSION_PROMPT {
-                events::NEEDS_ATTENTION
-            } else {
+            let kind = if a == USAGE_LIMIT {
                 events::USAGE_LIMIT_EVENT
+            } else {
+                events::NEEDS_ATTENTION
             };
             extra.push(Extra {
                 kind,
@@ -188,8 +219,16 @@ impl AgentManager {
             None => s.idle_since = None,
         }
         s.activity = display;
+        s.program = program.map(|p| match s.program.take() {
+            Some(was) if (was.state, was.kind) == (p.state, p.kind) => was,
+            _ => ProgramStatus {
+                state: p.state,
+                kind: p.kind,
+                since: stamp.clone(),
+            },
+        });
         if s.attention != attention {
-            s.attention_since = attention.as_ref().map(|_| super::now());
+            s.attention_since = attention.as_ref().map(|_| stamp.clone());
         }
         s.attention = attention.clone();
         s.health = health.clone();
@@ -201,6 +240,24 @@ impl AgentManager {
             },
             extra,
         }
+    }
+
+    /// The program's own status (decision 155), shown only while the
+    /// session runs, as its activity is.
+    pub fn program_status(&self, r: &SessionRecord) -> Option<ProgramStatus> {
+        if r.status != "running" {
+            return None;
+        }
+        self.program_status_of(&r.id)
+    }
+
+    fn program_status_of(&self, id: &str) -> Option<ProgramStatus> {
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(id)
+            .and_then(|s| s.program.clone())
     }
 
     /// The session's `needs_attention`, if any. An ended session needs none.

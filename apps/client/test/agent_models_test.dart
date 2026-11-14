@@ -194,4 +194,37 @@ void main() {
     expect(partial.spawn.attention?.kind, 'usage_limit');
     expect(partial.spawn.attention?.since, isNull);
   });
+
+  test('155: program_status parses, survives a copy, and is null from an '
+      'older server or a title-only session', () {
+    AgentSession of(Object? program) => AgentSession.fromJson({
+      ...agentSession('ags_1', activity: 'idle'),
+      'program_status': program,
+    });
+    final asked = of({
+      'state': 'blocked',
+      'kind': 'auth',
+      'since': '2026-11-14T12:00:00Z',
+    }).programStatus!;
+    expect(asked.state, 'blocked');
+    expect(asked.kind, 'auth');
+    expect(asked.since, DateTime.utc(2026, 11, 14, 12));
+    final s = of({'state': 'done', 'since': '2026-11-14T12:00:00Z'});
+    expect(s.withCrew(null).programStatus?.state, 'done');
+    expect(s.withLive(null).programStatus?.state, 'done');
+    expect(
+      AgentSession.fromJson(agentSession('ags_1')).programStatus,
+      isNull,
+      reason: 'an older server',
+    );
+    for (final bad in [
+      null,
+      'done',
+      {'state': 'clear'},
+      {'state': 7},
+      <String, dynamic>{},
+    ]) {
+      expect(of(bad).programStatus, isNull, reason: '$bad');
+    }
+  });
 }

@@ -138,23 +138,142 @@ void main() {
       await disposeShell(tester, c);
     });
 
-    testWidgets('has no search field (153b); Notes keeps its own', (
-      tester,
-    ) async {
-      final c = shellContainer();
-      await pumpShell(tester, c, size: wide);
-      c.read(routerProvider).go(Routes.browse(v));
-      await tester.pumpAndSettle();
-      expect(
-        find.descendant(of: bar, matching: find.byType(EditableText)),
-        findsNothing,
-      );
-      expect(
-        find.descendant(of: bar, matching: find.textContaining('Search')),
-        findsNothing,
-      );
-      expect(find.textContaining('Search'), findsWidgets);
-      await disposeShell(tester, c);
+    group('the search field (156n, restoring 153b)', () {
+      final field = find.byKey(const Key('app-bar-search'));
+      final paletteField = find.byKey(const Key('palette-field'));
+
+      testWidgets('centred, 420 wide, opens the palette; not a text field', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+        final c = shellContainer();
+        await pumpShell(tester, c, size: wide);
+        c.read(routerProvider).go(Routes.browse(v));
+        await tester.pumpAndSettle();
+        expect(find.descendant(of: bar, matching: field), findsOneWidget);
+        final rect = tester.getRect(field);
+        expect(rect.width, 420);
+        expect(rect.center.dx, closeTo(1280 / 2, 0.5));
+        expect(
+          find.descendant(of: bar, matching: find.byType(EditableText)),
+          findsNothing,
+        );
+        expect(
+          find.descendant(
+            of: field,
+            matching: find.text('Search notes, sessions, commands…'),
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.descendant(of: field, matching: find.text('⌘K')),
+          findsOneWidget,
+        );
+        await tester.tap(field);
+        await tester.pumpAndSettle();
+        expect(paletteField, findsOneWidget);
+        expect(find.byKey(const Key('palette-dialog')), findsOneWidget);
+        await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+        await tester.pumpAndSettle();
+        expect(paletteField, findsNothing);
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('shrinks with the window, never under 280', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        final c = shellContainer();
+        await pumpShell(tester, c, size: const Size(900, 800));
+        final width = tester.getRect(field).width;
+        expect(width, lessThanOrEqualTo(420));
+        expect(width, greaterThanOrEqualTo(280));
+        final backRight = tester.getRect(back).right;
+        final dotLeft = tester
+            .getRect(find.byKey(const Key('bar-status')))
+            .left;
+        expect(tester.getRect(field).left, greaterThan(backRight));
+        expect(tester.getRect(field).right, lessThan(dotLeft));
+        expect(find.text('Ctrl K'), findsOneWidget);
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('no field in a narrow window\'s frame', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        final c = shellContainer();
+        await pumpShell(tester, c, size: phone);
+        expect(bar, findsOneWidget);
+        expect(field, findsNothing);
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('blank bar either side still drags and double-click zooms', (
+        tester,
+      ) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        final calls = <String>[];
+        final messenger =
+            TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+        const channel = MethodChannel('window_manager');
+        messenger.setMockMethodCallHandler(channel, (call) async {
+          calls.add(call.method);
+          return switch (call.method) {
+            'isMaximized' || 'isFocused' || 'isFullScreen' => false,
+            _ => null,
+          };
+        });
+        addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+        final c = shellContainer();
+        await pumpShell(tester, c, size: wide);
+        final rect = tester.getRect(field);
+
+        for (final x in [rect.left - 40, rect.right + 40]) {
+          calls.clear();
+          await tester.dragFrom(Offset(x, 20), const Offset(60, 0));
+          await tester.pumpAndSettle();
+          expect(calls, contains('startDragging'), reason: 'drag at $x');
+
+          calls.clear();
+          await tester.tapAt(Offset(x, 20));
+          await tester.pump(const Duration(milliseconds: 50));
+          await tester.tapAt(Offset(x, 20));
+          await tester.pumpAndSettle();
+          expect(calls, contains('maximize'), reason: 'double-click at $x');
+        }
+        expect(paletteField, findsNothing, reason: 'blank bar is not search');
+
+        calls.clear();
+        await tester.dragFrom(rect.center, const Offset(60, 0));
+        await tester.pumpAndSettle();
+        expect(calls, isNot(contains('startDragging')));
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
+
+      testWidgets('unfocused, it goes text3', (tester) async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+        final c = shellContainer();
+        await pumpShell(tester, c, size: wide);
+        final t = tester.element(bar).tokens;
+        Color ink() => tester
+            .widget<Text>(find.text('Search notes, sessions, commands…'))
+            .style!
+            .color!;
+        Color icon() => tester
+            .widget<Icon>(
+              find.descendant(of: field, matching: find.byType(Icon)),
+            )
+            .color!;
+        expect(ink(), t.text2);
+        expect(icon(), t.text2);
+        c.read(windowStateProvider.notifier).onWindowBlur();
+        await tester.pump();
+        expect(ink(), t.text3);
+        expect(icon(), t.text3);
+        await disposeShell(tester, c);
+        debugDefaultTargetPlatformOverride = null;
+      });
     });
   });
 

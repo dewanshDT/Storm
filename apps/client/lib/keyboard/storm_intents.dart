@@ -1,39 +1,19 @@
 import 'package:flutter/widgets.dart';
 
-/// Global / note / editor intents for Storm's desktop keyboard layer.
+/// App / note / editor intents for Storm's desktop keyboard layer.
 ///
 /// Actions live next to the widgets that can fulfill them; this file only
 /// names the intents so [Shortcuts] maps stay typed and shared.
 
-// --- Global (vault shell) -------------------------------------------------
+// --- App-wide ------------------------------------------------------------
 
-class StormSearchIntent extends Intent {
-  const StormSearchIntent();
-}
+/// A chord of the app layer, by its `StormChord.id`. One chord can mean several
+/// commands (⇧⌘N is New folder in Notes, New session in Agents); the layer
+/// runs the first that can run where you are.
+class StormChordIntent extends Intent {
+  const StormChordIntent(this.chord);
 
-class StormNewNoteIntent extends Intent {
-  const StormNewNoteIntent();
-}
-
-class StormNewFolderIntent extends Intent {
-  const StormNewFolderIntent();
-}
-
-/// ⇧⌘N while Agents is open (153f); in Notes the same chord is New folder.
-class StormNewSessionIntent extends Intent {
-  const StormNewSessionIntent();
-}
-
-class StormToggleSidebarIntent extends Intent {
-  const StormToggleSidebarIntent();
-}
-
-class StormBackIntent extends Intent {
-  const StormBackIntent();
-}
-
-class StormForwardIntent extends Intent {
-  const StormForwardIntent();
+  final String chord;
 }
 
 // --- Note open ------------------------------------------------------------

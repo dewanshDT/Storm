@@ -294,13 +294,14 @@ impl FakeRelay {
         let status = head["status"].as_u64().unwrap() as u16;
         let headers = head["headers"].clone();
 
-        let mut body = Vec::new();
+        let (mut body, mut largest_frame) = (Vec::new(), 0);
         loop {
             match self.next_event().await {
                 Event::Binary(frame) => {
                     let (kind, id, payload) = proto::decode_body_frame(&frame).unwrap();
                     assert_eq!(kind, proto::FRAME_RESPONSE_BODY);
                     assert_eq!(id, stream_id);
+                    largest_frame = largest_frame.max(payload.len());
                     body.extend_from_slice(payload);
                 }
                 Event::Text(value) if value["type"] == "PING" => continue,
@@ -316,6 +317,7 @@ impl FakeRelay {
             status,
             headers,
             body,
+            largest_frame,
         }
     }
 }
@@ -352,6 +354,8 @@ struct TunnelResponse {
     status: u16,
     headers: serde_json::Value,
     body: Vec<u8>,
+    /// The largest response body frame's payload.
+    largest_frame: usize,
 }
 
 impl TunnelResponse {
@@ -1523,7 +1527,8 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
     let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
 
     // A session that has ended, with output, so the stream sends everything
-    // and closes — what lets the fake relay read the whole response.
+    // and closes — what lets the fake relay read the whole response. The
+    // output fills one 256 KiB catch-up event, ~341 KiB of base64 (154-S1).
     let (_generation, _rx) = state.agent.connect_host("hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X");
     state
         .agent
@@ -1555,9 +1560,11 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
         .unwrap()
         .0;
     let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+    let mut output = b"over the relay".to_vec();
+    output.extend((0..256 * 1024 - output.len()).map(|i| (i % 251) as u8));
     state
         .agent
-        .host_output(host, &record.id, 0, b"over the relay")
+        .host_output(host, &record.id, 0, &output)
         .unwrap();
     state
         .agent
@@ -1599,9 +1606,57 @@ async fn the_terminal_stream_crosses_the_relay_on_the_same_handler_and_auth() {
     let body = String::from_utf8_lossy(&streamed.body);
     assert!(body.starts_with("event: status"), "status first: {body}");
     assert!(body.contains("event: output"), "{body}");
+    let events: Vec<&str> = body.split("\n\n").filter(|e| !e.is_empty()).collect();
+    assert_eq!(events.len(), 2, "status, then one output event");
+    let data = events[1]
+        .lines()
+        .find_map(|l| l.strip_prefix("data: "))
+        .unwrap();
+    assert!(data.len() > 340 * 1024, "one event of {} bytes", data.len());
     assert!(
-        body.contains(&data_encoding::BASE64.encode(b"over the relay")),
-        "{body}"
+        data_encoding::BASE64.decode(data.as_bytes()).unwrap() == output,
+        "the event arrives whole"
+    );
+    assert!(
+        streamed.largest_frame <= proto::MAX_BODY_FRAME_PAYLOAD,
+        "a frame carried {} bytes",
+        streamed.largest_frame
+    );
+
+    // A cold open asking for the screen gets it over the relay too
+    // (decision 154, AM110): status, then the snapshot at the end, then the
+    // stream closes, the session having ended.
+    let snapshot = relay
+        .request(
+            3,
+            TunnelRequest::get(&format!("{path}&attach=snapshot"))
+                .header("authorization", &format!("Bearer {token}")),
+        )
+        .await;
+    assert_eq!(snapshot.status, 200);
+    let body = String::from_utf8_lossy(&snapshot.body);
+    let events: Vec<&str> = body.split("\n\n").filter(|e| !e.is_empty()).collect();
+    assert_eq!(events.len(), 2, "status, then the snapshot: {body}");
+    assert!(events[0].starts_with("event: status"));
+    assert!(events[1].starts_with("event: snapshot\n"), "{}", events[1]);
+    assert!(events[1].contains(&format!("\nid: {}\n", output.len())));
+    let data: serde_json::Value = serde_json::from_str(
+        events[1]
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(data["offset"], output.len());
+    assert_eq!(data["complete"], true);
+    let screen = data_encoding::BASE64
+        .decode(data["data"].as_str().unwrap().as_bytes())
+        .unwrap();
+    assert!(screen.starts_with(b"\x1bc"), "a reset, then the screen");
+    assert!(
+        snapshot.body.len() < 64 * 1024,
+        "{} bytes",
+        snapshot.body.len()
     );
 
     // And the host tier is the host tier over the relay too.
@@ -2660,5 +2715,111 @@ async fn a_relay_that_answers_heartbeats_is_kept_past_the_deadline() {
         1,
         "and never redialled"
     );
+    tunnels.shutdown().await;
+}
+
+#[tokio::test]
+async fn the_agent_events_stream_crosses_the_relay_as_sse() {
+    // Decision 154, AM109 (SRP §5.3): an ordinary §5.2 request under the
+    // same `require_auth`, answered as SSE with no `id:`, and kept open.
+    let dir = tempdir::TempDir::new("storm-relay-agent-events").unwrap();
+    let (router, identity, state) = crate::api::tests::test_router_with_state(dir.path());
+    let host = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
+    let (_generation, _rx) = state.agent.connect_host(host);
+    state
+        .agent
+        .hello(
+            host,
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 4,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let owner = crate::api::tests::seed_owner(&state).await;
+    let id = state
+        .agent
+        .launch(
+            &owner,
+            serde_json::from_value(serde_json::json!({
+                "host_id": host, "workspace": "storm", "provider": "fake",
+                "terminal": {"cols": 80, "rows": 24},
+            }))
+            .unwrap(),
+            Default::default(),
+            Vec::new(),
+        )
+        .unwrap()
+        .0
+        .id;
+    let report = |status: serde_json::Value| {
+        state
+            .agent
+            .host_status(host, &id, &serde_json::from_value(status).unwrap())
+            .unwrap();
+    };
+    report(serde_json::json!({"status": "running"}));
+
+    let mut relay = FakeRelay::start(Behaviour::Normal).await;
+    let (_registered, tunnels) = start_tunnel(&relay.url, router, identity);
+    let _ = relay.await_registration().await;
+
+    let anonymous = relay
+        .request(1, TunnelRequest::get("/v1/agent/events"))
+        .await;
+    assert_eq!(anonymous.status, 401);
+
+    let token = crate::api::tests::session_token(&state, &owner).await;
+    relay.send(serde_json::json!({"v":1,"type":"STREAM_OPEN","stream_id":2}));
+    assert_eq!(relay.next_control().await["type"], "STREAM_ACK");
+    relay.send(serde_json::json!({
+        "v":1,"type":"HTTP_REQUEST_HEAD","stream_id":2,"method":"GET",
+        "path":"/v1/agent/events",
+        "headers": {"authorization": format!("Bearer {token}")},
+    }));
+    let head = relay.next_control().await;
+    assert_eq!(head["type"], "HTTP_RESPONSE_HEAD", "{head}");
+    assert_eq!(head["status"], 200);
+    assert!(
+        head["headers"]["content-type"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("text/event-stream"),
+        "{head}"
+    );
+
+    let mut body = String::new();
+    let mut read_until = async |relay: &mut FakeRelay, done: &dyn Fn(&str) -> bool| {
+        while !done(&body) {
+            match relay.next_event().await {
+                Event::Binary(frame) => {
+                    let (kind, stream, payload) = proto::decode_body_frame(&frame).unwrap();
+                    assert_eq!((kind, stream), (proto::FRAME_RESPONSE_BODY, 2));
+                    body.push_str(std::str::from_utf8(payload).unwrap());
+                }
+                Event::Text(value) if value["type"] == "PING" => {}
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        body.clone()
+    };
+    let seen = read_until(&mut relay, &|b| b.contains("\n\n")).await;
+    assert!(seen.starts_with("event: snapshot\ndata: {"), "{seen}");
+    assert!(seen.contains(&id), "{seen}");
+
+    report(serde_json::json!({"status": "running", "activity": "working"}));
+    let seen = read_until(&mut relay, &|b| {
+        b.split("event: session\n")
+            .nth(1)
+            .is_some_and(|s| s.contains("\n\n"))
+    })
+    .await;
+    let session = seen.split("event: session\n").nth(1).unwrap();
+    assert!(session.contains(r#""activity":"working""#), "{session}");
+    assert!(!seen.lines().any(|l| l.starts_with("id:")), "no id: {seen}");
+
+    relay.send(serde_json::json!({"v":1,"type":"CLOSE","stream_id":2}));
     tunnels.shutdown().await;
 }

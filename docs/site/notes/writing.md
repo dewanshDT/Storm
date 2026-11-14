@@ -20,9 +20,13 @@ notes as you type, and following a link opens the note. Under each note,
 
 ## Search
 
-`⌘/Ctrl K` searches the whole vault's text, with the matching snippet
-highlighted. Search runs on the server, so it covers notes this device has
-never opened.
+`⌘/Ctrl K`, or the search field in the middle of the app bar, opens the
+[command palette](/docs/notes/shortcuts/#the-command-palette). Note titles
+match as you type; from two letters on, the palette also searches the text
+of every vault's notes and lists them under **In note text**, with the
+matching words highlighted. Text search runs on the server, so it covers
+notes this device has never opened. On a phone, use the pill's Search
+button, or the search bubble beside Settings in Agents and Settings.
 
 ## Properties
 

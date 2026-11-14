@@ -421,6 +421,28 @@ class _DeleteSheet extends ConsumerWidget {
 const kDeleteToastedKey = 'storm.agents.delete_toasted';
 const _toastedLimit = 200;
 
+ScaffoldMessengerState? _agentToastOn;
+ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _agentToast;
+
+/// Raises [bar] in the agents' one toast slot (153h, 154-4): a newer toast
+/// takes the place of the one showing, whichever watcher raised it, and is
+/// never queued behind it.
+ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? showAgentToast(
+  SnackBar bar,
+) {
+  final messenger = rootMessengerKey.currentState;
+  if (messenger == null) return null;
+  if (_agentToast != null && identical(_agentToastOn, messenger)) {
+    messenger.removeCurrentSnackBar();
+  }
+  final toast = _agentToast = messenger.showSnackBar(bar);
+  _agentToastOn = messenger;
+  toast.closed.then((_) {
+    if (_agentToast == toast) _agentToast = null;
+  });
+  return toast;
+}
+
 /// `/agents/s/<id>` → the session shown there.
 String? shownSessionOf(String location) {
   final m = RegExp(r'^/agents/s/([^/?#]+)').firstMatch(location);
@@ -597,15 +619,8 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
   }
 
   void _raise(DeleteRequest r, DeleteAsker asker) {
-    final messenger = rootMessengerKey.currentState;
-    if (messenger == null) return;
-    // Never a stack: a newer request takes the place of the one showing.
-    if (_toast != null) {
-      _toast = null;
-      messenger.removeCurrentSnackBar();
-    }
     final router = GoRouter.maybeOf(context);
-    final toast = messenger.showSnackBar(
+    final toast = showAgentToast(
       SnackBar(
         key: ValueKey('delete-toast-${r.id}'),
         content: Text('${asker.name} wants to delete ${deleteItem(r)}'),
@@ -618,6 +633,7 @@ class _DeleteRequestWatcherState extends ConsumerState<DeleteRequestWatcher> {
         ),
       ),
     );
+    if (toast == null) return;
     _toast = toast;
     _toastFor = r.id;
     toast.closed.then((_) {

@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
+import 'agent/agent_state.dart' show sessionKeepAliveProvider;
 import 'agent/oauth_links.dart';
 import 'router.dart';
 import 'state/app_state.dart';
@@ -72,8 +73,17 @@ class _StormAppState extends ConsumerState<StormApp>
       // A suspended phone's sockets may be dead without a FIN, and the
       // trunk's silence clock stopped while it slept (§8.7 rule 3).
       unawaited(ref.read(connectionProvider)?.onAppResumed());
+      ref.read(sessionKeepAliveProvider).foreground();
+    } else if (state == AppLifecycleState.hidden ||
+        state == AppLifecycleState.paused) {
+      // No terminal stream runs behind the person's back (decision 154).
+      ref.read(sessionKeepAliveProvider).background();
     }
   }
+
+  @override
+  void didHaveMemoryPressure() =>
+      ref.read(sessionKeepAliveProvider).memoryPressure();
 
   /// Renews a stale session, retires a dead one.
   ///

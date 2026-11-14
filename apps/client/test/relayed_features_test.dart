@@ -287,7 +287,7 @@ void main() {
 
     final events = <TerminalEvent>[];
     final got = StreamController<void>.broadcast();
-    final sub = openTerminalStream(api, 'ses_1', 0).listen((e) {
+    final sub = openTerminalStream(api, 'ses_1', 0, false).listen((e) {
       events.add(e);
       got.add(null);
     });

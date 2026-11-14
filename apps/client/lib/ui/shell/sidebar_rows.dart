@@ -4,9 +4,12 @@ import '../tokens.dart';
 
 /// A vault's name as a small outlined tag beside a cross-vault row.
 class VaultTag extends StatelessWidget {
-  const VaultTag(this.name, {super.key});
+  const VaultTag(this.name, {super.key, this.color});
 
   final String name;
+
+  /// Over `text3`, for a row whose ground `text3` is not readable on.
+  final Color? color;
 
   @override
   Widget build(BuildContext context) {
@@ -23,7 +26,7 @@ class VaultTag extends StatelessWidget {
         style: TextStyle(
           fontFamily: StormTokens.monoFamily,
           fontSize: t.labelSize,
-          color: t.text3,
+          color: color ?? t.text3,
           height: 1.4,
         ),
       ),

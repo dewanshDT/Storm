@@ -115,7 +115,7 @@ void main() {
           }),
         ),
         sessionId: 'ags_1',
-        open: (_) => const Stream<TerminalEvent>.empty(),
+        open: (_, _) => const Stream<TerminalEvent>.empty(),
       )..start();
       return c;
     }

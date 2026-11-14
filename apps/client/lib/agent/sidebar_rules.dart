@@ -23,13 +23,15 @@ enum SidebarTier {
   bool get urgent => index <= SidebarTier.unknown.index;
 }
 
-/// What waits for the person to answer: a permission prompt, a question or
-/// a delete approval. The only state outlined, and counted on the rail.
+/// What waits for the person to answer: a permission prompt, a question, a
+/// sign-in (decision 155) or a delete approval. The only state outlined, and
+/// counted on the rail.
 const kNeedsYouKinds = {
   'permission_prompt',
   'delete_approval',
   'approval',
   'question',
+  'sign_in',
 };
 
 /// How long a failed session stays in the failed tier after it ended.
@@ -272,6 +274,7 @@ String _needsYouWords(AgentSession s) {
     'permission_prompt' => 'permission prompt',
     'delete_approval' => 'delete request',
     'question' => 'question',
+    'sign_in' => 'sign in',
     'approval' => 'approval',
     _ when s.deleteRequest?.pending ?? false => 'delete request',
     _ => switch (s.pendingDecisions.firstOrNull?.kind) {
@@ -348,6 +351,12 @@ SubLine? reasonLine(
             : (work != null ? SubTone.accent : SubTone.plain),
       );
     default:
+      if (s.status == 'running' && s.programStatus?.state == 'error') {
+        return SubLine(
+          withAge('hit an error', s.programStatus?.since),
+          SubTone.quiet,
+        );
+      }
       if (workToApply(s) case final work?) {
         return SubLine(
           '${s.statusLabel.toLowerCase()} · $work',

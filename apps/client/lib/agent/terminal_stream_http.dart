@@ -7,6 +7,13 @@ import '../api/models.dart';
 import 'agent_api.dart';
 import 'terminal_events.dart';
 
+/// `attach=snapshot` asks for the screen instead of the history before it
+/// (AM110); a server that predates it ignores it and replays.
+Map<String, String> streamQuery(int offset, bool snapshot) => {
+  'offset': '$offset',
+  if (snapshot) 'attach': 'snapshot',
+};
+
 /// A streamed GET with the bearer header, on the [AgentApi]'s own client, so
 /// over the relay when the session is relayed (SRP §5.3): the tunnel hands
 /// each chunk on as it arrives, like the change feed.
@@ -20,6 +27,7 @@ Stream<TerminalEvent> openStreamedTerminal(
   AgentApi api,
   String sessionId,
   int offset,
+  bool snapshot,
 ) {
   StreamSubscription<String>? body;
   late final StreamController<TerminalEvent> controller;
@@ -32,7 +40,7 @@ Stream<TerminalEvent> openStreamedTerminal(
               Uri.parse(
                 '${api.baseUrl}/v1/agent/sessions/${Uri.encodeComponent(sessionId)}'
                 '/terminal/stream',
-              ).replace(queryParameters: {'offset': '$offset'}),
+              ).replace(queryParameters: streamQuery(offset, snapshot)),
             )
             ..headers.addAll({
               'Authorization': 'Bearer ${api.token}',
