@@ -89,6 +89,14 @@ pub struct RuntimeConfig {
     /// had ([`crate::login_env::for_host`]).
     #[serde(skip)]
     pub person: Option<crate::login_env::LoginEnv>,
+    /// Decision 155: answer a program's OSC 7501 probe and take its own
+    /// status report. `false` is the host's kill switch: titles only.
+    #[serde(default = "program_status_default")]
+    pub program_status: bool,
+}
+
+fn program_status_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -184,6 +192,7 @@ impl Default for RuntimeConfig {
             children_max: None,
             import_env: Vec::new(),
             person: None,
+            program_status: true,
         }
     }
 }
@@ -1111,6 +1120,15 @@ mod tests {
         ] {
             assert!(toml::from_str::<RuntimeConfig>(bad).is_err(), "{bad}");
         }
+    }
+
+    /// Decision 155 (Q14): on unless the host's operator switched it off.
+    #[test]
+    fn program_status_defaults_on() {
+        assert!(RuntimeConfig::default().program_status);
+        assert!(toml::from_str::<RuntimeConfig>("").unwrap().program_status);
+        let off: RuntimeConfig = toml::from_str("program_status = false").unwrap();
+        assert!(!off.program_status);
     }
 
     #[test]

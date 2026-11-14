@@ -60,6 +60,9 @@ const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
 const IMAGE_FETCH_TIMEOUT: Duration = Duration::from_secs(25);
 /// At most one title report per session per this long (D15 AM43).
 const TITLE_EVERY: Duration = Duration::from_secs(1);
+/// A change in what the program or its hooks say needs the person is not
+/// held for [`TITLE_EVERY`] (decision 155), only for this long.
+const PROGRAM_EVERY: Duration = Duration::from_millis(100);
 /// How long a provider may take to start a session. A start that has not
 /// returned by then is reported `failed (start_failure)`, and whatever it
 /// later returns is stopped: a start that hangs costs its own session, never
@@ -335,6 +338,56 @@ struct Events {
     /// 145g's log lines, each once per session: its words reached the
     /// host, and why they did not.
     said_logged: Mutex<std::collections::HashSet<&'static str>>,
+    /// Decision 155: set where the host answers the OSC 7501 probe.
+    program: Option<Program>,
+}
+
+/// A session's OSC 7501 program status (decision 155).
+struct Program {
+    session: String,
+    status: Mutex<crate::program_status::ProgramStatus>,
+    /// The session's ordered input, made before `start`, so the reply is
+    /// queued before any client can see a query in the same bytes.
+    reply: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    breaker: Arc<crate::program_status::Breaker>,
+    no_record_logged: AtomicBool,
+}
+
+impl Program {
+    fn take(&self, payloads: Vec<Vec<u8>>) {
+        use crate::program_status::{PROBE_REPLY, Seen};
+        let mut status = self.status.lock().unwrap();
+        status.output_at(std::time::Instant::now());
+        for data in payloads {
+            match status.see(&data) {
+                Seen::Answer => {
+                    let queued = self.reply.send(PROBE_REPLY.to_vec()).is_ok();
+                    tracing::debug!(session = %self.session, queued, "answered OSC 7501 ; ?");
+                }
+                Seen::Discarded(m) => {
+                    let host_failures = self.breaker.failed();
+                    tracing::warn!(
+                        session = %self.session,
+                        error = m.error.as_str(),
+                        child = m.child,
+                        session_failures = status.failures(),
+                        host_failures,
+                        "an OSC 7501 record did not parse"
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn report(&self) -> Option<crate::program_status::Report> {
+        let now = std::time::Instant::now();
+        let mut status = self.status.lock().unwrap();
+        if status.no_record(now) && !self.no_record_logged.swap(true, Ordering::Relaxed) {
+            tracing::debug!(session = %self.session, "no OSC 7501 record within 2 s; activity from the title");
+        }
+        status.report(now)
+    }
 }
 
 impl Events {
@@ -361,7 +414,31 @@ impl Events {
             gone: watch::channel(false).0,
             transcript: tokio::sync::Mutex::new(None),
             said_logged: Mutex::new(Default::default()),
+            program: None,
         }
+    }
+
+    /// Answers the session's OSC 7501 probe through `input` and reads its
+    /// records (decision 155).
+    fn with_program_status(
+        mut self,
+        session: &str,
+        input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+        breaker: Arc<crate::program_status::Breaker>,
+    ) -> Self {
+        self.title = Mutex::new(TitleObserver::new(self.titles, true));
+        self.program = Some(Program {
+            session: session.to_string(),
+            status: Mutex::default(),
+            reply: input,
+            breaker,
+            no_record_logged: AtomicBool::new(false),
+        });
+        self
+    }
+
+    fn program_report(&self) -> Option<crate::program_status::Report> {
+        self.program.as_ref().and_then(Program::report)
     }
 
     /// Whether 145g's `what` is logged for the first time this session.
@@ -419,7 +496,16 @@ async fn type_when_ready(s: Arc<HostSession>, text: String) {
 
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
-        if self.titles {
+        if let Some(program) = &self.program {
+            // Before the ring: the reply is queued ahead of anything a client
+            // could send for a query in these bytes.
+            let payloads = {
+                let mut title = self.title.lock().unwrap();
+                title.feed(bytes);
+                title.take_program()
+            };
+            program.take(payloads);
+        } else if self.titles {
             self.title.lock().unwrap().feed(bytes);
         }
         self.ring.lock().unwrap().append(bytes);
@@ -466,6 +552,8 @@ struct HostSession {
     attention_sent: Mutex<Option<&'static str>>,
     /// The hooks' turn last acknowledged by the server (144b).
     activity_sent: Mutex<Option<&'static str>>,
+    /// The program's status last acknowledged by the server (decision 155).
+    program_sent: Mutex<Option<crate::program_status::Report>>,
     /// Storm asked to park it (145e): its end is reported `parked` once
     /// its workspace is kept for a resume.
     parking: AtomicBool,
@@ -562,6 +650,9 @@ pub struct Host {
     /// Each live spawned child's own workspace directory (137-1), reported
     /// in `workspace_paths` under the name its record has (137-2).
     child_paths: Mutex<HashMap<String, PathBuf>>,
+    /// OSC 7501 parse failures across this process's sessions (decision
+    /// 155): once open, new sessions are not answered until a restart.
+    program_breaker: Arc<crate::program_status::Breaker>,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -658,6 +749,7 @@ impl Host {
             sign_in: Arc::default(),
             agent_jobs: Mutex::default(),
             isolation,
+            program_breaker: Arc::default(),
         }))
     }
 
@@ -1564,7 +1656,11 @@ impl Host {
             let mut entry = with_title(status_json(end), s.events.title.lock().unwrap().current());
             entry = with_harness(entry, s.events.harness.lock().unwrap().as_deref());
             entry = with_attention(entry, &s.events);
-            entry = with_hook_activity(entry, s.events.hook_activity_now());
+            let hook_activity = s.events.hook_activity_now();
+            entry = with_hook_activity(entry, hook_activity);
+            if let Some(program) = s.events.program_report() {
+                entry = with_program_status(entry, &program, hook_activity.is_some());
+            }
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -2170,12 +2266,22 @@ impl Host {
             .lock()
             .unwrap()
             .hooks(&provider_id, child_of.is_some());
-        let events = Arc::new(Events::new(
+        let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let events = Events::new(
             self.config.scrollback_bytes,
             crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             hooks,
             child_of.is_some(),
-        ));
+        );
+        // The inbox ConPTY answers DA1 itself, so the probe never passes.
+        let events = Arc::new(if cfg!(windows) || !self.config.program_status {
+            events
+        } else if self.program_breaker.closed() {
+            events.with_program_status(&id, input.clone(), self.program_breaker.clone())
+        } else {
+            tracing::warn!(session = %id, "OSC 7501 records failed to parse on this host; not answering the probe until it restarts");
+            events
+        });
         self.leaders
             .lock()
             .unwrap()
@@ -2323,7 +2429,6 @@ impl Host {
                     .await;
             });
         }
-        let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let host_session = Arc::new(HostSession {
             id: id.clone(),
             provider: provider_id.clone(),
@@ -2336,6 +2441,7 @@ impl Host {
             harness_sent: Mutex::new(None),
             attention_sent: Mutex::new(None),
             activity_sent: Mutex::new(None),
+            program_sent: Mutex::new(None),
             parking: AtomicBool::new(false),
             input,
         });
@@ -2497,11 +2603,22 @@ impl Host {
                 attention.is_some_and(|a| a != *s.attention_sent.lock().unwrap());
             let activity = s.events.hook_activity_now();
             let activity_changed = activity != *s.activity_sent.lock().unwrap();
+            let program = s.events.program_report();
+            let program_changed = program != *s.program_sent.lock().unwrap();
             if end.is_none()
-                && (title != sent || harness_changed || attention_changed || activity_changed)
+                && (title != sent
+                    || harness_changed
+                    || attention_changed
+                    || activity_changed
+                    || program_changed)
             {
+                let every = if program_changed || attention_changed {
+                    PROGRAM_EVERY
+                } else {
+                    TITLE_EVERY
+                };
                 let wait = posted_at
-                    .map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()))
+                    .map_or(Duration::ZERO, |t| every.saturating_sub(t.elapsed()))
                     .max(status_retry_at.map_or(Duration::ZERO, |t| {
                         t.saturating_duration_since(std::time::Instant::now())
                     }));
@@ -2523,11 +2640,24 @@ impl Host {
                 if let Some(attention) = attention {
                     body["attention"] = json!(attention);
                 }
+                if let Some(p) = &program {
+                    body = with_program_status(body, p, activity.is_some());
+                    if program_changed {
+                        tracing::debug!(
+                            session = %s.id,
+                            source = ?p.source,
+                            state = p.root.as_ref().map(|r| r.state.as_str()),
+                            attention = p.attention,
+                            "program status"
+                        );
+                    }
+                }
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
                 {
                     Ok(st) if st.is_success() => {
+                        *s.program_sent.lock().unwrap() = program;
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
@@ -3730,6 +3860,42 @@ fn with_hook_activity(mut body: serde_json::Value, activity: Option<&str>) -> se
     if let Some(activity) = activity {
         body["activity"] = json!(activity);
         body["activity_source"] = json!(crate::harness::PROVIDER_HOOK);
+    }
+    body
+}
+
+/// A status body with the program's own root record (decision 155, AM113),
+/// and activity and attention from it while it is live; else unchanged,
+/// the title's. A record that did not parse makes activity unknown (null),
+/// never a guessed idle. The hooks' activity (144b) is left as it was, and
+/// a live record governs the permission prompt. `msg=` and `title=` never
+/// leave the host.
+fn with_program_status(
+    mut body: serde_json::Value,
+    p: &crate::program_status::Report,
+    hooks_said: bool,
+) -> serde_json::Value {
+    use crate::program_status::{SOURCE, Source};
+    body["program_status"] = json!(p.root.as_ref().map(|r| json!({
+        "state": r.state.as_str(),
+        "kind": r.kind,
+        "app": r.app,
+    })));
+    if p.source != Source::Title && !hooks_said {
+        body["activity"] = json!(p.activity);
+        body["activity_source"] = json!(SOURCE);
+    }
+    if p.source == Source::Program {
+        match p.attention {
+            Some(a) => {
+                body["attention"] = json!(a);
+                body["attention_source"] = json!(SOURCE);
+            }
+            None if body["attention"] == crate::harness::PERMISSION_PROMPT => {
+                body["attention"] = serde_json::Value::Null;
+            }
+            None => {}
+        }
     }
     body
 }
@@ -9107,6 +9273,345 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             json!({"from": "ags_CHILD", "conversation": uuid}),
             "its own kept conversation"
         );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Decision 155: a host whose `shell` runs `script`, on the recording
+    /// server, with `extra` in its `runtime.toml`.
+    #[cfg(target_os = "linux")]
+    async fn prober_host(
+        script: &str,
+        extra: &str,
+    ) -> (
+        Arc<Host>,
+        Arc<Mutex<Vec<(String, serde_json::Value)>>>,
+        tempfile::TempDir,
+        tempfile::TempDir,
+    ) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let (url, seen) = recording_server().await;
+        let state = tempfile::tempdir().unwrap();
+        let roots = tempfile::tempdir().unwrap();
+        std::fs::create_dir(roots.path().join("w")).unwrap();
+        let key = HostKey::generate();
+        key.save(state.path()).unwrap();
+        HostConfig {
+            server_url: url,
+            server_id: "srv_TEST".into(),
+            server_pubkey: HostKey::generate().public_key_b64(),
+            host_id: "hst_TEST".into(),
+            key_id: key.key_id.clone(),
+        }
+        .save(state.path())
+        .unwrap();
+        let script = script.replace("$W", &roots.path().join("w").display().to_string());
+        let config: RuntimeConfig = toml::from_str(&format!(
+            "workspace_roots = [{:?}]\n{extra}\n[[providers]]\nid = \"shell\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", {script:?}]\n",
+            roots.path().display().to_string(),
+        ))
+        .unwrap();
+        let host = Host::new(state.path(), config).unwrap();
+        *host.token.write().await = Some("sht_test".into());
+        host.link_up.send_replace(true);
+        (host, seen, state, roots)
+    }
+
+    /// Claude Code's startup queries as S0 captured them, then everything the
+    /// program is sent, raw, in `$W/<session>.in`; two more probes later.
+    #[cfg(target_os = "linux")]
+    const PROBER: &str = r#"stty raw -echo
+        printf '\033]0;\342\234\263 Claude Code\007\033[>0q\033[?u\033]7501;?\007\033[c'
+        (sleep 0.8; printf '\033]7501;?\007\033[c'; sleep 0.4; printf '\033]7501;?\033\\:again') &
+        exec cat > "$W/$STORM_RUNTIME_SESSION.in""#;
+
+    #[cfg(target_os = "linux")]
+    const DA1_REPLY: &[u8] = b"\x1b[?62;22c";
+
+    /// What `PROBER` was sent once its later probes went out.
+    #[cfg(target_os = "linux")]
+    async fn prober_input(host: &Arc<Host>, roots: &tempfile::TempDir, id: &str) -> Vec<u8> {
+        let input = roots.path().join(format!("w/{id}.in"));
+        eventually("the program's later probes", || {
+            output(host, id).contains(":again")
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::read(input).unwrap()
+    }
+
+    /// AM112, A-155-1, A-155-2: the host's reply reaches the program before
+    /// the DA1 reply a client sends on seeing the probe, and it is the only
+    /// one for the process across a resize, a replay and later probes.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn the_probe_is_answered_once_and_before_the_clients_da1() {
+        let (host, seen, _state, roots) = prober_host(PROBER, "").await;
+        host.clone().handle(start("ags_PROBE", "shell")).await;
+        eventually("the probe in the output", || {
+            output(&host, "ags_PROBE").contains("7501;?")
+        })
+        .await;
+        let shown = std::time::Instant::now();
+        host.clone()
+            .handle(Command::Input {
+                session: "ags_PROBE".into(),
+                data: BASE64.encode(DA1_REPLY),
+            })
+            .await;
+        let input = roots.path().join("w/ags_PROBE.in");
+        eventually("the reply reached the program", || {
+            std::fs::read(&input).is_ok_and(|b| b.starts_with(crate::program_status::PROBE_REPLY))
+        })
+        .await;
+        assert!(
+            shown.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            shown.elapsed()
+        );
+        host.clone()
+            .handle(Command::Resize {
+                session: "ags_PROBE".into(),
+                cols: 100,
+                rows: 30,
+            })
+            .await;
+        host.clone()
+            .handle(Command::Replay {
+                session: "ags_PROBE".into(),
+                from: 0,
+            })
+            .await;
+        let got = prober_input(&host, &roots, "ags_PROBE").await;
+        assert_eq!(
+            got,
+            [crate::program_status::PROBE_REPLY, DA1_REPLY].concat()
+        );
+        let posts = seen.lock().unwrap().clone();
+        let program: Vec<_> = posts
+            .iter()
+            .filter(|(p, b)| p.ends_with("/ags_probe/status") && b.get("program_status").is_some())
+            .collect();
+        assert!(
+            !program.is_empty(),
+            "an answered session carries program_status"
+        );
+        assert!(
+            program.iter().all(|(_, b)| b["program_status"].is_null()),
+            "no record yet"
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// The kill switch: no reply, no parsing, nothing new in a post, and the
+    /// title still gives activity (A-155-3).
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn with_program_status_off_nothing_is_answered() {
+        let (host, seen, _state, roots) = prober_host(PROBER, "program_status = false").await;
+        host.clone().handle(start("ags_OFF", "shell")).await;
+        eventually("the probe in the output", || {
+            output(&host, "ags_OFF").contains("7501;?")
+        })
+        .await;
+        host.clone()
+            .handle(Command::Input {
+                session: "ags_OFF".into(),
+                data: BASE64.encode(DA1_REPLY),
+            })
+            .await;
+        assert_eq!(prober_input(&host, &roots, "ags_OFF").await, DA1_REPLY);
+        eventually("idle from the title", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_off/status") && b["activity"] == "idle")
+        })
+        .await;
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .all(|(_, b)| b.get("program_status").is_none()
+                    && b.get("activity_source").is_none())
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// AM113: records are posted as `program_status {state, kind, app}`,
+    /// with activity and attention from them and the source
+    /// `program_status`; a change is not held a second for the title
+    /// limiter; `msg=` never leaves the host; `hello` carries the record.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn records_are_posted_at_once_without_their_messages() {
+        let secret = BASE64.encode(b"approve Bash: echo SECRET-WORDS");
+        let script = format!(
+            r#"printf '\033]0;\342\234\263 Claude Code\007\033]7501;?\007'
+            sleep 0.3; printf '\033]7501;state=idle:app=claude-code\007\033]0;Claude Code\007'
+            sleep 0.3; printf '\033]7501;state=working:app=claude-code:msg={secret}\007'
+            sleep 0.2; printf '\033]7501;state=blocked:app=claude-code:kind=permission:msg={secret}\007'
+            exec sleep 1000"#
+        );
+        let (host, seen, _state, _roots) = prober_host(&script, "").await;
+        host.clone().handle(start("ags_REC", "shell")).await;
+        let posted = |state: &'static str| {
+            let seen = seen.clone();
+            move || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.ends_with("/ags_rec/status") && b["program_status"]["state"] == state
+                })
+            }
+        };
+        eventually("working posted", posted("working")).await;
+        let working = std::time::Instant::now();
+        eventually("blocked posted", posted("blocked")).await;
+        assert!(
+            working.elapsed() < Duration::from_millis(700),
+            "blocked took {:?} after working",
+            working.elapsed()
+        );
+        let posts = seen.lock().unwrap().clone();
+        let body = |state: &str| {
+            posts
+                .iter()
+                .find(|(p, b)| {
+                    p.ends_with("/ags_rec/status") && b["program_status"]["state"] == state
+                })
+                .unwrap()
+                .1
+                .clone()
+        };
+        let w = body("working");
+        assert_eq!(
+            (
+                &w["activity"],
+                &w["activity_source"],
+                &w["program_status"]["app"]
+            ),
+            (
+                &json!("working"),
+                &json!("program_status"),
+                &json!("claude-code")
+            )
+        );
+        assert!(w.get("attention").is_none());
+        let b = body("blocked");
+        assert_eq!(
+            b["program_status"],
+            json!({"state": "blocked", "kind": "permission", "app": "claude-code"})
+        );
+        assert_eq!(
+            (&b["activity"], &b["attention"], &b["attention_source"]),
+            (
+                &json!("idle"),
+                &json!("permission_prompt"),
+                &json!("program_status")
+            )
+        );
+        assert_eq!(body("idle")["activity"], "idle");
+        for (_, b) in &posts {
+            let text = b.to_string();
+            assert!(
+                !text.contains("SECRET") && !text.contains(&secret) && !text.contains("\"msg\""),
+                "{text}"
+            );
+        }
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(hello["sessions"][0]["program_status"]["kind"], "permission");
+        assert_eq!(hello["sessions"][0]["attention"], "permission_prompt");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Safeguard (2): records that stop parsing make activity unknown (null),
+    /// never idle; (3) three failures open the host's breaker, so the next
+    /// session's probe is not answered and its title gives its activity.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn bad_records_make_activity_unknown_and_open_the_breaker() {
+        let script = r#"if [ "$STORM_RUNTIME_SESSION" = ags_BAD ]; then
+            printf '\033]7501;?\007'; sleep 0.3
+            printf '\033]7501;state=working:app=claude-code\007'; sleep 0.3
+            printf '\033]7501;state=thinking\007\033]7501;app=x\007\033]7501;state=bogus:id=t\007'
+            exec sleep 1000
+        fi
+        stty raw -echo
+        printf '\033]0;\342\227\220 Busy\033\\\033]7501;?\007'
+        (sleep 1.2; printf ':again') &
+        exec cat > "$W/$STORM_RUNTIME_SESSION.in""#;
+        let (host, seen, _state, roots) = prober_host(script, "").await;
+        host.clone().handle(start("ags_BAD", "shell")).await;
+        eventually("unknown posted", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/ags_bad/status")
+                    && b["activity"].is_null()
+                    && b["activity_source"] == "program_status"
+                    && b["program_status"].is_null()
+            })
+        })
+        .await;
+        eventually("the breaker opened", || !host.program_breaker.closed()).await;
+        host.clone().handle(start("ags_NEXT", "shell")).await;
+        assert!(
+            prober_input(&host, &roots, "ags_NEXT").await.is_empty(),
+            "not answered"
+        );
+        eventually("working from the title", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/ags_next/status")
+                    && b["title"] == "Busy"
+                    && b["activity"] == "working"
+            })
+        })
+        .await;
+        assert!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.contains("/ags_next/"))
+                .all(|(_, b)| b.get("program_status").is_none())
+        );
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// Safeguard (1): the probe answered but no record comes, as when the
+    /// program never took the reply: activity stays the title's.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn no_record_after_the_reply_keeps_title_activity() {
+        let script = r#"printf '\033]7501;?\007\033]0;\342\227\220 Busy\007'
+            sleep 2.5; printf '\033]0;\342\234\263 Busy\007'; exec sleep 1000"#;
+        let (host, seen, _state, _roots) = prober_host(script, "").await;
+        host.clone().handle(start("ags_QUIET", "shell")).await;
+        for activity in ["working", "idle"] {
+            eventually(activity, || {
+                seen.lock().unwrap().iter().any(|(p, b)| {
+                    p.ends_with("/ags_quiet/status")
+                        && b["title"] == "Busy"
+                        && b["activity"] == activity
+                })
+            })
+            .await;
+        }
+        for (p, b) in seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, b)| p.ends_with("/ags_quiet/status") && b.get("title").is_some())
+        {
+            assert!(
+                b["program_status"].is_null() && b.get("activity_source").is_none(),
+                "{p} {b}"
+            );
+        }
         host.shutdown(Duration::from_millis(200)).await;
     }
 }

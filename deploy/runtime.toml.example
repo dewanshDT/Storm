@@ -63,6 +63,10 @@ scrollback_bytes = 4194304
 # at most this many bytes, and all of them together at most the second.
 # child_workspace_max = 2147483648
 # children_max = 21474836480
+#
+# Answer an agent's OSC 7501 status probe and report its own state (working,
+# waiting for you, done; decision 155). false keeps title-only status.
+# program_status = true
 
 # Omit [[providers]] entirely to offer every built-in (decision 130):
 # claude-code (the default), opencode, codex, cursor, command-code and shell.

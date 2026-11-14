@@ -69,8 +69,10 @@ pub struct HarnessLine {
 /// (decision 134p): each joins only once G-134-7 passes for it
 /// (`tests/attention_gate.rs`), and 134 lands dark, so none is on. Claude
 /// Code 2.1.310 failed: an Esc at its prompt runs no hook, so nothing
-/// clears it. OpenCode 1.18.31 passed. Codex has no hooks written. The
-/// server keeps the same list and takes a report only from both.
+/// clears it, and 2.1.325 still does (decision 155's spike); its prompt
+/// reaches Storm from its own OSC 7501 report instead (`program_status`).
+/// OpenCode 1.18.31 passed. Codex has no hooks written. The server keeps
+/// the same list and takes a report only from both.
 pub const PERMISSION_PROMPT_ADAPTERS: &[&str] = &[];
 
 pub const PERMISSION_PROMPT: &str = "permission_prompt";
