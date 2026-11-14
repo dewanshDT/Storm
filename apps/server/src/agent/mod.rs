@@ -30,6 +30,7 @@ pub mod jobs;
 pub mod model;
 pub mod park;
 pub mod permission;
+pub mod program;
 pub mod round;
 pub mod said;
 pub mod scope;
@@ -668,6 +669,10 @@ pub struct StatusReport {
     /// AM42's terminal title reports it) or `provider_hook`.
     #[serde(default)]
     pub activity_source: Option<String>,
+    /// The program's own OSC 7501 root record (decision 155, AM113). Each
+    /// report replaces it, as `activity`; an older host never sends one.
+    #[serde(default, deserialize_with = "program::lenient")]
+    pub program_status: Option<program::ProgramReport>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -936,6 +941,8 @@ struct SessionLive {
     /// When `attention` last changed to what it is (153a). Not kept across
     /// a server restart: the host's next report starts it again.
     attention_since: Option<String>,
+    /// The program's own root record (decision 155), as the host last said.
+    program: Option<program::ProgramStatus>,
     /// `working` / `idle` from a gated idle signal only (144b), and its
     /// source.
     health: Option<String>,
@@ -965,6 +972,7 @@ impl SessionLive {
             activity: None,
             attention: None,
             attention_since: None,
+            program: None,
             health: None,
             health_source: None,
             idle_since: None,
@@ -3837,6 +3845,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -3972,6 +3981,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4599,6 +4609,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4620,6 +4631,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4646,6 +4658,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4743,6 +4756,7 @@ mod tests {
                 attention: None,
                 attention_source: None,
                 activity_source: None,
+                program_status: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -5011,6 +5025,7 @@ mod tests {
                         attention: None,
                         attention_source: None,
                         activity_source: None,
+                        program_status: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -5048,6 +5063,7 @@ mod tests {
             attention: None,
             attention_source: None,
             activity_source: None,
+            program_status: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -5378,6 +5394,7 @@ mod tests {
                     attention: None,
                     attention_source: None,
                     activity_source: None,
+                    program_status: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
