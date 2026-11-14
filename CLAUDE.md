@@ -534,6 +534,19 @@ decision 77):
   while the host is offline and never queued on the server. On the host, each
   session has its own ordered writer, and every PTY write is bounded, so a hung
   agent can never hold the session against the owner's `end`.
+- **The host answers exactly one terminal query, `OSC 7501 ; ?`, once per
+  process; every other reply is the client's** (decision 155, AM112). The
+  session's input channel exists before `start`, and `Events::output`
+  queues the reply before the bytes reach the ring, so it is ahead of any
+  client's DA1 reply (Claude Code takes none after DA1); a resize, replay or
+  re-attach never sends another. Records count only after the reply
+  (`program_status.rs`, AM113): no record within 2 s of first output leaves
+  the title's activity; one that does not parse posts activity `null`,
+  never idle; 3 failures on a host and its new sessions go unanswered until
+  it restarts; `msg=` and `title=` never leave the host. `runtime.toml`
+  `program_status = false` is the kill switch, and Windows never answers.
+  `docs/program-status-vectors.json` holds both crates to the captured
+  records.
 - **A start runs only while Storm still wants it** (round 4's stray launch).
   A launch refused because its host is offline writes nothing and is never
   queued. A `start` its host has not reported when the link it went down
