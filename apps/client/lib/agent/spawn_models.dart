@@ -32,7 +32,8 @@ class SpawnFacts {
   final String? rootSession;
   final int depth;
 
-  /// `permission_prompt`, `usage_limit` (144b) or `blocked`; never from
+  /// `permission_prompt`, `usage_limit` (144b), `blocked`, or `question`
+  /// and `sign_in` from the program's own report (decision 155); never from
   /// idle (A3). An older server's `approval` is read and shown as nothing.
   final String? needsAttention;
 
@@ -116,7 +117,8 @@ class Attention {
     this.resetsAt,
   });
 
-  /// `permission_prompt`, `usage_limit`, `blocked` or `delete_approval`.
+  /// `permission_prompt`, `question`, `sign_in`, `usage_limit`, `blocked`
+  /// or `delete_approval`.
   final String kind;
   final DateTime? since;
   final String? detail;
@@ -283,7 +285,12 @@ class ChildEvent {
 String childEventLabel(ChildEvent e) => switch (e.kind) {
   'started' => 'Started',
   // A child never asks (148a): a prompt there is a fault its parent hears.
-  'needs_attention' => e.reason == 'blocked' ? 'Blocked' : 'Permission prompt',
+  'needs_attention' => switch (e.reason) {
+    'blocked' => 'Blocked',
+    'question' => 'Question',
+    'sign_in' => 'Needs sign-in',
+    _ => 'Permission prompt',
+  },
   'denied' => deniedLabel(e),
   'idle_timeout' => 'Idle for 10 minutes',
   'usage_limit' => 'Out of usage',
@@ -617,6 +624,8 @@ String? attentionLabel(String? kind) => switch (kind) {
   'delete_approval' => 'Needs you',
   // 151 N5: a child's own prompt waits for the person, in its terminal.
   'permission_prompt' => 'Needs you',
+  // Decision 155: the program asks a question or needs a sign-in.
+  'question' || 'sign_in' => 'Needs you',
   'usage_limit' => 'Out of usage',
   'blocked' => 'Blocked',
   _ => null,
