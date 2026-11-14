@@ -209,7 +209,7 @@ integrations beside the MCP servers its agent loads by itself: yours, its
 under the agent's own prompts; `agent_mcp = "storm-only"` in `runtime.toml`
 gives a host Storm's servers alone.
 
-**Settings › Agents** (beta) installs, updates and removes the agent CLIs on
+**Settings › Agents & hosts** installs, updates and removes the agent CLIs on
 a Linux or macOS host, into the host's own folder, checked against each
 vendor's published checksum; `agent_install = "off"` in `runtime.toml` turns
 that off. The launcher picks a model and a permission mode: the agent's own
@@ -225,7 +225,7 @@ and only you can turn it on, never a key or an agent.
 Those agents run as the same account, in the session's workspace, under
 their agent's own permissions; a Claude Code or OpenCode prompt shows as
 Needs you (a Codex one does not yet). Each host's **Limits** (Settings ›
-Hosts) cap agents per session (3) and per tree (6), and can lower its
+Agents & hosts) cap agents per session (3) and per tree (6), and can lower its
 concurrent sessions; a session's agents can't start their own.
 
 The package also ships `storm-runtime-isolation`, a root helper that runs
