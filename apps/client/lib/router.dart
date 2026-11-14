@@ -19,7 +19,6 @@ import 'agent/crew_screen.dart';
 import 'agent/session_screen.dart';
 import 'ui/note_screen.dart';
 import 'ui/pairing_screen.dart';
-import 'ui/search_screen.dart';
 import 'ui/settings/settings_shell.dart';
 import 'ui/shell/app_bar.dart' show WindowFrame;
 import 'ui/shell/app_shell.dart';
@@ -78,7 +77,6 @@ abstract final class Routes {
   static String vault(String vaultId) => '/v/$vaultId';
 
   static String browse(String vaultId) => '${vault(vaultId)}/browse';
-  static String search(String vaultId) => '${vault(vaultId)}/search';
   static String tags(String vaultId) => '${vault(vaultId)}/tags';
   static String trash(String vaultId) => '${vault(vaultId)}/trash';
 
@@ -273,10 +271,6 @@ final routerProvider = Provider<GoRouter>((ref) {
                 ),
               ),
               GoRoute(
-                path: '/v/:vault/search',
-                builder: (_, _) => _leaf(const SearchScreen()),
-              ),
-              GoRoute(
                 path: '/v/:vault/tags',
                 builder: (_, _) => _leaf(const TagsScreen()),
               ),
@@ -362,6 +356,10 @@ String? _shellRedirect(GoRouterState state, Ref ref) {
   if (path == '/agents/hosts') return Routes.settingsPage('hosts');
   // Settings › Agents became Agents & hosts (153-7).
   if (path == '/settings/agents') return Routes.settingsPage('hosts');
+  // The vault's search page became the palette (156o).
+  if (seg.length == 3 && seg[0] == 'v' && seg[2] == 'search') {
+    return Routes.browse(seg[1]);
+  }
   if (seg.length == 4 && seg[0] == 'v' && seg[2] == 'settings') {
     return Routes.settingsPage(seg[3] == 'client' ? 'device' : 'vaults');
   }

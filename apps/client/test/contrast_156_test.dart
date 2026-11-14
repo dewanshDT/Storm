@@ -8,7 +8,9 @@ import 'package:storm/ui/tokens.dart';
 /// The palette's rows (decision 156q), selected and not, in every theme:
 /// each word on the ground it is actually drawn on. The unselected ground
 /// is `surface`; the selected one is `surface2`, where `text3` would not
-/// pass, so nothing on it is `text3`.
+/// pass, so nothing on it is `text3`, and a snippet's highlight steps from
+/// `accent` to `text` (accent is 4.37:1 there in Storm dark). 156-3 adds
+/// the bar field, drawn on `surface`.
 void main() {
   for (final preset in StormPreset.values) {
     group(preset.label, () {
@@ -27,6 +29,7 @@ void main() {
               ('label', c.label),
               ('sub-line', c.sub),
               ('hint', c.hint),
+              ('snippet highlight', c.highlight),
             ]) {
               final ratio = contrastRatio(fg, c.ground);
               expect(
@@ -38,13 +41,24 @@ void main() {
               );
             }
             if (selected) {
-              expect([c.label, c.sub, c.hint], isNot(contains(t.text3)));
+              expect([
+                c.label,
+                c.sub,
+                c.hint,
+                c.highlight,
+              ], isNot(contains(t.text3)));
             }
           });
         }
       }
-      test('the group heading and the offline line: text3 on surface', () {
+      test('the group heading, the offline and text-slot lines: text3 on '
+          'surface', () {
         expect(contrastRatio(t.text3, t.surface), greaterThanOrEqualTo(4.5));
+      });
+      test('the bar field: text2 focused, text3 unfocused, on surface', () {
+        for (final ink in [t.text2, t.text3]) {
+          expect(contrastRatio(ink, t.surface), greaterThanOrEqualTo(4.5));
+        }
       });
     });
   }

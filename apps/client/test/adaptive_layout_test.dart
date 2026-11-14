@@ -128,7 +128,7 @@ void main() {
   });
 
   group('the rail is ordered the way the design orders it', () {
-    testWidgets('vault, then search, then folders, then actions', (
+    testWidgets('vault, then folders, then actions; no search field', (
       tester,
     ) async {
       // The order is the design decision, not the contents. Actions used to be
@@ -142,12 +142,18 @@ void main() {
       final sidebar = find.byType(VaultSidebar);
       Finder inRail(Finder f) => find.descendant(of: sidebar, matching: f);
 
-      final search = inRail(find.byKey(const Key('sidebar-search')));
+      final vault = inRail(find.text('Primary'));
+      final folders = inRail(find.text('FOLDERS'));
       final actions = inRail(find.byTooltip('Tags'));
-      expect(search, findsOneWidget, reason: 'the rail offers search');
-      expect(actions, findsOneWidget);
       expect(
-        topOf(search),
+        inRail(find.byKey(const Key('sidebar-search'))),
+        findsNothing,
+        reason: 'search is the bar field and the palette (156o)',
+      );
+      expect(actions, findsOneWidget);
+      expect(topOf(vault.first), lessThan(topOf(folders)));
+      expect(
+        topOf(folders),
         lessThan(topOf(actions)),
         reason: 'actions belong at the bottom of the rail',
       );

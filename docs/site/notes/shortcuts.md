@@ -31,11 +31,14 @@ Undo, redo and select all are the system's own.
 
 ## The command palette
 
-`⌘/Ctrl K` opens one search over everything: note titles in every vault,
-agent sessions, commands (with their shortcuts), Settings pages, folders,
-tags and hosts. It works from every screen, with or without a vault open.
-With nothing typed it shows what needs you, your recent notes and a few
-commands.
+`⌘/Ctrl K`, or a click on the search field in the app bar, opens one
+search over everything: note titles in every vault, agent sessions,
+commands (with their shortcuts), Settings pages, folders, tags and hosts,
+then **In note text**: the notes whose text matches, from every vault, with
+the matching words highlighted. It works from every screen, with or without
+a vault open. With nothing typed it shows what needs you, your recent notes
+and a few commands. On a phone it opens full screen from the pill's Search
+button, or from the search bubble in Agents and Settings.
 
 | Key | Does |
 |---|---|
@@ -55,7 +58,14 @@ Start with a character to search one kind of thing:
 | `/` | Folders |
 | `?` | Lists these prefixes |
 
-Offline, the palette searches what this device holds, and says so.
+Text search starts at two letters and only with no prefix. A note already
+listed by its title is not listed again under In note text. If a vault
+could not be searched in time, the palette says "Couldn't search {vault}";
+if the server could not search at all, the other results stay and one line
+says so.
+
+Offline, the palette searches what this device holds, and says so; there
+is no text search then.
 
 ## In the agent terminal
 

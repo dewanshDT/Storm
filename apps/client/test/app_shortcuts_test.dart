@@ -279,8 +279,9 @@ void main() {
       await t.tap(find.byKey(const Key('note-body')));
       await frames(t);
 
-      // The app bar's blank middle: no control, so only the tap-outside.
-      await t.tapAt(const Offset(450, 20));
+      // Blank bar left of the search field: no control, so only the
+      // tap-outside.
+      await t.tapAt(const Offset(200, 20));
       await frames(t);
       expect(
         FocusManager.instance.primaryFocus?.context
