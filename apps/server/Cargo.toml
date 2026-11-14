@@ -114,6 +114,7 @@ walkdir = "2.5.0"
 
 [dev-dependencies]
 tempdir = "0.3.7"
+tokio = { version = "1.53.1", features = ["test-util"] }
 tower = { version = "0.5.3", features = ["util"] }
 
 # Packaged with `cargo deb`. The release job copies the Flutter web build into
