@@ -580,6 +580,31 @@ fn claude_attention_hooks(settings: &mut serde_json::Value, exe: &Path) {
     ] {
         hooks[event] = json!([{"hooks": command(ATTENTION_CLEAR)}]);
     }
+    if let Some(log) = std::env::var_os("STORM_SPIKE_HOOK_LOG") {
+        // Decision 155 spike (S3): every hook event, timestamped, beside
+        // the OSC 7501 records.
+        let log = shell_quote(&std::path::PathBuf::from(log).display().to_string());
+        for event in [
+            "PermissionRequest",
+            "Notification",
+            "PreToolUse",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "UserPromptSubmit",
+            "Stop",
+            "StopFailure",
+            "SubagentStop",
+        ] {
+            add_hook(
+                settings,
+                event,
+                None,
+                json!({"type": "command", "command": format!(
+                    "{{ printf '%s {event} ' \"$(date +%s.%N)\"; head -c 1500 | tr '\\n' ' '; echo; }} >> {log}"
+                )}),
+            );
+        }
+    }
 }
 
 /// Adds `handler` to `event`'s hooks, in the group with `matcher` (none for

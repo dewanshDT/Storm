@@ -335,6 +335,14 @@ struct Events {
     /// 145g's log lines, each once per session: its words reached the
     /// host, and why they did not.
     said_logged: Mutex<std::collections::HashSet<&'static str>>,
+    /// Decision 155 (spike): the program's own OSC 7501 status, read when
+    /// the host answers its probe.
+    session: String,
+    program_on: bool,
+    program: Mutex<crate::program_status::ProgramStatus>,
+    /// The session's ordered input, there before `start` so the host's
+    /// reply to the probe is queued before any client can see a query.
+    reply: Option<tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl Events {
@@ -361,6 +369,88 @@ impl Events {
             gone: watch::channel(false).0,
             transcript: tokio::sync::Mutex::new(None),
             said_logged: Mutex::new(Default::default()),
+            session: String::new(),
+            program_on: false,
+            program: Mutex::new(Default::default()),
+            reply: None,
+        }
+    }
+
+    /// Answers OSC 7501 for this session, through `input`.
+    fn with_program_status(
+        mut self,
+        session: &str,
+        input: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    ) -> Self {
+        self.session = session.to_string();
+        self.program_on = true;
+        self.title = Mutex::new(TitleObserver::new(self.titles));
+        self.reply = Some(input);
+        self
+    }
+
+    /// The program's records, the probe and the titles in one read, in order.
+    fn program_output(&self, observer: &mut TitleObserver) {
+        use crate::program_status::{HOST, PROBE_REPLY, Seen, spike_log};
+        let now = std::time::Instant::now();
+        let mut program = self.program.lock().unwrap();
+        program.output_at(now);
+        for raw in observer.take_raw_titles() {
+            spike_log(json!({"session": self.session, "ev": "title", "raw": raw}));
+        }
+        for data in observer.take_program() {
+            let raw = String::from_utf8_lossy(&data).into_owned();
+            let seen = program.see(&data, now);
+            match &seen {
+                Seen::Answer => {
+                    let queued = self
+                        .reply
+                        .as_ref()
+                        .is_some_and(|tx| tx.send(PROBE_REPLY.to_vec()).is_ok());
+                    tracing::info!(session = %self.session, queued, "answered OSC 7501 ; ?");
+                    spike_log(
+                        json!({"session": self.session, "ev": "probe_answered", "raw": raw, "queued": queued,
+                        "queue_us": now.elapsed().as_micros() as u64}),
+                    );
+                }
+                Seen::Discarded(e) => {
+                    let host = HOST.failed();
+                    tracing::warn!(session = %self.session, error = e.as_str(), host_failures = host, "an OSC 7501 record did not parse");
+                    spike_log(
+                        json!({"session": self.session, "ev": "parse_failure", "raw": raw, "error": e.as_str(),
+                        "session_failures": program.failures(), "host_failures": host}),
+                    );
+                }
+                other => {
+                    spike_log(
+                        json!({"session": self.session, "ev": "record", "raw": raw, "seen": format!("{other:?}"),
+                        "children": program.children()}),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Activity and attention as the program reports them, else the title's.
+    fn program_now(&self, title: Option<crate::terminal::Activity>) -> ProgramNow {
+        if !self.program_on {
+            return ProgramNow {
+                activity: title,
+                source: crate::program_status::Source::Title,
+                attention: None,
+                state: None,
+            };
+        }
+        let now = std::time::Instant::now();
+        let mut p = self.program.lock().unwrap();
+        let (activity, source) = p.activity(title, now);
+        let attention = p.attention(now);
+        let state = p.root(now).map(|r| (r.state.as_str(), r.kind.clone()));
+        ProgramNow {
+            activity,
+            source,
+            attention,
+            state,
         }
     }
 
@@ -417,10 +507,72 @@ async fn type_when_ready(s: Arc<HostSession>, text: String) {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ProgramNow {
+    activity: Option<crate::terminal::Activity>,
+    source: crate::program_status::Source,
+    attention: Option<&'static str>,
+    state: Option<(&'static str, Option<String>)>,
+}
+
+impl ProgramNow {
+    const QUIET: (
+        crate::program_status::Source,
+        Option<crate::terminal::Activity>,
+        Option<&'static str>,
+        Option<&'static str>,
+    ) = (crate::program_status::Source::Title, None, None, None);
+
+    fn news(
+        &self,
+    ) -> (
+        crate::program_status::Source,
+        Option<crate::terminal::Activity>,
+        Option<&'static str>,
+        Option<&'static str>,
+    ) {
+        let own = self.source != crate::program_status::Source::Title;
+        (
+            self.source,
+            self.activity.filter(|_| own),
+            self.state.as_ref().map(|(s, _)| *s),
+            self.attention,
+        )
+    }
+}
+
 impl SessionEvents for Events {
     fn output(&self, bytes: &[u8]) {
-        if self.titles {
+        if self.program_on {
+            // Before the ring: a reply queued here is ahead of anything a
+            // client could send for a query in these bytes.
+            let mut observer = self.title.lock().unwrap();
+            observer.feed(bytes);
+            self.program_output(&mut observer);
+        } else if self.titles {
             self.title.lock().unwrap().feed(bytes);
+        }
+        if let Some(dir) = std::env::var_os("STORM_SPIKE_SCREEN_DIR") {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(std::path::Path::new(&dir).join(format!("{}.out", self.session)))
+            {
+                let at = f.metadata().map(|m| m.len()).unwrap_or(0);
+                let _ = f.write_all(bytes);
+                if let Ok(mut idx) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(std::path::Path::new(&dir).join(format!("{}.idx", self.session)))
+                {
+                    let t = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs_f64();
+                    let _ = writeln!(idx, "{t:.6} {at} {}", bytes.len());
+                }
+            }
         }
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
@@ -466,6 +618,8 @@ struct HostSession {
     attention_sent: Mutex<Option<&'static str>>,
     /// The hooks' turn last acknowledged by the server (144b).
     activity_sent: Mutex<Option<&'static str>>,
+    /// Decision 155 (spike): the program's state last posted.
+    program_sent: Mutex<Option<ProgramNow>>,
     /// Storm asked to park it (145e): its end is reported `parked` once
     /// its workspace is kept for a resume.
     parking: AtomicBool,
@@ -2165,17 +2319,32 @@ impl Host {
             }
             None => serde_json::Value::Null,
         };
-        let hooks = self
+        let mut hooks = self
             .gates
             .lock()
             .unwrap()
             .hooks(&provider_id, child_of.is_some());
-        let events = Arc::new(Events::new(
+        if std::env::var_os("STORM_SPIKE_ATTENTION_HOOKS").is_some() && is_claude {
+            // S3: G-134-7's hooks on a top-level session, beside OSC 7501.
+            hooks.attention = true;
+        }
+        let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let mut events = Events::new(
             self.config.scrollback_bytes,
             crate::profile::get(&provider_id).is_none_or(|p| p.titles),
             hooks,
             child_of.is_some(),
-        ));
+        );
+        events.session = id.clone();
+        let answer = self.config.program_status && crate::program_status::HOST.closed();
+        if self.config.program_status && !answer {
+            tracing::warn!(session = %id, "OSC 7501 records failed to parse on this host; not answering the probe until it restarts");
+        }
+        let events = Arc::new(if answer {
+            events.with_program_status(&id, input.clone())
+        } else {
+            events
+        });
         self.leaders
             .lock()
             .unwrap()
@@ -2323,7 +2492,6 @@ impl Host {
                     .await;
             });
         }
-        let (input, mut queue) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
         let host_session = Arc::new(HostSession {
             id: id.clone(),
             provider: provider_id.clone(),
@@ -2336,6 +2504,7 @@ impl Host {
             harness_sent: Mutex::new(None),
             attention_sent: Mutex::new(None),
             activity_sent: Mutex::new(None),
+            program_sent: Mutex::new(None),
             parking: AtomicBool::new(false),
             input,
         });
@@ -2497,8 +2666,23 @@ impl Host {
                 attention.is_some_and(|a| a != *s.attention_sent.lock().unwrap());
             let activity = s.events.hook_activity_now();
             let activity_changed = activity != *s.activity_sent.lock().unwrap();
+            let program = s
+                .events
+                .program_on
+                .then(|| s.events.program_now(title.activity));
+            // Title-sourced activity is already a title change; only what
+            // the program itself said is news here.
+            let program_changed = {
+                let sent = s.program_sent.lock().unwrap();
+                let was = sent.as_ref().map_or(ProgramNow::QUIET, ProgramNow::news);
+                program.as_ref().is_some_and(|p| p.news() != was)
+            };
             if end.is_none()
-                && (title != sent || harness_changed || attention_changed || activity_changed)
+                && (title != sent
+                    || harness_changed
+                    || attention_changed
+                    || activity_changed
+                    || program_changed)
             {
                 let wait = posted_at
                     .map_or(Duration::ZERO, |t| TITLE_EVERY.saturating_sub(t.elapsed()))
@@ -2523,11 +2707,15 @@ impl Host {
                 if let Some(attention) = attention {
                     body["attention"] = json!(attention);
                 }
+                if let Some(p) = &program {
+                    body = with_program_status(body, p, activity.is_some());
+                }
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
                 {
                     Ok(st) if st.is_success() => {
+                        *s.program_sent.lock().unwrap() = program;
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
@@ -3731,6 +3919,35 @@ fn with_hook_activity(mut body: serde_json::Value, activity: Option<&str>) -> se
         body["activity"] = json!(activity);
         body["activity_source"] = json!(crate::harness::PROVIDER_HOOK);
     }
+    body
+}
+
+/// Decision 155 (spike): the program's own state, and activity from it while
+/// its root record is live. A record that did not parse makes activity
+/// unknown (null), never a guessed idle: its title has no glyph by then.
+/// The derived attention is carried beside, for the log only; the server
+/// takes no attention from it yet.
+fn with_program_status(
+    mut body: serde_json::Value,
+    p: &ProgramNow,
+    hooks_said: bool,
+) -> serde_json::Value {
+    use crate::program_status::Source;
+    if !hooks_said && p.source != Source::Title {
+        body["activity"] = json!(p.activity);
+    }
+    body["program_status"] = json!(
+        p.state
+            .as_ref()
+            .map(|(state, kind)| json!({"state": state, "kind": kind}))
+    );
+    body["program_source"] = json!(match p.source {
+        Source::Program => "program_status",
+        Source::Title => "title",
+        Source::Unknown => "unknown",
+    });
+    body["program_attention"] = json!(p.attention);
+    crate::program_status::spike_log(json!({"ev": "post", "body": body.clone()}));
     body
 }
 

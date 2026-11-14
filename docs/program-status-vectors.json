@@ -1,0 +1,19 @@
+{
+  "about": "Decision 155 (draft, spike capture 2026-11-14, Claude Code 2.1.323 and 2.1.325 through a Storm host that answered OSC 7501 ; ?). Each record is the payload after `ESC ] 7501 ;`, as captured; activity and attention are what the host derives by the decision's mapping. null activity with source unknown means a record that did not parse.",
+  "reply": "\u001b]7501;?:states=idle,working,done,blocked,error:kinds=permission,question,auth\u001b\\",
+  "records": [
+    {"case": "startup, reply accepted", "raw": "state=idle:app=claude-code", "activity": "idle", "attention": null, "source": "program"},
+    {"case": "prompt sent", "raw": "state=working:app=claude-code", "activity": "working", "attention": null, "source": "program"},
+    {"case": "tool about to run", "raw": "state=working:app=claude-code:msg=V3JpdGluZyAib25lIiBpbnRvIG9uZS50eHQ=", "activity": "working", "attention": null, "source": "program"},
+    {"case": "1, 2: Bash permission prompt", "raw": "state=blocked:app=claude-code:kind=permission:msg=YXBwcm92ZSBCYXNoOiBlY2hvIG9uZSA+IG9uZS50eHQ=", "activity": "idle", "attention": "permission_prompt", "source": "program"},
+    {"case": "1: Esc at the prompt", "raw": "state=idle:app=claude-code", "activity": "idle", "attention": null, "source": "program"},
+    {"case": "3: turn finished", "raw": "state=done:app=claude-code", "activity": "idle", "attention": null, "source": "program"},
+    {"case": "5: AskUserQuestion", "raw": "state=blocked:app=claude-code:kind=question:msg=YW5zd2VyOiBEbyB5b3UgcHJlZmVyIHJlZCBvciBibHVlPyAoUmVkIMK3IEJsdWUp", "activity": "idle", "attention": "question", "source": "program"},
+    {"case": "8: API error", "raw": "state=error:app=claude-code:msg=QVBJIEVycm9yOiBDb25uZWN0aW9uIHJlZnVzZWQg4oCUIGEgZmlyZXdhbGwgb3IgcHJveHkgbWF5IGJlIGJsb2NraW5nIGl0IChFQ09OTlJFRlVTRUQp", "activity": "idle", "attention": null, "source": "program"},
+    {"case": "auth: 401 invalid token", "raw": "state=blocked:app=claude-code:kind=auth:msg=UGxlYXNlIHJ1biAvbG9naW4gwrcgQVBJIEVycm9yOiA0MDEgT0F1dGggYWNjZXNzIHRva2VuIGlzIGludmFsaWQu", "activity": "idle", "attention": "sign_in", "source": "program"},
+    {"case": "10: background subagent (child, root unchanged)", "raw": "state=working:app=claude-code:id=acce0dcebc0ae70cf:title=U2xlZXAgdGhlbiB3cml0ZSByaXZlciBwb2Vt", "activity": "idle", "attention": null, "source": "program", "after": "state=done:app=claude-code"},
+    {"case": "10: child ends", "raw": "state=clear:id=acce0dcebc0ae70cf", "activity": "idle", "attention": null, "source": "program", "after": "state=done:app=claude-code"},
+    {"case": "11: ← agent view", "raw": "state=clear", "activity": null, "attention": null, "source": "title"},
+    {"case": "unparsable", "raw": "state=thinking:app=claude-code", "activity": null, "attention": null, "source": "unknown", "after": "state=working:app=claude-code"}
+  ]
+}

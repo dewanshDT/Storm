@@ -89,6 +89,14 @@ pub struct RuntimeConfig {
     /// had ([`crate::login_env::for_host`]).
     #[serde(skip)]
     pub person: Option<crate::login_env::LoginEnv>,
+    /// Decision 155: answer a program's OSC 7501 probe and take its own
+    /// status report. `false` is the host's kill switch.
+    #[serde(default = "program_status_default")]
+    pub program_status: bool,
+}
+
+fn program_status_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -184,6 +192,7 @@ impl Default for RuntimeConfig {
             children_max: None,
             import_env: Vec::new(),
             person: None,
+            program_status: true,
         }
     }
 }
