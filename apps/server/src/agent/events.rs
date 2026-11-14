@@ -13,7 +13,7 @@ use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::Serialize;
 
-use super::attention::{BLOCKED, PERMISSION_PROMPT, USAGE_LIMIT};
+use super::attention::{BLOCKED, PERMISSION_PROMPT, QUESTION, SIGN_IN, USAGE_LIMIT};
 use super::scope::MAX_WAIT_IDS;
 use super::store::{SessionRecord, Store};
 use super::{AgentError, AgentManager, AgentResult, now};
@@ -64,11 +64,13 @@ pub const HOST_PROCESS: &str = "host_process";
 pub const STORM: &str = "storm";
 pub const PROVIDER_HOOK: &str = "provider_hook";
 pub const OUTPUT_PATTERN: &str = "output_pattern";
+/// The program's own OSC 7501 report (decision 155).
+pub const PROGRAM_STATUS: &str = "program_status";
 
 /// What a source's word is worth (144b).
 pub fn confidence(source: &str) -> &'static str {
     match source {
-        PROVIDER_HOOK => "reported",
+        PROVIDER_HOOK | PROGRAM_STATUS => "reported",
         OUTPUT_PATTERN => "heuristic",
         _ => "certain",
     }
@@ -186,7 +188,9 @@ pub struct ChildEvent {
 pub struct LiveSignals {
     /// `working` or `idle`, only from a gated idle signal.
     pub activity: Option<String>,
-    /// `permission_prompt` or `usage_limit`, only from a gated signal.
+    /// `permission_prompt` or `usage_limit` from a gated signal, or
+    /// `permission_prompt`, `question` or `sign_in` from the program's own
+    /// status (decision 155).
     pub attention: Option<String>,
 }
 
@@ -379,8 +383,8 @@ pub(super) fn record_usage(
     Ok(())
 }
 
-/// 134p's `needs_attention` with 144b's `usage_limit`: what a gated signal
-/// says while the session runs, then a `blocked` result for the round it is
+/// 134p's `needs_attention` with 144b's `usage_limit` and 155's `question`
+/// and `sign_in`: what a live signal says while the session runs, then a `blocked` result for the round it is
 /// in (145). An ended session needs none; since 145a nothing waits for a
 /// person's approval.
 pub(super) fn needs_attention_in(
@@ -395,6 +399,8 @@ pub(super) fn needs_attention_in(
         match live_attention {
             Some(PERMISSION_PROMPT) => return Ok(Some(PERMISSION_PROMPT)),
             Some(USAGE_LIMIT) => return Ok(Some(USAGE_LIMIT)),
+            Some(QUESTION) => return Ok(Some(QUESTION)),
+            Some(SIGN_IN) => return Ok(Some(SIGN_IN)),
             _ => {}
         }
     }
