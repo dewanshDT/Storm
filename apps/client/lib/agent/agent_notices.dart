@@ -14,11 +14,21 @@ import 'output_seen.dart';
 import 'sidebar_rules.dart';
 
 /// What a live change of a session's says to someone not looking at it
-/// (decision 154, Notices). In-app only: Storm has no OS notifications.
+/// (decision 154, Notices; decision 155, AM115). In-app only: Storm has no
+/// OS notifications.
 enum AgentNotice {
   needsYou,
 
-  /// Never "done": a top-level agent at a prompt can read as idle (134 A3).
+  /// The program said `done`. "Its turn": a `run_in_background` shell can
+  /// still be running (decision 155 spike, case 9).
+  finishedTurn,
+
+  /// The program said `error`.
+  hitError,
+
+  /// A session known only by its title went idle, or a program went from
+  /// working to idle without `done` (Esc, Ctrl+C). Never "done": a title
+  /// can't tell a prompt from a finish (134 A3).
   stoppedWorking,
 }
 
@@ -35,9 +45,21 @@ AgentNotice? noticeOf(AgentSession before, AgentSession after) {
   if (!needsYou(before) && needsYou(after) && _needsMoreThanADelete(after)) {
     return AgentNotice.needsYou;
   }
+  final idle = after.status == 'running' && after.activity == 'idle';
+  final program = after.status == 'running' ? after.programStatus : null;
+  final was = before.programStatus;
+  bool entered(String state) =>
+      program?.state == state &&
+      (was?.state != state || was?.since != program?.since);
+  if (program != null && idle) {
+    if (entered('done')) return AgentNotice.finishedTurn;
+    if (entered('error')) return AgentNotice.hitError;
+  }
+  if (program != null && program.state != 'idle') return null;
   final wasWorking = before.status == 'running' && before.working;
-  final stopped = after.ended || (after.status == 'running' && !after.working);
-  return wasWorking && stopped ? AgentNotice.stoppedWorking : null;
+  return wasWorking && (after.ended || idle)
+      ? AgentNotice.stoppedWorking
+      : null;
 }
 
 /// One transition, as this device remembers it toasted: the same prompt or
@@ -46,6 +68,10 @@ String noticeKey(AgentNotice n, AgentSession s) => switch (n) {
   AgentNotice.needsYou =>
     '${s.id} needs ${attentionKindOf(s) ?? 'decision'}@'
         '${s.pendingDecisions.firstOrNull?.id ?? s.spawn.attention?.since?.toIso8601String() ?? s.outputEnd ?? ''}',
+  AgentNotice.finishedTurn =>
+    '${s.id} done@${s.programStatus?.since?.toIso8601String() ?? ''}',
+  AgentNotice.hitError =>
+    '${s.id} error@${s.programStatus?.since?.toIso8601String() ?? ''}',
   AgentNotice.stoppedWorking => '${s.id} stopped@${s.outputEnd ?? ''}',
 };
 
@@ -54,11 +80,13 @@ String noticeKey(AgentNotice n, AgentSession s) => switch (n) {
 const kNoticeToastedKey = 'storm.agents.notice_toasted';
 const _toastedLimit = 200;
 
-/// Raises "{name} needs you · Open" and "{name} stopped working · Open"
-/// from live session changes on every screen while signed in (decision 154,
-/// slice 154-4). Never from a snapshot or a resync, so a reconnect or a
-/// return to the app says nothing; never for the session on screen; a stop
-/// only while its output is unread here, the same rule as the row's dot.
+/// Raises "{name} needs you · Open", "{name} finished its turn · Open",
+/// "{name} hit an error · Open" and "{name} stopped working · Open" from
+/// live session changes on every screen while signed in (decision 154,
+/// slice 154-4; decision 155, slice 155-1). Never from a snapshot or a
+/// resync, so a reconnect or a return to the app says nothing; never for
+/// the session on screen; anything but a need only while its output is
+/// unread here, the same rule as the row's dot.
 class AgentNoticeWatcher extends ConsumerStatefulWidget {
   const AgentNoticeWatcher({
     super.key,
@@ -159,7 +187,7 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     final toasted = await _loadToasted();
     if (!mounted) return;
     if (s.id == shownSessionOf(widget.location)) return;
-    if (n == AgentNotice.stoppedWorking &&
+    if (n != AgentNotice.needsYou &&
         !outputUnread(ref.read(seenOutputProvider).value, s)) {
       return;
     }
@@ -176,6 +204,8 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
         key: ValueKey('notice-toast-${n.name}-$id'),
         content: Text(switch (n) {
           AgentNotice.needsYou => '${s.displayName} needs you',
+          AgentNotice.finishedTurn => '${s.displayName} finished its turn',
+          AgentNotice.hitError => '${s.displayName} hit an error',
           AgentNotice.stoppedWorking => '${s.displayName} stopped working',
         }),
         persist: false,

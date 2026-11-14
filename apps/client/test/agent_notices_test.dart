@@ -27,15 +27,45 @@ void main() {
     String? attention,
     int? outputEnd = 50,
     List<Map<String, dynamic>>? decisions,
+    Map<String, dynamic>? program,
   }) => AgentSession.fromJson({
     ...agentSession(id, name: name, status: status, activity: activity),
     'needs_attention': ?attention,
     'output_end': outputEnd,
     'pending_decisions': ?decisions,
+    'program_status': ?program,
   });
 
   AgentSession working(String id, {int? outputEnd = 50}) =>
       view(id, activity: 'working', outputEnd: outputEnd);
+
+  const t1 = '2026-11-14T12:00:00Z';
+  const t2 = '2026-11-14T12:05:00Z';
+
+  /// A session whose program reports its own state (decision 155), as the
+  /// server derives activity and attention from it.
+  AgentSession reporting(
+    String id,
+    String state, {
+    String name = 'alpha',
+    String? kind,
+    String since = t1,
+    String? activity,
+    int? outputEnd = 90,
+  }) => view(
+    id,
+    name: name,
+    activity: activity ?? (state == 'working' ? 'working' : 'idle'),
+    attention: state == 'blocked'
+        ? switch (kind) {
+            'permission' => 'permission_prompt',
+            'auth' => 'sign_in',
+            _ => 'question',
+          }
+        : null,
+    outputEnd: outputEnd,
+    program: {'state': state, 'kind': ?kind, 'since': since},
+  );
 
   group('which changes say something', () {
     test('entering needs-you, from any state', () {
@@ -73,7 +103,6 @@ void main() {
     test('working to idle, completed, failed or stopped', () {
       for (final after in [
         view('a', activity: 'idle'),
-        view('a'),
         view('a', status: 'completed'),
         view('a', status: 'failed'),
         view('a', status: 'stopped'),
@@ -85,6 +114,103 @@ void main() {
       expect(
         noticeOf(view('a', status: 'starting'), view('a', activity: 'idle')),
         isNull,
+      );
+    });
+
+    test('working to unknown says nothing (155-R1 safeguard)', () {
+      expect(noticeOf(working('a'), view('a')), isNull);
+      expect(
+        noticeOf(reporting('a', 'working'), reporting('a', 'done').withUnknown),
+        isNull,
+      );
+      expect(
+        noticeOf(
+          reporting('a', 'working'),
+          reporting('a', 'error').withUnknown,
+        ),
+        isNull,
+      );
+      expect(
+        noticeOf(reporting('a', 'working'), reporting('a', 'idle').withUnknown),
+        isNull,
+      );
+    });
+
+    test('decision 155: what the program said, in its words', () {
+      final busy = reporting('a', 'working');
+      expect(noticeOf(busy, reporting('a', 'done')), AgentNotice.finishedTurn);
+      expect(noticeOf(busy, reporting('a', 'error')), AgentNotice.hitError);
+      for (final kind in ['permission', 'question', 'auth', null]) {
+        expect(
+          noticeOf(busy, reporting('a', 'blocked', kind: kind)),
+          AgentNotice.needsYou,
+          reason: '$kind',
+        );
+      }
+      expect(
+        noticeOf(busy, reporting('a', 'idle')),
+        AgentNotice.stoppedWorking,
+        reason: 'Esc or Ctrl+C: idle without done',
+      );
+      expect(
+        noticeOf(
+          reporting('a', 'blocked', kind: 'permission'),
+          reporting('a', 'done'),
+        ),
+        AgentNotice.finishedTurn,
+      );
+      expect(noticeOf(busy, busy), isNull);
+      expect(
+        noticeOf(working('a'), reporting('a', 'done')),
+        AgentNotice.finishedTurn,
+        reason: 'the first record after the title said working',
+      );
+      expect(
+        noticeOf(busy, view('a', status: 'completed')),
+        AgentNotice.stoppedWorking,
+        reason: 'an ended session has no program status',
+      );
+    });
+
+    test('a done or an error is said once per record', () {
+      final done = reporting('a', 'done');
+      expect(noticeOf(done, reporting('a', 'done', outputEnd: 120)), isNull);
+      expect(
+        noticeOf(done, reporting('a', 'done', since: t2)),
+        AgentNotice.finishedTurn,
+      );
+      expect(
+        noticeOf(reporting('a', 'error'), reporting('a', 'error')),
+        isNull,
+      );
+      expect(
+        noticeOf(done, reporting('a', 'idle')),
+        isNull,
+        reason: 'not working before',
+      );
+      expect(
+        noticeOf(
+          reporting('a', 'working'),
+          reporting('a', 'done', activity: 'working'),
+        ),
+        isNull,
+        reason: 'still working, whatever the record says',
+      );
+      expect(
+        noticeKey(AgentNotice.finishedTurn, done),
+        noticeKey(
+          AgentNotice.finishedTurn,
+          reporting('a', 'done', outputEnd: 500),
+        ),
+      );
+      expect(
+        noticeKey(AgentNotice.finishedTurn, done),
+        isNot(
+          noticeKey(
+            AgentNotice.finishedTurn,
+            reporting('a', 'done', since: t2),
+          ),
+        ),
       );
     });
 
@@ -180,6 +306,79 @@ void main() {
         await disposeShell(t, c);
       });
     }
+
+    for (final (what, after, words) in [
+      ('done', reporting('ags_1', 'done'), 'alpha finished its turn'),
+      ('error', reporting('ags_1', 'error'), 'alpha hit an error'),
+      (
+        'blocked kind=auth',
+        reporting('ags_1', 'blocked', kind: 'auth'),
+        'alpha needs you',
+      ),
+      (
+        'blocked kind=permission',
+        reporting('ags_1', 'blocked', kind: 'permission'),
+        'alpha needs you',
+      ),
+      ('idle (Esc)', reporting('ags_1', 'idle'), 'alpha stopped working'),
+    ]) {
+      testWidgets('decision 155: working to $what says "$words"', (t) async {
+        final c = await mount(t, snapshot: [reporting('ags_1', 'working')]);
+        await push(t, after);
+        expect(find.text(words), findsOneWidget);
+        expect(toast(), findsOneWidget);
+        await disposeShell(t, c);
+      });
+    }
+
+    testWidgets('decision 155: a turn already seen says nothing, a need '
+        'still does', (t) async {
+      final c = await mount(
+        t,
+        snapshot: [reporting('ags_1', 'working', outputEnd: 50)],
+      );
+      await push(t, reporting('ags_1', 'done', outputEnd: 50));
+      await push(t, reporting('ags_1', 'error', since: t2, outputEnd: 50));
+      expect(toast(), findsNothing);
+      await push(t, reporting('ags_1', 'blocked', kind: 'question'));
+      expect(find.text('alpha needs you'), findsOneWidget);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('decision 155: one "finished its turn" per record, by its '
+        'since', (t) async {
+      final c = await mount(t, snapshot: [reporting('ags_1', 'working')]);
+      await push(t, reporting('ags_1', 'done'));
+      expect(find.text('alpha finished its turn'), findsOneWidget);
+      await push(t, reporting('ags_1', 'done', outputEnd: 95));
+      await push(t, reporting('ags_1', 'working', outputEnd: 95));
+      await push(t, reporting('ags_1', 'done', outputEnd: 100));
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getStringList(kNoticeToastedKey), [
+        noticeKey(AgentNotice.finishedTurn, reporting('ags_1', 'done')),
+      ]);
+      await push(t, reporting('ags_1', 'working', outputEnd: 100));
+      await push(t, reporting('ags_1', 'done', since: t2, outputEnd: 110));
+      expect(prefs.getStringList(kNoticeToastedKey), hasLength(2));
+      expect(find.text('alpha finished its turn'), findsOneWidget);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('decision 155: unknown activity never toasts', (t) async {
+      final c = await mount(t, snapshot: [reporting('ags_1', 'working')]);
+      await push(t, view('ags_1', outputEnd: 90));
+      await push(t, reporting('ags_1', 'done').withUnknown);
+      expect(toast(), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('a title-only session keeps "stopped working"', (t) async {
+      final c = await mount(t, snapshot: [working('ags_1')]);
+      await push(t, view('ags_1', activity: 'idle', outputEnd: 90));
+      expect(find.text('alpha stopped working'), findsOneWidget);
+      expect(find.textContaining('finished'), findsNothing);
+      await disposeShell(t, c);
+    });
 
     testWidgets('working to idle when already seen: no toast and no dot', (
       t,
@@ -338,5 +537,26 @@ void main() {
       expect(toast(), findsNothing);
       await disposeShell(t, c);
     });
+  });
+}
+
+extension on AgentSession {
+  /// This view with its activity unknown, as a host whose program's records
+  /// stopped parsing posts it.
+  AgentSession get withUnknown => AgentSession.fromJson({
+    'id': id,
+    'host_id': hostId,
+    'workspace': workspace,
+    'provider': provider,
+    'status': status,
+    'name': name,
+    'activity': null,
+    'output_end': outputEnd,
+    if (programStatus case final p?)
+      'program_status': {
+        'state': p.state,
+        'kind': ?p.kind,
+        'since': p.since?.toIso8601String(),
+      },
   });
 }
