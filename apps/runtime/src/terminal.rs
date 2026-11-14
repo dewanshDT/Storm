@@ -21,29 +21,59 @@ pub struct Title {
 
 /// Feeds a session's output through a VT parser and keeps what its latest
 /// title says. A name, once given, survives a later title that has none.
-#[derive(Default)]
+/// The same pass collects OSC 7501 payloads (decision 155) for the caller.
 pub struct TitleObserver {
     parser: vte::Parser,
     sink: Sink,
     current: Title,
 }
 
-#[derive(Default)]
+impl Default for TitleObserver {
+    fn default() -> Self {
+        Self::new(true, false)
+    }
+}
+
 struct Sink {
+    titles: bool,
+    program_status: bool,
     latest: Option<String>,
+    program: Vec<Vec<u8>>,
 }
 
 impl vte::Perform for Sink {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if let [kind, text @ ..] = params
-            && matches!(*kind, b"0" | b"2")
-        {
-            self.latest = Some(String::from_utf8_lossy(&text.join(&b';')).into_owned());
+        match params {
+            [kind, text @ ..] if self.titles && matches!(*kind, b"0" | b"2") => {
+                self.latest = Some(String::from_utf8_lossy(&text.join(&b';')).into_owned());
+            }
+            [b"7501", data @ ..] if self.program_status => self.program.push(data.join(&b';')),
+            _ => {}
         }
     }
 }
 
 impl TitleObserver {
+    /// `titles: false` reads no titles; `program_status` keeps OSC 7501
+    /// payloads for [`Self::take_program`].
+    pub fn new(titles: bool, program_status: bool) -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            sink: Sink {
+                titles,
+                program_status,
+                latest: None,
+                program: Vec::new(),
+            },
+            current: Title::default(),
+        }
+    }
+
+    /// The OSC 7501 payloads seen since the last call, in order.
+    pub fn take_program(&mut self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.sink.program)
+    }
+
     /// Returns the new state when this output changed it.
     pub fn feed(&mut self, bytes: &[u8]) -> Option<Title> {
         self.parser.advance(&mut self.sink, bytes);

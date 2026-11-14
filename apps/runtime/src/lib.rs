@@ -87,6 +87,7 @@ pub mod peer_identity;
 pub mod platform;
 pub mod plugins;
 pub mod profile;
+pub mod program_status;
 pub mod provider;
 mod pty;
 pub mod race;
