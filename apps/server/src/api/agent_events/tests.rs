@@ -569,3 +569,96 @@ fn the_shipped_pace_is_decision_154s() {
     assert_eq!(PACE.keepalive, Duration::from_secs(15));
     assert_eq!(Frame::resync().sse(), super::super::SSE_RESYNC);
 }
+
+/// A-155-4 at the shipped pace: a top-level session's program saying
+/// `blocked kind=permission` reaches a subscriber on the state lane as
+/// needs-you within 1.2 s, and its `idle` clears it the same way. The
+/// record's `msg` and `title` are never kept or sent.
+#[tokio::test]
+async fn a_programs_blocked_is_pushed_at_once_and_its_words_never_are() {
+    let dir = tempdir::TempDir::new("storm-155-events-program").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut stream = f.open().await;
+    let snapshot = stream.expect("snapshot").await;
+    assert_eq!(
+        snapshot.data["sessions"][0]["program_status"],
+        serde_json::Value::Null
+    );
+
+    // "approve Bash: cat ~/.ssh/id_ed25519", base64 as OSC 7501 carries it.
+    let words = "YXBwcm92ZSBCYXNoOiBjYXQgfi8uc3NoL2lkX2VkMjU1MTk=";
+    let blocked = serde_json::json!({
+        "status": "running", "title": "Claude Code", "activity": "idle",
+        "activity_source": "program_status",
+        "attention": "permission_prompt", "attention_source": "program_status",
+        "program_status": {"state": "blocked", "kind": "permission", "app": "claude-code",
+            "msg": words, "title": words, "progress": 40},
+        "msg": words,
+    });
+    let sent = Instant::now();
+    f.report(&id, blocked);
+    let event = stream
+        .next(Duration::from_millis(1200))
+        .await
+        .expect("blocked took over 1.2 s");
+    assert!(sent.elapsed() <= Duration::from_millis(1200));
+    assert_eq!(event.name, "session");
+    assert_eq!(event.data["needs_attention"], "permission_prompt");
+    assert_eq!(event.data["attention"]["kind"], "permission_prompt");
+    assert_eq!(event.data["activity"], "idle");
+    let program = &event.data["program_status"];
+    assert_eq!(
+        (&program["state"], &program["kind"]),
+        (&"blocked".into(), &"permission".into())
+    );
+    assert_eq!(program["since"], event.data["attention"]["since"]);
+    assert_eq!(program.as_object().unwrap().len(), 3, "{program}");
+
+    let view = json(
+        f.ask(get(&format!("/v1/agent/sessions/{id}"), Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    assert_eq!(view["program_status"], *program);
+    for text in [event.raw.clone(), view.to_string()] {
+        assert!(!text.contains(words), "{text}");
+        assert!(!text.contains("ssh"), "{text}");
+    }
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "title": "Claude Code", "activity": "idle",
+            "activity_source": "program_status",
+            "program_status": {"state": "idle", "app": "claude-code"}}),
+    );
+    let cleared = stream
+        .next(Duration::from_millis(1200))
+        .await
+        .expect("idle took over 1.2 s");
+    assert_eq!(cleared.data["needs_attention"], serde_json::Value::Null);
+    assert_eq!(cleared.data["attention"], serde_json::Value::Null);
+    assert_eq!(cleared.data["program_status"]["state"], "idle");
+    assert!(cleared.data["program_status"].get("kind").is_none());
+}
+
+/// The same record reported again changes nothing a client sees.
+#[tokio::test]
+async fn an_unchanged_record_sends_nothing() {
+    let dir = tempdir::TempDir::new("storm-155-events-dedup").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let done = serde_json::json!({"status": "running", "activity": "idle",
+        "program_status": {"state": "done", "app": "claude-code"}});
+    f.report(&id, done.clone());
+    let mut rx = f.feed(QUICK, QUEUE);
+    let (_, snapshot) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(snapshot["sessions"][0]["program_status"]["state"], "done");
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..3 {
+        f.report(&id, done.clone());
+    }
+    let sent = next_frame(&mut rx, QUICK.output + QUICK.state).await;
+    assert!(sent.is_none(), "{sent:?}");
+}

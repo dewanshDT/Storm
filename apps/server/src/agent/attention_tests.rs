@@ -294,3 +294,431 @@ fn idle_never_sets_it() {
     f.m.hello("hst_A", hello).unwrap();
     assert_eq!(f.attention(&plain), None, "nor a hello");
 }
+
+// ---- program status (decision 155) -------------------------------------------
+
+/// A status body as 155-R1 posts it: every key of the record present,
+/// `kind` and `app` null when there are none.
+fn program(state: &str, kind: Option<&str>, activity: &str) -> serde_json::Value {
+    serde_json::json!({
+        "status": "running", "title": "Claude Code", "activity": activity,
+        "activity_source": "program_status",
+        "program_status": {"state": state, "kind": kind, "app": null},
+    })
+}
+
+impl Fixture {
+    fn program(&self, id: &str) -> Option<(&'static str, Option<&'static str>)> {
+        let r = self.m.get(id).unwrap();
+        self.m.program_status(&r).map(|p| (p.state, p.kind))
+    }
+
+    fn activity(&self, id: &str) -> Option<String> {
+        self.m.get(id).unwrap().activity
+    }
+}
+
+/// Q7 and AM113: each root record's activity, attention and view, for an
+/// agent with no gated signal at all and for a Shell running one, as for
+/// Claude Code: by capability, never by provider.
+#[test]
+fn each_program_state_maps_to_activity_and_attention() {
+    let f = fixture();
+    let rows = [
+        (("idle", None), "idle", None, ("idle", None)),
+        (("working", None), "working", None, ("working", None)),
+        (("done", None), "idle", None, ("done", None)),
+        (("error", None), "idle", None, ("error", None)),
+        (
+            ("blocked", Some("permission")),
+            "idle",
+            Some(PROMPT),
+            ("blocked", Some("permission")),
+        ),
+        (
+            ("blocked", Some("question")),
+            "idle",
+            Some("question"),
+            ("blocked", Some("question")),
+        ),
+        (
+            ("blocked", None),
+            "idle",
+            Some("question"),
+            ("blocked", None),
+        ),
+        (
+            ("blocked", Some("auth")),
+            "idle",
+            Some("sign_in"),
+            ("blocked", Some("auth")),
+        ),
+        (
+            ("blocked", Some("payment")),
+            "idle",
+            Some("question"),
+            ("blocked", None),
+        ),
+        (("done", Some("permission")), "idle", None, ("done", None)),
+    ];
+    for provider in ["claude-code", "codex", "shell"] {
+        let s = f.launch(provider).id;
+        for ((state, kind), activity, attention, view) in rows {
+            f.report(&s, program(state, kind, activity));
+            let case = format!("{provider} {state} {kind:?}");
+            assert_eq!(f.activity(&s).as_deref(), Some(activity), "{case}");
+            assert_eq!(f.attention(&s), attention, "{case}");
+            assert_eq!(f.program(&s), Some(view), "{case}");
+            let r = f.m.get(&s).unwrap();
+            let reason = f.m.attention(&r).unwrap().map(|a| a.kind);
+            assert_eq!(reason, attention, "{case}");
+        }
+    }
+}
+
+/// Any state but `blocked` clears what a `blocked` set, and so does a
+/// report saying no record is live (`null`, `clear`, or one that did not
+/// parse).
+#[test]
+fn a_program_that_is_no_longer_blocked_needs_no_one() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    let no_record = [
+        serde_json::json!({"status": "running", "activity": "idle", "program_status": null}),
+        serde_json::json!({"status": "running", "activity": "idle", "program_status": "garbled"}),
+        program("clear", None, "idle"),
+        program("thinking", None, "idle"),
+    ];
+    for (state, kind) in [
+        ("idle", None),
+        ("working", None),
+        ("done", None),
+        ("error", None),
+    ] {
+        for blocked in ["permission", "question", "auth"] {
+            f.report(&s, program("blocked", Some(blocked), "idle"));
+            assert!(f.attention(&s).is_some(), "{blocked}");
+            f.report(&s, program(state, kind, "idle"));
+            assert_eq!(f.attention(&s), None, "{blocked} then {state}");
+        }
+    }
+    for body in no_record {
+        f.report(&s, program("blocked", Some("permission"), "idle"));
+        f.report(&s, body.clone());
+        assert_eq!(f.attention(&s), None, "{body}");
+        assert_eq!(f.program(&s), None, "{body}");
+        assert_eq!(
+            f.activity(&s).as_deref(),
+            Some("idle"),
+            "the title's: {body}"
+        );
+    }
+}
+
+/// A report that does not carry the field (155-R1's one-shot `running`)
+/// changes nothing of the record; an end clears it whatever it carries.
+#[test]
+fn a_report_without_the_field_keeps_the_record() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    f.report(&s, program("blocked", Some("permission"), "idle"));
+    let since = f.m.program_status(&f.m.get(&s).unwrap()).unwrap().since;
+    f.report(
+        &s,
+        serde_json::json!({"status": "running", "title": "Claude Code", "activity": "idle"}),
+    );
+    assert_eq!(f.program(&s), Some(("blocked", Some("permission"))));
+    assert_eq!(f.attention(&s), Some(PROMPT));
+    assert_eq!(
+        f.m.program_status(&f.m.get(&s).unwrap()).unwrap().since,
+        since
+    );
+    f.report(
+        &s,
+        serde_json::json!({"status": "completed", "exit_code": 0}),
+    );
+    assert_eq!(f.program(&s), None);
+    assert_eq!(f.attention(&s), None);
+    let live = f.m.live.lock().unwrap();
+    assert!(live.sessions[&s].program.is_none(), "not kept past its end");
+}
+
+/// The host's activity is taken as it is, never re-derived from the
+/// record: a root `done` with a live working child is `working` (155-R1).
+/// A null is its unknown and stays unknown.
+#[test]
+fn the_hosts_activity_is_taken_as_it_is() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    f.report(&s, program("done", None, "working"));
+    assert_eq!(f.activity(&s).as_deref(), Some("working"));
+    assert_eq!(f.program(&s), Some(("done", None)));
+    for state in ["working", "done", "idle"] {
+        let mut body = program(state, None, "idle");
+        body["activity"] = serde_json::Value::Null;
+        f.report(&s, body);
+        assert_eq!(f.activity(&s), None, "{state}");
+    }
+}
+
+/// 155-R1's safeguard: after a record that did not parse the host posts
+/// activity null with no record. That is unknown: no idle, and nothing
+/// the record had set.
+#[test]
+fn a_parse_failure_is_unknown_and_needs_no_one() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    f.report(&s, program("blocked", Some("permission"), "idle"));
+    assert_eq!(f.attention(&s), Some(PROMPT));
+    f.report(
+        &s,
+        serde_json::json!({"status": "running", "title": "Claude Code", "activity": null,
+            "activity_source": "program_status", "attention": null, "program_status": null}),
+    );
+    assert_eq!(f.activity(&s), None);
+    assert_eq!(f.attention(&s), None);
+    assert_eq!(f.program(&s), None);
+}
+
+/// `docs/program-status-vectors.json`, which the host's suite reads too:
+/// each status body the host posts for a captured record, as it builds it,
+/// gives the view the vector says.
+#[test]
+fn every_captured_record_reads_as_the_vectors_say() {
+    let vectors: serde_json::Value =
+        serde_json::from_str(include_str!("../../../../docs/program-status-vectors.json")).unwrap();
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    for v in vectors["records"].as_array().unwrap() {
+        let case = &v["case"];
+        let mut body = serde_json::json!({
+            "status": "running", "title": "Claude Code",
+            "activity": v["activity"], "attention": null,
+            "program_status": v["program_status"],
+        });
+        match v["source"].as_str().unwrap() {
+            "title" => body["activity"] = "working".into(),
+            _ => body["activity_source"] = "program_status".into(),
+        }
+        if !v["attention"].is_null() {
+            body["attention"] = v["attention"].clone();
+            body["attention_source"] = "program_status".into();
+        }
+        f.report(&s, body);
+        let r = f.m.get(&s).unwrap();
+        let view = serde_json::to_value(f.m.program_status(&r)).unwrap();
+        let expected = match v["program_status"].as_object() {
+            None => serde_json::Value::Null,
+            Some(p) => {
+                let mut p = p.clone();
+                p.remove("app");
+                p.retain(|_, v| !v.is_null());
+                serde_json::Value::Object(p)
+            }
+        };
+        let mut seen = view.clone();
+        if let Some(o) = seen.as_object_mut() {
+            o.remove("since");
+        }
+        assert_eq!(seen, expected, "{case}");
+        let activity = match v["source"].as_str().unwrap() {
+            "title" => serde_json::json!("working"),
+            _ => v["activity"].clone(),
+        };
+        assert_eq!(serde_json::json!(f.activity(&s)), activity, "{case}");
+        assert_eq!(serde_json::json!(f.attention(&s)), v["attention"], "{case}");
+        let leaked = serde_json::to_string(&view).unwrap();
+        assert!(!leaked.contains("msg") && !leaked.contains("app"), "{case}");
+    }
+}
+
+/// A3: `blocked` is the program's own statement; idle, done and error,
+/// however long, never need a person.
+#[test]
+fn a_programs_idle_never_sets_attention() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    for state in ["idle", "done", "error", "idle", "idle"] {
+        f.report(&s, program(state, None, "idle"));
+        assert_eq!(f.attention(&s), None, "{state}");
+    }
+}
+
+/// A host from before decision 155 sends no `program_status`: activity and
+/// a gated hook's prompt are exactly as before, and a malformed field is
+/// no record, never a refused report.
+#[test]
+fn an_older_host_sees_no_change() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    let codex = f.launch("codex").id;
+    for (body, activity, attention) in [
+        (
+            serde_json::json!({"status": "running", "activity": "working"}),
+            Some("working"),
+            None,
+        ),
+        (
+            serde_json::json!({"status": "running", "activity": "idle", "attention": PROMPT}),
+            Some("idle"),
+            Some(PROMPT),
+        ),
+        (
+            serde_json::json!({"status": "running", "activity": "idle", "attention": null}),
+            Some("idle"),
+            None,
+        ),
+        (
+            serde_json::json!({"status": "running", "activity": "thinking"}),
+            None,
+            None,
+        ),
+    ] {
+        f.report(&s, body.clone());
+        assert_eq!(f.activity(&s).as_deref(), activity, "{body}");
+        assert_eq!(
+            f.attention(&s),
+            attention,
+            "{body}: the gated hook, as before"
+        );
+        assert_eq!(f.program(&s), None, "{body}");
+    }
+    for malformed in [
+        serde_json::json!("blocked"),
+        serde_json::json!({"kind": "permission"}),
+        serde_json::json!({"state": 3}),
+        serde_json::json!([]),
+    ] {
+        f.report(
+            &codex,
+            serde_json::json!({"status": "running", "activity": "working", "program_status": malformed}),
+        );
+        assert_eq!(
+            f.activity(&codex).as_deref(),
+            Some("working"),
+            "{malformed}"
+        );
+        assert_eq!(f.program(&codex), None, "{malformed}");
+    }
+}
+
+/// Q10: while a record is live it decides, so a hook's stale prompt after
+/// an Esc is not taken; with none, a child's hook is the fallback (146c).
+/// A usage limit is the hooks' alone and stays.
+#[test]
+fn a_live_record_wins_over_a_hook_and_the_hook_is_the_fallback() {
+    let f = fixture();
+    let (_parent, child) = f.tree();
+    f.report(
+        &child,
+        serde_json::json!({"status": "running", "attention": PROMPT}),
+    );
+    assert_eq!(
+        f.attention(&child),
+        Some(PROMPT),
+        "the hook, with no record"
+    );
+
+    let mut stale = program("idle", None, "idle");
+    stale["attention"] = PROMPT.into();
+    f.report(&child, stale);
+    assert_eq!(f.attention(&child), None, "Esc: the record wins");
+
+    let mut asked = program("blocked", Some("question"), "idle");
+    asked["attention"] = PROMPT.into();
+    f.report(&child, asked);
+    assert_eq!(f.attention(&child), Some("question"), "the record's kind");
+
+    f.m.gate_signals_for_tests(&[super::attention::GatedSignal {
+        provider: "claude-code",
+        signal: "usage_limit",
+        source: "provider_hook",
+    }]);
+    let mut limited = program("idle", None, "idle");
+    limited["attention"] = "usage_limit".into();
+    f.report(&child, limited);
+    assert_eq!(f.attention(&child), Some("usage_limit"));
+}
+
+/// `since` is when the record became what it is, so a client can say how
+/// long; a report of the same record keeps it.
+#[test]
+fn a_records_since_is_its_first_report() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    let since = |f: &Fixture| {
+        let r = f.m.get(&s).unwrap();
+        f.m.program_status(&r).unwrap().since
+    };
+    f.report(&s, program("blocked", Some("permission"), "idle"));
+    let first = since(&f);
+    let r = f.m.get(&s).unwrap();
+    assert_eq!(
+        f.m.attention(&r).unwrap().unwrap().since.as_deref(),
+        Some(first.as_str())
+    );
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    f.report(&s, program("blocked", Some("permission"), "idle"));
+    assert_eq!(since(&f), first, "the same record");
+    f.report(&s, program("blocked", Some("question"), "idle"));
+    assert_ne!(since(&f), first, "another kind is another record");
+}
+
+/// A record is shown only while its session runs, and a hello carries it.
+#[test]
+fn a_record_lives_with_its_session_and_comes_back_with_hello() {
+    let f = fixture();
+    let s = f.launch("claude-code").id;
+    f.report(&s, program("blocked", Some("auth"), "idle"));
+    f.m.disconnect_host("hst_A", f.generation);
+    assert_eq!(f.program(&s), None, "unknown while its host is away");
+    assert_eq!(f.attention(&s), None);
+
+    let (_generation, _link) = f.m.connect_host("hst_A");
+    let mut hello = hello();
+    let mut reported = program("blocked", Some("auth"), "idle");
+    reported["id"] = s.clone().into();
+    hello.sessions = vec![serde_json::from_value(reported).unwrap()];
+    f.m.hello("hst_A", hello).unwrap();
+    assert_eq!(f.program(&s), Some(("blocked", Some("auth"))));
+    assert_eq!(f.attention(&s), Some("sign_in"));
+
+    f.report(
+        &s,
+        serde_json::json!({"status": "completed", "exit_code": 0,
+            "program_status": {"state": "blocked", "kind": "auth"}}),
+    );
+    assert_eq!(f.program(&s), None, "ended");
+    assert_eq!(f.attention(&s), None);
+}
+
+/// A child's record reaches its parent as an ordinary `needs_attention`
+/// event, the program's word, with its kind as the reason.
+#[test]
+fn a_childs_record_is_its_parents_event() {
+    let f = fixture();
+    let (parent, child) = f.tree();
+    f.report(&child, program("blocked", Some("auth"), "idle"));
+    let e = f.m.events_of_for_tests(&parent).pop().unwrap();
+    assert_eq!(
+        (
+            e.kind.as_str(),
+            e.reason.as_deref(),
+            e.source.as_str(),
+            e.confidence.as_str()
+        ),
+        (
+            "needs_attention",
+            Some("sign_in"),
+            "program_status",
+            "reported"
+        )
+    );
+    let before = f.m.events_of_for_tests(&parent).len();
+    f.report(&child, program("blocked", Some("auth"), "idle"));
+    assert_eq!(
+        f.m.events_of_for_tests(&parent).len(),
+        before,
+        "once a change"
+    );
+}
