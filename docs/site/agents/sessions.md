@@ -91,6 +91,21 @@ starts waiting for you, stops working or ends shows within a second or two
 on every device that has Storm in front. A server older than the app
 refreshes them every 15 seconds instead.
 
+When it happens while you're looking elsewhere, Storm also says so once, in
+a short message at the bottom of the window, on any screen:
+
+- "*session* **needs you** · Open" when a session starts waiting for you
+  (a delete request has its own message, below).
+- "*session* **stopped working** · Open" when a working session goes idle
+  or ends with output you haven't seen on that device. It says "stopped
+  working", not "done": an agent waiting at a prompt can look idle too.
+
+**Open** goes to the session. Nothing is said for the session you have
+open, for changes that happened while Storm was in the background or
+offline, or twice for the same change on one device. A newer message takes
+the place of the one showing. These are messages inside the app only: Storm
+sends no system notifications.
+
 Sessions waiting for you, blocked, failed in the last hour or on an offline
 host move to the top of their crew or section, and crews with one move up
 too; everything else keeps your order. Nothing moves while the pointer is

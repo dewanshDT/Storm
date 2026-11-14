@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/agent_notices.dart';
 import '../../agent/delete_request.dart';
 import '../../router.dart';
 import '../../state/app_state.dart';
@@ -185,10 +186,13 @@ class _AppShellState extends ConsumerState<AppShell> {
       body = child;
     }
     // Outermost on both sides of the breakpoint, so crossing it keeps the
-    // watch (decision 149c).
+    // watches (decisions 149c, 154).
     return DeleteRequestWatcher(
       location: widget.location,
-      child: StormAppShortcuts(child: body),
+      child: AgentNoticeWatcher(
+        location: widget.location,
+        child: StormAppShortcuts(child: body),
+      ),
     );
   }
 }
