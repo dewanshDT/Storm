@@ -253,10 +253,14 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   web leaves a read-only text field's text out of the DOM, so the note body
   vanished from screen readers; Read mode is plain text in a `SelectionArea`.
   `test/semantics_test.dart` holds it, with the provenance link's own node.
-- **The terminal's theme is one instance per colour set** (Storm v2). xterm2
-  reports the colour scheme to the agent on every non-identical theme while
-  DEC 2031 is on; a report after the agent restored echo prints as
-  `^[[?997;1n` in the scrollback.
+- **The terminal's theme is one instance per colour set** (Storm v2), keyed
+  by its colours and brightness (decision 157). xterm2 reports the colour
+  scheme to the agent on every non-identical theme while DEC 2031 is on; a
+  report after the agent restored echo prints as `^[[?997;1n` in the
+  scrollback. Answers and reports come from the target theme
+  (`reportTheme`, 5.2.0+storm.4); an agent's view shows the brightness it
+  was last answered with, dark before any, so an agent that never asks is
+  never drawn light under its own dark text.
 - **A hidden terminal never answers, resizes or focuses** (decision 154).
   A session left for another stays in a bounded LRU with its stream open
   for a short grace; its replies (2031 reports included) go out only while

@@ -32,6 +32,20 @@ enum TerminalPadding {
       values.firstWhere((v) => v.name == name, orElse: () => normal);
 }
 
+/// Which brightness a terminal may take (decision 157d): the app's, or dark
+/// whatever the app is.
+enum TerminalColours {
+  matchApp('Match app'),
+  alwaysDark('Always dark');
+
+  const TerminalColours(this.label);
+
+  final String label;
+
+  static TerminalColours fromName(String? name) =>
+      values.firstWhere((v) => v.name == name, orElse: () => matchApp);
+}
+
 /// Settings › Terminal: one set of values for every terminal in this app
 /// (D15 AM47). Client-only; never sent to the server.
 @immutable
@@ -40,6 +54,7 @@ class TerminalPrefs {
     this.fontSize,
     this.spacing = TerminalSpacing.normal,
     this.padding = TerminalPadding.normal,
+    this.colours = TerminalColours.matchApp,
   });
 
   static const minFontSize = 10.0;
@@ -49,25 +64,37 @@ class TerminalPrefs {
   final double? fontSize;
   final TerminalSpacing spacing;
   final TerminalPadding padding;
+  final TerminalColours colours;
+
+  /// The brightness a terminal answers with and a shell shows (157c): light
+  /// only in a light app with [TerminalColours.matchApp].
+  Brightness target(Brightness app) =>
+      app == Brightness.light && colours == TerminalColours.matchApp
+      ? Brightness.light
+      : Brightness.dark;
 
   bool get isDefault =>
       fontSize == null &&
       spacing == TerminalSpacing.normal &&
-      padding == TerminalPadding.normal;
+      padding == TerminalPadding.normal &&
+      colours == TerminalColours.matchApp;
 
   TerminalPrefs copyWith({
     double? fontSize,
     TerminalSpacing? spacing,
     TerminalPadding? padding,
+    TerminalColours? colours,
   }) => TerminalPrefs(
     fontSize: fontSize ?? this.fontSize,
     spacing: spacing ?? this.spacing,
     padding: padding ?? this.padding,
+    colours: colours ?? this.colours,
   );
 
   static const _kFontSize = 'storm.terminal.fontSize';
   static const _kSpacing = 'storm.terminal.spacing';
   static const _kPadding = 'storm.terminal.padding';
+  static const _kColours = 'storm.terminal.colours';
 
   static TerminalPrefs read(SharedPreferences prefs) {
     final size = prefs.getDouble(_kFontSize);
@@ -75,6 +102,7 @@ class TerminalPrefs {
       fontSize: size?.clamp(minFontSize, maxFontSize).toDouble(),
       spacing: TerminalSpacing.fromName(prefs.getString(_kSpacing)),
       padding: TerminalPadding.fromName(prefs.getString(_kPadding)),
+      colours: TerminalColours.fromName(prefs.getString(_kColours)),
     );
   }
 
@@ -87,6 +115,7 @@ class TerminalPrefs {
     }
     await prefs.setString(_kSpacing, spacing.name);
     await prefs.setString(_kPadding, padding.name);
+    await prefs.setString(_kColours, colours.name);
   }
 
   @override
@@ -94,10 +123,11 @@ class TerminalPrefs {
       other is TerminalPrefs &&
       other.fontSize == fontSize &&
       other.spacing == spacing &&
-      other.padding == padding;
+      other.padding == padding &&
+      other.colours == colours;
 
   @override
-  int get hashCode => Object.hash(fontSize, spacing, padding);
+  int get hashCode => Object.hash(fontSize, spacing, padding, colours);
 }
 
 /// Seeded from what [SettingsNotifier] read at launch, so a terminal opens at

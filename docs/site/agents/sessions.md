@@ -151,7 +151,15 @@ needs you".
   Tab**, or click outside it.
 - **On a phone**, extra keys (Esc, Tab, ⇧Tab, arrows, Ctrl) sit above the
   keyboard.
-- **Settings › Terminal** sets the text size, line spacing and padding.
+- **Settings › Terminal** sets the text size, line spacing, padding and
+  colours.
+- **In a light theme the terminal can be light.** A shell follows the theme
+  as it changes. An agent stays dark until it asks the terminal for its
+  colours, as Codex, OpenCode and Command Code do when they start, and is
+  then light; one that asks again when the theme changes (OpenCode, Claude
+  Code with its theme on auto) follows it, and one that does not keeps the
+  colours it started with. Claude Code's own theme is dark unless you set it
+  to auto. **Colours: Always dark** keeps every terminal dark.
 
 Under the terminal, a line says how to leave it: *Tab and Shift+Tab go to
 the agent · Esc, then Tab, leaves the terminal* (⇧Tab on a Mac).
