@@ -273,7 +273,8 @@ Installing needs no sudo and no terminal, on a Linux or macOS host:
   checksum the vendor publishes; a download that does not match is never
   installed. Cursor publishes no checksum, and its details say so.
 - Codex and Command Code install through npm, so they need Node.js on the
-  host (Command Code needs Node 22).
+  host (Command Code needs Node 22). Storm's Command Code answers to `cmd`,
+  the name its own messages use, as well as `command-code`.
 - A running session keeps the version it started with; the next one gets the
   new one. An agent with a live session can't be removed.
 - Once a day the host checks for newer versions and updates what it
