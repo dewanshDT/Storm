@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show SnackBar;
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -7,6 +8,7 @@ import 'package:go_router/go_router.dart';
 import '../agent/agent_state.dart' show agentOverviewProvider;
 import '../agent/agents_screen.dart' show launchAgentSession;
 import '../agent/agents_shell.dart' show newSessionBlocker;
+import '../agent/delete_request.dart' show showAgentToast;
 import '../router.dart';
 import '../state/app_state.dart'
     show activeVaultProvider, openNoteIdProvider, sidebarCollapsedProvider;
@@ -173,6 +175,13 @@ List<StormChord> _searchChords() {
   ];
 }
 
+/// ⇧⌘N and Ctrl+Shift+N reach the app from a focused terminal; ⌘N only on
+/// macOS, as Ctrl+N stays the agent's (AM116).
+StormChord _createChord({bool shift = false}) => StormChord(
+  stormActivator(LogicalKeyboardKey.keyN, shift: shift),
+  terminalSafe: shift || stormUsesMetaModifier,
+);
+
 List<StormChord> _commandModeChords() => [
   StormChord(
     stormActivator(LogicalKeyboardKey.keyP, shift: true),
@@ -204,7 +213,7 @@ List<StormCommand> stormCommands() => [
     label: 'New note',
     synonyms: const ['create note', 'add note'],
     group: StormCommandGroup.create,
-    chords: [StormChord(stormActivator(LogicalKeyboardKey.keyN))],
+    chords: [_createChord()],
     when: (_, ref) => _hasVault(ref),
     run: (context, ref) => createNote(context, ref),
   ),
@@ -213,7 +222,7 @@ List<StormCommand> stormCommands() => [
     label: 'New folder',
     synonyms: const ['create folder', 'add folder'],
     group: StormCommandGroup.create,
-    chords: [StormChord(stormActivator(LogicalKeyboardKey.keyN, shift: true))],
+    chords: [_createChord(shift: true)],
     when: (context, ref) =>
         _hasVault(ref) && _activity(context) == Activity.notes,
     run: (context, ref) => createFolderInVault(context, ref),
@@ -223,11 +232,19 @@ List<StormCommand> stormCommands() => [
     label: 'New session',
     synonyms: const ['start session', 'launch agent', 'new agent'],
     group: StormCommandGroup.create,
-    chords: [StormChord(stormActivator(LogicalKeyboardKey.keyN, shift: true))],
+    chords: [_createChord(shift: true)],
     when: (context, _) => _activity(context) == Activity.agents,
     run: (context, ref) {
-      if (newSessionBlocker(ref.read(agentOverviewProvider)) == null) {
+      final blocker = newSessionBlocker(ref.read(agentOverviewProvider));
+      if (blocker == null) {
         launchAgentSession(context, ref);
+      } else {
+        showAgentToast(
+          SnackBar(
+            key: const Key('new-session-blocked'),
+            content: Text(blocker),
+          ),
+        );
       }
     },
   ),
@@ -236,7 +253,13 @@ List<StormCommand> stormCommands() => [
     label: 'Toggle sidebar',
     synonyms: const ['hide sidebar', 'show sidebar'],
     group: StormCommandGroup.view,
-    chords: [StormChord(stormActivator(LogicalKeyboardKey.backslash))],
+    chords: [
+      StormChord(
+        stormActivator(LogicalKeyboardKey.backslash),
+        // Ctrl+\ is the agent's SIGQUIT off macOS (AM116).
+        terminalSafe: stormUsesMetaModifier,
+      ),
+    ],
     // There is no sidebar below the breakpoint to toggle.
     when: (context, _) => context.isExpanded,
     run: (_, ref) {
