@@ -667,6 +667,9 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
         let managed = crate::agents::managed_bin(state_dir);
+        for recipe in &crate::install::RECIPES {
+            crate::install::link_aliases(state_dir, recipe);
+        }
         // 136a: with isolation on, every session goes through the helper. A
         // host that has none (not Linux, not the packaged state directory)
         // keeps providers that cannot isolate, and so starts nothing.

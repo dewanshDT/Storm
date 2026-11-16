@@ -145,6 +145,10 @@ pub struct Recipe {
     pub agent: &'static str,
     /// The command its profile runs (`profile.rs`), and `bin/<command>`.
     pub command: &'static str,
+    /// The other names the vendor's package puts on `PATH` for the same
+    /// binary, linked beside `bin/<command>`: Command Code tells people to
+    /// run `cmd`.
+    pub aliases: &'static [&'static str],
     kind: Kind,
     /// The largest download accepted.
     max_bytes: u64,
@@ -156,30 +160,35 @@ pub const RECIPES: [Recipe; 5] = [
     Recipe {
         agent: "claude-code",
         command: "claude",
+        aliases: &[],
         kind: Kind::Claude,
         max_bytes: 800 * MIB,
     },
     Recipe {
         agent: "opencode",
         command: "opencode",
+        aliases: &[],
         kind: Kind::OpenCode,
         max_bytes: 400 * MIB,
     },
     Recipe {
         agent: "codex",
         command: "codex",
+        aliases: &[],
         kind: Kind::Npm("@openai/codex"),
         max_bytes: 0,
     },
     Recipe {
         agent: "cursor",
         command: "cursor-agent",
+        aliases: &[],
         kind: Kind::Cursor,
         max_bytes: 400 * MIB,
     },
     Recipe {
         agent: "command-code",
         command: "command-code",
+        aliases: &["cmd", "cmdc", "commandcode"],
         kind: Kind::Npm("command-code"),
         max_bytes: 0,
     },
@@ -478,6 +487,7 @@ pub async fn run_as(
             .is_ok_and(|c| c.trim() == version)
         && managed_target(state_dir, agent).is_some_and(|t| t.exists())
     {
+        link_aliases(state_dir, recipe);
         return Ok(Some(version));
     }
     let target = match recipe.kind {
@@ -728,8 +738,8 @@ async fn npm_install(
     }
 }
 
-/// Points `bin/<command>` at `target`, atomically, records the version, and
-/// keeps only the current and previous releases.
+/// Points `bin/<command>` and its aliases at `target`, atomically, records
+/// the version, and keeps only the current and previous releases.
 fn activate_as(
     state_dir: &Path,
     recipe: &Recipe,
@@ -739,14 +749,10 @@ fn activate_as(
 ) -> std::io::Result<()> {
     let bin = crate::agents::managed_bin(state_dir);
     std::fs::create_dir_all(&bin)?;
-    let link = bin.join(recipe.command);
-    let staged = bin.join(format!(".{}.new", recipe.command));
-    let _ = std::fs::remove_file(&staged);
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, &staged)?;
-    #[cfg(not(unix))]
-    std::fs::write(&staged, format!("@\"{}\" %*\r\n", target.display()))?;
-    std::fs::rename(&staged, &link)?;
+    point(&bin, recipe.command, target)?;
+    for alias in recipe.aliases {
+        point(&bin, alias, target)?;
+    }
     let dir = agent_dir(state_dir, recipe);
     std::fs::create_dir_all(&dir)?;
     let previous = std::fs::read_to_string(dir.join("current")).ok();
@@ -776,13 +782,45 @@ fn activate_as(
     Ok(())
 }
 
+/// Points `bin/<name>` at `target`, atomically.
+fn point(bin: &Path, name: &str, target: &Path) -> std::io::Result<()> {
+    let staged = bin.join(format!(".{name}.new"));
+    let _ = std::fs::remove_file(&staged);
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, &staged)?;
+    #[cfg(not(unix))]
+    std::fs::write(&staged, format!("@\"{}\" %*\r\n", target.display()))?;
+    std::fs::rename(&staged, bin.join(name))
+}
+
+/// Gives a release activated before its recipe had aliases the missing
+/// ones. Best effort: on an isolated host the folder is not the runtime's.
+pub fn link_aliases(state_dir: &Path, recipe: &Recipe) {
+    let Some(target) = managed_target(state_dir, recipe.agent) else {
+        return;
+    };
+    let bin = crate::agents::managed_bin(state_dir);
+    for alias in recipe.aliases {
+        if std::fs::symlink_metadata(bin.join(alias)).is_err() {
+            let _ = point(&bin, alias, &target);
+        }
+    }
+}
+
 /// Removes what Storm installed for `recipe`, and nothing else.
 async fn remove(state_dir: &Path, recipe: &Recipe, path: Option<OsString>) -> Result<(), Failure> {
     let link = crate::agents::managed_bin(state_dir).join(recipe.command);
     if std::fs::symlink_metadata(&link).is_err() {
         return Err(Failure::NotManaged);
     }
+    let target = std::fs::read_link(&link).ok();
     std::fs::remove_file(&link).map_err(|e| io_failure(&e, Failure::UnpackFailed))?;
+    for alias in recipe.aliases {
+        let alias = crate::agents::managed_bin(state_dir).join(alias);
+        if cfg!(not(unix)) || (target.is_some() && std::fs::read_link(&alias).ok() == target) {
+            let _ = std::fs::remove_file(alias);
+        }
+    }
     if let Kind::Npm(package) = recipe.kind
         && let Some(npm) = crate::pty::resolve(OsStr::new("npm"), path.as_deref())
     {
@@ -907,6 +945,51 @@ mod tests {
         remove(t.path(), r, None).await.unwrap();
         assert!(managed_target(t.path(), "cursor").is_none());
         assert!(!agent_dir(t.path(), r).exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn command_code_answers_to_cmd_as_its_own_package_does() {
+        let t = tempfile::tempdir().unwrap();
+        let r = recipe("command-code").unwrap();
+        assert_eq!(r.aliases, ["cmd", "cmdc", "commandcode"]);
+        let bin = crate::agents::managed_bin(t.path());
+        let release = |v: &str| {
+            let dir = npm_prefix(t.path()).join(v);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("command-code"), v).unwrap();
+            dir.join("command-code")
+        };
+        let first = release("1.0.0");
+        activate_as(t.path(), r, &first, "1.0.0", false).unwrap();
+        for name in ["command-code", "cmd", "cmdc", "commandcode"] {
+            assert_eq!(std::fs::read_link(bin.join(name)).unwrap(), first, "{name}");
+        }
+        let second = release("1.1.0");
+        activate_as(t.path(), r, &second, "1.1.0", false).unwrap();
+        assert_eq!(std::fs::read_link(bin.join("cmd")).unwrap(), second);
+
+        // An install from before the aliases gets them.
+        std::fs::remove_file(bin.join("cmd")).unwrap();
+        std::fs::remove_file(bin.join("cmdc")).unwrap();
+        link_aliases(t.path(), r);
+        assert_eq!(std::fs::read_link(bin.join("cmd")).unwrap(), second);
+        assert_eq!(std::fs::read_link(bin.join("cmdc")).unwrap(), second);
+
+        // A `cmd` Storm did not link is left alone.
+        std::fs::remove_file(bin.join("cmd")).unwrap();
+        std::fs::write(bin.join("cmd"), "someone else's").unwrap();
+        remove(t.path(), r, None).await.unwrap();
+        assert_eq!(
+            std::fs::read_to_string(bin.join("cmd")).unwrap(),
+            "someone else's"
+        );
+        for name in ["command-code", "cmdc", "commandcode"] {
+            assert!(std::fs::symlink_metadata(bin.join(name)).is_err(), "{name}");
+        }
+        for other in RECIPES.iter().filter(|r| r.agent != "command-code") {
+            assert!(other.aliases.is_empty(), "{}", other.agent);
+        }
     }
 
     #[test]
