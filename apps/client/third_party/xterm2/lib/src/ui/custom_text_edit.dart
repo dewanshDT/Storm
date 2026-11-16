@@ -144,6 +144,7 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   void _onFocusChange() {
     _openOrCloseInputConnectionIfNeeded();
+    if (!widget.focusNode.hasFocus) _resetComposing();
   }
 
   KeyEventResult _onKeyEvent(FocusNode focusNode, KeyEvent event) {
@@ -205,6 +206,14 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
       _connection!.close();
       _connection = null;
     }
+  }
+
+  // A composition the input method never finished must not outlive its
+  // connection: while one is open every key, Cmd+C included, is skipped.
+  void _resetComposing() {
+    if (_currentEditingState.composing.isCollapsed) return;
+    _currentEditingState = _initEditingState.copyWith();
+    widget.onComposing(null);
   }
 
   TextEditingValue get _initEditingState => widget.deleteDetection
@@ -283,7 +292,9 @@ class CustomTextEditState extends State<CustomTextEdit> with TextInputClient {
 
   @override
   void connectionClosed() {
-    // print('connectionClosed');
+    _connection?.connectionClosedReceived();
+    _connection = null;
+    _resetComposing();
   }
 
   @override
