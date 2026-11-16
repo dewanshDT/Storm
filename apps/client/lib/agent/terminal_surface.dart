@@ -28,10 +28,16 @@ class StormTerminal {
     _bytes = const Utf8Decoder(allowMalformed: true).startChunkedConversion(
       StringConversionSink.fromStringSink(_TerminalWriter(_terminal)),
     );
-    _terminal.onOutput = (data) =>
-        _writingOutput || _schemeReport.hasMatch(data)
-        ? _reply(data)
-        : _emit(data);
+    _terminal.onOutput = (data) {
+      if (_writingOutput && _colourAnswer.hasMatch(data)) {
+        answered.value = _target;
+      }
+      if (_writingOutput || _schemeReport.hasMatch(data)) {
+        _reply(data);
+      } else {
+        _emit(data);
+      }
+    };
     _terminal.onResize = (cols, rows, _, _) {
       if (cols > _widest) _widest = cols;
       onResize?.call(cols, rows);
@@ -66,6 +72,17 @@ class StormTerminal {
   /// A DEC 2031 colour-scheme report, sent on a theme change outside any
   /// output: still a reply, never a keystroke, so it is gated like one.
   static final _schemeReport = RegExp(r'^\x1b\[\?997;[12]n$');
+
+  /// An answer to the program's OSC 10 or 11 query.
+  static final _colourAnswer = RegExp(r'^\x1b\]1[01];');
+
+  /// The brightness Storm last answered the program's OSC 10/11 query with,
+  /// null before any (decision 157c). An agent's view shows it: the program
+  /// drew for it. Here, not in the view, so it outlives a remount.
+  final answered = ValueNotifier<Brightness?>(null);
+
+  /// What an answer gives now: the view's target, set as it builds.
+  Brightness _target = Brightness.dark;
 
   void _reply(String data) {
     final bytes = Uint8List.fromList(utf8.encode(data));
@@ -419,6 +436,7 @@ class StormTerminal {
     ctrlArmed.dispose();
     shiftArmed.dispose();
     title.dispose();
+    answered.dispose();
   }
 
   /// What a person typing [data] would send, for tests.
@@ -474,6 +492,7 @@ class StormTerminalView extends StatefulWidget {
     this.autofocus = false,
     this.readOnly = false,
     this.phone = false,
+    this.shell = false,
     this.prefs = const TerminalPrefs(),
     this.openLink = _launch,
   });
@@ -486,6 +505,10 @@ class StormTerminalView extends StatefulWidget {
   /// The phone's session: on `surface` rather than `bg`, with smaller text
   /// (handoff §3.6).
   final bool phone;
+
+  /// A shell session follows the target brightness live; an agent shows the
+  /// one its program was last answered with, dark before any (decision 157c).
+  final bool shell;
   final TerminalPrefs prefs;
 
   /// Opens a link from the terminal (decision 122). Tests replace it.
@@ -512,7 +535,27 @@ class _StormTerminalViewState extends State<StormTerminalView> {
   StormTerminal get terminal => widget.terminal;
 
   @override
+  void initState() {
+    super.initState();
+    terminal.answered.addListener(_onAnswered);
+  }
+
+  @override
+  void didUpdateWidget(StormTerminalView old) {
+    super.didUpdateWidget(old);
+    if (old.terminal != terminal) {
+      old.terminal.answered.removeListener(_onAnswered);
+      terminal.answered.addListener(_onAnswered);
+    }
+  }
+
+  void _onAnswered() {
+    if (mounted) setState(() {});
+  }
+
+  @override
   void dispose() {
+    terminal.answered.removeListener(_onAnswered);
     _controller.dispose();
     _ownFocus?.dispose();
     super.dispose();
@@ -556,22 +599,20 @@ class _StormTerminalViewState extends State<StormTerminalView> {
     final phone = widget.phone;
     final prefs = widget.prefs;
     final t = context.tokens;
-    // **Dark in both themes.** Agents and the ANSI palette assume a dark
-    // background; on the light theme's white code plate, an agent's white text
-    // would vanish. Both colours still come from the tokens: the light theme's
-    // off-black text and off-white page, swapped.
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final background = dark ? (phone ? t.surface : t.bg) : t.text;
-    final foreground = dark ? t.text : t.bg;
-    final theme = _themes.putIfAbsent((
-      foreground,
-      background,
-      t.accent,
-    ), () => _theme(foreground, background, t.accent));
+    final appLight = Theme.of(context).brightness == Brightness.light;
+    final target = prefs.target(Theme.of(context).brightness);
+    terminal._target = target;
+    final shown = widget.shell
+        ? target
+        : terminal.answered.value ?? Brightness.dark;
+    final theme = _terminalTheme(t, shown, dark: !appLight, phone: phone);
+    final answers = _terminalTheme(t, target, dark: !appLight, phone: phone);
     final style = TerminalStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: prefs.fontSize ?? (phone ? t.labelSize + 1 : t.codeSize),
       height: prefs.spacing.lineHeight,
+      // Bright text on a light ground is the faint one (157b).
+      drawBoldTextWithBrightColors: shown == Brightness.dark,
     );
     final base = EdgeInsets.all(t.sp * 1.25 * prefs.padding.scale);
     final cell = terminalCellHeight(style, MediaQuery.textScalerOf(context));
@@ -613,6 +654,7 @@ class _StormTerminalViewState extends State<StormTerminalView> {
                       : terminal._onKeyEvent(node, event);
                 },
                 theme: theme,
+                reportTheme: answers,
                 padding: evenTerminalPadding(base, box.maxHeight, cell),
                 textStyle: style,
                 keyboardAppearance: Brightness.dark,
@@ -845,33 +887,109 @@ double terminalCellHeight(TerminalStyle style, TextScaler scaler) =>
       return height;
     });
 
+/// The theme a view of [brightness] draws with (decision 157a). In a light
+/// app a light view sits on the page lightened halfway to white, and a dark
+/// one is the light theme's colours swapped, as before 157; in a dark app a
+/// dark view is the page (the phone's surface), and a light one, left from
+/// an answer before the app went dark, the dark theme's colours swapped.
+TerminalTheme _terminalTheme(
+  StormTokens t,
+  Brightness brightness, {
+  required bool dark,
+  required bool phone,
+}) {
+  final light = brightness == Brightness.light;
+  final (foreground, background) = switch ((dark, light)) {
+    (false, true) => (t.text, lightTerminalBackground(t)),
+    (false, false) => (t.bg, t.text),
+    (true, false) => (t.text, phone ? t.surface : t.bg),
+    (true, true) => (t.bg, t.text),
+  };
+  return _themes.putIfAbsent((
+    foreground,
+    background,
+    t.accent,
+    brightness,
+  ), () => _theme(foreground, background, t.accent, light: light));
+}
+
+/// The light theme's ANSI 16 (decision 157b): normal colours 4.5:1 and
+/// bright ones 3:1 on every light preset's terminal ground.
+const lightTerminalPalette = [
+  Color(0xff221e1c),
+  Color(0xffa41e1e),
+  Color(0xff026217),
+  Color(0xff6f4e07),
+  Color(0xff1a4eb3),
+  Color(0xff8b2a87),
+  Color(0xff105d64),
+  Color(0xff585350),
+  Color(0xff736d6a),
+  Color(0xffc43f38),
+  Color(0xff1d7f2b),
+  Color(0xff906707),
+  Color(0xff356ad1),
+  Color(0xffa947a3),
+  Color(0xff037a84),
+  Color(0xff66615e),
+];
+
+/// A light view's ground in a light app.
+Color lightTerminalBackground(StormTokens t) =>
+    Color.lerp(t.bg, Colors.white, 0.5)!;
+
 // xterm2 reports a colour-scheme change to the agent whenever the view gets a
 // theme that is not identical, and TerminalTheme has no value equality.
-final _themes = <(Color, Color, Color), TerminalTheme>{};
+final _themes = <(Color, Color, Color, Brightness), TerminalTheme>{};
 
-TerminalTheme _theme(Color foreground, Color background, Color accent) {
+TerminalTheme _theme(
+  Color foreground,
+  Color background,
+  Color accent, {
+  required bool light,
+}) {
   final base = TerminalThemes.defaultTheme;
+  final p = light
+      ? lightTerminalPalette
+      : [
+          base.black,
+          base.red,
+          base.green,
+          base.yellow,
+          base.blue,
+          base.magenta,
+          base.cyan,
+          base.white,
+          base.brightBlack,
+          base.brightRed,
+          base.brightGreen,
+          base.brightYellow,
+          base.brightBlue,
+          base.brightMagenta,
+          base.brightCyan,
+          base.brightWhite,
+        ];
   return TerminalTheme(
     cursor: foreground.withValues(alpha: 0.7),
     selection: accent.withValues(alpha: 0.35),
     foreground: foreground,
     background: background,
-    black: base.black,
-    white: base.white,
-    red: base.red,
-    green: base.green,
-    yellow: base.yellow,
-    blue: base.blue,
-    magenta: base.magenta,
-    cyan: base.cyan,
-    brightBlack: base.brightBlack,
-    brightRed: base.brightRed,
-    brightGreen: base.brightGreen,
-    brightYellow: base.brightYellow,
-    brightBlue: base.brightBlue,
-    brightMagenta: base.brightMagenta,
-    brightCyan: base.brightCyan,
-    brightWhite: base.brightWhite,
+    black: p[0],
+    red: p[1],
+    green: p[2],
+    yellow: p[3],
+    blue: p[4],
+    magenta: p[5],
+    cyan: p[6],
+    white: p[7],
+    brightBlack: p[8],
+    brightRed: p[9],
+    brightGreen: p[10],
+    brightYellow: p[11],
+    brightBlue: p[12],
+    brightMagenta: p[13],
+    brightCyan: p[14],
+    brightWhite: p[15],
     searchHitBackground: base.searchHitBackground,
     searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
     searchHitForeground: base.searchHitForeground,
