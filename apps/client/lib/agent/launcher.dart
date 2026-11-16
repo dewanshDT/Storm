@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../api/models.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
+import '../state/terminal_prefs.dart' show launchBrightness;
 import '../ui/controls.dart';
 import '../ui/states.dart';
 import '../ui/surfaces.dart';
@@ -339,6 +340,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
             writeVault != null,
         model: modelHint(_provider) == null ? null : _model.text.trim(),
         permissionMode: _permissionMode,
+        terminalBrightness: launchBrightness(context, ref),
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;

@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -158,3 +158,8 @@ final terminalPrefsProvider =
     NotifierProvider<TerminalPrefsNotifier, TerminalPrefs>(
       TerminalPrefsNotifier.new,
     );
+
+/// What a new session's terminal will answer with (157c), sent at launch so
+/// the host can set `COLORFGBG` (171-8).
+Brightness launchBrightness(BuildContext context, WidgetRef ref) =>
+    ref.read(terminalPrefsProvider).target(Theme.of(context).brightness);

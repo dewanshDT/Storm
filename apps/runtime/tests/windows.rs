@@ -142,6 +142,7 @@ fn start(provider: &CliProvider) -> (Box<dyn ProviderSession>, Arc<Recorder>, St
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     };
     let session = provider.start(spec, rec.clone()).expect("start");
     (session, rec, session_id)
@@ -277,6 +278,7 @@ fn a_missing_binary_is_not_installed_and_will_not_start() {
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     };
     let rec = Arc::new(Recorder::default());
     assert!(matches!(
@@ -318,6 +320,7 @@ fn a_batch_cli_refuses_an_argument_cmd_would_interpret() {
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     };
     let rec = Arc::new(Recorder::default());
     match provider.start(spec, rec) {
@@ -352,6 +355,7 @@ fn a_canonical_workspace_is_a_plain_working_directory() {
         workspace: canonical,
         interaction: InteractionSpec::Terminal(TerminalSize::new(120, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     };
     let _session = cmd("echo cwd=%CD%;")
         .start(spec, rec.clone())

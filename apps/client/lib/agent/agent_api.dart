@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'dart:ui' show Brightness;
 
 import 'package:http/http.dart' as http;
 
@@ -293,6 +294,7 @@ class AgentApi {
     String? model,
     String? permissionMode,
     String? typedInput,
+    Brightness? terminalBrightness,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -329,6 +331,8 @@ class AgentApi {
               // A Shell only (153-S3): typed in once it is ready, never run.
               if (typedInput != null && typedInput.isNotEmpty)
                 'typed_input': typedInput,
+              // The host sets COLORFGBG from it (decision 157, 171-8).
+              'terminal_brightness': ?terminalBrightness?.name,
             }),
           ),
         )

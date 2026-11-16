@@ -230,6 +230,9 @@ impl Provider for CliProvider {
                 spec.session_id.clone().into(),
             ),
         ];
+        if let Some(brightness) = spec.terminal_brightness {
+            env.push(("COLORFGBG".into(), brightness.colorfgbg().into()));
+        }
         env.extend(self.env.iter().cloned());
         env.extend(self.path.iter().map(|p| ("PATH".into(), p.clone())));
         // A login shell's profile may reorder PATH; this is what the

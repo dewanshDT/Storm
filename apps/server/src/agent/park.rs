@@ -148,6 +148,7 @@ impl AgentManager {
             .iter()
             .any(|g| g.id == crate::gateway::connections::BUILTIN_ID);
         let credential = credential::decide(&r.provider, deliverable, &caps);
+        let brightness = self.terminal_brightness_of(&parent.id);
         let start = Command::Start {
             session: r.id.clone(),
             workspace: parent.workspace.clone(),
@@ -169,6 +170,7 @@ impl AgentManager {
             child_of: Some(parent.id.clone()),
             cwd,
             typed_input: None,
+            terminal_brightness: brightness,
         };
         self.live
             .lock()

@@ -159,7 +159,9 @@ needs you".
   then light; one that asks again when the theme changes (OpenCode, Claude
   Code with its theme on auto) follows it, and one that does not keeps the
   colours it started with. Claude Code's own theme is dark unless you set it
-  to auto. **Colours: Always dark** keeps every terminal dark.
+  to auto. **Colours: Always dark** keeps every terminal dark. A session
+  also starts with `COLORFGBG` set to the colours it starts in, for
+  programs that read it instead of asking; agents it starts get the same.
 
 Under the terminal, a line says how to leave it: *Tab and Shift+Tab go to
 the agent · Esc, then Tab, leaves the terminal* (⇧Tab on a Mac).

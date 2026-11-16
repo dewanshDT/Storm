@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use storm_runtime::cli::CliProvider;
 use storm_runtime::provider::{
     Availability, Interaction, InteractionSpec, Provider, ProviderId, ProviderKind,
-    ProviderSession, SessionEvents, SessionSpec, StartError, TerminalSize,
+    ProviderSession, SessionEvents, SessionSpec, StartError, TerminalBrightness, TerminalSize,
 };
 use storm_runtime::status::{EndReason, SessionEnd, SessionStatus};
 
@@ -95,6 +95,13 @@ fn workspace() -> PathBuf {
 }
 
 fn start(provider: &dyn Provider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
+    start_in(provider, None)
+}
+
+fn start_in(
+    provider: &dyn Provider,
+    terminal_brightness: Option<TerminalBrightness>,
+) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
     // Unique per test: a session's ending ends every process carrying its
     // id, and the tests run side by side.
     static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -105,6 +112,7 @@ fn start(provider: &dyn Provider) -> (Box<dyn ProviderSession>, Arc<Recorder>) {
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness,
     };
     let session = provider.start(spec, rec.clone()).expect("start");
     (session, rec)
@@ -161,6 +169,26 @@ fn the_terminal_environment_and_the_workspace_are_set() {
     assert!(out.contains("extra=from-env-file"), "{out}");
     let ws = workspace().canonicalize().unwrap();
     assert!(out.contains(ws.to_str().unwrap()), "{out}");
+}
+
+/// 171-8: `COLORFGBG` says the client's brightness, black on white or white
+/// on black, and is not set when the launch named none.
+#[test]
+fn colorfgbg_follows_the_terminal_brightness() {
+    let provider = sh("echo fgbg=[${COLORFGBG-unset}]");
+    for (brightness, said) in [
+        (Some(TerminalBrightness::Light), "fgbg=[0;15]"),
+        (Some(TerminalBrightness::Dark), "fgbg=[15;0]"),
+        (None, "fgbg=[unset]"),
+    ] {
+        let (_session, rec) = start_in(&provider, brightness);
+        rec.wait_end();
+        assert!(
+            rec.output().contains(said),
+            "{brightness:?}: {}",
+            rec.output()
+        );
+    }
 }
 
 #[test]
@@ -230,6 +258,7 @@ fn a_missing_binary_is_not_installed_and_will_not_start() {
         workspace: workspace(),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     };
     assert!(matches!(
         provider.start(spec, rec.clone()),
@@ -506,6 +535,7 @@ fn removals_reach_the_inherited_environment_and_the_secret_comes_last() {
             secret_env: vec![("TOKEN".into(), SecretOsString::new("synced"))],
             ..Default::default()
         },
+        terminal_brightness: None,
     };
     let _session = provider.start(spec, rec.clone()).expect("start");
     assert_eq!(rec.wait_end(), SessionEnd::Completed { exit_code: Some(0) });

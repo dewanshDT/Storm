@@ -7,6 +7,7 @@ import '../agent/integrations_api.dart';
 import '../api/models.dart';
 import '../router.dart';
 import '../state/app_state.dart';
+import '../state/terminal_prefs.dart' show launchBrightness;
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
@@ -186,6 +187,7 @@ Future<AgentSession?> resumeAgentSession(
       rows: s.rows,
       resumeOf: s.id,
       spawn: !s.spawn.isChild && (s.spawn.switchState?.launchedOn ?? false),
+      terminalBrightness: launchBrightness(context, ref),
     );
     if (!context.mounted) return launched;
     final notice = launched.launchNotice;
