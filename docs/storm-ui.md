@@ -275,7 +275,9 @@ from one command registry (`lib/keyboard/storm_commands.dart`).
 | Dismiss / leave | Esc | Esc |
 
 With the terminal focused, every app chord stops there except ⌘K, ⌘P, ⇧⌘P,
-⌘[ and ⌘] on macOS and Ctrl ⇧ K / Ctrl ⇧ P elsewhere (AM111).
+⌘N, ⇧⌘N, ⌘\\, ⌘[ and ⌘] on macOS and Ctrl ⇧ K / Ctrl ⇧ P / Ctrl ⇧ N
+elsewhere (AM111, AM116). A New session that cannot start says why in a
+toast.
 
 ### Command palette (decision 156)
 

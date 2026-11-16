@@ -83,14 +83,23 @@ void main() {
     await frames(t);
   }
 
+  late FakeAgentServer agents;
+
+  /// What reached the agent as typed bytes.
+  String typed() => agents.requests
+      .where((r) => r.url.path.endsWith('/terminal/input'))
+      .map((r) => String.fromCharCodes(r.bodyBytes))
+      .join();
+
   Future<ProviderContainer> open(
     WidgetTester t,
     Size size,
     String route, {
     bool noVaults = false,
+    List<Map<String, dynamic>>? hosts,
   }) async {
-    final agents = FakeAgentServer(
-      hosts: [agentHost()],
+    agents = FakeAgentServer(
+      hosts: hosts ?? [agentHost()],
       sessions: [agentSession('ags_1', name: 'gateway-impl')],
     );
     final c = shellContainer(agentClient: agents.client);
@@ -348,17 +357,31 @@ void main() {
       return c;
     }
 
-    testWidgets('Linux: the app chords stop at it', (t) async {
+    testWidgets('Linux: Ctrl+N, Ctrl+K, Ctrl+P and Ctrl+\\ reach the agent', (
+      t,
+    ) async {
       final c = await focusedTerminal(t, TargetPlatform.linux);
       await press(t, LogicalKeyboardKey.keyN);
       expect(newNoteDialog, findsNothing);
-      await press(t, LogicalKeyboardKey.keyN, shift: true);
-      expect(launcher, findsNothing);
       await press(t, LogicalKeyboardKey.backslash);
       expect(c.read(sidebarCollapsedProvider), isFalse);
       await press(t, LogicalKeyboardKey.keyK);
       await press(t, LogicalKeyboardKey.keyP);
       expect(location(c), Routes.agentSession('ags_1'), reason: 'readline');
+      expect(find.byKey(const Key('palette-field')), findsNothing);
+      expect(typed(), contains('\x0e'), reason: 'Ctrl+N is ^N');
+      expect(typed(), contains('\x0b'), reason: 'Ctrl+K is ^K');
+      expect(typed(), contains('\x10'), reason: 'Ctrl+P is ^P');
+      await close(t, c);
+    });
+
+    testWidgets('Linux: Ctrl+Shift+N opens the launcher', (t) async {
+      final c = await focusedTerminal(t, TargetPlatform.linux);
+      final before = typed();
+      await press(t, LogicalKeyboardKey.keyN, shift: true);
+      expect(launcher, findsOneWidget);
+      expect(typed(), before, reason: 'never ^N for the agent');
+      await closeRoute(t);
       await close(t, c);
     });
 
@@ -378,17 +401,46 @@ void main() {
       await close(t, c);
     });
 
-    testWidgets('macOS: ⌘N, ⇧⌘N and ⌘\\ stop at it', (t) async {
+    testWidgets('macOS: ⇧⌘N opens the launcher', (t) async {
       final c = await focusedTerminal(t, TargetPlatform.macOS);
-      await press(t, LogicalKeyboardKey.keyN);
-      expect(newNoteDialog, findsNothing);
       await press(t, LogicalKeyboardKey.keyN, shift: true);
-      expect(launcher, findsNothing);
-      await press(t, LogicalKeyboardKey.backslash);
-      expect(c.read(sidebarCollapsedProvider), isFalse);
-      expect(location(c), Routes.agentSession('ags_1'));
+      expect(launcher, findsOneWidget);
+      await closeRoute(t);
       await close(t, c);
     });
+
+    testWidgets('macOS: ⌘N and ⌘\\ work from it', (t) async {
+      final c = await focusedTerminal(t, TargetPlatform.macOS);
+      await press(t, LogicalKeyboardKey.keyN);
+      expect(newNoteDialog, findsOneWidget);
+      await closeRoute(t);
+      await press(t, LogicalKeyboardKey.backslash);
+      expect(c.read(sidebarCollapsedProvider), isTrue);
+      await press(t, LogicalKeyboardKey.backslash);
+      expect(c.read(sidebarCollapsedProvider), isFalse);
+      await close(t, c);
+    });
+
+    for (final platform in [TargetPlatform.macOS, TargetPlatform.linux]) {
+      testWidgets('${platform.name}: a blocked New session says why', (
+        t,
+      ) async {
+        debugDefaultTargetPlatformOverride = platform;
+        final c = await open(t, at900, Routes.agents, hosts: []);
+        await press(t, LogicalKeyboardKey.keyN, shift: true);
+        expect(launcher, findsNothing);
+        final toast = find.byKey(const Key('new-session-blocked'));
+        expect(toast, findsOneWidget);
+        expect(
+          find.descendant(
+            of: toast,
+            matching: find.text('No host is set up yet'),
+          ),
+          findsOneWidget,
+        );
+        await close(t, c);
+      });
+    }
 
     for (final (label, key, shift) in [
       ('⌘K', LogicalKeyboardKey.keyK, false),
@@ -407,7 +459,7 @@ void main() {
   });
 
   group('the registry', () {
-    test('Linux blocks Ctrl+K and Ctrl+P in the terminal, not Ctrl+Shift', () {
+    test('Linux blocks Ctrl+K, Ctrl+P, Ctrl+N and Ctrl+\\ in the terminal', () {
       debugDefaultTargetPlatformOverride = TargetPlatform.linux;
       final blocked = stormTerminalBlockList().keys
           .cast<SingleActivator>()
@@ -415,12 +467,14 @@ void main() {
           .toSet();
       expect(blocked, contains((LogicalKeyboardKey.keyK, true, false)));
       expect(blocked, contains((LogicalKeyboardKey.keyP, true, false)));
-      expect(blocked, contains((LogicalKeyboardKey.keyN, true, true)));
+      expect(blocked, contains((LogicalKeyboardKey.keyN, true, false)));
+      expect(blocked, contains((LogicalKeyboardKey.backslash, true, false)));
+      expect(blocked, isNot(contains((LogicalKeyboardKey.keyN, true, true))));
       expect(blocked, isNot(contains((LogicalKeyboardKey.keyK, true, true))));
       expect(blocked, isNot(contains((LogicalKeyboardKey.keyP, true, true))));
     });
 
-    test('macOS lets ⌘K, ⌘P and ⇧⌘P through', () {
+    test('macOS lets ⌘K, ⌘P, ⇧⌘P, ⌘N, ⇧⌘N and ⌘\\ through', () {
       debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
       final blocked = stormTerminalBlockList().keys
           .cast<SingleActivator>()
@@ -429,7 +483,12 @@ void main() {
       expect(blocked, isNot(contains((LogicalKeyboardKey.keyK, true, false))));
       expect(blocked, isNot(contains((LogicalKeyboardKey.keyP, true, false))));
       expect(blocked, isNot(contains((LogicalKeyboardKey.keyP, true, true))));
-      expect(blocked, contains((LogicalKeyboardKey.keyN, true, false)));
+      expect(blocked, isNot(contains((LogicalKeyboardKey.keyN, true, false))));
+      expect(blocked, isNot(contains((LogicalKeyboardKey.keyN, true, true))));
+      expect(
+        blocked,
+        isNot(contains((LogicalKeyboardKey.backslash, true, false))),
+      );
     });
 
     test('ids are unique and chords are labelled per platform', () {
