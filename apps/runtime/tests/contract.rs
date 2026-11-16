@@ -71,6 +71,7 @@ fn spec() -> SessionSpec {
         workspace: PathBuf::from("/work/storm"),
         interaction: InteractionSpec::Terminal(TerminalSize::new(80, 24).unwrap()),
         launch: Default::default(),
+        terminal_brightness: None,
     }
 }
 

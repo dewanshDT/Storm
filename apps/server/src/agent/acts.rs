@@ -217,6 +217,9 @@ impl AgentManager {
             .lineage(&child.id)?
             .parent_session;
         let parent = parent.map(|p| self.get(&p)).transpose()?;
+        let brightness = parent
+            .as_ref()
+            .and_then(|p| self.terminal_brightness_of(&p.id));
         let start = parent.and_then(|parent| {
             let caps = self.host_live(&child.host_id).capabilities?;
             let (mcp, model, permission_mode, cwd) = {
@@ -255,6 +258,7 @@ impl AgentManager {
                     child_of: Some(parent.id.clone()),
                     cwd,
                     typed_input: None,
+                    terminal_brightness: brightness,
                 },
             ))
         });
@@ -262,6 +266,7 @@ impl AgentManager {
             Some((credential, command)) => {
                 let mut session_live = super::SessionLive::new();
                 session_live.credential = credential;
+                session_live.terminal_brightness = brightness;
                 self.live
                     .lock()
                     .unwrap()

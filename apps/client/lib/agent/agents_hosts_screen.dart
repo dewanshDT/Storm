@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../state/terminal_prefs.dart' show launchBrightness;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart';
@@ -404,6 +405,7 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
         cols: (size.width / 9).clamp(40, 240).floor(),
         rows: (size.height / 20).clamp(12, 80).floor(),
         typedInput: typed,
+        terminalBrightness: launchBrightness(context, ref),
       );
       if (!mounted) return null;
       _close();

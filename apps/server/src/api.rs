@@ -18990,6 +18990,34 @@ pub(crate) mod tests {
         assert!(plain.get("model").is_none(), "an empty field is no model");
     }
 
+    /// 171-8: a launch's terminal brightness reaches its host's start as
+    /// sent; anything but `light` or `dark`, or none, is no field at all.
+    #[tokio::test]
+    async fn a_171_8_the_terminal_brightness_reaches_the_start() {
+        let dir = tempdir::TempDir::new("storm-171-8").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        for (sent, expected) in [
+            (Some("light"), Some("light")),
+            (Some("dark"), Some("dark")),
+            (Some("sepia"), None),
+            (None, None),
+        ] {
+            let mut body = serde_json::json!({"provider": "shell"});
+            if let Some(b) = sent {
+                body["terminal_brightness"] = b.into();
+            }
+            let (status, body) = f.launch_body(body).await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            let id = body["id"].as_str().unwrap().to_string();
+            let start = f.start_of(&id);
+            assert_eq!(
+                start.get("terminal_brightness").and_then(|b| b.as_str()),
+                expected,
+                "{sent:?}"
+            );
+        }
+    }
+
     /// 153-S3: a Shell launches with a line typed in, carried on its start
     /// as data for the terminal. Any other agent, a resume, a newline, a
     /// control character or more than 1 KiB is a 400 and nothing starts; a

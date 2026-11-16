@@ -124,6 +124,33 @@ pub enum InteractionSpec {
     Terminal(TerminalSize),
 }
 
+/// How the client draws a terminal (decision 157, 171-8), told to the
+/// program as `COLORFGBG` for those that read it rather than ask.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalBrightness {
+    Light,
+    Dark,
+}
+
+impl TerminalBrightness {
+    /// `light` or `dark`; anything else is unknown, and sets nothing.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    /// rxvt's `<fg>;<bg>`: black on white, or white on black.
+    pub fn colorfgbg(self) -> &'static str {
+        match self {
+            Self::Light => "0;15",
+            Self::Dark => "15;0",
+        }
+    }
+}
+
 /// Everything a host is told about a session (freeze §7.1).
 ///
 /// Never a user id, and a credential only as a [`LaunchExtras::secret_env`]
@@ -139,6 +166,8 @@ pub struct SessionSpec {
     /// arguments after its own and the environment after everything else;
     /// a provider with nothing to launch ignores it.
     pub launch: LaunchExtras,
+    /// The terminal's brightness as the client draws it; none sets nothing.
+    pub terminal_brightness: Option<TerminalBrightness>,
 }
 
 /// Per-session launch additions. Generic on purpose: the contract carries

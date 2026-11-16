@@ -149,6 +149,10 @@ pub enum Command {
         /// Written to the PTY as input; never argv or the environment.
         #[serde(default)]
         typed_input: Option<String>,
+        /// How the client draws the terminal (171-8): `COLORFGBG` in the
+        /// session's environment. Absent or unknown sets nothing.
+        #[serde(default)]
+        terminal_brightness: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -1790,6 +1794,7 @@ impl Host {
                 child_of,
                 cwd,
                 typed_input,
+                terminal_brightness,
             } => {
                 self.start(
                     session,
@@ -1803,7 +1808,13 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
-                    (permission_mode, spawn, cwd, typed_input),
+                    (
+                        permission_mode,
+                        spawn,
+                        cwd,
+                        typed_input,
+                        terminal_brightness,
+                    ),
                 )
                 .await
             }
@@ -1970,9 +1981,10 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
-        (permission_mode, spawn, cwd, typed_input): (
+        (permission_mode, spawn, cwd, typed_input, terminal_brightness): (
             Option<String>,
             bool,
+            Option<String>,
             Option<String>,
             Option<String>,
         ),
@@ -2358,6 +2370,9 @@ impl Host {
             workspace: dir,
             interaction: InteractionSpec::Terminal(size),
             launch,
+            terminal_brightness: terminal_brightness
+                .as_deref()
+                .and_then(crate::provider::TerminalBrightness::parse),
         };
         tracing::info!(session = %id, provider = %provider_id, %workspace, synced = is_synced, "starting");
         let begun = std::time::Instant::now();
@@ -4137,6 +4152,7 @@ mod tests {
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -4237,6 +4253,46 @@ mod tests {
             child_of: None,
             cwd: None,
             typed_input: Some(typed_input.into()),
+            terminal_brightness: None,
+        }
+    }
+
+    /// 171-8: a start's terminal brightness is the session's `COLORFGBG`,
+    /// and a start without one, or with a word the host does not know,
+    /// sets none.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_starts_terminal_brightness_is_its_colorfgbg() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "echo \"${{COLORFGBG-unset}}\" > {o}/$STORM_RUNTIME_SESSION.tmp; \
+             mv {o}/$STORM_RUNTIME_SESSION.tmp {o}/$STORM_RUNTIME_SESSION; sleep 1000"
+        );
+        let (host, _state, _roots) = shell_host(&script).await;
+        for (id, brightness, said) in [
+            ("ags_LIGHT", Some("light"), "0;15"),
+            ("ags_DARK", Some("dark"), "15;0"),
+            ("ags_NONE", None, "unset"),
+            ("ags_SEPIA", Some("sepia"), "unset"),
+        ] {
+            let mut start = typed_start(id, "shell", "");
+            if let Command::Start {
+                typed_input,
+                terminal_brightness,
+                ..
+            } = &mut start
+            {
+                *typed_input = None;
+                *terminal_brightness = brightness.map(Into::into);
+            }
+            host.clone().handle(start).await;
+            let file = out.path().join(id);
+            wait_for("the shell to say its COLORFGBG", || file.exists()).await;
+            assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), said, "{id}");
+            host.clone()
+                .handle(Command::End { session: id.into() })
+                .await;
         }
     }
 
@@ -4420,6 +4476,7 @@ mod tests {
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 
@@ -6130,6 +6187,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
 
@@ -6226,6 +6284,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         let s = host.session("ags_BUSY").expect("the session started");
@@ -6351,6 +6410,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -7717,6 +7777,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 
@@ -8044,6 +8105,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 

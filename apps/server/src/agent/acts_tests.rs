@@ -1633,3 +1633,41 @@ fn a_resume_keeps_its_cwd_and_is_refused_once_it_is_gone() {
         Err(super::AgentError::Conflict(why)) if why == "working directory no longer exists"
     ));
 }
+
+/// 171-8: a child starts with its parent's terminal brightness, and with
+/// none when the parent's launch named none.
+#[test]
+fn a_child_starts_with_its_parents_terminal_brightness() {
+    let mut f = fixture(16);
+    for said in [Some("light"), Some("dark"), None] {
+        let mut body = serde_json::json!({
+            "host_id": "hst_A", "workspace": "storm", "provider": "claude-code",
+            "terminal": {"cols": 80, "rows": 24}, "spawn": true,
+        });
+        if let Some(b) = said {
+            body["terminal_brightness"] = b.into();
+        }
+        let launch: Launch = serde_json::from_value(body).unwrap();
+        let meta = LaunchMeta {
+            write_vault_id: Some("vlt_W".into()),
+            ..LaunchMeta::default()
+        };
+        let (p, ..) =
+            f.m.launch("usr_A", launch, meta, vec![grant("storm"), grant("con_X")])
+                .unwrap();
+        f.report(&p.id, "running");
+        let c = f.start(&p.id).unwrap();
+        let starts = f.starts();
+        let of = |id: &str| {
+            starts
+                .iter()
+                .find(|s| s["session"] == id)
+                .unwrap_or_else(|| panic!("no start for {id}: {starts:?}"))
+                .get("terminal_brightness")
+                .and_then(|b| b.as_str())
+                .map(str::to_owned)
+        };
+        assert_eq!(of(&p.id).as_deref(), said, "the parent's own start");
+        assert_eq!(of(&c.id).as_deref(), said, "the child's start");
+    }
+}

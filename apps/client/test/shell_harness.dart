@@ -175,6 +175,7 @@ Future<void> pumpShell(
   ProviderContainer c, {
   Size size = const Size(411, 900),
   double keyboard = 0,
+  ThemeData? theme,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -187,7 +188,7 @@ Future<void> pumpShell(
     UncontrolledProviderScope(
       container: c,
       child: MaterialApp.router(
-        theme: StormTheme.dark(),
+        theme: theme ?? StormTheme.dark(),
         routerConfig: c.read(routerProvider),
         scaffoldMessengerKey: rootMessengerKey,
       ),
