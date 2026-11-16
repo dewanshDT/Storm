@@ -9,8 +9,10 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm2/xterm.dart';
 
+import '../keyboard/storm_activators.dart' show stormUsesMetaModifier;
 import '../keyboard/storm_commands.dart';
 import '../state/terminal_prefs.dart';
+import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/surfaces.dart';
 import '../ui/tokens.dart';
@@ -464,7 +466,7 @@ class _TerminalWriter implements StringSink {
 enum PasteChord { paste, controlV }
 
 /// The terminal widget, themed from the tokens and sized by [prefs].
-class StormTerminalView extends StatelessWidget {
+class StormTerminalView extends StatefulWidget {
   const StormTerminalView({
     super.key,
     required this.terminal,
@@ -495,20 +497,64 @@ class StormTerminalView extends StatelessWidget {
     webOnlyWindowName: '_blank',
   );
 
+  @override
+  State<StormTerminalView> createState() => _StormTerminalViewState();
+}
+
+class _StormTerminalViewState extends State<StormTerminalView> {
+  final _controller = TerminalController();
+  final _viewKey = GlobalKey<TerminalViewState>();
+  FocusNode? _ownFocus;
+
+  FocusNode get _focus =>
+      widget.focusNode ?? (_ownFocus ??= FocusNode(debugLabel: 'terminal'));
+
+  StormTerminal get terminal => widget.terminal;
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    _ownFocus?.dispose();
+    super.dispose();
+  }
+
+  // A press and drag never becomes xterm2's focusing tap; a touch still waits
+  // for one, since focus opens a phone's keyboard.
+  void _onPointerDown(PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.mouse && !_focus.hasFocus) {
+      _focus.requestFocus();
+    }
+  }
+
+  void _copy() {
+    final selection = _controller.selectionFor(terminal._terminal.buffer);
+    if (selection == null) return;
+    final text = terminal._terminal.buffer.getText(selection, true);
+    copyToClipboard(text).then((_) {
+      // The web's plain-HTTP fallback takes the browser's focus for its copy.
+      if (kIsWeb && mounted && _focus.hasFocus) {
+        _viewKey.currentState?.requestKeyboard();
+      }
+    });
+  }
+
   /// A modifier-click opens the link under the pointer; a tap asks first,
   /// because a tap is also how the terminal is focused (decision 122).
   void _onTapUp(BuildContext context, TapUpDetails details, CellOffset cell) {
     final link = terminalLinkAt(terminal._terminal, cell);
     if (link == null) return;
     if (details.kind == PointerDeviceKind.touch) {
-      _confirmLink(context, link, openLink);
+      _confirmLink(context, link, widget.openLink);
     } else if (_linkModifierPressed()) {
-      openLink(link);
+      widget.openLink(link);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final readOnly = widget.readOnly;
+    final phone = widget.phone;
+    final prefs = widget.prefs;
     final t = context.tokens;
     // **Dark in both themes.** Agents and the ANSI palette assume a dark
     // background; on the light theme's white code plate, an agent's white text
@@ -537,39 +583,84 @@ class StormTerminalView extends StatelessWidget {
     return Shortcuts(
       shortcuts: stormTerminalBlockList(),
       // Tab is the agent's here, so the way out is said (147b, WCAG 2.1.2).
-      child: Semantics(
-        container: true,
-        label: readOnly ? terminalReadOnlyLabel : terminalLabel,
-        child: LayoutBuilder(
-          builder: (context, box) => TerminalView(
-            terminal._terminal,
-            focusNode: focusNode,
-            autofocus: autofocus,
-            readOnly: readOnly,
-            contentInsertionConfiguration: readOnly
-                ? null
-                : terminal._insertion,
-            // Asked first; whatever it leaves goes to xterm2's own encoding.
-            onKeyEvent: (node, event) {
-              final app = stormTerminalSafeKey(context, event);
-              if (app != null) return app;
-              return readOnly
-                  ? KeyEventResult.ignored
-                  : terminal._onKeyEvent(node, event);
-            },
-            theme: theme,
-            padding: evenTerminalPadding(base, box.maxHeight, cell),
-            textStyle: style,
-            keyboardAppearance: Brightness.dark,
-            // Agents redraw on resize; the terminal follows its box.
-            autoResize: true,
-            onTapUp: (details, cell) => _onTapUp(context, details, cell),
+      child: Actions(
+        actions: {
+          _CopyIntent: CallbackAction<_CopyIntent>(onInvoke: (_) => _copy()),
+        },
+        child: Semantics(
+          container: true,
+          label: readOnly ? terminalReadOnlyLabel : terminalLabel,
+          child: LayoutBuilder(
+            builder: (context, box) => Listener(
+              onPointerDown: _onPointerDown,
+              child: TerminalView(
+                terminal._terminal,
+                key: _viewKey,
+                focusNode: _focus,
+                autofocus: widget.autofocus,
+                controller: _controller,
+                shortcuts: _terminalShortcuts(),
+                readOnly: readOnly,
+                contentInsertionConfiguration: readOnly
+                    ? null
+                    : terminal._insertion,
+                // Asked first; whatever it leaves goes to xterm2's own encoding.
+                onKeyEvent: (node, event) {
+                  final app = stormTerminalSafeKey(context, event);
+                  if (app != null) return app;
+                  return readOnly
+                      ? KeyEventResult.ignored
+                      : terminal._onKeyEvent(node, event);
+                },
+                theme: theme,
+                padding: evenTerminalPadding(base, box.maxHeight, cell),
+                textStyle: style,
+                keyboardAppearance: Brightness.dark,
+                // Agents redraw on resize; the terminal follows its box.
+                autoResize: true,
+                onTapUp: (details, cell) => _onTapUp(context, details, cell),
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 }
+
+/// Copy through [copyToClipboard]: xterm2's own uses `Clipboard.setData`,
+/// which a plain-HTTP LAN page does not have.
+class _CopyIntent extends Intent {
+  const _CopyIntent();
+}
+
+/// AM116. Ctrl+A and Ctrl+V are the agent's. A paste [StormTerminal.pasteChord]
+/// makes itself never reaches these.
+Map<ShortcutActivator, Intent> _terminalShortcuts() => stormUsesMetaModifier
+    ? const {
+        SingleActivator(LogicalKeyboardKey.keyC, meta: true): _CopyIntent(),
+        SingleActivator(LogicalKeyboardKey.keyV, meta: true): PasteTextIntent(
+          SelectionChangedCause.keyboard,
+        ),
+        SingleActivator(LogicalKeyboardKey.keyA, meta: true):
+            SelectAllTextIntent(SelectionChangedCause.keyboard),
+      }
+    : {
+        const SingleActivator(
+          LogicalKeyboardKey.keyC,
+          control: true,
+          shift: true,
+        ): const _CopyIntent(),
+        // On the web the browser's own paste event brings text and images.
+        if (!kIsWeb)
+          const SingleActivator(
+            LogicalKeyboardKey.keyV,
+            control: true,
+            shift: true,
+          ): const PasteTextIntent(
+            SelectionChangedCause.keyboard,
+          ),
+      };
 
 /// The terminal's accessible name: what it is, and how keyboard focus
 /// leaves it, since Tab and Shift+Tab go to the agent (decision 147b).

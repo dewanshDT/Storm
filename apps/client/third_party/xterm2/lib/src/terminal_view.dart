@@ -349,7 +349,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installColorQuery(Terminal terminal) {
-    terminal.onColorQuery ??= _colorQuery;
+    terminal.onColorQuery = _colorQuery;
   }
 
   void _removeColorQuery(Terminal terminal) {
@@ -359,7 +359,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installColorSchemeQuery(Terminal terminal) {
-    terminal.onColorSchemeQuery ??= _resolveColorSchemeQuery;
+    terminal.onColorSchemeQuery = _resolveColorSchemeQuery;
   }
 
   void _removeColorSchemeQuery(Terminal terminal) {
@@ -369,8 +369,8 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installClipboardHandlers(Terminal terminal) {
-    terminal.onClipboardStore ??= _clipboardStore;
-    terminal.onClipboardQuery ??= _clipboardQuery;
+    terminal.onClipboardStore = _clipboardStore;
+    terminal.onClipboardQuery = _clipboardQuery;
   }
 
   void _removeClipboardHandlers(Terminal terminal) {

@@ -141,6 +141,10 @@ needs you".
   Android (including Gboard's image keyboard). It is staged on the host and
   handed to the agent as a file path.
 - **Links** in the terminal open in your browser.
+- **Copy and paste:** drag over text to select it, then `⌘C` and `⌘V` on a
+  Mac (the browser on a Mac too), or `Ctrl ⇧ C` and `Ctrl ⇧ V` elsewhere.
+  `Ctrl A` and `Ctrl V` go to the agent; in Claude Code, `Ctrl V` pastes an
+  image.
 - **Tab and Shift+Tab go to the agent** while the terminal has focus: in
   Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
   move focus out of the terminal with the keyboard, press **Escape, then
