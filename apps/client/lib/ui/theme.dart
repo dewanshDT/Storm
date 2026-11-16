@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import 'oklch.dart' show contrastRatio;
 import 'tokens.dart';
 
 /// Storm's visual language, built entirely from [StormTokens].
@@ -136,9 +137,41 @@ abstract final class StormTheme {
         behavior: SnackBarBehavior.floating,
         backgroundColor: t.surface2,
         contentTextStyle: TextStyle(color: t.text),
+        actionTextColor: toastAction(t),
         shape: control,
       ),
     );
+  }
+
+  /// A toast's widest at the desk, where it sits in the bottom-right corner.
+  static const toastMaxWidth = 400.0;
+
+  /// [base] placed for a desk-width window [width] wide: bottom right, at
+  /// most [toastMaxWidth], clear of the sidebar.
+  static SnackBarThemeData deskToasts(
+    SnackBarThemeData base,
+    double width,
+    StormTokens t,
+  ) {
+    final edge = t.sp * 2;
+    return base.copyWith(
+      insetPadding: EdgeInsets.fromLTRB(
+        (width - toastMaxWidth - edge).clamp(edge, double.infinity),
+        0,
+        edge,
+        edge,
+      ),
+    );
+  }
+
+  /// The accent, moved toward [StormTokens.text] until it reads at 4.5:1 on
+  /// the toast's surface.
+  static Color toastAction(StormTokens t) {
+    for (var k = 0; k <= 20; k++) {
+      final c = Color.lerp(t.accent, t.text, k / 20)!;
+      if (contrastRatio(c, t.surface2) >= 4.5) return c;
+    }
+    return t.text;
   }
 
   /// The five type roles, sized from the token scale.
