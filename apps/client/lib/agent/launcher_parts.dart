@@ -745,10 +745,23 @@ class _SelectState<T> extends State<_Select<T>> {
   Future<void> _open() async {
     final box = _anchor.currentContext?.findRenderObject() as RenderBox?;
     final room = popoverRoom(context, _anchor);
+    final anchorWidth = box?.size.width ?? context.tokens.sp * 30;
+    final fit = widget.menu != null
+        ? anchorWidth
+        : fitPopoverWidth(context, [
+            for (final o in widget.options) o.label,
+            ...widget.disabled,
+          ]);
+    final width = widget.compact || widget.menu != null
+        ? fit
+        : math.max(anchorWidth, fit);
+    final line = width - popoverChrome(context.tokens);
+    String? tip(String label) =>
+        popoverLabelWidth(context, label) > line ? label : null;
     final picked = await showStormPopover<T>(
       context: context,
       anchorKey: _anchor,
-      width: box?.size.width ?? context.tokens.sp * 30,
+      width: width,
       builder: (popover) =>
           widget.menu?.call(popover, room) ??
           StormPopover(
@@ -756,10 +769,12 @@ class _SelectState<T> extends State<_Select<T>> {
               for (final o in widget.options)
                 PopoverItem(
                   label: o.label,
+                  tooltip: tip(o.label),
                   selected: o.value == widget.value,
                   onTap: () => Navigator.of(popover).pop(o.value),
                 ),
-              for (final label in widget.disabled) PopoverItem(label: label),
+              for (final label in widget.disabled)
+                PopoverItem(label: label, tooltip: tip(label)),
             ],
           ),
     );

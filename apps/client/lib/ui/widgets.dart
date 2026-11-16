@@ -400,9 +400,13 @@ class PopoverItem extends StatelessWidget {
     this.onTap,
     this.tone = PopoverTone.normal,
     this.selected = false,
+    this.tooltip,
   });
 
   final String label;
+
+  /// The whole label on hover, for a label its menu elides.
+  final String? tooltip;
   final Widget? leading;
   final Widget? trailing;
   final String? subtitle;
@@ -420,7 +424,7 @@ class PopoverItem extends StatelessWidget {
       PopoverTone.danger => t.danger,
     };
 
-    return InkWell(
+    final item = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(t.rControl * 0.8),
       child: Container(
@@ -442,11 +446,7 @@ class PopoverItem extends StatelessWidget {
                     label,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: color,
-                    ),
+                    style: popoverItemStyle(t).copyWith(color: color),
                   ),
                   if (subtitle != null)
                     Text(
@@ -467,10 +467,15 @@ class PopoverItem extends StatelessWidget {
         ),
       ),
     );
+    return tooltip == null ? item : Tooltip(message: tooltip, child: item);
   }
 }
 
 enum PopoverTone { normal, accent, muted, danger }
+
+/// A [PopoverItem]'s label face, also what menus measure to fit their lines.
+TextStyle popoverItemStyle(StormTokens t) =>
+    TextStyle(fontFamily: StormTokens.sansFamily, fontSize: t.codeSize);
 
 /// A number and what it counts, as the dashboard shows them.
 class StatBlock extends StatelessWidget {
