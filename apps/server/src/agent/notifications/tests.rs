@@ -539,7 +539,7 @@ fn the_counter_never_goes_backwards_across_a_read_or_a_clear() {
     assert!(b.updated_seq > a.updated_seq);
 
     // A read bumps `a`'s updated_seq past `b`'s.
-    mark_read(&conn, &[a.id.clone()], None, &now()).unwrap();
+    mark_read(&conn, std::slice::from_ref(&a.id), None, &now()).unwrap();
     let a_after_read = conn
         .query_row(
             "SELECT updated_seq FROM notifications WHERE id = ?1",

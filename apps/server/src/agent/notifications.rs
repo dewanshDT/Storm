@@ -911,9 +911,9 @@ pub struct Notification {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub silent: bool,
-    /// Why it is silent (`quiet`/`paused`/`off`/`muted`); internal to the
-    /// summary's own counting, not part of the wire shape.
-    #[serde(skip)]
+    /// Why it is silent (`quiet`/`paused`/`off`/`muted`), so the inbox can
+    /// say why it was held.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub silent_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
