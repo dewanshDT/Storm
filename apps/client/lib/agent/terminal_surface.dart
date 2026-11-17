@@ -30,9 +30,11 @@ class StormTerminal {
     );
     _terminal.onOutput = (data) {
       if (_writingOutput && _colourAnswer.hasMatch(data)) {
-        answered.value = _target;
-      }
-      if (_writingOutput || _schemeReport.hasMatch(data)) {
+        _reply(data, colour: true);
+        // A replayed query's answer never reached the program; what the
+        // host remembers it was told is better than this device's guess.
+        if (_answeredHere || _remembered == null) answered.value = _target;
+      } else if (_writingOutput || _schemeReport.hasMatch(data)) {
         _reply(data);
       } else {
         _emit(data);
@@ -81,12 +83,49 @@ class StormTerminal {
   /// drew for it. Here, not in the view, so it outlives a remount.
   final answered = ValueNotifier<Brightness?>(null);
 
+  /// This terminal's own colour answer reached the program, so what its
+  /// host remembers is no news from then on.
+  bool _answeredHere = false;
+  Brightness? _remembered;
+  bool _colourPending = false;
+
+  /// What the session's host says its program was last answered with
+  /// (157g), from whichever device answered: shown until this terminal
+  /// answers, so a reload or another device draws what the program drew
+  /// for.
+  void remembered(String? brightness) {
+    final b = switch (brightness) {
+      'light' => Brightness.light,
+      'dark' => Brightness.dark,
+      _ => null,
+    };
+    if (b == null) return;
+    _remembered = b;
+    if (!_answeredHere) answered.value = b;
+  }
+
+  /// The reply [onReply] is being handed went out to the program.
+  void replySent() {
+    if (_colourPending) _answeredHere = true;
+  }
+
   /// What an answer gives now: the view's target, set as it builds.
   Brightness _target = Brightness.dark;
 
-  void _reply(String data) {
+  void _reply(String data, {bool colour = false}) {
     final bytes = Uint8List.fromList(utf8.encode(data));
-    (onReply ?? onInput)?.call(bytes);
+    final reply = onReply;
+    if (reply == null) {
+      if (colour) _answeredHere = true;
+      onInput?.call(bytes);
+      return;
+    }
+    _colourPending = colour;
+    try {
+      reply(bytes);
+    } finally {
+      _colourPending = false;
+    }
   }
 
   /// The view's size changed.

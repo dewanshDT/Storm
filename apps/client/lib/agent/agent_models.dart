@@ -710,6 +710,7 @@ class AgentSession {
     this.title,
     this.activity,
     this.programStatus,
+    this.terminalAnswered,
     this.harnessSession,
     this.resumedFrom,
     this.mcpSkipped = const [],
@@ -766,6 +767,11 @@ class AgentSession {
   /// The program's own report of its state (decision 155), while it runs;
   /// null for a session known only by its title, or from an older server.
   final ProgramStatus? programStatus;
+
+  /// What its program was last told the terminal's brightness is, as its
+  /// host saw the answer go in (157g): `light`, `dark`, or null before any
+  /// or from an older server.
+  final String? terminalAnswered;
 
   /// What every surface calls the session. A child goes by the name its
   /// parent gave it (145b), never by its agent's terminal title.
@@ -978,6 +984,7 @@ class AgentSession {
     title: title ?? this.title,
     activity: activity == _keep ? this.activity : activity as String?,
     programStatus: programStatus,
+    terminalAnswered: terminalAnswered,
     harnessSession: harnessSession ?? this.harnessSession,
     resumedFrom: resumedFrom,
     mcpSkipped: mcpSkipped,
@@ -1035,6 +1042,10 @@ class AgentSession {
     title: j['title'] as String?,
     activity: j['activity'] as String?,
     programStatus: ProgramStatus.tryParse(j['program_status']),
+    terminalAnswered: switch (j['terminal_answered']) {
+      final String a when a == 'light' || a == 'dark' => a,
+      _ => null,
+    },
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
     mcpSkipped: [

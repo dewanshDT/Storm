@@ -163,6 +163,8 @@ needs you".
   to auto. **Colours: Always dark** keeps every terminal dark. A session
   also starts with `COLORFGBG` set to the colours it starts in, for
   programs that read it instead of asking; agents it starts get the same.
+  Storm remembers what a session's program was told, so it looks the same
+  on every device and after a reload.
 
 Under the terminal, a line says how to leave it: *Tab and Shift+Tab go to
 the agent · Esc, then Tab, leaves the terminal* (⇧Tab on a Mac).
