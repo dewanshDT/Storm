@@ -2528,9 +2528,17 @@ fn agent_error(e: crate::agent::AgentError) -> ApiError {
 pub struct WorkspaceView {
     pub name: String,
     pub live_sessions: usize,
+    /// The write vault last started with here (decision 159), when one is
+    /// remembered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write: Option<crate::agent::store::WorkspacePref>,
 }
 
-pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<WorkspaceView>> {
+pub async fn host_workspaces(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+) -> ApiResult<Vec<WorkspaceView>> {
     state
         .agent
         .refresh_and_wait(host_id, std::time::Duration::from_secs(2))
@@ -2551,14 +2559,47 @@ pub async fn host_workspaces(state: &Shared, host_id: &str) -> ApiResult<Vec<Wor
     for (name, n) in state.agent.live_counts(host_id).map_err(agent_error)? {
         *counts.entry(dir(&name)).or_insert(0) += n;
     }
-    Ok(caps
-        .workspaces
-        .iter()
-        .map(|name| WorkspaceView {
+    let mut prefs = if matches!(actor, Actor::Session { .. }) {
+        state.agent.workspace_prefs(host_id).map_err(internal)?
+    } else {
+        Default::default()
+    };
+    let mut out = Vec::with_capacity(caps.workspaces.len());
+    for name in &caps.workspaces {
+        let mut write = prefs.remove(name);
+        // A vault gone or no longer writable is forgotten silently.
+        if let Some(v) = write.as_ref().and_then(|w| w.vault_id.clone())
+            && vault_of(state, actor, Access::Write, &v).await.is_err()
+        {
+            state
+                .agent
+                .forget_workspace_pref(host_id, name)
+                .map_err(internal)?;
+            write = None;
+        }
+        out.push(WorkspaceView {
             live_sessions: counts.get(&dir(name)).copied().unwrap_or(0),
             name: name.clone(),
-        })
-        .collect())
+            write,
+        });
+    }
+    Ok(out)
+}
+
+/// `DELETE /v1/agent/hosts/{id}/workspaces/{workspace}/prefs` (decision
+/// 159): Forget in Settings. Owner only; forgetting nothing is no error.
+pub async fn forget_workspace_pref(
+    state: &Shared,
+    actor: &Actor,
+    host_id: &str,
+    workspace: &str,
+) -> ApiResult<()> {
+    crews_owner(actor)?;
+    state
+        .agent
+        .forget_workspace_pref(host_id, workspace)
+        .map_err(internal)?;
+    Ok(())
 }
 
 // ---- New workspaces (decision 141c) ----------------------------------------
@@ -5268,6 +5309,12 @@ pub async fn launch_session(
         device: device.map(str::to_string),
     };
     let spawn = req.spawn;
+    // Decision 159: only a person's own choice of write vault is remembered,
+    // never a resume's, a rerun's or a crew launch's.
+    let remember = matches!(actor, Actor::Session { .. })
+        && req.resume_of.is_none()
+        && req.rerun_of.is_none()
+        && req.crew.is_none();
     let mut offered = vec![crate::agent::store::McpGrant {
         id: BUILTIN_ID.into(),
         slug: BUILTIN_SLUG.into(),
@@ -5286,6 +5333,17 @@ pub async fn launch_session(
         .agent
         .launch(actor.user_id(), req, meta, offered)
         .map_err(agent_error)?;
+    // A Shell can't write to a vault, so it says nothing about one.
+    if remember
+        && !matches!(outcome, crate::agent::McpOutcome::Shell)
+        && let Err(e) = state.agent.remember_workspace_pref(
+            &session.host_id,
+            &session.workspace,
+            launch.write_vault_id.as_deref(),
+        )
+    {
+        tracing::warn!(session = session.id, error = %e, "workspace pref not recorded");
+    }
     if spawn && state.agent.spawn_launched(&session.id) {
         let detail = serde_json::json!({
             "session_id": session.id,
