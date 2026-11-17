@@ -592,8 +592,15 @@ SessionTab sessionTabOf(String? raw) => raw == 'requests'
 
 /// Shows a session. A route, so it is linkable, remembered for launch and
 /// backed out of like any other place (plan §6.1).
-void openAgentSession(BuildContext context, String id, {SessionTab? tab}) =>
-    context.go(Routes.agentSession(id, tab: tab?.name));
+void openAgentSession(BuildContext context, String id, {SessionTab? tab}) {
+  final last = agentSessionOpened.value;
+  agentSessionOpened.value = (id, (last?.$2 ?? 0) + 1);
+  context.go(Routes.agentSession(id, tab: tab?.name));
+}
+
+/// The session [openAgentSession] last asked for, with a count, so opening
+/// the one already shown still gives its terminal the keyboard (171-12).
+final agentSessionOpened = ValueNotifier<(String, int)?>(null);
 
 /// The host this device launched on last, so the launcher can preselect it.
 ///
