@@ -10,7 +10,6 @@ import 'package:storm/ui/properties_panel.dart';
 import 'package:storm/ui/shell/nav_bubble.dart';
 import 'package:storm/ui/shell/activity_rail.dart';
 import 'package:storm/ui/shell/corner_bubbles.dart';
-import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/shell/vault_sidebar.dart';
 
 import 'fake_server.dart';
@@ -320,7 +319,7 @@ void main() {
       c.read(routerProvider).go(Routes.settingsPage('device'));
       await tester.pumpAndSettle();
 
-      await tester.tap(find.text(StormPreset.slowflowEarth.label));
+      await tester.tap(find.byKey(const Key('theme-family-slowflow')));
       await tester.pumpAndSettle();
 
       expect(locationOf(c), Routes.settingsPage('device'));

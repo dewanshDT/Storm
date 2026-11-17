@@ -8,9 +8,9 @@ import '../../state/app_state.dart';
 import '../controls.dart';
 import '../surfaces.dart';
 import '../widgets.dart' show PopoverItem;
-import '../themes/theme_library.dart';
 import '../tokens.dart';
 import 'settings_widgets.dart';
+import 'theme_picker.dart';
 
 const _minText = 12.0;
 const _maxText = 24.0;
@@ -37,18 +37,7 @@ class DevicePage extends ConsumerWidget {
       intro: 'Only affects this device.',
       children: [
         const GroupLabel('Appearance', bottom: 10),
-        Wrap(
-          spacing: t.sp,
-          runSpacing: t.sp,
-          children: [
-            for (final preset in StormPreset.values)
-              _PresetButton(
-                preset: preset,
-                selected: settings.theme == _choiceOf(preset),
-                onTap: () => save(settings.copyWith(theme: _choiceOf(preset))),
-              ),
-          ],
-        ),
+        const ThemePicker(),
         SizedBox(height: t.sp * 1.25),
         SettingsRow(
           label: 'Text size',
@@ -107,77 +96,7 @@ class DevicePage extends ConsumerWidget {
   }
 }
 
-ThemeChoice _choiceOf(StormPreset p) =>
-    ThemeChoice(p.family, p.inputs.dark ? ThemeMode.dark : ThemeMode.light);
-
 String _mod() => stormUsesMetaModifier ? '⌘' : 'Ctrl+';
-
-class _PresetButton extends StatelessWidget {
-  const _PresetButton({
-    required this.preset,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final StormPreset preset;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final own = StormTokens.from(preset);
-    final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: preset.label,
-      onTap: onTap,
-      excludeSemantics: true,
-      child: Material(
-        key: Key('preset-${preset.name}'),
-        color: selected ? t.accentSoft : t.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: radius,
-          side: BorderSide(color: selected ? t.accent : t.border, width: t.bw),
-        ),
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: radius,
-          child: Padding(
-            padding: EdgeInsets.symmetric(
-              horizontal: t.sp * 1.5,
-              vertical: t.sp,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  width: t.sp * 2.25,
-                  height: t.sp * 2.25,
-                  decoration: BoxDecoration(
-                    shape: BoxShape.circle,
-                    color: own.bg,
-                    border: Border.all(color: own.accent, width: t.bw * 3),
-                  ),
-                ),
-                SizedBox(width: t.sp),
-                Text(
-                  preset.label,
-                  style: TextStyle(
-                    fontFamily: StormTokens.sansFamily,
-                    fontSize: t.codeSize,
-                    color: t.text,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _TextSizeStepper extends StatelessWidget {
   const _TextSizeStepper({required this.value, required this.onChanged});
