@@ -4869,6 +4869,10 @@ pub struct SessionView {
     /// since}`, `state` one of `idle`, `working`, `done`, `blocked` or
     /// `error`, while it runs and its program reports one; `null` otherwise.
     pub program_status: Option<crate::agent::program::ProgramStatus>,
+    /// `light` or `dark`: what its client last answered its program's
+    /// OSC 10/11 colour query with (157g); absent until its host says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_answered: Option<crate::agent::TerminalBrightness>,
     /// Its host's last request, while the host is offline and the session
     /// has not ended (153a); `null` otherwise.
     pub host_last_seen: Option<String>,
@@ -5006,6 +5010,7 @@ fn session_view(
     };
     let attention = state.agent.attention(&session).map_err(agent_error)?;
     let program_status = state.agent.program_status(&session);
+    let terminal_answered = state.agent.terminal_answered(&session.id);
     let pending_decisions = delete_request
         .iter()
         .map(|d| PendingDecision {
@@ -5046,6 +5051,7 @@ fn session_view(
         delete_request,
         attention,
         program_status,
+        terminal_answered,
         host_last_seen: None,
         pending_decisions,
         output_end,
@@ -5406,6 +5412,7 @@ pub async fn launch_session(
         delete_request: None,
         attention: None,
         program_status: None,
+        terminal_answered: None,
         host_last_seen: None,
         pending_decisions: Vec::new(),
         output_end: None,

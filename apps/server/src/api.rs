@@ -2649,7 +2649,11 @@ async fn agent_terminal_stream(
                 st.stale = false;
                 st.read_at = std::time::Instant::now();
                 st.size = (record.cols, record.rows);
-                let json = serde_json::to_string(&record).unwrap_or_default();
+                let mut status = serde_json::to_value(&record).unwrap_or_default();
+                if let Some(answered) = st.agent.terminal_answered(&st.id) {
+                    status["terminal_answered"] = serde_json::json!(answered);
+                }
+                let json = status.to_string();
                 if st.last_status.as_ref() != Some(&json) {
                     st.last_status = Some(json.clone());
                     return Some((Ok(Event::default().event("status").data(json)), st));
@@ -21513,6 +21517,28 @@ pub(crate) mod tests {
             "{} bytes before live",
             before_live.len()
         );
+    }
+
+    /// 157g: the stream's status says what the host remembers its client
+    /// answered, before the snapshot a fresh client draws.
+    #[tokio::test]
+    async fn the_streams_status_carries_the_answered_brightness() {
+        let dir = tempdir::TempDir::new("storm-157g-stream").unwrap();
+        let f = terminal_fixture(dir.path(), b"hello").await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert!(record.get("terminal_answered").is_none(), "{record}");
+
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "running", "terminal_answered": "light"}),
+        );
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["terminal_answered"], "light");
     }
 
     #[tokio::test]
