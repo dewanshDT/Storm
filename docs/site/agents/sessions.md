@@ -150,6 +150,9 @@ needs you".
   Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
   move focus out of the terminal with the keyboard, press **Escape, then
   Tab**, or click outside it.
+- **Opening a session gives its terminal the keyboard** on a computer, from
+  the sidebar or anywhere else, so you can type straight away. A phone waits
+  for a tap, so the keyboard does not cover the screen.
 - **On a phone**, extra keys (Esc, Tab, ⇧Tab, arrows, Ctrl) sit above the
   keyboard.
 - **Settings › Terminal** sets the text size, line spacing, padding and
