@@ -472,14 +472,33 @@ class AgentJob {
 
 /// A workspace on a host, with how many live sessions already share it.
 class AgentWorkspace {
-  AgentWorkspace({required this.name, required this.liveSessions});
+  AgentWorkspace({required this.name, required this.liveSessions, this.write});
 
   final String name;
   final int liveSessions;
 
+  /// The write vault last started with here, when remembered (decision 159).
+  final WorkspaceWrite? write;
+
   factory AgentWorkspace.fromJson(Map<String, dynamic> j) => AgentWorkspace(
     name: j['name'] as String,
     liveSessions: (j['live_sessions'] as num?)?.toInt() ?? 0,
+    write: j['write'] is Map<String, dynamic>
+        ? WorkspaceWrite.fromJson(j['write'] as Map<String, dynamic>)
+        : null,
+  );
+}
+
+/// A remembered Write to (decision 159): [writes] false is "no writes".
+class WorkspaceWrite {
+  const WorkspaceWrite({required this.writes, this.vaultId});
+
+  final bool writes;
+  final String? vaultId;
+
+  factory WorkspaceWrite.fromJson(Map<String, dynamic> j) => WorkspaceWrite(
+    writes: j['writes'] as bool? ?? false,
+    vaultId: j['vault_id'] as String?,
   );
 }
 
