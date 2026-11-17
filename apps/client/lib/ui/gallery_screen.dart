@@ -22,21 +22,24 @@ class GalleryScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: const Color(0xFF15130F),
       body: SafeArea(
-        child: SingleChildScrollView(
-          scrollDirection: Axis.horizontal,
-          child: IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                for (final preset in StormPreset.values)
-                  SizedBox(
-                    width: 380,
-                    child: Theme(
-                      data: StormTheme.from(preset),
-                      child: const _Column(),
+        child: LayoutBuilder(
+          builder: (context, box) => SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: SizedBox(
+              height: box.maxHeight,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  for (final preset in StormPreset.values)
+                    SizedBox(
+                      width: 380,
+                      child: Theme(
+                        data: StormTheme.from(preset),
+                        child: const _Column(),
+                      ),
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -217,6 +220,37 @@ class _Column extends StatelessWidget {
                     ),
                   ),
                 ],
+              ),
+            ),
+
+            _Card(
+              label: 'v2 · choice cards',
+              child: ChoiceCards<String>(
+                key: const Key('gallery-choice-cards'),
+                options: const [
+                  ChoiceCardOption('storm', 'Storm', subtitle: 'Default'),
+                  ChoiceCardOption(
+                    'catppuccin',
+                    'Catppuccin',
+                    subtitle: 'Mocha',
+                    note: 'Inspired by Catppuccin',
+                  ),
+                  ChoiceCardOption(
+                    'slowflow',
+                    'SlowFlow',
+                    subtitle: 'Earth',
+                    note: 'Light only',
+                  ),
+                  ChoiceCardOption(
+                    'off',
+                    'Unavailable',
+                    subtitle: 'Disabled',
+                    enabled: false,
+                  ),
+                ],
+                selected: 'catppuccin',
+                onSelected: (_) {},
+                minCardWidth: 120,
               ),
             ),
 
