@@ -161,6 +161,14 @@ impl AuthDb {
             "UPDATE client_devices SET revoked = ?2, revoked_reason = ?3 WHERE id = ?1",
             params![id, now, reason],
         )?;
+        // Decision 161: a revoked device's notification prefs are deleted
+        // (push endpoints follow in 161-6). Revoking is an UPDATE, never a
+        // row delete, so the `ON DELETE CASCADE` on this table never fires
+        // on its own.
+        self.conn.execute(
+            "DELETE FROM device_notification_prefs WHERE device_id = ?1",
+            params![id],
+        )?;
         Ok(())
     }
 }
@@ -317,4 +325,37 @@ pub fn revoke(db: &mut AuthDb, id: &str, reason: &str, now: &str) -> Result<(Dev
         &format!(r#"{{"reason":{reason:?},"sessions_revoked":{killed}}}"#),
     )?;
     Ok((device, killed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Decision 161 (AM125): revoking is an `UPDATE`, never a row delete,
+    /// so the table's `ON DELETE CASCADE` alone would never fire here —
+    /// this is what actually clears a revoked device's notification prefs.
+    #[test]
+    fn revoking_a_device_deletes_its_notification_prefs() {
+        let mut db = AuthDb::open_in_memory().unwrap();
+        let now = "2026-11-17T00:00:00Z";
+        let device = create_synthetic(&mut db, "Pixel 8", now).unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO device_notification_prefs (device_id, updated_at) VALUES (?1, ?2)",
+                rusqlite::params![device.id, now],
+            )
+            .unwrap();
+
+        revoke(&mut db, &device.id, "lost", now).unwrap();
+
+        let left: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM device_notification_prefs WHERE device_id = ?1",
+                rusqlite::params![device.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(left, 0);
+    }
 }

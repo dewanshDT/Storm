@@ -99,13 +99,16 @@ pub(super) async fn agent_events(
     }
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
+    // 161-1: the inbox, prefs and mutes share one `notification`/
+    // `notification_read`/`prefs_changed` feed on this same stream.
+    let notify_changed = state.agent.watch_notifications();
     let (tx, rx) = mpsc::channel(QUEUE);
 
     if wants_websocket(&parts) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
             Ok(ws) => ws.on_upgrade(move |socket| async move {
                 tokio::select! {
-                    () = feed(state, changes, tx, PACE) => {}
+                    () = feed(state, changes, notify_changed, tx, PACE) => {}
                     () = pump_ws(socket, rx) => {}
                 }
             }),
@@ -116,7 +119,7 @@ pub(super) async fn agent_events(
     if let Some(id) = parts.headers.get("last-event-id") {
         tracing::debug!(last_event_id = ?id, "ignoring Last-Event-ID: a reconnect is a new snapshot");
     }
-    tokio::spawn(feed(state, changes, tx, PACE));
+    tokio::spawn(feed(state, changes, notify_changed, tx, PACE));
     let body = tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(rx), |f| {
         Ok::<_, std::convert::Infallible>(f.sse())
     });
@@ -157,6 +160,7 @@ enum Stop {
 pub(super) async fn feed(
     state: Shared,
     mut changes: watch::Receiver<u64>,
+    mut notify_changed: watch::Receiver<u64>,
     tx: mpsc::Sender<Frame>,
     pace: Pace,
 ) {
@@ -169,10 +173,14 @@ pub(super) async fn feed(
                 return;
             }
         };
+        sub.init_notify(&state);
         if tx.send(snapshot).await.is_err() {
             return;
         }
-        match sub.follow(&state, &mut changes, &tx, pace).await {
+        match sub
+            .follow(&state, &mut changes, &mut notify_changed, &tx, pace)
+            .await
+        {
             Stop::Overflowed => {
                 if tx.send(Frame::resync()).await.is_err() {
                     return;
@@ -201,6 +209,15 @@ struct Subscriber {
     sent: HashMap<String, Sent>,
     /// Sessions held back by their lane, and when each may go.
     due: HashMap<String, Instant>,
+    /// 161-1: the inbox's `seq` this subscriber has already been sent past.
+    notif_cursor: i64,
+    /// Ids sent as `notification` while still unread, so a later read
+    /// (by this device or another) is sent as `notification_read` rather
+    /// than resending the whole row.
+    notif_unread_sent: std::collections::HashSet<String>,
+    prefs_version: i64,
+    mutes_version: i64,
+    cleared_version: i64,
 }
 
 #[derive(Serialize)]
@@ -260,6 +277,7 @@ impl Subscriber {
         &mut self,
         state: &Shared,
         changes: &mut watch::Receiver<u64>,
+        notify_changed: &mut watch::Receiver<u64>,
         tx: &mpsc::Sender<Frame>,
         pace: Pace,
     ) -> Stop {
@@ -267,14 +285,24 @@ impl Subscriber {
             tokio::time::interval_at(Instant::now() + pace.keepalive, pace.keepalive);
         loop {
             let due = self.due.values().min().copied();
+            let frames;
             tokio::select! {
                 changed = changes.changed() => {
                     if changed.is_err() {
                         return Stop::Gone;
                     }
                     tokio::time::sleep(pace.coalesce).await;
+                    frames = self.scan(state, changes, pace).await;
                 }
-                () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {}
+                () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                    frames = self.scan(state, changes, pace).await;
+                }
+                notified = notify_changed.changed() => {
+                    if notified.is_err() {
+                        return Stop::Gone;
+                    }
+                    frames = self.scan_notify(state).await;
+                }
                 _ = keepalive.tick() => {
                     // A full queue is already traffic.
                     if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send(Frame::Keepalive) {
@@ -284,7 +312,7 @@ impl Subscriber {
                 }
                 () = tx.closed() => return Stop::Gone,
             }
-            for frame in self.scan(state, changes, pace).await {
+            for frame in frames {
                 match tx.try_send(frame) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => return Stop::Overflowed,
@@ -292,6 +320,100 @@ impl Subscriber {
                 }
             }
         }
+    }
+
+    /// Starts this subscriber's inbox cursor at "nothing before now", so a
+    /// reconnect does not replay the whole inbox as if it had just
+    /// happened — `GET /v1/notifications` is the backfill path for that.
+    fn init_notify(&mut self, state: &Shared) {
+        self.notif_cursor = state.agent.notifications_update_cursor().unwrap_or(0);
+        self.prefs_version = state
+            .agent
+            .notification_prefs()
+            .map(|p| p.version)
+            .unwrap_or(0);
+        self.mutes_version = state.agent.notifications_mutes_version().unwrap_or(0);
+        self.cleared_version = state.agent.notifications_cleared_version().unwrap_or(0);
+    }
+
+    async fn scan_notify(&mut self, state: &Shared) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut read_ids = Vec::new();
+        loop {
+            let rows = match state
+                .agent
+                .list_notifications_since_update(self.notif_cursor, 500)
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "agent events: listing notifications failed");
+                    break;
+                }
+            };
+            let got = rows.len();
+            for n in rows {
+                self.notif_cursor = self.notif_cursor.max(n.updated_seq);
+                // Any read row is `notification_read`, whether or not this
+                // very subscriber had sent it unread before — a row from
+                // before this connection (the backfill case) must never go
+                // out as a fresh `notification` carrying `read_at`.
+                if n.read_at.is_some() || n.cancelled {
+                    self.notif_unread_sent.remove(&n.id);
+                    if n.read_at.is_some() {
+                        read_ids.push(n.id);
+                    }
+                    continue;
+                }
+                self.notif_unread_sent.insert(n.id.clone());
+                frames.push(Frame::event(
+                    "notification",
+                    serde_json::to_string(&n).unwrap_or_default(),
+                ));
+            }
+            if got < 500 {
+                break;
+            }
+        }
+        if !read_ids.is_empty() {
+            frames.push(Frame::event(
+                "notification_read",
+                serde_json::json!({ "ids": read_ids }).to_string(),
+            ));
+        }
+        match state.agent.notification_prefs() {
+            Ok(p) if p.version != self.prefs_version => {
+                self.prefs_version = p.version;
+                frames.push(Frame::event(
+                    "prefs_changed",
+                    serde_json::to_string(&p).unwrap_or_default(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading notification prefs failed"),
+        }
+        match state.agent.notifications_mutes_version() {
+            Ok(v) if v != self.mutes_version => {
+                self.mutes_version = v;
+                match state.agent.notification_mutes() {
+                    Ok(mutes) => frames.push(Frame::event(
+                        "mutes_changed",
+                        serde_json::json!({ "mutes": mutes }).to_string(),
+                    )),
+                    Err(e) => tracing::warn!(error = ?e, "agent events: listing mutes failed"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading mutes version failed"),
+        }
+        match state.agent.notifications_cleared_version() {
+            Ok(v) if v != self.cleared_version => {
+                self.cleared_version = v;
+                frames.push(Frame::event("notifications_cleared", String::new()));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading cleared version failed"),
+        }
+        frames
     }
 
     /// Rebuilds the views whose session moved, or every view when the

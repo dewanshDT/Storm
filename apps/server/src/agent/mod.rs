@@ -28,6 +28,7 @@ pub mod images;
 pub mod inbox;
 pub mod jobs;
 pub mod model;
+pub mod notifications;
 pub mod park;
 pub mod permission;
 pub mod program;
@@ -1043,6 +1044,10 @@ struct Live {
     /// When each host that dropped its link in this run last made a request
     /// (153a), for "host offline · last seen".
     last_seen_at: HashMap<String, String>,
+    /// The link generation each offline host went down on (161-1): the
+    /// Notifier's `host_offline` key, so a reconnect starts a fresh outage
+    /// rather than re-raising the one just cleared.
+    offline_generation: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1094,6 +1099,13 @@ pub struct AgentManager {
     pub(crate) wake_poke: tokio::sync::Notify,
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
+    /// The Notifier's own memory (161-1): each session's last-seen snapshot,
+    /// so a transition is only ever read from two states this server itself
+    /// observed, and what has already been said about an outage or a child.
+    notify_memory: Mutex<notifications::NotifierMemory>,
+    /// Bumped on any inbox, prefs, mute or pause change `/v1/agent/events`
+    /// cares about (161-1).
+    notify_changed: watch::Sender<u64>,
     changes: changes::Changes,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
@@ -1227,6 +1239,8 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
+            notify_memory: Mutex::new(notifications::NotifierMemory::new(now())),
+            notify_changed: watch::channel(0).0,
             changes: changes::Changes::new(),
             #[cfg(test)]
             record_reads: Default::default(),
@@ -1292,6 +1306,8 @@ impl AgentManager {
                     );
                     live.hosts.remove(host_id);
                     live.last_seen_at.insert(host_id.to_string(), seen);
+                    live.offline_generation
+                        .insert(host_id.to_string(), generation);
                 }
                 _ => return,
             }
@@ -1389,6 +1405,26 @@ impl AgentManager {
     /// this run of the server.
     pub fn host_last_seen(&self, host_id: &str) -> Option<String> {
         self.live.lock().unwrap().last_seen_at.get(host_id).cloned()
+    }
+
+    /// Every host offline in this run of the server, with when it was last
+    /// seen and the link generation its outage began on (161-1's
+    /// `host_offline`). A host this server has never seen connect at all
+    /// (so never disconnected either) is not here, which is right: nothing
+    /// is known of when it went offline.
+    pub(super) fn offline_hosts(&self) -> Vec<(String, String, u64)> {
+        let live = self.live.lock().unwrap();
+        live.last_seen_at
+            .iter()
+            .filter(|(id, _)| !live.hosts.contains_key(id.as_str()))
+            .map(|(id, seen)| {
+                (
+                    id.clone(),
+                    seen.clone(),
+                    live.offline_generation.get(id).copied().unwrap_or(0),
+                )
+            })
+            .collect()
     }
 
     /// The end of a session's output as the server's cache holds it: a byte

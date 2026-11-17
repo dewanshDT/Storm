@@ -614,6 +614,30 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/config/agent",
             get(agent_get_config).put(agent_put_config),
         )
+        // Decision 161, slice 161-1: the inbox and its settings. Owner
+        // only — no MCP tool reaches any of this (Q18).
+        .route(
+            "/v1/notifications",
+            get(notifications_list).delete(notifications_clear),
+        )
+        .route("/v1/notifications/read", post(notifications_read))
+        .route(
+            "/v1/notifications/prefs",
+            get(notification_prefs_get).put(notification_prefs_put),
+        )
+        .route(
+            "/v1/notifications/mutes",
+            get(notification_mutes_list).post(notification_mutes_create),
+        )
+        .route(
+            "/v1/notifications/mutes/{id}",
+            delete(notification_mutes_delete),
+        )
+        .route(
+            "/v1/notifications/pause",
+            post(notifications_pause).delete(notifications_unpause),
+        )
+        .route("/v1/notifications/test", post(notifications_test))
         // MCP Gateway integrations (decision 81c) — owner only, checked in
         // ops. **Session tier**, so an `stk_` key can never manage one (§14).
         .route(
@@ -2748,6 +2772,125 @@ async fn agent_put_config(
 ) -> ApiResult<Json<crate::ops::AgentConfigView>> {
     Ok(Json(
         crate::ops::set_agent_config(&state, &actor, &req.default_provider).await?,
+    ))
+}
+
+// ---- Notifications (decision 161, slice 161-1) ------------------------
+
+#[derive(Debug, Deserialize)]
+struct NotificationsQuery {
+    #[serde(default)]
+    after: i64,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn notifications_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(query): Query<NotificationsQuery>,
+) -> ApiResult<Json<crate::ops::NotificationsPage>> {
+    Ok(Json(
+        crate::ops::list_notifications(&state, &actor, query.after, query.limit).await?,
+    ))
+}
+
+fn device_of(auth: &Option<Extension<SessionAuth>>) -> Option<&str> {
+    auth.as_ref().map(|a| a.authenticated.device.id.as_str())
+}
+
+async fn notifications_read(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<crate::ops::MarkRead>,
+) -> ApiResult<Json<crate::ops::notifications::MarkReadResult>> {
+    Ok(Json(
+        crate::ops::mark_notifications_read(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn notifications_clear(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<StatusCode> {
+    crate::ops::clear_notifications(&state, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn notification_prefs_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::get_notification_prefs(&state, &actor).await?,
+    ))
+}
+
+async fn notification_prefs_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::PutPrefsBody>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::put_notification_prefs(&state, &actor, body).await?,
+    ))
+}
+
+async fn notification_mutes_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::agent::notifications::Mute>>> {
+    Ok(Json(
+        crate::ops::list_notification_mutes(&state, &actor).await?,
+    ))
+}
+
+async fn notification_mutes_create(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<crate::ops::MutePrefs>,
+) -> ApiResult<Json<crate::agent::notifications::Mute>> {
+    Ok(Json(
+        crate::ops::create_notification_mute(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn notification_mutes_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_notification_mute(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn notifications_pause(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::PausePrefs>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::pause_notifications(&state, &actor, body).await?,
+    ))
+}
+
+async fn notifications_unpause(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::unpause_notifications(&state, &actor).await?,
+    ))
+}
+
+async fn notifications_test(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Notification>> {
+    Ok(Json(
+        crate::ops::send_test_notification(&state, &actor).await?,
     ))
 }
 

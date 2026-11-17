@@ -17,6 +17,10 @@ blake3 = "1.8.5"
 # one, which is the same reason rustls runs on `ring` below.
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 clap = { version = "4.6.5", features = ["derive", "env"] }
+# Quiet hours (decision 161) are stored with an IANA zone, and `time` carries
+# no tz database. Pure Rust, no C bindings, builds on the musl/zig release.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+chrono-tz = "0.10"
 data-encoding = "2.11.1"
 # Renders the pairing URI as a scannable block for `storm-server pair --qr`.
 # Default features off: the image/svg renderers pull a decoder stack we never

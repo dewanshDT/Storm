@@ -1153,6 +1153,12 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 if let Err(e) = agent.park_idle_children() {
                     tracing::warn!(error = ?e, "could not park idle children");
                 }
+                // 161-1: the Notifier's own tick — transitions, offline
+                // hosts, child events, the quiet-hours/pause summary and
+                // inbox retention.
+                if let Err(e) = agent.notifier_tick() {
+                    tracing::warn!(error = ?e, "notifier tick failed");
+                }
             }
         });
     }
