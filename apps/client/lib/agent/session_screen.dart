@@ -1310,6 +1310,8 @@ class _NotePanel extends ConsumerWidget {
         vaults.where((v) => v.id == at.vaultId).firstOrNull?.name ?? '';
     final n = note.value;
     void open() => context.go(Routes.note(at.vaultId, at.noteId));
+    final shown =
+        title ?? (n == null ? '' : noteTitleOf(n.meta.title, n.meta.path));
     final accent = TextStyle(
       fontFamily: StormTokens.sansFamily,
       fontSize: t.codeSize,
@@ -1320,53 +1322,56 @@ class _NotePanel extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              if (onBack != null) ...[
-                Semantics(
-                  link: true,
-                  label: 'Back to Wrote',
-                  excludeSemantics: true,
-                  onTap: onBack,
-                  child: GestureDetector(
-                    key: const Key('back-to-wrote'),
+          LayoutBuilder(
+            builder: (context, box) => Row(
+              children: [
+                if (onBack != null) ...[
+                  Semantics(
+                    link: true,
+                    label: 'Back to Wrote',
+                    excludeSemantics: true,
                     onTap: onBack,
-                    child: Text('‹ Wrote', style: accent),
+                    child: GestureDetector(
+                      key: const Key('back-to-wrote'),
+                      onTap: onBack,
+                      child: Text('‹ Wrote', style: accent),
+                    ),
+                  ),
+                  SizedBox(width: t.sp),
+                ],
+                Expanded(
+                  child: Text(
+                    n == null ? vault : noteCrumb(vault, n.meta.path),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: agentMono(t, size: t.labelSize * 1.09),
                   ),
                 ),
-                SizedBox(width: t.sp),
-              ],
-              Expanded(
-                child: Text(
-                  n == null ? vault : noteCrumb(vault, n.meta.path),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: agentMono(t, size: t.labelSize * 1.09),
-                ),
-              ),
-              Flexible(
-                child: Semantics(
-                  link: true,
-                  label: 'Open in Notes',
-                  excludeSemantics: true,
-                  onTap: open,
-                  child: GestureDetector(
-                    key: const Key('open-in-notes'),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: box.maxWidth / 2),
+                  child: Semantics(
+                    link: true,
+                    label: 'Open in Notes',
+                    excludeSemantics: true,
                     onTap: open,
-                    child: Text(
-                      'Open in Notes ›',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: accent,
+                    child: GestureDetector(
+                      key: const Key('open-in-notes'),
+                      onTap: open,
+                      child: Text(
+                        'Open in Notes ›',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: accent,
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
           SizedBox(height: t.sp * 1.25),
           Text(
-            title ?? (n == null ? '' : noteTitleOf(n.meta.title, n.meta.path)),
+            shown,
             key: const Key('panel-note-title'),
             style: TextStyle(
               fontFamily: StormTokens.serifFamily,
@@ -1384,7 +1389,9 @@ class _NotePanel extends ConsumerWidget {
               style: agentMono(t, size: t.labelSize * 1.09),
             ),
             SizedBox(height: t.sp * 1.25),
-            StormMarkdownView(markdown: fm.split(n.content).body),
+            StormMarkdownView(
+              markdown: withoutLeadingTitle(fm.split(n.content).body, shown),
+            ),
           ] else if (note.isLoading)
             const SkeletonRows(rows: 3)
           else
