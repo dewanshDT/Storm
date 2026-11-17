@@ -62,5 +62,22 @@ be up to 64 MiB, and a note itself up to 16 MiB.
 ## Appearance
 
 **Settings › This device** holds the text size and the note font (Newsreader,
-Sans or Monospace). Themes — Storm dark, Storm light and SlowFlow earth — are
-chosen there too. These are per device.
+Sans or Monospace), and the theme. These are per device.
+
+**Theme** is a family, each shown as a card with a preview:
+
+- **Storm** (light and dark) and **SlowFlow** (light only), Storm's own.
+- Storm-made themes inspired by **Catppuccin** (Latte, Mocha), **Gruvbox**,
+  **Nord**, **Rosé Pine** (Dawn and the dark original), **Solarized** and
+  **Tokyo Night** (Day and Night), each with a light and a dark member.
+
+They are built from Storm's own colour recipe, so every one keeps text,
+links, signals and the terminal's colours readable (4.5:1 for text). They
+look like the themes they are named after but are not copies of their
+colours. **Settings › About & health** lists who each is inspired by.
+
+**Mode** is **System**, **Light** or **Dark**. System follows your device's
+light or dark setting as it changes. A family without the mode you chose
+(SlowFlow is light only) says so on its card and uses the one it has.
+
+The session terminal takes its colours from the theme too.

@@ -163,6 +163,10 @@ needs you".
   to auto. **Colours: Always dark** keeps every terminal dark. A session
   also starts with `COLORFGBG` set to the colours it starts in, for
   programs that read it instead of asking; agents it starts get the same.
+  The terminal's colours come from your theme: a dark terminal in a light
+  theme uses the same family's dark colours, or Storm dark's for a family
+  with no dark member. Faint text is drawn lighter, not darker, on a light
+  terminal.
   Storm remembers what a session's program was told, so it looks the same
   on every device and after a reload.
 

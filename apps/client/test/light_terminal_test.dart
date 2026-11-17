@@ -187,8 +187,8 @@ void main() {
         'nothing', (tester) async {
       for (final (said, bg) in [
         ('light', lightTerminalBackground(lightT)),
-        ('dark', lightT.text),
-        (null, lightT.text),
+        ('dark', darkT.bg),
+        (null, darkT.bg),
       ]) {
         final h = harness(tester);
         h.t.remembered(said);
