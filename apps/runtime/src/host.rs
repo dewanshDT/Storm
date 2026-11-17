@@ -25,7 +25,7 @@
 //! `failed (host_restart)`, exactly as after a crash (§13). Nothing a session
 //! spawned outlives the host, whichever service manager runs it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -49,7 +49,7 @@ use crate::provider::{
 };
 use crate::scrollback::{Read, Scrollback};
 use crate::status::{EndReason, SessionEnd};
-use crate::terminal::{Title, TitleObserver};
+use crate::terminal::{Notice, NoticeObserver, Title, TitleObserver};
 
 const SESSIONS_FILE: &str = "sessions.json";
 const BATCH: usize = 64 * 1024;
@@ -63,6 +63,14 @@ const TITLE_EVERY: Duration = Duration::from_secs(1);
 /// A change in what the program or its hooks say needs the person is not
 /// held for [`TITLE_EVERY`] (decision 155), only for this long.
 const PROGRAM_EVERY: Duration = Duration::from_millis(100);
+/// At most this many terminal notices (OSC 9/777/99; decision 161, AM126)
+/// accepted per session each rolling minute. The rest are dropped and
+/// counted.
+const NOTICE_CAP_PER_MINUTE: u32 = 10;
+/// A safety bound on the backlog itself, well above the per-minute cap: a
+/// status post normally drains it within [`PROGRAM_EVERY`], so this only
+/// matters while the link is down for minutes at a time.
+const NOTICE_QUEUE_MAX: usize = 4 * NOTICE_CAP_PER_MINUTE as usize;
 /// How long a provider may take to start a session. A start that has not
 /// returned by then is reported `failed (start_failure)`, and whatever it
 /// later returns is stopped: a start that hangs costs its own session, never
@@ -344,6 +352,68 @@ struct Events {
     said_logged: Mutex<std::collections::HashSet<&'static str>>,
     /// Decision 155: set where the host answers the OSC 7501 probe.
     program: Option<Program>,
+    /// Decision 161 (161-R1): OSC 9/777/99 desktop notifications, read on
+    /// every session regardless of `titles` or `program`.
+    notice_parser: Mutex<NoticeObserver>,
+    notice_queue: NoticeQueue,
+}
+
+/// A session's terminal notices (OSC 9/777/99; decision 161, AM126), capped
+/// at [`NOTICE_CAP_PER_MINUTE`]: past it, a new notice is dropped and
+/// counted rather than queued without end. Queued notices are only removed
+/// once [`Self::ack`] confirms the server has them, so a failed status post
+/// never loses one.
+#[derive(Default)]
+struct NoticeQueue {
+    pending: Mutex<VecDeque<Notice>>,
+    window: Mutex<(Option<Instant>, u32)>,
+    dropped: Mutex<u32>,
+}
+
+impl NoticeQueue {
+    fn push(&self, notices: Vec<Notice>, now: Instant) {
+        if notices.is_empty() {
+            return;
+        }
+        let mut pending = self.pending.lock().unwrap();
+        let mut window = self.window.lock().unwrap();
+        let mut dropped = self.dropped.lock().unwrap();
+        for notice in notices {
+            if window
+                .0
+                .is_none_or(|start| now.duration_since(start) >= Duration::from_secs(60))
+            {
+                *window = (Some(now), 0);
+            }
+            if window.1 >= NOTICE_CAP_PER_MINUTE || pending.len() >= NOTICE_QUEUE_MAX {
+                *dropped += 1;
+                continue;
+            }
+            window.1 += 1;
+            pending.push_back(notice);
+        }
+    }
+
+    /// What a status POST should carry: the queued notices, and how many
+    /// were dropped since the last [`Self::ack`]. Nothing is removed yet.
+    fn pending(&self) -> (Vec<Notice>, u32) {
+        (
+            self.pending.lock().unwrap().iter().cloned().collect(),
+            *self.dropped.lock().unwrap(),
+        )
+    }
+
+    /// The server accepted the first `sent` queued notices and `dropped`
+    /// drops reported by [`Self::pending`].
+    fn ack(&self, sent: usize, dropped: u32) {
+        let mut pending = self.pending.lock().unwrap();
+        for _ in 0..sent {
+            pending.pop_front();
+        }
+        drop(pending);
+        let mut d = self.dropped.lock().unwrap();
+        *d = d.saturating_sub(dropped);
+    }
 }
 
 /// A session's OSC 7501 program status (decision 155).
@@ -419,6 +489,8 @@ impl Events {
             transcript: tokio::sync::Mutex::new(None),
             said_logged: Mutex::new(Default::default()),
             program: None,
+            notice_parser: Mutex::new(NoticeObserver::default()),
+            notice_queue: NoticeQueue::default(),
         }
     }
 
@@ -473,6 +545,16 @@ impl Events {
             .then(|| *self.hook_activity.lock().unwrap())
             .flatten()
     }
+
+    /// 161-R1: the terminal notices queued for the next status post, and how
+    /// many were dropped under the per-minute cap since the last one.
+    fn pending_notices(&self) -> (Vec<Notice>, u32) {
+        self.notice_queue.pending()
+    }
+
+    fn ack_notices(&self, sent: usize, dropped: u32) {
+        self.notice_queue.ack(sent, dropped);
+    }
 }
 
 /// A session's leader, and on an isolated host the uid it runs as: both
@@ -512,6 +594,10 @@ impl SessionEvents for Events {
         } else if self.titles {
             self.title.lock().unwrap().feed(bytes);
         }
+        // 161-R1: read regardless of `titles`/`program` — a notification is
+        // never gated by whether title tracking is on.
+        let notices = self.notice_parser.lock().unwrap().feed(bytes);
+        self.notice_queue.push(notices, Instant::now());
         self.ring.lock().unwrap().append(bytes);
         self.wake.notify_one();
     }
@@ -2623,14 +2709,17 @@ impl Host {
             let activity_changed = activity != *s.activity_sent.lock().unwrap();
             let program = s.events.program_report();
             let program_changed = program != *s.program_sent.lock().unwrap();
+            let (notices, notices_dropped) = s.events.pending_notices();
+            let notices_pending = !notices.is_empty() || notices_dropped > 0;
             if end.is_none()
                 && (title != sent
                     || harness_changed
                     || attention_changed
                     || activity_changed
-                    || program_changed)
+                    || program_changed
+                    || notices_pending)
             {
-                let every = if program_changed || attention_changed {
+                let every = if program_changed || attention_changed || notices_pending {
                     PROGRAM_EVERY
                 } else {
                     TITLE_EVERY
@@ -2670,6 +2759,7 @@ impl Host {
                         );
                     }
                 }
+                body = with_terminal_notices(body, &notices, notices_dropped);
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
@@ -2680,6 +2770,7 @@ impl Host {
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
                         *s.activity_sent.lock().unwrap() = activity;
+                        s.events.ack_notices(notices.len(), notices_dropped);
                         status_retry_at = None;
                         retry = Duration::from_millis(250);
                     }
@@ -3926,6 +4017,23 @@ fn with_title(mut body: serde_json::Value, title: &Title) -> serde_json::Value {
     body
 }
 
+/// A status body with any terminal notices (OSC 9/777/99; decision 161,
+/// AM126) queued since the last post, and how many the session's per-minute
+/// cap dropped; unchanged with neither.
+fn with_terminal_notices(
+    mut body: serde_json::Value,
+    notices: &[Notice],
+    dropped: u32,
+) -> serde_json::Value {
+    if !notices.is_empty() {
+        body["terminal_notice"] = json!(notices);
+    }
+    if dropped > 0 {
+        body["terminal_notice_dropped"] = json!(dropped);
+    }
+    body
+}
+
 /// Aborts a task when the scope that owns it ends.
 struct AbortOnDrop(tokio::task::JoinHandle<()>);
 
@@ -4007,6 +4115,73 @@ fn event_data(event: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn notice(body: &str) -> Notice {
+        Notice {
+            title: None,
+            body: body.into(),
+            source_form: "osc9",
+        }
+    }
+
+    /// 161-R1: at most [`NOTICE_CAP_PER_MINUTE`] notices a rolling minute;
+    /// the rest are dropped and counted, and nothing is lost until `ack`.
+    #[test]
+    fn the_notice_queue_caps_per_minute_and_drops_are_counted() {
+        let q = NoticeQueue::default();
+        let t0 = Instant::now();
+        let many: Vec<_> = (0..15).map(|i| notice(&i.to_string())).collect();
+        q.push(many, t0);
+        let (pending, dropped) = q.pending();
+        assert_eq!(pending.len(), 10, "capped at the per-minute limit");
+        assert_eq!(dropped, 5);
+        assert_eq!(pending[0].body, "0", "the earliest are kept");
+
+        // Still inside the same window: nothing new fits.
+        q.push(vec![notice("extra")], t0 + Duration::from_secs(30));
+        let (_, dropped) = q.pending();
+        assert_eq!(dropped, 6);
+
+        // A new window reopens the cap.
+        q.push(vec![notice("next minute")], t0 + Duration::from_secs(61));
+        let (pending, _) = q.pending();
+        assert_eq!(pending.len(), 11);
+        assert_eq!(pending.last().unwrap().body, "next minute");
+    }
+
+    #[test]
+    fn acking_removes_only_what_was_sent_and_reported() {
+        let q = NoticeQueue::default();
+        let t0 = Instant::now();
+        q.push((0..3).map(|i| notice(&i.to_string())).collect(), t0);
+        q.push(vec![notice("over")], t0); // the 4th is still within the cap
+        let (pending, dropped) = q.pending();
+        assert_eq!(pending.len(), 4);
+        assert_eq!(dropped, 0);
+
+        // Only the first 2 were actually posted; more arrived meanwhile.
+        q.push(vec![notice("meanwhile")], t0);
+        q.ack(2, 0);
+        let (pending, dropped) = q.pending();
+        assert_eq!(
+            pending.iter().map(|n| n.body.as_str()).collect::<Vec<_>>(),
+            ["2", "over", "meanwhile"],
+            "the acked ones are gone, the rest kept in order"
+        );
+        assert_eq!(dropped, 0);
+    }
+
+    /// A refused status post must not lose a notice: it stays queued for
+    /// the next attempt.
+    #[test]
+    fn a_failed_post_keeps_the_notice_queued() {
+        let q = NoticeQueue::default();
+        q.push(vec![notice("one")], Instant::now());
+        let (pending, _) = q.pending();
+        assert_eq!(pending.len(), 1, "peeked, not consumed");
+        let (pending_again, _) = q.pending();
+        assert_eq!(pending_again.len(), 1, "still there until acked");
+    }
 
     /// A stand-in server that answers every POST `200 {}` and records it.
     /// Sessions (lowercased, as the recording server sees paths) whose
@@ -9609,6 +9784,58 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .clone();
         assert_eq!(hello["sessions"][0]["program_status"]["kind"], "permission");
         assert_eq!(hello["sessions"][0]["attention"], "permission_prompt");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 161-R1: OSC 9/777/99 are posted as `terminal_notice`; ConEmu's
+    /// `9;4` progress and OpenCode's OSC 99 probe never become one and are
+    /// never answered; the bytes the client reads are exactly what the
+    /// program wrote.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn terminal_notices_are_posted_and_the_probe_is_never_answered() {
+        let script = r#"stty raw -echo
+            printf 'hello '
+            printf '\033]777;notify;tidier;Approve Bash?\007'
+            printf '\033]9;4;0\007'
+            printf '\033]99;i=opentui-notifications:p=?\007'
+            printf ' world'
+            exec cat > "$W/$STORM_RUNTIME_SESSION.in""#;
+        let (host, seen, _state, roots) = prober_host(script, "").await;
+        host.clone().handle(start("ags_NOTICE", "shell")).await;
+        let expected = "hello \x1b]777;notify;tidier;Approve Bash?\x07\x1b]9;4;0\x07\x1b]99;i=opentui-notifications:p=?\x07 world";
+        eventually("the full output reached the ring", || {
+            output(&host, "ags_NOTICE") == expected
+        })
+        .await;
+        eventually("the notice posted", || {
+            seen.lock().unwrap().iter().any(|(p, b)| {
+                p.ends_with("/ags_notice/status") && b.get("terminal_notice").is_some()
+            })
+        })
+        .await;
+        let posts = seen.lock().unwrap().clone();
+        let with_notice = posts
+            .iter()
+            .find(|(p, b)| p.ends_with("/ags_notice/status") && b.get("terminal_notice").is_some())
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(
+            with_notice["terminal_notice"],
+            json!([{"title": "tidier", "body": "Approve Bash?", "source_form": "osc777"}]),
+            "the progress form and the probe never became a notice"
+        );
+        assert!(
+            posts
+                .iter()
+                .filter(|(p, _)| p.ends_with("/ags_notice/status"))
+                .all(|(_, b)| b["terminal_notice"].as_array().is_none_or(|a| a.len() == 1)),
+            "exactly one notice, ever"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let input = std::fs::read(roots.path().join("w/ags_NOTICE.in")).unwrap_or_default();
+        assert!(input.is_empty(), "the probe was never answered: {input:?}");
         host.shutdown(Duration::from_millis(200)).await;
     }
 
