@@ -160,6 +160,14 @@ pub struct Membership {
     pub order: i64,
 }
 
+/// A workspace's remembered write vault (decision 159): `writes` false is
+/// a remembered "no writes".
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkspacePref {
+    pub writes: bool,
+    pub vault_id: Option<String>,
+}
+
 /// A session's role label: a note, by id (138d).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleLabel {
@@ -342,6 +350,16 @@ impl Store {
                  identity_mechanism  TEXT,
                  identity_reason     TEXT,
                  recorded_at         TEXT NOT NULL
+             );
+             -- The write vault a person last started a session with in each
+             -- workspace (decision 159): what the launcher preselects there.
+             CREATE TABLE IF NOT EXISTS workspace_prefs (
+                 host_id        TEXT NOT NULL,
+                 workspace      TEXT NOT NULL,
+                 write_vault_id TEXT,
+                 writes         INTEGER NOT NULL,
+                 updated_at     TEXT NOT NULL,
+                 PRIMARY KEY (host_id, workspace)
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -1193,6 +1211,65 @@ impl Store {
                 params![session_id],
             )
             .unwrap();
+    }
+
+    pub fn set_workspace_pref(
+        &self,
+        host_id: &str,
+        workspace: &str,
+        write_vault_id: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_prefs (host_id, workspace, write_vault_id, writes, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (host_id, workspace) DO UPDATE SET
+                 write_vault_id = excluded.write_vault_id, writes = excluded.writes,
+                 updated_at = excluded.updated_at",
+            params![
+                host_id,
+                workspace,
+                write_vault_id,
+                write_vault_id.is_some(),
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn workspace_prefs(
+        &self,
+        host_id: &str,
+    ) -> Result<std::collections::HashMap<String, WorkspacePref>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workspace, writes, write_vault_id FROM workspace_prefs WHERE host_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![host_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                WorkspacePref {
+                    writes: r.get(1)?,
+                    vault_id: r.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether there was one to forget.
+    pub fn forget_workspace_pref(&self, host_id: &str, workspace: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM workspace_prefs WHERE host_id = ?1 AND workspace = ?2",
+            params![host_id, workspace],
+        )? > 0)
+    }
+
+    pub fn forget_host_workspace_prefs(&self, host_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM workspace_prefs WHERE host_id = ?1",
+            params![host_id],
+        )?;
+        Ok(())
     }
 
     pub fn ran_as(&self, session_id: &str) -> Result<Option<super::RanAs>> {

@@ -795,6 +795,53 @@ fn the_oldest_database_reaches_134() {
     assert_eq!(s.descendants("ags_OLD", false).unwrap(), ["ags_C"]);
 }
 
+/// Decision 159: a v0.17.0 database (the schema less `workspace_prefs`,
+/// unchanged since that tag) gains the table on boot, keeps its sessions,
+/// and keeps what is remembered across boots.
+#[test]
+fn a_v0_17_0_database_gains_workspace_prefs_on_boot() {
+    let d = tempdir::TempDir::new("storm-prefs-migration").unwrap();
+    let path = d.path().join("agent/agent.db");
+    {
+        std::fs::create_dir_all(d.path().join("agent")).unwrap();
+        let old = Store::open(&path).unwrap();
+        old.insert(&record("ags_OLD", "completed")).unwrap();
+        old.conn
+            .execute_batch("DROP TABLE workspace_prefs;")
+            .unwrap();
+    }
+    let has_table = |s: &Store| -> bool {
+        s.conn
+            .prepare(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_prefs'",
+            )
+            .unwrap()
+            .exists([])
+            .unwrap()
+    };
+    for boot in 0..3 {
+        let m = AgentManager::open(d.path()).unwrap();
+        let s = m.store.lock().unwrap();
+        assert!(has_table(&s), "boot {boot}");
+        assert_eq!(s.get("ags_OLD").unwrap().unwrap().status, "completed");
+        if boot == 0 {
+            assert!(s.workspace_prefs("hst_A").unwrap().is_empty());
+            s.set_workspace_pref("hst_A", "storm", Some("vlt_W"), NOW)
+                .unwrap();
+        } else {
+            let prefs = s.workspace_prefs("hst_A").unwrap();
+            assert_eq!(
+                prefs.get("storm"),
+                Some(&super::store::WorkspacePref {
+                    writes: true,
+                    vault_id: Some("vlt_W".into()),
+                }),
+                "kept across boots"
+            );
+        }
+    }
+}
+
 // ---- 134-2: the spawn switch ------------------------------------------------
 
 use super::{AgentError, Envelope, Hello, Launch, LaunchMeta, McpGrant};

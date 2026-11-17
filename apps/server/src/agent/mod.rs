@@ -818,6 +818,10 @@ pub struct Launch {
     /// an older server ignores the field.
     #[serde(default)]
     pub terminal_brightness: Option<String>,
+    /// The ended session a Run again starts from (decision 159): a rerun is
+    /// not a choice of write vault, so it is not remembered.
+    #[serde(default)]
+    pub rerun_of: Option<String>,
 }
 
 /// How a client draws a session's terminal (decision 157, 171-8).
@@ -3418,7 +3422,35 @@ impl AgentManager {
     /// A removed host (decision 153): its Limits go. Its sessions and what
     /// it last reported about itself stay, as their record.
     pub fn forget_host(&self, host_id: &str) -> Result<()> {
-        self.store.lock().unwrap().forget_host_limits(host_id)
+        let store = self.store.lock().unwrap();
+        store.forget_host_limits(host_id)?;
+        store.forget_host_workspace_prefs(host_id)
+    }
+
+    /// A person's top-level start in `workspace` (decision 159).
+    pub fn remember_workspace_pref(
+        &self,
+        host_id: &str,
+        workspace: &str,
+        write_vault_id: Option<&str>,
+    ) -> Result<()> {
+        self.store.lock().unwrap().set_workspace_pref(
+            host_id,
+            workspace,
+            write_vault_id,
+            &crate::index::now_rfc3339(),
+        )
+    }
+
+    pub fn workspace_prefs(&self, host_id: &str) -> Result<HashMap<String, store::WorkspacePref>> {
+        self.store.lock().unwrap().workspace_prefs(host_id)
+    }
+
+    pub fn forget_workspace_pref(&self, host_id: &str, workspace: &str) -> Result<bool> {
+        self.store
+            .lock()
+            .unwrap()
+            .forget_workspace_pref(host_id, workspace)
     }
 
     /// A revoked host: its link is closed and its sessions are failed
@@ -3842,6 +3874,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             meta,
             grants,
@@ -3870,6 +3903,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -4549,6 +4583,7 @@ mod tests {
                     permission_mode: None,
                     typed_input: None,
                     terminal_brightness: None,
+                    rerun_of: None,
                 },
                 meta,
                 offered(),
@@ -4770,6 +4805,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             Vec::new(),
