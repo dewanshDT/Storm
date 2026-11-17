@@ -39,6 +39,15 @@ Notes can have a **colour** — coral, peach, sand, sage, mint, sky, lavender,
 blossom — stored in the note as a word (`color: sage`), so it means something
 outside Storm too. Vaults can have one as well.
 
+The panel's **Size** row shows how big the note is for an AI agent, for
+example `~2.4k tokens · 1,812 words · 10.2k chars`. Tokens count the whole
+file an agent reads, frontmatter included; words and characters count the
+body. It updates as you type, and while you have text selected in Read or
+Edit mode it also shows the selection's own count. The token figure is an
+estimate: the exact count depends on the model, and is usually within about
+15%. The New session window shows the same estimate beside the note it
+starts from.
+
 ## Tags
 
 Tags come from the note's `tags:` property, as a list. Through MCP, AI apps

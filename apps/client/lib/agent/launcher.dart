@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
+import '../editor/token_estimate.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../state/terminal_prefs.dart' show launchBrightness;
