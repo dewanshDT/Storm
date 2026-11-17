@@ -197,6 +197,15 @@ const V5_SCHEMA: &str = r#"
                 expires     TEXT NOT NULL,
                 used        TEXT
             );
+
+            -- Decision 161 (AM125): per-device notification settings. Additive.
+            CREATE TABLE IF NOT EXISTS device_notification_prefs (
+                device_id  TEXT PRIMARY KEY REFERENCES client_devices(id) ON DELETE CASCADE,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                classes    TEXT NOT NULL DEFAULT '[]',
+                preview    TEXT NOT NULL DEFAULT 'full',
+                updated_at TEXT NOT NULL
+            );
             "#;
 
 const NOW: &str = "2026-10-08T12:00:00Z";

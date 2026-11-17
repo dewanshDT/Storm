@@ -373,6 +373,7 @@ impl Store {
         spawn::init(&conn)?;
         super::events::init(&conn)?;
         super::deletes::init(&conn)?;
+        super::notifications::init(&conn)?;
         conn.execute_batch(
             "-- One-time upgrades, each recorded with what it did and when the
              -- server audited it.
@@ -1474,6 +1475,8 @@ fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
     )?;
     spawn::forget(conn, id)?;
     super::events::forget_in(conn, id)?;
+    // 161-1: a session mute is removed with its session (Q17).
+    super::notifications::forget_session_mutes(conn, id)?;
     Ok((gone, crew))
 }
 

@@ -98,8 +98,9 @@ impl Fixture {
     /// The feed itself, at `pace`, into a queue of `queue`.
     fn feed(&self, pace: Pace, queue: usize) -> mpsc::Receiver<Frame> {
         let changes = self.state.agent.subscribe_changes();
+        let notify_changed = self.state.agent.watch_notifications();
         let (tx, rx) = mpsc::channel(queue);
-        tokio::spawn(feed(self.state.clone(), changes, tx, pace));
+        tokio::spawn(feed(self.state.clone(), changes, notify_changed, tx, pace));
         rx
     }
 }
@@ -664,4 +665,79 @@ async fn an_unchanged_record_sends_nothing() {
     }
     let sent = next_frame(&mut rx, QUICK.output + QUICK.state).await;
     assert!(sent.is_none(), "{sent:?}");
+}
+
+// ---- Decision 161, slice 161-1: notification/notification_read/prefs_changed ----
+
+#[tokio::test]
+async fn a_new_notice_reaches_a_live_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-live").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // snapshot
+
+    let n = f.state.agent.send_test_notification().unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5))
+        .await
+        .expect("a notification frame");
+    assert_eq!(name, "notification");
+    assert_eq!(data["id"], n.id);
+    assert_eq!(data["kind"], "test");
+}
+
+/// Read state is the inbox's, server-side (Q20): a read on one device
+/// reaches every other subscriber on the stream.
+#[tokio::test]
+async fn a_read_syncs_to_a_second_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-read-sync").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification().unwrap();
+    let (name_a, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_a, "notification");
+    assert_eq!(data_a["id"], n.id);
+    let (name_b, _) = next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_b, "notification");
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+
+    let (name_a2, data_a2) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_a2, "notification_read");
+    assert_eq!(data_a2["ids"][0], n.id);
+    let (name_b2, data_b2) = next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_b2, "notification_read");
+    assert_eq!(data_b2["ids"][0], n.id);
+}
+
+#[tokio::test]
+async fn a_prefs_change_is_told_to_every_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-prefs").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    let before = f.state.agent.notification_prefs().unwrap();
+    f.state
+        .agent
+        .update_notification_prefs(
+            before.version,
+            crate::agent::notifications::PrefsPatch {
+                summary_on: Some(false),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5))
+        .await
+        .expect("a prefs_changed frame");
+    assert_eq!(name, "prefs_changed");
+    assert_eq!(data["summary_on"], false);
 }

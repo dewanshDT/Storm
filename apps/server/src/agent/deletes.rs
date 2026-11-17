@@ -351,9 +351,13 @@ impl AgentManager {
             )
             .map_err(anyhow::Error::from)?;
         let made = by_id(&store.conn, &id)?.expect("just written");
+        // 161-1: the notice is written on the same connection, so it and
+        // the request are made together or not at all.
+        let _ = super::notifications::notify_delete_request(&store.conn, &r, &made);
         drop(store);
         self.bump(session_id);
         self.poke_deletes();
+        self.poke_notify();
         Ok(Ok((made, true)))
     }
 

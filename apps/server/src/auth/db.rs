@@ -225,6 +225,18 @@ impl AuthDb {
                 revoked_reason TEXT
             );
 
+            -- Decision 161 (AM125): per-device notification settings, visible
+            -- from every device but writable only by its own. Unused until
+            -- 161-3/161-4 add the API; the table and the revoke cascade are
+            -- this slice's share of it.
+            CREATE TABLE IF NOT EXISTS device_notification_prefs (
+                device_id  TEXT PRIMARY KEY REFERENCES client_devices(id) ON DELETE CASCADE,
+                enabled    INTEGER NOT NULL DEFAULT 1,
+                classes    TEXT NOT NULL DEFAULT '[]',
+                preview    TEXT NOT NULL DEFAULT 'full',
+                updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS sessions (
                 id                  TEXT PRIMARY KEY,
                 user_id             TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
