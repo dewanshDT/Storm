@@ -144,7 +144,8 @@ needs you".
 - **Copy and paste:** drag over text to select it, then `⌘C` and `⌘V` on a
   Mac (the browser on a Mac too), or `Ctrl ⇧ C` and `Ctrl ⇧ V` elsewhere.
   `Ctrl A` and `Ctrl V` go to the agent; in Claude Code, `Ctrl V` pastes an
-  image.
+  image. On the web, paste comes from the browser's own paste, so it works
+  over plain HTTP.
 - **Tab and Shift+Tab go to the agent** while the terminal has focus: in
   Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
   move focus out of the terminal with the keyboard, press **Escape, then

@@ -414,6 +414,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         Positioned.fill(
           child: ImagePasteTarget(
             onImages: c.pasteImages,
+            onText: c.terminal.paste,
             focused: () => _focus.hasFocus,
             child: terminal,
           ),
