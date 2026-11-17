@@ -519,6 +519,11 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/agent/hosts/{id}/workspaces",
             get(agent_host_workspaces).post(agent_create_workspace),
         )
+        // Forget a workspace's remembered write vault (decision 159).
+        .route(
+            "/v1/agent/hosts/{id}/workspaces/{workspace}/prefs",
+            delete(agent_forget_workspace_pref),
+        )
         // Agent installs (decision 133): owner only, never an `stk_` key.
         .route("/v1/agent/hosts/{id}/agents/{agent}", post(agent_start_job))
         .route("/v1/agent/hosts/{id}/agents/jobs/{job}", get(agent_get_job))
@@ -2020,9 +2025,21 @@ async fn runtime_mcp(
 
 async fn agent_host_workspaces(
     State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<Vec<crate::ops::WorkspaceView>>> {
-    Ok(Json(crate::ops::host_workspaces(&state, &id).await?))
+    Ok(Json(
+        crate::ops::host_workspaces(&state, &actor, &id).await?,
+    ))
+}
+
+async fn agent_forget_workspace_pref(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path((id, workspace)): Path<(String, String)>,
+) -> ApiResult<StatusCode> {
+    crate::ops::forget_workspace_pref(&state, &actor, &id, &workspace).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn agent_create_workspace(
@@ -2649,7 +2666,11 @@ async fn agent_terminal_stream(
                 st.stale = false;
                 st.read_at = std::time::Instant::now();
                 st.size = (record.cols, record.rows);
-                let json = serde_json::to_string(&record).unwrap_or_default();
+                let mut status = serde_json::to_value(&record).unwrap_or_default();
+                if let Some(answered) = st.agent.terminal_answered(&st.id) {
+                    status["terminal_answered"] = serde_json::json!(answered);
+                }
+                let json = status.to_string();
                 if st.last_status.as_ref() != Some(&json) {
                     st.last_status = Some(json.clone());
                     return Some((Ok(Event::default().event("status").data(json)), st));
@@ -17348,6 +17369,205 @@ pub(crate) mod tests {
         }
     }
 
+    // ---- remembered write vaults (decision 159) ---------------------------
+
+    impl GatewayFixture {
+        fn prefs_of(&self, host: &str) -> Vec<(String, bool, Option<String>)> {
+            let mut out: Vec<_> = self
+                .state
+                .agent
+                .workspace_prefs(host)
+                .unwrap()
+                .into_iter()
+                .map(|(w, p)| (w, p.writes, p.vault_id))
+                .collect();
+            out.sort();
+            out
+        }
+
+        /// `GET …/workspaces` for this fixture's host, answering its refresh.
+        async fn listed_workspaces(&mut self) -> serde_json::Value {
+            self.sent();
+            let path = format!("/v1/agent/hosts/{}/workspaces", self.host_id);
+            let (app, bearer, state, host, link) = (
+                &self.app,
+                &self.owner_bearer,
+                &self.state,
+                &self.host_id,
+                &mut self.link,
+            );
+            let refresh = async {
+                link.recv().await.unwrap();
+                let caps = state.agent.host_live(host).capabilities.unwrap();
+                state.agent.inventory(host, caps).unwrap();
+            };
+            let ((status, body), ()) =
+                tokio::join!(send(app, get_with_auth(&path, bearer)), refresh);
+            assert_eq!(status, StatusCode::OK, "{body}");
+            body
+        }
+    }
+
+    /// 159: a person's top-level start records its write vault for its
+    /// (host, workspace), "no writes" included; a spawned child, a crew
+    /// launch, a rerun, a resume and a Shell record nothing; the listing
+    /// carries it.
+    #[tokio::test]
+    async fn a_persons_top_level_start_is_remembered_for_its_workspace() {
+        let dir = tempdir::TempDir::new("storm-159-record").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.off_host().await;
+        let work = f.vault("Work").await;
+        let host = f.host_id.clone();
+        let remembered = |vault: Option<&str>| {
+            vec![(
+                "storm".to_string(),
+                vault.is_some(),
+                vault.map(str::to_string),
+            )]
+        };
+        assert!(f.prefs_of(&host).is_empty());
+
+        let (status, parent) = f
+            .launch_body(serde_json::json!({"write_vault_id": work, "spawn": true}))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{parent}");
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)));
+        let parent = parent["id"].as_str().unwrap().to_string();
+        f.initialize(&parent, "storm").await;
+        let started = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
+                .await,
+        );
+        assert_eq!(started["state"], "started", "{started}");
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)), "a child");
+
+        let (_, plain) = f.launch_body(serde_json::json!({})).await;
+        assert_eq!(
+            f.prefs_of(&host),
+            remembered(None),
+            "no writes is remembered"
+        );
+        let plain = plain["id"].as_str().unwrap().to_string();
+        f.launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)));
+
+        let (status, _) = f.launch_body(serde_json::json!({"rerun_of": plain})).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)), "a rerun");
+        let (status, _) = f
+            .launch_body(serde_json::json!({"crew": {"new_name": "Crew"}}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)), "a crew launch");
+        let (status, _) = f
+            .launch_body(serde_json::json!({"provider": "shell"}))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)), "a Shell");
+
+        let (code, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/runtime/sessions/{plain}/status"),
+                serde_json::json!({"status": "completed", "exit_code": 0,
+                    "harness_session": "80d0cf8c-8176-43b4-8206-7908d74d1387"}),
+                &f.host_bearer,
+            ),
+        )
+        .await;
+        assert!(code.is_success());
+        let (status, body) = f.launch_body(serde_json::json!({"resume_of": plain})).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["resumed_from"], plain.as_str());
+        assert_eq!(f.prefs_of(&host), remembered(Some(&work)), "a resume");
+
+        let listed = f.listed_workspaces().await;
+        assert_eq!(
+            listed[0]["write"],
+            serde_json::json!({"writes": true, "vault_id": work}),
+            "{listed}"
+        );
+    }
+
+    /// 159: each host's workspace is its own; Forget and a removed host
+    /// clear them, and a vault that is gone is forgotten silently.
+    #[tokio::test]
+    async fn remembered_write_vaults_are_per_host_forgotten_and_dropped_with_their_vault() {
+        let dir = tempdir::TempDir::new("storm-159-forget").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let host = f.host_id.clone();
+        let (other, _) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let (_, _other_link) = f.state.agent.connect_host(&other);
+        f.state
+            .agent
+            .hello(&other, serde_json::from_value(host_caps(true)).unwrap())
+            .unwrap();
+
+        f.launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        let (status, body) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/agent/sessions",
+                serde_json::json!({"host_id": other, "workspace": "storm",
+                    "provider": "claude-code", "terminal": {"cols": 80, "rows": 24}}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mine = vec![("storm".to_string(), true, Some(work.clone()))];
+        let theirs = vec![("storm".to_string(), false, None)];
+        assert_eq!(f.prefs_of(&host), mine);
+        assert_eq!(f.prefs_of(&other), theirs, "the same path elsewhere");
+
+        let forget = format!("/v1/agent/hosts/{host}/workspaces/storm/prefs");
+        let (status, _) = send(&f.app, delete_with_auth(&forget, &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(f.prefs_of(&host).is_empty());
+        assert_eq!(f.prefs_of(&other), theirs);
+        let (status, _) = send(&f.app, delete_with_auth(&forget, &f.owner_bearer)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT, "forgetting nothing");
+        let listed = f.listed_workspaces().await;
+        assert!(listed[0].get("write").is_none(), "{listed}");
+
+        f.launch_body(serde_json::json!({"write_vault_id": work}))
+            .await;
+        assert_eq!(f.prefs_of(&host), mine);
+        let (status, _) = send(
+            &f.app,
+            delete_with_auth(&format!("/v1/vaults/{work}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let listed = f.listed_workspaces().await;
+        assert_eq!(listed[0]["name"], "storm");
+        assert!(listed[0].get("write").is_none(), "{listed}");
+        assert!(f.prefs_of(&host).is_empty(), "the row is gone");
+
+        let (status, _) = send(
+            &f.app,
+            delete_with_auth(&format!("/v1/agent/hosts/{other}"), &f.owner_bearer),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(f.prefs_of(&other), theirs, "kept while only revoked");
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                &format!("/v1/agent/hosts/{other}/remove"),
+                serde_json::json!({}),
+                &f.owner_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert!(f.prefs_of(&other).is_empty());
+    }
+
     /// 151 N6 through the real routes: on a host with isolation off, a
     /// session launched with the switch on starts Claude Code, OpenCode and
     /// Codex children in its own workspace, or in a `cwd` inside one, and
@@ -21513,6 +21733,28 @@ pub(crate) mod tests {
             "{} bytes before live",
             before_live.len()
         );
+    }
+
+    /// 157g: the stream's status says what the host remembers its client
+    /// answered, before the snapshot a fresh client draws.
+    #[tokio::test]
+    async fn the_streams_status_carries_the_answered_brightness() {
+        let dir = tempdir::TempDir::new("storm-157g-stream").unwrap();
+        let f = terminal_fixture(dir.path(), b"hello").await;
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert!(record.get("terminal_answered").is_none(), "{record}");
+
+        report(
+            &f.state,
+            &f.id,
+            serde_json::json!({"status": "running", "terminal_answered": "light"}),
+        );
+        let mut stream = EventReader::open_query(&f, "offset=0&attach=snapshot").await;
+        let status = stream.expect("status").await;
+        let record: serde_json::Value = serde_json::from_str(&status.data).unwrap();
+        assert_eq!(record["terminal_answered"], "light");
     }
 
     #[tokio::test]

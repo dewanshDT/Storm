@@ -168,6 +168,10 @@ class FakeAgentServer {
 
   final requests = <http.Request>[];
 
+  /// Each workspace's remembered Write to (decision 159), by
+  /// `<host id>/<workspace>`: `{writes, vault_id}`.
+  final workspacePrefs = <String, Map<String, dynamic>>{};
+
   /// Answers a route this fake does not know before it says 404, or null
   /// to fall through (the spawning routes, `spawn_fakes.dart`).
   Future<http.Response?> Function(http.Request req)? extra;
@@ -482,6 +486,14 @@ class FakeAgentServer {
       caps['workspaces'] = [...caps['workspaces'] as List, name];
       return _json({'name': name}, 201);
     }
+    if (seg.length == 7 &&
+        seg[2] == 'hosts' &&
+        seg[4] == 'workspaces' &&
+        seg[6] == 'prefs' &&
+        req.method == 'DELETE') {
+      workspacePrefs.remove('${seg[3]}/${seg[5]}');
+      return http.Response('', 204);
+    }
     if (seg.length == 5 && seg[2] == 'hosts' && seg[4] == 'workspaces') {
       final host = hosts.firstWhere((h) => h['id'] == seg[3]);
       final names = (host['capabilities'] as Map)['workspaces'] as List;
@@ -489,6 +501,7 @@ class FakeAgentServer {
         for (final n in names)
           {
             'name': n,
+            'write': ?workspacePrefs['${host['id']}/$n'],
             'live_sessions': sessions
                 .where(
                   (s) =>

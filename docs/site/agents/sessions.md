@@ -32,7 +32,7 @@ uses the agent's defaults.
 
 | Field | What it means |
 |---|---|
-| **Write to** | The one vault the agent may write to, or none (read only). Only when **Settings › AI access** allows writes chosen at launch; off, and saying why, for a shell, Cursor or Command Code. |
+| **Write to** | The one vault the agent may write to, or none (read only). Only when **Settings › AI access** allows writes chosen at launch; off, and saying why, for a shell, Cursor or Command Code. It starts as what you last chose in that workspace on that host (**last used here** beside the vault), else the **From** note's vault; **Run again** keeps the session's own. Changing **Where** picks that workspace's, until you change **Write to** yourself. Agents it starts, a resume, a Run again and a launch into a crew don't change what is remembered. **Settings › Agents & hosts** lists it per workspace, with **Forget**. |
 | **Start agents** | On by default (turn it off to launch without): the session may start, message and end agents of its own, up to the host's limits (3 at once and 6 in its tree unless you changed them), which run in its [crew](/docs/agents/crews/) with it. Claude Code, OpenCode and Codex, on any host that says which account it runs as; a host too old to say, or one set to isolate sessions whose isolation isn't working, can't offer it, and the row says so. No key, API call or agent can turn it on: only you, here, from the session header's **Starts agents ▾**, or in its About. |
 | **Let the agents it starts write to {vault}** | Off by default, and only with **Start agents** and **Write to** on. Off, they are read only. On, they write only to that vault, never another. About's **Starts agents** says which. |
 | **Model** | The model the agent runs, or empty for the agent's own default. For Claude Code, **opus**, **sonnet** and **haiku** fill it in; it also takes a full id such as `claude-sonnet-4-5`. OpenCode takes `provider/model`; Codex a model id such as `gpt-5-codex`. A shell, Cursor and Command Code have none. The session's header shows it. |
@@ -144,7 +144,8 @@ needs you".
 - **Copy and paste:** drag over text to select it, then `⌘C` and `⌘V` on a
   Mac (the browser on a Mac too), or `Ctrl ⇧ C` and `Ctrl ⇧ V` elsewhere.
   `Ctrl A` and `Ctrl V` go to the agent; in Claude Code, `Ctrl V` pastes an
-  image.
+  image. On the web, paste comes from the browser's own paste, so it works
+  over plain HTTP.
 - **Tab and Shift+Tab go to the agent** while the terminal has focus: in
   Claude Code, Shift+Tab switches between Manual, Accept edits and Plan. To
   move focus out of the terminal with the keyboard, press **Escape, then
@@ -166,6 +167,8 @@ needs you".
   theme uses the same family's dark colours, or Storm dark's for a family
   with no dark member. Faint text is drawn lighter, not darker, on a light
   terminal.
+  Storm remembers what a session's program was told, so it looks the same
+  on every device and after a reload.
 
 Under the terminal, a line says how to leave it: *Tab and Shift+Tab go to
 the agent · Esc, then Tab, leaves the terminal* (⇧Tab on a Mac).

@@ -6,22 +6,37 @@ import 'image_paste.dart';
 import 'paste_listener.dart'
     if (dart.library.js_interop) 'paste_listener_web.dart';
 
-/// Takes images dropped on a session's terminal, and on the web images
-/// pasted while it has focus (D15 AM45).
+typedef PasteListen =
+    void Function() Function({
+      required bool Function() focused,
+      required void Function(List<PastedImage>) onImages,
+      required void Function(String) onText,
+    });
+
+/// Takes images dropped on a session's terminal, and on the web images and
+/// text pasted while it has focus (D15 AM45).
 class ImagePasteTarget extends StatefulWidget {
   const ImagePasteTarget({
     super.key,
     required this.child,
     required this.onImages,
+    required this.onText,
     required this.focused,
   });
 
   final Widget child;
   final void Function(List<PastedImage> images) onImages;
 
+  /// A browser text paste, for the terminal's own paste.
+  final void Function(String text) onText;
+
   /// Whether a paste is the terminal's: the browser's paste event has no
   /// other way to say where it was aimed.
   final bool Function() focused;
+
+  /// The browser's paste events. Tests replace it.
+  @visibleForTesting
+  static PasteListen listen = listenForPaste;
 
   @override
   State<ImagePasteTarget> createState() => _ImagePasteTargetState();
@@ -34,9 +49,15 @@ class _ImagePasteTargetState extends State<ImagePasteTarget> {
   @override
   void initState() {
     super.initState();
-    _unlisten = listenForPastedImages((images) {
-      if (mounted && widget.focused()) widget.onImages(images);
-    });
+    _unlisten = ImagePasteTarget.listen(
+      focused: () => mounted && widget.focused(),
+      onImages: (images) {
+        if (mounted && widget.focused()) widget.onImages(images);
+      },
+      onText: (text) {
+        if (mounted) widget.onText(text);
+      },
+    );
   }
 
   @override

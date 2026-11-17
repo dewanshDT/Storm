@@ -181,4 +181,58 @@ void main() {
     await h.pump(StormTheme.dark());
     expect(view(tester).textStyle.drawBoldTextWithBrightColors, isTrue);
   });
+
+  group('what the host remembers (157g)', () {
+    testWidgets('an agent view shows light, dark, or dark when it says '
+        'nothing', (tester) async {
+      for (final (said, bg) in [
+        ('light', lightTerminalBackground(lightT)),
+        ('dark', lightT.text),
+        (null, lightT.text),
+      ]) {
+        final h = harness(tester);
+        h.t.remembered(said);
+        await h.pump(StormTheme.light());
+        expect(view(tester).theme.background, bg, reason: '$said');
+      }
+    });
+
+    testWidgets('it follows the host until this view answers, then the '
+        'answer wins', (tester) async {
+      final h = harness(tester);
+      await h.pump(StormTheme.light());
+      h.t.remembered('dark');
+      h.t.remembered('light');
+      await tester.pumpAndSettle();
+      expect(view(tester).theme.background, lightTerminalBackground(lightT));
+
+      await h.pump(StormTheme.dark());
+      write(h.t, '\x1b]11;?\x1b\\');
+      await tester.pumpAndSettle();
+      expect(h.t.answered.value, Brightness.dark);
+      h.t.remembered('light');
+      expect(h.t.answered.value, Brightness.dark);
+    });
+
+    testWidgets('an answer to a replayed query never overrides it', (
+      tester,
+    ) async {
+      final h = harness(tester);
+      h.t.onReply = (_) {};
+      h.t.remembered('light');
+      await h.pump(StormTheme.dark());
+      write(h.t, '\x1b]11;?\x1b\\');
+      await tester.pumpAndSettle();
+      expect(h.t.answered.value, Brightness.light);
+      h.t.remembered('dark');
+      expect(h.t.answered.value, Brightness.dark);
+    });
+
+    testWidgets('a shell view still follows the app', (tester) async {
+      final h = harness(tester, shell: true);
+      h.t.remembered('dark');
+      await h.pump(StormTheme.light());
+      expect(view(tester).theme.background, lightTerminalBackground(lightT));
+    });
+  });
 }

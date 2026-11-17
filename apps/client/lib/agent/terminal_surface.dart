@@ -31,9 +31,11 @@ class StormTerminal {
     );
     _terminal.onOutput = (data) {
       if (_writingOutput && _colourAnswer.hasMatch(data)) {
-        answered.value = _target;
-      }
-      if (_writingOutput || _schemeReport.hasMatch(data)) {
+        _reply(data, colour: true);
+        // A replayed query's answer never reached the program; what the
+        // host remembers it was told is better than this device's guess.
+        if (_answeredHere || _remembered == null) answered.value = _target;
+      } else if (_writingOutput || _schemeReport.hasMatch(data)) {
         _reply(data);
       } else {
         _emit(data);
@@ -82,12 +84,49 @@ class StormTerminal {
   /// drew for it. Here, not in the view, so it outlives a remount.
   final answered = ValueNotifier<Brightness?>(null);
 
+  /// This terminal's own colour answer reached the program, so what its
+  /// host remembers is no news from then on.
+  bool _answeredHere = false;
+  Brightness? _remembered;
+  bool _colourPending = false;
+
+  /// What the session's host says its program was last answered with
+  /// (157g), from whichever device answered: shown until this terminal
+  /// answers, so a reload or another device draws what the program drew
+  /// for.
+  void remembered(String? brightness) {
+    final b = switch (brightness) {
+      'light' => Brightness.light,
+      'dark' => Brightness.dark,
+      _ => null,
+    };
+    if (b == null) return;
+    _remembered = b;
+    if (!_answeredHere) answered.value = b;
+  }
+
+  /// The reply [onReply] is being handed went out to the program.
+  void replySent() {
+    if (_colourPending) _answeredHere = true;
+  }
+
   /// What an answer gives now: the view's target, set as it builds.
   Brightness _target = Brightness.dark;
 
-  void _reply(String data) {
+  void _reply(String data, {bool colour = false}) {
     final bytes = Uint8List.fromList(utf8.encode(data));
-    (onReply ?? onInput)?.call(bytes);
+    final reply = onReply;
+    if (reply == null) {
+      if (colour) _answeredHere = true;
+      onInput?.call(bytes);
+      return;
+    }
+    _colourPending = colour;
+    try {
+      reply(bytes);
+    } finally {
+      _colourPending = false;
+    }
   }
 
   /// The view's size changed.
@@ -311,14 +350,6 @@ class StormTerminal {
         !keys.isMetaPressed) {
       return _onTab(node, event, shift: keys.isShiftPressed);
     }
-    if (event is KeyUpEvent) return KeyEventResult.ignored;
-    // A modifier on its own is no next key: Escape, then Shift+Tab, leaves
-    // backwards.
-    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
-      _escapedAt = event.logicalKey == LogicalKeyboardKey.escape
-          ? clock()
-          : null;
-    }
     final chord = pasteChord(
       event.logicalKey,
       shift: keys.isShiftPressed,
@@ -327,14 +358,28 @@ class StormTerminal {
       meta: keys.isMetaPressed,
       platform: defaultTargetPlatform,
     );
+    // Left unhandled so the browser makes its own paste event: the clipboard
+    // API needs a secure context, which a plain-HTTP LAN page is not.
+    if (web && chord == PasteChord.paste) {
+      if (event is KeyDownEvent) _escapedAt = null;
+      return KeyEventResult.skipRemainingHandlers;
+    }
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    // A modifier on its own is no next key: Escape, then Shift+Tab, leaves
+    // backwards.
+    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
+      _escapedAt = event.logicalKey == LogicalKeyboardKey.escape
+          ? clock()
+          : null;
+    }
     final ask = onImagePaste;
     // A held paste chord repeats. The repeat must not reach the terminal as
     // a bare ^V: the agent would look for an image in the host's own
     // clipboard and say there is none, while this paste is still in flight.
-    if (chord != null && ask != null && !kIsWeb && event is KeyRepeatEvent) {
+    if (chord != null && ask != null && !web && event is KeyRepeatEvent) {
       return KeyEventResult.handled;
     }
-    if (chord != null && ask != null && !kIsWeb && event is KeyDownEvent) {
+    if (chord != null && ask != null && !web && event is KeyDownEvent) {
       () async {
         if (await ask()) return;
         if (chord == PasteChord.paste) {
@@ -412,6 +457,10 @@ class StormTerminal {
     }
     onInput?.call(Uint8List.fromList(utf8.encode(data)));
   }
+
+  /// Whether this runs in a browser. Tests set it.
+  @visibleForTesting
+  static bool web = kIsWeb;
 
   /// Which paste a key is, if any: the platform's own paste (Cmd+V on a Mac,
   /// Ctrl+Shift+V elsewhere), or Ctrl+V, which Claude Code uses for images.
@@ -641,7 +690,10 @@ class _StormTerminalViewState extends State<StormTerminalView> {
                 focusNode: _focus,
                 autofocus: widget.autofocus,
                 controller: _controller,
-                shortcuts: _terminalShortcuts(),
+                shortcuts: terminalShortcuts(
+                  meta: stormUsesMetaModifier,
+                  web: StormTerminal.web,
+                ),
                 readOnly: readOnly,
                 contentInsertionConfiguration: readOnly
                     ? null
@@ -678,15 +730,21 @@ class _CopyIntent extends Intent {
 }
 
 /// AM116. Ctrl+A and Ctrl+V are the agent's. A paste [StormTerminal.pasteChord]
-/// makes itself never reaches these.
-Map<ShortcutActivator, Intent> _terminalShortcuts() => stormUsesMetaModifier
-    ? const {
-        SingleActivator(LogicalKeyboardKey.keyC, meta: true): _CopyIntent(),
-        SingleActivator(LogicalKeyboardKey.keyV, meta: true): PasteTextIntent(
-          SelectionChangedCause.keyboard,
-        ),
-        SingleActivator(LogicalKeyboardKey.keyA, meta: true):
-            SelectAllTextIntent(SelectionChangedCause.keyboard),
+/// makes itself never reaches these. On the web the browser's own paste event
+/// brings text and images.
+@visibleForTesting
+Map<ShortcutActivator, Intent> terminalShortcuts({
+  required bool meta,
+  required bool web,
+}) => meta
+    ? {
+        const SingleActivator(LogicalKeyboardKey.keyC, meta: true):
+            const _CopyIntent(),
+        if (!web)
+          const SingleActivator(LogicalKeyboardKey.keyV, meta: true):
+              const PasteTextIntent(SelectionChangedCause.keyboard),
+        const SingleActivator(LogicalKeyboardKey.keyA, meta: true):
+            const SelectAllTextIntent(SelectionChangedCause.keyboard),
       }
     : {
         const SingleActivator(
@@ -694,8 +752,7 @@ Map<ShortcutActivator, Intent> _terminalShortcuts() => stormUsesMetaModifier
           control: true,
           shift: true,
         ): const _CopyIntent(),
-        // On the web the browser's own paste event brings text and images.
-        if (!kIsWeb)
+        if (!web)
           const SingleActivator(
             LogicalKeyboardKey.keyV,
             control: true,
