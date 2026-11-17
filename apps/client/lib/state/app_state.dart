@@ -18,7 +18,7 @@ import '../cache/cache_db.dart';
 import 'secret_store.dart';
 import 'web_bootstrap.dart';
 import '../ui/theme.dart';
-import '../ui/tokens.dart';
+import '../ui/themes/theme_library.dart';
 import '../sync/sync_engine.dart';
 import 'nav_memory.dart';
 import 'terminal_prefs.dart';
@@ -35,7 +35,7 @@ class Settings {
     this.baseUrl = '',
     // Dark-first, matching the design. Someone who turns it off has `false`
     // stored, so this default never overrides a deliberate choice.
-    this.theme = StormPreset.stormDark,
+    this.theme = ThemeChoice.initial,
     this.fontSize = 16,
     this.activeVault = '',
     this.bodyFont = BodyFont.serif,
@@ -67,15 +67,12 @@ class Settings {
 
   final String baseUrl;
 
-  /// Which visual identity the app wears.
+  /// Which theme family the app wears, and whether it follows the system
+  /// (decision 160).
   ///
-  /// Replaces the old `darkMode` bool, which could only express two of the
-  /// three shipped presets. The stored bool is migrated on load rather than
-  /// dropped — see [SettingsNotifier.build].
-  final StormPreset theme;
-
-  /// Kept so the rest of the app can still ask the simple question.
-  bool get darkMode => theme.inputs.dark;
+  /// Replaces the old `darkMode` bool and then a single preset name; both are
+  /// migrated on load rather than dropped — see [SettingsNotifier.build].
+  final ThemeChoice theme;
   final double fontSize;
 
   /// The face note bodies are set in.
@@ -228,7 +225,7 @@ class Settings {
 
   Settings copyWith({
     String? baseUrl,
-    StormPreset? theme,
+    ThemeChoice? theme,
     double? fontSize,
     String? activeVault,
     BodyFont? bodyFont,
@@ -350,13 +347,13 @@ class SettingsNotifier extends AsyncNotifier<Settings> {
   /// their choice would silently flip the app to dark on the first launch after
   /// an update. The old key is read but never written again, so the migration
   /// happens once and then stops mattering.
-  static StormPreset _themeFrom(SharedPreferences prefs) {
+  static ThemeChoice _themeFrom(SharedPreferences prefs) {
     final stored = prefs.getString(_kTheme);
-    if (stored != null) return StormPreset.parse(stored);
+    if (stored != null) return ThemeChoice.parse(stored);
 
     final wasDark = prefs.getBool(_kDark);
-    if (wasDark == null) return StormPreset.stormDark;
-    return wasDark ? StormPreset.stormDark : StormPreset.stormLight;
+    if (wasDark == null) return ThemeChoice.initial;
+    return ThemeChoice('storm', wasDark ? ThemeMode.dark : ThemeMode.light);
   }
 
   /// The relay set as a JSON string for prefs, or `''` when empty.

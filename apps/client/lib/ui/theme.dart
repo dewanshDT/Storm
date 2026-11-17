@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'oklch.dart' show contrastRatio;
+import 'themes/theme_library.dart';
 import 'tokens.dart';
 
 /// Storm's visual language, built entirely from [StormTokens].
@@ -20,8 +21,19 @@ abstract final class StormTheme {
   static ThemeData dark() => from(StormPreset.stormDark);
   static ThemeData light() => from(StormPreset.stormLight);
 
-  static ThemeData from(StormPreset preset, {double? fontSize}) =>
-      _build(StormTokens.from(preset, fs: fontSize));
+  static ThemeData from(ThemeVariant variant, {double? fontSize}) =>
+      _build(StormTokens.from(variant, fs: fontSize));
+
+  /// The light and dark themes a [choice] gives `MaterialApp`, which picks
+  /// between them by [ThemeChoice.mode], following the platform live for
+  /// `system` (decision 160).
+  static ({ThemeData light, ThemeData dark}) forChoice(
+    ThemeChoice choice, {
+    double? fontSize,
+  }) => (
+    light: from(choice.resolve(Brightness.light), fontSize: fontSize),
+    dark: from(choice.resolve(Brightness.dark), fontSize: fontSize),
+  );
 
   static ThemeData _build(StormTokens t) {
     final scheme = schemeFrom(t);

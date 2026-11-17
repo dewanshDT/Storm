@@ -59,7 +59,7 @@ class _Column extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              t.preset.label,
+              t.variant.label,
               style: TextStyle(
                 fontFamily: StormTokens.sansFamily,
                 fontSize: t.headingSize,

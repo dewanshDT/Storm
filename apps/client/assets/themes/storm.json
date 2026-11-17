@@ -1,0 +1,26 @@
+{
+  "id": "storm",
+  "label": "Storm",
+  "inspiredBy": null,
+  "shape": "storm",
+  "variants": {
+    "light": {
+      "label": "Storm light",
+      "bgL": 92,
+      "hue": 55,
+      "chroma": 8,
+      "accentH": 293,
+      "accentC": 0.15,
+      "accentL": 68
+    },
+    "dark": {
+      "label": "Storm dark",
+      "bgL": 22,
+      "hue": 55,
+      "chroma": 8,
+      "accentH": 293,
+      "accentC": 0.15,
+      "accentL": 68
+    }
+  }
+}

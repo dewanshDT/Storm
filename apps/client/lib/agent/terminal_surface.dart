@@ -15,6 +15,7 @@ import '../state/terminal_prefs.dart';
 import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/surfaces.dart';
+import '../ui/themes/theme_library.dart';
 import '../ui/tokens.dart';
 
 /// **The terminal-surface boundary** (freeze §10, gate Q5; decision 77d).
@@ -944,88 +945,52 @@ double terminalCellHeight(TerminalStyle style, TextScaler scaler) =>
       return height;
     });
 
-/// The theme a view of [brightness] draws with (decision 157a). In a light
-/// app a light view sits on the page lightened halfway to white, and a dark
-/// one is the light theme's colours swapped, as before 157; in a dark app a
-/// dark view is the page (the phone's surface), and a light one, left from
-/// an answer before the app went dark, the dark theme's colours swapped.
+/// The theme a view of [brightness] draws with (decisions 157a, 160).
+///
+/// A view in the app's own brightness wears the theme's derived terminal
+/// palette; one in the other brightness wears the family's other member's,
+/// or Storm's when the family has only the one (SlowFlow is light only). A
+/// dark phone view sits on the surface rather than the page.
 TerminalTheme _terminalTheme(
   StormTokens t,
   Brightness brightness, {
   required bool dark,
   required bool phone,
 }) {
-  final light = brightness == Brightness.light;
-  final (foreground, background) = switch ((dark, light)) {
-    (false, true) => (t.text, lightTerminalBackground(t)),
-    (false, false) => (t.bg, t.text),
-    (true, false) => (t.text, phone ? t.surface : t.bg),
-    (true, true) => (t.bg, t.text),
-  };
+  final p = terminalPaletteFor(t, brightness);
+  final background = dark && brightness == Brightness.dark && phone
+      ? t.surface
+      : p.background;
   return _themes.putIfAbsent((
-    foreground,
+    p,
     background,
     t.accent,
-    brightness,
-  ), () => _theme(foreground, background, t.accent, light: light));
+  ), () => _theme(p, background, t.accent));
 }
 
-/// The light theme's ANSI 16 (decision 157b): normal colours 4.5:1 and
-/// bright ones 3:1 on every light preset's terminal ground.
-const lightTerminalPalette = [
-  Color(0xff221e1c),
-  Color(0xffa41e1e),
-  Color(0xff026217),
-  Color(0xff6f4e07),
-  Color(0xff1a4eb3),
-  Color(0xff8b2a87),
-  Color(0xff105d64),
-  Color(0xff585350),
-  Color(0xff736d6a),
-  Color(0xffc43f38),
-  Color(0xff1d7f2b),
-  Color(0xff906707),
-  Color(0xff356ad1),
-  Color(0xffa947a3),
-  Color(0xff037a84),
-  Color(0xff66615e),
-];
+/// The terminal palette of [t]'s family in [brightness].
+TerminalPalette terminalPaletteFor(StormTokens t, Brightness brightness) {
+  if (t.brightness == brightness) return t.terminal;
+  final family = ThemeLibrary.family(t.variant.family);
+  final other = family.has(brightness)
+      ? family.variantFor(brightness)
+      : brightness == Brightness.dark
+      ? StormPreset.stormDark
+      : StormPreset.stormLight;
+  return StormTokens.from(other).terminal;
+}
 
 /// A light view's ground in a light app.
-Color lightTerminalBackground(StormTokens t) =>
-    Color.lerp(t.bg, Colors.white, 0.5)!;
+Color lightTerminalBackground(StormTokens t) => lightTerminalGround(t.bg);
 
 // xterm2 reports a colour-scheme change to the agent whenever the view gets a
 // theme that is not identical, and TerminalTheme has no value equality.
-final _themes = <(Color, Color, Color, Brightness), TerminalTheme>{};
+final _themes = <(TerminalPalette, Color, Color), TerminalTheme>{};
 
-TerminalTheme _theme(
-  Color foreground,
-  Color background,
-  Color accent, {
-  required bool light,
-}) {
+TerminalTheme _theme(TerminalPalette palette, Color background, Color accent) {
   final base = TerminalThemes.defaultTheme;
-  final p = light
-      ? lightTerminalPalette
-      : [
-          base.black,
-          base.red,
-          base.green,
-          base.yellow,
-          base.blue,
-          base.magenta,
-          base.cyan,
-          base.white,
-          base.brightBlack,
-          base.brightRed,
-          base.brightGreen,
-          base.brightYellow,
-          base.brightBlue,
-          base.brightMagenta,
-          base.brightCyan,
-          base.brightWhite,
-        ];
+  final foreground = palette.foreground;
+  final p = palette.ansi;
   return TerminalTheme(
     cursor: foreground.withValues(alpha: 0.7),
     selection: accent.withValues(alpha: 0.35),

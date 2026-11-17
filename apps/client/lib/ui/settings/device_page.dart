@@ -8,6 +8,7 @@ import '../../state/app_state.dart';
 import '../controls.dart';
 import '../surfaces.dart';
 import '../widgets.dart' show PopoverItem;
+import '../themes/theme_library.dart';
 import '../tokens.dart';
 import 'settings_widgets.dart';
 
@@ -43,8 +44,8 @@ class DevicePage extends ConsumerWidget {
             for (final preset in StormPreset.values)
               _PresetButton(
                 preset: preset,
-                selected: settings.theme == preset,
-                onTap: () => save(settings.copyWith(theme: preset)),
+                selected: settings.theme == _choiceOf(preset),
+                onTap: () => save(settings.copyWith(theme: _choiceOf(preset))),
               ),
           ],
         ),
@@ -105,6 +106,9 @@ class DevicePage extends ConsumerWidget {
     );
   }
 }
+
+ThemeChoice _choiceOf(StormPreset p) =>
+    ThemeChoice(p.family, p.inputs.dark ? ThemeMode.dark : ThemeMode.light);
 
 String _mod() => stormUsesMetaModifier ? '⌘' : 'Ctrl+';
 
