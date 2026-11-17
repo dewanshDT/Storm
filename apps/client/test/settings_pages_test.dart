@@ -213,7 +213,7 @@ void main() {
       await open(tester, c, 'device');
       Settings s() => c.read(settingsProvider).value!;
 
-      await tapKey(tester, 'preset-stormLight');
+      await tapKey(tester, 'theme-mode-light');
       expect(s().theme, const ThemeChoice('storm', ThemeMode.light));
 
       final before = s().fontSize;
