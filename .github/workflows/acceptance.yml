@@ -124,10 +124,34 @@ jobs:
           # Ad-hoc signed and unnotarized, like a release's.
           ditto -c -k --sequesterRsrc --keepParent "$APP" \
             "dist/Storm-acceptance-${GITHUB_SHA::7}-macos.zip"
+          # A copy that installs beside the released app (temporary): its
+          # own bundle id, so its own sandbox container, preferences and
+          # keychain; no storm:// handler, so links keep opening the
+          # released app.
+          mkdir -p staging dist-staging
+          STG="staging/Storm Staging.app"
+          ditto "$APP" "$STG"
+          PL="$STG/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier dev.storm.storm.staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleName Storm Staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Add :CFBundleDisplayName string Storm Staging" "$PL" || \
+            /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName Storm Staging" "$PL"
+          /usr/libexec/PlistBuddy -c "Delete :CFBundleURLTypes" "$PL" || true
+          codesign -d --entitlements :- "$APP" > staging/entitlements.plist
+          codesign --force --deep --sign - --entitlements staging/entitlements.plist "$STG"
+          codesign --verify --deep --strict "$STG"
+          plutil -p "$PL" | grep -E "CFBundleIdentifier|CFBundleName|URLTypes" || true
+          ditto -c -k --sequesterRsrc --keepParent "$STG" \
+            "dist-staging/Storm-Staging-${GITHUB_SHA::7}-macos.zip"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-acceptance
           path: apps/client/dist/*
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-staging
+          path: apps/client/dist-staging/*
           retention-days: 14
 
   # The Windows app (decision 125d), packaged by the release's own script, so
