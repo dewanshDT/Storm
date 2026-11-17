@@ -19,6 +19,7 @@ import 'markdown/storm_markdown_view.dart';
 import 'note_find_bar.dart';
 import 'note_header.dart';
 import 'note_mode_toggle.dart';
+import 'note_size.dart' show reportNoteSelection;
 import 'widgets.dart';
 import 'states.dart';
 import 'tokens.dart';
@@ -137,11 +138,26 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
       theme: MarkdownTheme.light(const TextStyle()),
     );
     _controller.addListener(_onLocalEdit);
+    _controller.addListener(_onSelection);
+    // A selection belongs to the note it was made in.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) reportNoteSelection(ref, '');
+    });
+  }
+
+  void _onSelection() {
+    final sel = _controller.selection;
+    final text = _controller.text;
+    final selected = !sel.isValid || sel.isCollapsed || sel.end > text.length
+        ? ''
+        : sel.textInside(text);
+    reportNoteSelection(ref, selected);
   }
 
   @override
   void dispose() {
     _controller.removeListener(_onLocalEdit);
+    _controller.removeListener(_onSelection);
     _controller.dispose();
     _focus.dispose();
     _findController.dispose();
@@ -550,6 +566,7 @@ class _NoteEditorState extends ConsumerState<NoteEditor> {
   void _setMode(NoteViewMode mode) {
     if (_mode == mode) return;
     setState(() => _mode = mode);
+    reportNoteSelection(ref, '');
     if (mode == NoteViewMode.edit) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _focus.requestFocus();
