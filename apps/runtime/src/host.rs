@@ -358,16 +358,35 @@ struct Events {
     notice_queue: NoticeQueue,
 }
 
+/// A queued [`Notice`] with its per-session sequence number (161-R1 fix 2):
+/// assigned once, at [`NoticeQueue::push`], so a retried status post (its
+/// response lost, or a refusal) carries the same `seq` every time and the
+/// server's `UNIQUE` key on `ses:<id>:osc:<seq>` makes the replay a no-op.
+/// Never persisted: a host restart ends its sessions, so the counter needs
+/// no durability.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct SeqNotice {
+    seq: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    body: String,
+    source_form: &'static str,
+}
+
 /// A session's terminal notices (OSC 9/777/99; decision 161, AM126), capped
 /// at [`NOTICE_CAP_PER_MINUTE`]: past it, a new notice is dropped and
 /// counted rather than queued without end. Queued notices are only removed
 /// once [`Self::ack`] confirms the server has them, so a failed status post
 /// never loses one.
 #[derive(Default)]
-struct NoticeQueue {
-    pending: Mutex<VecDeque<Notice>>,
-    window: Mutex<(Option<Instant>, u32)>,
-    dropped: Mutex<u32>,
+struct NoticeQueue(Mutex<NoticeQueueState>);
+
+#[derive(Default)]
+struct NoticeQueueState {
+    pending: VecDeque<SeqNotice>,
+    window: (Option<Instant>, u32),
+    dropped: u32,
+    next_seq: u64,
 }
 
 impl NoticeQueue {
@@ -375,44 +394,46 @@ impl NoticeQueue {
         if notices.is_empty() {
             return;
         }
-        let mut pending = self.pending.lock().unwrap();
-        let mut window = self.window.lock().unwrap();
-        let mut dropped = self.dropped.lock().unwrap();
+        let mut s = self.0.lock().unwrap();
         for notice in notices {
-            if window
+            if s.window
                 .0
                 .is_none_or(|start| now.duration_since(start) >= Duration::from_secs(60))
             {
-                *window = (Some(now), 0);
+                s.window = (Some(now), 0);
             }
-            if window.1 >= NOTICE_CAP_PER_MINUTE || pending.len() >= NOTICE_QUEUE_MAX {
-                *dropped += 1;
+            if s.window.1 >= NOTICE_CAP_PER_MINUTE || s.pending.len() >= NOTICE_QUEUE_MAX {
+                s.dropped += 1;
                 continue;
             }
-            window.1 += 1;
-            pending.push_back(notice);
+            s.window.1 += 1;
+            s.next_seq += 1;
+            let seq = s.next_seq;
+            s.pending.push_back(SeqNotice {
+                seq,
+                title: notice.title,
+                body: notice.body,
+                source_form: notice.source_form,
+            });
         }
     }
 
     /// What a status POST should carry: the queued notices, and how many
-    /// were dropped since the last [`Self::ack`]. Nothing is removed yet.
-    fn pending(&self) -> (Vec<Notice>, u32) {
-        (
-            self.pending.lock().unwrap().iter().cloned().collect(),
-            *self.dropped.lock().unwrap(),
-        )
+    /// were dropped since the last [`Self::ack`]. Nothing is removed yet,
+    /// so a lost response or a refused post resends the same `seq`s.
+    fn pending(&self) -> (Vec<SeqNotice>, u32) {
+        let s = self.0.lock().unwrap();
+        (s.pending.iter().cloned().collect(), s.dropped)
     }
 
     /// The server accepted the first `sent` queued notices and `dropped`
     /// drops reported by [`Self::pending`].
     fn ack(&self, sent: usize, dropped: u32) {
-        let mut pending = self.pending.lock().unwrap();
+        let mut s = self.0.lock().unwrap();
         for _ in 0..sent {
-            pending.pop_front();
+            s.pending.pop_front();
         }
-        drop(pending);
-        let mut d = self.dropped.lock().unwrap();
-        *d = d.saturating_sub(dropped);
+        s.dropped = s.dropped.saturating_sub(dropped);
     }
 }
 
@@ -548,7 +569,7 @@ impl Events {
 
     /// 161-R1: the terminal notices queued for the next status post, and how
     /// many were dropped under the per-minute cap since the last one.
-    fn pending_notices(&self) -> (Vec<Notice>, u32) {
+    fn pending_notices(&self) -> (Vec<SeqNotice>, u32) {
         self.notice_queue.pending()
     }
 
@@ -2740,25 +2761,39 @@ impl Host {
                     }
                     continue;
                 }
-                let mut body = with_hook_activity(
-                    with_harness(with_title(status_json(None), &title), harness.as_deref()),
-                    activity,
-                );
-                if let Some(attention) = attention {
-                    body["attention"] = json!(attention);
-                }
-                if let Some(p) = &program {
-                    body = with_program_status(body, p, activity.is_some());
-                    if program_changed {
-                        tracing::debug!(
-                            session = %s.id,
-                            source = ?p.source,
-                            state = p.root.as_ref().map(|r| r.state.as_str()),
-                            attention = p.attention,
-                            "program status"
-                        );
+                // 161-R1 fix 4: nothing but the notices changed → a lean
+                // post, not a resend of title/activity/program the server
+                // already has (no needless `bump`, no title/session frame).
+                let only_notices = notices_pending
+                    && !(title != sent
+                        || harness_changed
+                        || attention_changed
+                        || activity_changed
+                        || program_changed);
+                let mut body = if only_notices {
+                    status_json(None)
+                } else {
+                    let mut body = with_hook_activity(
+                        with_harness(with_title(status_json(None), &title), harness.as_deref()),
+                        activity,
+                    );
+                    if let Some(attention) = attention {
+                        body["attention"] = json!(attention);
                     }
-                }
+                    if let Some(p) = &program {
+                        body = with_program_status(body, p, activity.is_some());
+                        if program_changed {
+                            tracing::debug!(
+                                session = %s.id,
+                                source = ?p.source,
+                                state = p.root.as_ref().map(|r| r.state.as_str()),
+                                attention = p.attention,
+                                "program status"
+                            );
+                        }
+                    }
+                    body
+                };
                 body = with_terminal_notices(body, &notices, notices_dropped);
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
@@ -2799,12 +2834,21 @@ impl Host {
                 } else {
                     status_json(Some(end))
                 };
-                let body = with_harness(with_title(status, &title), harness.as_deref());
+                // 161-R1 fix 3: a notice queued just before the session
+                // ended (e.g. "done", then exit) still reaches the server,
+                // on the same report that ends the session.
+                let (notices, notices_dropped) = s.events.pending_notices();
+                let body = with_terminal_notices(
+                    with_harness(with_title(status, &title), harness.as_deref()),
+                    &notices,
+                    notices_dropped,
+                );
                 match self
                     .post(&format!("/v1/runtime/sessions/{}/status", s.id), &body)
                     .await
                 {
                     Ok(st) if st.is_success() => {
+                        s.events.ack_notices(notices.len(), notices_dropped);
                         self.sessions.lock().unwrap().remove(&s.id);
                         self.forget_mcp(&s.id);
                         self.write_table();
@@ -4022,7 +4066,7 @@ fn with_title(mut body: serde_json::Value, title: &Title) -> serde_json::Value {
 /// cap dropped; unchanged with neither.
 fn with_terminal_notices(
     mut body: serde_json::Value,
-    notices: &[Notice],
+    notices: &[SeqNotice],
     dropped: u32,
 ) -> serde_json::Value {
     if !notices.is_empty() {
@@ -4181,6 +4225,22 @@ mod tests {
         assert_eq!(pending.len(), 1, "peeked, not consumed");
         let (pending_again, _) = q.pending();
         assert_eq!(pending_again.len(), 1, "still there until acked");
+    }
+
+    /// 161-R1 fix 2: `seq` is assigned once, at `push`, so a lost response
+    /// and the resend it provokes carry the same `seq`s — the server's
+    /// `UNIQUE` key makes the replay a no-op.
+    #[test]
+    fn a_lost_response_and_its_resend_carry_the_same_seqs() {
+        let q = NoticeQueue::default();
+        q.push(vec![notice("one"), notice("two")], Instant::now());
+        let (first, _) = q.pending();
+        let (resend, _) = q.pending();
+        assert_eq!(
+            first.iter().map(|n| n.seq).collect::<Vec<_>>(),
+            resend.iter().map(|n| n.seq).collect::<Vec<_>>()
+        );
+        assert_eq!((first[0].seq, first[1].seq), (1, 2));
     }
 
     /// A stand-in server that answers every POST `200 {}` and records it.
@@ -9823,8 +9883,16 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .clone();
         assert_eq!(
             with_notice["terminal_notice"],
-            json!([{"title": "tidier", "body": "Approve Bash?", "source_form": "osc777"}]),
+            json!([{"seq": 1, "title": "tidier", "body": "Approve Bash?", "source_form": "osc777"}]),
             "the progress form and the probe never became a notice"
+        );
+        assert_eq!(
+            with_notice["status"], "running",
+            "a lean post: nothing else changed"
+        );
+        assert!(
+            with_notice.get("title").is_none() && with_notice.get("activity").is_none(),
+            "161-R1 fix 4: no needless title/activity resend, {with_notice}"
         );
         assert!(
             posts
@@ -9836,6 +9904,44 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         tokio::time::sleep(Duration::from_millis(300)).await;
         let input = std::fs::read(roots.path().join("w/ags_NOTICE.in")).unwrap_or_default();
         assert!(input.is_empty(), "the probe was never answered: {input:?}");
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 161-R1 fix 3: a notice queued right before the session exits still
+    /// reaches the server, on the same report that ends the session.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_notice_queued_at_exit_is_posted_with_the_end_report() {
+        let script = r#"stty raw -echo
+            printf '\033]777;notify;tidier;Finished\007'
+            exec true"#;
+        let (host, seen, _state, _roots) = prober_host(script, "").await;
+        host.clone().handle(start("ags_ENDNOTE", "shell")).await;
+        let is_end = |b: &serde_json::Value| {
+            matches!(
+                b["status"].as_str(),
+                Some("completed" | "failed" | "stopped")
+            )
+        };
+        eventually("the session ended", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_endnote/status") && is_end(b))
+        })
+        .await;
+        let posts = seen.lock().unwrap().clone();
+        let ended = posts
+            .iter()
+            .find(|(p, b)| p.ends_with("/ags_endnote/status") && is_end(b))
+            .unwrap()
+            .1
+            .clone();
+        assert_eq!(
+            ended["terminal_notice"],
+            json!([{"seq": 1, "title": "tidier", "body": "Finished", "source_form": "osc777"}]),
+            "the notice reached the server before the session was removed: {ended}"
+        );
         host.shutdown(Duration::from_millis(200)).await;
     }
 

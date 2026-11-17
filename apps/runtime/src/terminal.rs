@@ -2,7 +2,7 @@
 //! D15 AM43), and its desktop notifications (OSC 9/777/99; decision 161,
 //! AM126). The output stream is only observed, never rewritten.
 
-use std::collections::HashMap;
+use std::collections::VecDeque;
 
 use serde::Serialize;
 
@@ -134,14 +134,30 @@ struct KittyPending {
     body: Option<String>,
 }
 
-#[derive(Default)]
+/// Kitty's own defaults (its desktop notifications protocol): `d` absent
+/// means done, `p` absent means `title`, `i` is optional.
 struct KittyMeta {
     id: Option<String>,
-    field: Option<String>,
+    field: String,
     done: bool,
+    /// `e=1`/`e=2`: the payload is encoded (base64). Never decoded here —
+    /// the text is dropped rather than shown garbled.
+    encoded: bool,
 }
 
-/// `i=`, `p=` and `d=` out of an OSC 99 message's colon-separated metadata.
+impl Default for KittyMeta {
+    fn default() -> Self {
+        Self {
+            id: None,
+            field: "title".to_string(),
+            done: true,
+            encoded: false,
+        }
+    }
+}
+
+/// `i=`, `p=`, `d=` and `e=` out of an OSC 99 message's colon-separated
+/// metadata.
 fn kitty_meta(meta: &[u8]) -> KittyMeta {
     let text = String::from_utf8_lossy(meta);
     let mut m = KittyMeta::default();
@@ -151,25 +167,28 @@ fn kitty_meta(meta: &[u8]) -> KittyMeta {
         };
         match k {
             "i" => m.id = Some(bounded(v.to_string(), NOTICE_ID_MAX)),
-            "p" => m.field = Some(v.to_string()),
-            "d" => m.done = v == "1",
+            "p" => m.field = v.to_string(),
+            "d" => m.done = v != "0",
+            "e" => m.encoded = v != "0",
             _ => {}
         }
     }
     m
 }
 
-fn kitty_set(entry: &mut KittyPending, field: Option<&str>, text: Option<String>) {
+fn kitty_set(entry: &mut KittyPending, field: &str, text: String) {
     match field {
-        Some("title") => entry.title = Some(bounded(text.unwrap_or_default(), NOTICE_TITLE_MAX)),
-        Some("body") => entry.body = Some(bounded(text.unwrap_or_default(), NOTICE_BODY_MAX)),
+        "title" => entry.title = Some(bounded(text, NOTICE_TITLE_MAX)),
+        "body" => entry.body = Some(bounded(text, NOTICE_BODY_MAX)),
         _ => {}
     }
 }
 
 #[derive(Default)]
 struct NoticeSink {
-    kitty: HashMap<String, KittyPending>,
+    /// Pending OSC 99 (kitty) notifications by `i=`, oldest first, so a
+    /// full table evicts the oldest rather than refusing a new id.
+    kitty: VecDeque<(String, KittyPending)>,
     notices: Vec<Notice>,
 }
 
@@ -187,7 +206,10 @@ impl vte::Perform for NoticeSink {
 impl NoticeSink {
     /// iTerm2's form, `OSC 9 ; <text>`. ConEmu's and iTerm2's own progress
     /// forms, `OSC 9 ; <digit> ; …` (for example `9;4`), are not
-    /// notifications and are ignored (AM126).
+    /// notifications and are ignored (AM126) — so is a body that happens to
+    /// be only digits (`OSC 9;42`), the same test a lone progress field
+    /// would fail; accepted, since real notification text is rarely bare
+    /// digits.
     fn osc9(&mut self, rest: &[&[u8]]) {
         if rest.first().is_some_and(|p| is_ascii_digits(p)) {
             return;
@@ -218,29 +240,49 @@ impl NoticeSink {
         }
     }
 
-    /// Kitty's form, assembled across its `i=` messages until `d=1`. A
-    /// query (`p=?`, OpenCode's capability probe) is never answered and
-    /// never becomes a notice (AM22, AM126).
+    /// Kitty's form, assembled across its `i=` messages until done (`d`
+    /// absent, or present and not `0`). A query (`p=?`, OpenCode's
+    /// capability probe) is never answered and never becomes a notice
+    /// (AM22, AM126). A message with no `i=` is a one-shot: there is
+    /// nothing to assemble it with later, so it reports only if it is
+    /// itself done.
     fn osc99(&mut self, meta: &[u8], payload: &[&[u8]]) {
         let meta = kitty_meta(meta);
-        if meta.field.as_deref() == Some("?") {
+        if meta.field == "?" {
             return;
         }
-        let Some(id) = meta.id else { return };
-        let text = (!payload.is_empty()).then(|| joined_text(payload));
-        if !self.kitty.contains_key(&id) {
-            if self.kitty.len() >= KITTY_PENDING_MAX {
-                return;
+        let text = (!meta.encoded && !payload.is_empty()).then(|| joined_text(payload));
+        let Some(id) = meta.id else {
+            let mut entry = KittyPending::default();
+            if let Some(text) = text {
+                kitty_set(&mut entry, &meta.field, text);
             }
-            self.kitty.insert(id.clone(), KittyPending::default());
+            if meta.done {
+                self.finish(entry);
+            }
+            return;
+        };
+        if !self.kitty.iter().any(|(i, _)| *i == id) {
+            if self.kitty.len() >= KITTY_PENDING_MAX {
+                self.kitty.pop_front();
+            }
+            self.kitty.push_back((id.clone(), KittyPending::default()));
         }
-        if let Some(entry) = self.kitty.get_mut(&id) {
-            kitty_set(entry, meta.field.as_deref(), text);
+        if let Some(text) = text
+            && let Some((_, entry)) = self.kitty.iter_mut().find(|(i, _)| *i == id)
+        {
+            kitty_set(entry, &meta.field, text);
         }
         if meta.done
-            && let Some(entry) = self.kitty.remove(&id)
-            && (entry.title.is_some() || entry.body.is_some())
+            && let Some(pos) = self.kitty.iter().position(|(i, _)| *i == id)
         {
+            let (_, entry) = self.kitty.remove(pos).unwrap();
+            self.finish(entry);
+        }
+    }
+
+    fn finish(&mut self, entry: KittyPending) {
+        if entry.title.is_some() || entry.body.is_some() {
             self.notices.push(Notice {
                 title: entry.title,
                 body: entry.body.unwrap_or_default(),
@@ -435,13 +477,14 @@ mod tests {
     }
 
     /// Claude Code 2.1.325's kitty channel: three OSC 99 messages sharing
-    /// one `i=`, assembled into one notice once `d=1` arrives.
+    /// one `i=`. It completes at the second (`p=body`, no `d=` → done by
+    /// kitty's own default); the trailing `d=1:a=focus` carries no text and
+    /// the id is already gone, so it reports nothing.
     #[test]
     fn claude_code_kitty_osc99_is_assembled_into_one_notice() {
         let mut o = NoticeObserver::default();
         assert!(o.feed(b"\x1b]99;i=42:d=0:p=title;tidier\x07").is_empty());
-        assert!(o.feed(b"\x1b]99;i=42:p=body;Approve Bash?\x07").is_empty());
-        let got = o.feed(b"\x1b]99;i=42:d=1:a=focus\x07");
+        let got = o.feed(b"\x1b]99;i=42:p=body;Approve Bash?\x07");
         assert_eq!(
             got,
             [Notice {
@@ -449,6 +492,74 @@ mod tests {
                 body: "Approve Bash?".into(),
                 source_form: "osc99",
             }]
+        );
+        assert!(o.feed(b"\x1b]99;i=42:d=1:a=focus\x07").is_empty());
+    }
+
+    /// Kitty's own defaults: `i` is optional, `p` defaults to `title`, and
+    /// `d` absent means done — the simplest possible form.
+    #[test]
+    fn a_bare_osc_99_with_no_metadata_reports_one_notice() {
+        let mut o = NoticeObserver::default();
+        let got = o.feed(b"\x1b]99;;Hello\x07");
+        assert_eq!(
+            got,
+            [Notice {
+                title: Some("Hello".into()),
+                body: "".into(),
+                source_form: "osc99",
+            }]
+        );
+    }
+
+    /// A body with no `d=` field completes immediately (kitty's default).
+    #[test]
+    fn an_osc_99_body_with_no_d_completes() {
+        let mut o = NoticeObserver::default();
+        let got = o.feed(b"\x1b]99;i=1:p=body;hello\x07");
+        assert_eq!(
+            got,
+            [Notice {
+                title: None,
+                body: "hello".into(),
+                source_form: "osc99",
+            }]
+        );
+    }
+
+    /// The pending table evicts the oldest open id rather than refusing a
+    /// new one, so 17 ids left open don't disable OSC 99.
+    #[test]
+    fn seventeen_open_ids_evict_the_oldest_rather_than_refuse_the_newest() {
+        let mut o = NoticeObserver::default();
+        for i in 0..17 {
+            assert!(
+                o.feed(format!("\x1b]99;i={i}:d=0:p=title;t{i}\x07").as_bytes())
+                    .is_empty()
+            );
+        }
+        // Evicted: completing it starts a fresh, empty one, so nothing to
+        // report.
+        assert!(o.feed(b"\x1b]99;i=0:d=1\x07").is_empty());
+        // The newest id survived the eviction and still assembles.
+        let got = o.feed(b"\x1b]99;i=16:d=1:p=body;done\x07");
+        assert_eq!(
+            got,
+            [Notice {
+                title: Some("t16".into()),
+                body: "done".into(),
+                source_form: "osc99",
+            }]
+        );
+    }
+
+    /// A base64-encoded payload (`e=1`) is dropped, never shown garbled.
+    #[test]
+    fn an_encoded_osc_99_payload_is_dropped_not_garbled() {
+        let mut o = NoticeObserver::default();
+        assert!(
+            o.feed(b"\x1b]99;i=9:e=1:p=title;aGVsbG8=\x07").is_empty(),
+            "nothing set, so nothing to report once done"
         );
     }
 
