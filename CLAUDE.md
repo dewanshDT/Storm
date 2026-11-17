@@ -1158,3 +1158,10 @@ From M28 (desktop clients — the vault's *Desktop Clients — decision 125*):
 Match the surrounding code. Comments explain *why*, especially where something
 looks odd — most non-obvious code here is guarding one of the invariants above,
 and a future reader needs to know that before "simplifying" it.
+
+**Client UI: controls come from the shared components in `lib/ui/`**
+(`controls.dart`, `widgets.dart`, `surfaces.dart`). A pattern that doesn't
+exist is added there as a token-driven component (`context.tokens`, no
+hard-coded colours) with every state — idle, hover, keyboard focus,
+pressed, selected, disabled — and an entry in `lib/ui/gallery_screen.dart`,
+then used. No one-off `Container`/`InkWell` controls.

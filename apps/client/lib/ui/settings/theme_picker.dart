@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../state/app_state.dart';
+import '../controls.dart';
 import '../themes/theme_audit.dart';
 import '../themes/theme_config.dart';
 import '../themes/theme_library.dart';
@@ -30,126 +31,38 @@ class ThemePicker extends ConsumerWidget {
     return ValueListenableBuilder(
       valueListenable: ThemeLibrary.families,
       builder: (context, families, _) => Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _ModeControl(
-            mode: choice.mode,
-            onChanged: (m) => choose(choice.copyWith(mode: m)),
-          ),
-          SizedBox(height: t.sp * 1.5),
-          Wrap(
-            spacing: t.sp,
-            runSpacing: t.sp,
-            children: [
-              for (final f in families)
-                _FamilyCard(
-                  family: f,
-                  brightness: shown,
-                  selected: f.id == ThemeLibrary.family(choice.family).id,
-                  onTap: () => choose(choice.copyWith(family: f.id)),
-                ),
+          ChoiceChips<ThemeMode>(
+            key: const Key('theme-mode'),
+            options: [
+              for (final (m, label) in const [
+                (ThemeMode.system, 'System'),
+                (ThemeMode.light, 'Light'),
+                (ThemeMode.dark, 'Dark'),
+              ])
+                ChoiceOption(m, label, key: Key('theme-mode-${m.name}')),
             ],
+            selected: choice.mode,
+            onSelected: (m) => choose(choice.copyWith(mode: m)),
+          ),
+          SizedBox(height: t.sp * 2),
+          ChoiceCards<String>(
+            options: [for (final f in families) _option(f, shown, t)],
+            selected: ThemeLibrary.family(choice.family).id,
+            onSelected: (id) => choose(choice.copyWith(family: id)),
           ),
         ],
       ),
     );
   }
-}
 
-/// "Low contrast: secondary text, terminal yellow", or null when every pair
-/// passes.
-String? lowContrastNote(ThemeVariant v) {
-  final low = lowContrast(StormTokens.from(v));
-  if (low.isEmpty) return null;
-  return 'Low contrast: ${low.map((c) => c.part).join(', ')}';
-}
-
-class _ModeControl extends StatelessWidget {
-  const _ModeControl({required this.mode, required this.onChanged});
-
-  final ThemeMode mode;
-  final ValueChanged<ThemeMode> onChanged;
-
-  static const _labels = {
-    ThemeMode.system: 'System',
-    ThemeMode.light: 'Light',
-    ThemeMode.dark: 'Dark',
-  };
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final radius = BorderRadius.circular(t.rControl);
-    return Semantics(
-      container: true,
-      label: 'Mode',
-      child: DecoratedBox(
-        decoration: BoxDecoration(
-          borderRadius: radius,
-          border: Border.all(color: t.border, width: t.bw),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final MapEntry(key: m, value: label) in _labels.entries)
-              Semantics(
-                button: true,
-                selected: m == mode,
-                label: 'Mode, $label',
-                onTap: () => onChanged(m),
-                excludeSemantics: true,
-                child: Material(
-                  key: Key('theme-mode-${m.name}'),
-                  color: m == mode ? t.accentSoft : Colors.transparent,
-                  borderRadius: radius,
-                  child: InkWell(
-                    onTap: () => onChanged(m),
-                    borderRadius: radius,
-                    child: Padding(
-                      padding: EdgeInsets.symmetric(
-                        horizontal: t.sp * 1.75,
-                        vertical: t.sp * 0.75,
-                      ),
-                      child: Text(
-                        label,
-                        style: TextStyle(
-                          fontFamily: StormTokens.sansFamily,
-                          fontSize: t.codeSize,
-                          fontWeight: m == mode
-                              ? FontWeight.w500
-                              : FontWeight.w400,
-                          color: m == mode ? t.accent : t.text,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _FamilyCard extends StatelessWidget {
-  const _FamilyCard({
-    required this.family,
-    required this.brightness,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final ThemeFamily family;
-  final Brightness brightness;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
+  ChoiceCardOption<String> _option(
+    ThemeFamily family,
+    Brightness brightness,
+    StormTokens t,
+  ) {
     final variant = family.variantFor(brightness);
-    final own = StormTokens.from(variant);
     final only = family.has(brightness)
         ? null
         : family.light == null
@@ -158,71 +71,50 @@ class _FamilyCard extends StatelessWidget {
     final credit = family.inspiredBy == null
         ? null
         : 'Inspired by ${family.inspiredBy!.name}';
+    final note = [?credit, ?only].join(' · ');
     final low = lowContrastNote(variant);
-    final lines = [
-      if (variant.label != family.label) variant.label,
-      ?credit,
-      ?only,
-    ];
-    final radius = BorderRadius.circular(t.rCard * 0.75);
-    final small = TextStyle(
-      fontFamily: StormTokens.sansFamily,
-      fontSize: t.labelSize,
-      color: t.text2,
-    );
-
-    return Semantics(
-      button: true,
-      selected: selected,
-      label: [family.label, ...lines, ?low].join(', '),
-      onTap: onTap,
-      excludeSemantics: true,
-      child: SizedBox(
-        width: t.sp * 26,
-        child: Material(
-          key: Key('theme-family-${family.id}'),
-          color: selected ? t.accentSoft : t.surface,
-          shape: RoundedRectangleBorder(
-            borderRadius: radius,
-            side: BorderSide(
-              color: selected ? t.accent : t.border,
-              width: selected ? t.bw * 2 : t.bw,
-            ),
-          ),
-          child: InkWell(
-            onTap: onTap,
-            borderRadius: radius,
-            child: Padding(
-              padding: EdgeInsets.all(t.sp * 1.25),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  ThemePreviewStrip(tokens: own),
-                  SizedBox(height: t.sp),
-                  Text(
-                    family.label,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      fontWeight: FontWeight.w500,
-                      color: t.text,
-                    ),
-                  ),
-                  if (lines.isNotEmpty) Text(lines.join(' · '), style: small),
-                  if (low != null)
-                    Text(
-                      low,
-                      key: Key('theme-low-${family.id}'),
-                      style: small.copyWith(color: t.danger),
-                    ),
-                ],
+    final title = familyTitle(family);
+    return ChoiceCardOption(
+      family.id,
+      title,
+      key: Key('theme-family-${family.id}'),
+      subtitle: variant.label,
+      note: note.isEmpty ? null : note,
+      preview: ThemePreviewStrip(tokens: StormTokens.from(variant)),
+      semanticLabel: [title, variant.label, ?credit, ?only, ?low].join(', '),
+      alert: low == null
+          ? null
+          : Text(
+              low,
+              key: Key('theme-low-${family.id}'),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize,
+                color: t.danger,
               ),
             ),
-          ),
-        ),
-      ),
     );
   }
+}
+
+/// The family's name without the "(inspired)" its config label carries; the
+/// card says who it is inspired by on its own line.
+String familyTitle(ThemeFamily family) {
+  const suffix = ' (inspired)';
+  final l = family.label;
+  return family.inspiredBy != null && l.endsWith(suffix)
+      ? l.substring(0, l.length - suffix.length)
+      : l;
+}
+
+/// "Low contrast: secondary text, terminal yellow", or null when every pair
+/// passes.
+String? lowContrastNote(ThemeVariant v) {
+  final low = lowContrast(StormTokens.from(v));
+  if (low.isEmpty) return null;
+  return 'Low contrast: ${low.map((c) => c.part).join(', ')}';
 }
 
 /// A theme in miniature: its page, a panel with its text, its accent, and a
@@ -236,17 +128,11 @@ class ThemePreviewStrip extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final o = tokens;
-    final h = t.sp * 4;
     final r = BorderRadius.circular(t.rControl * 0.6);
-    Widget dot(Color c) => Container(
-      width: t.sp,
-      height: t.sp,
-      margin: EdgeInsets.only(right: t.sp * 0.4),
-      decoration: BoxDecoration(color: c, shape: BoxShape.circle),
-    );
+    final dot = t.sp * 0.875;
     return ExcludeSemantics(
       child: Container(
-        height: h,
+        height: t.sp * 3.5,
         decoration: BoxDecoration(
           color: o.bg,
           borderRadius: r,
@@ -256,36 +142,35 @@ class ThemePreviewStrip extends StatelessWidget {
         child: Row(
           children: [
             Container(
-              width: t.sp * 7,
+              width: t.sp * 5,
               color: o.surface,
-              alignment: Alignment.center,
-              child: Text(
-                'Aa',
-                style: TextStyle(
-                  fontFamily: StormTokens.sansFamily,
-                  fontSize: t.codeSize,
-                  fontWeight: FontWeight.w600,
-                  color: o.text,
+              padding: EdgeInsets.symmetric(horizontal: t.sp),
+              alignment: Alignment.centerLeft,
+              child: Container(
+                height: t.sp * 0.75,
+                decoration: BoxDecoration(
+                  color: o.accent,
+                  borderRadius: BorderRadius.circular(t.sp),
                 ),
-              ),
-            ),
-            SizedBox(width: t.sp),
-            Container(
-              width: t.sp * 3,
-              height: t.sp * 1.5,
-              decoration: BoxDecoration(
-                color: o.accent,
-                borderRadius: BorderRadius.circular(t.sp),
               ),
             ),
             const Spacer(),
             Container(
-              height: h,
-              padding: EdgeInsets.symmetric(horizontal: t.sp * 0.75),
+              padding: EdgeInsets.symmetric(horizontal: t.sp),
               color: o.terminal.background,
+              alignment: Alignment.center,
               child: Row(
                 children: [
-                  for (final i in [1, 2, 3, 4, 5]) dot(o.terminal.ansi[i]),
+                  for (final i in [1, 2, 3, 4, 5])
+                    Container(
+                      width: dot,
+                      height: dot,
+                      margin: EdgeInsets.only(left: i == 1 ? 0 : t.sp * 0.5),
+                      decoration: BoxDecoration(
+                        color: o.terminal.ansi[i],
+                        shape: BoxShape.circle,
+                      ),
+                    ),
                 ],
               ),
             ),

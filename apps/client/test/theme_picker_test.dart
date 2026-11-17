@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -80,24 +82,60 @@ void main() {
 
     await tapKey(tester, 'theme-family-catppuccin');
     expect(s().theme, const ThemeChoice('catppuccin', ThemeMode.dark));
-    expect(find.text('Mocha · Inspired by Catppuccin'), findsOneWidget);
+    expect(find.text('Catppuccin'), findsOneWidget);
+    expect(find.text('Catppuccin (inspired)'), findsNothing);
+    expect(find.text('Mocha'), findsOneWidget);
+    expect(find.text('Inspired by Catppuccin'), findsOneWidget);
 
     await tapKey(tester, 'theme-mode-light');
     expect(s().theme, const ThemeChoice('catppuccin', ThemeMode.light));
-    expect(find.text('Latte · Inspired by Catppuccin'), findsOneWidget);
+    expect(find.text('Latte'), findsOneWidget);
+    expect(find.text('Light only'), findsNothing);
 
     await tapKey(tester, 'theme-mode-system');
     expect(s().theme.mode, ThemeMode.system);
 
     await tapKey(tester, 'theme-mode-dark');
-    expect(find.text('SlowFlow earth · Light only'), findsOneWidget);
+    expect(find.text('SlowFlow earth'), findsOneWidget);
+    expect(find.text('Light only'), findsOneWidget);
     await tapKey(tester, 'theme-family-slowflow');
     expect(s().theme.resolve(Brightness.dark).label, 'SlowFlow earth');
+
+    final mode = tester.getSemantics(find.byKey(const Key('theme-mode-dark')));
+    expect(mode.flagsCollection.isSelected, Tristate.isTrue);
 
     final card = tester.getSemantics(
       find.byKey(const Key('theme-family-storm')),
     );
     expect(card.label, contains('Storm'));
+    expect(card.flagsCollection.isSelected, Tristate.isFalse);
+    final picked = tester.getSemantics(
+      find.byKey(const Key('theme-family-slowflow')),
+    );
+    expect(picked.label, 'SlowFlow, SlowFlow earth, Light only');
+    expect(picked.flagsCollection.isSelected, Tristate.isTrue);
+    await disposeShell(tester, c);
+  });
+
+  testWidgets('the cards fill the page in equal columns of equal height', (
+    tester,
+  ) async {
+    final c = shellContainer();
+    await pumpShell(tester, c, size: desk);
+    await open(tester, c, 'device');
+    final cards = [
+      for (final f in ThemeLibrary.families.value)
+        tester.getRect(find.byKey(Key('theme-family-${f.id}'))),
+    ];
+    final widths = cards.map((r) => r.width.round()).toSet();
+    final heights = cards.map((r) => r.height.round()).toSet();
+    expect(widths, hasLength(1));
+    expect(heights, hasLength(1));
+    expect(widths.single, greaterThanOrEqualTo(220));
+    final picker = tester.getRect(find.byType(ThemePicker));
+    final rowOne = cards.where((r) => r.top == cards.first.top).toList();
+    expect(rowOne.length, greaterThan(1));
+    expect(rowOne.last.right, moreOrLessEquals(picker.right, epsilon: 1));
     await disposeShell(tester, c);
   });
 
