@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::{agent_error, crews_owner};
-use crate::agent::notifications::{Mute, Notification, PAUSE_INDEFINITELY, Prefs, PrefsPatch};
+use crate::agent::notifications::{Mute, Notification, Prefs, PrefsPatch};
 use crate::api::{ApiError, ApiResult, Shared, bad_request};
 use crate::auth::authz::Actor;
 
@@ -152,8 +152,10 @@ pub async fn pause_notifications(
     body: PausePrefs,
 ) -> ApiResult<Prefs> {
     crews_owner(actor)?;
-    let until = body.until.unwrap_or_else(|| PAUSE_INDEFINITELY.to_string());
-    state.agent.pause_notifications(&until).map_err(agent_error)
+    state
+        .agent
+        .pause_notifications(body.until.as_deref())
+        .map_err(agent_error)
 }
 
 pub async fn unpause_notifications(state: &Shared, actor: &Actor) -> ApiResult<Prefs> {

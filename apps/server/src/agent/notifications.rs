@@ -7,7 +7,9 @@
 //! and mutes before deciding whether it interrupts. Nothing is raised for a
 //! transition the server has not itself observed: at boot the Notifier's
 //! per-session memory starts empty, so the first tick after a restart says
-//! nothing, the same rule "nothing on a snapshot" gives the client.
+//! nothing, the same rule "nothing on a snapshot" gives the client — except
+//! for a session created after the Notifier itself started, which has no
+//! earlier state to have missed.
 //!
 //! The MCP `notify` tool, OS/push delivery and device prefs are later
 //! slices (161-2 onward); this one only builds the pipe and the inbox.
@@ -95,6 +97,8 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              kind           TEXT NOT NULL,
              session_id     TEXT,
              host_id        TEXT,
+             provider       TEXT,
+             session_title  TEXT,
              note_vault_id  TEXT,
              note_id        TEXT,
              title          TEXT NOT NULL,
@@ -102,6 +106,7 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              urgency        TEXT NOT NULL CHECK (urgency IN ('low', 'normal', 'high')),
              key            TEXT UNIQUE,
              silent         INTEGER NOT NULL DEFAULT 0,
+             silent_reason  TEXT CHECK (silent_reason IN ('quiet', 'paused', 'off', 'muted')),
              read_at        TEXT,
              read_by_device TEXT,
              due            TEXT,
@@ -111,8 +116,23 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
          CREATE INDEX IF NOT EXISTS notifications_by_updated ON notifications(updated_seq);
          CREATE INDEX IF NOT EXISTS notifications_by_session ON notifications(session_id);
 
+         -- One monotonic counter, persisted and never reused: `seq` on
+         -- insert and `updated_seq` on every update (including a read) both
+         -- take the next value, so the live stream's `updated_seq > cursor`
+         -- poll can never skip a row — unlike deriving either from
+         -- `MAX(seq)`/`MAX(updated_seq)` over `notifications`, which repeats
+         -- a value after a read bump (no new max) or after `DELETE FROM
+         -- notifications` (the max resets to nothing).
+         CREATE TABLE IF NOT EXISTS notification_counter (
+             only_row INTEGER PRIMARY KEY CHECK (only_row = 1),
+             value    INTEGER NOT NULL DEFAULT 0
+         );
+
          -- One row, account-wide (Q15), `version` for optimistic concurrency
-         -- across two devices editing at once.
+         -- across two devices editing at once. `mutes_version` and
+         -- `cleared_version` are separate counters for the stream's
+         -- `mutes_changed`/`notifications_cleared` events; they are not part
+         -- of the prefs a client edits.
          CREATE TABLE IF NOT EXISTS notification_prefs (
              only_row                    INTEGER PRIMARY KEY CHECK (only_row = 1),
              version                     INTEGER NOT NULL DEFAULT 1,
@@ -121,6 +141,9 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              quiet_start                 TEXT NOT NULL DEFAULT '22:00',
              quiet_end                   TEXT NOT NULL DEFAULT '08:00',
              quiet_tz                    TEXT NOT NULL DEFAULT 'UTC',
+             -- Every day for now (161-3 adds per-day filtering); stored so
+             -- that slice is additive rather than another migration.
+             quiet_days                  TEXT NOT NULL DEFAULT '*',
              quiet_allow_delete_requests INTEGER NOT NULL DEFAULT 0,
              summary_on                  INTEGER NOT NULL DEFAULT 1,
              paused_until                TEXT,
@@ -129,6 +152,8 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              per_session_limit           INTEGER NOT NULL DEFAULT 20,
              retention_days              INTEGER NOT NULL DEFAULT 30,
              retention_rows              INTEGER NOT NULL DEFAULT 1000,
+             mutes_version               INTEGER NOT NULL DEFAULT 1,
+             cleared_version             INTEGER NOT NULL DEFAULT 1,
              updated_at                  TEXT NOT NULL
          );
 
@@ -145,6 +170,18 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              ON notification_mutes(scope, target);",
     )?;
     Ok(())
+}
+
+/// The next value of the persisted counter, atomically. See the schema
+/// comment on `notification_counter`.
+fn next_counter(conn: &Connection) -> Result<i64> {
+    Ok(conn.query_row(
+        "INSERT INTO notification_counter (only_row, value) VALUES (1, 1)
+         ON CONFLICT(only_row) DO UPDATE SET value = value + 1
+         RETURNING value",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
 // ---------------------------------------------------------------------
@@ -179,14 +216,23 @@ pub(super) enum Notice {
 }
 
 /// Decision 161's "needs you": a permission prompt, a question or a
-/// sign-in. Delete requests and usage limit are their own events (below),
-/// so — unlike the client's `needsYou`, whose toast shares a slot with
-/// 153h's delete toast — this does not need the client's extra exclusion.
+/// sign-in. Delete requests are their own event (below), so — unlike the
+/// client's `needsYou`, whose toast shares a slot with 153h's delete toast
+/// — this does not need the client's `delete_approval` exclusion.
+///
+/// `"approval"` is checked for parity with the client's `kNeedsYouKinds`
+/// (`sidebar_rules.dart:29-35`); nothing server-side produces it today, so
+/// this is inert until something does. `attention::BLOCKED` ("134h": a
+/// round whose result outcome is `blocked`) is deliberately **not** here —
+/// `kNeedsYouKinds` does not contain it either, and `tierOf`
+/// (`sidebar_rules.dart:54-61`) checks it only *after* `needsYou`, as its
+/// own, lower `SidebarTier.blocked` tier. Promoting it to needs-you would
+/// be a real behaviour change from the client this is a port of.
 fn snap_needs_you(s: &Snap) -> bool {
     matches!(
         s.attention_kind,
         Some(PERMISSION_PROMPT | QUESTION | SIGN_IN)
-    )
+    ) || s.attention_kind == Some("approval")
 }
 
 /// Port of `noticeOf(before, after)` (`agent_notices.dart:44-63`).
@@ -223,12 +269,16 @@ pub(super) fn notice_of(before: &Snap, after: &Snap) -> Option<Notice> {
 }
 
 /// Port of `noticeKey` (`agent_notices.dart:67-76`), as a collapse/dedupe
-/// key (the Events table's column), prefixed `ses:<id>:`.
-pub(super) fn notice_key(n: Notice, id: &str, s: &Snap) -> String {
+/// key (the Events table's column), prefixed `ses:<id>:`. `at` is the
+/// fallback for `NeedsYou` when there is no `attention_since` (evidence
+/// that may be missing, `attention.rs`) — without one, every later
+/// needs-you for the session would otherwise share one constant key and,
+/// because `key` is `UNIQUE`, never fire again.
+pub(super) fn notice_key(n: Notice, id: &str, s: &Snap, at: &str) -> String {
     match n {
         Notice::NeedsYou => format!(
             "ses:{id}:need:{}",
-            s.attention_since.as_deref().unwrap_or_default()
+            s.attention_since.as_deref().unwrap_or(at)
         ),
         Notice::FinishedTurn => format!(
             "ses:{id}:done:{}",
@@ -244,10 +294,9 @@ pub(super) fn notice_key(n: Notice, id: &str, s: &Snap) -> String {
                 .map(|p| p.since.as_str())
                 .unwrap_or_default()
         ),
-        Notice::StoppedWorking => format!(
-            "ses:{id}:stopped:{}",
-            s.watermark.as_deref().unwrap_or_default()
-        ),
+        Notice::StoppedWorking => {
+            format!("ses:{id}:stopped:{}", s.watermark.as_deref().unwrap_or(at))
+        }
     }
 }
 
@@ -258,6 +307,45 @@ fn display_title(r: &SessionRecord) -> String {
         .filter(|t| !t.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| r.workspace.clone())
+}
+
+/// An agent's own text (a delete request's `reason`): plain, bounded, with
+/// control, bidi-override and zero-width characters removed and newlines
+/// collapsed — the sanitiser 161-2's `notify` tool will also use, brought
+/// forward because this slice already shows agent text (the draft's
+/// security section: agent text is always sanitised, never shown raw).
+/// `None` if nothing is left.
+fn sanitise_agent_text(s: &str, max_chars: usize) -> Option<String> {
+    let mut out = String::new();
+    let mut last_was_space = false;
+    for c in s.chars() {
+        let space = match c {
+            '\n' | '\r' | '\t' => true,
+            // Zero-width and bidi-control characters (ZWSP..ZWJ/LRM..RLM,
+            // the bidi embedding/override/isolate controls, BOM/ZWNBSP).
+            '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}' => continue,
+            c if c.is_control() => continue,
+            ' ' => true,
+            _ => false,
+        };
+        if space {
+            if !last_was_space && !out.is_empty() {
+                out.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            out.push(c);
+            last_was_space = false;
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(max_chars).collect())
 }
 
 // ---------------------------------------------------------------------
@@ -483,18 +571,66 @@ fn apply_patch(mut base: Prefs, patch: PrefsPatch) -> Prefs {
     base
 }
 
+fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
+    let (h, m) = s.split_once(':')?;
+    Some((h.parse().ok()?, m.parse().ok()?))
+}
+
+fn valid_hhmm(s: &str) -> bool {
+    parse_hhmm(s).is_some_and(|(h, m)| h < 24 && m < 60)
+}
+
+/// What the person may set is checked here, once, rather than at each of
+/// `prune`/`in_quiet_hours`/`threshold_s`'s call sites: a stored row is
+/// always within range, so those stay simple.
+fn validate_prefs(p: &Prefs) -> std::result::Result<(), String> {
+    if !(1..=365).contains(&p.retention_days) {
+        return Err("retention_days must be 1-365".into());
+    }
+    if !(50..=10_000).contains(&p.retention_rows) {
+        return Err("retention_rows must be 50-10000".into());
+    }
+    if !(1..=200).contains(&p.per_session_limit) {
+        return Err("per_session_limit must be 1-200".into());
+    }
+    if !valid_hhmm(&p.quiet_start) || !valid_hhmm(&p.quiet_end) {
+        return Err("quiet_start and quiet_end must be \"HH:MM\"".into());
+    }
+    if p.quiet_tz.parse::<chrono_tz::Tz>().is_err() {
+        return Err(format!("\"{}\" is not a known time zone", p.quiet_tz));
+    }
+    for (k, v) in &p.events {
+        if !AUTOMATIC_KINDS.contains(&k.as_str()) {
+            return Err(format!("\"{k}\" is not a notification event"));
+        }
+        if let Some(t) = v.threshold_s
+            && !(0..=86_400).contains(&t)
+        {
+            return Err(format!("{k}'s threshold_s must be 0-86400"));
+        }
+    }
+    Ok(())
+}
+
+/// `save_prefs`'s two ways of not saving: `expected_version` was stale, or
+/// the result of applying the patch would not validate.
+pub(super) enum SaveOutcome {
+    Saved(Prefs),
+    Conflict,
+    Invalid(String),
+}
+
 /// `UPDATE … WHERE version = expected`, so two devices saving at once don't
-/// clobber each other (Q15). `Ok(None)` is the conflict.
-fn save_prefs(
-    conn: &Connection,
-    expected_version: i64,
-    patch: PrefsPatch,
-) -> Result<Option<Prefs>> {
+/// clobber each other (Q15).
+fn save_prefs(conn: &Connection, expected_version: i64, patch: PrefsPatch) -> Result<SaveOutcome> {
     let current = load_prefs(conn)?;
     if current.version != expected_version {
-        return Ok(None);
+        return Ok(SaveOutcome::Conflict);
     }
     let next = apply_patch(current, patch);
+    if let Err(msg) = validate_prefs(&next) {
+        return Ok(SaveOutcome::Invalid(msg));
+    }
     let changed = conn.execute(
         "UPDATE notification_prefs SET
              version = version + 1, events = ?1, quiet_on = ?2, quiet_start = ?3,
@@ -521,33 +657,69 @@ fn save_prefs(
         ],
     )?;
     if changed == 0 {
-        return Ok(None);
+        return Ok(SaveOutcome::Conflict);
     }
-    Ok(Some(load_prefs(conn)?))
+    Ok(SaveOutcome::Saved(load_prefs(conn)?))
 }
 
+/// Bumps `version` too, so `prefs_changed` reaches every other device —
+/// pausing from the phone has to be able to say "Paused" on the desktop.
 fn set_paused_until(conn: &Connection, until: Option<&str>) -> Result<()> {
+    load_prefs(conn)?; // ensures the row exists before the bare UPDATE below
     conn.execute(
-        "UPDATE notification_prefs SET paused_until = ?1, updated_at = ?2 WHERE only_row = 1",
+        "UPDATE notification_prefs SET paused_until = ?1, version = version + 1, updated_at = ?2
+         WHERE only_row = 1",
         params![until, now()],
     )?;
     Ok(())
 }
 
+fn bump_mutes_version(conn: &Connection) -> Result<()> {
+    load_prefs(conn)?;
+    conn.execute(
+        "UPDATE notification_prefs SET mutes_version = mutes_version + 1 WHERE only_row = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+fn mutes_version(conn: &Connection) -> Result<i64> {
+    load_prefs(conn)?;
+    Ok(conn.query_row(
+        "SELECT mutes_version FROM notification_prefs WHERE only_row = 1",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+fn bump_cleared_version(conn: &Connection) -> Result<()> {
+    load_prefs(conn)?;
+    conn.execute(
+        "UPDATE notification_prefs SET cleared_version = cleared_version + 1 WHERE only_row = 1",
+        [],
+    )?;
+    Ok(())
+}
+
+fn cleared_version(conn: &Connection) -> Result<i64> {
+    load_prefs(conn)?;
+    Ok(conn.query_row(
+        "SELECT cleared_version FROM notification_prefs WHERE only_row = 1",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// `quiet_tz` parsed, falling back to UTC for a value that is not (or is no
-/// longer) a known IANA zone rather than refusing the whole row.
+/// longer) a known IANA zone rather than refusing the whole row. A stored
+/// value is always valid (`validate_prefs`); this only guards an older row.
 fn tz_of(prefs: &Prefs) -> chrono_tz::Tz {
     prefs.quiet_tz.parse().unwrap_or(chrono_tz::UTC)
 }
 
-fn parse_hhmm(s: &str) -> Option<(u32, u32)> {
-    let (h, m) = s.split_once(':')?;
-    Some((h.parse().ok()?, m.parse().ok()?))
-}
-
 /// Whether `at` (an RFC3339 instant) falls inside quiet hours (Q16). The
-/// window may cross midnight; `quiet_days` is not yet filtered (every day),
-/// which is this slice's only simplification — tracked for 161-3.
+/// window may cross midnight; `quiet_days` is stored but not yet filtered
+/// (every day), tracked for 161-3.
 pub(super) fn in_quiet_hours(prefs: &Prefs, at: &str) -> bool {
     if !prefs.quiet_on {
         return false;
@@ -575,6 +747,24 @@ pub(super) fn is_paused(prefs: &Prefs, at: &str) -> bool {
         .paused_until
         .as_deref()
         .is_some_and(|until| at < until)
+}
+
+/// `s` as an RFC3339 instant strictly after `at`, reformatted to UTC `Z` —
+/// what a mute's or a pause's `until` is stored as, so a later string
+/// comparison against `now()` (also UTC `Z`) is correct even when the
+/// caller sent an offset like `+01:00`.
+fn parse_future_utc(s: &str, at: &str) -> std::result::Result<String, String> {
+    use time::format_description::well_known::Rfc3339;
+    let parsed = time::OffsetDateTime::parse(s, &Rfc3339)
+        .map_err(|_| "must be an RFC3339 time".to_string())?;
+    let now = time::OffsetDateTime::parse(at, &Rfc3339).map_err(|_| "bad clock".to_string())?;
+    if parsed <= now {
+        return Err("must be in the future".into());
+    }
+    parsed
+        .to_offset(time::UtcOffset::UTC)
+        .format(&Rfc3339)
+        .map_err(|_| "bad time".into())
 }
 
 // ---------------------------------------------------------------------
@@ -607,6 +797,21 @@ fn list_mutes(conn: &Connection) -> Result<Vec<Mute>> {
     let mut stmt = conn.prepare(&format!("SELECT {MUTE_COLUMNS} FROM notification_mutes"))?;
     let rows = stmt.query_map([], row_to_mute)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether `id` is a session the server knows of (any status) or a
+/// provider some session has used — the mute-target check (item 5): a
+/// typo'd id would otherwise mute nothing, silently.
+fn known_mute_target(conn: &Connection, scope: &str, target: &str) -> Result<bool> {
+    let column = match scope {
+        "session" => "id",
+        _ => "provider",
+    };
+    Ok(conn.query_row(
+        &format!("SELECT EXISTS(SELECT 1 FROM sessions WHERE {column} = ?1)"),
+        params![target],
+        |r| r.get(0),
+    )?)
 }
 
 fn create_mute(
@@ -686,6 +891,15 @@ pub struct Notification {
     pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
+    /// The session's agent, as it was when the notice was made (161-3/4:
+    /// "{session} · {Agent}"); `null` for a notice with no session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The session's display title at the time, kept even if the session
+    /// is later removed — the client would otherwise have to join against
+    /// the session list, which a closed session may have left.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note_vault_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -697,13 +911,18 @@ pub struct Notification {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub key: Option<String>,
     pub silent: bool,
+    /// Why it is silent (`quiet`/`paused`/`off`/`muted`); internal to the
+    /// summary's own counting, not part of the wire shape.
+    #[serde(skip)]
+    pub silent_reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
     pub cancelled: bool,
 }
 
 const NOTIF_COLUMNS: &str = "id, seq, updated_seq, created, source, kind, session_id, host_id, \
-    note_vault_id, note_id, title, body, urgency, key, silent, read_at, cancelled";
+    provider, session_title, note_vault_id, note_id, title, body, urgency, key, silent, \
+    silent_reason, read_at, cancelled";
 
 fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
     Ok(Notification {
@@ -715,15 +934,18 @@ fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
         kind: row.get(5)?,
         session_id: row.get(6)?,
         host_id: row.get(7)?,
-        note_vault_id: row.get(8)?,
-        note_id: row.get(9)?,
-        title: row.get(10)?,
-        body: row.get(11)?,
-        urgency: row.get(12)?,
-        key: row.get(13)?,
-        silent: row.get(14)?,
-        read_at: row.get(15)?,
-        cancelled: row.get(16)?,
+        provider: row.get(8)?,
+        session_title: row.get(9)?,
+        note_vault_id: row.get(10)?,
+        note_id: row.get(11)?,
+        title: row.get(12)?,
+        body: row.get(13)?,
+        urgency: row.get(14)?,
+        key: row.get(15)?,
+        silent: row.get(16)?,
+        silent_reason: row.get(17)?,
+        read_at: row.get(18)?,
+        cancelled: row.get(19)?,
     })
 }
 
@@ -733,36 +955,60 @@ pub(super) struct NewNotice<'a> {
     pub kind: &'static str,
     pub session_id: Option<&'a str>,
     pub host_id: Option<&'a str>,
+    pub provider: Option<&'a str>,
+    pub session_title: Option<&'a str>,
     pub title: String,
     pub body: Option<String>,
     pub urgency: &'static str,
     pub key: Option<String>,
 }
 
-fn next_seq(conn: &Connection) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COALESCE(MAX(seq), 0) + 1 FROM notifications",
-        [],
-        |r| r.get(0),
-    )?)
+impl<'a> NewNotice<'a> {
+    /// A notice about `r`: `provider`/`session_title` filled in from it.
+    fn for_session(r: &'a SessionRecord, kind: &'static str, title: String) -> Self {
+        Self {
+            source: "storm",
+            kind,
+            session_id: Some(&r.id),
+            host_id: None,
+            provider: Some(r.provider.as_str()),
+            session_title: Some(r.title.as_deref().unwrap_or(r.workspace.as_str())),
+            title,
+            body: None,
+            urgency: default_urgency(kind),
+            key: None,
+        }
+    }
+
+    fn with_key(mut self, key: String) -> Self {
+        self.key = Some(key);
+        self
+    }
+
+    fn with_body(mut self, body: Option<String>) -> Self {
+        self.body = body;
+        self
+    }
 }
 
 /// Inserts a notice, unless its key has already fired (the dedupe rule: a
 /// transition seen twice never notifies twice). `Ok(None)` is the dedupe
-/// case, not an error.
+/// case, not an error. `silence` is `None` when the notice interrupts, or
+/// the reason it does not.
 fn insert_notice(
     conn: &Connection,
     n: NewNotice<'_>,
-    silent: bool,
+    silence: Option<&'static str>,
 ) -> Result<Option<Notification>> {
     let id = crate::auth::identity::random_id("ntf_");
     let created = now();
-    let seq = next_seq(conn)?;
-    let changed = conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let seq = next_counter(&tx)?;
+    let changed = tx.execute(
         "INSERT INTO notifications
-             (id, seq, updated_seq, created, source, kind, session_id, host_id, title, body,
-              urgency, key, silent)
-         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             (id, seq, updated_seq, created, source, kind, session_id, host_id, provider,
+              session_title, title, body, urgency, key, silent, silent_reason)
+         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(key) DO NOTHING",
         params![
             id,
@@ -772,35 +1018,27 @@ fn insert_notice(
             n.kind,
             n.session_id,
             n.host_id,
+            n.provider,
+            n.session_title,
             n.title,
             n.body,
             n.urgency,
             n.key,
-            silent,
+            silence.is_some(),
+            silence,
         ],
     )?;
     if changed == 0 {
+        tx.commit()?;
         return Ok(None);
     }
-    Ok(Some(conn.query_row(
+    let made = tx.query_row(
         &format!("SELECT {NOTIF_COLUMNS} FROM notifications WHERE id = ?1"),
         params![id],
         row_to_notification,
-    )?))
-}
-
-fn bump_updated(conn: &Connection, ids: &[String]) -> Result<()> {
-    if ids.is_empty() {
-        return Ok(());
-    }
-    let seq = next_seq(conn)?;
-    for (i, id) in ids.iter().enumerate() {
-        conn.execute(
-            "UPDATE notifications SET updated_seq = ?1 WHERE id = ?2",
-            params![seq + i as i64, id],
-        )?;
-    }
-    Ok(())
+    )?;
+    tx.commit()?;
+    Ok(Some(made))
 }
 
 fn list_notifications(conn: &Connection, after_seq: i64, limit: i64) -> Result<Vec<Notification>> {
@@ -834,18 +1072,20 @@ fn mark_read(
     device: Option<&str>,
     at: &str,
 ) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
     let mut changed = Vec::new();
     for id in ids {
-        let n = conn.execute(
-            "UPDATE notifications SET read_at = ?2, read_by_device = ?3
+        let seq = next_counter(&tx)?;
+        let n = tx.execute(
+            "UPDATE notifications SET read_at = ?2, read_by_device = ?3, updated_seq = ?4
              WHERE id = ?1 AND read_at IS NULL",
-            params![id, at, device],
+            params![id, at, device, seq],
         )?;
         if n > 0 {
             changed.push(id.clone());
         }
     }
-    bump_updated(conn, &changed)?;
+    tx.commit()?;
     Ok(changed)
 }
 
@@ -864,12 +1104,15 @@ fn mark_read_for_session(
     mark_read(conn, &ids, device, at)
 }
 
+/// Clears the inbox. The counter is untouched: `seq`/`updated_seq` keep
+/// climbing, so a stream subscriber's cursor from before the clear still
+/// makes sense (nothing to catch up on), and a later `GET ?after=<old>`
+/// never mistakes "cleared" for "nothing new".
 fn clear_inbox(conn: &Connection) -> Result<()> {
     conn.execute("DELETE FROM notifications", [])?;
     Ok(())
 }
 
-/// 30 days or 1,000 rows, whichever is fewer (Q21), on account prefs.
 fn child_events_since(conn: &Connection, after: i64) -> Result<Vec<(i64, String, String)>> {
     let mut stmt = conn.prepare(
         "SELECT rowid, child, kind FROM child_events
@@ -882,16 +1125,20 @@ fn child_events_since(conn: &Connection, after: i64) -> Result<Vec<(i64, String,
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// What a summary counts: only what quiet hours or a pause itself held
+/// back, never a kind that is off by default or a muted one — otherwise
+/// "while you were away" is noise (item 8).
 fn silenced_counts(conn: &Connection, since: &str) -> Result<Vec<(String, i64)>> {
     let mut stmt = conn.prepare(
         "SELECT kind, COUNT(*) FROM notifications
-         WHERE created >= ?1 AND silent = 1 AND kind != ?2
+         WHERE created >= ?1 AND silent_reason IN ('quiet', 'paused')
          GROUP BY kind",
     )?;
-    let rows = stmt.query_map(params![since, SUMMARY], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let rows = stmt.query_map(params![since], |r| Ok((r.get(0)?, r.get(1)?)))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// 30 days or 1,000 rows, whichever is fewer (Q21), on account prefs.
 fn prune(conn: &Connection, retention_days: i64, retention_rows: i64, at: &str) -> Result<usize> {
     let cutoff = crate::index::rfc3339_minus_secs(at, retention_days * 86_400);
     let by_age = conn.execute(
@@ -916,7 +1163,8 @@ fn prune(conn: &Connection, retention_days: i64, retention_rows: i64, at: &str) 
 // Precedence (the Rules list under "Notification settings"): pause or
 // quiet hours → the event's toggle → a session or provider mute. A notice
 // stopped by any of these is still written to the inbox, marked silent —
-// nothing is lost, it just never interrupts.
+// nothing is lost, it just never interrupts. `Some(reason)` is silent;
+// `None` is not.
 // ---------------------------------------------------------------------
 
 pub(super) fn silent_for(
@@ -926,20 +1174,20 @@ pub(super) fn silent_for(
     session_id: Option<&str>,
     provider: Option<&str>,
     at: &str,
-) -> bool {
+) -> Option<&'static str> {
     if is_paused(prefs, at) {
-        return true;
+        return Some("paused");
     }
     if in_quiet_hours(prefs, at) && !(kind == DELETE_REQUEST && prefs.quiet_allow_delete_requests) {
-        return true;
+        return Some("quiet");
     }
     if !prefs.event_on(kind) {
-        return true;
+        return Some("off");
     }
     if muted(mutes, session_id, provider, kind, at) {
-        return true;
+        return Some("muted");
     }
-    false
+    None
 }
 
 fn elapsed_secs(from: &str, to: &str) -> Option<i64> {
@@ -987,7 +1235,7 @@ pub(super) fn notify_delete_request(
     let prefs = load_prefs(conn)?;
     let mutes = list_mutes(conn)?;
     let at = now();
-    let silent = silent_for(
+    let silence = silent_for(
         &prefs,
         &mutes,
         DELETE_REQUEST,
@@ -999,27 +1247,27 @@ pub(super) fn notify_delete_request(
         .title
         .clone()
         .unwrap_or_else(|| request.path.clone());
+    // The reason is the agent's own words (prompt-injectable): sanitised,
+    // never shown raw (draft, Security and privacy).
+    let body = sanitise_agent_text(&request.reason, 200);
     insert_notice(
         conn,
-        NewNotice {
-            source: "storm",
-            kind: DELETE_REQUEST,
-            session_id: Some(&request.session_id),
-            host_id: None,
-            title: format!("{} wants to delete {what}", display_title(r)),
-            body: Some(request.reason.clone()),
-            urgency: default_urgency(DELETE_REQUEST),
-            key: Some(format!("ses:{}:del:{}", request.session_id, request.id)),
-        },
-        silent,
+        NewNotice::for_session(
+            r,
+            DELETE_REQUEST,
+            format!("{} wants to delete {what}", display_title(r)),
+        )
+        .with_body(body)
+        .with_key(format!("ses:{}:del:{}", request.session_id, request.id)),
+        silence,
     )?;
     Ok(())
 }
 
 /// The Notifier's memory between ticks: nothing in here survives a
 /// restart, which is why nothing is raised on one (the same rule the
-/// client's toasts follow for a snapshot).
-#[derive(Default)]
+/// client's toasts follow for a snapshot) — except for a session the
+/// Notifier never had a chance to see an earlier state for.
 pub(super) struct NotifierMemory {
     prev: HashMap<String, Snap>,
     /// The link generation an offline host was last notified for, so a
@@ -1028,6 +1276,22 @@ pub(super) struct NotifierMemory {
     last_child_event_rowid: i64,
     /// When the current quiet-hours-or-paused spell began, if one is open.
     quiet_since: Option<String>,
+    /// When this Notifier started: a session created at or after this
+    /// instant has no earlier state to have missed, so its first observed
+    /// state is still notified (item 4).
+    started_at: String,
+}
+
+impl NotifierMemory {
+    pub(super) fn new(started_at: String) -> Self {
+        Self {
+            prev: HashMap::new(),
+            host_offline_notified: HashMap::new(),
+            last_child_event_rowid: 0,
+            quiet_since: None,
+            started_at,
+        }
+    }
 }
 
 impl AgentManager {
@@ -1044,7 +1308,8 @@ impl AgentManager {
     }
 
     /// `PUT /v1/notifications/prefs`: `expected_version` must match the
-    /// stored one, or this is a conflict (Q15) rather than a silent clobber.
+    /// stored one, or this is a conflict (Q15) rather than a silent clobber,
+    /// and the result must itself be a valid row (item 5).
     pub fn update_notification_prefs(
         &self,
         expected_version: i64,
@@ -1055,11 +1320,12 @@ impl AgentManager {
             save_prefs(&store.conn, expected_version, patch)?
         };
         match saved {
-            Some(p) => {
+            SaveOutcome::Saved(p) => {
                 self.poke_notify();
                 Ok(p)
             }
-            None => Err(AgentError::Conflict("prefs_version".into())),
+            SaveOutcome::Conflict => Err(AgentError::Conflict("prefs_version".into())),
+            SaveOutcome::Invalid(msg) => Err(AgentError::BadRequest(msg)),
         }
     }
 
@@ -1133,13 +1399,24 @@ impl AgentManager {
     }
 
     pub fn clear_notifications(&self) -> AgentResult<()> {
-        clear_inbox(&self.store.lock().unwrap().conn)?;
+        let store = self.store.lock().unwrap();
+        clear_inbox(&store.conn)?;
+        bump_cleared_version(&store.conn)?;
+        drop(store);
         self.poke_notify();
         Ok(())
     }
 
     pub fn notification_mutes(&self) -> AgentResult<Vec<Mute>> {
         Ok(list_mutes(&self.store.lock().unwrap().conn)?)
+    }
+
+    pub fn notifications_mutes_version(&self) -> AgentResult<i64> {
+        Ok(mutes_version(&self.store.lock().unwrap().conn)?)
+    }
+
+    pub fn notifications_cleared_version(&self) -> AgentResult<i64> {
+        Ok(cleared_version(&self.store.lock().unwrap().conn)?)
     }
 
     pub fn mute_notifications(
@@ -1154,29 +1431,49 @@ impl AgentManager {
                 "scope must be \"session\" or \"provider\"".into(),
             ));
         }
-        let m = create_mute(
-            &self.store.lock().unwrap().conn,
-            scope,
-            target,
-            until,
-            device,
-        )?;
+        if target.is_empty() {
+            return Err(AgentError::BadRequest("target must not be empty".into()));
+        }
+        let at = now();
+        let until = match until {
+            Some(u) => Some(parse_future_utc(u, &at).map_err(AgentError::BadRequest)?),
+            None => None,
+        };
+        let store = self.store.lock().unwrap();
+        if !known_mute_target(&store.conn, scope, target)? {
+            return Err(AgentError::BadRequest(format!(
+                "no {scope} \"{target}\" to mute"
+            )));
+        }
+        let m = create_mute(&store.conn, scope, target, until.as_deref(), device)?;
+        bump_mutes_version(&store.conn)?;
+        drop(store);
         self.poke_notify();
         Ok(m)
     }
 
     pub fn unmute_notifications(&self, id: &str) -> AgentResult<bool> {
-        let removed = delete_mute(&self.store.lock().unwrap().conn, id)?;
+        let store = self.store.lock().unwrap();
+        let removed = delete_mute(&store.conn, id)?;
+        if removed {
+            bump_mutes_version(&store.conn)?;
+        }
+        drop(store);
         if removed {
             self.poke_notify();
         }
         Ok(removed)
     }
 
-    /// 1 hour, until tomorrow 08:00, or indefinitely: `until` is the
-    /// resolved RFC3339 instant either way, chosen by the caller.
-    pub fn pause_notifications(&self, until: &str) -> AgentResult<Prefs> {
-        set_paused_until(&self.store.lock().unwrap().conn, Some(until))?;
+    /// 1 hour, until tomorrow 08:00, or indefinitely (`until: None`):
+    /// a given `until` must be a real, future RFC3339 time.
+    pub fn pause_notifications(&self, until: Option<&str>) -> AgentResult<Prefs> {
+        let at = now();
+        let resolved = match until {
+            Some(u) => parse_future_utc(u, &at).map_err(AgentError::BadRequest)?,
+            None => PAUSE_INDEFINITELY.to_string(),
+        };
+        set_paused_until(&self.store.lock().unwrap().conn, Some(&resolved))?;
         self.poke_notify();
         self.notification_prefs()
     }
@@ -1199,12 +1496,14 @@ impl AgentManager {
                     kind: TEST,
                     session_id: None,
                     host_id: None,
+                    provider: None,
+                    session_title: None,
                     title: "Test notification".into(),
                     body: Some("If this reached you, delivery to this device works.".into()),
                     urgency: "normal",
                     key: None,
                 },
-                false,
+                None,
             )?
             .expect("no key: never deduped")
         };
@@ -1225,11 +1524,13 @@ impl AgentManager {
     }
 
     /// Everything one Notifier tick does: diffs every live session against
-    /// its own memory of it (`notice_of`, plus usage limit), checks hosts
-    /// offline and new child events, sends the one quiet-hours/pause
-    /// summary, and runs the retention sweep. Run every few seconds
-    /// (`lib.rs`); nothing here is raised for a session this server has
-    /// not itself watched change, which is what keeps a restart quiet.
+    /// its own memory of it (`notice_of`, plus usage limit and a lifecycle
+    /// `failed`), checks hosts offline and new child events, sends the one
+    /// quiet-hours/pause summary, and runs the retention sweep. Run every
+    /// few seconds (`lib.rs`); nothing here is raised for a session this
+    /// server has not itself watched change — unless the session did not
+    /// exist yet when this Notifier started, which is what keeps a restart
+    /// quiet without also silencing a session's very first turn.
     pub fn notifier_tick(&self) -> AgentResult<()> {
         let at = now();
         let sessions = self.list()?;
@@ -1240,18 +1541,36 @@ impl AgentManager {
         let mut wrote = false;
         {
             let mut mem = self.notify_memory.lock().unwrap();
+            let started_at = mem.started_at.clone();
             for r in &sessions {
                 let snap = self.snap_of(r)?;
-                let Some(before) = mem.prev.insert(r.id.clone(), snap.clone()) else {
-                    continue; // nothing on a snapshot or a restart
+                let before = match mem.prev.insert(r.id.clone(), snap.clone()) {
+                    Some(b) => b,
+                    None if r.created_at >= started_at => Snap {
+                        status: "starting".into(),
+                        ..Snap::default()
+                    },
+                    None => continue, // pre-existing: nothing on a snapshot or a restart
                 };
                 if let Some(n) = notice_of(&before, &snap) {
                     wrote |= self.emit_transition(&prefs, &mutes, r, n, (&before, &snap), &at)?;
                 }
+                if before.status != "failed" && snap.status == "failed" {
+                    let silence =
+                        silent_for(&prefs, &mutes, ERROR, Some(&r.id), Some(&r.provider), &at);
+                    let store = self.store.lock().unwrap();
+                    wrote |= insert_notice(
+                        &store.conn,
+                        NewNotice::for_session(r, ERROR, format!("{} failed", display_title(r)))
+                            .with_key(format!("ses:{}:failed", r.id)),
+                        silence,
+                    )?
+                    .is_some();
+                }
                 if before.attention_kind != Some(super::attention::USAGE_LIMIT)
                     && snap.attention_kind == Some(super::attention::USAGE_LIMIT)
                 {
-                    let silent = silent_for(
+                    let silence = silent_for(
                         &prefs,
                         &mutes,
                         USAGE_LIMIT,
@@ -1262,21 +1581,17 @@ impl AgentManager {
                     let store = self.store.lock().unwrap();
                     wrote |= insert_notice(
                         &store.conn,
-                        NewNotice {
-                            source: "storm",
-                            kind: USAGE_LIMIT,
-                            session_id: Some(&r.id),
-                            host_id: None,
-                            title: format!("{} hit its usage limit", display_title(r)),
-                            body: None,
-                            urgency: default_urgency(USAGE_LIMIT),
-                            key: Some(format!(
-                                "ses:{}:limit:{}",
-                                r.id,
-                                snap.attention_since.clone().unwrap_or_default()
-                            )),
-                        },
-                        silent,
+                        NewNotice::for_session(
+                            r,
+                            USAGE_LIMIT,
+                            format!("{} hit its usage limit", display_title(r)),
+                        )
+                        .with_key(format!(
+                            "ses:{}:limit:{}",
+                            r.id,
+                            snap.attention_since.clone().unwrap_or_else(|| at.clone())
+                        )),
+                        silence,
                     )?
                     .is_some();
                 }
@@ -1308,12 +1623,8 @@ impl AgentManager {
         at: &str,
     ) -> AgentResult<bool> {
         let (before, after) = transition;
-        let (kind, title, key): (&'static str, String, String) = match n {
-            Notice::NeedsYou => (
-                NEEDS_YOU,
-                format!("{} needs you", display_title(r)),
-                notice_key(n, &r.id, after),
-            ),
+        let (kind, title): (&'static str, String) = match n {
+            Notice::NeedsYou => (NEEDS_YOU, format!("{} needs you", display_title(r))),
             Notice::FinishedTurn => {
                 let started = before.program.as_ref().map(|p| p.since.as_str());
                 let worked = started
@@ -1322,46 +1633,21 @@ impl AgentManager {
                 if worked < prefs.threshold_s(FINISHED) {
                     return Ok(false);
                 }
-                (
-                    FINISHED,
-                    format!("{} finished its turn", display_title(r)),
-                    notice_key(n, &r.id, after),
-                )
+                (FINISHED, format!("{} finished its turn", display_title(r)))
             }
-            Notice::HitError => (
-                ERROR,
-                format!("{} hit an error", display_title(r)),
-                notice_key(n, &r.id, after),
-            ),
-            // The lifecycle's own `failed` (no program status) is on by
-            // default, unlike the generic stopped-working fallback it would
-            // otherwise be ported as (Events table: "Hit an error / failed").
-            Notice::StoppedWorking if after.status == "failed" => (
-                ERROR,
-                format!("{} failed", display_title(r)),
-                format!("ses:{}:failed", r.id),
-            ),
+            Notice::HitError => (ERROR, format!("{} hit an error", display_title(r))),
             Notice::StoppedWorking => (
                 STOPPED_WORKING,
                 format!("{} stopped working", display_title(r)),
-                notice_key(n, &r.id, after),
             ),
         };
-        let silent = silent_for(prefs, mutes, kind, Some(&r.id), Some(&r.provider), at);
+        let key = notice_key(n, &r.id, after, at);
+        let silence = silent_for(prefs, mutes, kind, Some(&r.id), Some(&r.provider), at);
         let store = self.store.lock().unwrap();
         Ok(insert_notice(
             &store.conn,
-            NewNotice {
-                source: "storm",
-                kind,
-                session_id: Some(&r.id),
-                host_id: None,
-                title,
-                body: None,
-                urgency: default_urgency(kind),
-                key: Some(key),
-            },
-            silent,
+            NewNotice::for_session(r, kind, title).with_key(key),
+            silence,
         )?
         .is_some())
     }
@@ -1399,7 +1685,7 @@ impl AgentManager {
             if !had_running {
                 continue;
             }
-            let silent = silent_for(prefs, mutes, HOST_OFFLINE, None, None, at);
+            let silence = silent_for(prefs, mutes, HOST_OFFLINE, None, None, at);
             let store = self.store.lock().unwrap();
             wrote |= insert_notice(
                 &store.conn,
@@ -1408,12 +1694,14 @@ impl AgentManager {
                     kind: HOST_OFFLINE,
                     session_id: None,
                     host_id: Some(&host_id),
+                    provider: None,
+                    session_title: None,
                     title: "A host went offline".into(),
                     body: None,
                     urgency: default_urgency(HOST_OFFLINE),
                     key: Some(format!("host:{host_id}:offline:{generation}")),
                 },
-                silent,
+                silence,
             )?
             .is_some();
         }
@@ -1434,7 +1722,7 @@ impl AgentManager {
                 "ended" => "ended",
                 _ => "reported back",
             };
-            let silent = silent_for(
+            let silence = silent_for(
                 prefs,
                 mutes,
                 CHILD_FINISHED,
@@ -1445,17 +1733,9 @@ impl AgentManager {
             let store = self.store.lock().unwrap();
             wrote |= insert_notice(
                 &store.conn,
-                NewNotice {
-                    source: "storm",
-                    kind: CHILD_FINISHED,
-                    session_id: Some(child),
-                    host_id: None,
-                    title: format!("{} {verb}", display_title(&r)),
-                    body: None,
-                    urgency: default_urgency(CHILD_FINISHED),
-                    key: Some(format!("ses:{child}:child:{rowid}")),
-                },
-                silent,
+                NewNotice::for_session(&r, CHILD_FINISHED, format!("{} {verb}", display_title(&r)))
+                    .with_key(format!("ses:{child}:child:{rowid}")),
+                silence,
             )?
             .is_some();
         }
@@ -1463,7 +1743,10 @@ impl AgentManager {
     }
 
     /// One summary when quiet hours or a pause ends (Q16), counting what
-    /// was held silent while it was active. On by default.
+    /// was held silent *by* quiet hours or the pause while it was active
+    /// (never a kind that is off by default, nor a muted one). Keyed by
+    /// when the spell began, not the calendar date, so a spell that crosses
+    /// midnight (or two in one day) each get their own summary.
     fn maybe_send_summary(&self, prefs: &Prefs, at: &str) -> AgentResult<bool> {
         let active = in_quiet_hours(prefs, at) || is_paused(prefs, at);
         let since = {
@@ -1494,7 +1777,6 @@ impl AgentManager {
             .map(|(kind, n)| format!("{n} {}", summary_word(kind, *n)))
             .collect::<Vec<_>>()
             .join(", ");
-        let date = &at[..at.len().min(10)];
         Ok(insert_notice(
             &store.conn,
             NewNotice {
@@ -1502,12 +1784,14 @@ impl AgentManager {
                 kind: SUMMARY,
                 session_id: None,
                 host_id: None,
+                provider: None,
+                session_title: None,
                 title: "While you were away".into(),
                 body: Some(body),
                 urgency: "normal",
-                key: Some(format!("summary:{date}")),
+                key: Some(format!("summary:{since}")),
             },
-            false,
+            None,
         )?
         .is_some())
     }

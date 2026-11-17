@@ -77,7 +77,7 @@ fn entering_needs_you_from_any_state() {
     for before in [
         view("running"),
         working(),
-        blocked(super::super::attention::BLOCKED),
+        blocked(crate::agent::attention::BLOCKED),
     ] {
         assert_eq!(notice_of(&before, &after), Some(Notice::NeedsYou));
     }
@@ -85,6 +85,16 @@ fn entering_needs_you_from_any_state() {
         notice_of(&blocked(QUESTION), &blocked(PERMISSION_PROMPT)),
         None,
         "already in the tier"
+    );
+}
+
+/// `attention::BLOCKED` (134h) is its own, lower sidebar tier on the
+/// client (`tierOf`, checked after `needsYou`) — not a needs-you kind.
+#[test]
+fn a_blocked_round_outcome_is_not_needs_you() {
+    assert_eq!(
+        notice_of(&view("running"), &blocked(crate::agent::attention::BLOCKED)),
+        None
     );
 }
 
@@ -206,13 +216,13 @@ fn a_done_or_an_error_is_said_once_per_record() {
 fn notice_key_dedupe() {
     let done = reporting("done", None, T1);
     assert_eq!(
-        notice_key(Notice::FinishedTurn, "a", &done),
-        notice_key(Notice::FinishedTurn, "a", &reporting("done", None, T1)),
+        notice_key(Notice::FinishedTurn, "a", &done, T1),
+        notice_key(Notice::FinishedTurn, "a", &reporting("done", None, T1), T1),
         "the same record never notifies twice"
     );
     assert_ne!(
-        notice_key(Notice::FinishedTurn, "a", &done),
-        notice_key(Notice::FinishedTurn, "a", &reporting("done", None, T2)),
+        notice_key(Notice::FinishedTurn, "a", &done, T1),
+        notice_key(Notice::FinishedTurn, "a", &reporting("done", None, T2), T1),
         "a newer record is a new key"
     );
     let at_50 = Snap {
@@ -224,17 +234,35 @@ fn notice_key_dedupe() {
         ..view("running")
     };
     assert_eq!(
-        notice_key(Notice::StoppedWorking, "a", &at_50),
-        notice_key(Notice::StoppedWorking, "a", &at_50)
+        notice_key(Notice::StoppedWorking, "a", &at_50, T1),
+        notice_key(Notice::StoppedWorking, "a", &at_50, T1)
     );
     assert_ne!(
-        notice_key(Notice::StoppedWorking, "a", &at_50),
-        notice_key(Notice::StoppedWorking, "a", &at_90)
+        notice_key(Notice::StoppedWorking, "a", &at_50, T1),
+        notice_key(Notice::StoppedWorking, "a", &at_90, T1)
     );
     assert_ne!(
-        notice_key(Notice::NeedsYou, "a", &blocked(PERMISSION_PROMPT)),
-        notice_key(Notice::NeedsYou, "b", &blocked(PERMISSION_PROMPT)),
+        notice_key(Notice::NeedsYou, "a", &blocked(PERMISSION_PROMPT), T1),
+        notice_key(Notice::NeedsYou, "b", &blocked(PERMISSION_PROMPT), T1),
         "scoped by session"
+    );
+}
+
+/// Item 3: a needs-you with no `attention.since` (evidence that may be
+/// missing) must not fall back to a constant key, or the `UNIQUE` column
+/// would silence every later needs-you for the session.
+#[test]
+fn a_missing_since_does_not_give_a_constant_needs_you_key() {
+    let no_since = Snap {
+        status: "running".into(),
+        attention_kind: Some(PERMISSION_PROMPT),
+        attention_since: None,
+        ..Snap::default()
+    };
+    assert_ne!(
+        notice_key(Notice::NeedsYou, "a", &no_since, T1),
+        notice_key(Notice::NeedsYou, "a", &no_since, T2),
+        "falls back to the observed instant, not a constant"
     );
 }
 
@@ -302,24 +330,21 @@ fn pause() {
 fn silent_for_precedence() {
     let mut prefs = Prefs::defaults();
     let at = "2026-11-15T12:00:00Z";
-    assert!(!silent_for(
-        &prefs,
-        &[],
-        NEEDS_YOU,
-        Some("a"),
-        Some("fake"),
-        at
-    ));
+    assert_eq!(
+        silent_for(&prefs, &[], NEEDS_YOU, Some("a"), Some("fake"), at),
+        None
+    );
 
     prefs.paused_until = Some("2099-01-01T00:00:00Z".into());
-    assert!(
+    assert_eq!(
         silent_for(&prefs, &[], NEEDS_YOU, Some("a"), Some("fake"), at),
-        "paused"
+        Some("paused")
     );
     prefs.paused_until = None;
 
-    assert!(
+    assert_eq!(
         silent_for(&prefs, &[], CHILD_FINISHED, Some("a"), Some("fake"), at),
+        Some("off"),
         "off by default"
     );
 
@@ -330,29 +355,28 @@ fn silent_for_precedence() {
         until: None,
         created_at: at.into(),
     };
-    assert!(silent_for(
-        &prefs,
-        &[mute],
-        FINISHED,
-        Some("a"),
-        Some("fake"),
-        at
-    ));
+    assert_eq!(
+        silent_for(&prefs, &[mute], FINISHED, Some("a"), Some("fake"), at),
+        Some("muted")
+    );
     // Q17: a session mute never hides a delete request.
-    assert!(!silent_for(
-        &prefs,
-        &[Mute {
-            id: "ntm_2".into(),
-            scope: "session".into(),
-            target: "a".into(),
-            until: None,
-            created_at: at.into(),
-        }],
-        DELETE_REQUEST,
-        Some("a"),
-        Some("fake"),
-        at,
-    ));
+    assert_eq!(
+        silent_for(
+            &prefs,
+            &[Mute {
+                id: "ntm_2".into(),
+                scope: "session".into(),
+                target: "a".into(),
+                until: None,
+                created_at: at.into(),
+            }],
+            DELETE_REQUEST,
+            Some("a"),
+            Some("fake"),
+            at,
+        ),
+        None
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -371,6 +395,8 @@ fn plain_notice(key: &str) -> NewNotice<'static> {
         kind: NEEDS_YOU,
         session_id: None,
         host_id: None,
+        provider: None,
+        session_title: None,
         title: "t".into(),
         body: None,
         urgency: "normal",
@@ -382,7 +408,7 @@ fn plain_notice(key: &str) -> NewNotice<'static> {
 fn retention_by_age_and_by_row_count() {
     let conn = test_conn();
     for i in 0..5 {
-        insert_notice(&conn, plain_notice(&format!("k{i}")), false).unwrap();
+        insert_notice(&conn, plain_notice(&format!("k{i}")), None).unwrap();
     }
     conn.execute(
         "UPDATE notifications SET created = '2000-01-01T00:00:00Z' WHERE key IN ('k0', 'k1')",
@@ -399,7 +425,7 @@ fn retention_by_age_and_by_row_count() {
     );
 
     for i in 5..1005 {
-        insert_notice(&conn, plain_notice(&format!("k{i}")), false).unwrap();
+        insert_notice(&conn, plain_notice(&format!("k{i}")), None).unwrap();
     }
     let removed = prune(&conn, 30, 1000, &now()).unwrap();
     assert!(removed > 0, "over the row cap");
@@ -472,7 +498,12 @@ fn migrates_from_a_v0_18_0_db_without_losing_sessions() {
             .collect::<rusqlite::Result<_>>()
             .unwrap()
     };
-    for expected in ["notifications", "notification_prefs", "notification_mutes"] {
+    for expected in [
+        "notifications",
+        "notification_prefs",
+        "notification_mutes",
+        "notification_counter",
+    ] {
         assert!(
             tables.iter().any(|t| t == expected),
             "missing {expected}: {tables:?}"
@@ -483,13 +514,56 @@ fn migrates_from_a_v0_18_0_db_without_losing_sessions() {
 #[test]
 fn a_key_never_notifies_twice() {
     let conn = test_conn();
-    let first = insert_notice(&conn, plain_notice("dup"), false).unwrap();
+    let first = insert_notice(&conn, plain_notice("dup"), None).unwrap();
     assert!(first.is_some());
-    let second = insert_notice(&conn, plain_notice("dup"), false).unwrap();
+    let second = insert_notice(&conn, plain_notice("dup"), None).unwrap();
     assert!(
         second.is_none(),
         "the same key is a dedupe, not a second row"
     );
+}
+
+/// Item 1: the counter is one persisted sequence, never derived from
+/// `MAX(seq)`/`MAX(updated_seq)` over the rows themselves — so a read
+/// bump, or a clear, can never make a later insert collide with (and so
+/// never be streamed past) an earlier cursor value.
+#[test]
+fn the_counter_never_goes_backwards_across_a_read_or_a_clear() {
+    let conn = test_conn();
+    let a = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    let b = insert_notice(&conn, plain_notice("b"), None)
+        .unwrap()
+        .unwrap();
+    assert!(b.updated_seq > a.updated_seq);
+
+    // A read bumps `a`'s updated_seq past `b`'s.
+    mark_read(&conn, &[a.id.clone()], None, &now()).unwrap();
+    let a_after_read = conn
+        .query_row(
+            "SELECT updated_seq FROM notifications WHERE id = ?1",
+            params![a.id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    assert!(a_after_read > b.updated_seq, "the read moved past b");
+
+    // A third insert must still land strictly after that read bump.
+    let c = insert_notice(&conn, plain_notice("c"), None)
+        .unwrap()
+        .unwrap();
+    assert!(
+        c.updated_seq > a_after_read,
+        "an insert after a read is never skipped by the stream cursor"
+    );
+
+    // Clearing the inbox must not reset the counter backwards either.
+    clear_inbox(&conn).unwrap();
+    let d = insert_notice(&conn, plain_notice("d"), None)
+        .unwrap()
+        .unwrap();
+    assert!(d.seq > c.seq, "the counter survives a clear");
 }
 
 // ---------------------------------------------------------------------
@@ -564,6 +638,16 @@ fn kinds(m: &AgentManager) -> Vec<String> {
 fn nothing_on_the_first_tick_after_a_restart() {
     let (m, _d, _link) = manager();
     let id = launch(&m);
+    // Backdated so the session reads as one that existed before this
+    // Notifier started (a real restart), not one launched fresh by this
+    // test — which item 4 says should notify on its first tick instead.
+    m.store_for_tests()
+        .conn
+        .execute(
+            "UPDATE sessions SET created_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
     // Program-status attention (decision 155) is ungated, unlike the raw
     // hook path, so this is a reliable way to put a session in "needs you"
     // for any provider in a test.
@@ -642,6 +726,48 @@ fn a_delete_request_notifies_at_high_urgency() {
     assert_eq!(got[0].kind, DELETE_REQUEST);
     assert_eq!(got[0].urgency, "high");
     assert_eq!(got[0].key, Some(format!("ses:{id}:del:adr_1")));
+    assert_eq!(got[0].body, Some("stale".to_string()));
+    assert_eq!(got[0].provider, Some("fake".to_string()));
+    assert!(got[0].session_title.is_some());
+}
+
+/// Item 9: a delete request's `reason` is agent text — never shown raw.
+#[test]
+fn a_delete_requests_reason_is_sanitised() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    let r = m.get(&id).unwrap();
+    let dirty = "line one\nline two\u{200B}\u{202E}evil";
+    let request = super::super::deletes::DeleteRequest {
+        id: "adr_2".into(),
+        session_id: id.clone(),
+        vault_id: "vlt_1".into(),
+        kind: "note".into(),
+        note_id: Some("not_1".into()),
+        path: "Ideas.md".into(),
+        title: None,
+        reason: dirty.into(),
+        fingerprint: "1:Ideas.md".into(),
+        notes: 1,
+        size: 10,
+        modified: None,
+        paths: vec!["Ideas.md".into()],
+        created_at: now(),
+        expires_at: now(),
+        state: "pending".into(),
+        decided_at: None,
+        decided_by: None,
+        trash_id: None,
+    };
+    {
+        let store = m.store_for_tests();
+        notify_delete_request(&store.conn, &r, &request).unwrap();
+    }
+    let got = m.list_notifications(0, 10).unwrap();
+    let body = got[0].body.as_deref().unwrap();
+    // The zero-width space and the bidi override are removed outright, not
+    // turned into a visible gap — they carry no word boundary of their own.
+    assert_eq!(body, "line one line twoevil");
 }
 
 /// Q7: off by default — it is still written to the inbox, marked silent.
@@ -685,4 +811,194 @@ fn a_host_offline_under_the_threshold_does_not_notify_yet() {
     m.set_host_offline_for_tests(HOST, 10);
     m.notifier_tick().unwrap();
     assert!(!kinds(&m).contains(&HOST_OFFLINE.to_string()));
+}
+
+/// Item 4: a session launched after the Notifier started has no earlier
+/// state to have missed, so its first observed state is still notified —
+/// "nothing on a snapshot/restart" applies only to a pre-existing session.
+#[test]
+fn a_session_launched_after_the_notifier_started_notifies_on_the_first_tick() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    report(
+        &m,
+        &id,
+        json!({"status": "running", "program_status": {"state": "blocked", "kind": "permission", "app": "fake"}}),
+    );
+    m.notifier_tick().unwrap();
+    assert!(
+        kinds(&m).contains(&NEEDS_YOU.to_string()),
+        "a brand-new session's first needs-you is not a restart"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Validation (item 5) and the stream side-effects of pause/mute/clear
+// (items 6, 7)
+// ---------------------------------------------------------------------
+
+#[test]
+fn prefs_validation_rejects_out_of_range_values() {
+    let (m, _d, _link) = manager();
+    let v = m.notification_prefs().unwrap().version;
+    let bad = [
+        PrefsPatch {
+            retention_days: Some(0),
+            ..Default::default()
+        },
+        PrefsPatch {
+            retention_rows: Some(10),
+            ..Default::default()
+        },
+        PrefsPatch {
+            per_session_limit: Some(0),
+            ..Default::default()
+        },
+        PrefsPatch {
+            quiet_start: Some("25:00".into()),
+            ..Default::default()
+        },
+        PrefsPatch {
+            quiet_tz: Some("Nowhere/Fake".into()),
+            ..Default::default()
+        },
+        PrefsPatch {
+            events: Some(HashMap::from([(
+                "not_a_kind".into(),
+                EventPref {
+                    on: true,
+                    threshold_s: None,
+                },
+            )])),
+            ..Default::default()
+        },
+        PrefsPatch {
+            events: Some(HashMap::from([(
+                FINISHED.into(),
+                EventPref {
+                    on: true,
+                    threshold_s: Some(999_999),
+                },
+            )])),
+            ..Default::default()
+        },
+    ];
+    for patch in bad {
+        assert!(
+            m.update_notification_prefs(v, patch).is_err(),
+            "should have been rejected"
+        );
+    }
+    // A valid change still goes through with the same version.
+    assert!(
+        m.update_notification_prefs(
+            v,
+            PrefsPatch {
+                summary_on: Some(false),
+                ..Default::default()
+            },
+        )
+        .is_ok()
+    );
+}
+
+#[test]
+fn mute_validation_requires_a_known_target_and_a_future_until() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    assert!(
+        m.mute_notifications("session", "ags_no_such_session", None, None)
+            .is_err(),
+        "no such session"
+    );
+    assert!(
+        m.mute_notifications("provider", "no-such-provider", None, None)
+            .is_err(),
+        "no such provider"
+    );
+    assert!(
+        m.mute_notifications("session", &id, Some("2000-01-01T00:00:00Z"), None)
+            .is_err(),
+        "until must be in the future"
+    );
+    let mute = m.mute_notifications("session", &id, None, None).unwrap();
+    assert_eq!(mute.target, id);
+    // A provider with a live session is a known target.
+    m.mute_notifications("provider", "fake", None, None)
+        .unwrap();
+}
+
+#[test]
+fn pause_bumps_prefs_version_and_validates_until() {
+    let (m, _d, _link) = manager();
+    let before = m.notification_prefs().unwrap().version;
+    assert!(
+        m.pause_notifications(Some("2000-01-01T00:00:00Z")).is_err(),
+        "must be in the future"
+    );
+    let after = m.pause_notifications(None).unwrap();
+    assert!(after.version > before, "prefs_changed must be able to fire");
+    assert_eq!(after.paused_until.as_deref(), Some(PAUSE_INDEFINITELY));
+}
+
+#[test]
+fn clearing_and_muting_bump_their_own_versions() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    let cleared_before = m.notifications_cleared_version().unwrap();
+    m.clear_notifications().unwrap();
+    assert!(m.notifications_cleared_version().unwrap() > cleared_before);
+
+    let mutes_before = m.notifications_mutes_version().unwrap();
+    let mute = m.mute_notifications("session", &id, None, None).unwrap();
+    assert!(m.notifications_mutes_version().unwrap() > mutes_before);
+    m.unmute_notifications(&mute.id).unwrap();
+    assert!(m.notifications_mutes_version().unwrap() > mutes_before + 1);
+}
+
+#[test]
+fn a_silent_row_records_why() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("sr"), Some("off"))
+        .unwrap()
+        .unwrap();
+    assert!(n.silent);
+    assert_eq!(n.silent_reason, Some("off".to_string()));
+}
+
+/// Item 8: the summary counts only what quiet hours or the pause itself
+/// held back — never an off-by-default kind, and never a muted one.
+#[test]
+fn the_summary_counts_only_quiet_or_paused_rows() {
+    let conn = test_conn();
+    let at = now();
+    insert_notice(&conn, plain_notice("q1"), Some("quiet")).unwrap();
+    insert_notice(&conn, plain_notice("q2"), Some("paused")).unwrap();
+    insert_notice(&conn, plain_notice("q3"), Some("off")).unwrap();
+    insert_notice(&conn, plain_notice("q4"), Some("muted")).unwrap();
+    insert_notice(&conn, plain_notice("q5"), None).unwrap();
+    let counts = silenced_counts(&conn, &at).unwrap();
+    let total: i64 = counts.iter().map(|(_, n)| n).sum();
+    assert_eq!(total, 2, "only the quiet and paused rows: {counts:?}");
+}
+
+/// Item 10: `failed` fires from any running state, not only one the
+/// literal `noticeOf` port would already call `StoppedWorking` for.
+#[test]
+fn failed_notifies_even_when_not_preceded_by_working() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    report(
+        &m,
+        &id,
+        json!({"status": "running", "program_status": {"state": "blocked", "kind": "question", "app": "fake"}}),
+    );
+    m.notifier_tick().unwrap(); // seed memory on a non-working state
+    report(&m, &id, json!({"status": "failed"}));
+    m.notifier_tick().unwrap();
+    assert!(
+        kinds(&m).contains(&ERROR.to_string()),
+        "failed from a blocked (not working) state still notifies: {:?}",
+        kinds(&m)
+    );
 }

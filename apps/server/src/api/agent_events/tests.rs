@@ -741,3 +741,63 @@ async fn a_prefs_change_is_told_to_every_subscriber() {
     assert_eq!(name, "prefs_changed");
     assert_eq!(data["summary_on"], false);
 }
+
+/// Item 7: a row read before this subscriber's own scan ever saw it unread
+/// (insert and read landing in the same wake) must still be
+/// `notification_read`, never a `notification` frame carrying `read_at`.
+#[tokio::test]
+async fn a_read_before_ever_seen_unread_is_still_a_read() {
+    let dir = tempdir::TempDir::new("storm-161-notify-read-before-seen").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification().unwrap();
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5))
+        .await
+        .expect("a notification_read frame");
+    assert_eq!(name, "notification_read");
+    assert_eq!(data["ids"][0], n.id);
+    let extra = next_frame(&mut rx, Duration::from_millis(300)).await;
+    assert!(extra.is_none(), "nothing else for this notice: {extra:?}");
+}
+
+#[tokio::test]
+async fn muting_is_told_to_every_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-mutes").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    f.state
+        .agent
+        .mute_notifications("session", &id, None, None)
+        .unwrap();
+
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5))
+        .await
+        .expect("a mutes_changed frame");
+    assert_eq!(name, "mutes_changed");
+    assert_eq!(data["mutes"][0]["target"], id);
+}
+
+#[tokio::test]
+async fn clearing_the_inbox_is_told_to_every_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-cleared").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    f.state.agent.clear_notifications().unwrap();
+
+    let (name, _) = next_frame(&mut rx, Duration::from_secs(5))
+        .await
+        .expect("a notifications_cleared frame");
+    assert_eq!(name, "notifications_cleared");
+}

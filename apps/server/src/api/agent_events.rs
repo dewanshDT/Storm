@@ -216,6 +216,8 @@ struct Subscriber {
     /// than resending the whole row.
     notif_unread_sent: std::collections::HashSet<String>,
     prefs_version: i64,
+    mutes_version: i64,
+    cleared_version: i64,
 }
 
 #[derive(Serialize)]
@@ -330,34 +332,53 @@ impl Subscriber {
             .notification_prefs()
             .map(|p| p.version)
             .unwrap_or(0);
+        self.mutes_version = state.agent.notifications_mutes_version().unwrap_or(0);
+        self.cleared_version = state.agent.notifications_cleared_version().unwrap_or(0);
     }
 
     async fn scan_notify(&mut self, state: &Shared) -> Vec<Frame> {
         let mut frames = Vec::new();
-        match state
-            .agent
-            .list_notifications_since_update(self.notif_cursor, 500)
-        {
-            Ok(rows) => {
-                for n in rows {
-                    self.notif_cursor = self.notif_cursor.max(n.updated_seq);
-                    if n.read_at.is_some() && self.notif_unread_sent.remove(&n.id) {
-                        frames.push(Frame::event(
-                            "notification_read",
-                            serde_json::json!({ "ids": [n.id] }).to_string(),
-                        ));
-                        continue;
-                    }
-                    if n.read_at.is_none() {
-                        self.notif_unread_sent.insert(n.id.clone());
-                    }
-                    frames.push(Frame::event(
-                        "notification",
-                        serde_json::to_string(&n).unwrap_or_default(),
-                    ));
+        let mut read_ids = Vec::new();
+        loop {
+            let rows = match state
+                .agent
+                .list_notifications_since_update(self.notif_cursor, 500)
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "agent events: listing notifications failed");
+                    break;
                 }
+            };
+            let got = rows.len();
+            for n in rows {
+                self.notif_cursor = self.notif_cursor.max(n.updated_seq);
+                // Any read row is `notification_read`, whether or not this
+                // very subscriber had sent it unread before — a row from
+                // before this connection (the backfill case) must never go
+                // out as a fresh `notification` carrying `read_at`.
+                if n.read_at.is_some() || n.cancelled {
+                    self.notif_unread_sent.remove(&n.id);
+                    if n.read_at.is_some() {
+                        read_ids.push(n.id);
+                    }
+                    continue;
+                }
+                self.notif_unread_sent.insert(n.id.clone());
+                frames.push(Frame::event(
+                    "notification",
+                    serde_json::to_string(&n).unwrap_or_default(),
+                ));
             }
-            Err(e) => tracing::warn!(error = ?e, "agent events: listing notifications failed"),
+            if got < 500 {
+                break;
+            }
+        }
+        if !read_ids.is_empty() {
+            frames.push(Frame::event(
+                "notification_read",
+                serde_json::json!({ "ids": read_ids }).to_string(),
+            ));
         }
         match state.agent.notification_prefs() {
             Ok(p) if p.version != self.prefs_version => {
@@ -369,6 +390,28 @@ impl Subscriber {
             }
             Ok(_) => {}
             Err(e) => tracing::warn!(error = ?e, "agent events: reading notification prefs failed"),
+        }
+        match state.agent.notifications_mutes_version() {
+            Ok(v) if v != self.mutes_version => {
+                self.mutes_version = v;
+                match state.agent.notification_mutes() {
+                    Ok(mutes) => frames.push(Frame::event(
+                        "mutes_changed",
+                        serde_json::json!({ "mutes": mutes }).to_string(),
+                    )),
+                    Err(e) => tracing::warn!(error = ?e, "agent events: listing mutes failed"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading mutes version failed"),
+        }
+        match state.agent.notifications_cleared_version() {
+            Ok(v) if v != self.cleared_version => {
+                self.cleared_version = v;
+                frames.push(Frame::event("notifications_cleared", String::new()));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading cleared version failed"),
         }
         frames
     }

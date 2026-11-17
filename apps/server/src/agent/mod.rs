@@ -1239,7 +1239,7 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
-            notify_memory: Mutex::new(notifications::NotifierMemory::default()),
+            notify_memory: Mutex::new(notifications::NotifierMemory::new(now())),
             notify_changed: watch::channel(0).0,
             changes: changes::Changes::new(),
             #[cfg(test)]
