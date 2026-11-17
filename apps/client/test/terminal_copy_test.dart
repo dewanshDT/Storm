@@ -277,6 +277,16 @@ void main() {
     );
 
     testWidgets(
+      'by the terminal on a Mac, where Storm does not',
+      (tester) async {
+        final sent = await paste(tester, mac, storm: false);
+        expect(sent.join(), contains('pasted'));
+        expect(reads, 1);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
       'by the terminal, where Storm does not',
       (tester) async {
         final sent = await paste(tester, linux, storm: false);
@@ -285,6 +295,117 @@ void main() {
       },
       variant: TargetPlatformVariant.only(TargetPlatform.linux),
     );
+  });
+
+  group('on the web the browser pastes', () {
+    setUp(() => StormTerminal.web = true);
+    tearDown(() => StormTerminal.web = false);
+
+    /// Whether anything took the paste key, and what reached the agent.
+    Future<(bool, List<String>)> press(
+      WidgetTester tester,
+      List<LogicalKeyboardKey> modifiers,
+    ) async {
+      final t = terminalWith('');
+      final sent = <String>[];
+      t.onInput = (b) => sent.add(utf8.decode(b));
+      t.onImagePaste = () async => false;
+      await tester.pumpWidget(
+        app(StormTerminalView(terminal: t, autofocus: true)),
+      );
+      await tester.pump();
+      for (final m in modifiers) {
+        await tester.sendKeyDownEvent(m);
+      }
+      final down = await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+      final repeat = await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyV);
+      final up = await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+      for (final m in modifiers.reversed) {
+        await tester.sendKeyUpEvent(m);
+      }
+      await tester.pump();
+      return (down || repeat || up, sent);
+    }
+
+    testWidgets(
+      '⌘V on a Mac is left to the browser',
+      (tester) async {
+        final (taken, sent) = await press(tester, mac);
+        expect(taken, isFalse);
+        expect(sent, isEmpty);
+        expect(reads, 0);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      '⌘V on a Mac is left to the browser with the kitty protocol on',
+      (tester) async {
+        final t = terminalWith('\x1b[>1u');
+        expect(t.kittyKeyboard, isTrue);
+        final sent = <String>[];
+        t.onInput = (b) => sent.add(utf8.decode(b));
+        await tester.pumpWidget(
+          app(StormTerminalView(terminal: t, autofocus: true)),
+        );
+        await tester.pump();
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+        sent.clear();
+        expect(await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV), isFalse);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+        expect(sent.where((s) => s.contains('118')), isEmpty);
+        expect(reads, 0);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+
+    testWidgets(
+      'Ctrl+Shift+V elsewhere is left to the browser',
+      (tester) async {
+        final (taken, sent) = await press(tester, linux);
+        expect(taken, isFalse);
+        expect(sent, isEmpty);
+        expect(reads, 0);
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.linux),
+    );
+
+    testWidgets(
+      'Ctrl+V is still ^V',
+      (tester) async {
+        final (taken, sent) = await press(tester, [
+          LogicalKeyboardKey.controlLeft,
+        ]);
+        expect(taken, isTrue);
+        expect(sent.first, '\x16');
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.macOS),
+    );
+  });
+
+  group('the terminal binds paste', () {
+    bool pastes(Map<ShortcutActivator, Intent> shortcuts) =>
+        shortcuts.values.whereType<PasteTextIntent>().isNotEmpty;
+
+    test('natively, not in a browser', () {
+      expect(pastes(terminalShortcuts(meta: true, web: false)), isTrue);
+      expect(pastes(terminalShortcuts(meta: false, web: false)), isTrue);
+      expect(pastes(terminalShortcuts(meta: true, web: true)), isFalse);
+      expect(pastes(terminalShortcuts(meta: false, web: true)), isFalse);
+    });
+
+    test('copy and select all stay bound in a browser', () {
+      expect(
+        terminalShortcuts(
+          meta: true,
+          web: true,
+        ).values.map((i) => i.runtimeType),
+        containsAll([SelectAllTextIntent]),
+      );
+      expect(terminalShortcuts(meta: true, web: true), hasLength(2));
+      expect(terminalShortcuts(meta: false, web: true), hasLength(1));
+    });
   });
 
   testWidgets(
