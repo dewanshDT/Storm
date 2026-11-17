@@ -100,6 +100,7 @@ class TerminalView extends StatefulWidget {
     super.key,
     this.controller,
     this.theme = TerminalThemes.defaultTheme,
+    this.reportTheme,
     this.textStyle = const TerminalStyle(),
     this.textScaler,
     this.padding,
@@ -135,6 +136,11 @@ class TerminalView extends StatefulWidget {
 
   /// The theme to use for this terminal.
   final TerminalTheme theme;
+
+  /// The theme colour queries (OSC 4, 10–19) and colour-scheme reports
+  /// (DEC 2031) answer from, when it is not [theme]. A report goes out when
+  /// this one changes, never [theme] alone.
+  final TerminalTheme? reportTheme;
 
   /// The style to use for painting characters.
   final TerminalStyle textStyle;
@@ -322,7 +328,8 @@ class TerminalViewState extends State<TerminalView> {
       }
       _scrollController = widget.scrollController ?? ScrollController();
     }
-    if (oldWidget.theme != widget.theme) {
+    // Storm (5.2.0+storm.4): the report follows the theme answers come from.
+    if ((oldWidget.reportTheme ?? oldWidget.theme) != _answerTheme) {
       widget.terminal.reportColorSchemeChange();
     }
     _shortcutManager.shortcuts = widget.shortcuts ?? defaultTerminalShortcuts;
@@ -349,7 +356,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installColorQuery(Terminal terminal) {
-    terminal.onColorQuery ??= _colorQuery;
+    terminal.onColorQuery = _colorQuery;
   }
 
   void _removeColorQuery(Terminal terminal) {
@@ -359,7 +366,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installColorSchemeQuery(Terminal terminal) {
-    terminal.onColorSchemeQuery ??= _resolveColorSchemeQuery;
+    terminal.onColorSchemeQuery = _resolveColorSchemeQuery;
   }
 
   void _removeColorSchemeQuery(Terminal terminal) {
@@ -369,8 +376,8 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   void _installClipboardHandlers(Terminal terminal) {
-    terminal.onClipboardStore ??= _clipboardStore;
-    terminal.onClipboardQuery ??= _clipboardQuery;
+    terminal.onClipboardStore = _clipboardStore;
+    terminal.onClipboardQuery = _clipboardQuery;
   }
 
   void _removeClipboardHandlers(Terminal terminal) {
@@ -393,23 +400,26 @@ class TerminalViewState extends State<TerminalView> {
     return data?.text;
   }
 
+  TerminalTheme get _answerTheme => widget.reportTheme ?? widget.theme;
+
   int? _resolveColorQuery(int code, int? index) {
+    final theme = _answerTheme;
     if (code == 4) {
       if (index == null) return null;
-      return PaletteBuilder(widget.theme).paletteColor(index).toARGB32() &
+      return PaletteBuilder(theme).paletteColor(index).toARGB32() &
           0x00ffffff;
     }
     final color = switch (code) {
-      10 => widget.theme.foreground,
-      11 => widget.theme.background,
-      12 => widget.theme.cursor,
-      13 => widget.theme.foreground,
-      14 => widget.theme.background,
-      15 => widget.theme.foreground,
-      16 => widget.theme.background,
-      17 => widget.theme.selection,
-      18 => widget.theme.cursor,
-      19 => widget.theme.foreground,
+      10 => theme.foreground,
+      11 => theme.background,
+      12 => theme.cursor,
+      13 => theme.foreground,
+      14 => theme.background,
+      15 => theme.foreground,
+      16 => theme.background,
+      17 => theme.selection,
+      18 => theme.cursor,
+      19 => theme.foreground,
       _ => null,
     };
     if (color == null) return null;
@@ -417,7 +427,7 @@ class TerminalViewState extends State<TerminalView> {
   }
 
   TerminalColorScheme _resolveColorSchemeQuery() {
-    final luminance = widget.theme.background.computeLuminance();
+    final luminance = _answerTheme.background.computeLuminance();
     final isDark = luminance < 0.5;
     return switch (isDark) {
       true => TerminalColorScheme.dark,

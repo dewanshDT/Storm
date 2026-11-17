@@ -186,6 +186,43 @@ PopoverPosition placePopover({
   }
 }
 
+/// How wide [label] sets as a [PopoverItem]'s line.
+double popoverLabelWidth(BuildContext context, String label) {
+  final style = (Theme.of(context).textTheme.bodyMedium ?? const TextStyle())
+      .merge(popoverItemStyle(context.tokens));
+  final painter = TextPainter(
+    text: TextSpan(text: label, style: style),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+    maxLines: 1,
+  )..layout();
+  final width = painter.width;
+  painter.dispose();
+  return width;
+}
+
+/// What a [StormPopover] at its default padding and a [PopoverItem] take
+/// around a label.
+double popoverChrome(StormTokens t) => (t.sp * 1.5 + t.sp * 0.75 + t.bw) * 2;
+
+/// A [StormPopover] of [PopoverItem]s as wide as its widest of [labels],
+/// within [min]..[max]: a menu cut to its anchor's width elides short names.
+double fitPopoverWidth(
+  BuildContext context,
+  Iterable<String> labels, {
+  double min = 180,
+  double max = 320,
+}) {
+  var widest = 0.0;
+  for (final label in labels) {
+    widest = math.max(widest, popoverLabelWidth(context, label));
+  }
+  return (widest.ceilToDouble() + popoverChrome(context.tokens) + 1).clamp(
+    min,
+    max,
+  );
+}
+
 /// Opens a [StormPopover] anchored to [anchorKey]'s widget.
 ///
 /// Uses a transparent full-screen route rather than `showMenu`, which brings

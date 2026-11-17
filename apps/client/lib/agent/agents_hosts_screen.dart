@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../state/app_state.dart' show vaultsProvider;
+import '../state/terminal_prefs.dart' show launchBrightness;
 import '../ui/breakpoints.dart';
 import '../ui/controls.dart';
 import '../ui/settings/settings_widgets.dart';
@@ -46,6 +48,10 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
   String? _error;
   bool _loading = false;
   String? _selected;
+
+  /// Each host's workspaces with a remembered Write to (decision 159), by
+  /// host id; listed when its details open.
+  final _remembered = <String, List<AgentWorkspace>>{};
 
   /// By `<host id>/<agent>`.
   final _runs = <String, AgentRun>{};
@@ -145,8 +151,43 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
       }
       _loading = false;
     });
+    _loadRemembered(_selected);
     // The sessions sidebar beside this page shows the same hosts.
     ref.invalidate(agentOverviewProvider);
+  }
+
+  /// Best effort: a host that is offline or older lists nothing.
+  Future<void> _loadRemembered(String? hostId) async {
+    final host = _hosts?.where((h) => h.id == hostId).firstOrNull;
+    if (host == null || !host.online) return;
+    final api = agentApi(ref);
+    if (api == null) return;
+    try {
+      final ws = await api.workspaces(host.id);
+      if (!mounted) return;
+      setState(
+        () => _remembered[host.id] = [
+          for (final w in ws)
+            if (w.write != null) w,
+        ],
+      );
+    } catch (_) {
+    } finally {
+      api.dispose();
+    }
+  }
+
+  Future<void> _forgetRemembered(AgentHost host, String workspace) async {
+    final done = await _with((api) async {
+      await api.forgetWorkspacePref(host.id, workspace);
+      return true;
+    });
+    if (done == true && mounted) await _loadRemembered(host.id);
+  }
+
+  void _select(String? hostId) {
+    setState(() => _selected = hostId);
+    _loadRemembered(hostId);
   }
 
   Future<void> _enroll() async {
@@ -404,6 +445,7 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
         cols: (size.width / 9).clamp(40, 240).floor(),
         rows: (size.height / 20).clamp(12, 80).floor(),
         typedInput: typed,
+        terminalBrightness: launchBrightness(context, ref),
       );
       if (!mounted) return null;
       _close();
@@ -549,9 +591,13 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
     final sessions =
         ref.watch(agentOverviewProvider).value?.sessions ??
         const <AgentSession>[];
+    final vaults = ref.watch(vaultsProvider).value;
     Widget details(AgentHost h) => HostDetails(
       key: ValueKey('details-${h.id}'),
       host: h,
+      remembered: _remembered[h.id] ?? const [],
+      vaultName: (id) => vaults?.where((v) => v.id == id).firstOrNull?.name,
+      onForget: (workspace) => _forgetRemembered(h, workspace),
       hostAdmin: !_noHostAdmin,
       running: sessions.where((s) => s.hostId == h.id && !s.ended).length,
       onRename: (name) => _rename(h, name),
@@ -587,7 +633,7 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
             open: _open,
             hostAdmin: !_noHostAdmin,
             link: _link,
-            onSelect: (h) => setState(() => _selected = h.id),
+            onSelect: (h) => _select(h.id),
             onOpen: _openCell,
             onMakeDefault: _setDefault,
             onReenroll: _reenroll,
@@ -622,8 +668,7 @@ class _AgentsHostsScreenState extends ConsumerState<AgentsHostsScreen> {
               expanded: h.id == _selected,
               hostAdmin: !_noHostAdmin,
               details: h.status == 'revoked' ? null : details(h),
-              onSelect: () =>
-                  setState(() => _selected = _selected == h.id ? null : h.id),
+              onSelect: () => _select(_selected == h.id ? null : h.id),
               onOpen: (agent) => _openCell(h, agent),
               onReenroll: () => _reenroll(h),
               onRemove: () => _remove(h),

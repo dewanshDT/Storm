@@ -684,11 +684,25 @@ class BufferLine with IndexedItem {
       to++;
     }
 
+    var end = from;
+    for (var i = to - 1; i >= from; i--) {
+      if (getCodePoint(i) != 0 && i + getWidth(i) <= to) {
+        end = i + 1;
+        break;
+      }
+    }
+
     final builder = StringBuffer();
-    for (var i = from; i < to; i++) {
+    for (var i = from; i < end; i++) {
       final codePoint = getCodePoint(i);
       final width = getWidth(i);
-      if (codePoint != 0 && i + width <= to) {
+      if (codePoint == 0) {
+        if (width != 0 || i == 0 || getWidth(i - 1) != 2) {
+          builder.writeCharCode(0x20);
+        }
+        continue;
+      }
+      if (i + width <= to) {
         builder.writeCharCode(codePoint);
         final combining = _combiningCharacters?[i];
         if (combining != null) {

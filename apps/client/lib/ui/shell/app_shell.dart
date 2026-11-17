@@ -10,6 +10,8 @@ import '../../state/frecency.dart';
 import '../../state/nav_memory.dart';
 import '../../keyboard/storm_app_shortcuts.dart';
 import '../breakpoints.dart';
+import '../theme.dart' show StormTheme;
+import '../tokens.dart';
 import 'activity_rail.dart';
 import 'app_bar.dart';
 import 'create_here.dart' show pageArrivalProvider;
@@ -159,23 +161,32 @@ class _AppShellState extends ConsumerState<AppShell> {
     final wide = context.isExpanded;
     final Widget body;
     if (wide) {
-      body = Scaffold(
-        body: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            const StormAppBar(),
-            Expanded(
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  ActivityRail(
-                    current: activityOf(Uri.parse(widget.location).path),
-                  ),
-                  Expanded(child: PaneSemantics(child: child)),
-                ],
+      final theme = Theme.of(context);
+      final toasts = StormTheme.deskToasts(
+        theme.snackBarTheme,
+        MediaQuery.sizeOf(context).width,
+        context.tokens,
+      );
+      body = Theme(
+        data: theme.copyWith(snackBarTheme: toasts),
+        child: Scaffold(
+          body: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const StormAppBar(),
+              Expanded(
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    ActivityRail(
+                      current: activityOf(Uri.parse(widget.location).path),
+                    ),
+                    Expanded(child: PaneSemantics(child: child)),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       );
     } else if (windowChrome != WindowChrome.none) {

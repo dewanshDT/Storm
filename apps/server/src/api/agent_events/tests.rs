@@ -9,6 +9,9 @@ use crate::api::tests::{seed_owner, session_token, test_router_with_state};
 const HOST: &str = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
 
 /// Fast enough for a test to see both lanes in a few seconds.
+///
+/// The tests that time a lane run on paused time: the feed's waits are
+/// tokio's, so they hold exactly however starved the runner is.
 const QUICK: Pace = Pace {
     coalesce: Duration::from_millis(20),
     state: Duration::from_millis(400),
@@ -306,7 +309,7 @@ async fn the_snapshot_is_the_session_list_with_no_id() {
 
 /// A-154-4, at the shipped pace: each host report reaches the subscriber
 /// within 1.2 s, as one `session` event carrying the whole view.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn working_then_idle_is_one_session_event_each_within_1_2_s() {
     let dir = tempdir::TempDir::new("storm-154-events-status").unwrap();
     let f = fixture(dir.path()).await;
@@ -335,7 +338,7 @@ async fn working_then_idle_is_one_session_event_each_within_1_2_s() {
     assert!(extra.is_none(), "one event per change: {extra:?}");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_burst_of_uploads_is_one_slow_lane_event_per_window_with_the_final_end() {
     let dir = tempdir::TempDir::new("storm-154-events-output").unwrap();
     let f = fixture(dir.path()).await;
@@ -372,7 +375,7 @@ async fn a_burst_of_uploads_is_one_slow_lane_event_per_window_with_the_final_end
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_state_change_goes_at_once_and_then_at_most_once_a_window() {
     let dir = tempdir::TempDir::new("storm-154-events-lanes").unwrap();
     let f = fixture(dir.path()).await;
@@ -473,7 +476,7 @@ async fn a_crew_move_reaches_the_stream() {
     assert_eq!(moved.data["crew"]["id"], crew.id.as_str());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_reader_that_fell_behind_is_sent_resync_then_a_snapshot() {
     let dir = tempdir::TempDir::new("storm-154-events-resync").unwrap();
     let f = fixture(dir.path()).await;
@@ -574,7 +577,7 @@ fn the_shipped_pace_is_decision_154s() {
 /// `blocked kind=permission` reaches a subscriber on the state lane as
 /// needs-you within 1.2 s, and its `idle` clears it the same way. The
 /// record's `msg` and `title` are never kept or sent.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_programs_blocked_is_pushed_at_once_and_its_words_never_are() {
     let dir = tempdir::TempDir::new("storm-155-events-program").unwrap();
     let f = fixture(dir.path()).await;
@@ -661,4 +664,72 @@ async fn an_unchanged_record_sends_nothing() {
     }
     let sent = next_frame(&mut rx, QUICK.output + QUICK.state).await;
     assert!(sent.is_none(), "{sent:?}");
+}
+
+/// 157g: the brightness a host says its client answered with reaches the
+/// events, the session list and its view; a report without it keeps it, a
+/// `hello` says it again, and anything but `light` or `dark` is ignored.
+#[tokio::test]
+async fn the_answered_brightness_round_trips_from_the_host() {
+    let dir = tempdir::TempDir::new("storm-157g-answered").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut stream = f.open().await;
+    let snapshot = stream.expect("snapshot").await;
+    assert!(
+        snapshot.data["sessions"][0]
+            .get("terminal_answered")
+            .is_none()
+    );
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "light"}),
+    );
+    let event = stream
+        .next(Duration::from_secs(5))
+        .await
+        .expect("no session event");
+    assert_eq!(event.name, "session");
+    assert_eq!(event.data["terminal_answered"], "light");
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "mauve"}),
+    );
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "title": "Fix"}),
+    );
+    let list = json(f.ask(get("/v1/agent/sessions", Some(&f.bearer))).await).await;
+    let listed = list["sessions"]
+        .as_array()
+        .or(list.as_array())
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["terminal_answered"], "light");
+
+    f.state
+        .agent
+        .hello(
+            HOST,
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 8,
+                "sessions": [{"id": id, "status": "running", "terminal_answered": "dark",
+                    "output_end_offset": 0}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let view = json(
+        f.ask(get(&format!("/v1/agent/sessions/{id}"), Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    assert_eq!(view["terminal_answered"], "dark");
 }

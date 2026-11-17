@@ -8,7 +8,8 @@ import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
 import '../editor/frontmatter.dart' as fm;
-import '../keyboard/storm_activators.dart' show stormUsesMetaModifier;
+import '../keyboard/storm_activators.dart'
+    show stormHasKeyboard, stormUsesMetaModifier;
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/terminal_prefs.dart';
@@ -89,12 +90,35 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _focus.addListener(() {
       if (_focus.hasFocus) ref.read(sessionControllerProvider(_id))?.focus();
     });
+    agentSessionOpened.addListener(_onOpened);
+  }
+
+  void _onOpened() {
+    if (agentSessionOpened.value?.$1 == _id) _focusWhenShown();
+  }
+
+  /// This screen and its terminal are kept from one session to the next, so
+  /// `autofocus` fires only on the first: the session shown takes the
+  /// keyboard at desk width, unless a field or popover holds it (171-12).
+  void _focusWhenShown() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !stormHasKeyboard || !context.isExpanded) return;
+      if (_focus.context == null || _focus.hasPrimaryFocus) return;
+      final held = FocusManager.instance.primaryFocus?.context;
+      if (held != null &&
+          (held.findAncestorWidgetOfExactType<EditableText>() != null ||
+              ModalRoute.of(held) is PopupRoute)) {
+        return;
+      }
+      _focus.requestFocus();
+    });
   }
 
   @override
   void didUpdateWidget(SessionScreen old) {
     super.didUpdateWidget(old);
     if (old.sessionId != widget.sessionId) {
+      _focusWhenShown();
       _confirmEnd = false;
       _reloadedAtEnd = false;
       _laterFor = null;
@@ -105,6 +129,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   @override
   void dispose() {
+    agentSessionOpened.removeListener(_onOpened);
     _focus.dispose();
     super.dispose();
   }
@@ -414,6 +439,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         Positioned.fill(
           child: ImagePasteTarget(
             onImages: c.pasteImages,
+            onText: c.terminal.paste,
             focused: () => _focus.hasFocus,
             child: terminal,
           ),
@@ -453,6 +479,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                     focusNode: _focus,
                     autofocus: true,
                     readOnly: s.ended,
+                    shell: s.isShell,
                     prefs: ref.watch(terminalPrefsProvider),
                   ),
                 ),
@@ -873,6 +900,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
                           autofocus: false,
                           readOnly: s.ended,
                           phone: true,
+                          shell: s.isShell,
                           prefs: ref.watch(terminalPrefsProvider),
                         ),
                       ),
@@ -1308,6 +1336,8 @@ class _NotePanel extends ConsumerWidget {
         vaults.where((v) => v.id == at.vaultId).firstOrNull?.name ?? '';
     final n = note.value;
     void open() => context.go(Routes.note(at.vaultId, at.noteId));
+    final shown =
+        title ?? (n == null ? '' : noteTitleOf(n.meta.title, n.meta.path));
     final accent = TextStyle(
       fontFamily: StormTokens.sansFamily,
       fontSize: t.codeSize,
@@ -1318,53 +1348,56 @@ class _NotePanel extends ConsumerWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          Row(
-            children: [
-              if (onBack != null) ...[
-                Semantics(
-                  link: true,
-                  label: 'Back to Wrote',
-                  excludeSemantics: true,
-                  onTap: onBack,
-                  child: GestureDetector(
-                    key: const Key('back-to-wrote'),
+          LayoutBuilder(
+            builder: (context, box) => Row(
+              children: [
+                if (onBack != null) ...[
+                  Semantics(
+                    link: true,
+                    label: 'Back to Wrote',
+                    excludeSemantics: true,
                     onTap: onBack,
-                    child: Text('‹ Wrote', style: accent),
+                    child: GestureDetector(
+                      key: const Key('back-to-wrote'),
+                      onTap: onBack,
+                      child: Text('‹ Wrote', style: accent),
+                    ),
+                  ),
+                  SizedBox(width: t.sp),
+                ],
+                Expanded(
+                  child: Text(
+                    n == null ? vault : noteCrumb(vault, n.meta.path),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: agentMono(t, size: t.labelSize * 1.09),
                   ),
                 ),
-                SizedBox(width: t.sp),
-              ],
-              Expanded(
-                child: Text(
-                  n == null ? vault : noteCrumb(vault, n.meta.path),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: agentMono(t, size: t.labelSize * 1.09),
-                ),
-              ),
-              Flexible(
-                child: Semantics(
-                  link: true,
-                  label: 'Open in Notes',
-                  excludeSemantics: true,
-                  onTap: open,
-                  child: GestureDetector(
-                    key: const Key('open-in-notes'),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: box.maxWidth / 2),
+                  child: Semantics(
+                    link: true,
+                    label: 'Open in Notes',
+                    excludeSemantics: true,
                     onTap: open,
-                    child: Text(
-                      'Open in Notes ›',
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: accent,
+                    child: GestureDetector(
+                      key: const Key('open-in-notes'),
+                      onTap: open,
+                      child: Text(
+                        'Open in Notes ›',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: accent,
+                      ),
                     ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
           SizedBox(height: t.sp * 1.25),
           Text(
-            title ?? (n == null ? '' : noteTitleOf(n.meta.title, n.meta.path)),
+            shown,
             key: const Key('panel-note-title'),
             style: TextStyle(
               fontFamily: StormTokens.serifFamily,
@@ -1382,7 +1415,9 @@ class _NotePanel extends ConsumerWidget {
               style: agentMono(t, size: t.labelSize * 1.09),
             ),
             SizedBox(height: t.sp * 1.25),
-            StormMarkdownView(markdown: fm.split(n.content).body),
+            StormMarkdownView(
+              markdown: withoutLeadingTitle(fm.split(n.content).body, shown),
+            ),
           ] else if (note.isLoading)
             const SkeletonRows(rows: 3)
           else

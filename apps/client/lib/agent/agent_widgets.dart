@@ -38,6 +38,20 @@ String noteTitleOf(String? title, String? path) {
   return name.endsWith('.md') ? name.substring(0, name.length - 3) : name;
 }
 
+/// [body] without its opening `# heading` when that heading is [title], so a
+/// panel that shows the title above the body does not show it twice.
+String withoutLeadingTitle(String body, String title) {
+  final lines = body.split('\n');
+  final i = lines.indexWhere((l) => l.trim().isNotEmpty);
+  if (i < 0) return body;
+  final h1 = RegExp(r'^#\s+(.*?)(?:\s+#+)?$').firstMatch(lines[i].trim());
+  final want = title.trim().toLowerCase();
+  if (h1 == null || want.isEmpty || h1.group(1)!.trim().toLowerCase() != want) {
+    return body;
+  }
+  return lines.sublist(i + 1).join('\n');
+}
+
 /// "now", "40m", "3h", "2d": how long ago, as the lists say it.
 String shortAge(String? iso, {DateTime? now}) {
   final then = iso == null ? null : DateTime.tryParse(iso);

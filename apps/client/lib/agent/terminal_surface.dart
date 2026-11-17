@@ -9,10 +9,13 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:xterm2/xterm.dart';
 
+import '../keyboard/storm_activators.dart' show stormUsesMetaModifier;
 import '../keyboard/storm_commands.dart';
 import '../state/terminal_prefs.dart';
+import '../ui/clipboard_copy.dart';
 import '../ui/controls.dart';
 import '../ui/surfaces.dart';
+import '../ui/themes/theme_library.dart';
 import '../ui/tokens.dart';
 
 /// **The terminal-surface boundary** (freeze §10, gate Q5; decision 77d).
@@ -26,10 +29,18 @@ class StormTerminal {
     _bytes = const Utf8Decoder(allowMalformed: true).startChunkedConversion(
       StringConversionSink.fromStringSink(_TerminalWriter(_terminal)),
     );
-    _terminal.onOutput = (data) =>
-        _writingOutput || _schemeReport.hasMatch(data)
-        ? _reply(data)
-        : _emit(data);
+    _terminal.onOutput = (data) {
+      if (_writingOutput && _colourAnswer.hasMatch(data)) {
+        _reply(data, colour: true);
+        // A replayed query's answer never reached the program; what the
+        // host remembers it was told is better than this device's guess.
+        if (_answeredHere || _remembered == null) answered.value = _target;
+      } else if (_writingOutput || _schemeReport.hasMatch(data)) {
+        _reply(data);
+      } else {
+        _emit(data);
+      }
+    };
     _terminal.onResize = (cols, rows, _, _) {
       if (cols > _widest) _widest = cols;
       onResize?.call(cols, rows);
@@ -65,9 +76,57 @@ class StormTerminal {
   /// output: still a reply, never a keystroke, so it is gated like one.
   static final _schemeReport = RegExp(r'^\x1b\[\?997;[12]n$');
 
-  void _reply(String data) {
+  /// An answer to the program's OSC 10 or 11 query.
+  static final _colourAnswer = RegExp(r'^\x1b\]1[01];');
+
+  /// The brightness Storm last answered the program's OSC 10/11 query with,
+  /// null before any (decision 157c). An agent's view shows it: the program
+  /// drew for it. Here, not in the view, so it outlives a remount.
+  final answered = ValueNotifier<Brightness?>(null);
+
+  /// This terminal's own colour answer reached the program, so what its
+  /// host remembers is no news from then on.
+  bool _answeredHere = false;
+  Brightness? _remembered;
+  bool _colourPending = false;
+
+  /// What the session's host says its program was last answered with
+  /// (157g), from whichever device answered: shown until this terminal
+  /// answers, so a reload or another device draws what the program drew
+  /// for.
+  void remembered(String? brightness) {
+    final b = switch (brightness) {
+      'light' => Brightness.light,
+      'dark' => Brightness.dark,
+      _ => null,
+    };
+    if (b == null) return;
+    _remembered = b;
+    if (!_answeredHere) answered.value = b;
+  }
+
+  /// The reply [onReply] is being handed went out to the program.
+  void replySent() {
+    if (_colourPending) _answeredHere = true;
+  }
+
+  /// What an answer gives now: the view's target, set as it builds.
+  Brightness _target = Brightness.dark;
+
+  void _reply(String data, {bool colour = false}) {
     final bytes = Uint8List.fromList(utf8.encode(data));
-    (onReply ?? onInput)?.call(bytes);
+    final reply = onReply;
+    if (reply == null) {
+      if (colour) _answeredHere = true;
+      onInput?.call(bytes);
+      return;
+    }
+    _colourPending = colour;
+    try {
+      reply(bytes);
+    } finally {
+      _colourPending = false;
+    }
   }
 
   /// The view's size changed.
@@ -291,14 +350,6 @@ class StormTerminal {
         !keys.isMetaPressed) {
       return _onTab(node, event, shift: keys.isShiftPressed);
     }
-    if (event is KeyUpEvent) return KeyEventResult.ignored;
-    // A modifier on its own is no next key: Escape, then Shift+Tab, leaves
-    // backwards.
-    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
-      _escapedAt = event.logicalKey == LogicalKeyboardKey.escape
-          ? clock()
-          : null;
-    }
     final chord = pasteChord(
       event.logicalKey,
       shift: keys.isShiftPressed,
@@ -307,14 +358,28 @@ class StormTerminal {
       meta: keys.isMetaPressed,
       platform: defaultTargetPlatform,
     );
+    // Left unhandled so the browser makes its own paste event: the clipboard
+    // API needs a secure context, which a plain-HTTP LAN page is not.
+    if (web && chord == PasteChord.paste) {
+      if (event is KeyDownEvent) _escapedAt = null;
+      return KeyEventResult.skipRemainingHandlers;
+    }
+    if (event is KeyUpEvent) return KeyEventResult.ignored;
+    // A modifier on its own is no next key: Escape, then Shift+Tab, leaves
+    // backwards.
+    if (event is KeyDownEvent && !_modifiers.contains(event.logicalKey)) {
+      _escapedAt = event.logicalKey == LogicalKeyboardKey.escape
+          ? clock()
+          : null;
+    }
     final ask = onImagePaste;
     // A held paste chord repeats. The repeat must not reach the terminal as
     // a bare ^V: the agent would look for an image in the host's own
     // clipboard and say there is none, while this paste is still in flight.
-    if (chord != null && ask != null && !kIsWeb && event is KeyRepeatEvent) {
+    if (chord != null && ask != null && !web && event is KeyRepeatEvent) {
       return KeyEventResult.handled;
     }
-    if (chord != null && ask != null && !kIsWeb && event is KeyDownEvent) {
+    if (chord != null && ask != null && !web && event is KeyDownEvent) {
       () async {
         if (await ask()) return;
         if (chord == PasteChord.paste) {
@@ -393,6 +458,10 @@ class StormTerminal {
     onInput?.call(Uint8List.fromList(utf8.encode(data)));
   }
 
+  /// Whether this runs in a browser. Tests set it.
+  @visibleForTesting
+  static bool web = kIsWeb;
+
   /// Which paste a key is, if any: the platform's own paste (Cmd+V on a Mac,
   /// Ctrl+Shift+V elsewhere), or Ctrl+V, which Claude Code uses for images.
   @visibleForTesting
@@ -417,6 +486,7 @@ class StormTerminal {
     ctrlArmed.dispose();
     shiftArmed.dispose();
     title.dispose();
+    answered.dispose();
   }
 
   /// What a person typing [data] would send, for tests.
@@ -464,7 +534,7 @@ class _TerminalWriter implements StringSink {
 enum PasteChord { paste, controlV }
 
 /// The terminal widget, themed from the tokens and sized by [prefs].
-class StormTerminalView extends StatelessWidget {
+class StormTerminalView extends StatefulWidget {
   const StormTerminalView({
     super.key,
     required this.terminal,
@@ -472,6 +542,7 @@ class StormTerminalView extends StatelessWidget {
     this.autofocus = false,
     this.readOnly = false,
     this.phone = false,
+    this.shell = false,
     this.prefs = const TerminalPrefs(),
     this.openLink = _launch,
   });
@@ -484,6 +555,10 @@ class StormTerminalView extends StatelessWidget {
   /// The phone's session: on `surface` rather than `bg`, with smaller text
   /// (handoff §3.6).
   final bool phone;
+
+  /// A shell session follows the target brightness live; an agent shows the
+  /// one its program was last answered with, dark before any (decision 157c).
+  final bool shell;
   final TerminalPrefs prefs;
 
   /// Opens a link from the terminal (decision 122). Tests replace it.
@@ -495,37 +570,99 @@ class StormTerminalView extends StatelessWidget {
     webOnlyWindowName: '_blank',
   );
 
+  @override
+  State<StormTerminalView> createState() => _StormTerminalViewState();
+}
+
+class _StormTerminalViewState extends State<StormTerminalView> {
+  final _controller = TerminalController();
+  final _viewKey = GlobalKey<TerminalViewState>();
+  FocusNode? _ownFocus;
+
+  FocusNode get _focus =>
+      widget.focusNode ?? (_ownFocus ??= FocusNode(debugLabel: 'terminal'));
+
+  StormTerminal get terminal => widget.terminal;
+
+  @override
+  void initState() {
+    super.initState();
+    terminal.answered.addListener(_onAnswered);
+  }
+
+  @override
+  void didUpdateWidget(StormTerminalView old) {
+    super.didUpdateWidget(old);
+    if (old.terminal != terminal) {
+      old.terminal.answered.removeListener(_onAnswered);
+      terminal.answered.addListener(_onAnswered);
+    }
+  }
+
+  void _onAnswered() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    terminal.answered.removeListener(_onAnswered);
+    _controller.dispose();
+    _ownFocus?.dispose();
+    super.dispose();
+  }
+
+  // A press and drag never becomes xterm2's focusing tap; a touch still waits
+  // for one, since focus opens a phone's keyboard.
+  void _onPointerDown(PointerDownEvent event) {
+    if (event.kind == PointerDeviceKind.mouse && !_focus.hasFocus) {
+      _focus.requestFocus();
+    }
+  }
+
+  void _copy() {
+    final selection = _controller.selectionFor(terminal._terminal.buffer);
+    if (selection == null) return;
+    final text = terminal._terminal.buffer.getText(selection, true);
+    copyToClipboard(text).then((_) {
+      // The web's plain-HTTP fallback takes the browser's focus for its copy.
+      if (kIsWeb && mounted && _focus.hasFocus) {
+        _viewKey.currentState?.requestKeyboard();
+      }
+    });
+  }
+
   /// A modifier-click opens the link under the pointer; a tap asks first,
   /// because a tap is also how the terminal is focused (decision 122).
   void _onTapUp(BuildContext context, TapUpDetails details, CellOffset cell) {
     final link = terminalLinkAt(terminal._terminal, cell);
     if (link == null) return;
     if (details.kind == PointerDeviceKind.touch) {
-      _confirmLink(context, link, openLink);
+      _confirmLink(context, link, widget.openLink);
     } else if (_linkModifierPressed()) {
-      openLink(link);
+      widget.openLink(link);
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final readOnly = widget.readOnly;
+    final phone = widget.phone;
+    final prefs = widget.prefs;
     final t = context.tokens;
-    // **Dark in both themes.** Agents and the ANSI palette assume a dark
-    // background; on the light theme's white code plate, an agent's white text
-    // would vanish. Both colours still come from the tokens: the light theme's
-    // off-black text and off-white page, swapped.
-    final dark = Theme.of(context).brightness == Brightness.dark;
-    final background = dark ? (phone ? t.surface : t.bg) : t.text;
-    final foreground = dark ? t.text : t.bg;
-    final theme = _themes.putIfAbsent((
-      foreground,
-      background,
-      t.accent,
-    ), () => _theme(foreground, background, t.accent));
+    final appLight = Theme.of(context).brightness == Brightness.light;
+    final target = prefs.target(Theme.of(context).brightness);
+    terminal._target = target;
+    final shown = widget.shell
+        ? target
+        : terminal.answered.value ?? Brightness.dark;
+    final theme = _terminalTheme(t, shown, dark: !appLight, phone: phone);
+    final answers = _terminalTheme(t, target, dark: !appLight, phone: phone);
     final style = TerminalStyle(
       fontFamily: StormTokens.monoFamily,
       fontSize: prefs.fontSize ?? (phone ? t.labelSize + 1 : t.codeSize),
       height: prefs.spacing.lineHeight,
+      // Bright text on a light ground is the faint one (157b).
+      drawBoldTextWithBrightColors: shown == Brightness.dark,
     );
     final base = EdgeInsets.all(t.sp * 1.25 * prefs.padding.scale);
     final cell = terminalCellHeight(style, MediaQuery.textScalerOf(context));
@@ -537,39 +674,93 @@ class StormTerminalView extends StatelessWidget {
     return Shortcuts(
       shortcuts: stormTerminalBlockList(),
       // Tab is the agent's here, so the way out is said (147b, WCAG 2.1.2).
-      child: Semantics(
-        container: true,
-        label: readOnly ? terminalReadOnlyLabel : terminalLabel,
-        child: LayoutBuilder(
-          builder: (context, box) => TerminalView(
-            terminal._terminal,
-            focusNode: focusNode,
-            autofocus: autofocus,
-            readOnly: readOnly,
-            contentInsertionConfiguration: readOnly
-                ? null
-                : terminal._insertion,
-            // Asked first; whatever it leaves goes to xterm2's own encoding.
-            onKeyEvent: (node, event) {
-              final app = stormTerminalSafeKey(context, event);
-              if (app != null) return app;
-              return readOnly
-                  ? KeyEventResult.ignored
-                  : terminal._onKeyEvent(node, event);
-            },
-            theme: theme,
-            padding: evenTerminalPadding(base, box.maxHeight, cell),
-            textStyle: style,
-            keyboardAppearance: Brightness.dark,
-            // Agents redraw on resize; the terminal follows its box.
-            autoResize: true,
-            onTapUp: (details, cell) => _onTapUp(context, details, cell),
+      child: Actions(
+        actions: {
+          _CopyIntent: CallbackAction<_CopyIntent>(onInvoke: (_) => _copy()),
+        },
+        child: Semantics(
+          container: true,
+          label: readOnly ? terminalReadOnlyLabel : terminalLabel,
+          child: LayoutBuilder(
+            builder: (context, box) => Listener(
+              onPointerDown: _onPointerDown,
+              child: TerminalView(
+                terminal._terminal,
+                key: _viewKey,
+                focusNode: _focus,
+                autofocus: widget.autofocus,
+                controller: _controller,
+                shortcuts: terminalShortcuts(
+                  meta: stormUsesMetaModifier,
+                  web: StormTerminal.web,
+                ),
+                readOnly: readOnly,
+                contentInsertionConfiguration: readOnly
+                    ? null
+                    : terminal._insertion,
+                // Asked first; whatever it leaves goes to xterm2's own encoding.
+                onKeyEvent: (node, event) {
+                  final app = stormTerminalSafeKey(context, event);
+                  if (app != null) return app;
+                  return readOnly
+                      ? KeyEventResult.ignored
+                      : terminal._onKeyEvent(node, event);
+                },
+                theme: theme,
+                reportTheme: answers,
+                padding: evenTerminalPadding(base, box.maxHeight, cell),
+                textStyle: style,
+                keyboardAppearance: Brightness.dark,
+                // Agents redraw on resize; the terminal follows its box.
+                autoResize: true,
+                onTapUp: (details, cell) => _onTapUp(context, details, cell),
+              ),
+            ),
           ),
         ),
       ),
     );
   }
 }
+
+/// Copy through [copyToClipboard]: xterm2's own uses `Clipboard.setData`,
+/// which a plain-HTTP LAN page does not have.
+class _CopyIntent extends Intent {
+  const _CopyIntent();
+}
+
+/// AM116. Ctrl+A and Ctrl+V are the agent's. A paste [StormTerminal.pasteChord]
+/// makes itself never reaches these. On the web the browser's own paste event
+/// brings text and images.
+@visibleForTesting
+Map<ShortcutActivator, Intent> terminalShortcuts({
+  required bool meta,
+  required bool web,
+}) => meta
+    ? {
+        const SingleActivator(LogicalKeyboardKey.keyC, meta: true):
+            const _CopyIntent(),
+        if (!web)
+          const SingleActivator(LogicalKeyboardKey.keyV, meta: true):
+              const PasteTextIntent(SelectionChangedCause.keyboard),
+        const SingleActivator(LogicalKeyboardKey.keyA, meta: true):
+            const SelectAllTextIntent(SelectionChangedCause.keyboard),
+      }
+    : {
+        const SingleActivator(
+          LogicalKeyboardKey.keyC,
+          control: true,
+          shift: true,
+        ): const _CopyIntent(),
+        if (!web)
+          const SingleActivator(
+            LogicalKeyboardKey.keyV,
+            control: true,
+            shift: true,
+          ): const PasteTextIntent(
+            SelectionChangedCause.keyboard,
+          ),
+      };
 
 /// The terminal's accessible name: what it is, and how keyboard focus
 /// leaves it, since Tab and Shift+Tab go to the agent (decision 147b).
@@ -754,33 +945,73 @@ double terminalCellHeight(TerminalStyle style, TextScaler scaler) =>
       return height;
     });
 
+/// The theme a view of [brightness] draws with (decisions 157a, 160).
+///
+/// A view in the app's own brightness wears the theme's derived terminal
+/// palette; one in the other brightness wears the family's other member's,
+/// or Storm's when the family has only the one (SlowFlow is light only). A
+/// dark phone view sits on the surface rather than the page.
+TerminalTheme _terminalTheme(
+  StormTokens t,
+  Brightness brightness, {
+  required bool dark,
+  required bool phone,
+}) {
+  final p = terminalPaletteFor(t, brightness);
+  final background = dark && brightness == Brightness.dark && phone
+      ? t.surface
+      : p.background;
+  return _themes.putIfAbsent((
+    p,
+    background,
+    t.accent,
+  ), () => _theme(p, background, t.accent));
+}
+
+/// The terminal palette of [t]'s family in [brightness].
+TerminalPalette terminalPaletteFor(StormTokens t, Brightness brightness) {
+  if (t.brightness == brightness) return t.terminal;
+  final family = ThemeLibrary.family(t.variant.family);
+  final other = family.has(brightness)
+      ? family.variantFor(brightness)
+      : brightness == Brightness.dark
+      ? StormPreset.stormDark
+      : StormPreset.stormLight;
+  return StormTokens.from(other).terminal;
+}
+
+/// A light view's ground in a light app.
+Color lightTerminalBackground(StormTokens t) => lightTerminalGround(t.bg);
+
 // xterm2 reports a colour-scheme change to the agent whenever the view gets a
 // theme that is not identical, and TerminalTheme has no value equality.
-final _themes = <(Color, Color, Color), TerminalTheme>{};
+final _themes = <(TerminalPalette, Color, Color), TerminalTheme>{};
 
-TerminalTheme _theme(Color foreground, Color background, Color accent) {
+TerminalTheme _theme(TerminalPalette palette, Color background, Color accent) {
   final base = TerminalThemes.defaultTheme;
+  final foreground = palette.foreground;
+  final p = palette.ansi;
   return TerminalTheme(
     cursor: foreground.withValues(alpha: 0.7),
     selection: accent.withValues(alpha: 0.35),
     foreground: foreground,
     background: background,
-    black: base.black,
-    white: base.white,
-    red: base.red,
-    green: base.green,
-    yellow: base.yellow,
-    blue: base.blue,
-    magenta: base.magenta,
-    cyan: base.cyan,
-    brightBlack: base.brightBlack,
-    brightRed: base.brightRed,
-    brightGreen: base.brightGreen,
-    brightYellow: base.brightYellow,
-    brightBlue: base.brightBlue,
-    brightMagenta: base.brightMagenta,
-    brightCyan: base.brightCyan,
-    brightWhite: base.brightWhite,
+    black: p[0],
+    red: p[1],
+    green: p[2],
+    yellow: p[3],
+    blue: p[4],
+    magenta: p[5],
+    cyan: p[6],
+    white: p[7],
+    brightBlack: p[8],
+    brightRed: p[9],
+    brightGreen: p[10],
+    brightYellow: p[11],
+    brightBlue: p[12],
+    brightMagenta: p[13],
+    brightCyan: p[14],
+    brightWhite: p[15],
     searchHitBackground: base.searchHitBackground,
     searchHitBackgroundCurrent: base.searchHitBackgroundCurrent,
     searchHitForeground: base.searchHitForeground,

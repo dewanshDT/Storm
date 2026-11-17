@@ -472,14 +472,33 @@ class AgentJob {
 
 /// A workspace on a host, with how many live sessions already share it.
 class AgentWorkspace {
-  AgentWorkspace({required this.name, required this.liveSessions});
+  AgentWorkspace({required this.name, required this.liveSessions, this.write});
 
   final String name;
   final int liveSessions;
 
+  /// The write vault last started with here, when remembered (decision 159).
+  final WorkspaceWrite? write;
+
   factory AgentWorkspace.fromJson(Map<String, dynamic> j) => AgentWorkspace(
     name: j['name'] as String,
     liveSessions: (j['live_sessions'] as num?)?.toInt() ?? 0,
+    write: j['write'] is Map<String, dynamic>
+        ? WorkspaceWrite.fromJson(j['write'] as Map<String, dynamic>)
+        : null,
+  );
+}
+
+/// A remembered Write to (decision 159): [writes] false is "no writes".
+class WorkspaceWrite {
+  const WorkspaceWrite({required this.writes, this.vaultId});
+
+  final bool writes;
+  final String? vaultId;
+
+  factory WorkspaceWrite.fromJson(Map<String, dynamic> j) => WorkspaceWrite(
+    writes: j['writes'] as bool? ?? false,
+    vaultId: j['vault_id'] as String?,
   );
 }
 
@@ -691,6 +710,7 @@ class AgentSession {
     this.title,
     this.activity,
     this.programStatus,
+    this.terminalAnswered,
     this.harnessSession,
     this.resumedFrom,
     this.mcpSkipped = const [],
@@ -747,6 +767,11 @@ class AgentSession {
   /// The program's own report of its state (decision 155), while it runs;
   /// null for a session known only by its title, or from an older server.
   final ProgramStatus? programStatus;
+
+  /// What its program was last told the terminal's brightness is, as its
+  /// host saw the answer go in (157g): `light`, `dark`, or null before any
+  /// or from an older server.
+  final String? terminalAnswered;
 
   /// What every surface calls the session. A child goes by the name its
   /// parent gave it (145b), never by its agent's terminal title.
@@ -959,6 +984,7 @@ class AgentSession {
     title: title ?? this.title,
     activity: activity == _keep ? this.activity : activity as String?,
     programStatus: programStatus,
+    terminalAnswered: terminalAnswered,
     harnessSession: harnessSession ?? this.harnessSession,
     resumedFrom: resumedFrom,
     mcpSkipped: mcpSkipped,
@@ -1016,6 +1042,10 @@ class AgentSession {
     title: j['title'] as String?,
     activity: j['activity'] as String?,
     programStatus: ProgramStatus.tryParse(j['program_status']),
+    terminalAnswered: switch (j['terminal_answered']) {
+      final String a when a == 'light' || a == 'dark' => a,
+      _ => null,
+    },
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
     mcpSkipped: [

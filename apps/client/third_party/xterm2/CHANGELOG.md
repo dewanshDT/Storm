@@ -1,3 +1,14 @@
+## 5.2.0+storm.5
+
+- Faint (SGR 2) text on a light background is drawn at 65% opacity rather
+  than darkened, so it reads as secondary (Storm decision 160).
+
+## 5.2.0+storm.4
+
+- `TerminalView.reportTheme`: colour queries and DEC 2031 reports answer
+  from it instead of the drawn theme, and a report goes out only when it
+  changes (Storm decision 157c).
+
 ## 5.2.0+storm.3
 
 - modifyOtherKeys: only a key with Ctrl or Alt (or Shift+Space) is encoded,

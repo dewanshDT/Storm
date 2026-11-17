@@ -149,6 +149,10 @@ pub enum Command {
         /// Written to the PTY as input; never argv or the environment.
         #[serde(default)]
         typed_input: Option<String>,
+        /// How the client draws the terminal (171-8): `COLORFGBG` in the
+        /// session's environment. Absent or unknown sets nothing.
+        #[serde(default)]
+        terminal_brightness: Option<String>,
     },
     #[serde(rename = "end")]
     End { session: String },
@@ -340,6 +344,9 @@ struct Events {
     said_logged: Mutex<std::collections::HashSet<&'static str>>,
     /// Decision 155: set where the host answers the OSC 7501 probe.
     program: Option<Program>,
+    /// 157g: the client's answers to its program's OSC 10/11 query, read
+    /// from its input.
+    answered: Mutex<crate::colour_answer::ColourAnswers>,
 }
 
 /// A session's OSC 7501 program status (decision 155).
@@ -415,6 +422,7 @@ impl Events {
             transcript: tokio::sync::Mutex::new(None),
             said_logged: Mutex::new(Default::default()),
             program: None,
+            answered: Mutex::default(),
         }
     }
 
@@ -460,6 +468,16 @@ impl Events {
         let limit = (self.hooks.usage_limit && *self.usage_limit.lock().unwrap())
             .then_some(crate::harness::USAGE_LIMIT);
         Some(prompt.or(limit))
+    }
+
+    /// Reads a client's input for a colour answer; true when it changed
+    /// what the session was told.
+    fn saw_input(&self, bytes: &[u8]) -> bool {
+        self.answered.lock().unwrap().feed(bytes).is_some()
+    }
+
+    fn answered_now(&self) -> Option<crate::colour_answer::Brightness> {
+        self.answered.lock().unwrap().current()
     }
 
     /// Its turn as its gated idle hooks said, if they did.
@@ -554,6 +572,8 @@ struct HostSession {
     activity_sent: Mutex<Option<&'static str>>,
     /// The program's status last acknowledged by the server (decision 155).
     program_sent: Mutex<Option<crate::program_status::Report>>,
+    /// The colour answer last acknowledged by the server (157g).
+    answered_sent: Mutex<Option<crate::colour_answer::Brightness>>,
     /// Storm asked to park it (145e): its end is reported `parked` once
     /// its workspace is kept for a resume.
     parking: AtomicBool,
@@ -667,6 +687,9 @@ const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 impl Host {
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
         let managed = crate::agents::managed_bin(state_dir);
+        for recipe in &crate::install::RECIPES {
+            crate::install::link_aliases(state_dir, recipe);
+        }
         // 136a: with isolation on, every session goes through the helper. A
         // host that has none (not Linux, not the packaged state directory)
         // keeps providers that cannot isolate, and so starts nothing.
@@ -1661,6 +1684,9 @@ impl Host {
             if let Some(program) = s.events.program_report() {
                 entry = with_program_status(entry, &program, hook_activity.is_some());
             }
+            if let Some(answered) = s.events.answered_now() {
+                entry["terminal_answered"] = json!(answered.as_str());
+            }
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -1787,6 +1813,7 @@ impl Host {
                 child_of,
                 cwd,
                 typed_input,
+                terminal_brightness,
             } => {
                 self.start(
                     session,
@@ -1800,7 +1827,13 @@ impl Host {
                     provider_credential,
                     model,
                     child_of,
-                    (permission_mode, spawn, cwd, typed_input),
+                    (
+                        permission_mode,
+                        spawn,
+                        cwd,
+                        typed_input,
+                        terminal_brightness,
+                    ),
                 )
                 .await
             }
@@ -1922,7 +1955,11 @@ impl Host {
                 if let (Some(s), Ok(bytes)) =
                     (self.session(&session), BASE64.decode(data.as_bytes()))
                 {
+                    let answered = s.events.saw_input(&bytes);
                     let _ = s.input.send(bytes);
+                    if answered {
+                        s.events.wake.notify_one();
+                    }
                 }
             }
             Command::Resize {
@@ -1967,9 +2004,10 @@ impl Host {
         provider_credential: Option<String>,
         model: Option<String>,
         child_of: Option<String>,
-        (permission_mode, spawn, cwd, typed_input): (
+        (permission_mode, spawn, cwd, typed_input, terminal_brightness): (
             Option<String>,
             bool,
+            Option<String>,
             Option<String>,
             Option<String>,
         ),
@@ -2355,6 +2393,9 @@ impl Host {
             workspace: dir,
             interaction: InteractionSpec::Terminal(size),
             launch,
+            terminal_brightness: terminal_brightness
+                .as_deref()
+                .and_then(crate::provider::TerminalBrightness::parse),
         };
         tracing::info!(session = %id, provider = %provider_id, %workspace, synced = is_synced, "starting");
         let begun = std::time::Instant::now();
@@ -2442,6 +2483,7 @@ impl Host {
             attention_sent: Mutex::new(None),
             activity_sent: Mutex::new(None),
             program_sent: Mutex::new(None),
+            answered_sent: Mutex::new(None),
             parking: AtomicBool::new(false),
             input,
         });
@@ -2605,14 +2647,17 @@ impl Host {
             let activity_changed = activity != *s.activity_sent.lock().unwrap();
             let program = s.events.program_report();
             let program_changed = program != *s.program_sent.lock().unwrap();
+            let answered = s.events.answered_now();
+            let answered_changed = answered != *s.answered_sent.lock().unwrap();
             if end.is_none()
                 && (title != sent
                     || harness_changed
                     || attention_changed
                     || activity_changed
-                    || program_changed)
+                    || program_changed
+                    || answered_changed)
             {
-                let every = if program_changed || attention_changed {
+                let every = if program_changed || attention_changed || answered_changed {
                     PROGRAM_EVERY
                 } else {
                     TITLE_EVERY
@@ -2640,6 +2685,9 @@ impl Host {
                 if let Some(attention) = attention {
                     body["attention"] = json!(attention);
                 }
+                if let Some(a) = answered.filter(|_| answered_changed) {
+                    body["terminal_answered"] = json!(a.as_str());
+                }
                 if let Some(p) = &program {
                     body = with_program_status(body, p, activity.is_some());
                     if program_changed {
@@ -2658,6 +2706,7 @@ impl Host {
                 {
                     Ok(st) if st.is_success() => {
                         *s.program_sent.lock().unwrap() = program;
+                        *s.answered_sent.lock().unwrap() = answered;
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
@@ -4134,6 +4183,7 @@ mod tests {
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         // The recording server answers every request with `{}`: two bytes
@@ -4234,6 +4284,46 @@ mod tests {
             child_of: None,
             cwd: None,
             typed_input: Some(typed_input.into()),
+            terminal_brightness: None,
+        }
+    }
+
+    /// 171-8: a start's terminal brightness is the session's `COLORFGBG`,
+    /// and a start without one, or with a word the host does not know,
+    /// sets none.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn a_starts_terminal_brightness_is_its_colorfgbg() {
+        let out = tempfile::tempdir().unwrap();
+        let o = out.path().display();
+        let script = format!(
+            "echo \"${{COLORFGBG-unset}}\" > {o}/$STORM_RUNTIME_SESSION.tmp; \
+             mv {o}/$STORM_RUNTIME_SESSION.tmp {o}/$STORM_RUNTIME_SESSION; sleep 1000"
+        );
+        let (host, _state, _roots) = shell_host(&script).await;
+        for (id, brightness, said) in [
+            ("ags_LIGHT", Some("light"), "0;15"),
+            ("ags_DARK", Some("dark"), "15;0"),
+            ("ags_NONE", None, "unset"),
+            ("ags_SEPIA", Some("sepia"), "unset"),
+        ] {
+            let mut start = typed_start(id, "shell", "");
+            if let Command::Start {
+                typed_input,
+                terminal_brightness,
+                ..
+            } = &mut start
+            {
+                *typed_input = None;
+                *terminal_brightness = brightness.map(Into::into);
+            }
+            host.clone().handle(start).await;
+            let file = out.path().join(id);
+            wait_for("the shell to say its COLORFGBG", || file.exists()).await;
+            assert_eq!(std::fs::read_to_string(&file).unwrap().trim(), said, "{id}");
+            host.clone()
+                .handle(Command::End { session: id.into() })
+                .await;
         }
     }
 
@@ -4417,6 +4507,7 @@ mod tests {
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 
@@ -6127,6 +6218,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
 
@@ -6223,6 +6315,7 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         let s = host.session("ags_BUSY").expect("the session started");
@@ -6348,6 +6441,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 child_of: None,
                 cwd: None,
                 typed_input: None,
+                terminal_brightness: None,
             })
             .await;
         let s = host.session("ags_SHUTDOWN").expect("the session started");
@@ -7714,6 +7808,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 
@@ -8041,6 +8136,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             child_of: None,
             cwd: None,
             typed_input: None,
+            terminal_brightness: None,
         }
     }
 
@@ -9628,6 +9724,73 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 "{p} {b}"
             );
         }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 157g: the client's answer to its program's OSC 11 query is read from
+    /// its input, posted as `terminal_answered` once per change and carried
+    /// by `hello`; the bytes reach the program unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn the_answered_brightness_is_reported_once_per_change() {
+        let script = r#"stty raw -echo; exec cat > "$W/$STORM_RUNTIME_SESSION.in""#;
+        let (host, seen, _state, roots) = prober_host(script, "program_status = false").await;
+        host.clone().handle(start("ags_ANS", "shell")).await;
+        eventually("the session runs", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_ans/status") && b["status"] == "running")
+        })
+        .await;
+        let answers = || -> Vec<serde_json::Value> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/ags_ans/status"))
+                .filter_map(|(_, b)| b.get("terminal_answered").cloned())
+                .collect()
+        };
+        let writes: [&[u8]; 5] = [
+            b"hi ]11;#000000\r\x1b]11;rgb:ff",
+            b"ff/ffff/ffff\x1b",
+            b"\\",
+            b"\x1b]11;rgb:fe/fe/fe\x07ok",
+            b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07",
+        ];
+        let send = |bytes: &[u8]| {
+            host.clone().handle(Command::Input {
+                session: "ags_ANS".into(),
+                data: BASE64.encode(bytes),
+            })
+        };
+        for w in &writes[..4] {
+            send(w).await;
+        }
+        eventually("light", || answers() == [json!("light")]).await;
+        send(writes[4]).await;
+        eventually("dark", || answers().last() == Some(&json!("dark"))).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(answers(), [json!("light"), json!("dark")]);
+
+        let input = roots.path().join("w/ags_ANS.in");
+        let sent = writes.concat();
+        eventually("the input reached the program", || {
+            std::fs::read(&input).is_ok_and(|b| b.len() >= sent.len())
+        })
+        .await;
+        assert_eq!(std::fs::read(&input).unwrap(), sent);
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["terminal_answered"], "dark");
         host.shutdown(Duration::from_millis(200)).await;
     }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+import 'oklch.dart' show contrastRatio;
+import 'themes/theme_library.dart';
 import 'tokens.dart';
 
 /// Storm's visual language, built entirely from [StormTokens].
@@ -19,8 +21,19 @@ abstract final class StormTheme {
   static ThemeData dark() => from(StormPreset.stormDark);
   static ThemeData light() => from(StormPreset.stormLight);
 
-  static ThemeData from(StormPreset preset, {double? fontSize}) =>
-      _build(StormTokens.from(preset, fs: fontSize));
+  static ThemeData from(ThemeVariant variant, {double? fontSize}) =>
+      _build(StormTokens.from(variant, fs: fontSize));
+
+  /// The light and dark themes a [choice] gives `MaterialApp`, which picks
+  /// between them by [ThemeChoice.mode], following the platform live for
+  /// `system` (decision 160).
+  static ({ThemeData light, ThemeData dark}) forChoice(
+    ThemeChoice choice, {
+    double? fontSize,
+  }) => (
+    light: from(choice.resolve(Brightness.light), fontSize: fontSize),
+    dark: from(choice.resolve(Brightness.dark), fontSize: fontSize),
+  );
 
   static ThemeData _build(StormTokens t) {
     final scheme = schemeFrom(t);
@@ -136,9 +149,41 @@ abstract final class StormTheme {
         behavior: SnackBarBehavior.floating,
         backgroundColor: t.surface2,
         contentTextStyle: TextStyle(color: t.text),
+        actionTextColor: toastAction(t),
         shape: control,
       ),
     );
+  }
+
+  /// A toast's widest at the desk, where it sits in the bottom-right corner.
+  static const toastMaxWidth = 400.0;
+
+  /// [base] placed for a desk-width window [width] wide: bottom right, at
+  /// most [toastMaxWidth], clear of the sidebar.
+  static SnackBarThemeData deskToasts(
+    SnackBarThemeData base,
+    double width,
+    StormTokens t,
+  ) {
+    final edge = t.sp * 2;
+    return base.copyWith(
+      insetPadding: EdgeInsets.fromLTRB(
+        (width - toastMaxWidth - edge).clamp(edge, double.infinity),
+        0,
+        edge,
+        edge,
+      ),
+    );
+  }
+
+  /// The accent, moved toward [StormTokens.text] until it reads at 4.5:1 on
+  /// the toast's surface.
+  static Color toastAction(StormTokens t) {
+    for (var k = 0; k <= 20; k++) {
+      final c = Color.lerp(t.accent, t.text, k / 20)!;
+      if (contrastRatio(c, t.surface2) >= 4.5) return c;
+    }
+    return t.text;
   }
 
   /// The five type roles, sized from the token scale.

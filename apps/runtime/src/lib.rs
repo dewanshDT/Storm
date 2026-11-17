@@ -66,6 +66,7 @@ pub mod bridge;
 pub mod cli;
 pub mod client;
 pub mod codex;
+pub mod colour_answer;
 pub mod command_code;
 pub mod config;
 pub mod connection;

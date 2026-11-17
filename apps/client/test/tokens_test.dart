@@ -235,7 +235,7 @@ void main() {
     test('every preset carries its tokens on the ThemeData', () {
       for (final preset in StormPreset.values) {
         final theme = StormTheme.from(preset);
-        expect(theme.extension<StormTokens>()?.preset, preset);
+        expect(theme.extension<StormTokens>()?.variant, preset);
       }
     });
 

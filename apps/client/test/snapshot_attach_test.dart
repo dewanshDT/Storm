@@ -194,6 +194,26 @@ void main() {
       o.c.dispose();
     });
 
+    test('a snapshot attach shows what the host remembers (157g)', () async {
+      final o = open();
+      expect(o.c.terminal.answered.value, isNull);
+      o.current()
+        ..add(
+          StatusEvent(
+            AgentSession.fromJson({
+              ...agentSession('ags_1'),
+              'terminal_answered': 'light',
+            }),
+          ),
+        )
+        ..add(snapshot('screen', offset: 4000))
+        ..add(LiveEvent());
+      await settle();
+      expect(o.c.terminal.answered.value, Brightness.light);
+      expect(o.c.terminal.textForTest.trim(), 'screen');
+      o.c.dispose();
+    });
+
     test('nothing it draws is answered or typed, even once the quiet '
         'timer has passed', () async {
       final o = open();
@@ -341,20 +361,9 @@ void main() {
     });
 
     group("the server's own renders", () {
-      // `getText` skips cells nothing wrote, where vt100 reads a space.
-      String row(BufferLine line) {
-        final out = StringBuffer();
-        for (var i = 0; i < line.length; i++) {
-          final width = line.getWidth(i);
-          if (width == 0 && i > 0 && line.getWidth(i - 1) == 2) continue;
-          final code = line.getCodePoint(i);
-          out.writeCharCode(code == 0 ? 0x20 : code);
-        }
-        return out.toString().trimRight();
-      }
-
       List<String> screenRows(Buffer b) => [
-        for (var i = b.scrollBack; i < b.height; i++) row(b.lines[i]),
+        for (var i = b.scrollBack; i < b.height; i++)
+          b.lines[i].getText().trimRight(),
       ];
 
       String trimEnd(List<String> rows) {

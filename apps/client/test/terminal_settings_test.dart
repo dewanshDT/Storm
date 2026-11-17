@@ -44,6 +44,7 @@ void main() {
         fontSize: 15,
         spacing: TerminalSpacing.relaxed,
         padding: TerminalPadding.tight,
+        colours: TerminalColours.alwaysDark,
       );
       await custom.write(prefs);
       expect(TerminalPrefs.read(prefs), custom);
@@ -57,10 +58,12 @@ void main() {
       SharedPreferences.setMockInitialValues({
         'storm.terminal.fontSize': 99.0,
         'storm.terminal.spacing': 'cosy',
+        'storm.terminal.colours': 'sepia',
       });
       final p = TerminalPrefs.read(await SharedPreferences.getInstance());
       expect(p.fontSize, TerminalPrefs.maxFontSize);
       expect(p.spacing, TerminalSpacing.normal);
+      expect(p.colours, TerminalColours.matchApp);
     });
   });
 
@@ -157,6 +160,8 @@ void main() {
 
       await tap(tester, find.text('Relaxed'));
       await tap(tester, find.text('Roomy'));
+      expect(find.text('Match app'), findsOneWidget);
+      await tap(tester, find.text('Always dark'));
       await tap(tester, find.byKey(const Key('terminal-larger')));
       final tokens = tester
           .element(find.byKey(const Key('terminal-preview')))
@@ -167,6 +172,7 @@ void main() {
           fontSize: tokens.codeSize.roundToDouble() + 1,
           spacing: TerminalSpacing.relaxed,
           padding: TerminalPadding.roomy,
+          colours: TerminalColours.alwaysDark,
         ),
       );
       final stored = TerminalPrefs.read(await SharedPreferences.getInstance());

@@ -28,7 +28,7 @@ import 'package:storm/state/nav_memory.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/lan_servers.dart';
 import 'package:storm/ui/theme.dart';
-import 'package:storm/ui/tokens.dart';
+import 'package:storm/ui/themes/theme_library.dart';
 
 import 'fake_server.dart';
 import 'lan_fakes.dart';
@@ -175,6 +175,7 @@ Future<void> pumpShell(
   ProviderContainer c, {
   Size size = const Size(411, 900),
   double keyboard = 0,
+  ThemeData? theme,
 }) async {
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1.0;
@@ -187,7 +188,7 @@ Future<void> pumpShell(
     UncontrolledProviderScope(
       container: c,
       child: MaterialApp.router(
-        theme: StormTheme.dark(),
+        theme: theme ?? StormTheme.dark(),
         routerConfig: c.read(routerProvider),
         scaffoldMessengerKey: rootMessengerKey,
       ),
@@ -259,7 +260,7 @@ class FakeSettings extends SettingsNotifier {
           // Configured means *signed in* since the cutover — there is no
           // shared token that could stand in for a session any more.
           accessToken: 'sta_test',
-          theme: StormPreset.stormDark,
+          theme: ThemeChoice.initial,
           activeVault: activeVault,
           nav: nav,
         )

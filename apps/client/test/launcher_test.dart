@@ -490,6 +490,7 @@ void main() {
     });
   });
 
+  // Plus 171-8's terminal brightness, dark in the dark app the shell runs.
   group('the launch request is the one sent before 153-5', () {
     testWidgets('the defaults', (t) async {
       final agents = FakeAgentServer(hosts: [c0()]);
@@ -502,7 +503,7 @@ void main() {
             .body,
         '{"host_id":"hst_1","workspace":"storm","provider":"claude-code",'
         '"interaction":"terminal","terminal":{"cols":155,"rows":45},'
-        '"write_vault_id":"$primary","spawn":true}',
+        '"write_vault_id":"$primary","spawn":true,"terminal_brightness":"dark"}',
       );
       await disposeShell(t, c);
     });
@@ -530,7 +531,8 @@ void main() {
         '"interaction":"terminal","terminal":{"cols":155,"rows":45},'
         '"write_vault_id":"$primary","crew":{"id":"crw_1"},'
         '"role":{"vault_id":"v-kit","note_id":"k_rev"},"spawn":true,'
-        '"children_write":true,"model":"opus","permission_mode":"plan"}',
+        '"children_write":true,"model":"opus","permission_mode":"plan",'
+        '"terminal_brightness":"dark"}',
       );
       await disposeShell(t, c);
     });
@@ -549,7 +551,8 @@ void main() {
             .single
             .body,
         '{"host_id":"hst_1","workspace":"storm","provider":"shell",'
-        '"interaction":"terminal","terminal":{"cols":155,"rows":45}}',
+        '"interaction":"terminal","terminal":{"cols":155,"rows":45},'
+        '"terminal_brightness":"dark"}',
       );
       await disposeShell(t, c);
     });

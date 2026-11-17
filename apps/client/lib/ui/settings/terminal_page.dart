@@ -86,6 +86,15 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
           selected: prefs.padding,
           onSelected: (p) => notifier.set(prefs.copyWith(padding: p)),
         ),
+        GroupLabel('Colours', top: t.sp * 2.5, bottom: t.sp),
+        ChoiceChips<TerminalColours>(
+          key: const Key('terminal-colours'),
+          options: [
+            for (final c in TerminalColours.values) ChoiceOption(c, c.label),
+          ],
+          selected: prefs.colours,
+          onSelected: (c) => notifier.set(prefs.copyWith(colours: c)),
+        ),
         GroupLabel('Preview', top: t.sp * 2.5, bottom: t.sp),
         ClipRRect(
           borderRadius: BorderRadius.circular(t.rControl),
@@ -102,6 +111,7 @@ class _TerminalPageState extends ConsumerState<TerminalPage> {
                 child: StormTerminalView(
                   terminal: _preview,
                   readOnly: true,
+                  shell: true,
                   phone: phone,
                   prefs: prefs,
                 ),
