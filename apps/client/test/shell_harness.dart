@@ -28,7 +28,7 @@ import 'package:storm/state/nav_memory.dart';
 import 'package:storm/sync/sync_engine.dart';
 import 'package:storm/ui/lan_servers.dart';
 import 'package:storm/ui/theme.dart';
-import 'package:storm/ui/tokens.dart';
+import 'package:storm/ui/themes/theme_library.dart';
 
 import 'fake_server.dart';
 import 'lan_fakes.dart';
@@ -260,7 +260,7 @@ class FakeSettings extends SettingsNotifier {
           // Configured means *signed in* since the cutover — there is no
           // shared token that could stand in for a session any more.
           accessToken: 'sta_test',
-          theme: StormPreset.stormDark,
+          theme: ThemeChoice.initial,
           activeVault: activeVault,
           nav: nav,
         )

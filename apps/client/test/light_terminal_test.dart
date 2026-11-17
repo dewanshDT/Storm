@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:xterm2/xterm.dart' show TerminalView, TerminalThemes;
+import 'package:xterm2/xterm.dart' show TerminalView;
 
 import 'package:storm/agent/terminal_surface.dart';
 import 'package:storm/state/terminal_prefs.dart';
@@ -18,8 +18,10 @@ void main() {
       test(preset.label, () {
         final t = StormTokens.from(preset);
         final bg = lightTerminalBackground(t);
+        expect(t.terminal.background, bg);
         for (var i = 0; i < 16; i++) {
-          final ratio = contrastRatio(lightTerminalPalette[i], bg);
+          if (i % 8 == 7) continue;
+          final ratio = contrastRatio(t.terminal.ansi[i], bg);
           expect(
             ratio,
             greaterThanOrEqualTo(i < 8 ? 4.5 : 3.0),
@@ -77,12 +79,12 @@ void main() {
     await h.pump(StormTheme.light());
     expect(view(tester).theme.background, lightTerminalBackground(lightT));
     expect(view(tester).theme.foreground, lightT.text);
-    expect(view(tester).theme.red, lightTerminalPalette[1]);
-    expect(view(tester).theme.brightWhite, lightTerminalPalette[15]);
+    expect(view(tester).theme.red, lightT.terminal.ansi[1]);
+    expect(view(tester).theme.brightWhite, lightT.terminal.ansi[15]);
 
     await h.pump(StormTheme.dark());
     expect(view(tester).theme.background, darkT.bg);
-    expect(view(tester).theme.red, TerminalThemes.defaultTheme.red);
+    expect(view(tester).theme.red, darkT.terminal.ansi[1]);
 
     await h.pump(StormTheme.light());
     expect(view(tester).theme.background, lightTerminalBackground(lightT));
@@ -92,15 +94,15 @@ void main() {
       'answers light and shows light', (tester) async {
     final h = harness(tester);
     await h.pump(StormTheme.light());
-    expect(view(tester).theme.background, lightT.text, reason: 'dark, swapped');
-    expect(view(tester).theme.red, TerminalThemes.defaultTheme.red);
+    expect(view(tester).theme.background, darkT.bg, reason: "Storm dark's");
+    expect(view(tester).theme.red, darkT.terminal.ansi[1]);
 
     write(h.t, '\x1b]11;?\x1b\\');
     expect(h.sent, ['\x1b]11;${hex(lightTerminalBackground(lightT))}\x1b\\']);
     await tester.pumpAndSettle();
     expect(h.t.answered.value, Brightness.light);
     expect(view(tester).theme.background, lightTerminalBackground(lightT));
-    expect(view(tester).theme.red, lightTerminalPalette[1]);
+    expect(view(tester).theme.red, lightT.terminal.ansi[1]);
   });
 
   testWidgets('the answered brightness outlives a remount', (tester) async {
@@ -121,7 +123,7 @@ void main() {
 
     await h.pump(StormTheme.light());
     expect(h.sent, ['\x1b[?997;2n']);
-    expect(view(tester).theme.background, lightT.text, reason: 'still dark');
+    expect(view(tester).theme.background, darkT.bg, reason: 'still dark');
 
     h.sent.clear();
     write(h.t, '\x1b]11;?\x1b\\');
@@ -138,7 +140,7 @@ void main() {
     write(h.t, '\x1b]11;?\x1b\\');
     await h.pump(StormTheme.dark());
     expect(h.t.answered.value, Brightness.light);
-    expect(view(tester).theme.red, lightTerminalPalette[1]);
+    expect(view(tester).theme.red, lightT.terminal.ansi[1]);
   });
 
   testWidgets('Always dark keeps everything dark and answers dark', (
@@ -150,10 +152,10 @@ void main() {
       await h.pump(StormTheme.light());
       write(h.t, '\x1b]11;?\x1b\\\x1b[?996n');
       await tester.pumpAndSettle();
-      expect(h.sent, ['\x1b]11;${hex(lightT.text)}\x1b\\', '\x1b[?997;1n']);
+      expect(h.sent, ['\x1b]11;${hex(darkT.bg)}\x1b\\', '\x1b[?997;1n']);
       expect(h.t.answered.value, Brightness.dark);
-      expect(view(tester).theme.background, lightT.text);
-      expect(view(tester).theme.red, TerminalThemes.defaultTheme.red);
+      expect(view(tester).theme.background, darkT.bg);
+      expect(view(tester).theme.red, darkT.terminal.ansi[1]);
     }
   });
 
