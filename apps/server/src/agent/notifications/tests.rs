@@ -397,6 +397,8 @@ fn plain_notice(key: &str) -> NewNotice<'static> {
         host_id: None,
         provider: None,
         session_title: None,
+        note_vault_id: None,
+        note_id: None,
         title: "t".into(),
         body: None,
         urgency: "normal",
@@ -1001,4 +1003,336 @@ fn failed_notifies_even_when_not_preceded_by_working() {
         "failed from a blocked (not working) state still notifies: {:?}",
         kinds(&m)
     );
+}
+
+// ---------------------------------------------------------------------
+// 161-2: the `notify` tool's own mechanics (limits, duplicate/`key`
+// replace, `delay_s`/`cancel_notify`, the roll-up, sanitising).
+// ---------------------------------------------------------------------
+
+fn enable_notify(m: &AgentManager, id: &str) {
+    m.store_for_tests()
+        .set_notify(id, true, None, &now())
+        .unwrap();
+}
+
+fn notify_req(id: &str, title: &str, key: Option<&str>) -> AgentNotify {
+    AgentNotify {
+        session_id: id.to_string(),
+        provider: "fake".into(),
+        session_title: "tidier".into(),
+        title: title.into(),
+        body: None,
+        urgency: "normal",
+        key: key.map(str::to_string),
+        note_vault_id: None,
+        note_id: None,
+        due: None,
+    }
+}
+
+#[test]
+fn notify_offered_is_off_by_default_and_on_once_set() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    assert!(!m.notify_offered(&id), "off by default (Q3)");
+    enable_notify(&m, &id);
+    assert!(m.notify_offered(&id));
+}
+
+/// `silent_for`'s precedence governs an agent message exactly as it does
+/// an automatic notice (pause and quiet hours both hold it).
+#[test]
+fn agent_messages_go_through_the_same_precedence() {
+    let mut prefs = Prefs::defaults();
+    prefs.quiet_on = true;
+    prefs.quiet_start = "00:00".into();
+    prefs.quiet_end = "23:59".into();
+    assert_eq!(
+        silent_for(
+            &prefs,
+            &[],
+            AGENT_MESSAGE,
+            Some("ags_X"),
+            Some("fake"),
+            "2026-11-15T12:00:00Z"
+        ),
+        Some("quiet")
+    );
+    prefs.quiet_on = false;
+    prefs.paused_until = Some("2026-11-16T00:00:00Z".into());
+    assert_eq!(
+        silent_for(
+            &prefs,
+            &[],
+            AGENT_MESSAGE,
+            Some("ags_X"),
+            Some("fake"),
+            "2026-11-15T12:00:00Z"
+        ),
+        Some("paused")
+    );
+}
+
+#[test]
+fn held_under_a_session_mute_still_reaches_the_inbox() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    m.mute_notifications("session", &id, None, None).unwrap();
+    let out = m
+        .agent_notify(notify_req(&id, "hello", None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.state, "held");
+    assert_eq!(out.held_reason, Some("muted"));
+    assert!(
+        kinds(&m).contains(&AGENT_MESSAGE.to_string()),
+        "still in the inbox"
+    );
+}
+
+#[test]
+fn held_while_paused_still_reaches_the_inbox() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    m.pause_notifications(None).unwrap();
+    let out = m
+        .agent_notify(notify_req(&id, "hello", None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(out.state, "held");
+    assert_eq!(out.held_reason, Some("paused"));
+    assert!(kinds(&m).contains(&AGENT_MESSAGE.to_string()));
+}
+
+#[test]
+fn an_identical_title_and_body_within_the_window_is_the_same_notice() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let first = m
+        .agent_notify(notify_req(&id, "progress", None))
+        .unwrap()
+        .unwrap();
+    let second = m
+        .agent_notify(notify_req(&id, "progress", None))
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.id, second.id, "the same notice, not a new one");
+    assert_eq!(
+        m.list_notifications(0, 100).unwrap().len(),
+        1,
+        "no second row, and no token consumed"
+    );
+}
+
+#[test]
+fn a_key_replaces_this_sessions_earlier_notice_under_it() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let first = m
+        .agent_notify(notify_req(&id, "step 1", Some("progress")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.state, "sent");
+    let second = m
+        .agent_notify(notify_req(&id, "step 2", Some("progress")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.state, "replaced");
+    assert_ne!(first.id, second.id);
+    let rows = m.list_notifications(0, 100).unwrap();
+    let old = rows.iter().find(|n| n.id == first.id).unwrap();
+    assert!(old.cancelled, "the earlier notice is cancelled");
+    let new = rows.iter().find(|n| n.id == second.id).unwrap();
+    assert!(!new.cancelled);
+    assert_eq!(new.title, "step 2");
+}
+
+#[test]
+fn the_burst_then_the_hourly_cap_rate_limit_a_session() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    // Burst 3: distinct keys, so none is treated as a duplicate.
+    for i in 0..3 {
+        let out = m
+            .agent_notify(notify_req(&id, &format!("msg {i}"), Some(&format!("k{i}"))))
+            .unwrap();
+        assert!(out.is_ok(), "{i}: {out:?}");
+    }
+    let fourth = m
+        .agent_notify(notify_req(&id, "msg 4", Some("k4")))
+        .unwrap();
+    match fourth {
+        Err(NotifyRefusal::RateLimited { retry_after_s }) => assert!(retry_after_s > 0),
+        other => panic!("the 4th past the burst should be rate_limited: {other:?}"),
+    }
+}
+
+#[test]
+fn a_rate_limited_session_gets_one_rollup_bumped_in_place() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    for i in 0..3 {
+        m.agent_notify(notify_req(&id, &format!("msg {i}"), Some(&format!("k{i}"))))
+            .unwrap()
+            .unwrap();
+    }
+    for i in 4..6 {
+        let out = m
+            .agent_notify(notify_req(
+                &id,
+                &format!("over {i}"),
+                Some(&format!("o{i}")),
+            ))
+            .unwrap();
+        assert!(matches!(out, Err(NotifyRefusal::RateLimited { .. })));
+    }
+    let rollups: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == AGENT_ROLLUP)
+        .collect();
+    assert_eq!(
+        rollups.len(),
+        1,
+        "one roll-up notice, not one per limited call"
+    );
+    assert!(
+        rollups[0].title.contains("2 more notification"),
+        "{}",
+        rollups[0].title
+    );
+}
+
+#[test]
+fn too_many_pending_is_refused_past_the_cap() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    // Seeded directly: 10 live calls would hit the rate limit long before
+    // the pending cap, which is the thing this test isolates.
+    {
+        let store = m.store_for_tests();
+        for i in 0..10 {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO notify_pending
+                         (id, session_id, provider, session_title, title, urgency, due,
+                          created_at)
+                     VALUES (?1, ?2, 'fake', 'tidier', 'seeded', 'normal', ?3, ?3)",
+                    params![format!("ntf_seed{i}"), id, now()],
+                )
+                .unwrap();
+        }
+    }
+    let mut req = notify_req(&id, "one too many", Some("p10"));
+    req.due = Some(crate::index::rfc3339_minus_secs(&now(), -3600));
+    assert!(matches!(
+        m.agent_notify(req).unwrap(),
+        Err(NotifyRefusal::TooManyPending)
+    ));
+}
+
+#[test]
+fn a_delayed_notify_is_queued_then_fired_under_the_prefs_in_force_then() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let due = crate::index::rfc3339_minus_secs(&now(), -60);
+    let mut req = notify_req(&id, "later", Some("later-key"));
+    req.due = Some(due.clone());
+    let out = m.agent_notify(req).unwrap().unwrap();
+    assert_eq!(out.state, "queued");
+    assert!(kinds(&m).is_empty(), "not in the inbox until fired");
+
+    // Pause takes effect between queueing and firing: the fired notice is
+    // held under it, not under whatever was in force when it was asked for.
+    m.pause_notifications(None).unwrap();
+    let past_due = crate::index::rfc3339_minus_secs(&due, -1);
+    assert!(m.fire_due_notifies(&past_due).unwrap());
+    let rows = m.list_notifications(0, 100).unwrap();
+    let fired = rows.iter().find(|n| n.kind == AGENT_MESSAGE).unwrap();
+    assert!(fired.silent, "held under the pause in force at firing time");
+    assert_eq!(fired.silent_reason, Some("paused".to_string()));
+}
+
+#[test]
+fn cancel_notify_removes_a_still_pending_delayed_notice() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let mut req = notify_req(&id, "later", Some("cancel-me"));
+    req.due = Some(crate::index::rfc3339_minus_secs(&now(), -3600));
+    m.agent_notify(req).unwrap().unwrap();
+    assert!(m.cancel_agent_notify(&id, "cancel-me").unwrap());
+    let far_future = crate::index::rfc3339_minus_secs(&now(), -7200);
+    assert!(
+        !m.fire_due_notifies(&far_future).unwrap(),
+        "nothing left to fire"
+    );
+    assert!(kinds(&m).is_empty());
+}
+
+#[test]
+fn cancel_notify_cancels_an_already_live_notice_under_its_key() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    m.agent_notify(notify_req(&id, "hello", Some("k")))
+        .unwrap()
+        .unwrap();
+    assert!(m.cancel_agent_notify(&id, "k").unwrap());
+    let rows = m.list_notifications(0, 100).unwrap();
+    assert!(rows.iter().all(|n| n.cancelled));
+}
+
+#[test]
+fn sanitiser_vectors() {
+    assert_eq!(
+        checked_title("  hello   world  "),
+        Some("hello world".into())
+    );
+    assert_eq!(checked_title(""), None, "empty after sanitising");
+    assert_eq!(checked_title("   "), None);
+    assert_eq!(
+        checked_title(&"a".repeat(81)),
+        None,
+        "over NOTIFY_TITLE_MAX"
+    );
+    assert_eq!(checked_title(&"a".repeat(80)).unwrap().chars().count(), 80);
+    // Control characters (except whitespace) are dropped, not collapsed to
+    // a space.
+    assert_eq!(checked_title("a\u{0007}b"), Some("ab".into()));
+    // Bidi overrides and zero-width characters are dropped outright.
+    assert_eq!(
+        checked_title("a\u{202E}b\u{200B}c\u{FEFF}d"),
+        Some("abcd".into())
+    );
+    // Newlines collapse to a single space.
+    assert_eq!(checked_title("a\nb\r\nc"), Some("a b c".into()));
+    assert_eq!(
+        sanitised_body(&"x".repeat(600), NOTIFY_BODY_MAX)
+            .unwrap()
+            .chars()
+            .count(),
+        NOTIFY_BODY_MAX,
+        "truncated, never refused"
+    );
+}
+
+#[test]
+fn notify_key_shape() {
+    assert!(valid_notify_key("step.1_2:3-4"));
+    assert!(!valid_notify_key(""));
+    assert!(!valid_notify_key(&"a".repeat(65)));
+    assert!(!valid_notify_key("has space"));
+    assert!(!valid_notify_key("has/slash"));
 }

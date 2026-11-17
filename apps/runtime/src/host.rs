@@ -2339,6 +2339,13 @@ impl Host {
         if reads_storm && child_of.is_none() {
             layer = layer.reading().deleting();
         }
+        // 161-2: both a top-level session and a child can hold the
+        // "Notifies you" capability, so this is pre-allowed regardless of
+        // `child_of` — the server's own capability check still gates
+        // whether the tool is even listed.
+        if reads_storm {
+            layer = layer.notifying();
+        }
         let plugin_plan = match self.mcp_launch(
             &id,
             &provider_id,
@@ -8527,11 +8534,13 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         allow.extend([
             "mcp__storm__delete_note".into(),
             "mcp__storm__delete_folder".into(),
+            "mcp__storm__notify".into(),
+            "mcp__storm__cancel_notify".into(),
         ]);
         assert_eq!(
             settings("ags_SPAWN")["permissions"],
             serde_json::json!({"allow": allow}),
-            "only the read and 149b's tools"
+            "only the read, 149b's and 161-2's tools"
         );
         assert_eq!(settings("ags_SPAWN"), settings("ags_PLAIN"));
         let env = recorded(roots.path(), "env", "ags_OCSPAWN").unwrap();
@@ -8541,13 +8550,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .unwrap();
         let config: serde_json::Value = serde_json::from_str(config).unwrap();
         let mut want = serde_json::json!({"storm_*": "ask", "storm_delete_note": "allow",
-            "storm_delete_folder": "allow"});
+            "storm_delete_folder": "allow", "storm_notify": "allow",
+            "storm_cancel_notify": "allow"});
         for t in crate::mcp::READ_ALLOWED_TOOLS {
             want[format!("storm_{t}")] = "allow".into();
         }
         assert_eq!(
             config["permission"], want,
-            "only the server's own ask and the read and 149b's allows"
+            "only the server's own ask and the read, 149b's and 161-2's allows"
         );
         for tool in ["start_agent", "send_message", "end_agent", "wait_agent"] {
             assert!(!env.contains(tool), "{tool}");
@@ -8618,10 +8628,12 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
         // 149b: every top-level session reading Storm allows its reads and
-        // its deletes, never its other writes.
+        // its deletes, never its other writes. 161-2: `notify` too, for any
+        // session reading Storm, top-level or child.
         let deletes: Vec<String> = crate::mcp::READ_ALLOWED_TOOLS
             .iter()
             .chain(crate::mcp::DELETE_ALLOWED_TOOLS.iter())
+            .chain(crate::mcp::NOTIFY_ALLOWED_TOOLS.iter())
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
         rules.extend(deletes.iter().cloned());
@@ -8651,6 +8663,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         for t in crate::mcp::READ_ALLOWED_TOOLS
             .iter()
             .chain(crate::mcp::DELETE_ALLOWED_TOOLS.iter())
+            .chain(crate::mcp::NOTIFY_ALLOWED_TOOLS.iter())
         {
             want[format!("storm_{t}")] = "allow".into();
             plain[format!("storm_{t}")] = "allow".into();
@@ -9274,6 +9287,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
         .unwrap();
         let rules: Vec<String> = crate::mcp::CHILD_ALLOWED_TOOLS
             .iter()
+            .chain(crate::mcp::NOTIFY_ALLOWED_TOOLS.iter())
             .map(|t| format!("mcp__storm__{t}"))
             .collect();
         assert_eq!(settings["permissions"], json!({ "allow": rules }));

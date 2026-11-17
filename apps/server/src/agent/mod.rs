@@ -800,6 +800,12 @@ pub struct Launch {
     /// resume keeps its predecessor's.
     #[serde(default)]
     pub children_write: bool,
+    /// The "Notifies you" capability (Q3): absent falls back to the
+    /// account's "New sessions can notify you" default
+    /// (`notification_prefs.agent_default_on`). A resume keeps its
+    /// predecessor's.
+    #[serde(default)]
+    pub notify: Option<bool>,
     /// The model the agent starts on (145b): checked for its agent, else
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
@@ -2613,6 +2619,16 @@ impl AgentManager {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
         let write_vault_id = meta.write_vault_id.clone().filter(|_| reads_storm);
+        // Q3: a resume keeps its predecessor's; otherwise the launch's own
+        // flag, else the account's "New sessions can notify you" default.
+        // Never offered without Storm, same as every other agent-only tool.
+        let notify = match resume.as_ref() {
+            Some((old, _)) => self.store.lock().unwrap().notify_enabled(old)?,
+            None => req.notify.unwrap_or_else(|| {
+                self.notification_prefs()
+                    .map_or(true, |p| p.agent_default_on)
+            }),
+        } && reads_storm;
         let children_write = match resume.as_ref() {
             Some((old, _)) => {
                 self.store.lock().unwrap().children_write(old)? && spawn && write_vault_id.is_some()
@@ -2693,6 +2709,12 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            store.set_notify(
+                &record.id,
+                notify,
+                meta.device.as_deref(),
+                &record.created_at,
+            )?;
             if spawn {
                 store.record_spawn_launch(
                     &record.id,
@@ -3872,6 +3894,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
@@ -3900,6 +3923,7 @@ mod tests {
                 resume_of: Some(old.id.clone()),
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
@@ -4579,6 +4603,7 @@ mod tests {
                     resume_of: None,
                     crew: None,
                     role: None,
+                    notify: None,
                     spawn: false,
                     children_write: false,
                     model: None,
@@ -4800,6 +4825,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,

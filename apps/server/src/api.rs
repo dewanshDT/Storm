@@ -20900,6 +20900,129 @@ pub(crate) mod tests {
         assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
     }
 
+    /// Decision 161-2: `notify`/`cancel_notify` are listed and callable
+    /// only with the "Notifies you" capability (Q3) — one rule for both
+    /// (mirrors A-149-1's delete-tools pattern).
+    #[tokio::test]
+    async fn notify_tools_are_offered_only_with_the_capability() {
+        let dir = tempdir::TempDir::new("storm-161-2-cap").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, with) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let with = with["id"].as_str().unwrap().to_string();
+        f.initialize(&with, "storm").await;
+        let (_, without) = f.launch_body(serde_json::json!({"notify": false})).await;
+        let without = without["id"].as_str().unwrap().to_string();
+        f.initialize(&without, "storm").await;
+
+        let tools = f.storm_tools(&with).await;
+        for t in ["notify", "cancel_notify"] {
+            assert!(tools.contains(&t.to_string()), "{t}: {tools:?}");
+        }
+        let sent = structured(
+            &f.tool(&with, "notify", serde_json::json!({"title": "hello"}))
+                .await,
+        );
+        assert_eq!(sent["state"], "sent", "{sent}");
+
+        let tools = f.storm_tools(&without).await;
+        for t in ["notify", "cancel_notify"] {
+            assert!(!tools.contains(&t.to_string()), "{t}: {tools:?}");
+            assert_eq!(
+                error_code(
+                    &f.tool(&without, t, serde_json::json!({"title": "x", "key": "k"}))
+                        .await
+                )
+                .as_deref(),
+                Some("tool_not_allowed")
+            );
+        }
+    }
+
+    /// Q3: a spawned child's own default ("Agents started by agents can
+    /// notify") is off, even though its parent's own is on.
+    #[tokio::test]
+    async fn a_spawned_childs_notify_default_is_off() {
+        let dir = tempdir::TempDir::new("storm-161-2-child").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        assert!(
+            f.state.agent.notify_offered(&parent),
+            "the account's agent_default_on is on"
+        );
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "tidy"}))
+            .await;
+        assert!(
+            !f.state.agent.notify_offered(&child),
+            "children_default_on is off by default"
+        );
+        assert!(!f.storm_tools(&child).await.contains(&"notify".to_string()));
+    }
+
+    /// 161-2: `link` to a note is resolved and checked on the server; one
+    /// the session cannot find is `bad_link`, never silently dropped.
+    #[tokio::test]
+    async fn notify_refuses_a_link_to_a_note_that_cannot_be_found() {
+        let dir = tempdir::TempDir::new("storm-161-2-link").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let note = f.note(&work, "Todo.md", "# Todo\n").await;
+        let (_, body) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let session = body["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+
+        let ok = structured(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": "done", "link": {"kind": "note", "vault": work, "note": note["id"]}}),
+            )
+            .await,
+        );
+        assert_eq!(ok["state"], "sent", "{ok}");
+
+        let bad = tool_error(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": "done", "link": {"kind": "note", "vault": work, "note": "nte_missing"}}),
+            )
+            .await,
+        );
+        assert_eq!(bad, "bad_link");
+    }
+
+    /// 161-2, G-D18: `notify`'s audit is metadata only — never the agent's
+    /// text.
+    #[tokio::test]
+    async fn notifys_audit_carries_no_text() {
+        let dir = tempdir::TempDir::new("storm-161-2-audit").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, body) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let session = body["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+        let secret_title = "the quarterly numbers are bad, don't tell anyone";
+        structured(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": secret_title}),
+            )
+            .await,
+        );
+        let events = f.state.auth_db.lock().await.all_events().unwrap();
+        let notify_events: Vec<_> = events.into_iter().filter(|(k, _)| k == "notify").collect();
+        assert_eq!(notify_events.len(), 1, "{notify_events:?}");
+        let (_, detail) = &notify_events[0];
+        assert!(
+            !detail.contains("quarterly"),
+            "the audit must never carry the text: {detail}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(parsed["outcome"], "sent", "{parsed}");
+        assert!(parsed.get("title").is_none() && parsed.get("body").is_none());
+    }
+
     /// A-149-2: nothing is deleted without Approve. A note and a folder
     /// survive a decline and a time-out; each is in the trash, as the
     /// agent's with its reason, only after Approve; a session in auto asks

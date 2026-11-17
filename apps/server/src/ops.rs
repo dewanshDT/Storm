@@ -7318,6 +7318,8 @@ struct Authorized {
     /// The delete tools are offered (149a): vault writes, and not a child,
     /// which never asks the person (149d).
     deletes: bool,
+    /// The "Notifies you" capability is offered (161-2, Q3).
+    notify: bool,
     /// The host makes each child its own workspace (137-1), as its live
     /// link says: what `start_agent`'s description tells the agent.
     child_workspaces: bool,
@@ -7335,6 +7337,7 @@ impl Authorized {
                     && (self.deletes || !crate::mcp::DELETE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
+                    && (self.notify || !crate::mcp::NOTIFY_TOOLS.contains(&name))
             }
         }
     }
@@ -7480,6 +7483,7 @@ async fn authorize_call(
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
         deletes: vault_writes && top_level,
+        notify: state.agent.notify_offered(session_id),
         child_workspaces: state
             .agent
             .host_live(host_id)
@@ -7890,6 +7894,7 @@ async fn connect_builtin(
         state.clone(),
         authorized.vault_writes,
         authorized.deletes,
+        authorized.notify,
         authorized.has_context,
         authorized.has_role,
         actor,
@@ -7980,6 +7985,8 @@ pub use notifications::{
     list_notification_mutes, list_notifications, mark_notifications_read, pause_notifications,
     put_notification_prefs, send_test_notification, unpause_notifications,
 };
+
+pub mod notify;
 
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------
 //

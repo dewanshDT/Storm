@@ -445,6 +445,9 @@ pub struct Storm {
     role: bool,
     /// An agent session offered the delete tools (decision 149a).
     deletes: bool,
+    /// An agent session offered `notify`/`cancel_notify` (decision 161-2,
+    /// Q3: the "Notifies you" capability).
+    notifies: bool,
 }
 
 /// The tools an agent deletes with, each waiting for the person's Approve
@@ -453,8 +456,14 @@ pub struct Storm {
 pub const DELETE_TOOLS: &[&str] = &["delete_note", "delete_folder"];
 
 /// Tools only an agent session is offered. A person's own MCP client
-/// deletes a folder in the app, where the confirm is.
-pub const ONLY_FOR_AGENTS: &[&str] = &["session_context", "delete_folder"];
+/// deletes a folder in the app, where the confirm is, and sends its own
+/// notifications, never through a tool.
+pub const ONLY_FOR_AGENTS: &[&str] = &[
+    "session_context",
+    "delete_folder",
+    "notify",
+    "cancel_notify",
+];
 
 /// Decision 134's tools for a session whose spawn switch is on (134c), offered
 /// by the gateway only while the switch is on and C0 holds. 134-4 built the
@@ -497,6 +506,10 @@ pub fn describe_for_host(tool: &mut serde_json::Value, child_workspaces: bool) {
 /// Decision 134's tools for a spawned session, offered only to a session with
 /// a parent while C0 holds.
 pub const SPAWNED_TOOLS: &[&str] = &["report_result", "read_messages"];
+
+/// Decision 161-2's agent-sent notice, offered only to a session with the
+/// "Notifies you" capability (Q3, AM-G24).
+pub const NOTIFY_TOOLS: &[&str] = &["notify", "cancel_notify"];
 
 /// Renders an operation's result as a tool result.
 ///
@@ -571,6 +584,7 @@ impl Storm {
             context: false,
             role: false,
             deletes: false,
+            notifies: false,
         }
     }
 
@@ -581,6 +595,7 @@ impl Storm {
         state: Shared,
         writable: bool,
         deletes: bool,
+        notifies: bool,
         context: bool,
         role: bool,
         actor: Actor,
@@ -592,6 +607,7 @@ impl Storm {
             context,
             role,
             deletes,
+            notifies,
         }
     }
 
@@ -624,6 +640,11 @@ impl Storm {
         if self.is_agent() {
             if !self.deletes {
                 for name in DELETE_TOOLS {
+                    router.remove_route(name);
+                }
+            }
+            if !self.notifies {
+                for name in NOTIFY_TOOLS {
                     router.remove_route(name);
                 }
             }
@@ -1071,6 +1092,38 @@ impl Storm {
             )
             .await,
         )
+    }
+
+    #[tool(
+        description = "Send a notification through Storm: to the person, on every device, now or later. title is required; body is optional. Shown under a title Storm writes, never yours, in a category separate from Storm's own notices, with no action buttons — tapping it opens the session (or a linked note). Returns {state, held_reason?}: sent (interrupted), queued (delay_s, not yet due), replaced (took over your earlier notice under the same key), or held (a mute, quiet hours or a pause kept it to the inbox only — not an error, don't retry). Over the limits, the tool error rate_limited carries retry_after_s; Storm sends you one roll-up per hour if you keep being limited. An identical (title, body) within 10 minutes is treated as the same notice."
+    )]
+    async fn notify(
+        &self,
+        Parameters(req): Parameters<crate::ops::notify::NotifyReq>,
+    ) -> Result<CallToolResult, ErrorData> {
+        use crate::ops::notify::NotifyOutcome;
+        match crate::ops::notify::notify(&self.state, self.actor()?, req).await {
+            Ok(outcome @ NotifyOutcome::Sent(_)) => Ok(CallToolResult::structured(
+                serde_json::to_value(&outcome).unwrap_or_default(),
+            )),
+            Ok(outcome) => Ok(CallToolResult::structured_error(
+                serde_json::to_value(&outcome).unwrap_or_default(),
+            )),
+            Err(e) if e.0.is_server_error() => Err(ErrorData::internal_error(e.1, None)),
+            Err(e) => Ok(CallToolResult::structured_error(
+                serde_json::json!({ "error": e.1 }),
+            )),
+        }
+    }
+
+    #[tool(
+        description = "Cancels a pending or still-live notification you sent with notify under this key, so it never lands (if still queued) or is dropped from the inbox (if it already did). Returns {cancelled}."
+    )]
+    async fn cancel_notify(
+        &self,
+        Parameters(req): Parameters<crate::ops::notify::CancelNotifyReq>,
+    ) -> Result<CallToolResult, ErrorData> {
+        respond_object(crate::ops::notify::cancel_notify(&self.state, self.actor()?, req).await)
     }
 
     #[tool(
