@@ -344,6 +344,7 @@ Future<bool> confirmSetting(
   required String title,
   required String body,
   required String action,
+  String cancelLabel = 'Cancel',
   Key? confirmKey,
 }) async {
   final ok = await showDialog<bool>(
@@ -354,7 +355,7 @@ Future<bool> confirmSetting(
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(c, false),
-          child: const Text('Cancel'),
+          child: Text(cancelLabel),
         ),
         FilledButton(
           key: confirmKey,

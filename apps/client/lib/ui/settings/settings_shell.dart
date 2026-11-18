@@ -7,6 +7,7 @@ import '../../agent/agents_hosts_screen.dart';
 import '../../agent/claude_login_api.dart' show claudeLoginAttentionProvider;
 import '../../agent/claude_login_screen.dart';
 import '../../agent/integrations_screen.dart';
+import '../../agent/notifications_state.dart' show notificationsStateProvider;
 import '../../router.dart';
 import '../../state/app_state.dart'
     show serverConfigProvider, sidebarCollapsedProvider;
@@ -23,10 +24,42 @@ import 'ai_page.dart';
 import 'connection_page.dart';
 import 'device_page.dart';
 import 'health_page.dart';
+import 'notifications_page.dart';
 import 'settings_widgets.dart';
 import 'storage_page.dart';
 import 'terminal_page.dart';
 import 'vaults_page.dart';
+
+List<SettingsPageInfo> _pagesFor({required bool hideNotifications}) => [
+  for (final p in kSettingsPages)
+    if (p.id != 'notifications' || !hideNotifications) p,
+];
+
+/// Builds with the pages to show, leaving out decision 161's page on a
+/// server before it (the inbox 404s) rather than showing an empty one.
+/// [NotificationsState.unsupported] only settles once its backfill answers,
+/// after this provider's own watch would have already rebuilt — so this
+/// also listens to the state object itself, not only its identity.
+class _NotificationsAwareNav extends ConsumerWidget {
+  const _NotificationsAwareNav({required this.builder});
+
+  final Widget Function(BuildContext, List<SettingsPageInfo>) builder;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notifications = ref.watch(notificationsStateProvider);
+    if (notifications == null) {
+      return builder(context, _pagesFor(hideNotifications: false));
+    }
+    return ListenableBuilder(
+      listenable: notifications,
+      builder: (context, _) => builder(
+        context,
+        _pagesFor(hideNotifications: notifications.unsupported),
+      ),
+    );
+  }
+}
 
 /// One settings page (handoff §5.1). [storm] pages sit under the STORM label.
 class SettingsPageInfo {
@@ -45,6 +78,7 @@ const kSettingsPages = [
   SettingsPageInfo('ai', 'AI access', storm: true),
   // One page for hosts and their agents (153-7); `agents` redirects here.
   SettingsPageInfo('hosts', 'Agents & hosts', storm: true),
+  SettingsPageInfo('notifications', 'Notifications', storm: true),
   SettingsPageInfo('integrations', 'Integrations', storm: true),
   SettingsPageInfo('claude-login', 'Claude login', storm: true),
   SettingsPageInfo('storage', 'Storage', storm: true),
@@ -66,6 +100,7 @@ Widget _pageFor(String id) => switch (id) {
   'integrations' => const IntegrationsScreen(),
   'claude-login' => const ClaudeLoginScreen(),
   'hosts' => const AgentsHostsScreen(),
+  'notifications' => const NotificationsPage(),
   'storage' => const StoragePage(),
   'connection' => const ConnectionPage(),
   'advanced' => const AdvancedPage(),
@@ -164,6 +199,24 @@ class SettingsNav extends StatelessWidget {
   final ValueChanged<String> onOpen;
 
   @override
+  Widget build(BuildContext context) => _NotificationsAwareNav(
+    builder: (context, pages) =>
+        _SettingsNavBody(selected: selected, onOpen: onOpen, pages: pages),
+  );
+}
+
+class _SettingsNavBody extends StatelessWidget {
+  const _SettingsNavBody({
+    required this.selected,
+    required this.onOpen,
+    required this.pages,
+  });
+
+  final String? selected;
+  final ValueChanged<String> onOpen;
+  final List<SettingsPageInfo> pages;
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
     Widget item(SettingsPageInfo p) {
@@ -227,16 +280,14 @@ class SettingsNav extends StatelessWidget {
             ),
           ),
         ),
-        for (final p in kSettingsPages.where(
-          (p) => !p.storm && p.id != 'health',
-        ))
+        for (final p in pages.where((p) => !p.storm && p.id != 'health'))
           item(p),
         Padding(
           padding: EdgeInsets.fromLTRB(t.sp * 1.25, t.sp * 2, 0, t.sp * 0.75),
           child: const GroupLabel('Storm', bottom: 0),
         ),
-        for (final p in kSettingsPages.where((p) => p.storm)) item(p),
-        item(kSettingsPages.last),
+        for (final p in pages.where((p) => p.storm)) item(p),
+        item(pages.last),
       ],
     );
   }
@@ -245,6 +296,17 @@ class SettingsNav extends StatelessWidget {
 /// The phone's settings list, reached from the right corner bubble.
 class SettingsListScreen extends StatelessWidget {
   const SettingsListScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) => _NotificationsAwareNav(
+    builder: (context, pages) => _SettingsListBody(pages: pages),
+  );
+}
+
+class _SettingsListBody extends StatelessWidget {
+  const _SettingsListBody({required this.pages});
+
+  final List<SettingsPageInfo> pages;
 
   @override
   Widget build(BuildContext context) {
@@ -281,13 +343,11 @@ class SettingsListScreen extends StatelessWidget {
             ),
           ),
           SizedBox(height: t.sp),
-          for (final p in kSettingsPages.where(
-            (p) => !p.storm && p.id != 'health',
-          ))
+          for (final p in pages.where((p) => !p.storm && p.id != 'health'))
             row(p),
           GroupLabel('Storm', top: t.sp * 3),
-          for (final p in kSettingsPages.where((p) => p.storm)) row(p),
-          row(kSettingsPages.last),
+          for (final p in pages.where((p) => p.storm)) row(p),
+          row(pages.last),
         ],
       ),
     );
