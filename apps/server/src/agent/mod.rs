@@ -1153,6 +1153,11 @@ pub struct AgentManager {
     /// Bumped on any inbox, prefs, mute or pause change `/v1/agent/events`
     /// cares about (161-1).
     notify_changed: watch::Sender<u64>,
+    /// Which devices are connected to `/v1/agent/events` and whether each
+    /// is active right now (161-4's deliver hint). In memory only, like the
+    /// session list's own live state — a restart simply forgets who was
+    /// looking, and every device re-reports on its next connect.
+    presence: Mutex<HashMap<String, notifications::Presence>>,
     changes: changes::Changes,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
@@ -1288,6 +1293,7 @@ impl AgentManager {
             deletes_changed: watch::channel(0).0,
             notify_memory: Mutex::new(notifications::NotifierMemory::new(now())),
             notify_changed: watch::channel(0).0,
+            presence: Mutex::new(HashMap::new()),
             changes: changes::Changes::new(),
             #[cfg(test)]
             record_reads: Default::default(),

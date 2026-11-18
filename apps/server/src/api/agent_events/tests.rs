@@ -1103,3 +1103,297 @@ async fn the_answered_brightness_round_trips_from_the_host() {
     .await;
     assert_eq!(view["terminal_answered"], "dark");
 }
+
+// ---- Decision 161, slice 161-4: this device's own prefs ------------------
+
+#[tokio::test]
+async fn device_prefs_default_on_for_a_desktop_platform() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-default-desktop").unwrap();
+    let f = fixture(dir.path()).await;
+    let prefs = json(
+        f.ask(get(
+            "/v1/notifications/device?platform=linux",
+            Some(&f.bearer),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(prefs["enabled"], true);
+    assert_eq!(prefs["classes"], serde_json::json!([]));
+    assert_eq!(prefs["preview"], "full");
+}
+
+#[tokio::test]
+async fn device_prefs_default_off_for_web() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-default-web").unwrap();
+    let f = fixture(dir.path()).await;
+    let prefs = json(
+        f.ask(get(
+            "/v1/notifications/device?platform=web",
+            Some(&f.bearer),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(prefs["enabled"], false);
+}
+
+#[tokio::test]
+async fn device_prefs_put_patches_only_the_given_fields_and_persists() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-put").unwrap();
+    let f = fixture(dir.path()).await;
+    let created = json(
+        f.ask(get(
+            "/v1/notifications/device?platform=macos",
+            Some(&f.bearer),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(created["enabled"], true);
+
+    let response = f
+        .ask(put_json_with_auth(
+            "/v1/notifications/device",
+            serde_json::json!({"enabled": false}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let patched = json(response).await;
+    assert_eq!(patched["enabled"], false);
+    assert_eq!(patched["preview"], "full", "untouched field stays as-is");
+
+    // Persisted: a fresh GET (no platform — the row already exists) sees it.
+    let reread = json(
+        f.ask(get("/v1/notifications/device", Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    assert_eq!(reread["enabled"], false);
+}
+
+#[tokio::test]
+async fn device_prefs_put_rejects_an_unknown_class() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-bad-class").unwrap();
+    let f = fixture(dir.path()).await;
+    let response = f
+        .ask(put_json_with_auth(
+            "/v1/notifications/device",
+            serde_json::json!({"classes": ["needs_you", "made_up"]}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn device_prefs_put_rejects_an_unknown_preview_level() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-bad-preview").unwrap();
+    let f = fixture(dir.path()).await;
+    let response = f
+        .ask(put_json_with_auth(
+            "/v1/notifications/device",
+            serde_json::json!({"preview": "everything"}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn device_prefs_are_the_calling_devices_own() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-own").unwrap();
+    let f = fixture(dir.path()).await;
+    let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+
+    f.ask(put_json_with_auth(
+        "/v1/notifications/device",
+        serde_json::json!({"platform": "macos", "enabled": false}),
+        &f.bearer,
+    ))
+    .await;
+    // `platform` as a body field is ignored by this endpoint (it is a
+    // query param); what matters here is that device B is untouched.
+    let _ = f
+        .ask(get(
+            "/v1/notifications/device?platform=macos",
+            Some(&f.bearer),
+        ))
+        .await;
+
+    let b_prefs = json(
+        f.ask(get(
+            "/v1/notifications/device?platform=macos",
+            Some(&bearer_b),
+        ))
+        .await,
+    )
+    .await;
+    assert_eq!(
+        b_prefs["enabled"], true,
+        "device B's own first GET still gets the platform default"
+    );
+}
+
+#[tokio::test]
+async fn notification_devices_list_shows_every_paired_device() {
+    let dir = tempdir::TempDir::new("storm-161-4-devices-list").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+    // Device A gets a row; device B never calls GET, so it has none yet.
+    f.ask(get(
+        "/v1/notifications/device?platform=macos",
+        Some(&f.bearer),
+    ))
+    .await;
+
+    let list = json(
+        f.ask(get("/v1/notifications/devices", Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    let rows = list.as_array().unwrap();
+    let b_row = rows
+        .iter()
+        .find(|r| r["device_id"] == device_b)
+        .expect("device B is listed even with no prefs row");
+    assert!(b_row["enabled"].is_null());
+    let _ = bearer_b;
+}
+
+// ---- Decision 161, slice 161-4: presence and the deliver hint -----------
+
+/// A fresh device paired to the fixture's owner, for tests that need to
+/// know a specific device's id — `session_token` mints one too, but never
+/// hands the id back.
+async fn second_device(state: &Shared, user_id: &str, name: &str) -> (String, String) {
+    let now = crate::index::now_rfc3339();
+    let mut auth_db = state.auth_db.lock().await;
+    let device = crate::auth::devices::create_synthetic(&mut auth_db, name, &now).unwrap();
+    let token = crate::auth::sessions::create(&mut auth_db, user_id, &device.id, &now)
+        .unwrap()
+        .access_token;
+    (device.id, format!("Bearer {token}"))
+}
+
+async fn open_at(app: &Router, path: &str, bearer: &str) -> Reader {
+    let response = app.clone().oneshot(get(path, Some(bearer))).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    Reader::new(response.into_body())
+}
+
+#[tokio::test]
+async fn deliver_hint_is_toast_for_the_one_active_device() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-toast").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+
+    let mut a = open_at(&f.app, "/v1/agent/events?presence=active", &bearer_a).await;
+    a.expect("snapshot").await;
+    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    b.expect("snapshot").await;
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+
+    let event_a = a.expect("notification").await;
+    assert_eq!(event_a.data["deliver"], format!("toast:{device_a}"));
+    let event_b = b.expect("notification").await;
+    assert_eq!(
+        event_b.data["deliver"], event_a.data["deliver"],
+        "the same notice carries the same hint to every subscriber"
+    );
+}
+
+#[tokio::test]
+async fn deliver_hint_is_os_when_every_device_is_backgrounded() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-os").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+
+    let mut a = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_a).await;
+    a.expect("snapshot").await;
+    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    b.expect("snapshot").await;
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+
+    let event_a = a.expect("notification").await;
+    assert_eq!(event_a.data["deliver"], "os");
+    let event_b = b.expect("notification").await;
+    assert_eq!(event_b.data["deliver"], "os");
+}
+
+#[tokio::test]
+async fn deliver_hint_is_absent_when_an_active_device_has_that_session_open() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-open").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+
+    let mut a = open_at(
+        &f.app,
+        &format!("/v1/agent/events?presence=active&open_session={id}"),
+        &bearer_a,
+    )
+    .await;
+    a.expect("snapshot").await;
+    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    b.expect("snapshot").await;
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+
+    let event_a = a.expect("notification").await;
+    assert!(
+        event_a.data.get("deliver").is_none(),
+        "the device already showing this session gets no hint: {:?}",
+        event_a.data
+    );
+    let event_b = b.expect("notification").await;
+    assert!(
+        event_b.data.get("deliver").is_none(),
+        "nobody else is told to alert either: {:?}",
+        event_b.data
+    );
+}
+
+#[tokio::test]
+async fn presence_is_forgotten_when_the_stream_closes() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-forget").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    {
+        let mut a = open_at(&f.app, "/v1/agent/events?presence=active", &bearer_a).await;
+        a.expect("snapshot").await;
+    } // dropped: the SSE body stream (and with it `feed`) ends here.
+
+    // `feed`'s drop runs on its own task; give it a beat to clear presence.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(f.state.agent.deliver_hint(None), Some("os".to_string()));
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+    let _ = device_a;
+}

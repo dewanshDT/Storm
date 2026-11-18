@@ -15,19 +15,46 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        FromRequestParts, State,
+        FromRequestParts, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use super::{ApiError, Shared, wants_websocket};
+use super::{ApiError, SessionAuth, Shared, wants_websocket};
 use crate::auth::authz::Actor;
 use crate::ops::SessionView;
+
+/// `?presence=active|background[&open_session=<id>]` on connect (161-4).
+/// Absent entirely — every client before this slice, and phones and web
+/// after it — is `active`: they close the stream the moment they are not,
+/// so a connection at all has always meant "visible".
+#[derive(Debug, Default, Deserialize)]
+struct PresenceQuery {
+    presence: Option<String>,
+    open_session: Option<String>,
+}
+
+/// Clears this device's presence when its connection ends — the SSE task
+/// returning naturally, or the WebSocket branch's `select!` dropping this
+/// future when the socket closes first. Without it, a desktop that quit
+/// mid-session would be "active" forever.
+struct PresenceGuard {
+    state: Shared,
+    device_id: Option<String>,
+}
+
+impl Drop for PresenceGuard {
+    fn drop(&mut self) {
+        if let Some(id) = &self.device_id {
+            self.state.agent.clear_presence(id);
+        }
+    }
+}
 
 /// How the stream paces itself (Q6).
 #[derive(Clone, Copy)]
@@ -97,6 +124,27 @@ pub(super) async fn agent_events(
     if !matches!(parts.extensions.get::<Actor>(), Some(Actor::Session { .. })) {
         return ApiError(StatusCode::FORBIDDEN, "owner_only".into()).into_response();
     }
+    // 161-4: presence for the deliver hint. A device with no `SessionAuth`
+    // (a key, or a test harness that bypassed the auth middleware) is
+    // never registered and never cleared — `deliver_hint` simply never
+    // sees it, same as before this slice existed.
+    let device_id = parts
+        .extensions
+        .get::<SessionAuth>()
+        .map(|a| a.authenticated.device.id.clone());
+    let presence_query = Query::<PresenceQuery>::try_from_uri(&parts.uri)
+        .map(|q| q.0)
+        .unwrap_or_default();
+    if let Some(id) = &device_id {
+        let active = presence_query.presence.as_deref() != Some("background");
+        state
+            .agent
+            .set_presence(id, active, presence_query.open_session.clone());
+    }
+    let presence_guard = PresenceGuard {
+        state: state.clone(),
+        device_id,
+    };
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
     // 161-1: the inbox, prefs and mutes share one `notification`/
@@ -108,6 +156,7 @@ pub(super) async fn agent_events(
     if wants_websocket(&parts) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
             Ok(ws) => ws.on_upgrade(move |socket| async move {
+                let _presence = presence_guard;
                 tokio::select! {
                     () = feed(state, changes, notify_changed, tx, PACE) => {}
                     () = pump_ws(socket, rx) => {}
@@ -120,7 +169,10 @@ pub(super) async fn agent_events(
     if let Some(id) = parts.headers.get("last-event-id") {
         tracing::debug!(last_event_id = ?id, "ignoring Last-Event-ID: a reconnect is a new snapshot");
     }
-    tokio::spawn(feed(state, changes, notify_changed, tx, PACE));
+    tokio::spawn(async move {
+        let _presence = presence_guard;
+        feed(state, changes, notify_changed, tx, PACE).await;
+    });
     let body = tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(rx), |f| {
         Ok::<_, std::convert::Infallible>(f.sse())
     });
@@ -373,10 +425,17 @@ impl Subscriber {
                     continue;
                 }
                 self.notif_unread_sent.insert(n.id.clone());
-                frames.push(Frame::event(
-                    "notification",
-                    serde_json::to_string(&n).unwrap_or_default(),
-                ));
+                // 161-4: the deliver hint is this stream's business, not
+                // the inbox's — `GET /v1/notifications` and the test
+                // helpers above never see it, only a *live* frame does.
+                let mut data = serde_json::to_value(&n).unwrap_or_default();
+                if let (Some(hint), Some(obj)) = (
+                    state.agent.deliver_hint(n.session_id.as_deref()),
+                    data.as_object_mut(),
+                ) {
+                    obj.insert("deliver".into(), serde_json::Value::String(hint));
+                }
+                frames.push(Frame::event("notification", data.to_string()));
             }
             if got < 500 {
                 break;

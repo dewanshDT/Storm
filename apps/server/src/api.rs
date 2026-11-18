@@ -649,6 +649,14 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             post(notifications_pause).delete(notifications_unpause),
         )
         .route("/v1/notifications/test", post(notifications_test))
+        // Decision 161, slice 161-4: this device's own notification
+        // settings, and presence for the deliver hint.
+        .route(
+            "/v1/notifications/device",
+            get(notification_device_get).put(notification_device_put),
+        )
+        .route("/v1/notifications/devices", get(notification_devices_list))
+        .route("/v1/notifications/presence", post(notifications_presence))
         // MCP Gateway integrations (decision 81c) — owner only, checked in
         // ops. **Session tier**, so an `stk_` key can never manage one (§14).
         .route(
@@ -2944,6 +2952,72 @@ async fn notifications_test(
     Ok(Json(
         crate::ops::send_test_notification(&state, &actor).await?,
     ))
+}
+
+// ---- This device, and presence (decision 161, slice 161-4) ---------------
+
+async fn notification_device_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Query(query): Query<crate::ops::DevicePlatform>,
+) -> ApiResult<Json<crate::auth::device_prefs::DevicePrefs>> {
+    Ok(Json(
+        crate::ops::get_device_prefs(&state, &actor, device_of(&auth), query.platform.as_deref())
+            .await?,
+    ))
+}
+
+async fn notification_device_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Query(query): Query<crate::ops::DevicePlatform>,
+    Json(body): Json<crate::ops::DevicePrefsPatch>,
+) -> ApiResult<Json<crate::auth::device_prefs::DevicePrefs>> {
+    Ok(Json(
+        crate::ops::put_device_prefs(
+            &state,
+            &actor,
+            device_of(&auth),
+            query.platform.as_deref(),
+            body,
+        )
+        .await?,
+    ))
+}
+
+async fn notification_devices_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::auth::device_prefs::DeviceRow>>> {
+    Ok(Json(
+        crate::ops::list_device_notification_rows(&state, &actor).await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresenceBody {
+    state: String,
+    #[serde(default)]
+    open_session: Option<String>,
+}
+
+async fn notifications_presence(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<PresenceBody>,
+) -> ApiResult<StatusCode> {
+    crate::ops::set_presence(
+        &state,
+        &actor,
+        device_of(&auth),
+        &body.state,
+        body.open_session.as_deref(),
+    )?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Three credential tiers: `none` (unauthenticated), `device` (paired

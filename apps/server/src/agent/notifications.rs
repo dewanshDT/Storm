@@ -2237,6 +2237,15 @@ pub(super) struct NotifierMemory {
     started_at: String,
 }
 
+/// One device's live state on `/v1/agent/events` (161-4). Never persisted:
+/// the stream itself is the source of truth, and a restart forgets it the
+/// same way it forgets which sessions are open on screen.
+#[derive(Debug, Clone)]
+pub(super) struct Presence {
+    pub active: bool,
+    pub open_session: Option<String>,
+}
+
 impl NotifierMemory {
     pub(super) fn new(started_at: String) -> Self {
         Self {
@@ -2466,6 +2475,58 @@ impl AgentManager {
         };
         self.poke_notify();
         Ok(n)
+    }
+
+    // ---- Presence and the deliver hint (161-4) --------------------------
+
+    /// Records whether `device_id`'s `/v1/agent/events` connection is
+    /// active (visible and focused) or backgrounded, and which session (if
+    /// any) it has open — reported on connect and again on
+    /// `POST …/presence` whenever either changes.
+    pub fn set_presence(&self, device_id: &str, active: bool, open_session: Option<String>) {
+        self.presence.lock().unwrap().insert(
+            device_id.to_string(),
+            Presence {
+                active,
+                open_session,
+            },
+        );
+    }
+
+    /// Forgets a device's presence — called once its `/v1/agent/events`
+    /// connection ends, so a closed app is never mistaken for a quiet one.
+    pub fn clear_presence(&self, device_id: &str) {
+        self.presence.lock().unwrap().remove(device_id);
+    }
+
+    /// The architecture's delivery order, for one notice about
+    /// `session_id` (`None` for a notice with no session):
+    ///
+    /// 1. A device active and showing that very session: `None` — nothing,
+    ///    as today's in-app toast already covers it.
+    /// 2. Any other device active: `toast:<device_id>`, that device alone.
+    /// 3. Otherwise: `os`, every background desktop.
+    ///
+    /// With more than one device active and none showing the session, the
+    /// lowest device id by sort order is picked — the matrix does not say
+    /// which wins, and ties are rare enough that determinism matters more
+    /// than the choice.
+    pub fn deliver_hint(&self, session_id: Option<&str>) -> Option<String> {
+        let presence = self.presence.lock().unwrap();
+        let mut active_devices: Vec<&String> = Vec::new();
+        for (device_id, p) in presence.iter() {
+            if !p.active {
+                continue;
+            }
+            if session_id.is_some() && p.open_session.as_deref() == session_id {
+                return None;
+            }
+            active_devices.push(device_id);
+        }
+        match active_devices.into_iter().min() {
+            Some(device_id) => Some(format!("toast:{device_id}")),
+            None => Some("os".to_string()),
+        }
     }
 
     fn snap_of(&self, r: &SessionRecord) -> AgentResult<Snap> {
