@@ -10,6 +10,8 @@ import '../router.dart';
 import 'agent_events.dart';
 import 'agent_models.dart';
 import 'delete_request.dart' show shownSessionOf, showAgentToast;
+import 'notifications_models.dart';
+import 'notifications_state.dart';
 import 'output_seen.dart';
 import 'sidebar_rules.dart';
 
@@ -78,7 +80,23 @@ String noticeKey(AgentNotice n, AgentSession s) => switch (n) {
 /// The transitions this device has toasted, kept so nothing is said twice
 /// across a restart. Device-local, like what it has seen (Q12).
 const kNoticeToastedKey = 'storm.agents.notice_toasted';
+
+/// Decision 161: server-sourced toasts (`needs_you`/`finished`/`error`, and
+/// every agent- or terminal-sourced notice) are deduped by the
+/// [AgentNotification.id] instead, and kept separately — an old server's
+/// fallback still uses [kNoticeToastedKey] alone.
+const kServerNoticeToastedKey = 'storm.agents.server_notice_toasted';
 const _toastedLimit = 200;
+
+/// The kinds a non-silent `notification` push replaces `noticeOf` for, once
+/// the server's own inbox covers them (161-3). `stoppedWorking` is never
+/// here: the draft keeps that toast client-only.
+const _kServerCoveredKinds = {'needs_you', 'finished', 'error'};
+
+/// Source kinds with no client equivalent: an agent's or a terminal's own
+/// words, always shown as Storm reporting on them, never as Storm's voice.
+const _kAgentSourcedKinds = {'agent_message', 'agent_rollup'};
+const _kTerminalSourcedKinds = {'terminal_notice'};
 
 /// Raises "{name} needs you · Open", "{name} finished its turn · Open",
 /// "{name} hit an error · Open" and "{name} stopped working · Open" from
@@ -104,15 +122,31 @@ class AgentNoticeWatcher extends ConsumerStatefulWidget {
 class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
   StreamSubscription<AgentEventUpdate>? _updates;
   Set<String>? _toasted;
+  Set<String>? _serverToasted;
 
   ScaffoldFeatureController<SnackBar, SnackBarClosedReason>? _toast;
   String? _toastFor;
   AgentNotice? _toastKind;
 
+  /// The id of a currently shown server-sourced toast, so a
+  /// `notification_read` for it (read from elsewhere) dismisses it here.
+  String? _toastNotificationId;
+
+  /// Whether the account's inbox is connected and not falling back to an
+  /// older server (161-3): once true, `needs_you`/`finished`/`error` toasts
+  /// come from its own `notification` pushes, never from [noticeOf].
+  bool get _serverCovers {
+    final n = ref.read(notificationsStateProvider);
+    return n != null && !n.loading && !n.unsupported;
+  }
+
   @override
   void initState() {
     super.initState();
     ref.listenManual(seenOutputProvider, (_, _) {});
+    // Keeps the inbox warm everywhere this watcher is mounted (every screen
+    // while signed in), not only where the bell happens to be on screen.
+    ref.listenManual(notificationsStateProvider, (_, _) {});
     ref.listenManual<AgentEvents?>(
       agentEventsProvider,
       (_, events) => _follow(events),
@@ -163,6 +197,29 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     } catch (_) {}
   }
 
+  Future<Set<String>> _loadServerToasted() async {
+    if (_serverToasted case final t?) return t;
+    var loaded = <String>{};
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      loaded = {...?prefs.getStringList(kServerNoticeToastedKey)};
+    } catch (_) {
+      // No preferences store (tests, previews): memory still works.
+    }
+    return _serverToasted ??= loaded;
+  }
+
+  Future<void> _rememberServer(Set<String> toasted) async {
+    final list = toasted.toList();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList(
+        kServerNoticeToastedKey,
+        list.sublist(math.max(0, list.length - _toastedLimit)),
+      );
+    } catch (_) {}
+  }
+
   void _heard(AgentEventUpdate u) {
     switch (u.event) {
       case AgentSessionChanged(:final session):
@@ -174,13 +231,45 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
         final before = u.before;
         if (before == null) return;
         if (noticeOf(before, session) case final n?) {
-          unawaited(_consider(n, session));
+          // Once the server's own inbox raises these three, `noticeOf`
+          // would only say the same thing twice; `stoppedWorking` has no
+          // server equivalent on purpose and is always this path's.
+          if (n == AgentNotice.stoppedWorking || !_serverCovers) {
+            unawaited(_consider(n, session));
+          }
         }
       case AgentSessionRemoved(:final id) when id == _toastFor:
         _hideToast();
+      case AgentNotificationPushed(:final notification):
+        unawaited(_considerServer(notification));
+      case AgentNotificationsRead(:final ids):
+        if (_toastNotificationId != null &&
+            ids.contains(_toastNotificationId)) {
+          _hideToast();
+        }
       default:
         break;
     }
+  }
+
+  /// A server-sourced toast (161-3): `needs_you`/`finished`/`error`, or an
+  /// agent's or a terminal's own words, reported as Storm's own notice of
+  /// them rather than in Storm's voice.
+  Future<void> _considerServer(AgentNotification n) async {
+    if (n.silent || n.cancelled) return;
+    final isAgent = _kAgentSourcedKinds.contains(n.kind);
+    final isTerminal = _kTerminalSourcedKinds.contains(n.kind);
+    if (!isAgent && !isTerminal && !_kServerCoveredKinds.contains(n.kind)) {
+      return;
+    }
+    if (n.sessionId != null && n.sessionId == shownSessionOf(widget.location)) {
+      return;
+    }
+    final toasted = await _loadServerToasted();
+    if (!mounted) return;
+    if (!toasted.add(n.id)) return;
+    unawaited(_rememberServer(toasted));
+    _raiseServer(n, agent: isAgent, terminal: isTerminal);
   }
 
   Future<void> _consider(AgentNotice n, AgentSession s) async {
@@ -230,11 +319,74 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     });
   }
 
+  /// An agent's or a terminal's own text is sanitised plain text already
+  /// (the server, `sanitise_agent_text`); it is never treated as Storm's
+  /// own words here, and gets no action beyond Open.
+  void _raiseServer(
+    AgentNotification n, {
+    required bool agent,
+    required bool terminal,
+  }) {
+    final router = GoRouter.maybeOf(context);
+    final sessionId = n.sessionId;
+    final t = Theme.of(context);
+    final fromAgent = agent || terminal;
+    final content = !fromAgent
+        ? Text(n.title)
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${n.sessionTitle ?? 'A session'} · '
+                '${n.provider == null ? 'Agent' : providerLabel(n.provider!)}'
+                '${terminal ? ' via its terminal' : ''}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 12,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                n.title,
+                style: TextStyle(color: t.colorScheme.onInverseSurface),
+              ),
+            ],
+          );
+    final toast = showAgentToast(
+      SnackBar(
+        key: ValueKey('notice-toast-server-${n.id}'),
+        content: content,
+        persist: false,
+        duration: const Duration(seconds: 10),
+        action: sessionId == null
+            ? null
+            : SnackBarAction(
+                key: const Key('notice-toast-open'),
+                label: 'Open',
+                onPressed: () => router?.go(Routes.agentSession(sessionId)),
+              ),
+      ),
+    );
+    if (toast == null) return;
+    _toast = toast;
+    _toastFor = sessionId;
+    _toastNotificationId = n.id;
+    toast.closed.then((_) {
+      if (_toast == toast) {
+        _toast = null;
+        _toastFor = null;
+        _toastNotificationId = null;
+      }
+    });
+  }
+
   void _hideToast() {
     final toast = _toast;
     _toast = null;
     _toastFor = null;
     _toastKind = null;
+    _toastNotificationId = null;
     if (toast == null) return;
     try {
       toast.close();

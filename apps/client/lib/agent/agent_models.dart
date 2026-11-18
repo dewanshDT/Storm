@@ -709,6 +709,7 @@ class AgentSession {
     this.pendingDecisions = const [],
     this.hostLastSeen,
     this.outputEnd,
+    this.notify,
   }) : name = name ?? workspace;
 
   final String id;
@@ -823,6 +824,10 @@ class AgentSession {
   /// has none yet, or is older.
   final int? outputEnd;
 
+  /// Whether this session may notify (decision 161, 161-2); null hides the
+  /// toggle, for a server that does not say yet.
+  final bool? notify;
+
   /// There is a conversation to reopen.
   bool get hasConversation =>
       harnessSession != null &&
@@ -906,6 +911,7 @@ class AgentSession {
           harnessSession: live.harnessSession ?? harnessSession,
           launchNotice: null,
           credential: null,
+          notify: live.notify ?? notify,
         );
 
   /// This record in [crew] (null: none), as a change not yet confirmed
@@ -931,6 +937,7 @@ class AgentSession {
     Object? credential = _keep,
     Object? crew = _keep,
     Object? role = _keep,
+    Object? notify = _keep,
   }) => AgentSession(
     id: id,
     hostId: hostId,
@@ -977,7 +984,11 @@ class AgentSession {
     pendingDecisions: pendingDecisions,
     hostLastSeen: hostLastSeen,
     outputEnd: outputEnd,
+    notify: notify == _keep ? this.notify : notify as bool?,
   );
+
+  /// This record with [notify] set, as a change not yet confirmed draws it.
+  AgentSession withNotify(bool value) => _copy(notify: value);
 
   factory AgentSession.fromJson(Map<String, dynamic> j) => AgentSession(
     id: j['id'] as String,
@@ -1049,6 +1060,7 @@ class AgentSession {
         ? DateTime.tryParse(j['host_last_seen'] as String)
         : null,
     outputEnd: j['output_end'] is num ? (j['output_end'] as num).toInt() : null,
+    notify: j['notify'] as bool?,
   );
 }
 

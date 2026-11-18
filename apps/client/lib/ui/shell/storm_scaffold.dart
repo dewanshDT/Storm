@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/notifications_ui.dart' show NotifyBubble;
 import '../../state/app_state.dart';
 import '../../state/nav_memory.dart' show Activity, activityOf;
 import '../breakpoints.dart';
@@ -204,7 +205,7 @@ class StormChrome extends StatelessWidget {
               right: contentInset(context),
               child: const SettingsBubble(),
             ),
-            if (!inBar && _withoutPill(context))
+            if (!inBar && _withoutPill(context)) ...[
               Positioned(
                 top: bubbleTopInset(context),
                 right:
@@ -213,6 +214,15 @@ class StormChrome extends StatelessWidget {
                     context.tokens.sp * 1.5,
                 child: const SearchBubble(),
               ),
+              Positioned(
+                top: bubbleTopInset(context),
+                right:
+                    contentInset(context) +
+                    bubbleSide(context) * 2 +
+                    context.tokens.sp * 3,
+                child: const NotifyBubble(),
+              ),
+            ],
           ],
           if (showNav)
             const Positioned(left: 0, right: 0, bottom: 0, child: NavBubble()),

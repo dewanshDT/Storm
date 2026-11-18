@@ -82,9 +82,11 @@ void main() {
   Finder row(String id) => find.byKey(Key('session-$id'));
   Finder header(String id) => find.byKey(Key('crew-$id'));
 
+  // Opening a session also marks its notices read (decision 161); that is
+  // not a crew change, so it is not one of these.
   List<http.Request> changes(FakeAgentServer a) => [
     for (final r in a.requests)
-      if (r.method != 'GET') r,
+      if (r.method != 'GET' && !r.url.path.contains('notifications')) r,
   ];
 
   List<http.Request> roleRequests(FakeAgentServer a) => [

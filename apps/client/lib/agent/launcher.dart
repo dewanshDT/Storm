@@ -103,6 +103,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   bool? _writes;
   String? _writeVault;
 
+  /// Decision 161-2's launch toggle: null until the person touches the
+  /// chip, so the server's own default (`agent_default_on`) applies; the
+  /// chip itself still reflects [_agentDefaultOn] while null.
+  bool? _notify;
+  bool _agentDefaultOn = true;
+
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
@@ -134,6 +140,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   final _writesAnchor = GlobalKey();
   final _spawnAnchor = GlobalKey();
   final _riskAnchor = GlobalKey();
+  final _notifyAnchor = GlobalKey();
 
   @override
   void dispose() {
@@ -159,6 +166,22 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     _chosen = p.provider;
     _preselectHost();
     _loadDefault();
+    _loadNotifyDefault();
+  }
+
+  /// Decision 161-2: the chip's unchosen default, once per open.
+  Future<void> _loadNotifyDefault() async {
+    final api = agentApi(ref);
+    if (api == null) return;
+    try {
+      final prefs = await api.notificationPrefs();
+      if (!mounted) return;
+      setState(() => _agentDefaultOn = prefs.agentDefaultOn);
+    } catch (_) {
+      // Keeps the chip's built-in default; nothing to launch with turns on.
+    } finally {
+      api.dispose();
+    }
   }
 
   /// The session's own host when running one again, else the one this
@@ -341,6 +364,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         model: modelHint(_provider) == null ? null : _model.text.trim(),
         permissionMode: _permissionMode,
         terminalBrightness: launchBrightness(context, ref),
+        notify: _notify,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -756,6 +780,14 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 state: LauncherChipState.off,
                 onTap: () => _openAt(_riskAnchor),
               ),
+              LauncherChip(
+                key: const Key('launcher-chip-notify'),
+                label: 'Notifies you',
+                state: (_notify ?? _agentDefaultOn)
+                    ? LauncherChipState.on
+                    : LauncherChipState.off,
+                onTap: () => _openAt(_notifyAnchor),
+              ),
             ],
           ),
           _Under(
@@ -1000,6 +1032,18 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               onChanged: (k) => setState(
                 () => _role = roles.where((r) => _roleKey(r) == k).firstOrNull,
               ),
+            ),
+          ),
+          field(
+            'notify',
+            null,
+            anchor: _notifyAnchor,
+            child: _toggleLine(
+              key: const Key('launcher-notify'),
+              text: 'Notify you',
+              value: _notify ?? _agentDefaultOn,
+              enabled: true,
+              onChanged: (v) => setState(() => _notify = v),
             ),
           ),
           Align(

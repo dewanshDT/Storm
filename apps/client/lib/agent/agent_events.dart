@@ -15,6 +15,7 @@ import '../state/app_state.dart' show connectionProvider;
 import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'notifications_models.dart';
 
 /// One event of `GET /v1/agent/events` (decision 154, AM109).
 sealed class AgentEvent {}
@@ -44,6 +45,34 @@ class AgentSessionRemoved extends AgentEvent {
 /// same stream.
 class AgentResync extends AgentEvent {}
 
+/// Decision 161: one new or replaced unread notice.
+class AgentNotificationPushed extends AgentEvent {
+  AgentNotificationPushed(this.notification);
+  final AgentNotification notification;
+}
+
+/// Decision 161: these ids were marked read, by this device or another.
+class AgentNotificationsRead extends AgentEvent {
+  AgentNotificationsRead(this.ids);
+  final List<String> ids;
+}
+
+/// Decision 161: the account's notification prefs changed; carries the row
+/// as it now is, so a listener need not re-`GET` it.
+class AgentPrefsChanged extends AgentEvent {
+  AgentPrefsChanged(this.prefs);
+  final NotificationPrefs prefs;
+}
+
+/// Decision 161: the mutes list changed; carries it as it now is.
+class AgentMutesChanged extends AgentEvent {
+  AgentMutesChanged(this.mutes);
+  final List<NotificationMute> mutes;
+}
+
+/// Decision 161: the inbox was cleared elsewhere.
+class AgentNotificationsCleared extends AgentEvent {}
+
 /// [name] and its decoded [data], or null for an event this client does not
 /// know or cannot read.
 AgentEvent? decodeAgentEvent(String name, Object? data) {
@@ -58,6 +87,20 @@ AgentEvent? decodeAgentEvent(String name, Object? data) {
       ),
       'removed' => AgentSessionRemoved((data as Map)['id'] as String),
       'resync' => AgentResync(),
+      'notification' => AgentNotificationPushed(
+        AgentNotification.fromJson(data as Map<String, dynamic>),
+      ),
+      'notification_read' => AgentNotificationsRead([
+        for (final id in (data as Map)['ids'] as List) '$id',
+      ]),
+      'prefs_changed' => AgentPrefsChanged(
+        NotificationPrefs.fromJson(data as Map<String, dynamic>),
+      ),
+      'mutes_changed' => AgentMutesChanged([
+        for (final m in (data as Map)['mutes'] as List)
+          NotificationMute.fromJson(m as Map<String, dynamic>),
+      ]),
+      'notifications_cleared' => AgentNotificationsCleared(),
       _ => null,
     };
   } catch (_) {
@@ -87,6 +130,7 @@ class AgentEventLines {
       _name = 'message';
       _data.clear();
       if (name == 'resync') return AgentResync();
+      if (name == 'notifications_cleared') return AgentNotificationsCleared();
       if (data.isEmpty) return null;
       try {
         return decodeAgentEvent(name, jsonDecode(data));
@@ -543,6 +587,15 @@ class AgentEvents {
         _emit(AgentEventUpdate(e, before: before));
       case AgentResync():
         _emit(AgentEventUpdate(e));
+      case AgentNotificationPushed():
+      case AgentNotificationsRead():
+      case AgentPrefsChanged():
+      case AgentMutesChanged():
+      case AgentNotificationsCleared():
+        // Not session state; carried on this same stream (one connection
+        // per device) so `NotificationsState` can apply it without a
+        // second subscription.
+        _emit(AgentEventUpdate(e));
     }
   }
 
@@ -625,6 +678,11 @@ final agentEventsProvider = Provider.autoDispose<AgentEvents?>((ref) {
       case AgentSessionRemoved(:final id):
         keep.removed(id);
       case AgentResync():
+      case AgentNotificationPushed():
+      case AgentNotificationsRead():
+      case AgentPrefsChanged():
+      case AgentMutesChanged():
+      case AgentNotificationsCleared():
         break;
     }
   });

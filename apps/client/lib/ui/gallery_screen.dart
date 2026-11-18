@@ -324,6 +324,17 @@ class _Column extends StatelessWidget {
             ),
 
             _Card(
+              label: 'count badge',
+              child: Row(
+                children: [
+                  CountBadge(count: 3, color: t.danger),
+                  SizedBox(width: t.sp * 2),
+                  CountBadge(count: 12, color: t.accent),
+                ],
+              ),
+            ),
+
+            _Card(
               label: 'states',
               child: Column(
                 children: [

@@ -356,6 +356,7 @@ void main() {
         'permission-mode',
         'crew',
         'role',
+        'notify',
       };
       expect(rows(t), all);
       for (final agent in [

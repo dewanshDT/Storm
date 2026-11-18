@@ -265,6 +265,44 @@ class SectionLabel extends StatelessWidget {
   }
 }
 
+/// A small pill count, on a card's corner or beside a rail icon — `NeedsYou`
+/// (decision 153e) and the notification bell's unread count (decision 161)
+/// are both this, in their own colour.
+class CountBadge extends StatelessWidget {
+  const CountBadge({super.key, required this.count, required this.color});
+
+  final int count;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final side = t.sp * 2.125;
+    return IgnorePointer(
+      child: Container(
+        constraints: BoxConstraints(minWidth: side),
+        height: side,
+        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(999),
+        ),
+        child: Text(
+          count > 99 ? '99+' : '$count',
+          style: TextStyle(
+            fontFamily: StormTokens.monoFamily,
+            fontSize: t.labelSize,
+            height: 1,
+            fontWeight: FontWeight.w600,
+            color: t.onAccent,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// A themed text field. Never sets a border: passing one discards the fill,
 /// stroke and `rControl` radius that `inputDecorationTheme` supplies.
 class StormInput extends StatelessWidget {

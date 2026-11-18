@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../api/models.dart';
 import 'agent_models.dart';
+import 'notifications_models.dart';
 
 /// A refusal from `/v1/agent/*`, with the server's stable code when it gave
 /// one.
@@ -295,6 +296,7 @@ class AgentApi {
     String? permissionMode,
     String? typedInput,
     Brightness? terminalBrightness,
+    bool? notify,
   }) async => AgentSession.fromJson(
     _decode(
           await _client.post(
@@ -333,6 +335,9 @@ class AgentApi {
                 'typed_input': typedInput,
               // The host sets COLORFGBG from it (decision 157, 171-8).
               'terminal_brightness': ?terminalBrightness?.name,
+              // Absent is the server's default (decision 161-2): sent only
+              // when the person touched the chip.
+              'notify': ?notify,
             }),
           ),
         )
@@ -562,6 +567,183 @@ class AgentApi {
       ..headers.addAll(_headers);
     if (body != null) req.body = jsonEncode(body);
     return _decode(await http.Response.fromStream(await _client.send(req)));
+  }
+
+  // ---- notifications (decision 161, slice 161-1) ------------------------
+
+  /// A page of the inbox, newest-appended; pass the last page's `cursor`
+  /// back as [after] to continue.
+  Future<({List<AgentNotification> items, int cursor})> notifications({
+    int after = 0,
+    int limit = 100,
+  }) async {
+    final json =
+        _decode(
+              await _client.get(
+                _uri('/v1/notifications', {
+                  'after': '$after',
+                  'limit': '$limit',
+                }),
+                headers: _headers,
+              ),
+            )
+            as Map;
+    return (
+      items: [
+        for (final n in json['items'] as List)
+          AgentNotification.fromJson(n as Map<String, dynamic>),
+      ],
+      cursor: (json['cursor'] as num).toInt(),
+    );
+  }
+
+  Future<void> clearNotifications() async {
+    _decode(await _client.delete(_uri('/v1/notifications'), headers: _headers));
+  }
+
+  /// Marks notices read, either by [ids] or every unread one of
+  /// [sessionId] — exactly one must be given. Answers the ids actually
+  /// changed.
+  Future<List<String>> markNotificationsRead({
+    List<String>? ids,
+    String? sessionId,
+  }) async {
+    final json =
+        _decode(
+              await _client.post(
+                _uri('/v1/notifications/read'),
+                headers: _headers,
+                body: jsonEncode({'ids': ?ids, 'session_id': ?sessionId}),
+              ),
+            )
+            as Map;
+    return [for (final id in json['read'] as List) '$id'];
+  }
+
+  Future<NotificationPrefs> notificationPrefs() async =>
+      NotificationPrefs.fromJson(
+        _decode(
+              await _client.get(
+                _uri('/v1/notifications/prefs'),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>,
+      );
+
+  /// `PUT /v1/notifications/prefs`: [version] must be the one last read, or
+  /// this is a 409 `prefs_version` conflict rather than a silent clobber.
+  /// Only the fields in [patch] change.
+  Future<NotificationPrefs> putNotificationPrefs(
+    int version,
+    Map<String, dynamic> patch,
+  ) async => NotificationPrefs.fromJson(
+    _decode(
+          await _client.put(
+            _uri('/v1/notifications/prefs'),
+            headers: _headers,
+            body: jsonEncode({'version': version, ...patch}),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  Future<List<NotificationMute>> notificationMutes() async {
+    final json = _decode(
+      await _client.get(_uri('/v1/notifications/mutes'), headers: _headers),
+    );
+    return [
+      for (final m in json as List)
+        NotificationMute.fromJson(m as Map<String, dynamic>),
+    ];
+  }
+
+  /// [until] omitted mutes forever.
+  Future<NotificationMute> createNotificationMute(
+    String scope,
+    String target, {
+    String? until,
+  }) async => NotificationMute.fromJson(
+    _decode(
+          await _client.post(
+            _uri('/v1/notifications/mutes'),
+            headers: _headers,
+            body: jsonEncode({
+              'scope': scope,
+              'target': target,
+              'until': ?until,
+            }),
+          ),
+        )
+        as Map<String, dynamic>,
+  );
+
+  Future<void> deleteNotificationMute(String id) async {
+    _decode(
+      await _client.delete(
+        _uri('/v1/notifications/mutes/${Uri.encodeComponent(id)}'),
+        headers: _headers,
+      ),
+    );
+  }
+
+  /// [until] omitted pauses indefinitely ("until I turn them back on").
+  Future<NotificationPrefs> pauseNotifications({String? until}) async =>
+      NotificationPrefs.fromJson(
+        _decode(
+              await _client.post(
+                _uri('/v1/notifications/pause'),
+                headers: _headers,
+                body: jsonEncode({'until': ?until}),
+              ),
+            )
+            as Map<String, dynamic>,
+      );
+
+  Future<NotificationPrefs> unpauseNotifications() async =>
+      NotificationPrefs.fromJson(
+        _decode(
+              await _client.delete(
+                _uri('/v1/notifications/pause'),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>,
+      );
+
+  Future<AgentNotification> sendTestNotification() async =>
+      AgentNotification.fromJson(
+        _decode(
+              await _client.post(
+                _uri('/v1/notifications/test'),
+                headers: _headers,
+              ),
+            )
+            as Map<String, dynamic>,
+      );
+
+  /// Decision 161-2: whether [id] may notify.
+  Future<void> setSessionNotify(String id, bool enabled) async {
+    _decode(
+      await _client.put(
+        _uri('${_s(id)}/notify'),
+        headers: _headers,
+        body: jsonEncode({'enabled': enabled}),
+      ),
+    );
+  }
+
+  /// Decision 161-2: turns notify off for every running session (`all`) or
+  /// every running child (`children`). Answers how many changed.
+  Future<int> turnNotifyOff(String scope) async {
+    final json = _decode(
+      await _client.post(
+        _uri('/v1/agent/sessions/notify-off'),
+        headers: _headers,
+        body: jsonEncode({'scope': scope}),
+      ),
+    );
+    return json is Map ? (json['changed'] as num?)?.toInt() ?? 0 : 0;
   }
 
   void dispose() => _client.close();

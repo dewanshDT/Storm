@@ -1,0 +1,236 @@
+/// Decision 161's inbox, prefs and mutes as the client sees them (slice
+/// 161-1's server shapes). Field names are the server's; nothing here is
+/// invented.
+library;
+
+/// One event kind a pref row may toggle (`AUTOMATIC_KINDS` on the server).
+/// `summary` and `test` are not here: a summary is controlled by
+/// [NotificationPrefs.summaryOn], and a test always sends.
+const kNotificationEventKinds = [
+  'needs_you',
+  'delete_request',
+  'finished',
+  'error',
+  'usage_limit',
+  'host_offline',
+  'child_finished',
+  'stopped_working',
+];
+
+/// One account notice in the inbox (`GET /v1/notifications`, the
+/// `notification` stream event). Named `AgentNotification` to avoid
+/// clashing with Flutter's own `Notification`.
+class AgentNotification {
+  AgentNotification({
+    required this.id,
+    required this.seq,
+    required this.created,
+    required this.source,
+    required this.kind,
+    this.sessionId,
+    this.hostId,
+    this.provider,
+    this.sessionTitle,
+    this.noteVaultId,
+    this.noteId,
+    required this.title,
+    this.body,
+    required this.urgency,
+    this.key,
+    this.silent = false,
+    this.silentReason,
+    this.readAt,
+    this.cancelled = false,
+  });
+
+  final String id;
+  final int seq;
+  final String created;
+
+  /// `storm`, `agent` or `terminal`.
+  final String source;
+  final String kind;
+  final String? sessionId;
+  final String? hostId;
+
+  /// The session's agent at the time (161-3/4: "{session} · {Agent}").
+  final String? provider;
+  final String? sessionTitle;
+  final String? noteVaultId;
+  final String? noteId;
+  final String title;
+  final String? body;
+
+  /// `low`, `normal` or `high`.
+  final String urgency;
+  final String? key;
+  final bool silent;
+
+  /// Why it is silent: `quiet`, `paused`, `off` or `muted`.
+  final String? silentReason;
+  final String? readAt;
+  final bool cancelled;
+
+  bool get unread => readAt == null;
+
+  AgentNotification withReadAt(String at) => readAt != null
+      ? this
+      : AgentNotification(
+          id: id,
+          seq: seq,
+          created: created,
+          source: source,
+          kind: kind,
+          sessionId: sessionId,
+          hostId: hostId,
+          provider: provider,
+          sessionTitle: sessionTitle,
+          noteVaultId: noteVaultId,
+          noteId: noteId,
+          title: title,
+          body: body,
+          urgency: urgency,
+          key: key,
+          silent: silent,
+          silentReason: silentReason,
+          readAt: at,
+          cancelled: cancelled,
+        );
+
+  factory AgentNotification.fromJson(Map<String, dynamic> j) =>
+      AgentNotification(
+        id: j['id'] as String,
+        seq: (j['seq'] as num).toInt(),
+        created: j['created'] as String? ?? '',
+        source: j['source'] as String? ?? 'storm',
+        kind: j['kind'] as String? ?? '',
+        sessionId: j['session_id'] as String?,
+        hostId: j['host_id'] as String?,
+        provider: j['provider'] as String?,
+        sessionTitle: j['session_title'] as String?,
+        noteVaultId: j['note_vault_id'] as String?,
+        noteId: j['note_id'] as String?,
+        title: j['title'] as String? ?? '',
+        body: j['body'] as String?,
+        urgency: j['urgency'] as String? ?? 'normal',
+        key: j['key'] as String?,
+        silent: j['silent'] as bool? ?? false,
+        silentReason: j['silent_reason'] as String?,
+        readAt: j['read_at'] as String?,
+        cancelled: j['cancelled'] as bool? ?? false,
+      );
+}
+
+/// Whether one event kind notifies, and after how long (`finished`,
+/// `host_offline`).
+class EventPref {
+  const EventPref({required this.on, this.thresholdS});
+
+  final bool on;
+  final int? thresholdS;
+
+  factory EventPref.fromJson(Map<String, dynamic> j) => EventPref(
+    on: j['on'] as bool? ?? true,
+    thresholdS: (j['threshold_s'] as num?)?.toInt(),
+  );
+
+  Map<String, dynamic> toJson() => {
+    'on': on,
+    if (thresholdS != null) 'threshold_s': thresholdS,
+  };
+}
+
+/// `GET`/`PUT /v1/notifications/prefs`'s full row (Q15's optimistic
+/// concurrency is [version]).
+class NotificationPrefs {
+  const NotificationPrefs({
+    required this.version,
+    required this.events,
+    required this.quietOn,
+    required this.quietStart,
+    required this.quietEnd,
+    required this.quietTz,
+    required this.quietAllowDeleteRequests,
+    required this.summaryOn,
+    this.pausedUntil,
+    required this.agentDefaultOn,
+    required this.childrenDefaultOn,
+    required this.perSessionLimit,
+    required this.retentionDays,
+    required this.retentionRows,
+  });
+
+  final int version;
+  final Map<String, EventPref> events;
+  final bool quietOn;
+
+  /// `"HH:MM"`.
+  final String quietStart;
+  final String quietEnd;
+
+  /// An IANA zone.
+  final String quietTz;
+  final bool quietAllowDeleteRequests;
+  final bool summaryOn;
+
+  /// An RFC3339 instant; null means not paused.
+  final String? pausedUntil;
+  final bool agentDefaultOn;
+  final bool childrenDefaultOn;
+  final int perSessionLimit;
+  final int retentionDays;
+  final int retentionRows;
+
+  bool eventOn(String kind) => events[kind]?.on ?? true;
+
+  factory NotificationPrefs.fromJson(Map<String, dynamic> j) =>
+      NotificationPrefs(
+        version: (j['version'] as num?)?.toInt() ?? 1,
+        events: {
+          for (final e in (j['events'] as Map? ?? {}).entries)
+            '${e.key}': EventPref.fromJson(e.value as Map<String, dynamic>),
+        },
+        quietOn: j['quiet_on'] as bool? ?? false,
+        quietStart: j['quiet_start'] as String? ?? '22:00',
+        quietEnd: j['quiet_end'] as String? ?? '08:00',
+        quietTz: j['quiet_tz'] as String? ?? 'UTC',
+        quietAllowDeleteRequests:
+            j['quiet_allow_delete_requests'] as bool? ?? false,
+        summaryOn: j['summary_on'] as bool? ?? true,
+        pausedUntil: j['paused_until'] as String?,
+        agentDefaultOn: j['agent_default_on'] as bool? ?? true,
+        childrenDefaultOn: j['children_default_on'] as bool? ?? false,
+        perSessionLimit: (j['per_session_limit'] as num?)?.toInt() ?? 20,
+        retentionDays: (j['retention_days'] as num?)?.toInt() ?? 30,
+        retentionRows: (j['retention_rows'] as num?)?.toInt() ?? 1000,
+      );
+}
+
+/// `GET /v1/notifications/mutes`' row.
+class NotificationMute {
+  const NotificationMute({
+    required this.id,
+    required this.scope,
+    required this.target,
+    this.until,
+    required this.createdAt,
+  });
+
+  final String id;
+
+  /// `session` or `provider`.
+  final String scope;
+  final String target;
+
+  /// An RFC3339 instant; null is forever.
+  final String? until;
+  final String createdAt;
+
+  factory NotificationMute.fromJson(Map<String, dynamic> j) => NotificationMute(
+    id: j['id'] as String,
+    scope: j['scope'] as String,
+    target: j['target'] as String,
+    until: j['until'] as String?,
+    createdAt: j['created_at'] as String? ?? '',
+  );
+}
