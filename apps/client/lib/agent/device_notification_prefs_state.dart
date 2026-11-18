@@ -10,25 +10,51 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'agent_api.dart';
+import 'agent_events.dart';
 import 'agent_state.dart' show agentApiFactoryProvider;
 import 'desktop_platform.dart';
 import 'notifications_models.dart';
 
 class DeviceNotificationPrefsState extends ChangeNotifier {
-  DeviceNotificationPrefsState(this._apiFactory) {
+  DeviceNotificationPrefsState(this._apiFactory, {AgentEvents? events})
+    : _prefs = _placeholder() {
     unawaited(refresh());
+    _sub = events?.updates.listen(_onEvent);
   }
 
   final AgentApi Function() _apiFactory;
+  StreamSubscription<AgentEventUpdate>? _sub;
 
-  DeviceNotificationPrefs? _prefs;
+  /// Review item 12: shown the moment this is constructed, before the
+  /// real row ever answers — this device's own platform default, exactly
+  /// what the server would hand back on a first `ensure_device_prefs`
+  /// anyway (Q19), so the page is usable at once rather than blank.
+  static DeviceNotificationPrefs _placeholder() => DeviceNotificationPrefs(
+    deviceId: '',
+    enabled: isDesktopPlatform,
+    classes: const [],
+    preview: 'full',
+    updatedAt: '',
+  );
+
+  DeviceNotificationPrefs _prefs;
   bool _loading = true;
   Object? _error;
   bool _disposed = false;
 
-  DeviceNotificationPrefs? get prefs => _prefs;
+  DeviceNotificationPrefs get prefs => _prefs;
   bool get loading => _loading;
   Object? get error => _error;
+
+  /// Review item 12: a fresh connection or reconnect retries a backfill
+  /// that failed — the same reason `NotificationsState._backfill` retries
+  /// on a snapshot — so a network blip at launch doesn't strand this
+  /// device on the placeholder forever.
+  void _onEvent(AgentEventUpdate u) {
+    if (u.event is AgentSnapshot && _error != null) {
+      unawaited(refresh());
+    }
+  }
 
   Future<void> refresh() async {
     final api = _apiFactory();
@@ -83,6 +109,7 @@ class DeviceNotificationPrefsState extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    unawaited(_sub?.cancel());
     super.dispose();
   }
 }
@@ -93,7 +120,8 @@ final deviceNotificationPrefsProvider =
     Provider.autoDispose<DeviceNotificationPrefsState?>((ref) {
       final factory = ref.watch(agentApiFactoryProvider);
       if (factory == null) return null;
-      final state = DeviceNotificationPrefsState(factory);
+      final events = ref.watch(agentEventsProvider);
+      final state = DeviceNotificationPrefsState(factory, events: events);
       ref.onDispose(state.dispose);
       return state;
     });

@@ -25,12 +25,31 @@ import 'notifications_models.dart';
 /// device already has the session a notice is about on screen.
 @immutable
 class AgentPresence {
-  const AgentPresence({required this.active, this.openSessionId});
+  const AgentPresence({
+    required this.active,
+    this.openSessionId,
+    this.connectionId,
+  });
 
   final bool active;
   final String? openSessionId;
 
+  /// This client's own id for the connection this presence was (or will
+  /// be) reported over — a fresh one each time [AgentEvents] actually
+  /// connects (161-4 review item 3), so the server can tell two tabs, or
+  /// a reconnect's overlap, apart. `null` only before the very first
+  /// connect.
+  final String? connectionId;
+
   static const initial = AgentPresence(active: true);
+}
+
+/// A random id for one `/v1/agent/events` connection — never anything
+/// that identifies the device or session, just unique enough that the
+/// server's presence map keys two connections apart (review item 3).
+String newConnectionId(Random random) {
+  final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+  return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
 }
 
 /// One event of `GET /v1/agent/events` (decision 154, AM109).
@@ -387,12 +406,13 @@ Stream<AgentEvent> _openSocket(
   return out.stream;
 }
 
-/// `?presence=active|background[&open_session=<id>]` (161-4). Absent
-/// entirely is `active` too, server-side — but every connection here
-/// states it, so the server need not guess.
+/// `?presence=active|background[&open_session=<id>]&connection_id=<id>`
+/// (161-4). Absent `presence` entirely is `active` too, server-side —
+/// but every connection here states it, so the server need not guess.
 Map<String, String> _presenceQuery(AgentPresence presence) => {
   'presence': presence.active ? 'active' : 'background',
   if (presence.openSessionId != null) 'open_session': presence.openSessionId!,
+  if (presence.connectionId != null) 'connection_id': presence.connectionId!,
 };
 
 Uri _eventsUri(String base, AgentPresence presence) => Uri.parse(
@@ -471,11 +491,23 @@ class AgentEvents {
   final AgentApi Function()? _apiFactory;
   AgentPresence _presence = AgentPresence.initial;
 
+  /// What [_presence] was the moment the current connection's `_open`
+  /// call went out — compared against [_presence] again once the
+  /// connection reaches [AgentEventsState.open] (review item 6): a
+  /// change made in between (still `connecting`, so [_syncPresence]'s
+  /// `POST` could not reach a connection that does not exist yet) is
+  /// otherwise lost for good, since nothing else ever re-checks it.
+  AgentPresence? _sentPresence;
+
   final state = ValueNotifier(AgentEventsState.closed);
   bool get isOpen => state.value == AgentEventsState.open;
 
   /// The session [setOpenSession] last reported, if any.
   String? get openSessionId => _presence.openSessionId;
+
+  /// Whether this device currently reports itself active (visible and
+  /// focused) rather than backgrounded.
+  bool get isActive => _presence.active;
 
   final _updates = StreamController<AgentEventUpdate>.broadcast();
 
@@ -525,7 +557,18 @@ class AgentEvents {
         background();
       case AppLifecycleState.resumed:
         foreground();
-      case AppLifecycleState.inactive || AppLifecycleState.detached:
+        // Undoes a desktop `inactive`'s presence flip below even when
+        // `_background` was never set true by it (so `foreground()`
+        // itself no-ops) — a window that only lost and regained focus,
+        // never truly hidden.
+        if (isDesktopPlatform) _setActive(true);
+      case AppLifecycleState.inactive:
+        // Desktop only (review item 5): the window lost focus without
+        // being hidden, minimized or closed. Background presence, same
+        // as `background()`'s desktop branch — but never drop the
+        // stream (`_background` stays untouched; this is milder).
+        if (isDesktopPlatform) _setActive(false);
+      case AppLifecycleState.detached:
         break;
     }
   }
@@ -571,7 +614,11 @@ class AgentEvents {
   /// person looking at a session.
   void setOpenSession(String? id) {
     if (_presence.openSessionId == id) return;
-    _presence = AgentPresence(active: _presence.active, openSessionId: id);
+    _presence = AgentPresence(
+      active: _presence.active,
+      openSessionId: id,
+      connectionId: _presence.connectionId,
+    );
     _syncPresence();
   }
 
@@ -580,20 +627,26 @@ class AgentEvents {
     _presence = AgentPresence(
       active: active,
       openSessionId: _presence.openSessionId,
+      connectionId: _presence.connectionId,
     );
     _syncPresence();
   }
 
   /// Tells the server about [_presence] without reconnecting — the point
   /// of keeping the stream open at all. A connection not yet open carries
-  /// the current [_presence] itself once it does ([_connect]).
+  /// the current [_presence] itself once it does ([_connect]); and once
+  /// it does, [_apply]'s snapshot case re-checks for exactly this case —
+  /// a change made while still connecting, which this early return would
+  /// otherwise drop for good (review item 6).
   void _syncPresence() {
-    if (!isOpen) return;
+    final connectionId = _presence.connectionId;
+    if (!isOpen || connectionId == null) return;
     final api = _apiFactory?.call();
     if (api == null) return;
     unawaited(
       api
           .setPresence(
+            connectionId,
             _presence.active ? 'active' : 'background',
             openSessionId: _presence.openSessionId,
           )
@@ -617,6 +670,16 @@ class AgentEvents {
     _retry = null;
     final run = ++_run;
     state.value = AgentEventsState.connecting;
+    // A fresh connection id every time, including a reconnect (review
+    // item 3): the server tells this attempt apart from whatever came
+    // before, so an old connection's late drop can never clear this
+    // one's presence.
+    _presence = AgentPresence(
+      active: _presence.active,
+      openSessionId: _presence.openSessionId,
+      connectionId: newConnectionId(_random),
+    );
+    _sentPresence = _presence;
     final Stream<AgentEvent> stream;
     try {
       stream = _open(_presence);
@@ -677,6 +740,15 @@ class AgentEvents {
         _snapshotAt = at;
         _backoff = null;
         state.value = AgentEventsState.open;
+        // Review item 6: a presence change made while this connection was
+        // still `connecting` never reached `_syncPresence` (not `isOpen`
+        // yet) — catch up now, the first moment a `POST` can land.
+        if (_sentPresence != null &&
+            (_sentPresence!.active != _presence.active ||
+                _sentPresence!.openSessionId != _presence.openSessionId)) {
+          _syncPresence();
+        }
+        _sentPresence = null;
         _emit(AgentEventUpdate(e, epochChanged: changed));
       case AgentSessionChanged(:final session):
         final before = _sessions[session.id];

@@ -19,32 +19,48 @@ import 'device_notification_prefs_state.dart';
 import 'notifications_models.dart';
 import 'this_device_local_prefs.dart';
 
-/// Whether [deliver] (161-4's hint on a live frame) means *this* device,
-/// identified by [deviceId], should raise a local OS notification.
-/// `null` (an older server, or "an active device already has it open")
-/// never raises one.
-bool shouldRaiseOsNotification(String? deliver, String deviceId) {
-  if (deliver == null) return false;
-  return deliver == 'os' || deliver == 'toast:$deviceId';
-}
+/// Whether [deliver] (161-4's hint on a live frame) means this device
+/// should raise a local OS notification right now, given whether it is
+/// itself [thisDeviceActive] (review item 1):
+///
+/// - `"toast:<id>"` is never this notifier's job, on *any* device — it
+///   means that one device shows an in-app toast (`agent_notices.dart`),
+///   not an OS notification.
+/// - `"os"` raises on every backgrounded desktop. If this device somehow
+///   became active after the server computed the hint, it shows nothing
+///   — an OS popup while the person is already looking at Storm is
+///   exactly what the toast path exists to avoid.
+/// - `null` (key present, delivered nowhere) or no key at all (an older
+///   server) never raises one either.
+bool shouldRaiseOsNotification(
+  String? deliver, {
+  required bool thisDeviceActive,
+}) => deliver == 'os' && !thisDeviceActive;
 
-/// Whether this device's own prefs let [n] through at all (enabled, and
-/// its class — mapped from [AgentNotification.kind]/[source] — is one
-/// [prefs] sends here; `classes: []` means every class).
+/// Whether this device's own prefs let [n] through at all. `test` and
+/// `summary` bypass the class filter (review item 10): a self-requested
+/// test has to prove delivery regardless of what classes are on, and a
+/// quiet-hours summary has no device-level channel of its own — only
+/// [DeviceNotificationPrefs.enabled] gates either.
 bool devicePrefsAllow(AgentNotification n, DeviceNotificationPrefs prefs) {
   if (!prefs.enabled) return false;
+  if (n.kind == 'test' || n.kind == 'summary') return true;
   return prefs.classOn(deviceNotificationClassOf(n));
 }
 
 /// Maps a notice onto 161-4's "Send to this device" classes, which are
 /// coarser than [kNotificationEventKinds] (that table is the account-level
-/// *event* toggles; this one is per-device *channels*).
+/// *event* toggles; this one is per-device *channels*). Every kind Storm
+/// can emit is named here or falls into `agent_messages` only because it
+/// is agent- or terminal-sourced — never because it was merely
+/// unrecognised (review item 10: `test`/`summary` never reach this at
+/// all, gated in [devicePrefsAllow] first).
 String deviceNotificationClassOf(AgentNotification n) {
   if (n.source != 'storm') return 'agent_messages';
   return switch (n.kind) {
     'needs_you' => 'needs_you',
     'delete_request' => 'delete_requests',
-    'finished' => 'finished',
+    'finished' || 'stopped_working' || 'child_finished' => 'finished',
     'error' || 'usage_limit' => 'errors',
     'host_offline' => 'hosts',
     _ => 'agent_messages',
@@ -54,17 +70,19 @@ String deviceNotificationClassOf(AgentNotification n) {
 /// What a notification actually shows, by preview level (161-4's table):
 /// `full` is "{session} · {Agent}" plus the real text; `session` is
 /// "{session} · {kind}"; `storm` is "Storm · {kind}" — never the agent's
-/// own words.
+/// own words, and `{kind}` is always a human label (review item 9), never
+/// the wire code.
 ({String title, String? body}) renderPreview(
   AgentNotification n,
   String previewLevel,
 ) {
   final session = n.sessionTitle ?? 'Storm';
+  final label = noticeKindLabel(n.kind);
   switch (previewLevel) {
     case 'session':
-      return (title: '$session · ${n.kind}', body: null);
+      return (title: '$session · $label', body: null);
     case 'storm':
-      return (title: 'Storm · ${n.kind}', body: null);
+      return (title: 'Storm · $label', body: null);
     default: // 'full'
       final agent = n.provider == null
           ? session
@@ -105,10 +123,13 @@ int sessionBurstIntId(String sessionId) =>
 /// Builds the one thing worth raising for [n], already past
 /// [shouldRaiseOsNotification] and [devicePrefsAllow] — either the notice
 /// itself, rendered at [previewLevel], or, past the burst threshold, a
-/// fold for its whole session. `intId` is what the plugin cancels by
-/// later (a read, a clear, or the next notice in the same burst replacing
-/// this one).
-({int intId, String title, String? body}) planOsNotification(
+/// fold for its whole session, itself rendered at [previewLevel] (review
+/// item 8: `"Storm · 3 updates"` at the `storm` level, never the session
+/// name). `intId` is what the plugin cancels by later (a read, a clear,
+/// or the next notice in the same burst replacing this one); `folded`
+/// says whether this call folded, so the caller can track which notice
+/// ids the one shown `intId` now represents.
+({int intId, String title, String? body, bool folded}) planOsNotification(
   AgentNotification n,
   String previewLevel,
   Map<String, NotificationBurst> bursts,
@@ -119,11 +140,14 @@ int sessionBurstIntId(String sessionId) =>
     final burst = bursts.putIfAbsent(sessionId, NotificationBurst.new);
     final count = burst.record(now, _burstWindow);
     if (count >= _burstThreshold) {
-      final session = n.sessionTitle ?? 'Storm';
+      final session = previewLevel == 'storm'
+          ? 'Storm'
+          : (n.sessionTitle ?? 'Storm');
       return (
         intId: sessionBurstIntId(sessionId),
         title: '$session · $count updates',
         body: null,
+        folded: true,
       );
     }
   }
@@ -132,19 +156,26 @@ int sessionBurstIntId(String sessionId) =>
     intId: notificationIntId(n.id),
     title: preview.title,
     body: preview.body,
+    folded: false,
   );
 }
 
 /// `agent`/`terminal` notices get their own OS category, distinct from
 /// Storm's own automatic ones (161-4's "Agent messages" channel) — an
-/// agent can never dress its text up as a Storm system notice.
-String osCategoryOf(AgentNotification n) =>
-    n.source == 'storm' ? 'storm' : 'agent-messages';
+/// agent can never dress its text up as a Storm system notice. These are
+/// the macOS category identifiers [OsNotifications.init] registers
+/// (review item 17) and the Linux category hint `_RealOsNotifications`
+/// maps them to.
+const kStormNotificationCategory = 'storm';
+const kAgentMessagesNotificationCategory = 'agent-messages';
 
-/// Where a tap should go: the session (default) or, were a note ever
-/// added to a notice's payload, a note. Only `session` exists today — no
-/// notice currently carries a note reference — kept as a sum type so a
-/// later payload shape has somewhere to land without redesigning this.
+String osCategoryOf(AgentNotification n) => n.source == 'storm'
+    ? kStormNotificationCategory
+    : kAgentMessagesNotificationCategory;
+
+/// Where a tap should go. [NotificationTapNone] is still a real target —
+/// review item 18: even a notice with no session brings the window
+/// forward, it just has nowhere further to route.
 sealed class NotificationTapTarget {}
 
 class NotificationTapSession extends NotificationTapTarget {
@@ -152,22 +183,180 @@ class NotificationTapSession extends NotificationTapTarget {
   final String sessionId;
 }
 
+class NotificationTapNone extends NotificationTapTarget {}
+
 /// Fired when the person taps a Storm-raised OS notification from outside
 /// the widget tree — the same pattern `OAuthLinks.instance.orphans` uses
 /// for a deep link the app was not yet listening for. `_StormAppState`
 /// listens and routes, after bringing the window forward.
 final notificationTapped = ValueNotifier<NotificationTapTarget?>(null);
 
-NotificationTapTarget? decodeTapPayload(String? payload) {
-  if (payload == null || payload.isEmpty) return null;
+NotificationTapTarget decodeTapPayload(String? payload) {
   // `session:<id>` is the only shape ever written (see `_raise` below);
   // kept this explicit, rather than `jsonDecode`, so a stray payload from
   // a notification shown before an upgrade never throws decoding it.
   const prefix = 'session:';
-  if (payload.startsWith(prefix)) {
+  if (payload != null && payload.startsWith(prefix)) {
     return NotificationTapSession(payload.substring(prefix.length));
   }
-  return null;
+  return NotificationTapNone();
+}
+
+/// macOS only: `allowed`/`denied` (asked, and the answer); `notAsked`
+/// (macOS, never asked yet — review item 2: asking happens lazily, at
+/// the first notification, never at launch); `notApplicable` elsewhere,
+/// which have no such permission; `unavailable` when the plugin itself
+/// failed (review item 11).
+enum DesktopPermissionStatus {
+  notApplicable,
+  notAsked,
+  allowed,
+  denied,
+  unavailable,
+}
+
+/// The plugin calls [DesktopNotifier] needs, behind a seam tests can fake
+/// — `flutter_local_notifications` talks to real platform channels, which
+/// don't exist under `flutter test`.
+abstract class OsNotifications {
+  Future<void> init({required void Function(String? payload) onTap});
+  Future<void> show({
+    required int id,
+    required String title,
+    String? body,
+    String? payload,
+    String? threadId,
+    required String category,
+    required bool sound,
+  });
+  Future<void> cancel(int id);
+  Future<void> cancelAll();
+
+  /// `true`/`false` on macOS; `null` elsewhere (no such concept).
+  Future<bool?> checkPermission();
+
+  /// Asks once; a no-op everywhere but macOS.
+  Future<void> requestPermission();
+
+  /// Best-effort: there is no cross-platform API for this, so each
+  /// platform is its own settings URI. `false` on a platform with
+  /// neither (Linux has none standard).
+  Future<bool> openSystemSettings();
+}
+
+class RealOsNotifications implements OsNotifications {
+  final _plugin = FlutterLocalNotificationsPlugin();
+  bool _initialized = false;
+
+  @override
+  Future<void> init({required void Function(String? payload) onTap}) async {
+    if (_initialized) return;
+    await _plugin.initialize(
+      settings: InitializationSettings(
+        // Alert/sound/badge permission is asked lazily by
+        // `requestPermission` (review item 2: at the first notification,
+        // not at launch); categories registered up front cost nothing
+        // and have no actions (138p-7).
+        macOS: const DarwinInitializationSettings(
+          requestAlertPermission: false,
+          requestBadgePermission: false,
+          requestSoundPermission: false,
+          notificationCategories: [
+            DarwinNotificationCategory(kStormNotificationCategory),
+            DarwinNotificationCategory(kAgentMessagesNotificationCategory),
+          ],
+        ),
+        linux: const LinuxInitializationSettings(defaultActionName: 'Open'),
+        windows: WindowsInitializationSettings(
+          appName: 'Storm',
+          appUserModelId: 'dev.storm.Storm',
+          guid: '6f1b1c0e-6b7b-4a9e-9b0a-2a9b7c7a0f1a',
+        ),
+      ),
+      onDidReceiveNotificationResponse: (r) => onTap(r.payload),
+    );
+    _initialized = true;
+  }
+
+  @override
+  Future<void> show({
+    required int id,
+    required String title,
+    String? body,
+    String? payload,
+    String? threadId,
+    required String category,
+    required bool sound,
+  }) => _plugin.show(
+    id: id,
+    title: title,
+    body: body,
+    payload: payload,
+    notificationDetails: NotificationDetails(
+      macOS: DarwinNotificationDetails(
+        threadIdentifier: threadId,
+        categoryIdentifier: category,
+        presentSound: sound,
+      ),
+      linux: LinuxNotificationDetails(
+        suppressSound: !sound,
+        category: category == kStormNotificationCategory
+            ? LinuxNotificationCategory.im
+            : LinuxNotificationCategory.imReceived,
+      ),
+      windows: const WindowsNotificationDetails(),
+    ),
+  );
+
+  @override
+  Future<void> cancel(int id) => _plugin.cancel(id: id);
+
+  @override
+  Future<void> cancelAll() => _plugin.cancelAll();
+
+  @override
+  Future<bool?> checkPermission() async {
+    if (defaultTargetPlatform != TargetPlatform.macOS) return null;
+    final mac = _plugin
+        .resolvePlatformSpecificImplementation<
+          MacOSFlutterLocalNotificationsPlugin
+        >();
+    final options = await mac?.checkPermissions();
+    return options?.isEnabled;
+  }
+
+  @override
+  Future<void> requestPermission() async {
+    if (defaultTargetPlatform != TargetPlatform.macOS) return;
+    final mac = _plugin
+        .resolvePlatformSpecificImplementation<
+          MacOSFlutterLocalNotificationsPlugin
+        >();
+    await mac?.requestPermissions(alert: true, sound: true);
+  }
+
+  @override
+  Future<bool> openSystemSettings() {
+    final uri = switch (defaultTargetPlatform) {
+      TargetPlatform.macOS => Uri.parse(
+        'x-apple.systempreferences:com.apple.preference.notifications',
+      ),
+      TargetPlatform.windows => Uri.parse('ms-settings:notifications'),
+      _ => null,
+    };
+    if (uri == null) return Future.value(false);
+    return launchUrl(uri);
+  }
+}
+
+/// One session's live OS notification: its plugin id, and every notice id
+/// it currently represents — one while shown individually, every folded
+/// notice's id once the 60 s/≥3 fold kicks in (review item 8) — so a read
+/// or a removal of *any* of them cancels what is actually on screen.
+class _SessionNotice {
+  _SessionNotice(this.intId);
+  int intId;
+  final Set<String> noticeIds = {};
 }
 
 /// Raises/cancels local OS notifications for the signed-in session's
@@ -180,8 +369,10 @@ class DesktopNotifier {
     required this.events,
     required DeviceNotificationPrefs? Function() prefs,
     bool Function() soundOn = _alwaysSound,
+    OsNotifications? os,
   }) : _prefs = prefs,
-       _soundOn = soundOn {
+       _soundOn = soundOn,
+       _os = os ?? RealOsNotifications() {
     _sub = events.updates.listen(_heard);
   }
 
@@ -191,65 +382,53 @@ class DesktopNotifier {
   final AgentEvents events;
   final DeviceNotificationPrefs? Function() _prefs;
   final bool Function() _soundOn;
-  final _plugin = FlutterLocalNotificationsPlugin();
+  final OsNotifications _os;
   final _bursts = <String, NotificationBurst>{};
+
+  /// Session id → its live OS entry. A notice with no session (a test,
+  /// `host_offline`) is tracked only in [_noticeIntId] below and never
+  /// folds.
+  final _bySession = <String, _SessionNotice>{};
+
+  /// notice id → the plugin id it was shown under, for a sessionless
+  /// notice (1:1, never folded) or to find which session's
+  /// [_SessionNotice] a given notice id belongs to.
+  final _noticeIntId = <String, int>{};
+  final _sessionOfNotice = <String, String>{};
+
   StreamSubscription<AgentEventUpdate>? _sub;
-  bool _ready = false;
+  bool _permissionRequested = false;
 
-  Future<void> init() async {
-    if (_ready) return;
-    await _plugin.initialize(
-      settings: const InitializationSettings(
-        macOS: DarwinInitializationSettings(
-          requestAlertPermission: false,
-          requestBadgePermission: false,
-          requestSoundPermission: false,
-        ),
-        linux: LinuxInitializationSettings(defaultActionName: 'Open'),
-        windows: WindowsInitializationSettings(
-          appName: 'Storm',
-          appUserModelId: 'dev.storm.Storm',
-          guid: '6f1b1c0e-6b7b-4a9e-9b0a-2a9b7c7a0f1a',
-        ),
-      ),
-      onDidReceiveNotificationResponse: _onTap,
-    );
-    _ready = true;
+  /// The plugin failed to initialize, show, or ask permission (review
+  /// item 11): "This device" shows "No notification service" rather than
+  /// "Checking…" forever.
+  bool unavailable = false;
+
+  Future<void> init() => _os.init(onTap: _onTap);
+
+  void _onTap(String? payload) {
+    notificationTapped.value = decodeTapPayload(payload);
   }
 
-  void _onTap(NotificationResponse response) {
-    final target = decodeTapPayload(response.payload);
-    if (target != null) notificationTapped.value = target;
+  /// [DesktopPermissionStatus.unavailable] if the plugin itself failed —
+  /// never thrown, so a page reading this to render a row never crashes
+  /// on it.
+  Future<DesktopPermissionStatus> permissionStatus() async {
+    try {
+      await init();
+      final granted = await _os.checkPermission();
+      if (granted == null) return DesktopPermissionStatus.notApplicable;
+      if (granted) return DesktopPermissionStatus.allowed;
+      return _permissionRequested
+          ? DesktopPermissionStatus.denied
+          : DesktopPermissionStatus.notAsked;
+    } catch (_) {
+      unavailable = true;
+      return DesktopPermissionStatus.unavailable;
+    }
   }
 
-  /// `true`/`false` on macOS (the only desktop platform with a real OS
-  /// permission for this); `null` on Windows and Linux, which show a
-  /// toast unconditionally — "This device" reads `null` as "Allowed".
-  Future<bool?> permissionGranted() async {
-    await init();
-    if (defaultTargetPlatform != TargetPlatform.macOS) return null;
-    final mac = _plugin
-        .resolvePlatformSpecificImplementation<
-          MacOSFlutterLocalNotificationsPlugin
-        >();
-    final options = await mac?.checkPermissions();
-    return options?.isEnabled;
-  }
-
-  /// Best-effort: there is no cross-platform API for this, so each branch
-  /// is a platform's own settings URI. A platform with neither (Linux has
-  /// none standard) leaves the button hidden rather than open nothing.
-  static Future<bool> openSystemNotificationSettings() {
-    final uri = switch (defaultTargetPlatform) {
-      TargetPlatform.macOS => Uri.parse(
-        'x-apple.systempreferences:com.apple.preference.notifications',
-      ),
-      TargetPlatform.windows => Uri.parse('ms-settings:notifications'),
-      _ => null,
-    };
-    if (uri == null) return Future.value(false);
-    return launchUrl(uri);
-  }
+  Future<bool> openSystemNotificationSettings() => _os.openSystemSettings();
 
   void _heard(AgentEventUpdate u) {
     switch (u.event) {
@@ -257,42 +436,113 @@ class DesktopNotifier {
         unawaited(_raise(notification));
       case AgentNotificationsRead(:final ids):
         for (final id in ids) {
-          unawaited(_plugin.cancel(id: notificationIntId(id)));
+          _cancelForNoticeId(id);
         }
       case AgentNotificationsRemoved(:final ids):
         for (final id in ids) {
-          unawaited(_plugin.cancel(id: notificationIntId(id)));
+          _cancelForNoticeId(id);
         }
       case AgentNotificationsCleared():
-        unawaited(_plugin.cancelAll());
+        _bySession.clear();
+        _noticeIntId.clear();
+        _sessionOfNotice.clear();
+        unawaited(_os.cancelAll().catchError((_) {}));
       default:
         return;
     }
   }
 
+  /// Review item 8: a read or removal of any notice in a fold (or the
+  /// lone notice behind an unfolded entry) cancels whatever is actually
+  /// shown for its session, and drops the bookkeeping for the rest of
+  /// that fold with it — a stale rollup never outlives every notice it
+  /// once counted.
+  void _cancelForNoticeId(String noticeId) {
+    final intId = _noticeIntId.remove(noticeId);
+    final sessionId = _sessionOfNotice.remove(noticeId);
+    if (sessionId == null) {
+      if (intId != null) unawaited(_os.cancel(intId).catchError((_) {}));
+      return;
+    }
+    final tracked = _bySession.remove(sessionId);
+    if (tracked == null) return;
+    unawaited(_os.cancel(tracked.intId).catchError((_) {}));
+    for (final id in tracked.noticeIds) {
+      _noticeIntId.remove(id);
+      _sessionOfNotice.remove(id);
+    }
+  }
+
   Future<void> _raise(AgentNotification n) async {
     if (n.silent) return;
-    if (!shouldRaiseOsNotification(n.deliver, deviceId)) return;
+    if (!shouldRaiseOsNotification(
+      n.deliver,
+      thisDeviceActive: events.isActive,
+    )) {
+      return;
+    }
     final prefs = _prefs();
     if (prefs == null || !devicePrefsAllow(n, prefs)) return;
+    try {
+      await _show(n, prefs);
+    } catch (_) {
+      unavailable = true;
+    }
+  }
+
+  /// Bypasses [shouldRaiseOsNotification] and presence entirely — only
+  /// [devicePrefsAllow] still applies — for "Send a test notification"
+  /// (review item 13): the person is looking right at Settings, so the
+  /// server's own hint for a notice with no session would normally be a
+  /// toast or nothing, neither of which proves the OS path works.
+  Future<void> forceShow(AgentNotification n) async {
+    final prefs = _prefs();
+    if (prefs == null || !devicePrefsAllow(n, prefs)) return;
+    try {
+      await _show(n, prefs);
+    } catch (_) {
+      unavailable = true;
+    }
+  }
+
+  Future<void> _show(AgentNotification n, DeviceNotificationPrefs prefs) async {
     await init();
+    if (!_permissionRequested) {
+      _permissionRequested = true;
+      await _os.requestPermission();
+    }
     final plan = planOsNotification(n, prefs.preview, _bursts, DateTime.now());
-    final category = osCategoryOf(n);
-    final sound = _soundOn();
-    await _plugin.show(
+    final sessionId = n.sessionId;
+    if (sessionId != null) {
+      // One OS entry per session, always (review item 8): a new notice
+      // replaces whatever was shown for this session rather than
+      // stacking beside it, so a fold's own arrival is just one more
+      // replacement — the individual notices it absorbs are exactly the
+      // ones already superseded on the way there, cancelled as they go
+      // rather than left behind for the rollup to join. [tracked]
+      // accumulates every notice id that is this way "covered" by
+      // whatever is currently shown, so a read or removal of *any* of
+      // them (even an already-superseded one) cancels the current entry.
+      final existing = _bySession[sessionId];
+      if (existing != null && existing.intId != plan.intId) {
+        unawaited(_os.cancel(existing.intId).catchError((_) {}));
+      }
+      final tracked = existing ?? _SessionNotice(plan.intId);
+      tracked.intId = plan.intId;
+      tracked.noticeIds.add(n.id);
+      _bySession[sessionId] = tracked;
+      _sessionOfNotice[n.id] = sessionId;
+    } else {
+      _noticeIntId[n.id] = plan.intId;
+    }
+    await _os.show(
       id: plan.intId,
       title: plan.title,
       body: plan.body,
-      payload: n.sessionId == null ? null : 'session:${n.sessionId}',
-      notificationDetails: NotificationDetails(
-        macOS: DarwinNotificationDetails(
-          threadIdentifier: n.sessionId,
-          categoryIdentifier: category,
-          presentSound: sound,
-        ),
-        linux: LinuxNotificationDetails(suppressSound: !sound),
-        windows: const WindowsNotificationDetails(),
-      ),
+      payload: sessionId == null ? null : 'session:$sessionId',
+      threadId: sessionId,
+      category: osCategoryOf(n),
+      sound: _soundOn(),
     );
   }
 

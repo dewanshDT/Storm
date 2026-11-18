@@ -46,17 +46,6 @@ const _kPreviewLabels = {
   'storm': '"Storm" only',
 };
 
-const _kKindLabels = {
-  'needs_you': 'Needs you',
-  'delete_request': 'Delete requests',
-  'finished': 'Finished its turn',
-  'error': 'Hit an error',
-  'usage_limit': 'Usage limit',
-  'host_offline': 'Host offline',
-  'child_finished': 'Child finished',
-  'stopped_working': 'Stopped working',
-};
-
 /// Presets for `finished`/`host_offline`'s threshold, in seconds.
 const _kThresholdPresets = [0, 30, 120, 600];
 
@@ -422,7 +411,7 @@ class _EventRow extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           SettingsRow(
-            label: _kKindLabels[kind] ?? kind,
+            label: kNotificationKindLabels[kind] ?? kind,
             divider: onThreshold == null,
             trailing: StormToggle(
               key: Key('notify-event-$kind'),
@@ -644,8 +633,7 @@ class _ThisDeviceSection extends ConsumerStatefulWidget {
 }
 
 class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
-  bool? _permission;
-  bool _checkingPermission = true;
+  DesktopPermissionStatus? _permission;
 
   @override
   void initState() {
@@ -655,13 +643,19 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
 
   Future<void> _checkPermission() async {
     final notifier = ref.read(desktopNotifierProvider);
-    final granted = await notifier?.permissionGranted();
+    final status = await notifier?.permissionStatus();
     if (!mounted) return;
-    setState(() {
-      _permission = granted;
-      _checkingPermission = false;
-    });
+    setState(() => _permission = status);
   }
+
+  String get _permissionLabel => switch (_permission) {
+    null => 'Checking…',
+    DesktopPermissionStatus.unavailable => 'No notification service',
+    DesktopPermissionStatus.notAsked => 'Not asked yet',
+    DesktopPermissionStatus.denied => 'Blocked in system settings',
+    DesktopPermissionStatus.allowed ||
+    DesktopPermissionStatus.notApplicable => 'Allowed',
+  };
 
   String get _deliveryStatus => switch (defaultTargetPlatform) {
     TargetPlatform.macOS => 'While Storm runs',
@@ -686,13 +680,11 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
     ThisDeviceLocalPrefs local,
   ) {
     final t = context.tokens;
+    // Review item 12: never "Loading…" — [DeviceNotificationPrefsState]
+    // seeds [prefs] with this platform's own default the moment it is
+    // constructed, so the section is usable immediately and only quietly
+    // updates once the real row answers.
     final prefs = deviceState.prefs;
-    if (deviceState.loading || prefs == null) {
-      return Padding(
-        padding: EdgeInsets.only(bottom: t.sp * 3),
-        child: const SettingsMuted('Loading…'),
-      );
-    }
     return Padding(
       padding: EdgeInsets.only(bottom: t.sp * 1.5),
       child: Column(
@@ -711,17 +703,15 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
           SettingsRow(label: 'Delivery', sub: _deliveryStatus),
           SettingsRow(
             label: 'OS permission',
-            sub: _checkingPermission
-                ? 'Checking…'
-                : _permission == false
-                ? 'Blocked in system settings'
-                : 'Allowed',
-            trailing: _permission == false
+            sub: _permissionLabel,
+            trailing: _permission == DesktopPermissionStatus.denied
                 ? TextAction(
                     key: const Key('device-open-system-settings'),
                     label: 'Open system settings',
                     onTap: () => unawaited(
-                      DesktopNotifier.openSystemNotificationSettings(),
+                      ref
+                          .read(desktopNotifierProvider)
+                          ?.openSystemNotificationSettings(),
                     ),
                   )
                 : null,
@@ -741,22 +731,24 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
             ),
           ),
           SizedBox(height: t.sp * 1.5),
-          Text(
-            'Send to this device',
-            style: TextStyle(
-              fontFamily: StormTokens.sansFamily,
-              fontSize: t.uiSize,
-              color: t.text2,
-            ),
-          ),
-          SizedBox(height: t.sp * 0.75),
+          GroupLabel('Send to this device', top: t.sp),
           for (final kind in kDeviceNotificationClasses)
             SettingsRow(
               label: _kDeviceClassLabels[kind] ?? kind,
+              // The last class still on can't be turned off here (review
+              // item 7): `classes: []` means *every* class, so removing
+              // the only name left would turn every other class back on
+              // instead of leaving none — the opposite of this toggle's
+              // own meaning. The main switch above is the only way to
+              // turn everything off.
+              sub: prefs.classOn(kind) && _onClassCount(prefs) <= 1
+                  ? 'Use "Notifications on this device" to turn off the last one'
+                  : null,
               divider: kind != kDeviceNotificationClasses.last,
               trailing: StormToggle(
                 key: Key('device-class-$kind'),
                 value: prefs.classOn(kind),
+                enabled: !(prefs.classOn(kind) && _onClassCount(prefs) <= 1),
                 onChanged: (v) => _guard(
                   context,
                   () => deviceState.setClasses(_withClass(prefs, kind, v)),
@@ -790,7 +782,13 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
               label: 'Send a test notification',
               onPressed: () async {
                 try {
-                  await deviceState.sendTest();
+                  final n = await deviceState.sendTest();
+                  // Raises the OS notification itself, bypassing the
+                  // deliver hint and presence (review item 13): the
+                  // person is looking right at this page, so the normal
+                  // rule would otherwise show nothing or only a toast,
+                  // proving neither permission nor the OS path.
+                  unawaited(ref.read(desktopNotifierProvider)?.forceShow(n));
                   if (context.mounted) {
                     settingsToast(context, 'Sent — check this device.');
                   }
@@ -803,12 +801,18 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
             ),
           ),
           SizedBox(height: t.sp * 3),
-          Container(height: t.bw, color: t.border),
+          const SettingsDivider(),
           SizedBox(height: t.sp * 1.5),
         ],
       ),
     );
   }
+
+  /// How many of [kDeviceNotificationClasses] are currently on — `[]`
+  /// counts as every one of them.
+  int _onClassCount(DeviceNotificationPrefs prefs) => prefs.classes.isEmpty
+      ? kDeviceNotificationClasses.length
+      : kDeviceNotificationClasses.where(prefs.classOn).length;
 
   /// [prefs.classes] with [kind] added or removed. `[]` ("every class")
   /// is expanded to the full explicit list first — there is no way to

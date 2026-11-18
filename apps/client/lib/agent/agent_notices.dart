@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../router.dart';
+import '../state/app_state.dart' show settingsProvider;
 import '../ui/tokens.dart';
 import 'agent_events.dart';
 import 'agent_models.dart';
@@ -287,6 +288,16 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     // inbox has proven itself present; before that, `noticeOf` alone has
     // it (item 4 — otherwise both fire during the loading window).
     if (_kOverlapsClientKinds.contains(n.kind) && !_serverCovers) return;
+    // 161-4 review item 1: a server that computed a deliver hint means
+    // this device shows an in-app toast only for its *own*
+    // `"toast:<id>"` — `"os"` is the OS notifier's job, and `null` means
+    // the server already decided nobody needs telling. An older server
+    // (no `deliver` key at all) never computed one, so this keeps today's
+    // unconditional toast.
+    if (n.hasDeliverHint) {
+      final myDeviceId = ref.read(settingsProvider).value?.deviceId;
+      if (myDeviceId == null || n.deliver != 'toast:$myDeviceId') return;
+    }
     final isAgent = n.source == 'agent';
     final isTerminal = n.source == 'terminal';
     final toasted = await _loadServerToasted();

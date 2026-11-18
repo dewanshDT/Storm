@@ -2237,14 +2237,34 @@ pub(super) struct NotifierMemory {
     started_at: String,
 }
 
-/// One device's live state on `/v1/agent/events` (161-4). Never persisted:
-/// the stream itself is the source of truth, and a restart forgets it the
-/// same way it forgets which sessions are open on screen.
+/// One `/v1/agent/events` connection's live state (161-4), keyed by its own
+/// connection id rather than by device — two tabs, or an old connection
+/// overlapping its replacement during a reconnect, must never let one
+/// clear the other's presence or have the stronger state (background)
+/// lose to the weaker one. A device counts as active if *any* of its
+/// connections does. Never persisted: a restart forgets it the same way
+/// it forgets which sessions are open on screen.
 #[derive(Debug, Clone)]
 pub(super) struct Presence {
+    pub device_id: String,
     pub active: bool,
     pub open_session: Option<String>,
 }
+
+/// Caches [`AgentManager::deliver_hint_for`]'s answer per notice id,
+/// computed once at the first subscriber's fan-out and reused by every
+/// subsequent one (review item 4): computing it fresh per subscriber let
+/// a presence change land between two subscribers' scans and give the
+/// same notice two different verdicts — delivered twice, or never.
+/// Bounded FIFO: an entry this old has long since been read or
+/// cancelled, so losing it costs nothing.
+#[derive(Default)]
+pub(super) struct DeliverCache {
+    hints: HashMap<String, Option<String>>,
+    order: std::collections::VecDeque<String>,
+}
+
+const DELIVER_CACHE_CAP: usize = 4096;
 
 impl NotifierMemory {
     pub(super) fn new(started_at: String) -> Self {
@@ -2479,24 +2499,55 @@ impl AgentManager {
 
     // ---- Presence and the deliver hint (161-4) --------------------------
 
-    /// Records whether `device_id`'s `/v1/agent/events` connection is
-    /// active (visible and focused) or backgrounded, and which session (if
-    /// any) it has open — reported on connect and again on
-    /// `POST …/presence` whenever either changes.
-    pub fn set_presence(&self, device_id: &str, active: bool, open_session: Option<String>) {
+    /// Registers a brand new `/v1/agent/events` connection's presence,
+    /// keyed by `connection_id` (client-generated, unique per connection —
+    /// never per device, so two tabs or a reconnect's overlap each keep
+    /// their own entry). Always succeeds: connecting is how a connection
+    /// id starts existing.
+    pub fn set_presence(
+        &self,
+        connection_id: &str,
+        device_id: &str,
+        active: bool,
+        open_session: Option<String>,
+    ) {
         self.presence.lock().unwrap().insert(
-            device_id.to_string(),
+            connection_id.to_string(),
             Presence {
+                device_id: device_id.to_string(),
                 active,
                 open_session,
             },
         );
     }
 
-    /// Forgets a device's presence — called once its `/v1/agent/events`
-    /// connection ends, so a closed app is never mistaken for a quiet one.
-    pub fn clear_presence(&self, device_id: &str) {
-        self.presence.lock().unwrap().remove(device_id);
+    /// `POST …/presence`: updates an *existing* connection of the calling
+    /// device. `false` (404 to the caller) if that connection is not
+    /// live — it may have just disconnected, and a stale POST must never
+    /// resurrect a presence row for a connection that is really gone.
+    pub fn update_presence(
+        &self,
+        connection_id: &str,
+        device_id: &str,
+        active: bool,
+        open_session: Option<String>,
+    ) -> bool {
+        let mut presence = self.presence.lock().unwrap();
+        match presence.get_mut(connection_id) {
+            Some(p) if p.device_id == device_id => {
+                p.active = active;
+                p.open_session = open_session;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Forgets one connection's presence — called once it ends, so a
+    /// closed app is never mistaken for a quiet one. Never touches any
+    /// other connection, including another of the same device's.
+    pub fn clear_presence(&self, connection_id: &str) {
+        self.presence.lock().unwrap().remove(connection_id);
     }
 
     /// The architecture's delivery order, for one notice about
@@ -2507,26 +2558,53 @@ impl AgentManager {
     /// 2. Any other device active: `toast:<device_id>`, that device alone.
     /// 3. Otherwise: `os`, every background desktop.
     ///
-    /// With more than one device active and none showing the session, the
+    /// A device counts as active if *any* of its connections does. With
+    /// more than one device active and none showing the session, the
     /// lowest device id by sort order is picked — the matrix does not say
     /// which wins, and ties are rare enough that determinism matters more
     /// than the choice.
-    pub fn deliver_hint(&self, session_id: Option<&str>) -> Option<String> {
+    fn compute_deliver_hint(&self, session_id: Option<&str>) -> Option<String> {
         let presence = self.presence.lock().unwrap();
-        let mut active_devices: Vec<&String> = Vec::new();
-        for (device_id, p) in presence.iter() {
+        let mut active_devices: Vec<&str> = Vec::new();
+        for p in presence.values() {
             if !p.active {
                 continue;
             }
             if session_id.is_some() && p.open_session.as_deref() == session_id {
                 return None;
             }
-            active_devices.push(device_id);
+            active_devices.push(&p.device_id);
         }
         match active_devices.into_iter().min() {
             Some(device_id) => Some(format!("toast:{device_id}")),
             None => Some("os".to_string()),
         }
+    }
+
+    /// [`compute_deliver_hint`], computed once per `notice_id` and cached
+    /// for every later caller (review item 4) — see [`DeliverCache`].
+    pub fn deliver_hint_for(&self, notice_id: &str, session_id: Option<&str>) -> Option<String> {
+        let mut cache = self.deliver_cache.lock().unwrap();
+        if let Some(hint) = cache.hints.get(notice_id) {
+            return hint.clone();
+        }
+        let hint = self.compute_deliver_hint(session_id);
+        cache.hints.insert(notice_id.to_string(), hint.clone());
+        cache.order.push_back(notice_id.to_string());
+        if cache.order.len() > DELIVER_CACHE_CAP
+            && let Some(oldest) = cache.order.pop_front()
+        {
+            cache.hints.remove(&oldest);
+        }
+        hint
+    }
+
+    /// Bypasses [`DeliverCache`] — a test polling for presence to clear
+    /// must see it the moment it does, not whatever an earlier poll's
+    /// now-stale cache entry said.
+    #[cfg(test)]
+    pub fn deliver_hint_uncached(&self, session_id: Option<&str>) -> Option<String> {
+        self.compute_deliver_hint(session_id)
     }
 
     fn snap_of(&self, r: &SessionRecord) -> AgentResult<Snap> {

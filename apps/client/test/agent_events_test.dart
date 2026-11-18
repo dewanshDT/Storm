@@ -1,7 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -176,6 +176,107 @@ void main() {
       events.background();
       await settle();
       expect(events.state.value, AgentEventsState.closed);
+    });
+  });
+
+  group('desktop presence (decision 161, slice 161-4)', () {
+    late List<StreamController<AgentEvent>> opens;
+    late List<AgentPresence> presencesSent;
+    late List<Map<String, dynamic>> presencePosts;
+    late AgentEvents events;
+
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      opens = [];
+      presencesSent = [];
+      presencePosts = [];
+      events = AgentEvents(
+        (presence) {
+          presencesSent.add(presence);
+          final c = StreamController<AgentEvent>();
+          opens.add(c);
+          return c.stream;
+        },
+        retryMin: const Duration(milliseconds: 5),
+        apiFactory: () => AgentApi(
+          baseUrl: 'http://s',
+          token: 't',
+          client: MockClient((req) async {
+            if (req.url.path == '/v1/notifications/presence') {
+              presencePosts.add(jsonDecode(req.body) as Map<String, dynamic>);
+            }
+            return http.Response('', 204);
+          }),
+        ),
+      )..start(followLifecycle: false);
+    });
+
+    tearDown(() {
+      events.dispose();
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    Future<void> settle() => Future<void>.delayed(Duration.zero);
+
+    test(
+      'background() never drops the stream on desktop, and POSTs presence',
+      () async {
+        opens.last.add(AgentSnapshot('run_1', const []));
+        await settle();
+        expect(events.isOpen, isTrue);
+
+        events.background();
+        await settle();
+        expect(
+          events.isOpen,
+          isTrue,
+          reason: 'the stream itself never drops on desktop (amends 154 Q2)',
+        );
+        expect(opens, hasLength(1), reason: 'no reconnect happened');
+        expect(presencePosts, isNotEmpty);
+        expect(presencePosts.last['state'], 'background');
+      },
+    );
+
+    test('foreground() after background() POSTs active again', () async {
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      events.background();
+      await settle();
+      presencePosts.clear();
+      events.foreground();
+      await settle();
+      expect(presencePosts.last['state'], 'active');
+    });
+
+    test('review item 6: a presence change made while still connecting is '
+        'caught up the moment the connection reaches open', () async {
+      // Still connecting — no snapshot yet, so `isOpen` is false and
+      // `_syncPresence` cannot have POSTed anything yet.
+      events.background();
+      expect(
+        presencePosts,
+        isEmpty,
+        reason: 'no live connection exists to POST to yet',
+      );
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      expect(presencePosts, isNotEmpty);
+      expect(presencePosts.last['state'], 'background');
+    });
+
+    test('review item 3: every connect carries its own connection_id, '
+        'including a reconnect', () async {
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      final first = presencesSent.last.connectionId;
+      expect(first, isNotNull);
+      expect(first, isNotEmpty);
+
+      await opens.last.close();
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(opens, hasLength(2));
+      expect(presencesSent.last.connectionId, isNot(first));
     });
   });
 

@@ -24,6 +24,22 @@ const _kDefaultOffKinds = {'child_finished', 'stopped_working'};
 
 bool defaultEventOn(String kind) => !_kDefaultOffKinds.contains(kind);
 
+/// Human labels for [kNotificationEventKinds] — 161-3's Settings list,
+/// and reused everywhere else a kind needs a human word instead of its
+/// wire code (161-4's OS notification previews, review item 9).
+const kNotificationKindLabels = {
+  'needs_you': 'Needs you',
+  'delete_request': 'Delete requests',
+  'finished': 'Finished its turn',
+  'error': 'Hit an error',
+  'usage_limit': 'Usage limit',
+  'host_offline': 'Host offline',
+  'child_finished': 'Child finished',
+  'stopped_working': 'Stopped working',
+};
+
+String noticeKindLabel(String kind) => kNotificationKindLabels[kind] ?? kind;
+
 /// One account notice in the inbox (`GET /v1/notifications`, the
 /// `notification` stream event). Named `AgentNotification` to avoid
 /// clashing with Flutter's own `Notification`.
@@ -48,6 +64,7 @@ class AgentNotification {
     this.silentReason,
     this.readAt,
     this.cancelled = false,
+    this.hasDeliverHint = false,
     this.deliver,
   });
 
@@ -79,10 +96,20 @@ class AgentNotification {
   final String? readAt;
   final bool cancelled;
 
-  /// 161-4, live frames only: `"toast:<device_id>"` or `"os"`, or `null`
-  /// when a device already showing this session covers it. Never present
-  /// on `GET /v1/notifications`'s backfill — only a *live* stream frame
-  /// carries delivery, so this is never persisted or read back.
+  /// Whether the live frame carried a `deliver` key *at all* (161-4
+  /// review item 1): `false` means an older server, which never computed
+  /// delivery — 161-3's own unconditional toast decides, unchanged.
+  /// `true` with [deliver] `null` means this 161-4 server deliberately
+  /// delivered nowhere (an active device already has this session open).
+  /// Never present on `GET /v1/notifications`'s backfill — only a *live*
+  /// stream frame carries delivery, so this is never persisted or read
+  /// back, and [hasDeliverHint] is always `false` there.
+  final bool hasDeliverHint;
+
+  /// `"toast:<device_id>"` (that one device shows an in-app toast; no
+  /// other device does anything) or `"os"` (every backgrounded desktop
+  /// raises an OS notification; nobody toasts) — only meaningful when
+  /// [hasDeliverHint] is `true`.
   final String? deliver;
 
   bool get unread => readAt == null;
@@ -109,6 +136,7 @@ class AgentNotification {
           silentReason: silentReason,
           readAt: at,
           cancelled: cancelled,
+          hasDeliverHint: hasDeliverHint,
           deliver: deliver,
         );
 
@@ -133,6 +161,7 @@ class AgentNotification {
         silentReason: j['silent_reason'] as String?,
         readAt: j['read_at'] as String?,
         cancelled: j['cancelled'] as bool? ?? false,
+        hasDeliverHint: j.containsKey('deliver'),
         deliver: j['deliver'] as String?,
       );
 }

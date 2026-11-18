@@ -268,22 +268,39 @@ pub async fn list_device_notification_rows(
 /// `POST /v1/notifications/presence`: in-memory only (161-4's deliver
 /// hint), never persisted — a restart simply forgets who was active, same
 /// as the session list's own live state.
+/// `POST /v1/notifications/presence`: updates the *named connection*'s
+/// presence — never creates one (that only ever happens on connect) — so
+/// a device whose stream has already dropped gets a 404, not a ghost
+/// entry that outlives it.
 pub fn set_presence(
     state: &Shared,
     actor: &Actor,
     device: Option<&str>,
+    connection_id: &str,
     raw_state: &str,
     open_session: Option<&str>,
 ) -> ApiResult<()> {
     crews_owner(actor)?;
     let device = calling_device(device)?;
+    if connection_id.is_empty() {
+        return Err(bad_request("connection_id must not be empty"));
+    }
     let active = match raw_state {
         "active" => true,
         "background" => false,
         _ => return Err(bad_request("state must be \"active\" or \"background\"")),
     };
-    state
-        .agent
-        .set_presence(device, active, open_session.map(str::to_string));
+    let updated = state.agent.update_presence(
+        connection_id,
+        device,
+        active,
+        open_session.map(str::to_string),
+    );
+    if !updated {
+        return Err(ApiError(
+            axum::http::StatusCode::NOT_FOUND,
+            "no such live connection".into(),
+        ));
+    }
     Ok(())
 }

@@ -1283,6 +1283,24 @@ async fn open_at(app: &Router, path: &str, bearer: &str) -> Reader {
     Reader::new(response.into_body())
 }
 
+/// A device's own id in presence tests needs a unique connection id per
+/// connection (review item 3): two tabs, or a reconnect's overlap, are
+/// two different connections of the same device, and must stay that way.
+async fn open_presence(
+    app: &Router,
+    bearer: &str,
+    connection_id: &str,
+    active: bool,
+    open_session: Option<&str>,
+) -> Reader {
+    let presence = if active { "active" } else { "background" };
+    let mut path = format!("/v1/agent/events?presence={presence}&connection_id={connection_id}");
+    if let Some(id) = open_session {
+        path.push_str(&format!("&open_session={id}"));
+    }
+    open_at(app, &path, bearer).await
+}
+
 #[tokio::test]
 async fn deliver_hint_is_toast_for_the_one_active_device() {
     let dir = tempdir::TempDir::new("storm-161-4-deliver-toast").unwrap();
@@ -1291,9 +1309,9 @@ async fn deliver_hint_is_toast_for_the_one_active_device() {
     let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
     let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
 
-    let mut a = open_at(&f.app, "/v1/agent/events?presence=active", &bearer_a).await;
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
     a.expect("snapshot").await;
-    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    let mut b = open_presence(&f.app, &bearer_b, "conn-b", false, None).await;
     b.expect("snapshot").await;
 
     let _ = f
@@ -1319,9 +1337,9 @@ async fn deliver_hint_is_os_when_every_device_is_backgrounded() {
     let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
     let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
 
-    let mut a = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_a).await;
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", false, None).await;
     a.expect("snapshot").await;
-    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    let mut b = open_presence(&f.app, &bearer_b, "conn-b", false, None).await;
     b.expect("snapshot").await;
 
     let _ = f
@@ -1337,21 +1355,53 @@ async fn deliver_hint_is_os_when_every_device_is_backgrounded() {
 }
 
 #[tokio::test]
-async fn deliver_hint_is_absent_when_an_active_device_has_that_session_open() {
+async fn deliver_hint_is_null_when_an_active_device_has_that_session_open() {
     let dir = tempdir::TempDir::new("storm-161-4-deliver-open").unwrap();
     let f = fixture(dir.path()).await;
     let id = f.launch();
     let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
     let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
 
-    let mut a = open_at(
-        &f.app,
-        &format!("/v1/agent/events?presence=active&open_session={id}"),
-        &bearer_a,
-    )
-    .await;
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, Some(&id)).await;
     a.expect("snapshot").await;
-    let mut b = open_at(&f.app, "/v1/agent/events?presence=background", &bearer_b).await;
+    let mut b = open_presence(&f.app, &bearer_b, "conn-b", false, None).await;
+    b.expect("snapshot").await;
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+
+    // The key is always present — even here — so the client can tell a
+    // 161-4 server's deliberate "nothing" from an older server that never
+    // sent the field at all.
+    let event_a = a.expect("notification").await;
+    assert!(
+        event_a.data.get("deliver").is_some_and(|v| v.is_null()),
+        "the device already showing this session gets a null hint, not a missing key: {:?}",
+        event_a.data
+    );
+    let event_b = b.expect("notification").await;
+    assert!(
+        event_b.data.get("deliver").is_some_and(|v| v.is_null()),
+        "nobody else is told to alert either: {:?}",
+        event_b.data
+    );
+}
+
+#[tokio::test]
+async fn deliver_hint_with_two_active_devices_picks_the_lower_id_deterministically() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-two-active").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+    let expected = format!("toast:{}", device_a.min(device_b));
+
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+    a.expect("snapshot").await;
+    let mut b = open_presence(&f.app, &bearer_b, "conn-b", true, None).await;
     b.expect("snapshot").await;
 
     let _ = f
@@ -1361,16 +1411,61 @@ async fn deliver_hint_is_absent_when_an_active_device_has_that_session_open() {
         .unwrap();
 
     let event_a = a.expect("notification").await;
-    assert!(
-        event_a.data.get("deliver").is_none(),
-        "the device already showing this session gets no hint: {:?}",
-        event_a.data
-    );
+    assert_eq!(event_a.data["deliver"], expected);
     let event_b = b.expect("notification").await;
-    assert!(
-        event_b.data.get("deliver").is_none(),
-        "nobody else is told to alert either: {:?}",
-        event_b.data
+    assert_eq!(event_b.data["deliver"], expected);
+}
+
+/// Review item 3: a device active on *any* one of its connections counts
+/// as active, even while another of its own connections is backgrounded.
+#[tokio::test]
+async fn a_device_is_active_if_any_of_its_connections_is() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-multi-conn").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut tab1 = open_presence(&f.app, &bearer_a, "conn-1", false, None).await;
+    tab1.expect("snapshot").await;
+    let mut tab2 = open_presence(&f.app, &bearer_a, "conn-2", true, None).await;
+    tab2.expect("snapshot").await;
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+
+    let event = tab1.expect("notification").await;
+    assert_eq!(event.data["deliver"], format!("toast:{device_a}"));
+}
+
+/// Review item 3: an old connection's drop must never clear a newer
+/// connection's presence (the overlap during a reconnect).
+#[tokio::test]
+async fn an_overlapping_reconnect_does_not_clear_the_newer_connection() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-overlap").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut old = open_presence(&f.app, &bearer_a, "conn-old", true, None).await;
+    old.expect("snapshot").await;
+    let mut fresh = open_presence(&f.app, &bearer_a, "conn-new", true, None).await;
+    fresh.expect("snapshot").await;
+
+    drop(old); // the stale connection from before a reconnect, ending late
+
+    let _ = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hi", "k"))
+        .unwrap();
+    let event = fresh.expect("notification").await;
+    assert_eq!(
+        event.data["deliver"],
+        format!("toast:{device_a}"),
+        "conn-new's presence must survive conn-old's drop"
     );
 }
 
@@ -1378,22 +1473,182 @@ async fn deliver_hint_is_absent_when_an_active_device_has_that_session_open() {
 async fn presence_is_forgotten_when_the_stream_closes() {
     let dir = tempdir::TempDir::new("storm-161-4-deliver-forget").unwrap();
     let f = fixture(dir.path()).await;
-    let id = f.launch();
-    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
 
     {
-        let mut a = open_at(&f.app, "/v1/agent/events?presence=active", &bearer_a).await;
+        let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
         a.expect("snapshot").await;
     } // dropped: the SSE body stream (and with it `feed`) ends here.
 
-    // `feed`'s drop runs on its own task; give it a beat to clear presence.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(f.state.agent.deliver_hint(None), Some("os".to_string()));
+    // `feed`'s drop runs on its own task (dropping `rx` resolves its
+    // `tx.closed()` branch almost at once); give it a beat to run
+    // `PresenceGuard::drop`.
+    for _ in 0..50 {
+        if f.state.agent.deliver_hint_uncached(None) == Some("os".to_string()) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("presence was never cleared after the stream closed");
+}
+
+#[tokio::test]
+async fn post_presence_updates_an_existing_connection() {
+    let dir = tempdir::TempDir::new("storm-161-4-presence-post").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+    let (_device_b, bearer_b) = second_device(&f.state, &f.owner, "b").await;
+
+    // Connects active, then goes background by POST — never by reconnecting.
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+    a.expect("snapshot").await;
+    let mut b = open_presence(&f.app, &bearer_b, "conn-b", false, None).await;
+    b.expect("snapshot").await;
+
+    let response = f
+        .ask(post_json_with_auth(
+            "/v1/notifications/presence",
+            serde_json::json!({"connection_id": "conn-a", "state": "background"}),
+            &bearer_a,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
 
     let _ = f
         .state
         .agent
         .agent_notify(agent_notify(&id, "hi", "k"))
         .unwrap();
+    let event_a = a.expect("notification").await;
+    assert_eq!(
+        event_a.data["deliver"], "os",
+        "conn-a is background now, so nobody is active: {:?}",
+        event_a.data
+    );
     let _ = device_a;
+    let _ = b;
+}
+
+#[tokio::test]
+async fn post_presence_404s_for_a_connection_that_never_connected() {
+    let dir = tempdir::TempDir::new("storm-161-4-presence-post-404").unwrap();
+    let f = fixture(dir.path()).await;
+    let response = f
+        .ask(post_json_with_auth(
+            "/v1/notifications/presence",
+            serde_json::json!({"connection_id": "never-opened", "state": "active"}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn post_presence_404s_once_the_connection_has_closed() {
+    let dir = tempdir::TempDir::new("storm-161-4-presence-post-closed").unwrap();
+    let f = fixture(dir.path()).await;
+    let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    {
+        let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+        a.expect("snapshot").await;
+    } // dropped: conn-a's presence is cleared once `feed` notices.
+
+    for _ in 0..50 {
+        if f.state.agent.deliver_hint_uncached(None) == Some("os".to_string()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let response = f
+        .ask(post_json_with_auth(
+            "/v1/notifications/presence",
+            serde_json::json!({"connection_id": "conn-a", "state": "active"}),
+            &bearer_a,
+        ))
+        .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::NOT_FOUND,
+        "a stale POST must never resurrect a dead connection's presence"
+    );
+}
+
+#[tokio::test]
+async fn presence_requires_an_actual_session_actor() {
+    let dir = tempdir::TempDir::new("storm-161-4-presence-mcp-refused").unwrap();
+    let f = fixture(dir.path()).await;
+    // No credential at all is refused before `crews_owner` is even
+    // reached; `crews_owner` itself (exercised by every other
+    // `/v1/notifications/*` route already) refuses a key or an agent
+    // actor the same way.
+    let request = axum::http::Request::builder()
+        .method("POST")
+        .uri("/v1/notifications/presence")
+        .header("content-type", "application/json")
+        .body(axum::body::Body::from(
+            serde_json::json!({"connection_id": "conn-x", "state": "active"}).to_string(),
+        ))
+        .unwrap();
+    let response = f.ask(request).await;
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// Review item 16: a key or an agent actor is refused by `crews_owner`
+/// on every `/v1/notifications/*` route, device prefs and presence
+/// included — called directly here since crafting an `stk_`/agent
+/// bearer the real middleware accepts is this suite's job elsewhere,
+/// not this one's.
+#[tokio::test]
+async fn device_prefs_and_presence_ops_refuse_a_key_or_agent_actor() {
+    let dir = tempdir::TempDir::new("storm-161-4-device-presence-actor-refused").unwrap();
+    let f = fixture(dir.path()).await;
+    let bad_actors = [
+        Actor::Key {
+            key_id: "key_1".into(),
+            user_id: f.owner.clone(),
+        },
+        Actor::Agent {
+            session_id: "ags_1".into(),
+            host_id: HOST.into(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        },
+    ];
+    for actor in bad_actors {
+        assert!(
+            crate::ops::get_device_prefs(&f.state, &actor, Some("dev_x"), None)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::ops::list_device_notification_rows(&f.state, &actor)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::ops::set_presence(&f.state, &actor, Some("dev_x"), "conn-x", "active", None)
+                .is_err()
+        );
+    }
+}
+
+/// Review item 16: a notice with no session at all still gets a deliver
+/// hint through the live frame (the `os`/`toast` branches never assumed
+/// one; only the "showing that session" skip does).
+#[tokio::test]
+async fn a_sessionless_notice_still_carries_a_deliver_hint() {
+    let dir = tempdir::TempDir::new("storm-161-4-deliver-no-session").unwrap();
+    let f = fixture(dir.path()).await;
+    let (_device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", false, None).await;
+    a.expect("snapshot").await;
+
+    let n = f.state.agent.send_test_notification().unwrap();
+    let event = a.expect("notification").await;
+    assert_eq!(event.data["id"], n.id);
+    assert_eq!(event.data["deliver"], "os");
 }

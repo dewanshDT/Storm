@@ -2999,6 +2999,9 @@ async fn notification_devices_list(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PresenceBody {
+    /// The same id this device's own `/v1/agent/events` connection sent
+    /// as `?connection_id=`.
+    connection_id: String,
     state: String,
     #[serde(default)]
     open_session: Option<String>,
@@ -3014,6 +3017,7 @@ async fn notifications_presence(
         &state,
         &actor,
         device_of(&auth),
+        &body.connection_id,
         &body.state,
         body.open_session.as_deref(),
     )?;

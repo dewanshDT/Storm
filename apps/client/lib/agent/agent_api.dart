@@ -808,12 +808,20 @@ class AgentApi {
   /// `background`; [openSessionId] is the session this device currently
   /// has open, if any — best-effort, never retried (the next connect or
   /// change carries the current truth anyway).
-  Future<void> setPresence(String state, {String? openSessionId}) async {
+  Future<void> setPresence(
+    String connectionId,
+    String state, {
+    String? openSessionId,
+  }) async {
     _decode(
       await _client.post(
         _uri('/v1/notifications/presence'),
         headers: _headers,
-        body: jsonEncode({'state': state, 'open_session': ?openSessionId}),
+        body: jsonEncode({
+          'connection_id': connectionId,
+          'state': state,
+          'open_session': ?openSessionId,
+        }),
       ),
     );
   }

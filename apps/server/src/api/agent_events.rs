@@ -29,28 +29,44 @@ use super::{ApiError, SessionAuth, Shared, wants_websocket};
 use crate::auth::authz::Actor;
 use crate::ops::SessionView;
 
-/// `?presence=active|background[&open_session=<id>]` on connect (161-4).
-/// Absent entirely — every client before this slice, and phones and web
-/// after it — is `active`: they close the stream the moment they are not,
-/// so a connection at all has always meant "visible".
+/// `?presence=active|background[&open_session=<id>]&connection_id=<id>`
+/// on connect (161-4). Absent `presence` entirely — every client before
+/// this slice, and phones and web after it — is `active`: they close the
+/// stream the moment they are not, so a connection at all has always
+/// meant "visible". `connection_id` is the client's own, so `POST
+/// …/presence` can name *this* connection rather than overwriting
+/// whichever of a device's connections happened to answer last.
 #[derive(Debug, Default, Deserialize)]
 struct PresenceQuery {
     presence: Option<String>,
     open_session: Option<String>,
+    connection_id: Option<String>,
 }
 
-/// Clears this device's presence when its connection ends — the SSE task
+/// At most this many bytes of a client-given connection id — generous for
+/// a UUID, small enough that nothing abuses the presence map with it (an
+/// entry here only ever exists for a connection this handler itself
+/// opened, so the real bound is "how many sockets are actually open";
+/// this just keeps one of them from being a silly size).
+const MAX_CONNECTION_ID_LEN: usize = 128;
+
+fn clamp_connection_id(id: Option<String>) -> Option<String> {
+    id.filter(|s| !s.is_empty() && s.len() <= MAX_CONNECTION_ID_LEN)
+}
+
+/// Clears this connection's presence when it ends — the SSE task
 /// returning naturally, or the WebSocket branch's `select!` dropping this
 /// future when the socket closes first. Without it, a desktop that quit
-/// mid-session would be "active" forever.
+/// mid-session would be "active" forever. Keyed by connection, never by
+/// device: an old connection's drop must never clear a newer one's.
 struct PresenceGuard {
     state: Shared,
-    device_id: Option<String>,
+    connection_id: Option<String>,
 }
 
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
-        if let Some(id) = &self.device_id {
+        if let Some(id) = &self.connection_id {
             self.state.agent.clear_presence(id);
         }
     }
@@ -125,9 +141,10 @@ pub(super) async fn agent_events(
         return ApiError(StatusCode::FORBIDDEN, "owner_only".into()).into_response();
     }
     // 161-4: presence for the deliver hint. A device with no `SessionAuth`
-    // (a key, or a test harness that bypassed the auth middleware) is
-    // never registered and never cleared — `deliver_hint` simply never
-    // sees it, same as before this slice existed.
+    // (a key, or a test harness that bypassed the auth middleware), or no
+    // `connection_id` (an old client), is never registered and never
+    // cleared — `deliver_hint` simply never sees it, same as before this
+    // slice existed.
     let device_id = parts
         .extensions
         .get::<SessionAuth>()
@@ -135,15 +152,23 @@ pub(super) async fn agent_events(
     let presence_query = Query::<PresenceQuery>::try_from_uri(&parts.uri)
         .map(|q| q.0)
         .unwrap_or_default();
-    if let Some(id) = &device_id {
+    let connection_id = clamp_connection_id(presence_query.connection_id.clone());
+    if let (Some(device_id), Some(connection_id)) = (&device_id, &connection_id) {
         let active = presence_query.presence.as_deref() != Some("background");
-        state
-            .agent
-            .set_presence(id, active, presence_query.open_session.clone());
+        state.agent.set_presence(
+            connection_id,
+            device_id,
+            active,
+            presence_query.open_session.clone(),
+        );
     }
     let presence_guard = PresenceGuard {
         state: state.clone(),
-        device_id,
+        connection_id: if device_id.is_some() {
+            connection_id
+        } else {
+            None
+        },
     };
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
@@ -428,12 +453,17 @@ impl Subscriber {
                 // 161-4: the deliver hint is this stream's business, not
                 // the inbox's — `GET /v1/notifications` and the test
                 // helpers above never see it, only a *live* frame does.
+                // The key itself is always present (even as `null`): the
+                // client tells a 161-4 server's deliberate "nothing" from
+                // an older server that never had this field at all by
+                // whether the key exists, not by its value.
                 let mut data = serde_json::to_value(&n).unwrap_or_default();
-                if let (Some(hint), Some(obj)) = (
-                    state.agent.deliver_hint(n.session_id.as_deref()),
-                    data.as_object_mut(),
-                ) {
-                    obj.insert("deliver".into(), serde_json::Value::String(hint));
+                if let Some(obj) = data.as_object_mut() {
+                    let hint = state.agent.deliver_hint_for(&n.id, n.session_id.as_deref());
+                    obj.insert(
+                        "deliver".into(),
+                        hint.map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
                 }
                 frames.push(Frame::event("notification", data.to_string()));
             }
