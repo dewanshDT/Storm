@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -345,11 +347,19 @@ void main() {
   group('More', () {
     testWidgets('switching agents never adds or removes a row', (t) async {
       final agents = FakeAgentServer(hosts: [c0()]);
-      // Decision 161: a server that answers prefs keeps the "notify" row
+      // Decision 161: a server that answers the whole inbox backfill
+      // (list, prefs, mutes — the shared NotificationsState the chip now
+      // reads from, item N9 of the second review) keeps the "notify" row
       // present throughout, which is what this test's invariant is about.
-      agents.extra = (req) async => req.url.path == '/v1/notifications/prefs'
-          ? http.Response('{}', 200)
-          : null;
+      agents.extra = (req) async => switch (req.url.path) {
+        '/v1/notifications' => http.Response(
+          jsonEncode({'items': [], 'cursor': 0}),
+          200,
+        ),
+        '/v1/notifications/prefs' => http.Response('{}', 200),
+        '/v1/notifications/mutes' => http.Response('[]', 200),
+        _ => null,
+      };
       final c = await launcher(t, agents);
       await tapKey(t, 'launcher-more');
       const all = {

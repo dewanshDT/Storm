@@ -1752,7 +1752,7 @@ class _AboutRow extends StatelessWidget {
 /// Decision 161-2's "Notifies you" toggle and this session's or its agent's
 /// mute, inline in About. Hides entirely on a server before decision 161.
 class _NotifySection extends ConsumerStatefulWidget {
-  const _NotifySection({required this.session});
+  const _NotifySection({super.key, required this.session});
 
   final AgentSession session;
 
@@ -1761,13 +1761,22 @@ class _NotifySection extends ConsumerStatefulWidget {
 }
 
 class _NotifySectionState extends ConsumerState<_NotifySection> {
-  /// Set the moment the toggle is touched, cleared once the request lands
-  /// either way — the live session push that follows a success also
-  /// carries the new value, but this is what makes the toggle move at
-  /// once rather than waiting on that round trip. Reverted (not merely
-  /// cleared) on failure, so the toggle never shows a value the server
-  /// did not actually accept.
+  /// Set the moment the toggle is touched, so it moves at once rather than
+  /// waiting on the round trip; always cleared once the request lands,
+  /// success or failure (item N2 of the second review) — a success's own
+  /// live push will have (or will shortly have) [AgentSession.notify]
+  /// already carrying the new value, and a failure's [AgentSession.notify]
+  /// is already the right (unchanged) value to fall back to, so clearing
+  /// rather than guessing `!v` is both simpler and correct. Left set
+  /// indefinitely, it would also shadow a *later* push from another
+  /// device.
   bool? _optimisticNotify;
+
+  /// Which session this override belongs to — a stale `setState` arriving
+  /// after the section has moved on to a different session (unlikely, but
+  /// this widget is not itself keyed by session id by its parent) must
+  /// never touch that other session's toggle.
+  String? _optimisticFor;
 
   Future<void> _guarded(Future<void> Function() action) async {
     try {
@@ -1782,20 +1791,31 @@ class _NotifySectionState extends ConsumerState<_NotifySection> {
   }
 
   Future<void> _setNotify(bool v) async {
-    setState(() => _optimisticNotify = v);
+    final id = widget.session.id;
+    setState(() {
+      _optimisticNotify = v;
+      _optimisticFor = id;
+    });
     final api = agentApi(ref);
-    if (api == null) return;
+    if (api == null) {
+      if (mounted && _optimisticFor == id) {
+        setState(() => _optimisticNotify = null);
+      }
+      return;
+    }
     try {
-      await api.setSessionNotify(widget.session.id, v);
+      await api.setSessionNotify(id, v);
     } catch (e) {
       if (mounted) {
-        setState(() => _optimisticNotify = !v);
         ScaffoldMessenger.of(
           context,
         ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
       }
     } finally {
       api.dispose();
+      if (mounted && _optimisticFor == id) {
+        setState(() => _optimisticNotify = null);
+      }
     }
   }
 
@@ -1814,7 +1834,9 @@ class _NotifySectionState extends ConsumerState<_NotifySection> {
         final providerMute = state.mutes
             .where((m) => m.scope == 'provider' && m.target == session.provider)
             .firstOrNull;
-        final notify = _optimisticNotify ?? session.notify;
+        final notify =
+            (_optimisticFor == session.id ? _optimisticNotify : null) ??
+            session.notify;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1964,7 +1986,10 @@ class AboutSections extends ConsumerWidget {
               ),
             ),
           ),
-        _NotifySection(session: session),
+        _NotifySection(
+          key: ValueKey('notify-section-${session.id}'),
+          session: session,
+        ),
         PluginProblem(session: session),
       ],
     );

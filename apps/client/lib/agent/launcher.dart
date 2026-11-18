@@ -20,6 +20,8 @@ import 'agent_widgets.dart';
 import 'claude_login_api.dart';
 import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
+import 'notifications_state.dart'
+    show notificationsStateProvider, NotificationsState;
 import 'spawn_models.dart' show kHostTooOldToSpawn, kSpawnProviders;
 
 part 'launcher_parts.dart';
@@ -114,6 +116,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   /// toggle the server has nothing to do with.
   bool _notifySupported = true;
 
+  /// The shared inbox state (161-3's second review, item N9): read from it
+  /// rather than making a one-off request of its own, so the chip reflects
+  /// whatever it already knows instead of flashing on then off while a
+  /// redundant request resolves.
+  NotificationsState? _notifyState;
+
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
@@ -149,6 +157,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
 
   @override
   void dispose() {
+    _notifyState?.removeListener(_onNotifyStateChanged);
     _model.dispose();
     super.dispose();
   }
@@ -171,25 +180,27 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     _chosen = p.provider;
     _preselectHost();
     _loadDefault();
-    _loadNotifyDefault();
+    _syncNotifyState();
   }
 
-  /// Decision 161-2: the chip's unchosen default, once per open.
-  Future<void> _loadNotifyDefault() async {
-    final api = agentApi(ref);
-    if (api == null) return;
-    try {
-      final prefs = await api.notificationPrefs();
-      if (!mounted) return;
-      setState(() => _agentDefaultOn = prefs.agentDefaultOn);
-    } catch (e) {
-      if (mounted && e is AgentRefusal && e.statusCode == 404) {
-        setState(() => _notifySupported = false);
-      }
-      // Any other failure keeps the chip's built-in default.
-    } finally {
-      api.dispose();
-    }
+  /// Decision 161-2's chip default, from the shared inbox state rather
+  /// than a request of its own (item N9 of the second 161-3 review).
+  void _syncNotifyState() {
+    final state = ref.read(notificationsStateProvider);
+    if (identical(state, _notifyState)) return;
+    _notifyState?.removeListener(_onNotifyStateChanged);
+    _notifyState = state;
+    state?.addListener(_onNotifyStateChanged);
+    _onNotifyStateChanged();
+  }
+
+  void _onNotifyStateChanged() {
+    if (!mounted) return;
+    final state = _notifyState;
+    setState(() {
+      _notifySupported = state == null || !state.unsupported;
+      _agentDefaultOn = state?.prefs?.agentDefaultOn ?? _agentDefaultOn;
+    });
   }
 
   /// The session's own host when running one again, else the one this

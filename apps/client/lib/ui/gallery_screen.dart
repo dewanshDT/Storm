@@ -372,6 +372,38 @@ class _Column extends StatelessWidget {
                     onTap: () {},
                     child: Text('A read row', style: TextStyle(color: t.text)),
                   ),
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'From a session (an agent)',
+                          style: TextStyle(
+                            color: t.text2,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          'With a source line and a held reason',
+                          style: TextStyle(color: t.text),
+                        ),
+                        Text(
+                          'Held: quiet hours',
+                          style: TextStyle(color: t.text3),
+                        ),
+                      ],
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: null,
+                    child: Text(
+                      'A disabled row (no onTap)',
+                      style: TextStyle(color: t.text),
+                    ),
+                  ),
                 ],
               ),
             ),

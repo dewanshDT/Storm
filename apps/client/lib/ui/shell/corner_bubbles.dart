@@ -320,16 +320,14 @@ class PlacePicker extends ConsumerWidget {
                   child: Icon(LucideIcons.bell, size: t.uiSize, color: t.text2),
                 ),
                 label: 'Notifications',
+                // The shared count badge (161-3's review, item 9), not a
+                // one-off `Text` doing the same job as `CountBadge`.
                 meta: unread == 0
                     ? null
-                    : Text(
-                        unread > 99 ? '99+' : '$unread',
+                    : CountBadge(
                         key: const Key('place-notifications-meta'),
-                        style: TextStyle(
-                          fontFamily: StormTokens.monoFamily,
-                          fontSize: t.labelSize,
-                          color: t.danger,
-                        ),
+                        count: unread,
+                        color: t.danger,
                       ),
                 onTap: onNotifications,
               );

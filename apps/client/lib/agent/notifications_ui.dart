@@ -101,7 +101,43 @@ class NotificationsPanel extends ConsumerWidget {
                   ],
                 ),
               ),
-              if (items.isEmpty)
+              if (state.loading)
+                Padding(
+                  padding: EdgeInsets.symmetric(vertical: t.sp * 2.5),
+                  child: const Center(
+                    child: SizedBox.square(
+                      dimension: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
+                  ),
+                )
+              else if (state.backfillFailed)
+                Padding(
+                  padding: EdgeInsets.symmetric(
+                    horizontal: t.sp * 0.75,
+                    vertical: t.sp * 1.5,
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        "Couldn't load notifications.",
+                        style: TextStyle(
+                          fontFamily: StormTokens.sansFamily,
+                          fontSize: t.codeSize,
+                          color: t.text3,
+                        ),
+                      ),
+                      SizedBox(height: t.sp * 0.75),
+                      TextAction(
+                        key: const Key('notify-retry'),
+                        label: 'Retry',
+                        onTap: () => _guard(context, state.refresh),
+                      ),
+                    ],
+                  ),
+                )
+              else if (items.isEmpty)
                 Padding(
                   padding: EdgeInsets.symmetric(
                     horizontal: t.sp * 0.75,
@@ -173,7 +209,12 @@ class _InboxRow extends ConsumerWidget {
     onOpened?.call();
     final n = notification;
     final router = GoRouter.maybeOf(context);
-    unawaited(ref.read(notificationsStateProvider)?.markRead([n.id]));
+    unawaited(
+      _guard(
+        context,
+        () async => ref.read(notificationsStateProvider)?.markRead([n.id]),
+      ),
+    );
     if (n.sessionId != null) {
       router?.go(Routes.agentSession(n.sessionId!));
     } else if (n.noteVaultId != null && n.noteId != null) {

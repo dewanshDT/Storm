@@ -153,6 +153,24 @@ void main() {
       expect(state.items.map((n) => n.id), ['n2']);
     });
 
+    test('two devices converge: a read broadcast reaches both (dedupe across '
+        'devices)', () {
+      final a = NotificationsState(fakeApi, null);
+      final b = NotificationsState(fakeApi, null);
+      final pushed = notif('n1');
+      a.applyEvent(AgentNotificationPushed(pushed));
+      b.applyEvent(AgentNotificationPushed(pushed));
+      expect(a.unreadCount, 1);
+      expect(b.unreadCount, 1);
+      // The server broadcasts one read to every connected device; each
+      // device's own copy converges on the same read state.
+      final read = AgentNotificationsRead(['n1']);
+      a.applyEvent(read);
+      b.applyEvent(read);
+      expect(a.items.single.unread, isFalse);
+      expect(b.items.single.unread, isFalse);
+    });
+
     test('a snapshot (a fresh or resumed connection) re-backfills', () async {
       var gets = 0;
       AgentApi api() => AgentApi(
@@ -186,6 +204,109 @@ void main() {
       events.dispose();
       await c.close();
     });
+
+    Map<String, dynamic> notifJson(String id) => {
+      'id': id,
+      'seq': 1,
+      'created': DateTime.now().toUtc().toIso8601String(),
+      'source': 'storm',
+      'kind': 'needs_you',
+      'title': 't',
+      'urgency': 'high',
+    };
+
+    test('a row missing from a later backfill is dropped, not merged (N1, '
+        'second review, blocker)', () async {
+      var call = 0;
+      AgentApi api() => AgentApi(
+        baseUrl: 'http://x',
+        token: 't',
+        client: MockClient((req) async {
+          if (req.url.path == '/v1/notifications') {
+            call++;
+            final items = call == 1
+                ? [notifJson('n1'), notifJson('n2')]
+                : [notifJson('n2')];
+            return http.Response(
+              jsonEncode({'items': items, 'cursor': 2}),
+              200,
+            );
+          }
+          if (req.url.path == '/v1/notifications/prefs') {
+            return http.Response(
+              jsonEncode(FakeNotifications._defaults()),
+              200,
+            );
+          }
+          if (req.url.path == '/v1/notifications/mutes') {
+            return http.Response(jsonEncode([]), 200);
+          }
+          return http.Response('', 404);
+        }),
+      );
+      final c = StreamController<AgentEvent>();
+      final events = AgentEvents(() => c.stream)..start(followLifecycle: false);
+      final state = NotificationsState(api, events);
+      await settle();
+      expect(state.items.map((n) => n.id).toSet(), {'n1', 'n2'});
+      c.add(AgentSnapshot('run_2', const []));
+      await settle();
+      expect(
+        state.items.map((n) => n.id).toSet(),
+        {'n2'},
+        reason: 'n1 was cleared or pruned while this device was offline',
+      );
+      events.dispose();
+      await c.close();
+    });
+
+    test(
+      'a frame heard mid-backfill is buffered, then replayed once it lands',
+      () async {
+        final hold = Completer<void>();
+        var listedAfterHold = false;
+        AgentApi api() => AgentApi(
+          baseUrl: 'http://x',
+          token: 't',
+          client: MockClient((req) async {
+            if (req.url.path == '/v1/notifications') {
+              await hold.future;
+              listedAfterHold = true;
+              return http.Response(jsonEncode({'items': [], 'cursor': 0}), 200);
+            }
+            if (req.url.path == '/v1/notifications/prefs') {
+              return http.Response(
+                jsonEncode(FakeNotifications._defaults()),
+                200,
+              );
+            }
+            if (req.url.path == '/v1/notifications/mutes') {
+              return http.Response(jsonEncode([]), 200);
+            }
+            return http.Response('', 404);
+          }),
+        );
+        final c = StreamController<AgentEvent>();
+        final events = AgentEvents(() => c.stream)
+          ..start(followLifecycle: false);
+        final state = NotificationsState(api, events);
+        // The backfill's own GET is blocked on `hold`; a push heard now
+        // must queue rather than apply (or be lost) immediately.
+        c.add(AgentNotificationPushed(notif('n1')));
+        await settle();
+        expect(
+          state.items,
+          isEmpty,
+          reason: 'still buffered — the backfill has not landed yet',
+        );
+        hold.complete();
+        await settle();
+        expect(listedAfterHold, isTrue);
+        expect(state.items.map((n) => n.id), ['n1']);
+        events.dispose();
+        await c.close();
+      },
+    );
   });
 
   group('Settings › Notifications and the inbox', () {
@@ -472,6 +593,39 @@ void main() {
       await disposeShell(t, c);
     });
 
+    testWidgets('notification_removed dismisses the shown toast', (t) async {
+      final c = await mount(t, notif: FakeNotifications());
+      opens.last.add(AgentNotificationPushed(notif(id: 'n1')));
+      await t.pumpAndSettle();
+      expect(toast(), findsOneWidget);
+      opens.last.add(AgentNotificationsRemoved(['n1']));
+      await t.pumpAndSettle();
+      expect(toast(), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    testWidgets(
+      'noticeOf still fires after a transient (non-404) backfill failure',
+      (t) async {
+        final c = await mount(
+          t,
+          // A 500, never a 404: `supported` never resolves true, so
+          // `noticeOf` must keep covering needs_you — the "unsupported"
+          // path must not be the only one that keeps it alive (item 4 /
+          // the transient-error watcher case).
+          notif: FakeNotifications()..failBackfillWith = 500,
+          snapshot: [session('beta')],
+        );
+        await t.pumpAndSettle();
+        opens.last.add(
+          AgentSessionChanged(session('beta', attention: 'question')),
+        );
+        await t.pumpAndSettle();
+        expect(find.text('beta needs you'), findsOneWidget);
+        await disposeShell(t, c);
+      },
+    );
+
     testWidgets(
       'a notice for the session already open is marked read, never toasted',
       (t) async {
@@ -550,6 +704,11 @@ class FakeNotifications {
   final items = <Map<String, dynamic>>[];
   final notifyOffCalls = <String>[];
   (int, String)? refusePrefsPutOnce;
+
+  /// Makes every `GET /v1/notifications` answer this status instead (a
+  /// transient failure, never a 404 — used to test that `supported` never
+  /// resolves `true` without actually succeeding).
+  int? failBackfillWith;
   int _seq = 0;
 
   static Map<String, dynamic> _defaults() => {
@@ -611,6 +770,9 @@ class FakeNotifications {
   Future<http.Response?> handle(http.Request req) async {
     final path = req.url.path;
     if (path == '/v1/notifications' && req.method == 'GET') {
+      if (failBackfillWith case final status?) {
+        return _json({'error': 'nope'}, status);
+      }
       final after = int.tryParse(req.url.queryParameters['after'] ?? '0') ?? 0;
       final page = items.where((n) => (n['seq'] as int) > after).toList();
       return _json({

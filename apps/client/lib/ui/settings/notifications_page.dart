@@ -44,9 +44,6 @@ String _thresholdLabel(int s) => switch (s) {
 const _kSessionLimitPresets = [5, 20, 50, 100, 200];
 const _kRetentionPresets = [7, 30, 90, 365];
 
-/// "14:02", or "3/4 14:02" for a moment not today; "you turn them back on"
-/// for [NotificationPrefs.pausedUntil]'s far-future sentinel
-/// (`PAUSE_INDEFINITELY`).
 /// Runs [action], showing any failure rather than swallowing it.
 Future<void> _guard(
   BuildContext context,
@@ -59,6 +56,9 @@ Future<void> _guard(
   }
 }
 
+/// "14:02", or "3/4 14:02" for a moment not today; "you turn them back on"
+/// for [NotificationPrefs.pausedUntil]'s far-future sentinel
+/// (`PAUSE_INDEFINITELY`).
 String friendlyUntil(DateTime until) {
   if (until.year >= 9999) return 'you turn them back on';
   final local = until.toLocal();
@@ -498,17 +498,49 @@ class _MutesList extends ConsumerWidget {
   }
 }
 
-class _PauseControl extends StatelessWidget {
+class _PauseControl extends StatefulWidget {
   const _PauseControl({required this.state, required this.prefs});
 
   final NotificationsState state;
   final NotificationPrefs prefs;
 
   @override
+  State<_PauseControl> createState() => _PauseControlState();
+}
+
+class _PauseControlState extends State<_PauseControl> {
+  Timer? _expiry;
+  DateTime? _scheduledFor;
+
+  /// Nothing pushes a change when a pause simply elapses (item N8 of the
+  /// second review) — a timer to its own end is what turns this row back
+  /// into "Pause" without waiting for some unrelated rebuild.
+  void _scheduleExpiry(DateTime? until) {
+    if (_scheduledFor == until) return;
+    _expiry?.cancel();
+    _scheduledFor = until;
+    if (until == null) return;
+    final delay = until.difference(DateTime.now());
+    if (delay.isNegative) return;
+    _expiry = Timer(delay, () {
+      if (mounted) setState(() {});
+    });
+  }
+
+  @override
+  void dispose() {
+    _expiry?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final t = context.tokens;
+    final state = widget.state;
+    final prefs = widget.prefs;
     final pausedUntil = prefs.pausedUntil;
     final parsed = pausedUntil == null ? null : DateTime.tryParse(pausedUntil);
+    _scheduleExpiry(parsed);
     // "Paused" means an end strictly in the future, not merely a parsable
     // one: a past `paused_until` the server has not yet cleared is not
     // still paused (item 7 of the review).

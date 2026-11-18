@@ -269,19 +269,26 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
   /// — never by `kind` (a roll-up is Storm's own words about an agent,
   /// source `storm`, not an agent's).
   Future<void> _considerServer(AgentNotification n) async {
-    if (n.silent || n.cancelled || _kNeverToastKinds.contains(n.kind)) return;
+    if (n.cancelled) return;
+    if (n.sessionId != null && n.sessionId == shownSessionOf(widget.location)) {
+      // Already looking at it: never toasted (even a silent one — item 6
+      // of the second review, checked ahead of the silent/never-toast
+      // filters below, not after them), but still read, the same rule
+      // `markSessionRead` gives output otherwise seen there.
+      try {
+        await ref.read(notificationsStateProvider)?.markRead([n.id]);
+      } catch (_) {
+        // Background bookkeeping, not a tap: nothing useful to surface.
+      }
+      return;
+    }
+    if (n.silent || _kNeverToastKinds.contains(n.kind)) return;
     // The three kinds `noticeOf` also raises toast from here only once the
     // inbox has proven itself present; before that, `noticeOf` alone has
     // it (item 4 — otherwise both fire during the loading window).
     if (_kOverlapsClientKinds.contains(n.kind) && !_serverCovers) return;
     final isAgent = n.source == 'agent';
     final isTerminal = n.source == 'terminal';
-    if (n.sessionId != null && n.sessionId == shownSessionOf(widget.location)) {
-      // Already looking at it: never toasted, but still read, the same
-      // rule `markSessionRead` gives output otherwise seen there (item 6).
-      unawaited(ref.read(notificationsStateProvider)?.markRead([n.id]));
-      return;
-    }
     final toasted = await _loadServerToasted();
     if (!mounted) return;
     if (!toasted.add(n.id)) return;
@@ -327,6 +334,10 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     _toast = toast;
     _toastFor = id;
     _toastKind = n;
+    // A server-sourced toast this replaces left its id behind (item N6):
+    // without clearing it, a later `notification_read`/`notification_
+    // removed` for that stale id would hide *this* toast instead.
+    _toastNotificationId = null;
     toast.closed.then((_) {
       if (_toast == toast) {
         _toast = null;
@@ -390,6 +401,10 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     _toast = toast;
     _toastFor = sessionId;
     _toastNotificationId = n.id;
+    // This replaces whatever noticeOf toast might have been showing
+    // (item N6): clear its kind, or a later session change could match
+    // against it and mis-hide this one.
+    _toastKind = null;
     toast.closed.then((_) {
       if (_toast == toast) {
         _toast = null;
