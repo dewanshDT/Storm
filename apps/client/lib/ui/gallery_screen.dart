@@ -358,6 +358,91 @@ class _Column extends StatelessWidget {
             ),
 
             _Card(
+              label: 'count badge',
+              child: Row(
+                children: [
+                  CountBadge(count: 3, color: t.danger),
+                  SizedBox(width: t.sp * 2),
+                  CountBadge(count: 12, color: t.accent),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'icon badge button',
+              child: Row(
+                children: [
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 0,
+                    onTap: () {},
+                  ),
+                  SizedBox(width: t.sp * 2),
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 4,
+                    onTap: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'unread row',
+              child: Column(
+                children: [
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Text(
+                      'An unread row',
+                      style: TextStyle(color: t.text),
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: () {},
+                    child: Text('A read row', style: TextStyle(color: t.text)),
+                  ),
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'From a session (an agent)',
+                          style: TextStyle(
+                            color: t.text2,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          'With a source line and a held reason',
+                          style: TextStyle(color: t.text),
+                        ),
+                        Text(
+                          'Held: quiet hours',
+                          style: TextStyle(color: t.text3),
+                        ),
+                      ],
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: null,
+                    child: Text(
+                      'A disabled row (no onTap)',
+                      style: TextStyle(color: t.text),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
               label: 'states',
               child: Column(
                 children: [

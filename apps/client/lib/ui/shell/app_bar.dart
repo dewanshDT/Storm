@@ -4,6 +4,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../agent/notifications_ui.dart' show NotificationBellButton;
 import '../../keyboard/storm_activators.dart';
 import '../../state/health.dart';
 import '../palette/palette.dart' show openPalette;
@@ -114,6 +115,10 @@ class StormAppBar extends ConsumerWidget {
                       child: Row(
                         mainAxisSize: MainAxisSize.min,
                         children: [
+                          if (full) ...[
+                            const NotificationBellButton(),
+                            SizedBox(width: t.sp * 0.75),
+                          ],
                           if (full) const BarHealthDot(),
                           SizedBox(
                             width: layout.right.isEmpty

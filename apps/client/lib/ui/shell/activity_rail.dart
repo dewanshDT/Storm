@@ -8,6 +8,7 @@ import '../../agent/agent_state.dart';
 import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../state/nav_memory.dart';
 import '../tokens.dart';
+import '../widgets.dart' show CountBadge;
 import 'app_bar.dart' show railTopInset;
 
 /// The desktop activity rail (handoff §2.1): Notes, Agents, then Settings at
@@ -266,37 +267,13 @@ class _PixelGlyphViewState extends State<_PixelGlyphView>
 double railFootSize(StormTokens t) => t.sp * 5;
 
 /// The `danger` count of sessions that need you: on the rail's Agents item
-/// and on the phone's place bubble (153e, 153o).
+/// and on the phone's place bubble (153e, 153o). A thin [CountBadge].
 class NeedsYouCount extends StatelessWidget {
   const NeedsYouCount({super.key, required this.count});
 
   final int count;
 
   @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    final side = t.sp * 2.125;
-    return IgnorePointer(
-      child: Container(
-        constraints: BoxConstraints(minWidth: side),
-        height: side,
-        padding: EdgeInsets.symmetric(horizontal: t.sp * 0.5),
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: t.danger,
-          borderRadius: BorderRadius.circular(999),
-        ),
-        child: Text(
-          count > 99 ? '99+' : '$count',
-          style: TextStyle(
-            fontFamily: StormTokens.monoFamily,
-            fontSize: t.labelSize,
-            height: 1,
-            fontWeight: FontWeight.w600,
-            color: t.onAccent,
-          ),
-        ),
-      ),
-    );
-  }
+  Widget build(BuildContext context) =>
+      CountBadge(count: count, color: context.tokens.danger);
 }

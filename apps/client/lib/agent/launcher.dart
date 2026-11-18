@@ -22,6 +22,8 @@ import 'agent_widgets.dart';
 import 'claude_login_api.dart';
 import 'crew_widgets.dart' show RoleMenu, popoverRoom;
 import 'integrations_api.dart' show integrationNamesOn;
+import 'notifications_state.dart'
+    show notificationsStateProvider, NotificationsState;
 import 'spawn_models.dart' show kHostTooOldToSpawn, kSpawnProviders;
 
 part 'launcher_parts.dart';
@@ -117,6 +119,23 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   /// The vault Write to was preselected with from the workspace's memory.
   String? _rememberedVault;
 
+  /// Decision 161-2's launch toggle: null until the person touches the
+  /// chip, so the server's own default (`agent_default_on`) applies; the
+  /// chip itself still reflects [_agentDefaultOn] while null.
+  bool? _notify;
+  bool _agentDefaultOn = true;
+
+  /// False only once a server before decision 161 has actually answered
+  /// (161-3's review, item 11): the chip hides rather than offering a
+  /// toggle the server has nothing to do with.
+  bool _notifySupported = true;
+
+  /// The shared inbox state (161-3's second review, item N9): read from it
+  /// rather than making a one-off request of its own, so the chip reflects
+  /// whatever it already knows instead of flashing on then off while a
+  /// redundant request resolves.
+  NotificationsState? _notifyState;
+
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
@@ -148,9 +167,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   final _writesAnchor = GlobalKey();
   final _spawnAnchor = GlobalKey();
   final _riskAnchor = GlobalKey();
+  final _notifyAnchor = GlobalKey();
 
   @override
   void dispose() {
+    _notifyState?.removeListener(_onNotifyStateChanged);
     _model.dispose();
     super.dispose();
   }
@@ -173,6 +194,27 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
     _chosen = p.provider;
     _preselectHost();
     _loadDefault();
+    _syncNotifyState();
+  }
+
+  /// Decision 161-2's chip default, from the shared inbox state rather
+  /// than a request of its own (item N9 of the second 161-3 review).
+  void _syncNotifyState() {
+    final state = ref.read(notificationsStateProvider);
+    if (identical(state, _notifyState)) return;
+    _notifyState?.removeListener(_onNotifyStateChanged);
+    _notifyState = state;
+    state?.addListener(_onNotifyStateChanged);
+    _onNotifyStateChanged();
+  }
+
+  void _onNotifyStateChanged() {
+    if (!mounted) return;
+    final state = _notifyState;
+    setState(() {
+      _notifySupported = state == null || !state.unsupported;
+      _agentDefaultOn = state?.prefs?.agentDefaultOn ?? _agentDefaultOn;
+    });
   }
 
   /// The session's own host when running one again, else the one this
@@ -374,6 +416,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         model: modelHint(_provider) == null ? null : _model.text.trim(),
         permissionMode: _permissionMode,
         terminalBrightness: launchBrightness(context, ref),
+        notify: _notify,
       );
       await rememberLaunchHost(host.id);
       if (!mounted) return;
@@ -804,6 +847,15 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 state: LauncherChipState.off,
                 onTap: () => _openAt(_riskAnchor),
               ),
+              if (_notifySupported)
+                LauncherChip(
+                  key: const Key('launcher-chip-notify'),
+                  label: 'Notifies you',
+                  state: (_notify ?? _agentDefaultOn)
+                      ? LauncherChipState.on
+                      : LauncherChipState.off,
+                  onTap: () => _openAt(_notifyAnchor),
+                ),
             ],
           ),
           _Under(
@@ -1067,6 +1119,19 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               ),
             ),
           ),
+          if (_notifySupported)
+            field(
+              'notify',
+              null,
+              anchor: _notifyAnchor,
+              child: _toggleLine(
+                key: const Key('launcher-notify'),
+                text: 'Notify you',
+                value: _notify ?? _agentDefaultOn,
+                enabled: true,
+                onChanged: (v) => setState(() => _notify = v),
+              ),
+            ),
           Align(
             alignment: Alignment.centerLeft,
             child: _Link(

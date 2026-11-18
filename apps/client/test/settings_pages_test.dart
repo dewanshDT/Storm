@@ -116,6 +116,7 @@ void main() {
       'Vaults',
       'AI access',
       'Agents & hosts',
+      'Notifications',
       'Integrations',
       'Claude login',
       'Storage',
@@ -132,7 +133,7 @@ void main() {
       expect([for (final p in kSettingsPages) p.label], order);
       expect([
         for (final p in kSettingsPages.where((p) => p.storm)) p.label,
-      ], order.sublist(3, 11));
+      ], order.sublist(3, 12));
       double top(String id) =>
           tester.getTopLeft(find.byKey(Key('settings-nav-$id'))).dy;
       final ids = [for (final p in kSettingsPages) p.id];
