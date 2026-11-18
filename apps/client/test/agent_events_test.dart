@@ -97,7 +97,7 @@ void main() {
     setUp(() {
       opens = [];
       events = AgentEvents(
-        () {
+        (presence) {
           final c = StreamController<AgentEvent>();
           opens.add(c);
           return c.stream;
@@ -218,7 +218,7 @@ void main() {
               grace: Duration.zero,
             ),
           ),
-          agentEventsTransportProvider.overrideWithValue(() {
+          agentEventsTransportProvider.overrideWithValue((presence) {
             final s = StreamController<AgentEvent>();
             eventOpens.add(s);
             return s.stream;
@@ -282,7 +282,7 @@ void main() {
     late List<StreamController<AgentEvent>> opens;
     Object? refuse;
 
-    Stream<AgentEvent> open() {
+    Stream<AgentEvent> open(AgentPresence presence) {
       final c = StreamController<AgentEvent>();
       opens.add(c);
       if (refuse case final e?) {

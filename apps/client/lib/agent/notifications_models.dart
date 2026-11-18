@@ -48,6 +48,7 @@ class AgentNotification {
     this.silentReason,
     this.readAt,
     this.cancelled = false,
+    this.deliver,
   });
 
   final String id;
@@ -78,6 +79,12 @@ class AgentNotification {
   final String? readAt;
   final bool cancelled;
 
+  /// 161-4, live frames only: `"toast:<device_id>"` or `"os"`, or `null`
+  /// when a device already showing this session covers it. Never present
+  /// on `GET /v1/notifications`'s backfill — only a *live* stream frame
+  /// carries delivery, so this is never persisted or read back.
+  final String? deliver;
+
   bool get unread => readAt == null;
 
   AgentNotification withReadAt(String at) => readAt != null
@@ -102,6 +109,7 @@ class AgentNotification {
           silentReason: silentReason,
           readAt: at,
           cancelled: cancelled,
+          deliver: deliver,
         );
 
   factory AgentNotification.fromJson(Map<String, dynamic> j) =>
@@ -125,6 +133,7 @@ class AgentNotification {
         silentReason: j['silent_reason'] as String?,
         readAt: j['read_at'] as String?,
         cancelled: j['cancelled'] as bool? ?? false,
+        deliver: j['deliver'] as String?,
       );
 }
 
@@ -240,4 +249,84 @@ class NotificationMute {
     until: j['until'] as String?,
     createdAt: j['created_at'] as String? ?? '',
   );
+}
+
+/// The known device-prefs classes (161-4), in the order the page shows
+/// them. `classes: []` on a row means every one of these.
+const kDeviceNotificationClasses = [
+  'needs_you',
+  'delete_requests',
+  'finished',
+  'errors',
+  'agent_messages',
+  'hosts',
+];
+
+const kDevicePreviewLevels = ['full', 'session', 'storm'];
+
+/// `GET`/`PUT /v1/notifications/device` — this device's own row (161-4).
+class DeviceNotificationPrefs {
+  const DeviceNotificationPrefs({
+    required this.deviceId,
+    required this.enabled,
+    required this.classes,
+    required this.preview,
+    required this.updatedAt,
+  });
+
+  final String deviceId;
+  final bool enabled;
+
+  /// Empty means every class in [kDeviceNotificationClasses].
+  final List<String> classes;
+
+  /// `full`, `session` or `storm`.
+  final String preview;
+  final String updatedAt;
+
+  bool classOn(String kind) => classes.isEmpty || classes.contains(kind);
+
+  factory DeviceNotificationPrefs.fromJson(Map<String, dynamic> j) =>
+      DeviceNotificationPrefs(
+        deviceId: j['device_id'] as String,
+        enabled: j['enabled'] as bool? ?? true,
+        classes: [for (final c in j['classes'] as List? ?? const []) '$c'],
+        preview: j['preview'] as String? ?? 'full',
+        updatedAt: j['updated_at'] as String? ?? '',
+      );
+}
+
+/// One row of `GET /v1/notifications/devices` (161-4): this device's prefs
+/// beside its name, read-only, for a future "Other devices" list. The
+/// `enabled`/`classes`/`preview` fields are null for a device that has
+/// never opened the app since this slice shipped.
+class NotificationDeviceRow {
+  const NotificationDeviceRow({
+    required this.deviceId,
+    required this.deviceName,
+    this.platform,
+    required this.revoked,
+    this.enabled,
+    this.classes,
+    this.preview,
+  });
+
+  final String deviceId;
+  final String deviceName;
+  final String? platform;
+  final bool revoked;
+  final bool? enabled;
+  final List<String>? classes;
+  final String? preview;
+
+  factory NotificationDeviceRow.fromJson(Map<String, dynamic> j) =>
+      NotificationDeviceRow(
+        deviceId: j['device_id'] as String,
+        deviceName: j['device_name'] as String? ?? '',
+        platform: j['platform'] as String?,
+        revoked: j['revoked'] as bool? ?? false,
+        enabled: j['enabled'] as bool?,
+        classes: (j['classes'] as List?)?.map((c) => '$c').toList(),
+        preview: j['preview'] as String?,
+      );
 }

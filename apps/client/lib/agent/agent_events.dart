@@ -15,7 +15,23 @@ import '../state/app_state.dart' show connectionProvider;
 import 'agent_api.dart';
 import 'agent_models.dart';
 import 'agent_state.dart';
+import 'desktop_platform.dart';
 import 'notifications_models.dart';
+
+/// What this device reports on connect, and again on change while connected
+/// (decision 161, slice 161-4): whether it is active (visible and
+/// focused) or backgrounded, and which session (if any) it currently has
+/// open — the server skips the deliver hint entirely when an active
+/// device already has the session a notice is about on screen.
+@immutable
+class AgentPresence {
+  const AgentPresence({required this.active, this.openSessionId});
+
+  final bool active;
+  final String? openSessionId;
+
+  static const initial = AgentPresence(active: true);
+}
 
 /// One event of `GET /v1/agent/events` (decision 154, AM109).
 sealed class AgentEvent {}
@@ -174,8 +190,9 @@ class AgentEventsRefused implements Exception {
   String toString() => 'AgentEventsRefused($status)';
 }
 
-/// Opens one connection's events; errors or ends when it does.
-typedef AgentEventsOpen = Stream<AgentEvent> Function();
+/// Opens one connection's events; errors or ends when it does. [presence] is
+/// this device's state as of the moment it connects (161-4).
+typedef AgentEventsOpen = Stream<AgentEvent> Function(AgentPresence presence);
 
 /// Silence this long on SSE, which carries a keepalive every 15 s, is a dead
 /// tunnel.
@@ -187,6 +204,7 @@ const agentEventsIdle = Duration(seconds: 45);
 Stream<AgentEvent> openAgentEvents(
   AgentApi Function() api,
   StormConnection connection,
+  AgentPresence presence,
 ) {
   late final StreamController<AgentEvent> out;
   StreamSubscription<AgentEvent>? inner;
@@ -211,8 +229,8 @@ Stream<AgentEvent> openAgentEvents(
       }
       final client = a = api();
       final s = connection.isRelayed
-          ? _openSse(client)
-          : _openSocket(client, connection.active.baseUrl);
+          ? _openSse(client, presence)
+          : _openSocket(client, connection.active.baseUrl, presence);
       inner = s.listen(out.add, onError: end, onDone: end, cancelOnError: true);
     } catch (e) {
       if (!cancelled) end(e);
@@ -231,7 +249,7 @@ Stream<AgentEvent> openAgentEvents(
   return out.stream;
 }
 
-Stream<AgentEvent> _openSse(AgentApi api) {
+Stream<AgentEvent> _openSse(AgentApi api, AgentPresence presence) {
   late final StreamController<AgentEvent> out;
   StreamSubscription<String>? body;
   Timer? idle;
@@ -256,7 +274,7 @@ Stream<AgentEvent> _openSse(AgentApi api) {
 
   Future<void> start() async {
     try {
-      final request = http.Request('GET', _eventsUri(api.baseUrl))
+      final request = http.Request('GET', _eventsUri(api.baseUrl, presence))
         ..headers.addAll({
           'Authorization': 'Bearer ${api.token}',
           'Accept': 'text/event-stream',
@@ -301,7 +319,11 @@ Stream<AgentEvent> _openSse(AgentApi api) {
   return out.stream;
 }
 
-Stream<AgentEvent> _openSocket(AgentApi api, String activeBase) {
+Stream<AgentEvent> _openSocket(
+  AgentApi api,
+  String activeBase,
+  AgentPresence presence,
+) {
   late final StreamController<AgentEvent> out;
   WebSocketChannel? channel;
   StreamSubscription<Object?>? frames;
@@ -322,7 +344,9 @@ Stream<AgentEvent> _openSocket(AgentApi api, String activeBase) {
       if (cancelled) return;
       final ws = activeBase.replaceFirst(RegExp(r'^http'), 'ws');
       final c = channel = connectFeed(
-        Uri.parse('$ws/v1/agent/events?ticket=${Uri.encodeComponent(ticket)}'),
+        _eventsUri(ws, presence).replace(
+          queryParameters: {..._presenceQuery(presence), 'ticket': ticket},
+        ),
       );
       frames = c.stream.listen(
         (frame) {
@@ -363,7 +387,17 @@ Stream<AgentEvent> _openSocket(AgentApi api, String activeBase) {
   return out.stream;
 }
 
-Uri _eventsUri(String base) => Uri.parse('$base/v1/agent/events');
+/// `?presence=active|background[&open_session=<id>]` (161-4). Absent
+/// entirely is `active` too, server-side — but every connection here
+/// states it, so the server need not guess.
+Map<String, String> _presenceQuery(AgentPresence presence) => {
+  'presence': presence.active ? 'active' : 'background',
+  if (presence.openSessionId != null) 'open_session': presence.openSessionId!,
+};
+
+Uri _eventsUri(String base, AgentPresence presence) => Uri.parse(
+  '$base/v1/agent/events',
+).replace(queryParameters: _presenceQuery(presence));
 
 Object _refusal(int status) => status == 404 || status == 403
     ? AgentEventsRefused(status)
@@ -373,7 +407,7 @@ Object _refusal(int status) => status == 404 || status == 403
 Future<int?> _probe(AgentApi api) async {
   try {
     final r = await api.client.send(
-      http.Request('HEAD', _eventsUri(api.baseUrl))
+      http.Request('HEAD', _eventsUri(api.baseUrl, AgentPresence.initial))
         ..headers['Authorization'] = 'Bearer ${api.token}',
     );
     unawaited(r.stream.listen(null).cancel());
@@ -421,6 +455,7 @@ class AgentEvents {
     this._open, {
     this.retryMin = const Duration(seconds: 1),
     this.retryMax = const Duration(seconds: 60),
+    this._apiFactory,
     Random? random,
   }) : _random = random ?? Random();
 
@@ -429,8 +464,18 @@ class AgentEvents {
   final Duration retryMax;
   final Random _random;
 
+  /// Used only for the lightweight `POST …/presence` while already
+  /// connected (161-4) — never to open the stream itself. Null in tests
+  /// that don't exercise presence; a failed POST is swallowed the same way
+  /// `NotificationsState.markSessionRead` swallows its own.
+  final AgentApi Function()? _apiFactory;
+  AgentPresence _presence = AgentPresence.initial;
+
   final state = ValueNotifier(AgentEventsState.closed);
   bool get isOpen => state.value == AgentEventsState.open;
+
+  /// The session [setOpenSession] last reported, if any.
+  String? get openSessionId => _presence.openSessionId;
 
   final _updates = StreamController<AgentEventUpdate>.broadcast();
 
@@ -485,26 +530,76 @@ class AgentEvents {
     }
   }
 
-  /// No stream runs behind the person's back.
+  /// No stream runs behind the person's back — except on desktop (161-4,
+  /// amends 154 Q2): there, the stream stays open so a closed-window
+  /// session still gets OS notifications, and only presence changes to
+  /// `background`. Phones and web still close it.
   void background() {
     if (_disposed || _background) return;
     _background = true;
+    if (isDesktopPlatform) {
+      _setActive(false);
+      return;
+    }
     _drop();
     if (state.value != AgentEventsState.unsupported) {
       state.value = AgentEventsState.closed;
     }
   }
 
-  /// Back in front: connect now, for a fresh snapshot. A server that had no
-  /// stream is asked again, in case it was upgraded meanwhile.
+  /// Back in front. On desktop the stream never left, so this only reports
+  /// presence; everywhere else, connect now for a fresh snapshot — a
+  /// server that had no stream is asked again, in case it was upgraded
+  /// meanwhile.
   void foreground() {
     if (_disposed || !_background) return;
     _background = false;
+    if (isDesktopPlatform) {
+      _setActive(true);
+      return;
+    }
     _backoff = null;
     if (state.value == AgentEventsState.unsupported) {
       state.value = AgentEventsState.closed;
     }
     _connect();
+  }
+
+  /// This device now has [id] open (or, `null`, has closed whatever it had
+  /// open) — 161-4's "any device active and showing that session: nothing"
+  /// rule. Best-effort and silent: nothing here is worth surfacing to the
+  /// person looking at a session.
+  void setOpenSession(String? id) {
+    if (_presence.openSessionId == id) return;
+    _presence = AgentPresence(active: _presence.active, openSessionId: id);
+    _syncPresence();
+  }
+
+  void _setActive(bool active) {
+    if (_presence.active == active) return;
+    _presence = AgentPresence(
+      active: active,
+      openSessionId: _presence.openSessionId,
+    );
+    _syncPresence();
+  }
+
+  /// Tells the server about [_presence] without reconnecting — the point
+  /// of keeping the stream open at all. A connection not yet open carries
+  /// the current [_presence] itself once it does ([_connect]).
+  void _syncPresence() {
+    if (!isOpen) return;
+    final api = _apiFactory?.call();
+    if (api == null) return;
+    unawaited(
+      api
+          .setPresence(
+            _presence.active ? 'active' : 'background',
+            openSessionId: _presence.openSessionId,
+          )
+          .catchError((_) {})
+          .whenComplete(api.dispose),
+    );
   }
 
   void _drop() {
@@ -524,7 +619,7 @@ class AgentEvents {
     state.value = AgentEventsState.connecting;
     final Stream<AgentEvent> stream;
     try {
-      stream = _open();
+      stream = _open(_presence);
     } catch (_) {
       _ended(run);
       return;
@@ -667,7 +762,7 @@ final agentEventsTransportProvider = Provider<AgentEventsOpen?>((ref) {
   final ours = probe.client is ConnectionClient;
   probe.dispose();
   if (!ours) return null;
-  return () => openAgentEvents(factory, connection);
+  return (presence) => openAgentEvents(factory, connection, presence);
 });
 
 /// The pushed session state, alive while anything showing the lists is:
@@ -678,8 +773,9 @@ final agentEventsTransportProvider = Provider<AgentEventsOpen?>((ref) {
 final agentEventsProvider = Provider.autoDispose<AgentEvents?>((ref) {
   final open = ref.watch(agentEventsTransportProvider);
   if (open == null) return null;
+  final factory = ref.watch(agentApiFactoryProvider);
   final keep = ref.read(sessionKeepAliveProvider);
-  final events = AgentEvents(open)..start();
+  final events = AgentEvents(open, apiFactory: factory)..start();
   final sub = events.updates.listen((u) {
     final at = DateTime.now();
     switch (u.event) {
