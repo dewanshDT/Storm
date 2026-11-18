@@ -680,6 +680,10 @@ pub struct StatusReport {
     /// `Some(None)` when none is live, `None` when the report does not say.
     #[serde(default, deserialize_with = "program::lenient")]
     pub program_status: Option<Option<program::ProgramReport>>,
+    /// The brightness its client last answered the program's OSC 10/11
+    /// query with (157g), sent on change; absent from an older host.
+    #[serde(default)]
+    pub terminal_answered: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -697,6 +701,28 @@ pub struct StatusReport {
     /// by its first `running` report only.
     #[serde(default)]
     pub child_workspace: Option<ChildWorkspace>,
+    /// OSC 9/777/99 desktop notifications queued since the host's last
+    /// report (decision 161, AM126). Absent from an older host.
+    #[serde(default)]
+    pub terminal_notice: Option<Vec<TerminalNoticeItem>>,
+    /// How many more the host's own per-minute cap dropped since its last
+    /// report.
+    #[serde(default)]
+    pub terminal_notice_dropped: Option<u32>,
+}
+
+/// One OSC 9/777/99 notification as a host reports it (decision 161,
+/// AM126): never answered, never shown raw — `notifications::record_terminal_notices`
+/// sanitises it exactly as `notify`'s own `title`/`body`. `seq` is the
+/// host's own per-session counter, assigned once per notice, so a retried
+/// status post carries the same value every time.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TerminalNoticeItem {
+    pub seq: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub body: String,
+    pub source_form: String,
 }
 
 /// A spawned child's own workspace (decision 137): a clone of its parent's
@@ -800,6 +826,12 @@ pub struct Launch {
     /// resume keeps its predecessor's.
     #[serde(default)]
     pub children_write: bool,
+    /// The "Notifies you" capability (Q3): absent falls back to the
+    /// account's "New sessions can notify you" default
+    /// (`notification_prefs.agent_default_on`). A resume keeps its
+    /// predecessor's.
+    #[serde(default)]
+    pub notify: Option<bool>,
     /// The model the agent starts on (145b): checked for its agent, else
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
@@ -819,6 +851,10 @@ pub struct Launch {
     /// an older server ignores the field.
     #[serde(default)]
     pub terminal_brightness: Option<String>,
+    /// The ended session a Run again starts from (decision 159): a rerun is
+    /// not a choice of write vault, so it is not remembered.
+    #[serde(default)]
+    pub rerun_of: Option<String>,
 }
 
 /// How a client draws a session's terminal (decision 157, 171-8).
@@ -996,11 +1032,21 @@ struct SessionLive {
     /// start with. Not kept across a restart: a child started after one
     /// gets none.
     terminal_brightness: Option<TerminalBrightness>,
+    /// What its client last answered its program's colour query with, as
+    /// its host said (157g). In memory: a host's `hello` says it again.
+    terminal_answered: Option<TerminalBrightness>,
+    /// 161-5: the host link generation and highest `seq` of a terminal
+    /// notice already accepted from it, so a retried status post never
+    /// double-charges the rate limit. A host restart or reconnect gets a
+    /// new generation (`AgentManager::connect_host`), whose own counter
+    /// starts over, so a lower `seq` under it is accepted again.
+    osc_seq: Option<(u64, u64)>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
+            terminal_answered: None,
             parking: false,
             wake_sent: None,
             terminal_brightness: None,
@@ -1015,6 +1061,7 @@ impl SessionLive {
             idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
+            osc_seq: None,
         }
     }
 
@@ -1434,6 +1481,17 @@ impl AgentManager {
         let live = self.live.lock().unwrap();
         let s = live.sessions.get(session_id)?;
         s.cache.initialized().then(|| s.cache.end())
+    }
+
+    /// What a session's client last answered its program's colour query
+    /// with, as its host said (157g).
+    pub fn terminal_answered(&self, session_id: &str) -> Option<TerminalBrightness> {
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)?
+            .terminal_answered
     }
 
     /// The terminal brightness a session started with in this run (171-8).
@@ -2261,13 +2319,15 @@ impl AgentManager {
         Ok(())
     }
 
-    /// A status change from a host.
+    /// A status change from a host. Returns an audit row per terminal
+    /// notice the report carried (161-5), metadata only, for
+    /// `ops::runtime_status` to record.
     pub fn host_status(
         &self,
         host_id: &str,
         session_id: &str,
         report: &StatusReport,
-    ) -> AgentResult<()> {
+    ) -> AgentResult<Vec<notifications::TerminalNoticeAudit>> {
         let mut r = self.owned_by(host_id, session_id)?;
         self.start_acknowledged(session_id);
         if r.is_ended() {
@@ -2279,7 +2339,7 @@ impl AgentManager {
                 "running" => self.end_unwanted(host_id, &r),
                 _ => {}
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         // 145e: `parked` only answers Storm's own `park`; anything else that
         // says it is a stop.
@@ -2321,7 +2381,17 @@ impl AgentManager {
             self.record_ran_as(host_id, session_id)?;
         }
         self.bump(session_id);
-        Ok(())
+        let audits = if report.terminal_notice.is_some() || report.terminal_notice_dropped.is_some()
+        {
+            self.record_terminal_notices(
+                &r,
+                report.terminal_notice.as_deref().unwrap_or(&[]),
+                report.terminal_notice_dropped.unwrap_or(0),
+            )?
+        } else {
+            Vec::new()
+        };
+        Ok(audits)
     }
 
     /// A child's workspace as its host made it, kept once. Only a session
@@ -2613,6 +2683,16 @@ impl AgentManager {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
         let write_vault_id = meta.write_vault_id.clone().filter(|_| reads_storm);
+        // Q3: a resume keeps its predecessor's; otherwise the launch's own
+        // flag, else the account's "New sessions can notify you" default.
+        // Never offered without Storm, same as every other agent-only tool.
+        let notify = match resume.as_ref() {
+            Some((old, _)) => self.store.lock().unwrap().notify_enabled(old)?,
+            None => req.notify.unwrap_or_else(|| {
+                self.notification_prefs()
+                    .map_or(true, |p| p.agent_default_on)
+            }),
+        } && reads_storm;
         let children_write = match resume.as_ref() {
             Some((old, _)) => {
                 self.store.lock().unwrap().children_write(old)? && spawn && write_vault_id.is_some()
@@ -2693,6 +2773,12 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            store.set_notify(
+                &record.id,
+                notify,
+                meta.device.as_deref(),
+                &record.created_at,
+            )?;
             if spawn {
                 store.record_spawn_launch(
                     &record.id,
@@ -2952,13 +3038,27 @@ impl AgentManager {
     /// A host's report written back, with what its gated signals say and
     /// the events it makes, in one transaction (144a).
     fn record_report(&self, r: &SessionRecord, report: &StatusReport) -> AgentResult<()> {
+        if let Some(answered) = TerminalBrightness::parse(report.terminal_answered.as_deref()) {
+            self.live
+                .lock()
+                .unwrap()
+                .sessions
+                .entry(r.id.clone())
+                .or_insert_with(SessionLive::new)
+                .terminal_answered = Some(answered);
+        }
         let taken = self.take_signals(r, report);
         let ctx = events::EventCtx {
             source: events::HOST_PROCESS,
             live: taken.live,
             extra: taken.extra,
         };
-        self.store.lock().unwrap().update_with(r, &ctx)?;
+        let just_ended = self.store.lock().unwrap().update_with(r, &ctx)?;
+        if just_ended {
+            // 161-2 F2: after the wake above, never delaying it.
+            let store = self.store.lock().unwrap();
+            notifications::forget_due_at_end(&store.conn, &r.id)?;
+        }
         Ok(())
     }
 
@@ -3454,7 +3554,35 @@ impl AgentManager {
     /// A removed host (decision 153): its Limits go. Its sessions and what
     /// it last reported about itself stay, as their record.
     pub fn forget_host(&self, host_id: &str) -> Result<()> {
-        self.store.lock().unwrap().forget_host_limits(host_id)
+        let store = self.store.lock().unwrap();
+        store.forget_host_limits(host_id)?;
+        store.forget_host_workspace_prefs(host_id)
+    }
+
+    /// A person's top-level start in `workspace` (decision 159).
+    pub fn remember_workspace_pref(
+        &self,
+        host_id: &str,
+        workspace: &str,
+        write_vault_id: Option<&str>,
+    ) -> Result<()> {
+        self.store.lock().unwrap().set_workspace_pref(
+            host_id,
+            workspace,
+            write_vault_id,
+            &crate::index::now_rfc3339(),
+        )
+    }
+
+    pub fn workspace_prefs(&self, host_id: &str) -> Result<HashMap<String, store::WorkspacePref>> {
+        self.store.lock().unwrap().workspace_prefs(host_id)
+    }
+
+    pub fn forget_workspace_pref(&self, host_id: &str, workspace: &str) -> Result<bool> {
+        self.store
+            .lock()
+            .unwrap()
+            .forget_workspace_pref(host_id, workspace)
     }
 
     /// A revoked host: its link is closed and its sessions are failed
@@ -3872,12 +4000,14 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             meta,
             grants,
@@ -3900,12 +4030,14 @@ mod tests {
                 resume_of: Some(old.id.clone()),
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3928,10 +4060,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4064,10 +4199,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4579,12 +4717,14 @@ mod tests {
                     resume_of: None,
                     crew: None,
                     role: None,
+                    notify: None,
                     spawn: false,
                     children_write: false,
                     model: None,
                     permission_mode: None,
                     typed_input: None,
                     terminal_brightness: None,
+                    rerun_of: None,
                 },
                 meta,
                 offered(),
@@ -4693,10 +4833,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4715,10 +4858,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4742,10 +4888,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4800,12 +4949,14 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -4841,10 +4992,13 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -5110,10 +5264,13 @@ mod tests {
                         attention_source: None,
                         activity_source: None,
                         program_status: None,
+                        terminal_answered: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
                         child_workspace: None,
+                        terminal_notice: None,
+                        terminal_notice_dropped: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -5148,10 +5305,13 @@ mod tests {
             attention_source: None,
             activity_source: None,
             program_status: None,
+            terminal_answered: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
             child_workspace: None,
+            terminal_notice: None,
+            terminal_notice_dropped: None,
             signal: None,
         }
     }
@@ -5479,10 +5639,13 @@ mod tests {
                     attention_source: None,
                     activity_source: None,
                     program_status: None,
+                    terminal_answered: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,
                     child_workspace: None,
+                    terminal_notice: None,
+                    terminal_notice_dropped: None,
                 },
             )
             .unwrap();

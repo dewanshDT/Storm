@@ -3,6 +3,10 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import 'oklch.dart';
+import 'themes/terminal_palette.dart';
+
+export 'themes/terminal_palette.dart'
+    show AnsiInputs, TerminalPalette, lightTerminalGround;
 
 /// The whole visual system, derived from about fifteen numbers.
 ///
@@ -20,7 +24,7 @@ import 'oklch.dart';
 @immutable
 class StormTokens extends ThemeExtension<StormTokens> {
   const StormTokens({
-    required this.preset,
+    required this.variant,
     required this.brightness,
     required this.bg,
     required this.surface,
@@ -48,10 +52,11 @@ class StormTokens extends ThemeExtension<StormTokens> {
     required this.duration,
     required this.surfaceL,
     required this.dir,
+    required this.terminal,
   });
 
-  /// Which identity this is, so a preset can be named in settings and in tests.
-  final StormPreset preset;
+  /// Which identity this is, so it can be named in settings and in tests.
+  final ThemeVariant variant;
   final Brightness brightness;
 
   /// The page. Semantic colours are *not* measured against this — see
@@ -130,6 +135,9 @@ class StormTokens extends ThemeExtension<StormTokens> {
   final double surfaceL;
   final double dir;
 
+  /// The session terminal's colours in this theme's own brightness.
+  final TerminalPalette terminal;
+
   // ---- type scale ------------------------------------------------------
 
   /// The smallest step any label may be.
@@ -202,8 +210,8 @@ class StormTokens extends ThemeExtension<StormTokens> {
   };
 
   @override
-  StormTokens copyWith({double? fs, StormPreset? preset}) =>
-      StormTokens.from(preset ?? this.preset, fs: fs ?? this.fs);
+  StormTokens copyWith({double? fs, ThemeVariant? variant}) =>
+      StormTokens.from(variant ?? this.variant, fs: fs ?? this.fs);
 
   /// Colour-space interpolation is deliberately not implemented.
   ///
@@ -214,9 +222,9 @@ class StormTokens extends ThemeExtension<StormTokens> {
   StormTokens lerp(ThemeExtension<StormTokens>? other, double t) =>
       t < 0.5 ? this : (other as StormTokens? ?? this);
 
-  /// Derives the whole system from one preset's inputs.
-  factory StormTokens.from(StormPreset preset, {double? fs}) {
-    final i = preset.inputs;
+  /// Derives the whole system from one variant's inputs.
+  factory StormTokens.from(ThemeVariant variant, {double? fs}) {
+    final i = variant.inputs;
     final dark = i.dark;
     final dir = dark ? 1.0 : -1.0;
     final bgL = i.bgL / 100;
@@ -227,14 +235,16 @@ class StormTokens extends ThemeExtension<StormTokens> {
     // accent stays bright on a pale ground and the contrast guarantee fails.
     final accentL = dark ? i.accentL / 100 : math.min(0.40, i.accentL / 100);
 
+    final bg = neutral(bgL);
+    final text = neutral(dark ? 0.95 : 0.18);
     return StormTokens(
-      preset: preset,
+      variant: variant,
       brightness: dark ? Brightness.dark : Brightness.light,
-      bg: neutral(bgL),
+      bg: bg,
       surface: neutral(bgL + dir * 0.05),
       surface2: neutral(bgL + dir * 0.09),
       border: neutral(bgL + dir * 0.14),
-      text: neutral(dark ? 0.95 : 0.18),
+      text: text,
       text2: neutral(dark ? 0.74 : 0.34),
       text3: neutral(dark ? 0.66 : 0.40),
       accent: oklch(accentL, i.accentC, i.accentH),
@@ -243,10 +253,10 @@ class StormTokens extends ThemeExtension<StormTokens> {
       onAccent: accentL > 0.6
           ? oklch(0.16, 0.03, i.accentH)
           : const Color(0xFFFFFFFF),
-      amber: oklch(dark ? 0.74 : 0.38, 0.14, 68),
-      amberSoft: oklch(bgL + dir * 0.08, 0.05, 68),
-      green: oklch(dark ? 0.74 : 0.38, 0.13, 148),
-      danger: oklch(dark ? 0.70 : 0.38, 0.17, 25),
+      amber: oklch(dark ? 0.74 : 0.38, 0.14, i.amberHue),
+      amberSoft: oklch(bgL + dir * 0.08, 0.05, i.amberHue),
+      green: oklch(dark ? 0.74 : 0.38, 0.13, i.greenHue),
+      danger: oklch(dark ? 0.70 : 0.38, 0.17, i.dangerHue),
       // Not theme-dependent: a camera needs the contrast either way.
       codePlate: const Color(0xFFFFFFFF),
       onCodePlate: const Color(0xFF000000),
@@ -260,6 +270,7 @@ class StormTokens extends ThemeExtension<StormTokens> {
       duration: Duration(milliseconds: i.dur),
       surfaceL: bgL + dir * 0.05,
       dir: dir,
+      terminal: deriveTerminalPalette(i, bg: bg, text: text),
     );
   }
 }
@@ -283,6 +294,10 @@ class TokenInputs {
     this.bw = 1,
     required this.shadow,
     required this.dur,
+    this.amberHue = 68,
+    this.greenHue = 148,
+    this.dangerHue = 25,
+    this.ansi = AnsiInputs.storm,
   });
 
   final bool dark;
@@ -316,10 +331,108 @@ class TokenInputs {
   final double bw;
   final double shadow;
   final int dur;
+
+  /// Hues of the three signal colours. Their lightness and chroma stay the
+  /// recipe's, so a theme can move the hue without weakening the signal.
+  final double amberHue;
+  final double greenHue;
+  final double dangerHue;
+
+  /// The terminal's 16 colours, as hues and chroma; the lightness is found.
+  final AnsiInputs ansi;
+
+  @override
+  bool operator ==(Object other) =>
+      other is TokenInputs &&
+      other.dark == dark &&
+      other.bgL == bgL &&
+      other.hue == hue &&
+      other.chroma == chroma &&
+      other.accentH == accentH &&
+      other.accentC == accentC &&
+      other.accentL == accentL &&
+      other.fs == fs &&
+      other.scale == scale &&
+      other.sp == sp &&
+      other.rCard == rCard &&
+      other.rControl == rControl &&
+      other.bw == bw &&
+      other.shadow == shadow &&
+      other.dur == dur &&
+      other.amberHue == amberHue &&
+      other.greenHue == greenHue &&
+      other.dangerHue == dangerHue &&
+      other.ansi == ansi;
+
+  @override
+  int get hashCode => Object.hash(
+    dark,
+    bgL,
+    hue,
+    chroma,
+    accentH,
+    accentC,
+    accentL,
+    scale,
+    rCard,
+    rControl,
+    shadow,
+    dur,
+    amberHue,
+    greenHue,
+    dangerHue,
+    ansi,
+  );
 }
 
-/// The shipped identities.
-enum StormPreset {
+/// One shipped look: a family's light or dark member.
+///
+/// Storm's own are the [StormPreset] values, built in so the app never waits
+/// for its theme files; everything else comes from `assets/themes/`.
+abstract interface class ThemeVariant {
+  /// The [ThemeFamily] id this belongs to.
+  String get family;
+  String get wire;
+  String get label;
+  TokenInputs get inputs;
+}
+
+/// A variant read from a theme config.
+@immutable
+final class ConfiguredVariant implements ThemeVariant {
+  const ConfiguredVariant({
+    required this.family,
+    required this.wire,
+    required this.label,
+    required this.inputs,
+  });
+
+  @override
+  final String family;
+  @override
+  final String wire;
+  @override
+  final String label;
+  @override
+  final TokenInputs inputs;
+
+  @override
+  bool operator ==(Object other) =>
+      other is ConfiguredVariant &&
+      other.family == family &&
+      other.wire == wire &&
+      other.label == label &&
+      other.inputs == inputs;
+
+  @override
+  int get hashCode => Object.hash(family, wire, label, inputs);
+}
+
+/// Storm's own identities, built in.
+///
+/// `assets/themes/storm.json` and `slowflow.json` carry the same inputs; these
+/// are what the app wears before those load, or if they fail to.
+enum StormPreset implements ThemeVariant {
   /// The product's real identity.
   stormDark(
     'storm-dark',
@@ -393,10 +506,15 @@ enum StormPreset {
 
   const StormPreset(this.wire, this.label, this.inputs);
 
-  /// How the choice is stored. Stable across renames of [label].
+  @override
   final String wire;
+  @override
   final String label;
+  @override
   final TokenInputs inputs;
+
+  @override
+  String get family => this == slowflowEarth ? 'slowflow' : 'storm';
 
   static StormPreset parse(String? wire) => StormPreset.values.firstWhere(
     (p) => p.wire == wire,

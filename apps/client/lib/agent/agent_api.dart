@@ -245,6 +245,19 @@ class AgentApi {
     ];
   }
 
+  /// Forgets a workspace's remembered write vault (decision 159).
+  Future<void> forgetWorkspacePref(String hostId, String workspace) async {
+    _decode(
+      await _client.delete(
+        _uri(
+          '/v1/agent/hosts/${Uri.encodeComponent(hostId)}/workspaces/'
+          '${Uri.encodeComponent(workspace)}/prefs',
+        ),
+        headers: _headers,
+      ),
+    );
+  }
+
   /// Makes a workspace on a host (decision 141c): a folder in its first
   /// workspace root, a git repository if [git]. Answers its name.
   Future<String> createWorkspace(
@@ -288,6 +301,7 @@ class AgentApi {
     ({String vaultId, String noteId})? context,
     String? writeVaultId,
     String? resumeOf,
+    String? rerunOf,
     LaunchCrew? crew,
     ({String vaultId, String noteId})? role,
     bool spawn = false,
@@ -318,6 +332,8 @@ class AgentApi {
               'write_vault_id': ?writeVaultId,
               // The server takes the rest from that session (decision 89).
               'resume_of': ?resumeOf,
+              // A rerun's write vault is not remembered (decision 159).
+              'rerun_of': ?rerunOf,
               if (crew != null)
                 'crew': crew.id != null
                     ? {'id': crew.id}

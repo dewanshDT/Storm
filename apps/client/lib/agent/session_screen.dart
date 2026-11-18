@@ -8,7 +8,8 @@ import 'package:go_router/go_router.dart';
 
 import '../api/models.dart';
 import '../editor/frontmatter.dart' as fm;
-import '../keyboard/storm_activators.dart' show stormUsesMetaModifier;
+import '../keyboard/storm_activators.dart'
+    show stormHasKeyboard, stormUsesMetaModifier;
 import '../router.dart';
 import '../state/app_state.dart';
 import '../state/terminal_prefs.dart';
@@ -94,12 +95,35 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       if (_focus.hasFocus) ref.read(sessionControllerProvider(_id))?.focus();
     });
     _markNotificationsRead();
+    agentSessionOpened.addListener(_onOpened);
+  }
+
+  void _onOpened() {
+    if (agentSessionOpened.value?.$1 == _id) _focusWhenShown();
+  }
+
+  /// This screen and its terminal are kept from one session to the next, so
+  /// `autofocus` fires only on the first: the session shown takes the
+  /// keyboard at desk width, unless a field or popover holds it (171-12).
+  void _focusWhenShown() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !stormHasKeyboard || !context.isExpanded) return;
+      if (_focus.context == null || _focus.hasPrimaryFocus) return;
+      final held = FocusManager.instance.primaryFocus?.context;
+      if (held != null &&
+          (held.findAncestorWidgetOfExactType<EditableText>() != null ||
+              ModalRoute.of(held) is PopupRoute)) {
+        return;
+      }
+      _focus.requestFocus();
+    });
   }
 
   @override
   void didUpdateWidget(SessionScreen old) {
     super.didUpdateWidget(old);
     if (old.sessionId != widget.sessionId) {
+      _focusWhenShown();
       _confirmEnd = false;
       _reloadedAtEnd = false;
       _laterFor = null;
@@ -118,6 +142,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
 
   @override
   void dispose() {
+    agentSessionOpened.removeListener(_onOpened);
     _focus.dispose();
     super.dispose();
   }
@@ -427,6 +452,7 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
         Positioned.fill(
           child: ImagePasteTarget(
             onImages: c.pasteImages,
+            onText: c.terminal.paste,
             focused: () => _focus.hasFocus,
             child: terminal,
           ),

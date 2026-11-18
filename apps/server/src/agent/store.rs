@@ -160,6 +160,14 @@ pub struct Membership {
     pub order: i64,
 }
 
+/// A workspace's remembered write vault (decision 159): `writes` false is
+/// a remembered "no writes".
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct WorkspacePref {
+    pub writes: bool,
+    pub vault_id: Option<String>,
+}
+
 /// A session's role label: a note, by id (138d).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoleLabel {
@@ -302,6 +310,15 @@ impl Store {
                  note_id    TEXT NOT NULL,
                  set_at     TEXT NOT NULL
              );
+             -- 161-2: the Notifies-you capability (Q3). No row is off, set
+             -- at launch from the account's agent_default_on /
+             -- children_default_on default.
+             CREATE TABLE IF NOT EXISTS session_notify (
+                 session_id        TEXT PRIMARY KEY,
+                 enabled           INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                 changed_by_device TEXT,
+                 changed_at        TEXT NOT NULL
+             );
              -- Each host's bridge identity as it last reported it (decision
              -- 135d), so a host offline or not yet back since a restart is
              -- still labelled.
@@ -342,6 +359,16 @@ impl Store {
                  identity_mechanism  TEXT,
                  identity_reason     TEXT,
                  recorded_at         TEXT NOT NULL
+             );
+             -- The write vault a person last started a session with in each
+             -- workspace (decision 159): what the launcher preselects there.
+             CREATE TABLE IF NOT EXISTS workspace_prefs (
+                 host_id        TEXT NOT NULL,
+                 workspace      TEXT NOT NULL,
+                 write_vault_id TEXT,
+                 writes         INTEGER NOT NULL,
+                 updated_at     TEXT NOT NULL,
+                 PRIMARY KEY (host_id, workspace)
              );",
         )?;
         // D15 AM42, additive: a database from before it gains the column.
@@ -467,7 +494,8 @@ impl Store {
     /// state transition worth persisting in full.
     #[cfg(test)]
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
-        self.update_with(r, &super::events::EventCtx::storm())
+        self.update_with(r, &super::events::EventCtx::storm())?;
+        Ok(())
     }
 
     /// [`Self::update`], with the events the change makes for a child's
@@ -476,7 +504,11 @@ impl Store {
     ///
     /// An ending refuses the session's pending requests, `requester_ended`,
     /// in the same transaction (P-4, L-7).
-    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<()> {
+    /// Returns whether this write is what just ended `r` (false → false),
+    /// so a caller can run cleanup that is not worth this transaction's time
+    /// (161-2 F2: `notifications::forget_due_at_end`) after it, never
+    /// delaying the commit or the wake it fires below.
+    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let before: Option<String> = tx
             .query_row(
@@ -508,7 +540,8 @@ impl Store {
                 r.harness_session
             ],
         )?;
-        if r.is_ended() && !was_ended {
+        let just_ended = r.is_ended() && !was_ended;
+        if just_ended {
             spawn::on_ended(&tx, r, &crate::index::now_rfc3339())?;
         }
         let now = crate::index::now_rfc3339();
@@ -541,7 +574,7 @@ impl Store {
         if wrote {
             self.notify_events();
         }
-        Ok(())
+        Ok(just_ended)
     }
 
     /// Records a session's grants and its vault-write flag, in one
@@ -1196,6 +1229,65 @@ impl Store {
             .unwrap();
     }
 
+    pub fn set_workspace_pref(
+        &self,
+        host_id: &str,
+        workspace: &str,
+        write_vault_id: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO workspace_prefs (host_id, workspace, write_vault_id, writes, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (host_id, workspace) DO UPDATE SET
+                 write_vault_id = excluded.write_vault_id, writes = excluded.writes,
+                 updated_at = excluded.updated_at",
+            params![
+                host_id,
+                workspace,
+                write_vault_id,
+                write_vault_id.is_some(),
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn workspace_prefs(
+        &self,
+        host_id: &str,
+    ) -> Result<std::collections::HashMap<String, WorkspacePref>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT workspace, writes, write_vault_id FROM workspace_prefs WHERE host_id = ?1",
+        )?;
+        let rows = stmt.query_map(params![host_id], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                WorkspacePref {
+                    writes: r.get(1)?,
+                    vault_id: r.get(2)?,
+                },
+            ))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Whether there was one to forget.
+    pub fn forget_workspace_pref(&self, host_id: &str, workspace: &str) -> Result<bool> {
+        Ok(self.conn.execute(
+            "DELETE FROM workspace_prefs WHERE host_id = ?1 AND workspace = ?2",
+            params![host_id, workspace],
+        )? > 0)
+    }
+
+    pub fn forget_host_workspace_prefs(&self, host_id: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM workspace_prefs WHERE host_id = ?1",
+            params![host_id],
+        )?;
+        Ok(())
+    }
+
     pub fn ran_as(&self, session_id: &str) -> Result<Option<super::RanAs>> {
         Ok(self
             .conn
@@ -1222,6 +1314,50 @@ impl Store {
             )
             .optional()?)
     }
+
+    /// 161-2: the "Notifies you" capability. No row is off.
+    pub fn notify_enabled(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT enabled FROM session_notify WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Sets a session's "Notifies you" flag: at launch, from the account's
+    /// default, or a child's from `children_default_on`.
+    pub fn set_notify(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        write_notify(&self.conn, session_id, enabled, device, now)
+    }
+}
+
+/// Shared with `spawn::spawn_child`, which only has a bare `&Connection`.
+fn write_notify(
+    conn: &Connection,
+    session_id: &str,
+    enabled: bool,
+    device: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_notify (session_id, enabled, changed_by_device, changed_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (session_id) DO UPDATE SET enabled = excluded.enabled,
+             changed_by_device = excluded.changed_by_device,
+             changed_at = excluded.changed_at",
+        params![session_id, enabled, device, now],
+    )?;
+    Ok(())
 }
 
 fn label_table(kind: super::HostLabel) -> &'static str {
@@ -1477,6 +1613,8 @@ fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
     super::events::forget_in(conn, id)?;
     // 161-1: a session mute is removed with its session (Q17).
     super::notifications::forget_session_mutes(conn, id)?;
+    // 161-2 F2: the "Notifies you" flag and its rate-limit state too.
+    super::notifications::forget_session_notify(conn, id)?;
     Ok((gone, crew))
 }
 
@@ -3480,6 +3618,12 @@ pub mod spawn {
         };
         let builtin = crate::gateway::connections::BUILTIN_ID;
         let reads_storm = grants.iter().any(|g| g.id == builtin);
+        // Q3: a spawned child's own default ("Agents started by agents can
+        // notify"), never the parent's — only a session the person
+        // launched themselves gets `agent_default_on`.
+        let notify =
+            reads_storm && super::super::notifications::load_prefs(conn)?.children_default_on;
+        super::write_notify(conn, &child.id, notify, None, now)?;
         let parent_vault: Option<String> = conn
             .query_row(
                 "SELECT write_vault_id FROM session_launch WHERE session_id = ?1",

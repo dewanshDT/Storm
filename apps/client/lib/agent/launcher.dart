@@ -1,10 +1,12 @@
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../api/models.dart';
+import '../editor/token_estimate.dart';
 import '../state/app_state.dart';
 import '../state/health.dart' show integrationsSummaryProvider;
 import '../state/terminal_prefs.dart' show launchBrightness;
@@ -40,6 +42,7 @@ class LaunchPrefill {
     this.writes,
     this.writeVaultId,
     this.crewId,
+    this.rerunOf,
   });
 
   /// Everything the session was launched with. Its host may be offline by
@@ -54,6 +57,7 @@ class LaunchPrefill {
     contextTitle: s.context?.title,
     writes: s.writeVaultId != null,
     writeVaultId: s.writeVaultId,
+    rerunOf: s.id,
   );
 
   final String? hostId;
@@ -68,6 +72,10 @@ class LaunchPrefill {
 
   /// The crew to join: preset when opened from a crew page (138h).
   final String? crewId;
+
+  /// The session Run again starts from: its Write to wins over what is
+  /// remembered, and is not remembered itself (decision 159).
+  final String? rerunOf;
 }
 
 /// The New session launcher (153-5): From, Agent and Where, what the
@@ -104,6 +112,12 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   NoteRef? _context;
   bool? _writes;
   String? _writeVault;
+
+  /// The person changed Write to in this launch: Where no longer resets it.
+  bool _writesTouched = false;
+
+  /// The vault Write to was preselected with from the workspace's memory.
+  String? _rememberedVault;
 
   /// Decision 161-2's launch toggle: null until the person touches the
   /// chip, so the server's own default (`agent_default_on`) applies; the
@@ -289,7 +303,23 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       _workspace =
           ws.where((w) => w.name == keepWorkspace).firstOrNull?.name ??
           ws.firstOrNull?.name;
+      _applyRemembered();
     });
+  }
+
+  /// Write to for the chosen workspace (decision 159): a rerun's own, else
+  /// what was last used there, else the note's vault. Left alone once the
+  /// person has changed it in this launch.
+  void _applyRemembered() {
+    final p = widget.prefill;
+    if (_writesTouched || p.rerunOf != null) return;
+    final pref = _workspaces
+        ?.where((w) => w.name == _workspace)
+        .firstOrNull
+        ?.write;
+    _writes = pref?.writes ?? p.writes;
+    _writeVault = pref?.vaultId ?? p.writeVaultId ?? p.context?.vaultId;
+    _rememberedVault = pref?.writes == true ? pref?.vaultId : null;
   }
 
   /// A workspace × host from Where's picker.
@@ -313,6 +343,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           _settleProvider();
         }
         _workspace = name;
+        _applyRemembered();
       });
     } else {
       _pickHost(host, keepWorkspace: name);
@@ -329,6 +360,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
           _host = host;
           _workspace = _spaces[host.id]!.firstOrNull?.name;
           _settleProvider();
+          _applyRemembered();
         });
       }
     }
@@ -368,6 +400,7 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         rows: (size.height / 20).clamp(12, 80).floor(),
         context: _context,
         writeVaultId: writes && _reachesStorm ? writeVault : null,
+        rerunOf: widget.prefill.rerunOf,
         crew: crew,
         // An agent that can't read Storm notes is never sent one (138g).
         role: _role == null || !_reachesStorm
@@ -520,6 +553,16 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
         .firstOrNull
         ?.name;
     final writes = allowed && (_writes ?? true) && writeVault != null;
+    final lastUsedHere = writes && !shell && writeVault == _rememberedVault;
+    Widget lastUsed() => Text(
+      'last used here',
+      key: const Key('launcher-writes-remembered'),
+      style: TextStyle(
+        fontFamily: StormTokens.sansFamily,
+        fontSize: t.labelSize,
+        color: t.text3,
+      ),
+    );
     final integrations = integrationNamesOn(
       ref.watch(integrationsSummaryProvider).value,
       host?.id,
@@ -765,6 +808,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                       )
                     : _openAt(_writesAnchor),
               ),
+              if (lastUsedHere)
+                Padding(
+                  padding: EdgeInsets.only(top: t.sp * 0.75),
+                  child: lastUsed(),
+                ),
               LauncherChip(
                 key: const Key('launcher-chip-spawn'),
                 label: 'Starts agents',
@@ -849,17 +897,34 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               text: 'Write to',
               value: writes && !shell,
               enabled: allowed && writeVault != null && !shell,
-              onChanged: (v) => setState(() => _writes = v),
+              onChanged: (v) => setState(() {
+                _writes = v;
+                _writesTouched = true;
+              }),
               trailing: writes && !shell
                   ? Align(
                       alignment: Alignment.centerLeft,
-                      child: _Select<String>(
-                        key: const Key('launcher-write-vault'),
-                        label: 'Write vault',
-                        value: writeVault,
-                        compact: true,
-                        options: [for (final v in vaults) _Opt(v.id, v.name)],
-                        onChanged: (v) => setState(() => _writeVault = v),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        spacing: t.sp,
+                        children: [
+                          Flexible(
+                            child: _Select<String>(
+                              key: const Key('launcher-write-vault'),
+                              label: 'Write vault',
+                              value: writeVault,
+                              compact: true,
+                              options: [
+                                for (final v in vaults) _Opt(v.id, v.name),
+                              ],
+                              onChanged: (v) => setState(() {
+                                _writeVault = v;
+                                _writesTouched = true;
+                              }),
+                            ),
+                          ),
+                          if (lastUsedHere) lastUsed(),
+                        ],
                       ),
                     )
                   : Text(

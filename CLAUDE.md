@@ -254,10 +254,10 @@ From M9/M10 (`docs/storm-multi-vault.md`):
   vanished from screen readers; Read mode is plain text in a `SelectionArea`.
   `test/semantics_test.dart` holds it, with the provenance link's own node.
 - **The terminal's theme is one instance per colour set** (Storm v2), keyed
-  by its colours and brightness (decision 157). xterm2 reports the colour
-  scheme to the agent on every non-identical theme while DEC 2031 is on; a
-  report after the agent restored echo prints as `^[[?997;1n` in the
-  scrollback. Answers and reports come from the target theme
+  by its palette (compared by value), ground and accent (decisions 157,
+  160). xterm2 reports the colour scheme to the agent on every non-identical
+  theme while DEC 2031 is on; a report after the agent restored echo prints
+  as `^[[?997;1n` in the scrollback. Answers and reports come from the target theme
   (`reportTheme`, 5.2.0+storm.4); an agent's view shows the brightness it
   was last answered with, dark before any, so an agent that never asks is
   never drawn light under its own dark text.
@@ -1158,3 +1158,10 @@ From M28 (desktop clients — the vault's *Desktop Clients — decision 125*):
 Match the surrounding code. Comments explain *why*, especially where something
 looks odd — most non-obvious code here is guarding one of the invariants above,
 and a future reader needs to know that before "simplifying" it.
+
+**Client UI: controls come from the shared components in `lib/ui/`**
+(`controls.dart`, `widgets.dart`, `surfaces.dart`). A pattern that doesn't
+exist is added there as a token-driven component (`context.tokens`, no
+hard-coded colours) with every state — idle, hover, keyboard focus,
+pressed, selected, disabled — and an entry in `lib/ui/gallery_screen.dart`,
+then used. No one-off `Container`/`InkWell` controls.

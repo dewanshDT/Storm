@@ -1,0 +1,17 @@
+{
+  "id": "slowflow",
+  "label": "SlowFlow",
+  "inspiredBy": null,
+  "shape": { "scale": 1.3, "rCard": 2, "rControl": 10, "shadow": 16, "dur": 320 },
+  "variants": {
+    "light": {
+      "label": "SlowFlow earth",
+      "bgL": 84,
+      "hue": 62,
+      "chroma": 22,
+      "accentH": 55,
+      "accentC": 0.06,
+      "accentL": 38
+    }
+  }
+}

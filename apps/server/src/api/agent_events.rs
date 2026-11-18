@@ -100,7 +100,8 @@ pub(super) async fn agent_events(
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
     // 161-1: the inbox, prefs and mutes share one `notification`/
-    // `notification_read`/`prefs_changed` feed on this same stream.
+    // `notification_read`/`notification_removed`/`prefs_changed` feed on
+    // this same stream.
     let notify_changed = state.agent.watch_notifications();
     let (tx, rx) = mpsc::channel(QUEUE);
 
@@ -339,6 +340,7 @@ impl Subscriber {
     async fn scan_notify(&mut self, state: &Shared) -> Vec<Frame> {
         let mut frames = Vec::new();
         let mut read_ids = Vec::new();
+        let mut removed_ids = Vec::new();
         loop {
             let rows = match state
                 .agent
@@ -353,15 +355,21 @@ impl Subscriber {
             let got = rows.len();
             for n in rows {
                 self.notif_cursor = self.notif_cursor.max(n.updated_seq);
+                // A cancelled row (a `key` replace, or `cancel_notify`) is
+                // `notification_removed`, whatever its read state: a row
+                // that is gone is gone, not merely read.
+                if n.cancelled {
+                    self.notif_unread_sent.remove(&n.id);
+                    removed_ids.push(n.id);
+                    continue;
+                }
                 // Any read row is `notification_read`, whether or not this
                 // very subscriber had sent it unread before — a row from
                 // before this connection (the backfill case) must never go
                 // out as a fresh `notification` carrying `read_at`.
-                if n.read_at.is_some() || n.cancelled {
+                if n.read_at.is_some() {
                     self.notif_unread_sent.remove(&n.id);
-                    if n.read_at.is_some() {
-                        read_ids.push(n.id);
-                    }
+                    read_ids.push(n.id);
                     continue;
                 }
                 self.notif_unread_sent.insert(n.id.clone());
@@ -378,6 +386,12 @@ impl Subscriber {
             frames.push(Frame::event(
                 "notification_read",
                 serde_json::json!({ "ids": read_ids }).to_string(),
+            ));
+        }
+        if !removed_ids.is_empty() {
+            frames.push(Frame::event(
+                "notification_removed",
+                serde_json::json!({ "ids": removed_ids }).to_string(),
             ));
         }
         match state.agent.notification_prefs() {

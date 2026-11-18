@@ -194,6 +194,26 @@ void main() {
       o.c.dispose();
     });
 
+    test('a snapshot attach shows what the host remembers (157g)', () async {
+      final o = open();
+      expect(o.c.terminal.answered.value, isNull);
+      o.current()
+        ..add(
+          StatusEvent(
+            AgentSession.fromJson({
+              ...agentSession('ags_1'),
+              'terminal_answered': 'light',
+            }),
+          ),
+        )
+        ..add(snapshot('screen', offset: 4000))
+        ..add(LiveEvent());
+      await settle();
+      expect(o.c.terminal.answered.value, Brightness.light);
+      expect(o.c.terminal.textForTest.trim(), 'screen');
+      o.c.dispose();
+    });
+
     test('nothing it draws is answered or typed, even once the quiet '
         'timer has passed', () async {
       final o = open();

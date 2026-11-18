@@ -14,6 +14,7 @@ import 'package:storm/ui/accents.dart';
 import 'package:storm/ui/pairing_screen.dart';
 import 'package:storm/ui/settings/settings_shell.dart';
 import 'package:storm/ui/settings/settings_widgets.dart';
+import 'package:storm/ui/themes/theme_library.dart';
 import 'package:storm/ui/tokens.dart';
 import 'package:storm/ui/widgets.dart' show PopoverItem;
 
@@ -213,8 +214,8 @@ void main() {
       await open(tester, c, 'device');
       Settings s() => c.read(settingsProvider).value!;
 
-      await tapKey(tester, 'preset-stormLight');
-      expect(s().theme, StormPreset.stormLight);
+      await tapKey(tester, 'theme-mode-light');
+      expect(s().theme, const ThemeChoice('storm', ThemeMode.light));
 
       final before = s().fontSize;
       await tapKey(tester, 'text-larger');
@@ -991,7 +992,7 @@ void main() {
           accessToken: 'sta_test',
           deviceId: 'dev_this',
           deviceSecret: 'sec',
-          theme: StormPreset.stormDark,
+          theme: ThemeChoice.initial,
           activeVault: FakeServer.primaryVault,
         ),
       );

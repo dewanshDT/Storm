@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use super::attention::{PERMISSION_PROMPT, QUESTION, SIGN_IN};
 use super::program::ProgramStatus;
 use super::store::SessionRecord;
-use super::{AgentError, AgentManager, AgentResult, now};
+use super::{AgentError, AgentManager, AgentResult, SessionLive, TerminalNoticeItem, now};
 
 // ---------------------------------------------------------------------
 // Event kinds
@@ -43,6 +43,45 @@ pub const CHILD_FINISHED: &str = "child_finished";
 pub const STOPPED_WORKING: &str = "stopped_working";
 pub const SUMMARY: &str = "summary";
 pub const TEST: &str = "test";
+/// 161-2: a notice the `notify` tool sent. Not in [`AUTOMATIC_KINDS`] — it
+/// has no on/off toggle of its own (the "Notifies you" capability is the
+/// gate); it still goes through [`silent_for`], so a mute, quiet hours or a
+/// pause hold it exactly like an automatic notice.
+pub const AGENT_MESSAGE: &str = "agent_message";
+/// 161-2: "{session} sent N more notifications" when a session's own
+/// notices are rate-limited (Q5). One per session per hour window, bumped
+/// in place as more are limited.
+pub const AGENT_ROLLUP: &str = "agent_rollup";
+/// 161-5: a notice forwarded from a session's terminal (OSC 9/777/99,
+/// AM126). Not in [`AUTOMATIC_KINDS`] either — like [`AGENT_MESSAGE`], its
+/// gate is the "Notifies you" capability, not an account toggle; it goes
+/// through [`silent_for`] under [`AGENT_MESSAGE`]'s own precedence.
+pub const TERMINAL_NOTICE: &str = "terminal_notice";
+
+// ---------------------------------------------------------------------
+// 161-2: the `notify` tool's own limits (Q5), independent of the account
+// prefs' `per_session_limit` setting applied on top of them.
+// ---------------------------------------------------------------------
+
+/// `title`'s bound after sanitising. Over this is `bad_title`, not a
+/// silent truncation (the draft's parameter table).
+pub const NOTIFY_TITLE_MAX: usize = 80;
+/// `body`'s bound after sanitising; truncated, never refused.
+pub const NOTIFY_BODY_MAX: usize = 500;
+/// `key`'s own bound (`[A-Za-z0-9._:-]`, 1–64).
+pub const NOTIFY_KEY_MAX: usize = 64;
+/// A token bucket's burst allowance per session.
+const AGENT_BURST: f64 = 3.0;
+/// Refills one token every this many seconds.
+const AGENT_REFILL_SECS: f64 = 120.0;
+/// Account-wide agent notices per hour; Storm's own automatic notices are
+/// never counted.
+const AGENT_ACCOUNT_HOURLY: i64 = 60;
+/// At most this many delayed notices pending per session.
+const AGENT_MAX_PENDING: i64 = 10;
+/// An identical (title, body) from the same session within this window is
+/// the same notice.
+const AGENT_DUP_WINDOW_SECS: i64 = 600;
 
 /// Every automatic kind a pref row may toggle. `summary` and `test` are not
 /// listed: a summary is controlled by `summary_on`, and a test always sends.
@@ -167,7 +206,47 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              created_at        TEXT NOT NULL
          );
          CREATE UNIQUE INDEX IF NOT EXISTS notification_mutes_target
-             ON notification_mutes(scope, target);",
+             ON notification_mutes(scope, target);
+
+         -- 161-2: the `notify` tool's per-session token bucket (burst 3,
+         -- refilling 1 every 2 minutes, Q5). `tokens` is fractional so a
+         -- partial refill is never lost between calls.
+         CREATE TABLE IF NOT EXISTS session_notify_bucket (
+             session_id TEXT PRIMARY KEY,
+             tokens     REAL NOT NULL,
+             updated_at TEXT NOT NULL
+         );
+
+         -- 161-2: a `notify` call with `delay_s`, queued here (not yet in
+         -- the inbox) until the Notifier fires it at `due`, under the
+         -- prefs/mutes/quiet/pause in force then, not when it was asked
+         -- for.
+         CREATE TABLE IF NOT EXISTS notify_pending (
+             id            TEXT PRIMARY KEY,
+             session_id    TEXT NOT NULL,
+             provider      TEXT,
+             session_title TEXT,
+             note_vault_id TEXT,
+             note_id       TEXT,
+             title         TEXT NOT NULL,
+             body          TEXT,
+             urgency       TEXT NOT NULL,
+             key           TEXT,
+             due           TEXT NOT NULL,
+             created_at    TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS notify_pending_by_due ON notify_pending(due);
+         CREATE INDEX IF NOT EXISTS notify_pending_by_session ON notify_pending(session_id);
+
+         -- 161-2: one roll-up notice per session per hour window (Q5),
+         -- bumped in place as more of the session's notices are limited.
+         CREATE TABLE IF NOT EXISTS session_notify_rollup (
+             session_id TEXT NOT NULL,
+             window     TEXT NOT NULL,
+             count      INTEGER NOT NULL,
+             notice_id  TEXT NOT NULL,
+             PRIMARY KEY (session_id, window)
+         );",
     )?;
     Ok(())
 }
@@ -309,13 +388,14 @@ fn display_title(r: &SessionRecord) -> String {
         .unwrap_or_else(|| r.workspace.clone())
 }
 
-/// An agent's own text (a delete request's `reason`): plain, bounded, with
-/// control, bidi-override and zero-width characters removed and newlines
-/// collapsed — the sanitiser 161-2's `notify` tool will also use, brought
-/// forward because this slice already shows agent text (the draft's
-/// security section: agent text is always sanitised, never shown raw).
-/// `None` if nothing is left.
-fn sanitise_agent_text(s: &str, max_chars: usize) -> Option<String> {
+/// An agent's own text (a delete request's `reason`, `notify`'s `title`
+/// and `body`): plain, with control, bidi-override and zero-width
+/// characters removed and newlines collapsed — the draft's security
+/// section: agent text is always sanitised, never shown raw. `None` if
+/// nothing is left. Not truncated: `notify`'s `title` must be rejected
+/// (`bad_title`) rather than silently shortened, so the length check runs
+/// on this, full length.
+fn strip_agent_text(s: &str) -> Option<String> {
     let mut out = String::new();
     let mut last_was_space = false;
     for c in s.chars() {
@@ -345,7 +425,26 @@ fn sanitise_agent_text(s: &str, max_chars: usize) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    Some(trimmed.chars().take(max_chars).collect())
+    Some(trimmed.to_string())
+}
+
+/// [`strip_agent_text`], then bounded: the delete request's `reason` and
+/// `notify`'s `body` are truncated rather than refused.
+fn sanitise_agent_text(s: &str, max_chars: usize) -> Option<String> {
+    strip_agent_text(s).map(|t| t.chars().take(max_chars).collect())
+}
+
+/// `notify`'s `title`: sanitised, then refused (`bad_title`) rather than
+/// truncated if it is empty or still over [`NOTIFY_TITLE_MAX`] — the
+/// draft's parameter table.
+pub fn checked_title(s: &str) -> Option<String> {
+    let t = strip_agent_text(s)?;
+    (t.chars().count() <= NOTIFY_TITLE_MAX).then_some(t)
+}
+
+/// `notify`'s `body`: sanitised and bounded; never refused.
+pub fn sanitised_body(s: &str, max_chars: usize) -> Option<String> {
+    sanitise_agent_text(s, max_chars)
 }
 
 // ---------------------------------------------------------------------
@@ -455,7 +554,7 @@ const PREFS_COLUMNS: &str = "version, events, quiet_on, quiet_start, quiet_end, 
     quiet_allow_delete_requests, summary_on, paused_until, agent_default_on, \
     children_default_on, per_session_limit, retention_days, retention_rows";
 
-fn load_prefs(conn: &Connection) -> Result<Prefs> {
+pub(super) fn load_prefs(conn: &Connection) -> Result<Prefs> {
     if let Some(p) = conn
         .query_row(
             &format!("SELECT {PREFS_COLUMNS} FROM notification_prefs WHERE only_row = 1"),
@@ -850,6 +949,36 @@ pub(super) fn forget_session_mutes(conn: &Connection, session_id: &str) -> Resul
     Ok(())
 }
 
+/// 161-2 F2: a session's queued delayed notices, dropped at the moment it
+/// ends rather than left for the Notifier to find due and discard one by
+/// one. Hooked where `update_with` first sees `is_ended()`.
+pub(super) fn forget_due_at_end(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM notify_pending WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// 161-2 F2: the "Notifies you" flag and its rate-limit and roll-up state,
+/// removed with a session (its inbox rows are kept, as a mute's are, for
+/// provenance). Hooked where a session is forgotten.
+pub(super) fn forget_session_notify(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM session_notify WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_notify_bucket WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_notify_rollup WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 /// Q17: a session mute never hides a delete request (it expires in 10
 /// minutes and needs the person regardless).
 fn muted(
@@ -957,6 +1086,8 @@ pub(super) struct NewNotice<'a> {
     pub host_id: Option<&'a str>,
     pub provider: Option<&'a str>,
     pub session_title: Option<&'a str>,
+    pub note_vault_id: Option<&'a str>,
+    pub note_id: Option<&'a str>,
     pub title: String,
     pub body: Option<String>,
     pub urgency: &'static str,
@@ -973,6 +1104,8 @@ impl<'a> NewNotice<'a> {
             host_id: None,
             provider: Some(r.provider.as_str()),
             session_title: Some(r.title.as_deref().unwrap_or(r.workspace.as_str())),
+            note_vault_id: None,
+            note_id: None,
             title,
             body: None,
             urgency: default_urgency(kind),
@@ -1007,8 +1140,9 @@ fn insert_notice(
     let changed = tx.execute(
         "INSERT INTO notifications
              (id, seq, updated_seq, created, source, kind, session_id, host_id, provider,
-              session_title, title, body, urgency, key, silent, silent_reason)
-         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+              session_title, note_vault_id, note_id, title, body, urgency, key, silent,
+              silent_reason)
+         VALUES (?1, ?2, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
          ON CONFLICT(key) DO NOTHING",
         params![
             id,
@@ -1020,6 +1154,8 @@ fn insert_notice(
             n.host_id,
             n.provider,
             n.session_title,
+            n.note_vault_id,
+            n.note_id,
             n.title,
             n.body,
             n.urgency,
@@ -1264,6 +1400,825 @@ pub(super) fn notify_delete_request(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// 161-2: the `notify` tool. `ops::notify` validates the call (sanitises
+// `title`/`body`, checks `key`'s shape, resolves and checks `link`) and
+// hands this a ready-made [`AgentNotify`]; everything here is the
+// mechanics — limits, the duplicate/`key`-replace rule, `delay_s`, and
+// running the result through the same [`silent_for`] precedence an
+// automatic notice gets.
+// ---------------------------------------------------------------------
+
+/// A validated `notify` call, ready to write.
+pub struct AgentNotify {
+    pub session_id: String,
+    pub provider: String,
+    pub session_title: String,
+    pub title: String,
+    pub body: Option<String>,
+    pub urgency: &'static str,
+    /// `[A-Za-z0-9._:-]`, 1–64 chars: already checked by the caller.
+    pub key: Option<String>,
+    pub note_vault_id: Option<String>,
+    pub note_id: Option<String>,
+    /// `Some(0)` and `None` both mean "now"; `notify`'s `delay_s` is
+    /// resolved to an absolute `due` instant by the caller, since only it
+    /// knows "now".
+    pub due: Option<String>,
+}
+
+/// `notify`'s result (the draft's wire shape): `sent` interrupted,
+/// `queued` is a delayed notice not yet due, `replaced` took over an
+/// earlier notice under the same `key`, `held` means a mute, quiet hours
+/// or a pause kept it to the inbox only.
+#[derive(Debug, Clone, Serialize)]
+pub struct NotifyResult {
+    pub id: String,
+    pub state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub held_reason: Option<&'static str>,
+}
+
+/// Why a call is refused outright rather than `held` (never reached for a
+/// duplicate or a `key` replace, which skip the limits entirely).
+#[derive(Debug, Clone, Copy)]
+pub enum NotifyRefusal {
+    RateLimited { retry_after_s: i64 },
+    TooManyPending,
+}
+
+/// `key` scoped to its session: never shared with another session's key,
+/// nor with a `storm`/`terminal` notice's own dedupe key.
+fn agent_key(session_id: &str, key: &str) -> String {
+    format!("ses:{session_id}:agent:{key}")
+}
+
+/// `[A-Za-z0-9._:-]`, 1–64 characters (the draft's parameter table).
+pub fn valid_notify_key(k: &str) -> bool {
+    !k.is_empty()
+        && k.len() <= NOTIFY_KEY_MAX
+        && k.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+}
+
+/// `silent_reason`'s stored word, as `notify`'s `held_reason` (the draft's
+/// wire enum uses `quiet_hours`, not the column's `quiet`).
+fn held_reason_wire(reason: &str) -> &'static str {
+    match reason {
+        "quiet" => "quiet_hours",
+        "paused" => "paused",
+        _ => "muted",
+    }
+}
+
+/// An uncancelled notice from this session, this call's exact (title,
+/// body), created within the duplicate window: the same notice (Q5), to
+/// answer again rather than insert. Shared with 161-5's terminal notices
+/// (`source IN ('agent', 'terminal')`): the same text forwarded twice,
+/// from `notify` or a session's own terminal, is still the same notice.
+fn recent_duplicate(
+    conn: &Connection,
+    session_id: &str,
+    title: &str,
+    body: Option<&str>,
+    since: &str,
+) -> Result<Option<Notification>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {NOTIF_COLUMNS} FROM notifications
+         WHERE session_id = ?1 AND source IN ('agent', 'terminal') AND cancelled = 0
+           AND title = ?2 AND body IS ?3 AND created >= ?4
+         ORDER BY seq DESC LIMIT 1"
+    ))?;
+    Ok(stmt
+        .query_row(params![session_id, title, body, since], row_to_notification)
+        .optional()?)
+}
+
+/// Cancels this session's earlier live notice under `full_key`, freeing
+/// the column's `UNIQUE` slot so the replacement can take it (`notify`'s
+/// `key` replace). `Ok(true)` if one was live to cancel.
+fn cancel_for_replace(conn: &Connection, session_id: &str, full_key: &str) -> Result<bool> {
+    let seq = next_counter(conn)?;
+    let n = conn.execute(
+        "UPDATE notifications SET cancelled = 1, key = NULL, updated_seq = ?3
+         WHERE session_id = ?1 AND key = ?2 AND cancelled = 0",
+        params![session_id, full_key, seq],
+    )?;
+    Ok(n > 0)
+}
+
+/// Count and earliest `created` of this session's agent and terminal
+/// notices in the rolling window (for the hourly cap and its
+/// `retry_after_s`) — 161-5 shares `notify`'s limits, so both sources
+/// count together.
+fn session_window(
+    conn: &Connection,
+    session_id: &str,
+    since: &str,
+) -> Result<(i64, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), MIN(created) FROM notifications
+         WHERE session_id = ?1 AND source IN ('agent', 'terminal') AND created >= ?2",
+        params![session_id, since],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// The same, account-wide (every session's agent and terminal notices).
+fn account_window(conn: &Connection, since: &str) -> Result<(i64, Option<String>)> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*), MIN(created) FROM notifications
+         WHERE source IN ('agent', 'terminal') AND created >= ?1",
+        params![since],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?)
+}
+
+/// Seconds until the oldest notice in a window ages out of it (so the
+/// count drops below the cap), at least 1.
+fn retry_after(oldest: Option<&str>, at: &str) -> i64 {
+    oldest
+        .and_then(|o| elapsed_secs(o, at))
+        .map(|elapsed| (3600 - elapsed).max(1))
+        .unwrap_or(60)
+}
+
+/// The per-session token bucket: burst [`AGENT_BURST`], refilling one
+/// token every [`AGENT_REFILL_SECS`]. `Ok(None)` consumed one; `Ok(Some(s))`
+/// is the seconds until the next.
+fn consume_token(conn: &Connection, session_id: &str, at: &str) -> Result<Option<i64>> {
+    let now_s = now_epoch(at);
+    let row: Option<(f64, String)> = conn
+        .query_row(
+            "SELECT tokens, updated_at FROM session_notify_bucket WHERE session_id = ?1",
+            params![session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (tokens, last_s) = match row {
+        Some((t, u)) => (t, now_epoch(&u)),
+        None => (AGENT_BURST, now_s),
+    };
+    let elapsed = (now_s - last_s).max(0) as f64;
+    let refilled = (tokens + elapsed / AGENT_REFILL_SECS).min(AGENT_BURST);
+    let (left, retry) = if refilled >= 1.0 {
+        (refilled - 1.0, None)
+    } else {
+        let wait = ((1.0 - refilled) * AGENT_REFILL_SECS).ceil() as i64;
+        (refilled, Some(wait.max(1)))
+    };
+    conn.execute(
+        "INSERT INTO session_notify_bucket (session_id, tokens, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET tokens = excluded.tokens, updated_at = excluded.updated_at",
+        params![session_id, left, at],
+    )?;
+    Ok(retry)
+}
+
+fn now_epoch(at: &str) -> i64 {
+    use time::format_description::well_known::Rfc3339;
+    time::OffsetDateTime::parse(at, &Rfc3339)
+        .map(|t| t.unix_timestamp())
+        .unwrap_or(0)
+}
+
+/// One roll-up notice per session per hour window (Q5), bumped in place
+/// as more of the session's notices are rate-limited: "{session} sent N
+/// more notifications". Runs through the same precedence an agent message
+/// gets, so a muted or quiet session is not interrupted by its own
+/// roll-up either.
+fn bump_rollup(
+    conn: &Connection,
+    session_id: &str,
+    provider: &str,
+    session_title: &str,
+    prefs: &Prefs,
+    mutes: &[Mute],
+    at: &str,
+) -> Result<()> {
+    let window = (now_epoch(at) / 3600).to_string();
+    let count: i64 = conn.query_row(
+        "INSERT INTO session_notify_rollup (session_id, window, count, notice_id)
+         VALUES (?1, ?2, 1, '')
+         ON CONFLICT(session_id, window) DO UPDATE SET count = count + 1
+         RETURNING count",
+        params![session_id, window],
+        |r| r.get(0),
+    )?;
+    let title = format!(
+        "{session_title} sent {count} more notification{}",
+        if count == 1 { "" } else { "s" }
+    );
+    let key = format!("ses:{session_id}:rollup:{window}");
+    if count == 1 {
+        let silence = silent_for(
+            prefs,
+            mutes,
+            AGENT_MESSAGE,
+            Some(session_id),
+            Some(provider),
+            at,
+        );
+        if let Some(made) = insert_notice(
+            conn,
+            NewNotice {
+                source: "storm",
+                kind: AGENT_ROLLUP,
+                session_id: Some(session_id),
+                host_id: None,
+                provider: Some(provider),
+                session_title: Some(session_title),
+                note_vault_id: None,
+                note_id: None,
+                title,
+                body: None,
+                urgency: "low",
+                key: Some(key),
+            },
+            silence,
+        )? {
+            conn.execute(
+                "UPDATE session_notify_rollup SET notice_id = ?3 WHERE session_id = ?1 AND window = ?2",
+                params![session_id, window, made.id],
+            )?;
+        }
+    } else {
+        let seq = next_counter(conn)?;
+        conn.execute(
+            "UPDATE notifications SET title = ?3, updated_seq = ?4
+             WHERE session_id = ?1 AND key = ?2 AND cancelled = 0",
+            params![session_id, key, title, seq],
+        )?;
+    }
+    Ok(())
+}
+
+impl AgentManager {
+    /// The "Notifies you" capability, offered now: a live session whose
+    /// flag is on. Checked again here (`ops`'s defensive re-check): the
+    /// gateway's `Authorized::may_call` already refused an unoffered call
+    /// before this is reached.
+    pub fn notify_offered(&self, session_id: &str) -> bool {
+        let store = self.store.lock().unwrap();
+        store
+            .get(session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|r| !r.is_ended())
+            && store.notify_enabled(session_id).unwrap_or(false)
+    }
+
+    /// The "Notifies you" flag as last set (161-2 F1), for `SessionView`:
+    /// unlike [`Self::notify_offered`] this does not require the session to
+    /// be live, so an ended session's view still shows what it was.
+    pub fn notify_enabled(&self, session_id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .notify_enabled(session_id)
+            .unwrap_or(false)
+    }
+
+    /// A person turns a session's "Notifies you" flag on or off from
+    /// Session Details (161-2 F1, AM124): "the chip at launch, and Session
+    /// Details afterwards, is the real grant". Bumped like `resize` and
+    /// every other per-session write, so the flip reaches every client
+    /// watching this session on `/v1/agent/events`, not only the one that
+    /// made it.
+    pub fn set_notify(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+    ) -> AgentResult<()> {
+        self.store
+            .lock()
+            .unwrap()
+            .set_notify(session_id, enabled, device, &now())?;
+        self.bump(session_id);
+        Ok(())
+    }
+
+    /// `cancel_notify(key)`: a session cancels only its own key, pending or
+    /// already live. `Ok(true)` if anything was cancelled.
+    pub fn cancel_agent_notify(&self, session_id: &str, key: &str) -> AgentResult<bool> {
+        let store = self.store.lock().unwrap();
+        let removed_pending = delete_pending_by_key(&store.conn, session_id, key)?;
+        let full_key = agent_key(session_id, key);
+        let cancelled_live = cancel_for_replace(&store.conn, session_id, &full_key)?;
+        drop(store);
+        if cancelled_live {
+            self.poke_notify();
+        }
+        Ok(removed_pending || cancelled_live)
+    }
+
+    /// `notify`: everything `ops::notify` has already validated, through
+    /// the duplicate rule, the `key` replace, the limits, and — immediately
+    /// or (`due` set) queued for the Notifier to fire — [`silent_for`].
+    pub fn agent_notify(
+        &self,
+        req: AgentNotify,
+    ) -> AgentResult<std::result::Result<NotifyResult, NotifyRefusal>> {
+        let at = now();
+        let store = self.store.lock().unwrap();
+        let conn = &store.conn;
+
+        // An identical (title, body) from this session within the window
+        // is the same notice: answer again, consuming no limit.
+        let dup_since = crate::index::rfc3339_minus_secs(&at, AGENT_DUP_WINDOW_SECS);
+        if let Some(existing) = recent_duplicate(
+            conn,
+            &req.session_id,
+            &req.title,
+            req.body.as_deref(),
+            &dup_since,
+        )? {
+            return Ok(Ok(NotifyResult {
+                id: existing.id,
+                state: if existing.silent { "held" } else { "sent" },
+                held_reason: existing.silent_reason.as_deref().map(held_reason_wire),
+            }));
+        }
+
+        // `delay_s`: queued, under its own pending cap, counted against the
+        // same limits as an immediate call (no bypass by delaying).
+        if let Some(due) = &req.due {
+            let pending = pending_count(conn, &req.session_id)?;
+            if pending >= AGENT_MAX_PENDING {
+                return Ok(Err(NotifyRefusal::TooManyPending));
+            }
+            if let Some(refusal) = self.check_agent_limits(
+                conn,
+                &req.session_id,
+                &req.provider,
+                &req.session_title,
+                &at,
+            )? {
+                return Ok(Err(refusal));
+            }
+            let id = crate::auth::identity::random_id("ntf_");
+            insert_pending(conn, &id, &req, due, &at)?;
+            return Ok(Ok(NotifyResult {
+                id,
+                state: "queued",
+                held_reason: None,
+            }));
+        }
+
+        if let Some(refusal) = self.check_agent_limits(
+            conn,
+            &req.session_id,
+            &req.provider,
+            &req.session_title,
+            &at,
+        )? {
+            return Ok(Err(refusal));
+        }
+        Ok(Ok(self.write_agent_notice(conn, &req, &at)?))
+    }
+
+    /// The limits (Q5), without writing anything: `None` passes. Shared by
+    /// `notify` and 161-5's terminal notices — the window queries below
+    /// count `source IN ('agent', 'terminal')`, and so does the token
+    /// bucket, which is keyed by `session_id` alone.
+    fn check_agent_limits(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        provider: &str,
+        session_title: &str,
+        at: &str,
+    ) -> AgentResult<Option<NotifyRefusal>> {
+        let prefs = load_prefs(conn)?;
+        let hour_ago = crate::index::rfc3339_minus_secs(at, 3600);
+        let (session_count, session_oldest) = session_window(conn, session_id, &hour_ago)?;
+        let session_cap = prefs.per_session_limit.max(0);
+        if session_count >= session_cap {
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
+            return Ok(Some(NotifyRefusal::RateLimited {
+                retry_after_s: retry_after(session_oldest.as_deref(), at),
+            }));
+        }
+        let (account_count, account_oldest) = account_window(conn, &hour_ago)?;
+        if account_count >= AGENT_ACCOUNT_HOURLY {
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
+            return Ok(Some(NotifyRefusal::RateLimited {
+                retry_after_s: retry_after(account_oldest.as_deref(), at),
+            }));
+        }
+        if let Some(wait) = consume_token(conn, session_id, at)? {
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
+            return Ok(Some(NotifyRefusal::RateLimited {
+                retry_after_s: wait,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn bump_and_poke_rollup(
+        &self,
+        conn: &Connection,
+        session_id: &str,
+        provider: &str,
+        session_title: &str,
+        at: &str,
+    ) -> AgentResult<()> {
+        let mutes = list_mutes(conn)?;
+        let prefs = load_prefs(conn)?;
+        bump_rollup(
+            conn,
+            session_id,
+            provider,
+            session_title,
+            &prefs,
+            &mutes,
+            at,
+        )?;
+        self.poke_notify();
+        Ok(())
+    }
+
+    /// Writes the notice now: a `key` replaces this session's earlier live
+    /// one under it (`replaced`); otherwise a plain insert (`sent`/`held`).
+    fn write_agent_notice(
+        &self,
+        conn: &Connection,
+        req: &AgentNotify,
+        at: &str,
+    ) -> AgentResult<NotifyResult> {
+        let prefs = load_prefs(conn)?;
+        let mutes = list_mutes(conn)?;
+        let silence = silent_for(
+            &prefs,
+            &mutes,
+            AGENT_MESSAGE,
+            Some(&req.session_id),
+            Some(&req.provider),
+            at,
+        );
+        let (full_key, replaced) = match &req.key {
+            Some(k) => {
+                let full = agent_key(&req.session_id, k);
+                let replaced = cancel_for_replace(conn, &req.session_id, &full)?;
+                (Some(full), replaced)
+            }
+            None => (None, false),
+        };
+        let made = insert_notice(
+            conn,
+            NewNotice {
+                source: "agent",
+                kind: AGENT_MESSAGE,
+                session_id: Some(&req.session_id),
+                host_id: None,
+                provider: Some(&req.provider),
+                session_title: Some(&req.session_title),
+                note_vault_id: req.note_vault_id.as_deref(),
+                note_id: req.note_id.as_deref(),
+                title: req.title.clone(),
+                body: req.body.clone(),
+                urgency: req.urgency,
+                key: full_key,
+            },
+            silence,
+        )?
+        .expect("a fresh or freed key is never a dedupe hit");
+        self.poke_notify();
+        Ok(NotifyResult {
+            id: made.id,
+            state: if replaced {
+                "replaced"
+            } else if made.silent {
+                "held"
+            } else {
+                "sent"
+            },
+            held_reason: made.silent_reason.as_deref().map(held_reason_wire),
+        })
+    }
+
+    /// The Notifier fires a delayed notice when it is due, under the
+    /// prefs/mutes/quiet/pause in force *then*, not when `notify` queued
+    /// it. Returns whether anything changed (for `notifier_tick`'s poke).
+    ///
+    /// A notice whose session has since ended or been removed, or no
+    /// longer has the "Notifies you" capability, is dropped rather than
+    /// fired (161-2 F2): ended and removed sessions are also cleaned up
+    /// eagerly (`forget_due_at_end`, `forget_session_notify`), so this is
+    /// the defensive case — a flag turned off after `notify` queued the
+    /// delay, or a race between the two.
+    pub(super) fn fire_due_notifies(&self, at: &str) -> AgentResult<bool> {
+        let due = {
+            let store = self.store.lock().unwrap();
+            due_notifies(&store.conn, at)?
+        };
+        if due.is_empty() {
+            return Ok(false);
+        }
+        let store = self.store.lock().unwrap();
+        for (pending_id, req) in &due {
+            let offered = store.get(&req.session_id)?.is_some_and(|r| !r.is_ended())
+                && store.notify_enabled(&req.session_id)?;
+            if offered {
+                self.write_agent_notice(&store.conn, req, at)?;
+            }
+            delete_pending(&store.conn, pending_id)?;
+        }
+        Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------
+// 161-5: terminal notices (OSC 9/777/99; AM126), forwarded by 161-R1's host
+// parser as `terminal_notice` on a session's status report. They run
+// through the same sanitiser, limits and precedence `notify` gets —
+// `check_agent_limits`, `recent_duplicate`, `silent_for` under
+// [`AGENT_MESSAGE`] — and nothing here forks them.
+// ---------------------------------------------------------------------
+
+/// A terminal notice's outcome, metadata only (G-D18): for
+/// `ops::runtime_status` to audit. Never the title or body.
+pub struct TerminalNoticeAudit {
+    pub owner_user_id: String,
+    pub session_id: String,
+    pub source_form: String,
+    /// Sanitised char counts, like `notify`'s own `title_chars`/`body_chars`
+    /// — never the raw byte length of the agent's untrusted text.
+    pub title_chars: usize,
+    pub body_chars: usize,
+    pub outcome: &'static str,
+}
+
+/// `title`/`body` after decision 161's sanitiser (point 3 of 161-5's build
+/// note): the OSC title if it survives sanitising, else the body cut to
+/// [`NOTIFY_TITLE_MAX`] chars with no separate body (the title already
+/// carries the only text there is). `None` once nothing is left of either.
+fn sanitise_terminal_item(item: &TerminalNoticeItem) -> Option<(String, Option<String>)> {
+    let body = sanitise_agent_text(&item.body, NOTIFY_BODY_MAX);
+    match item
+        .title
+        .as_deref()
+        .and_then(|t| sanitise_agent_text(t, NOTIFY_TITLE_MAX))
+    {
+        Some(title) => Some((title, body)),
+        None => body.map(|b| (b.chars().take(NOTIFY_TITLE_MAX).collect(), None)),
+    }
+}
+
+/// A short, deterministic signature of a terminal notice's sanitised text,
+/// for its dedupe `key` (`ses:<id>:osc:<signature>`). The same text from
+/// the same session collapses into the live (uncancelled) notice under
+/// that key rather than filling the inbox with repeats, for as long as
+/// that row exists — being read does not free it; only its being
+/// cancelled, pruned or the inbox cleared does.
+fn terminal_notice_signature(title: &str, body: Option<&str>) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(title.as_bytes());
+    h.update(&[0]);
+    h.update(body.unwrap_or("").as_bytes());
+    h.finalize().to_hex()[..16].to_string()
+}
+
+/// Whether an uncancelled notice already holds `key`, regardless of how
+/// long ago it was made. [`recent_duplicate`]'s 10-minute window only
+/// catches a resend bunched close together; identical text spread further
+/// apart still collides on `key`'s `UNIQUE` column, and checking this
+/// before the limits is what makes that answer "duplicate" rather than
+/// spend a token and then report "sent" on a row `insert_notice`'s
+/// `ON CONFLICT(key) DO NOTHING` never actually writes.
+fn live_notice_by_key(conn: &Connection, key: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM notifications WHERE key = ?1 AND cancelled = 0",
+            params![key],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+impl AgentManager {
+    /// Whether `seq` is new for `session_id` under its host's current link
+    /// generation — `false` for a status post retried with notices the
+    /// server already acted on. Never kept across a server restart (like
+    /// every other field of `SessionLive`); a host restart or reconnect
+    /// gets a new generation (`connect_host`), under which its own `seq`
+    /// starts at 1 again, so a lower value is accepted.
+    fn accept_terminal_seq(&self, host_id: &str, session_id: &str, seq: u64) -> bool {
+        let mut live = self.live.lock().unwrap();
+        let generation = live.hosts.get(host_id).map(|l| l.generation).unwrap_or(0);
+        let s = live
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(SessionLive::new);
+        match s.osc_seq {
+            Some((g, last)) if g == generation && seq <= last => false,
+            _ => {
+                s.osc_seq = Some((generation, seq));
+                true
+            }
+        }
+    }
+
+    /// 161-5: a host's `terminal_notice`/`terminal_notice_dropped` from its
+    /// status report. Dropped silently — no error to the host — for a
+    /// session without the "Notifies you" capability (`notify_enabled`);
+    /// never gated by whether the session has since ended, since the very
+    /// report that ends a session still carries a notice queued just before
+    /// it did (161-R1 fix 3). Returns one audit row per item, for
+    /// `ops::runtime_status` to record.
+    pub(super) fn record_terminal_notices(
+        &self,
+        r: &SessionRecord,
+        items: &[TerminalNoticeItem],
+        host_dropped: u32,
+    ) -> AgentResult<Vec<TerminalNoticeAudit>> {
+        let mut audits = Vec::new();
+        if items.is_empty() && host_dropped == 0 {
+            return Ok(audits);
+        }
+        let enabled = self
+            .store
+            .lock()
+            .unwrap()
+            .notify_enabled(&r.id)
+            .unwrap_or(false);
+        if !enabled {
+            tracing::debug!(session = %r.id, "terminal notices dropped: no capability");
+            return Ok(audits);
+        }
+        let store = self.store.lock().unwrap();
+        let conn = &store.conn;
+        let prefs = load_prefs(conn)?;
+        let mutes = list_mutes(conn)?;
+        let at = now();
+        let session_title = display_title(r);
+        let dup_since = crate::index::rfc3339_minus_secs(&at, AGENT_DUP_WINDOW_SECS);
+        for item in items {
+            let Some((title, body)) = sanitise_terminal_item(item) else {
+                continue;
+            };
+            if !self.accept_terminal_seq(&r.host_id, &r.id, item.seq) {
+                continue;
+            }
+            let title_chars = title.chars().count();
+            let body_chars = body.as_ref().map_or(0, |b| b.chars().count());
+            let key = format!(
+                "ses:{}:osc:{}",
+                r.id,
+                terminal_notice_signature(&title, body.as_deref())
+            );
+            // A key collision past the 10-minute window is still the same
+            // notice (S1): checked before the limits, or a stale duplicate
+            // would spend a token on a row `insert_notice` never writes.
+            let outcome = if recent_duplicate(conn, &r.id, &title, body.as_deref(), &dup_since)?
+                .is_some()
+                || live_notice_by_key(conn, &key)?
+            {
+                "duplicate"
+            } else if let Some(_refusal) =
+                self.check_agent_limits(conn, &r.id, &r.provider, &session_title, &at)?
+            {
+                "rate_limited"
+            } else {
+                let silence = silent_for(
+                    &prefs,
+                    &mutes,
+                    AGENT_MESSAGE,
+                    Some(&r.id),
+                    Some(&r.provider),
+                    &at,
+                );
+                insert_notice(
+                    conn,
+                    NewNotice {
+                        source: "terminal",
+                        kind: TERMINAL_NOTICE,
+                        session_id: Some(&r.id),
+                        host_id: None,
+                        provider: Some(&r.provider),
+                        session_title: Some(&session_title),
+                        note_vault_id: None,
+                        note_id: None,
+                        title,
+                        body,
+                        urgency: "normal",
+                        key: Some(key),
+                    },
+                    silence,
+                )?;
+                if silence.is_some() { "held" } else { "sent" }
+            };
+            audits.push(TerminalNoticeAudit {
+                owner_user_id: r.owner_user_id.clone(),
+                session_id: r.id.clone(),
+                source_form: item.source_form.clone(),
+                title_chars,
+                body_chars,
+                outcome,
+            });
+        }
+        for _ in 0..host_dropped {
+            bump_rollup(
+                conn,
+                &r.id,
+                &r.provider,
+                &session_title,
+                &prefs,
+                &mutes,
+                &at,
+            )?;
+        }
+        self.poke_notify();
+        Ok(audits)
+    }
+}
+
+/// `notify_pending` rows whose `due` has passed, as ready-made
+/// [`AgentNotify`]s (the Notifier fires them under the prefs in force now).
+fn due_notifies(conn: &Connection, at: &str) -> Result<Vec<(String, AgentNotify)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, session_id, provider, session_title, note_vault_id, note_id,
+                title, body, urgency, key
+         FROM notify_pending WHERE due <= ?1",
+    )?;
+    let rows = stmt.query_map(params![at], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            AgentNotify {
+                session_id: r.get(1)?,
+                provider: r.get(2)?,
+                session_title: r.get(3)?,
+                note_vault_id: r.get(4)?,
+                note_id: r.get(5)?,
+                title: r.get(6)?,
+                body: r.get(7)?,
+                urgency: match r.get::<_, String>(8)?.as_str() {
+                    "high" => "high",
+                    "low" => "low",
+                    _ => "normal",
+                },
+                key: r.get(9)?,
+                due: None,
+            },
+        ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+fn delete_pending(conn: &Connection, id: &str) -> Result<()> {
+    conn.execute("DELETE FROM notify_pending WHERE id = ?1", params![id])?;
+    Ok(())
+}
+
+/// `cancel_notify`: a still-queued delayed notice under this key, by this
+/// session. `Ok(true)` if one was removed.
+fn delete_pending_by_key(conn: &Connection, session_id: &str, key: &str) -> Result<bool> {
+    Ok(conn.execute(
+        "DELETE FROM notify_pending WHERE session_id = ?1 AND key = ?2",
+        params![session_id, key],
+    )? > 0)
+}
+
+fn pending_count(conn: &Connection, session_id: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM notify_pending WHERE session_id = ?1",
+        params![session_id],
+        |r| r.get(0),
+    )?)
+}
+
+fn insert_pending(
+    conn: &Connection,
+    id: &str,
+    req: &AgentNotify,
+    due: &str,
+    created_at: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO notify_pending
+             (id, session_id, provider, session_title, note_vault_id, note_id,
+              title, body, urgency, key, due, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+        params![
+            id,
+            req.session_id,
+            req.provider,
+            req.session_title,
+            req.note_vault_id,
+            req.note_id,
+            req.title,
+            req.body,
+            req.urgency,
+            req.key,
+            due,
+            created_at,
+        ],
+    )?;
+    Ok(())
+}
+
 /// The Notifier's memory between ticks: nothing in here survives a
 /// restart, which is why nothing is raised on one (the same rule the
 /// client's toasts follow for a snapshot) — except for a session the
@@ -1498,6 +2453,8 @@ impl AgentManager {
                     host_id: None,
                     provider: None,
                     session_title: None,
+                    note_vault_id: None,
+                    note_id: None,
                     title: "Test notification".into(),
                     body: Some("If this reached you, delivery to this device works.".into()),
                     urgency: "normal",
@@ -1603,6 +2560,7 @@ impl AgentManager {
         wrote |= self.notify_offline_hosts(&prefs, &mutes, &at)?;
         wrote |= self.notify_child_events(&prefs, &mutes, &at)?;
         wrote |= self.maybe_send_summary(&prefs, &at)?;
+        wrote |= self.fire_due_notifies(&at)?;
         {
             let store = self.store.lock().unwrap();
             prune(&store.conn, prefs.retention_days, prefs.retention_rows, &at)?;
@@ -1696,6 +2654,8 @@ impl AgentManager {
                     host_id: Some(&host_id),
                     provider: None,
                     session_title: None,
+                    note_vault_id: None,
+                    note_id: None,
                     title: "A host went offline".into(),
                     body: None,
                     urgency: default_urgency(HOST_OFFLINE),
@@ -1786,6 +2746,8 @@ impl AgentManager {
                 host_id: None,
                 provider: None,
                 session_title: None,
+                note_vault_id: None,
+                note_id: None,
                 title: "While you were away".into(),
                 body: Some(body),
                 urgency: "normal",

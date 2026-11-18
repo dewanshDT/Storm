@@ -689,9 +689,21 @@ class HostDetails extends StatefulWidget {
     required this.onSaveLimits,
     this.hostAdmin = true,
     this.running = 0,
+    this.remembered = const [],
+    this.vaultName,
+    this.onForget,
   });
 
   final AgentHost host;
+
+  /// Its workspaces with a remembered Write to (decision 159).
+  final List<AgentWorkspace> remembered;
+
+  /// A vault's name by id, or null when it is not known here.
+  final String? Function(String id)? vaultName;
+
+  /// Forgets a workspace's remembered Write to.
+  final Future<void> Function(String workspace)? onForget;
   final Future<void> Function(String name) onRename;
   final Future<void> Function() onRevoke;
 
@@ -1093,6 +1105,50 @@ class _HostDetailsState extends State<HostDetails> {
         if (h.identityUnverified)
           pair('Identity', Text(kIdentityNotVerified, style: value)),
         if (isolation != null) pair('Isolation', Text(isolation, style: value)),
+        if (widget.remembered.isNotEmpty)
+          pair(
+            'Write to',
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              spacing: t.sp * 0.5,
+              children: [
+                for (final w in widget.remembered)
+                  Wrap(
+                    key: Key('workspace-pref-${h.id}/${w.name}'),
+                    spacing: t.sp * 1.25,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        w.name,
+                        style: value.copyWith(
+                          fontFamily: StormTokens.monoFamily,
+                        ),
+                      ),
+                      Text(
+                        _rememberedLine(w.write!),
+                        key: Key('workspace-pref-line-${h.id}/${w.name}'),
+                        style: value.copyWith(color: t.text2),
+                      ),
+                      TextAction(
+                        key: Key('forget-pref-${h.id}/${w.name}'),
+                        label: 'Forget',
+                        onTap: widget.onForget == null
+                            ? null
+                            : () => widget.onForget!(w.name),
+                      ),
+                    ],
+                  ),
+                Text(
+                  'What the launcher preselects there, from the last session '
+                  'you started in it.',
+                  style: label.copyWith(
+                    fontSize: t.labelSize * 1.09,
+                    color: t.text3,
+                  ),
+                ),
+              ],
+            ),
+          ),
         if (limits != null)
           pair(
             'Limits',
@@ -1171,6 +1227,14 @@ class _HostDetailsState extends State<HostDetails> {
           ),
       ],
     );
+  }
+}
+
+extension on _HostDetailsState {
+  String _rememberedLine(WorkspaceWrite w) {
+    if (!w.writes) return 'No writes';
+    final name = w.vaultId == null ? null : widget.vaultName?.call(w.vaultId!);
+    return 'Writes to ${name ?? 'a vault'}';
   }
 }
 

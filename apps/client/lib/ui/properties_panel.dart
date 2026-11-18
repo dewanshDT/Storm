@@ -4,6 +4,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'widgets.dart';
 import 'breakpoints.dart';
 import 'note_properties.dart';
+import 'note_size.dart';
 import 'tokens.dart';
 
 /// A note's frontmatter, given a surface of its own.
@@ -72,7 +73,13 @@ class PropertiesPanel extends StatelessWidget {
               t.cardPad,
               t.cardPad,
             ),
-            child: NoteProperties(content: content, onChanged: onChanged),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                NoteSizeRow(content: content),
+                NoteProperties(content: content, onChanged: onChanged),
+              ],
+            ),
           ),
         ),
       ],
