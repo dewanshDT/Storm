@@ -114,7 +114,7 @@
     },
     {
       "name": "notify",
-      "description": "Send a notification through Storm: to the person, on every device, now or later. title is required; body is optional. Shown under a title Storm writes, never yours, in a category separate from Storm's own notices, with no action buttons — tapping it opens the session (or a linked note). Returns {state, held_reason?}: sent (interrupted), queued (delay_s, not yet due), replaced (took over your earlier notice under the same key), or held (a mute, quiet hours or a pause kept it to the inbox only — not an error, don't retry). Over the limits, the tool error rate_limited carries retry_after_s; Storm sends you one roll-up per hour if you keep being limited. An identical (title, body) within 10 minutes is treated as the same notice.",
+      "description": "Send a notification through Storm: to the person, on every device, now or later. title is required; body is optional. Shown under a title Storm writes, never yours, in a category separate from Storm's own notices, with no action buttons — tapping it opens the session (or a linked note). Returns {state, held_reason?}: sent (interrupted), queued (delay_s, not yet due), replaced (took over your earlier notice under the same key), or held (a mute, quiet hours or a pause kept it to the inbox only — not an error, don't retry). Over the limits, the tool error rate_limited carries retry_after_s; Storm sends you one roll-up per hour if you keep being limited. delay_s must be 0–3600 or the tool error bad_delay. An identical (title, body) within 10 minutes is treated as the same notice.",
       "access": "agents",
       "agents": true,
       "approval": false
