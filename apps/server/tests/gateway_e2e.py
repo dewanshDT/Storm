@@ -232,7 +232,7 @@ def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
         f.write("# Seed\n")
-    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw", "hs"):
+    for ws in ("gw", "oc", "sh", "wr", "ctx", "ctx2", "kw", "hs", "nt1", "nt2"):
         os.makedirs(os.path.join(WORKSPACES, ws))
     with open(os.path.join(WORKSPACES, "oc", "AGENTS.md"), "w") as f:
         f.write("the repository's instructions\n")
@@ -445,6 +445,42 @@ args = ["-i"]
         want = "verified" if expected_identity == "verified" else "unverified"
         check(f"every audited call of the session says {want} (135d)",
               len(audited) >= 8 and all(i == want for i in audited), audited)
+
+        print("\n=== decision 161-2: notify/cancel_notify, agent-only and capability-gated ===")
+        with_notify = launch("claude-code", "nt1", {"notify": True})
+        without_notify = launch("claude-code", "nt2", {"notify": False})
+        an = Agent("nt1")
+        an.initialize("storm", 1)
+        an.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        ntools = [t["name"] for t in an.answer("storm", 2)["result"]["tools"]]
+        check("notify and cancel_notify are listed with the capability",
+              "notify" in ntools and "cancel_notify" in ntools, ntools)
+        an.tool("storm", 3, "notify", {"title": "build finished"})
+        sent = an.answer("storm", 3)["result"]["structuredContent"]
+        check("a real notify call from a fake-provider host, through the host and server, succeeds",
+              sent.get("state") == "sent", sent)
+        an.tool("storm", 4, "cancel_notify", {"key": "nope"})
+        cancelled = an.answer("storm", 4)["result"]["structuredContent"]
+        check("cancel_notify on an unknown key answers cancelled: false",
+              cancelled == {"cancelled": False}, cancelled)
+        an.tool("storm", 5, "notify", {"title": "too long", "delay_s": 3601})
+        bad_delay = an.answer("storm", 5)
+        check("delay_s outside 0-3600 is the tool error bad_delay, not a silent clamp",
+              bad_delay.get("result", {}).get("isError") is True
+              and bad_delay["result"]["structuredContent"].get("error") == "bad_delay", bad_delay)
+
+        am = Agent("nt2")
+        am.initialize("storm", 1)
+        am.send("storm", {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        mtools = [t["name"] for t in am.answer("storm", 2)["result"]["tools"]]
+        check("without the capability, notify and cancel_notify are unlisted",
+              "notify" not in mtools and "cancel_notify" not in mtools, mtools)
+        am.tool("storm", 3, "notify", {"title": "nope"})
+        refused = am.answer("storm", 3)
+        check("and refused tool_not_allowed if called anyway (one rule for list and call)",
+              refused.get("error", {}).get("data", {}).get("storm_error") == "tool_not_allowed", refused)
+        call("POST", f"/v1/agent/sessions/{with_notify['id']}/end", auth=owner)
+        call("POST", f"/v1/agent/sessions/{without_notify['id']}/end", auth=owner)
 
         print("\n=== an integration scoped to another host (decision 121) ===")
         _, issued = call("POST", "/v1/agent/hosts/enrollments", {"server_url": BASE}, auth=owner)

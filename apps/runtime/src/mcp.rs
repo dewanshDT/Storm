@@ -160,6 +160,12 @@ pub const SPAWN_ALLOWED_TOOLS: [&str; 8] = [
 /// offers them only to a session with vault writes.
 pub const DELETE_ALLOWED_TOOLS: [&str; 2] = ["delete_note", "delete_folder"];
 
+/// The `notify`/`cancel_notify` tools (decision 161-2, AM-G19): allowed
+/// outright for Claude Code and OpenCode, whether this session is a
+/// top-level one or a child, since both can hold the "Notifies you"
+/// capability. Codex keeps its prompt, as it does for every Storm tool.
+pub const NOTIFY_ALLOWED_TOOLS: [&str; 2] = ["notify", "cancel_notify"];
+
 /// The Storm tools that only read, allowed outright for a top-level session
 /// reading Storm, so its reads before a delete or a spawn never stop on
 /// the CLI's prompt. Every server tool not in its write or spawn lists,
@@ -216,6 +222,12 @@ impl StormLayer {
     /// With the delete tools allowed too (149b).
     pub fn deleting(mut self) -> Self {
         self.allow.extend(DELETE_ALLOWED_TOOLS);
+        self
+    }
+
+    /// With `notify`/`cancel_notify` allowed too (161-2, AM-G19).
+    pub fn notifying(mut self) -> Self {
+        self.allow.extend(NOTIFY_ALLOWED_TOOLS);
         self
     }
 

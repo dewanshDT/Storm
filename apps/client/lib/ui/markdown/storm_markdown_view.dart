@@ -11,6 +11,7 @@ import '../states.dart';
 import '../tokens.dart';
 import '../widgets.dart';
 import '../storm_image_provider.dart';
+import '../note_size.dart' show reportNoteSelection;
 import 'storm_markdown_style.dart';
 
 /// Scheme used for `[[wikilink]]` targets rendered as ordinary Markdown links.
@@ -74,6 +75,8 @@ class StormMarkdownView extends ConsumerWidget {
       // leaves out of the accessibility tree; plain text in a SelectionArea
       // reads and selects the same.
       return SelectionArea(
+        onSelectionChanged: (selected) =>
+            reportNoteSelection(ref, selected?.plainText ?? ''),
         child: MarkdownBody(
           key: const Key('storm-markdown-body'),
           data: _withCompletedTaskStrike(markdown),

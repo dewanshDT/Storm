@@ -326,7 +326,7 @@ fn the_allowed_tools_are_the_servers() {
 }
 
 /// The read tools a top-level session allows are every server tool that is
-/// not a write, a spawn or a child's tool.
+/// not a write, a spawn, a child's or a notify tool.
 #[test]
 fn the_read_tools_are_every_server_tool_that_only_reads() {
     let src = std::fs::read_to_string(
@@ -344,10 +344,15 @@ fn the_read_tools_are_every_server_tool_that_only_reads() {
             .map(str::to_string)
             .collect()
     };
-    let not_reads: Vec<String> = ["WRITE_TOOLS", "SPAWN_TOOLS", "SPAWNED_TOOLS"]
-        .iter()
-        .flat_map(|n| list(n))
-        .collect();
+    let not_reads: Vec<String> = [
+        "WRITE_TOOLS",
+        "SPAWN_TOOLS",
+        "SPAWNED_TOOLS",
+        "NOTIFY_TOOLS",
+    ]
+    .iter()
+    .flat_map(|n| list(n))
+    .collect();
     let mut tools = Vec::new();
     for part in src.split("#[tool(").skip(1) {
         let at = part.find("async fn ").unwrap() + "async fn ".len();

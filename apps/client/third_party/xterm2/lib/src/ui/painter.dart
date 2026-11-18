@@ -8,6 +8,7 @@ import 'package:xterm2/src/ui/procedural_glyphs.dart';
 import 'package:xterm2/xterm.dart';
 
 const _dimColorFactor = 0.66;
+const _faintLightAlpha = 0.65;
 const _specialBoldColor = 0;
 const _specialUnderlineColor = 1;
 const _specialBlinkColor = 2;
@@ -933,6 +934,10 @@ class TerminalPainter {
     final color =
         specialColor ?? resolveForegroundColor(_boldBrightForeground(cellData));
     if (cellData.flags & CellFlags.faint == 0) return color;
+    // Darkening dark text on a light ground makes it bolder, not fainter.
+    if (_theme.background.computeLuminance() > 0.5) {
+      return color.withValues(alpha: color.a * _faintLightAlpha);
+    }
     return color.withValues(
       red: color.r * _dimColorFactor,
       green: color.g * _dimColorFactor,

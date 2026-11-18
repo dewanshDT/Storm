@@ -6,6 +6,34 @@ use tower::ServiceExt;
 use super::*;
 use crate::api::tests::{seed_owner, session_token, test_router_with_state};
 
+fn put_json_with_auth(
+    path: &str,
+    body: serde_json::Value,
+    auth: &str,
+) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("PUT")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap()
+}
+
+fn post_json_with_auth(
+    path: &str,
+    body: serde_json::Value,
+    auth: &str,
+) -> axum::http::Request<axum::body::Body> {
+    axum::http::Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json")
+        .header("authorization", auth)
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap()
+}
+
 const HOST: &str = "hst_01HB6V3Z7Q2M4N8P0R5S9T1W3X";
 
 /// Fast enough for a test to see both lanes in a few seconds.
@@ -767,6 +795,212 @@ async fn a_read_before_ever_seen_unread_is_still_a_read() {
     assert!(extra.is_none(), "nothing else for this notice: {extra:?}");
 }
 
+fn agent_notify(id: &str, title: &str, key: &str) -> crate::agent::notifications::AgentNotify {
+    crate::agent::notifications::AgentNotify {
+        session_id: id.to_string(),
+        provider: "fake".into(),
+        session_title: "tidier".into(),
+        title: title.into(),
+        body: None,
+        urgency: "normal",
+        key: Some(key.to_string()),
+        note_vault_id: None,
+        note_id: None,
+        due: None,
+    }
+}
+
+/// A row this stream already sent as `notification` is never left for a
+/// subscriber to keep once it is cancelled — by a `key` replace or by
+/// `cancel_notify` — and a cancelled row is never in `GET /v1/notifications`
+/// either, though it still exists for dedupe.
+#[tokio::test]
+async fn a_key_replace_tells_every_subscriber_the_old_notice_is_gone() {
+    let dir = tempdir::TempDir::new("storm-161-notify-key-replace").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let first = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "first", "k"))
+        .unwrap()
+        .unwrap();
+    let (name, data) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification");
+    assert_eq!(data["id"], first.id);
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let second = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "second", "k"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(second.state, "replaced");
+
+    for rx in [&mut a, &mut b] {
+        let mut seen_new = false;
+        let mut seen_removed = false;
+        for _ in 0..2 {
+            let (name, data) = next_frame(rx, Duration::from_secs(5))
+                .await
+                .expect("the new notice and the old one's removal");
+            match name {
+                "notification" => {
+                    assert_eq!(data["id"], second.id);
+                    seen_new = true;
+                }
+                "notification_removed" => {
+                    assert_eq!(data["ids"], serde_json::json!([first.id]));
+                    seen_removed = true;
+                }
+                other => panic!("unexpected frame: {other}"),
+            }
+        }
+        assert!(seen_new && seen_removed);
+    }
+
+    let list = json(f.ask(get("/v1/notifications", Some(&f.bearer))).await).await;
+    let ids: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| n["id"].as_str().unwrap())
+        .collect();
+    assert!(ids.contains(&second.id.as_str()), "{list}");
+    assert!(!ids.contains(&first.id.as_str()), "{list}");
+}
+
+#[tokio::test]
+async fn cancel_notify_of_a_live_notice_tells_every_subscriber_too() {
+    let dir = tempdir::TempDir::new("storm-161-notify-cancel-live").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let n = f
+        .state
+        .agent
+        .agent_notify(agent_notify(&id, "hello", "k"))
+        .unwrap()
+        .unwrap();
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    assert!(f.state.agent.cancel_agent_notify(&id, "k").unwrap());
+
+    for rx in [&mut a, &mut b] {
+        let (name, data) = next_frame(rx, Duration::from_secs(5))
+            .await
+            .expect("a notification_removed frame");
+        assert_eq!(name, "notification_removed");
+        assert_eq!(data["ids"], serde_json::json!([n.id]));
+    }
+
+    let list = json(f.ask(get("/v1/notifications", Some(&f.bearer))).await).await;
+    let ids: Vec<&str> = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&n.id.as_str()), "{list}");
+}
+
+/// The "Notifies you" switch is a per-session write like any other
+/// (161-2 F1): a flip reaches every client watching the session, not only
+/// the one that made it, whether through `PUT …/notify` or the bulk
+/// `POST …/sessions/notify-off`.
+#[tokio::test]
+async fn the_notify_switch_reaches_every_subscriber() {
+    let dir = tempdir::TempDir::new("storm-161-notify-switch-push").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    // This fixture's launch grants no Storm connection, so notify starts
+    // false (Q3: "never offered without Storm"); flip it on first.
+    assert!(!f.state.agent.notify_enabled(&id));
+    let response = f
+        .ask(put_json_with_auth(
+            &format!("/v1/agent/sessions/{id}/notify"),
+            serde_json::json!({"enabled": true}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for rx in [&mut a, &mut b] {
+        let (name, data) = next_frame(rx, Duration::from_secs(5))
+            .await
+            .expect("a session frame after PUT …/notify {enabled:true}");
+        assert_eq!(name, "session");
+        assert_eq!(data["id"], id);
+        assert_eq!(data["notify"], true);
+    }
+
+    let response = f
+        .ask(put_json_with_auth(
+            &format!("/v1/agent/sessions/{id}/notify"),
+            serde_json::json!({"enabled": false}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for rx in [&mut a, &mut b] {
+        let (name, data) = next_frame(rx, Duration::from_secs(5))
+            .await
+            .expect("a session frame after PUT …/notify {enabled:false}");
+        assert_eq!(name, "session");
+        assert_eq!(data["id"], id);
+        assert_eq!(data["notify"], false);
+    }
+
+    let response = f
+        .ask(put_json_with_auth(
+            &format!("/v1/agent/sessions/{id}/notify"),
+            serde_json::json!({"enabled": true}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for rx in [&mut a, &mut b] {
+        let (name, data) = next_frame(rx, Duration::from_secs(5))
+            .await
+            .expect("a session frame after PUT …/notify {enabled:true}, again");
+        assert_eq!(name, "session");
+        assert_eq!(data["id"], id);
+        assert_eq!(data["notify"], true);
+    }
+
+    let response = f
+        .ask(post_json_with_auth(
+            "/v1/agent/sessions/notify-off",
+            serde_json::json!({"scope": "all"}),
+            &f.bearer,
+        ))
+        .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    for rx in [&mut a, &mut b] {
+        let (name, data) = next_frame(rx, Duration::from_secs(5))
+            .await
+            .expect("a session frame after notify-off");
+        assert_eq!(name, "session");
+        assert_eq!(data["id"], id);
+        assert_eq!(data["notify"], false);
+    }
+}
+
 #[tokio::test]
 async fn muting_is_told_to_every_subscriber() {
     let dir = tempdir::TempDir::new("storm-161-notify-mutes").unwrap();
@@ -800,4 +1034,72 @@ async fn clearing_the_inbox_is_told_to_every_subscriber() {
         .await
         .expect("a notifications_cleared frame");
     assert_eq!(name, "notifications_cleared");
+}
+
+/// 157g: the brightness a host says its client answered with reaches the
+/// events, the session list and its view; a report without it keeps it, a
+/// `hello` says it again, and anything but `light` or `dark` is ignored.
+#[tokio::test]
+async fn the_answered_brightness_round_trips_from_the_host() {
+    let dir = tempdir::TempDir::new("storm-157g-answered").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut stream = f.open().await;
+    let snapshot = stream.expect("snapshot").await;
+    assert!(
+        snapshot.data["sessions"][0]
+            .get("terminal_answered")
+            .is_none()
+    );
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "light"}),
+    );
+    let event = stream
+        .next(Duration::from_secs(5))
+        .await
+        .expect("no session event");
+    assert_eq!(event.name, "session");
+    assert_eq!(event.data["terminal_answered"], "light");
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "mauve"}),
+    );
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "title": "Fix"}),
+    );
+    let list = json(f.ask(get("/v1/agent/sessions", Some(&f.bearer))).await).await;
+    let listed = list["sessions"]
+        .as_array()
+        .or(list.as_array())
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["terminal_answered"], "light");
+
+    f.state
+        .agent
+        .hello(
+            HOST,
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 8,
+                "sessions": [{"id": id, "status": "running", "terminal_answered": "dark",
+                    "output_end_offset": 0}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let view = json(
+        f.ask(get(&format!("/v1/agent/sessions/{id}"), Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    assert_eq!(view["terminal_answered"], "dark");
 }
