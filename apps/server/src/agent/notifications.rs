@@ -1939,8 +1939,10 @@ pub struct TerminalNoticeAudit {
     pub owner_user_id: String,
     pub session_id: String,
     pub source_form: String,
-    pub title_len: usize,
-    pub body_len: usize,
+    /// Sanitised char counts, like `notify`'s own `title_chars`/`body_chars`
+    /// — never the raw byte length of the agent's untrusted text.
+    pub title_chars: usize,
+    pub body_chars: usize,
     pub outcome: &'static str,
 }
 
@@ -1962,15 +1964,34 @@ fn sanitise_terminal_item(item: &TerminalNoticeItem) -> Option<(String, Option<S
 
 /// A short, deterministic signature of a terminal notice's sanitised text,
 /// for its dedupe `key` (`ses:<id>:osc:<signature>`). The same text from
-/// the same session collapses into the live notice under that key rather
-/// than filling the inbox with repeats, for as long as that notice's row
-/// still exists — pruned or read, the key is free again.
+/// the same session collapses into the live (uncancelled) notice under
+/// that key rather than filling the inbox with repeats, for as long as
+/// that row exists — being read does not free it; only its being
+/// cancelled, pruned or the inbox cleared does.
 fn terminal_notice_signature(title: &str, body: Option<&str>) -> String {
     let mut h = blake3::Hasher::new();
     h.update(title.as_bytes());
     h.update(&[0]);
     h.update(body.unwrap_or("").as_bytes());
     h.finalize().to_hex()[..16].to_string()
+}
+
+/// Whether an uncancelled notice already holds `key`, regardless of how
+/// long ago it was made. [`recent_duplicate`]'s 10-minute window only
+/// catches a resend bunched close together; identical text spread further
+/// apart still collides on `key`'s `UNIQUE` column, and checking this
+/// before the limits is what makes that answer "duplicate" rather than
+/// spend a token and then report "sent" on a row `insert_notice`'s
+/// `ON CONFLICT(key) DO NOTHING` never actually writes.
+fn live_notice_by_key(conn: &Connection, key: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM notifications WHERE key = ?1 AND cancelled = 0",
+            params![key],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 impl AgentManager {
@@ -2037,53 +2058,60 @@ impl AgentManager {
             if !self.accept_terminal_seq(&r.host_id, &r.id, item.seq) {
                 continue;
             }
-            let outcome =
-                if recent_duplicate(conn, &r.id, &title, body.as_deref(), &dup_since)?.is_some() {
-                    "duplicate"
-                } else if let Some(_refusal) =
-                    self.check_agent_limits(conn, &r.id, &r.provider, &session_title, &at)?
-                {
-                    "rate_limited"
-                } else {
-                    let key = format!(
-                        "ses:{}:osc:{}",
-                        r.id,
-                        terminal_notice_signature(&title, body.as_deref())
-                    );
-                    let silence = silent_for(
-                        &prefs,
-                        &mutes,
-                        AGENT_MESSAGE,
-                        Some(&r.id),
-                        Some(&r.provider),
-                        &at,
-                    );
-                    insert_notice(
-                        conn,
-                        NewNotice {
-                            source: "terminal",
-                            kind: TERMINAL_NOTICE,
-                            session_id: Some(&r.id),
-                            host_id: None,
-                            provider: Some(&r.provider),
-                            session_title: Some(&session_title),
-                            note_vault_id: None,
-                            note_id: None,
-                            title,
-                            body,
-                            urgency: "normal",
-                            key: Some(key),
-                        },
-                        silence,
-                    )?;
-                    if silence.is_some() { "held" } else { "sent" }
-                };
+            let title_chars = title.chars().count();
+            let body_chars = body.as_ref().map_or(0, |b| b.chars().count());
+            let key = format!(
+                "ses:{}:osc:{}",
+                r.id,
+                terminal_notice_signature(&title, body.as_deref())
+            );
+            // A key collision past the 10-minute window is still the same
+            // notice (S1): checked before the limits, or a stale duplicate
+            // would spend a token on a row `insert_notice` never writes.
+            let outcome = if recent_duplicate(conn, &r.id, &title, body.as_deref(), &dup_since)?
+                .is_some()
+                || live_notice_by_key(conn, &key)?
+            {
+                "duplicate"
+            } else if let Some(_refusal) =
+                self.check_agent_limits(conn, &r.id, &r.provider, &session_title, &at)?
+            {
+                "rate_limited"
+            } else {
+                let silence = silent_for(
+                    &prefs,
+                    &mutes,
+                    AGENT_MESSAGE,
+                    Some(&r.id),
+                    Some(&r.provider),
+                    &at,
+                );
+                insert_notice(
+                    conn,
+                    NewNotice {
+                        source: "terminal",
+                        kind: TERMINAL_NOTICE,
+                        session_id: Some(&r.id),
+                        host_id: None,
+                        provider: Some(&r.provider),
+                        session_title: Some(&session_title),
+                        note_vault_id: None,
+                        note_id: None,
+                        title,
+                        body,
+                        urgency: "normal",
+                        key: Some(key),
+                    },
+                    silence,
+                )?;
+                if silence.is_some() { "held" } else { "sent" }
+            };
             audits.push(TerminalNoticeAudit {
                 owner_user_id: r.owner_user_id.clone(),
                 session_id: r.id.clone(),
                 source_form: item.source_form.clone(),
-                title_len: item.title.as_deref().map_or(0, str::len),
-                body_len: item.body.len(),
+                title_chars,
+                body_chars,
                 outcome,
             });
         }

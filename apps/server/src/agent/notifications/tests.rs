@@ -1680,6 +1680,69 @@ fn audit_carries_lengths_and_outcome_only() {
     assert_eq!(audits.len(), 1);
     assert_eq!(audits[0].outcome, "sent");
     assert_eq!(audits[0].source_form, "osc777");
-    assert_eq!(audits[0].title_len, "Build".len());
-    assert_eq!(audits[0].body_len, "no errors".len());
+    assert_eq!(audits[0].title_chars, "Build".chars().count());
+    assert_eq!(audits[0].body_chars, "no errors".chars().count());
+}
+
+/// S1: the same text reused outside the 10-minute duplicate window still
+/// collides on its content-hash key, and that must answer "duplicate"
+/// without a row written or a token spent — not "sent" on a no-op insert.
+#[test]
+fn a_stale_key_collision_is_a_duplicate_not_a_spent_token() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "done", "osc777")],
+        }),
+    );
+    // 11 minutes later, outside AGENT_DUP_WINDOW_SECS, with the first
+    // notice still unread: the content-hash key is still live.
+    m.store_for_tests()
+        .conn
+        .execute(
+            "UPDATE notifications SET created = '2000-01-01T00:00:00Z'",
+            [],
+        )
+        .unwrap();
+    let audits = m
+        .host_status(
+            HOST,
+            &id,
+            &serde_json::from_value(json!({
+                "status": "running",
+                "terminal_notice": [notice_item(2, Some("Build"), "done", "osc777")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].outcome, "duplicate");
+    let rows: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == TERMINAL_NOTICE)
+        .collect();
+    assert_eq!(rows.len(), 1, "no second row");
+    // The duplicate spent no token of its own: only the burst's first
+    // notice did (the original, successfully sent one), so exactly 2 of
+    // the 3 remain for notify() — a third call is rate-limited.
+    for i in 0..2 {
+        let out = m
+            .agent_notify(notify_req(&id, &format!("msg {i}"), Some(&format!("k{i}"))))
+            .unwrap();
+        assert!(out.is_ok(), "{i}: {out:?}");
+    }
+    let third = m
+        .agent_notify(notify_req(&id, "msg 2", Some("k2")))
+        .unwrap();
+    assert!(
+        matches!(third, Err(NotifyRefusal::RateLimited { .. })),
+        "the duplicate spent no extra token, so the bucket is exactly where the first notice left it: {third:?}"
+    );
 }

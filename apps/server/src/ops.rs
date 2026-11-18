@@ -6478,8 +6478,8 @@ async fn audit_terminal_notice(
         &serde_json::json!({
             "session_id": a.session_id,
             "source_form": a.source_form,
-            "title_len": a.title_len,
-            "body_len": a.body_len,
+            "title_chars": a.title_chars,
+            "body_chars": a.body_chars,
             "outcome": a.outcome,
         })
         .to_string(),
