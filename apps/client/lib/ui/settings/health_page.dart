@@ -11,6 +11,7 @@ import '../shell/app_bar.dart' show healthColor;
 import '../tokens.dart';
 import 'connection_page.dart' show serverAddress;
 import 'settings_widgets.dart';
+import 'theme_picker.dart' show ThemeCredits;
 
 /// Settings › About & health: the rail popover's rows, each with the place
 /// that fixes it, then what this is and where it points.
@@ -79,6 +80,7 @@ class HealthPage extends ConsumerWidget {
             ),
           ),
         ),
+        const ThemeCredits(),
       ],
     );
   }

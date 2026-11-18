@@ -680,6 +680,10 @@ pub struct StatusReport {
     /// `Some(None)` when none is live, `None` when the report does not say.
     #[serde(default, deserialize_with = "program::lenient")]
     pub program_status: Option<Option<program::ProgramReport>>,
+    /// The brightness its client last answered the program's OSC 10/11
+    /// query with (157g), sent on change; absent from an older host.
+    #[serde(default)]
+    pub terminal_answered: Option<String>,
     #[serde(default)]
     pub signal: Option<i32>,
     /// The agent's own id for the conversation (decision 89). Null changes
@@ -825,6 +829,10 @@ pub struct Launch {
     /// an older server ignores the field.
     #[serde(default)]
     pub terminal_brightness: Option<String>,
+    /// The ended session a Run again starts from (decision 159): a rerun is
+    /// not a choice of write vault, so it is not remembered.
+    #[serde(default)]
+    pub rerun_of: Option<String>,
 }
 
 /// How a client draws a session's terminal (decision 157, 171-8).
@@ -1002,11 +1010,15 @@ struct SessionLive {
     /// start with. Not kept across a restart: a child started after one
     /// gets none.
     terminal_brightness: Option<TerminalBrightness>,
+    /// What its client last answered its program's colour query with, as
+    /// its host said (157g). In memory: a host's `hello` says it again.
+    terminal_answered: Option<TerminalBrightness>,
 }
 
 impl SessionLive {
     fn new() -> Self {
         Self {
+            terminal_answered: None,
             parking: false,
             wake_sent: None,
             terminal_brightness: None,
@@ -1440,6 +1452,17 @@ impl AgentManager {
         let live = self.live.lock().unwrap();
         let s = live.sessions.get(session_id)?;
         s.cache.initialized().then(|| s.cache.end())
+    }
+
+    /// What a session's client last answered its program's colour query
+    /// with, as its host said (157g).
+    pub fn terminal_answered(&self, session_id: &str) -> Option<TerminalBrightness> {
+        self.live
+            .lock()
+            .unwrap()
+            .sessions
+            .get(session_id)?
+            .terminal_answered
     }
 
     /// The terminal brightness a session started with in this run (171-8).
@@ -2974,6 +2997,15 @@ impl AgentManager {
     /// A host's report written back, with what its gated signals say and
     /// the events it makes, in one transaction (144a).
     fn record_report(&self, r: &SessionRecord, report: &StatusReport) -> AgentResult<()> {
+        if let Some(answered) = TerminalBrightness::parse(report.terminal_answered.as_deref()) {
+            self.live
+                .lock()
+                .unwrap()
+                .sessions
+                .entry(r.id.clone())
+                .or_insert_with(SessionLive::new)
+                .terminal_answered = Some(answered);
+        }
         let taken = self.take_signals(r, report);
         let ctx = events::EventCtx {
             source: events::HOST_PROCESS,
@@ -3476,7 +3508,35 @@ impl AgentManager {
     /// A removed host (decision 153): its Limits go. Its sessions and what
     /// it last reported about itself stay, as their record.
     pub fn forget_host(&self, host_id: &str) -> Result<()> {
-        self.store.lock().unwrap().forget_host_limits(host_id)
+        let store = self.store.lock().unwrap();
+        store.forget_host_limits(host_id)?;
+        store.forget_host_workspace_prefs(host_id)
+    }
+
+    /// A person's top-level start in `workspace` (decision 159).
+    pub fn remember_workspace_pref(
+        &self,
+        host_id: &str,
+        workspace: &str,
+        write_vault_id: Option<&str>,
+    ) -> Result<()> {
+        self.store.lock().unwrap().set_workspace_pref(
+            host_id,
+            workspace,
+            write_vault_id,
+            &crate::index::now_rfc3339(),
+        )
+    }
+
+    pub fn workspace_prefs(&self, host_id: &str) -> Result<HashMap<String, store::WorkspacePref>> {
+        self.store.lock().unwrap().workspace_prefs(host_id)
+    }
+
+    pub fn forget_workspace_pref(&self, host_id: &str, workspace: &str) -> Result<bool> {
+        self.store
+            .lock()
+            .unwrap()
+            .forget_workspace_pref(host_id, workspace)
     }
 
     /// A revoked host: its link is closed and its sessions are failed
@@ -3901,6 +3961,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             meta,
             grants,
@@ -3930,6 +3991,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             offered(),
@@ -3952,6 +4014,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: Some(harness.into()),
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4088,6 +4151,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4610,6 +4674,7 @@ mod tests {
                     permission_mode: None,
                     typed_input: None,
                     terminal_brightness: None,
+                    rerun_of: None,
                 },
                 meta,
                 offered(),
@@ -4718,6 +4783,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4740,6 +4806,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4767,6 +4834,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -4832,6 +4900,7 @@ mod tests {
                 permission_mode: None,
                 typed_input: None,
                 terminal_brightness: None,
+                rerun_of: None,
             },
             LaunchMeta::default(),
             Vec::new(),
@@ -4867,6 +4936,7 @@ mod tests {
                 attention_source: None,
                 activity_source: None,
                 program_status: None,
+                terminal_answered: None,
                 harness_session: None,
                 mcp_skipped: None,
                 mcp_plugin_local: None,
@@ -5136,6 +5206,7 @@ mod tests {
                         attention_source: None,
                         activity_source: None,
                         program_status: None,
+                        terminal_answered: None,
                         harness_session: None,
                         mcp_skipped: None,
                         mcp_plugin_local: None,
@@ -5174,6 +5245,7 @@ mod tests {
             attention_source: None,
             activity_source: None,
             program_status: None,
+            terminal_answered: None,
             harness_session: None,
             mcp_skipped: None,
             mcp_plugin_local: None,
@@ -5505,6 +5577,7 @@ mod tests {
                     attention_source: None,
                     activity_source: None,
                     program_status: None,
+                    terminal_answered: None,
                     harness_session: None,
                     mcp_skipped: None,
                     mcp_plugin_local: None,

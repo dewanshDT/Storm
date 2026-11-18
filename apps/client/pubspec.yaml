@@ -179,6 +179,8 @@ flutter:
     - assets/icon/storm_icon_full.png
     - assets/agents/
     - assets/rail/
+    # Theme families (decision 160): one config per family, read at startup.
+    - assets/themes/
 
   # To add assets to your application, add an assets section, like this:
   # assets:

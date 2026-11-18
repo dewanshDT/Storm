@@ -218,6 +218,7 @@ class SessionController extends ChangeNotifier {
     switch (event) {
       case StatusEvent(:final session):
         this.session = session;
+        terminal.remembered(session.terminalAnswered);
         _hostSize = (session.cols, session.rows);
         // Opening a session is using it. Another device may have sized the
         // PTY since, and its agent would draw for that height on this screen.
@@ -394,6 +395,7 @@ class SessionController extends ChangeNotifier {
   void _queueReply(Uint8List bytes) {
     if (!_visible || !_live || !_isForeground()) return;
     if (session?.ended ?? false) return;
+    terminal.replySent();
     _pending.add(bytes);
     _flush ??= Timer(coalesce, _send);
   }

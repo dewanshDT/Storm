@@ -801,3 +801,71 @@ async fn clearing_the_inbox_is_told_to_every_subscriber() {
         .expect("a notifications_cleared frame");
     assert_eq!(name, "notifications_cleared");
 }
+
+/// 157g: the brightness a host says its client answered with reaches the
+/// events, the session list and its view; a report without it keeps it, a
+/// `hello` says it again, and anything but `light` or `dark` is ignored.
+#[tokio::test]
+async fn the_answered_brightness_round_trips_from_the_host() {
+    let dir = tempdir::TempDir::new("storm-157g-answered").unwrap();
+    let f = fixture(dir.path()).await;
+    let id = f.launch();
+    let mut stream = f.open().await;
+    let snapshot = stream.expect("snapshot").await;
+    assert!(
+        snapshot.data["sessions"][0]
+            .get("terminal_answered")
+            .is_none()
+    );
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "light"}),
+    );
+    let event = stream
+        .next(Duration::from_secs(5))
+        .await
+        .expect("no session event");
+    assert_eq!(event.name, "session");
+    assert_eq!(event.data["terminal_answered"], "light");
+
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "terminal_answered": "mauve"}),
+    );
+    f.report(
+        &id,
+        serde_json::json!({"status": "running", "title": "Fix"}),
+    );
+    let list = json(f.ask(get("/v1/agent/sessions", Some(&f.bearer))).await).await;
+    let listed = list["sessions"]
+        .as_array()
+        .or(list.as_array())
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == id.as_str())
+        .unwrap()
+        .clone();
+    assert_eq!(listed["terminal_answered"], "light");
+
+    f.state
+        .agent
+        .hello(
+            HOST,
+            serde_json::from_value(serde_json::json!({
+                "providers": [{"id": "fake", "kind": "fake", "interactions": ["terminal"], "available": true}],
+                "workspaces": ["storm"],
+                "max_sessions": 8,
+                "sessions": [{"id": id, "status": "running", "terminal_answered": "dark",
+                    "output_end_offset": 0}],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    let view = json(
+        f.ask(get(&format!("/v1/agent/sessions/{id}"), Some(&f.bearer)))
+            .await,
+    )
+    .await;
+    assert_eq!(view["terminal_answered"], "dark");
+}

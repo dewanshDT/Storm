@@ -27,6 +27,11 @@ import 'package:flutter/painting.dart';
 /// shows up as a flat, slightly wrong colour rather than as a crash — and the
 /// contrast test is what would catch it.
 Color oklch(double l, double c, double hueDegrees) {
+  final (r, g, b) = _linear(l, c, hueDegrees);
+  return Color.fromARGB(255, _encode(r), _encode(g), _encode(b));
+}
+
+(double, double, double) _linear(double l, double c, double hueDegrees) {
   final h = hueDegrees * math.pi / 180;
   final a = c * math.cos(h);
   final b = c * math.sin(h);
@@ -46,7 +51,40 @@ Color oklch(double l, double c, double hueDegrees) {
   final bl =
       -0.0041960863 * long - 0.7034186147 * medium + 1.7076147010 * short;
 
-  return Color.fromARGB(255, _encode(r), _encode(g), _encode(bl));
+  return (r, g, bl);
+}
+
+/// [oklch], with an out-of-gamut colour brought in by lowering its chroma
+/// rather than by clipping channels, so the hue and lightness survive.
+Color oklchMapped(double l, double c, double hueDegrees) {
+  const tolerance = 1e-4;
+  var chroma = c;
+  while (chroma > 0) {
+    final (r, g, b) = _linear(l, chroma, hueDegrees);
+    bool inside(double v) => v >= -tolerance && v <= 1 + tolerance;
+    if (inside(r) && inside(g) && inside(b)) break;
+    chroma -= 0.002;
+  }
+  return oklch(l, math.max(0, chroma), hueDegrees);
+}
+
+/// sRGB → OKLCH: lightness 0–1, chroma, hue in degrees.
+({double l, double c, double h}) toOklch(Color color) {
+  double linear(double v) =>
+      v <= 0.04045 ? v / 12.92 : math.pow((v + 0.055) / 1.055, 2.4).toDouble();
+  final r = linear(color.r);
+  final g = linear(color.g);
+  final b = linear(color.b);
+  double cbrt(double v) => math.pow(v, 1 / 3).toDouble();
+  final l = cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  final m = cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  final s = cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  final lightness = 0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s;
+  final a = 1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s;
+  final bb = 0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s;
+  var hue = math.atan2(bb, a) * 180 / math.pi;
+  if (hue < 0) hue += 360;
+  return (l: lightness, c: math.sqrt(a * a + bb * bb), h: hue);
 }
 
 /// Linear light → an 8-bit sRGB channel.

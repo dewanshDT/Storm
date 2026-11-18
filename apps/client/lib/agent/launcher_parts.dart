@@ -26,6 +26,19 @@ class _Close extends StatelessWidget {
   }
 }
 
+/// The context note's estimated tokens (decision 158), from the note the
+/// chip already reads; a large one is estimated off the UI thread.
+final _contextTokensProvider = FutureProvider.autoDispose.family<int?, NoteRef>(
+  (ref, at) async {
+    final note = await ref.watch(agentNoteProvider(at).future);
+    if (note == null) return null;
+    final e = note.content.length > kLargeNoteChars
+        ? await compute(estimateNote, note.content)
+        : estimateNote(note.content);
+    return e.tokens;
+  },
+);
+
 /// From: the context note as one `accentSoft` chip with its crumb and ×.
 class _ContextChip extends ConsumerWidget {
   const _ContextChip({
@@ -44,6 +57,7 @@ class _ContextChip extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final t = context.tokens;
     final note = ref.watch(agentNoteProvider(at)).value;
+    final tokens = ref.watch(_contextTokensProvider(at)).value;
     final vault =
         vaults.where((v) => v.id == at.vaultId).firstOrNull?.name ?? '';
     // The launch snapshot when there is one: a rename does not change what
@@ -78,6 +92,20 @@ class _ContextChip extends ConsumerWidget {
               ),
             ),
           ),
+          if (tokens != null)
+            Tooltip(
+              message: kSizeTooltip,
+              child: Text(
+                ' · ${formatTokens(tokens)} tokens',
+                key: const Key('launcher-context-tokens'),
+                maxLines: 1,
+                style: TextStyle(
+                  fontFamily: StormTokens.sansFamily,
+                  fontSize: t.uiSize,
+                  color: t.text2,
+                ),
+              ),
+            ),
           if (note != null) ...[
             SizedBox(width: t.sp),
             Expanded(

@@ -1,3 +1,8 @@
+## 5.2.0+storm.5
+
+- Faint (SGR 2) text on a light background is drawn at 65% opacity rather
+  than darkened, so it reads as secondary (Storm decision 160).
+
 ## 5.2.0+storm.4
 
 - `TerminalView.reportTheme`: colour queries and DEC 2031 reports answer
