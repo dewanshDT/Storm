@@ -494,7 +494,8 @@ impl Store {
     /// state transition worth persisting in full.
     #[cfg(test)]
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
-        self.update_with(r, &super::events::EventCtx::storm())
+        self.update_with(r, &super::events::EventCtx::storm())?;
+        Ok(())
     }
 
     /// [`Self::update`], with the events the change makes for a child's
@@ -503,7 +504,11 @@ impl Store {
     ///
     /// An ending refuses the session's pending requests, `requester_ended`,
     /// in the same transaction (P-4, L-7).
-    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<()> {
+    /// Returns whether this write is what just ended `r` (false → false),
+    /// so a caller can run cleanup that is not worth this transaction's time
+    /// (161-2 F2: `notifications::forget_due_at_end`) after it, never
+    /// delaying the commit or the wake it fires below.
+    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let before: Option<String> = tx
             .query_row(
@@ -535,10 +540,9 @@ impl Store {
                 r.harness_session
             ],
         )?;
-        if r.is_ended() && !was_ended {
+        let just_ended = r.is_ended() && !was_ended;
+        if just_ended {
             spawn::on_ended(&tx, r, &crate::index::now_rfc3339())?;
-            // 161-2 F2: a notice queued for this session has nowhere to go.
-            super::notifications::forget_due_at_end(&tx, &r.id)?;
         }
         let now = crate::index::now_rfc3339();
         let mut wrote = false;
@@ -570,7 +574,7 @@ impl Store {
         if wrote {
             self.notify_events();
         }
-        Ok(())
+        Ok(just_ended)
     }
 
     /// Records a session's grants and its vault-write flag, in one
