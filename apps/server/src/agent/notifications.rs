@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use super::attention::{PERMISSION_PROMPT, QUESTION, SIGN_IN};
 use super::program::ProgramStatus;
 use super::store::SessionRecord;
-use super::{AgentError, AgentManager, AgentResult, now};
+use super::{AgentError, AgentManager, AgentResult, SessionLive, TerminalNoticeItem, now};
 
 // ---------------------------------------------------------------------
 // Event kinds
@@ -52,6 +52,11 @@ pub const AGENT_MESSAGE: &str = "agent_message";
 /// notices are rate-limited (Q5). One per session per hour window, bumped
 /// in place as more are limited.
 pub const AGENT_ROLLUP: &str = "agent_rollup";
+/// 161-5: a notice forwarded from a session's terminal (OSC 9/777/99,
+/// AM126). Not in [`AUTOMATIC_KINDS`] either — like [`AGENT_MESSAGE`], its
+/// gate is the "Notifies you" capability, not an account toggle; it goes
+/// through [`silent_for`] under [`AGENT_MESSAGE`]'s own precedence.
+pub const TERMINAL_NOTICE: &str = "terminal_notice";
 
 // ---------------------------------------------------------------------
 // 161-2: the `notify` tool's own limits (Q5), independent of the account
@@ -1468,7 +1473,9 @@ fn held_reason_wire(reason: &str) -> &'static str {
 
 /// An uncancelled notice from this session, this call's exact (title,
 /// body), created within the duplicate window: the same notice (Q5), to
-/// answer again rather than insert.
+/// answer again rather than insert. Shared with 161-5's terminal notices
+/// (`source IN ('agent', 'terminal')`): the same text forwarded twice,
+/// from `notify` or a session's own terminal, is still the same notice.
 fn recent_duplicate(
     conn: &Connection,
     session_id: &str,
@@ -1478,7 +1485,7 @@ fn recent_duplicate(
 ) -> Result<Option<Notification>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {NOTIF_COLUMNS} FROM notifications
-         WHERE session_id = ?1 AND source = 'agent' AND cancelled = 0
+         WHERE session_id = ?1 AND source IN ('agent', 'terminal') AND cancelled = 0
            AND title = ?2 AND body IS ?3 AND created >= ?4
          ORDER BY seq DESC LIMIT 1"
     ))?;
@@ -1500,8 +1507,10 @@ fn cancel_for_replace(conn: &Connection, session_id: &str, full_key: &str) -> Re
     Ok(n > 0)
 }
 
-/// Count and earliest `created` of this session's agent notices in the
-/// rolling window (for the hourly cap and its `retry_after_s`).
+/// Count and earliest `created` of this session's agent and terminal
+/// notices in the rolling window (for the hourly cap and its
+/// `retry_after_s`) — 161-5 shares `notify`'s limits, so both sources
+/// count together.
 fn session_window(
     conn: &Connection,
     session_id: &str,
@@ -1509,17 +1518,17 @@ fn session_window(
 ) -> Result<(i64, Option<String>)> {
     Ok(conn.query_row(
         "SELECT COUNT(*), MIN(created) FROM notifications
-         WHERE session_id = ?1 AND source = 'agent' AND created >= ?2",
+         WHERE session_id = ?1 AND source IN ('agent', 'terminal') AND created >= ?2",
         params![session_id, since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
 }
 
-/// The same, account-wide (every session's agent notices).
+/// The same, account-wide (every session's agent and terminal notices).
 fn account_window(conn: &Connection, since: &str) -> Result<(i64, Option<String>)> {
     Ok(conn.query_row(
         "SELECT COUNT(*), MIN(created) FROM notifications
-         WHERE source = 'agent' AND created >= ?1",
+         WHERE source IN ('agent', 'terminal') AND created >= ?1",
         params![since],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?)
@@ -1739,7 +1748,13 @@ impl AgentManager {
             if pending >= AGENT_MAX_PENDING {
                 return Ok(Err(NotifyRefusal::TooManyPending));
             }
-            if let Some(refusal) = self.check_agent_limits(conn, &req, &at)? {
+            if let Some(refusal) = self.check_agent_limits(
+                conn,
+                &req.session_id,
+                &req.provider,
+                &req.session_title,
+                &at,
+            )? {
                 return Ok(Err(refusal));
             }
             let id = crate::auth::identity::random_id("ntf_");
@@ -1751,38 +1766,49 @@ impl AgentManager {
             }));
         }
 
-        if let Some(refusal) = self.check_agent_limits(conn, &req, &at)? {
+        if let Some(refusal) = self.check_agent_limits(
+            conn,
+            &req.session_id,
+            &req.provider,
+            &req.session_title,
+            &at,
+        )? {
             return Ok(Err(refusal));
         }
         Ok(Ok(self.write_agent_notice(conn, &req, &at)?))
     }
 
-    /// The limits (Q5), without writing anything: `None` passes.
+    /// The limits (Q5), without writing anything: `None` passes. Shared by
+    /// `notify` and 161-5's terminal notices — the window queries below
+    /// count `source IN ('agent', 'terminal')`, and so does the token
+    /// bucket, which is keyed by `session_id` alone.
     fn check_agent_limits(
         &self,
         conn: &Connection,
-        req: &AgentNotify,
+        session_id: &str,
+        provider: &str,
+        session_title: &str,
         at: &str,
     ) -> AgentResult<Option<NotifyRefusal>> {
         let prefs = load_prefs(conn)?;
         let hour_ago = crate::index::rfc3339_minus_secs(at, 3600);
-        let (session_count, session_oldest) = session_window(conn, &req.session_id, &hour_ago)?;
+        let (session_count, session_oldest) = session_window(conn, session_id, &hour_ago)?;
         let session_cap = prefs.per_session_limit.max(0);
         if session_count >= session_cap {
-            self.bump_and_poke_rollup(conn, req, at)?;
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
             return Ok(Some(NotifyRefusal::RateLimited {
                 retry_after_s: retry_after(session_oldest.as_deref(), at),
             }));
         }
         let (account_count, account_oldest) = account_window(conn, &hour_ago)?;
         if account_count >= AGENT_ACCOUNT_HOURLY {
-            self.bump_and_poke_rollup(conn, req, at)?;
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
             return Ok(Some(NotifyRefusal::RateLimited {
                 retry_after_s: retry_after(account_oldest.as_deref(), at),
             }));
         }
-        if let Some(wait) = consume_token(conn, &req.session_id, at)? {
-            self.bump_and_poke_rollup(conn, req, at)?;
+        if let Some(wait) = consume_token(conn, session_id, at)? {
+            self.bump_and_poke_rollup(conn, session_id, provider, session_title, at)?;
             return Ok(Some(NotifyRefusal::RateLimited {
                 retry_after_s: wait,
             }));
@@ -1793,16 +1819,18 @@ impl AgentManager {
     fn bump_and_poke_rollup(
         &self,
         conn: &Connection,
-        req: &AgentNotify,
+        session_id: &str,
+        provider: &str,
+        session_title: &str,
         at: &str,
     ) -> AgentResult<()> {
         let mutes = list_mutes(conn)?;
         let prefs = load_prefs(conn)?;
         bump_rollup(
             conn,
-            &req.session_id,
-            &req.provider,
-            &req.session_title,
+            session_id,
+            provider,
+            session_title,
             &prefs,
             &mutes,
             at,
@@ -1898,6 +1926,212 @@ impl AgentManager {
             delete_pending(&store.conn, pending_id)?;
         }
         Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------
+// 161-5: terminal notices (OSC 9/777/99; AM126), forwarded by 161-R1's host
+// parser as `terminal_notice` on a session's status report. They run
+// through the same sanitiser, limits and precedence `notify` gets —
+// `check_agent_limits`, `recent_duplicate`, `silent_for` under
+// [`AGENT_MESSAGE`] — and nothing here forks them.
+// ---------------------------------------------------------------------
+
+/// A terminal notice's outcome, metadata only (G-D18): for
+/// `ops::runtime_status` to audit. Never the title or body.
+pub struct TerminalNoticeAudit {
+    pub owner_user_id: String,
+    pub session_id: String,
+    pub source_form: String,
+    /// Sanitised char counts, like `notify`'s own `title_chars`/`body_chars`
+    /// — never the raw byte length of the agent's untrusted text.
+    pub title_chars: usize,
+    pub body_chars: usize,
+    pub outcome: &'static str,
+}
+
+/// `title`/`body` after decision 161's sanitiser (point 3 of 161-5's build
+/// note): the OSC title if it survives sanitising, else the body cut to
+/// [`NOTIFY_TITLE_MAX`] chars with no separate body (the title already
+/// carries the only text there is). `None` once nothing is left of either.
+fn sanitise_terminal_item(item: &TerminalNoticeItem) -> Option<(String, Option<String>)> {
+    let body = sanitise_agent_text(&item.body, NOTIFY_BODY_MAX);
+    match item
+        .title
+        .as_deref()
+        .and_then(|t| sanitise_agent_text(t, NOTIFY_TITLE_MAX))
+    {
+        Some(title) => Some((title, body)),
+        None => body.map(|b| (b.chars().take(NOTIFY_TITLE_MAX).collect(), None)),
+    }
+}
+
+/// A short, deterministic signature of a terminal notice's sanitised text,
+/// for its dedupe `key` (`ses:<id>:osc:<signature>`). The same text from
+/// the same session collapses into the live (uncancelled) notice under
+/// that key rather than filling the inbox with repeats, for as long as
+/// that row exists — being read does not free it; only its being
+/// cancelled, pruned or the inbox cleared does.
+fn terminal_notice_signature(title: &str, body: Option<&str>) -> String {
+    let mut h = blake3::Hasher::new();
+    h.update(title.as_bytes());
+    h.update(&[0]);
+    h.update(body.unwrap_or("").as_bytes());
+    h.finalize().to_hex()[..16].to_string()
+}
+
+/// Whether an uncancelled notice already holds `key`, regardless of how
+/// long ago it was made. [`recent_duplicate`]'s 10-minute window only
+/// catches a resend bunched close together; identical text spread further
+/// apart still collides on `key`'s `UNIQUE` column, and checking this
+/// before the limits is what makes that answer "duplicate" rather than
+/// spend a token and then report "sent" on a row `insert_notice`'s
+/// `ON CONFLICT(key) DO NOTHING` never actually writes.
+fn live_notice_by_key(conn: &Connection, key: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM notifications WHERE key = ?1 AND cancelled = 0",
+            params![key],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+impl AgentManager {
+    /// Whether `seq` is new for `session_id` under its host's current link
+    /// generation — `false` for a status post retried with notices the
+    /// server already acted on. Never kept across a server restart (like
+    /// every other field of `SessionLive`); a host restart or reconnect
+    /// gets a new generation (`connect_host`), under which its own `seq`
+    /// starts at 1 again, so a lower value is accepted.
+    fn accept_terminal_seq(&self, host_id: &str, session_id: &str, seq: u64) -> bool {
+        let mut live = self.live.lock().unwrap();
+        let generation = live.hosts.get(host_id).map(|l| l.generation).unwrap_or(0);
+        let s = live
+            .sessions
+            .entry(session_id.to_string())
+            .or_insert_with(SessionLive::new);
+        match s.osc_seq {
+            Some((g, last)) if g == generation && seq <= last => false,
+            _ => {
+                s.osc_seq = Some((generation, seq));
+                true
+            }
+        }
+    }
+
+    /// 161-5: a host's `terminal_notice`/`terminal_notice_dropped` from its
+    /// status report. Dropped silently — no error to the host — for a
+    /// session without the "Notifies you" capability (`notify_enabled`);
+    /// never gated by whether the session has since ended, since the very
+    /// report that ends a session still carries a notice queued just before
+    /// it did (161-R1 fix 3). Returns one audit row per item, for
+    /// `ops::runtime_status` to record.
+    pub(super) fn record_terminal_notices(
+        &self,
+        r: &SessionRecord,
+        items: &[TerminalNoticeItem],
+        host_dropped: u32,
+    ) -> AgentResult<Vec<TerminalNoticeAudit>> {
+        let mut audits = Vec::new();
+        if items.is_empty() && host_dropped == 0 {
+            return Ok(audits);
+        }
+        let enabled = self
+            .store
+            .lock()
+            .unwrap()
+            .notify_enabled(&r.id)
+            .unwrap_or(false);
+        if !enabled {
+            tracing::debug!(session = %r.id, "terminal notices dropped: no capability");
+            return Ok(audits);
+        }
+        let store = self.store.lock().unwrap();
+        let conn = &store.conn;
+        let prefs = load_prefs(conn)?;
+        let mutes = list_mutes(conn)?;
+        let at = now();
+        let session_title = display_title(r);
+        let dup_since = crate::index::rfc3339_minus_secs(&at, AGENT_DUP_WINDOW_SECS);
+        for item in items {
+            let Some((title, body)) = sanitise_terminal_item(item) else {
+                continue;
+            };
+            if !self.accept_terminal_seq(&r.host_id, &r.id, item.seq) {
+                continue;
+            }
+            let title_chars = title.chars().count();
+            let body_chars = body.as_ref().map_or(0, |b| b.chars().count());
+            let key = format!(
+                "ses:{}:osc:{}",
+                r.id,
+                terminal_notice_signature(&title, body.as_deref())
+            );
+            // A key collision past the 10-minute window is still the same
+            // notice (S1): checked before the limits, or a stale duplicate
+            // would spend a token on a row `insert_notice` never writes.
+            let outcome = if recent_duplicate(conn, &r.id, &title, body.as_deref(), &dup_since)?
+                .is_some()
+                || live_notice_by_key(conn, &key)?
+            {
+                "duplicate"
+            } else if let Some(_refusal) =
+                self.check_agent_limits(conn, &r.id, &r.provider, &session_title, &at)?
+            {
+                "rate_limited"
+            } else {
+                let silence = silent_for(
+                    &prefs,
+                    &mutes,
+                    AGENT_MESSAGE,
+                    Some(&r.id),
+                    Some(&r.provider),
+                    &at,
+                );
+                insert_notice(
+                    conn,
+                    NewNotice {
+                        source: "terminal",
+                        kind: TERMINAL_NOTICE,
+                        session_id: Some(&r.id),
+                        host_id: None,
+                        provider: Some(&r.provider),
+                        session_title: Some(&session_title),
+                        note_vault_id: None,
+                        note_id: None,
+                        title,
+                        body,
+                        urgency: "normal",
+                        key: Some(key),
+                    },
+                    silence,
+                )?;
+                if silence.is_some() { "held" } else { "sent" }
+            };
+            audits.push(TerminalNoticeAudit {
+                owner_user_id: r.owner_user_id.clone(),
+                session_id: r.id.clone(),
+                source_form: item.source_form.clone(),
+                title_chars,
+                body_chars,
+                outcome,
+            });
+        }
+        for _ in 0..host_dropped {
+            bump_rollup(
+                conn,
+                &r.id,
+                &r.provider,
+                &session_title,
+                &prefs,
+                &mutes,
+                &at,
+            )?;
+        }
+        self.poke_notify();
+        Ok(audits)
     }
 }
 

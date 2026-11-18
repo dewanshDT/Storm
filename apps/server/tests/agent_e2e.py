@@ -191,6 +191,10 @@ def write(owner, sid, text):
     return call("POST", f"/v1/agent/sessions/{sid}/terminal/input", auth=owner, raw=text.encode())[0]
 
 
+def notifications(owner, after=0):
+    return call("GET", f"/v1/notifications?after={after}", auth=owner)[1]
+
+
 def main():
     os.makedirs(os.path.join(WORK, "vaults", "primary"))
     with open(os.path.join(WORK, "vaults", "primary", "Seed.md"), "w") as f:
@@ -354,6 +358,30 @@ args = ["-i"]
               ended_rec["title"] == "Fix the login" and ended_rec["activity"] is None, ended_rec)
         status, _ = call("POST", f"/v1/agent/sessions/{sid}/terminal/input", auth=owner, raw=b"x")
         check("input to an ended session is refused", status == 409, status)
+
+        print("\n=== decision 161, 161-R1/161-5: a terminal notice end to end ===")
+        status, notice_rec = call(
+            "POST", "/v1/agent/sessions",
+            {"host_id": host_id, "workspace": "storm", "provider": "fake",
+             "terminal": {"cols": 80, "rows": 24}, "notify": True},
+            auth=owner)
+        check("a launch can ask for the “Notifies you” capability", status == 200, notice_rec)
+        notice_sid = notice_rec["id"]
+        running(owner, notice_sid)
+        # The fake provider echoes every input byte as output (fake.rs), so
+        # an OSC 777 sequence typed in is exactly what a real agent's PTY
+        # output would be: the host's 161-R1 parser reads it from there.
+        check("input carrying an OSC 777 notification is accepted",
+              write(owner, notice_sid, "\x1b]777;notify;Build;All green\x07") == 204)
+        found = wait(
+            lambda: next((n for n in notifications(owner)["items"]
+                          if n.get("session_id") == notice_sid and n["kind"] == "terminal_notice"), None),
+            "the OSC 777 notice to reach the inbox")
+        check("it is stored under source terminal with its title and body",
+              found["source"] == "terminal" and found["title"] == "Build" and found["body"] == "All green",
+              found)
+        call("POST", f"/v1/agent/sessions/{notice_sid}/end", auth=owner)
+        wait(lambda: session(owner, notice_sid)["status"] == "stopped", "the notice session to stop")
 
         print("\n=== the launch record: name, context, write vault (decision 82, slice 5) ===")
         _, cfg = call("GET", "/v1/config", auth=owner)

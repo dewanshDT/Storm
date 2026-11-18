@@ -6453,12 +6453,37 @@ pub async fn runtime_status(
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
-    state
+    let audits = state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
+    for a in &audits {
+        audit_terminal_notice(state, a).await;
+    }
     sweep_gateway_sessions(state);
     Ok(())
+}
+
+/// 161-5: a terminal notice's outcome, metadata only — never its text
+/// (G-D18), the same rule `notify`'s own audit follows.
+async fn audit_terminal_notice(
+    state: &Shared,
+    a: &crate::agent::notifications::TerminalNoticeAudit,
+) {
+    let _ = state.auth_db.lock().await.record_event(
+        "terminal_notice",
+        Some(&a.owner_user_id),
+        None,
+        &crate::index::now_rfc3339(),
+        &serde_json::json!({
+            "session_id": a.session_id,
+            "source_form": a.source_form,
+            "title_chars": a.title_chars,
+            "body_chars": a.body_chars,
+            "outcome": a.outcome,
+        })
+        .to_string(),
+    );
 }
 
 /// A child's round ended with a final message (145c): audited with its
