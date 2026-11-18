@@ -586,6 +586,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         // The spawn switch (decision 134-2): owner only, checked in ops.
         .route("/v1/agent/sessions/{id}/spawn", put(agent_session_spawn))
+        // The "Notifies you" switch (decision 161-2 F1): owner only.
+        .route("/v1/agent/sessions/{id}/notify", put(agent_session_notify))
+        .route(
+            "/v1/agent/sessions/notify-off",
+            post(agent_sessions_notify_off),
+        )
         // An agent's deletion waits for the person (decision 149): the
         // session tier only, so no key or agent answers it.
         .route("/v1/agent/delete-requests", get(agent_delete_requests))
@@ -2406,6 +2412,31 @@ async fn agent_session_spawn(
     let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
     Ok(Json(
         crate::ops::set_session_spawn(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+async fn agent_session_notify(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::SetNotify>,
+) -> ApiResult<Json<crate::ops::NotifySwitch>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::set_session_notify(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+async fn agent_sessions_notify_off(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(req): Json<crate::ops::NotifyOff>,
+) -> ApiResult<Json<crate::ops::NotifyOffResult>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::notify_off(&state, &actor, device, req).await?,
     ))
 }
 
@@ -10438,6 +10469,37 @@ pub(crate) mod tests {
             )
         }
 
+        async fn notify(&self, session: &str, enabled: bool) -> (StatusCode, serde_json::Value) {
+            self.ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{session}/notify"),
+                serde_json::json!({"enabled": enabled}),
+                &self.owner_bearer,
+            ))
+            .await
+        }
+
+        async fn notify_off(&self, scope: &str) -> (StatusCode, serde_json::Value) {
+            self.ask(post_json_with_auth(
+                "/v1/agent/sessions/notify-off",
+                serde_json::json!({"scope": scope}),
+                &self.owner_bearer,
+            ))
+            .await
+        }
+
+        async fn notify_events(&self) -> Vec<(String, serde_json::Value)> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind.starts_with("notify_"))
+                .map(|(kind, detail)| (kind, serde_json::from_str(&detail).unwrap()))
+                .collect()
+        }
+
         /// What went down the host's link since the last look.
         fn sent(&mut self) -> Vec<serde_json::Value> {
             std::iter::from_fn(|| self.link.try_recv().ok())
@@ -10723,6 +10785,139 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["enabled"], true);
         assert_eq!(list_changed(&f.sent()), 1);
+    }
+
+    // ---- decision 161-2 F1: the "Notifies you" switch on a running session ---
+
+    async fn tool_call_refused(f: &GatewayFixture, session: &str, tool: &str) -> Option<String> {
+        error_code(
+            &f.mcp(
+                session,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": tool, "arguments": {"title": "hi"}}}),
+            )
+            .await,
+        )
+    }
+
+    #[tokio::test]
+    async fn turning_notify_on_and_off_tells_the_agent_and_is_audited() {
+        let dir = tempdir::TempDir::new("storm-notify-flip").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.verified().await;
+        let launched = f.launch("claude-code", false).await;
+        // The account default ("New sessions can notify you") is on (Q19).
+        assert_eq!(launched["notify"], true);
+        let session = launched["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+        let on = f.storm_tools(&session).await;
+        assert!(on.iter().any(|t| t == "notify"));
+        assert!(on.iter().any(|t| t == "cancel_notify"));
+        assert!(tool_call_refused(&f, &session, "notify").await.is_none());
+        f.sent();
+
+        let (status, body) = f.notify(&session, false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, serde_json::json!({"enabled": false}));
+        assert_eq!(list_changed(&f.sent()), 1);
+        let off = f.storm_tools(&session).await;
+        assert!(!off.iter().any(|t| t == "notify" || t == "cancel_notify"));
+        assert_eq!(
+            tool_call_refused(&f, &session, "notify").await,
+            Some("tool_not_allowed".to_string())
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["notify"], false);
+
+        let (status, body) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(list_changed(&f.sent()), 1);
+        assert_eq!(f.storm_tools(&session).await, on);
+
+        // Asked again: audited, but nothing flipped, so no notification.
+        let (status, _) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list_changed(&f.sent()), 0);
+
+        let detail = |was: bool| serde_json::json!({"session_id": session, "host_id": f.host_id, "was": was});
+        assert_eq!(
+            f.notify_events().await,
+            vec![
+                ("notify_disabled".to_string(), detail(true)),
+                ("notify_enabled".to_string(), detail(false)),
+                ("notify_enabled".to_string(), detail(true)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_notify_switch_refuses_on_an_ended_session() {
+        let dir = tempdir::TempDir::new("storm-notify-ended").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&session, "completed").await;
+        let (status, body) = f.notify(&session, false).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "session_not_live");
+        let (status, body) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "session_not_live");
+    }
+
+    #[tokio::test]
+    async fn notify_off_turns_off_every_live_session_or_only_children() {
+        let dir = tempdir::TempDir::new("storm-notify-off").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.off_host().await;
+        let parent = f.launch_on("claude-code").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let other = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&parent, "storm").await;
+        let child = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
+                .await,
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Off by default for a spawned child ("Agents started by agents
+        // can notify"); turned on here so this scope has something to flip.
+        assert!(!f.state.agent.notify_enabled(&child));
+        let (status, body) = f.notify(&child, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(f.state.agent.notify_enabled(&parent));
+        assert!(f.state.agent.notify_enabled(&other));
+        assert!(f.state.agent.notify_enabled(&child));
+
+        let (status, body) = f.notify_off("children").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], 1, "{body}: only the child");
+        assert!(f.state.agent.notify_enabled(&parent));
+        assert!(f.state.agent.notify_enabled(&other));
+        assert!(!f.state.agent.notify_enabled(&child));
+
+        let (status, body) = f.notify_off("all").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["changed"], 2,
+            "{body}: the parent and the other, the child already off"
+        );
+        assert!(!f.state.agent.notify_enabled(&parent));
+        assert!(!f.state.agent.notify_enabled(&other));
+
+        // Already off: nothing left to change.
+        let (status, body) = f.notify_off("all").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], 0, "{body}");
     }
 
     // ---- the approval engine is gone (decision 145a): see the A-145 tests ----

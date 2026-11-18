@@ -2795,6 +2795,155 @@ pub async fn set_session_spawn(
     })
 }
 
+// ---- Decision 161 (161-2 F1): the "Notifies you" switch --------------------
+//
+// Session tier and owner only, mirroring the spawn switch above: the chip
+// at launch, and Session Details afterwards, is the real grant (AM124).
+
+pub const EVENT_NOTIFY_ENABLED: &str = "notify_enabled";
+pub const EVENT_NOTIFY_DISABLED: &str = "notify_disabled";
+pub const EVENT_NOTIFY_OFF: &str = "notify_off";
+
+#[derive(Debug, Deserialize)]
+pub struct SetNotify {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotifySwitch {
+    pub enabled: bool,
+}
+
+/// Tells a session's agent its tool list changed, so `notify`/
+/// `cancel_notify` appear or disappear without a reconnect.
+fn poke_tools_changed(state: &Shared, session_id: &str) {
+    if matches!(state.agent.grant(session_id, BUILTIN_ID), Ok(Some(_))) {
+        state.agent.mcp_message(
+            session_id,
+            BUILTIN_ID,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
+        );
+    }
+}
+
+/// `PUT /v1/agent/sessions/{id}/notify`. Every change is audited; a flip
+/// pokes the session's tool list the same way the spawn switch does.
+pub async fn set_session_notify(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    id: &str,
+    req: SetNotify,
+) -> ApiResult<NotifySwitch> {
+    let (owner, record) = owners_session(state, actor, id)?;
+    if record.is_ended() {
+        return Err(conflict("session_not_live"));
+    }
+    let was = state.agent.notify_enabled(id);
+    state
+        .agent
+        .set_notify(id, req.enabled, device)
+        .map_err(agent_error)?;
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            if req.enabled {
+                EVENT_NOTIFY_ENABLED
+            } else {
+                EVENT_NOTIFY_DISABLED
+            },
+            Some(&owner),
+            device,
+            &crate::index::now_rfc3339(),
+            &serde_json::json!({
+                "session_id": id,
+                "host_id": record.host_id,
+                "was": was,
+            })
+            .to_string(),
+        )
+        .map_err(internal)?;
+    if was != req.enabled {
+        poke_tools_changed(state, id);
+    }
+    Ok(NotifySwitch {
+        enabled: req.enabled,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyOffScope {
+    All,
+    Children,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotifyOff {
+    pub scope: NotifyOffScope,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotifyOffResult {
+    pub changed: i64,
+}
+
+/// `POST /v1/agent/sessions/notify-off`: the client's "Also turn off for
+/// running sessions?" when an account default is switched off. Turns the
+/// flag off for every live session the owner has, or only spawned children.
+pub async fn notify_off(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    req: NotifyOff,
+) -> ApiResult<NotifyOffResult> {
+    let owner = crews_owner(actor)?.to_string();
+    let mut changed: i64 = 0;
+    for s in state.agent.list().map_err(agent_error)? {
+        if s.owner_user_id != owner || s.is_ended() || !state.agent.notify_enabled(&s.id) {
+            continue;
+        }
+        if matches!(req.scope, NotifyOffScope::Children)
+            && state
+                .agent
+                .lineage(&s.id)
+                .map_err(agent_error)?
+                .parent_session
+                .is_none()
+        {
+            continue;
+        }
+        state
+            .agent
+            .set_notify(&s.id, false, device)
+            .map_err(agent_error)?;
+        poke_tools_changed(state, &s.id);
+        changed += 1;
+    }
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            EVENT_NOTIFY_OFF,
+            Some(&owner),
+            device,
+            &crate::index::now_rfc3339(),
+            &serde_json::json!({
+                "scope": match req.scope {
+                    NotifyOffScope::All => "all",
+                    NotifyOffScope::Children => "children",
+                },
+                "changed": changed,
+            })
+            .to_string(),
+        )
+        .map_err(internal)?;
+    Ok(NotifyOffResult { changed })
+}
+
 // ---- Agent spawning: a parent's acts (decisions 134-3, 145a) ---------------
 //
 // A start, a message and an end act at once: the launch toggle is the
@@ -4887,6 +5036,9 @@ pub struct SessionView {
     /// now or the switch is on; absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spawn: Option<crate::agent::SpawnView>,
+    /// The "Notifies you" capability (decision 161, AM124): the chip at
+    /// launch, and this flag afterwards, is the real grant.
+    pub notify: bool,
     /// The role it was launched with (138f), titled as it was then. Fixed:
     /// changing the label never changes it.
     pub launch_role: Option<crate::agent::store::Context>,
@@ -5062,6 +5214,7 @@ fn session_view(
         })
         .collect();
     let output_end = state.agent.output_end(&session.id);
+    let notify = state.agent.notify_enabled(&session.id);
     let (work_to_take, unapplied_commits) = state.agent.work_to_take(&session).map_err(internal)?;
     Ok(SessionView {
         session,
@@ -5085,6 +5238,7 @@ fn session_view(
         pending_events,
         recent_events,
         spawn,
+        notify,
         launch_role,
         model,
         permission_mode,
@@ -5427,6 +5581,7 @@ pub async fn launch_session(
         .host_label(HostLabel::Isolation, &session.host_id)
         .map_err(internal)?;
     let spawn = state.agent.spawn_view(&session).map_err(internal)?;
+    let notify = state.agent.notify_enabled(&session.id);
     let crew = state.agent.membership(&session.id).map_err(internal)?;
     let role = state
         .agent
@@ -5463,6 +5618,7 @@ pub async fn launch_session(
         pending_events: None,
         recent_events: None,
         spawn,
+        notify,
         launch_role: launch.role,
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),

@@ -537,6 +537,8 @@ impl Store {
         )?;
         if r.is_ended() && !was_ended {
             spawn::on_ended(&tx, r, &crate::index::now_rfc3339())?;
+            // 161-2 F2: a notice queued for this session has nowhere to go.
+            super::notifications::forget_due_at_end(&tx, &r.id)?;
         }
         let now = crate::index::now_rfc3339();
         let mut wrote = false;
@@ -1607,6 +1609,8 @@ fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
     super::events::forget_in(conn, id)?;
     // 161-1: a session mute is removed with its session (Q17).
     super::notifications::forget_session_mutes(conn, id)?;
+    // 161-2 F2: the "Notifies you" flag and its rate-limit state too.
+    super::notifications::forget_session_notify(conn, id)?;
     Ok((gone, crew))
 }
 

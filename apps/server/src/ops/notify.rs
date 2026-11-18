@@ -78,7 +78,7 @@ pub struct NotifyReq {
     #[serde(default)]
     pub key: Option<String>,
     /// Seconds, 0–3600: deliver later instead of now. Cancellable with
-    /// `cancel_notify`.
+    /// `cancel_notify`. Outside 0–3600 is the tool error `bad_delay`.
     #[serde(default)]
     pub delay_s: Option<i64>,
 }
@@ -145,6 +145,11 @@ pub async fn notify(state: &Shared, actor: &Actor, req: NotifyReq) -> ApiResult<
     {
         return Ok(NotifyOutcome::refused("bad_key"));
     }
+    if let Some(s) = req.delay_s
+        && !(0..=MAX_DELAY_S).contains(&s)
+    {
+        return Ok(NotifyOutcome::refused("bad_delay"));
+    }
     let (note_vault_id, note_id) = match &req.link {
         NotifyLink::Session => (None, None),
         NotifyLink::Note { vault, note } => match vault_of(state, actor, Access::Read, vault).await
@@ -160,9 +165,10 @@ pub async fn notify(state: &Shared, actor: &Actor, req: NotifyReq) -> ApiResult<
         },
     };
     let urgency = req.urgency.as_ref().map_or("normal", NotifyUrgency::as_str);
-    let due = req.delay_s.filter(|s| *s > 0).map(|s| {
-        crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -s.clamp(0, MAX_DELAY_S))
-    });
+    let due = req
+        .delay_s
+        .filter(|s| *s > 0)
+        .map(|s| crate::index::rfc3339_minus_secs(&crate::index::now_rfc3339(), -s));
     let session_title = session
         .title
         .as_deref()
