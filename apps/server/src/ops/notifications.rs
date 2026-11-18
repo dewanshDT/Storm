@@ -24,11 +24,17 @@ pub async fn list_notifications(
     limit: Option<i64>,
 ) -> ApiResult<NotificationsPage> {
     crews_owner(actor)?;
-    let items = state
+    let fetched = state
         .agent
         .list_notifications(after, limit.unwrap_or(100))
         .map_err(agent_error)?;
-    let cursor = items.last().map_or(after, |n| n.seq);
+    // The cursor advances past a cancelled row too, or the next page would
+    // keep re-fetching it. A cancelled row (a `key` replace, or
+    // `cancel_notify`) is never shown here: this is the client's backfill
+    // and inbox list, and a row it replaced or withdrew is not something to
+    // show or count as unread. It is still in `agent.db` for dedupe.
+    let cursor = fetched.last().map_or(after, |n| n.seq);
+    let items = fetched.into_iter().filter(|n| !n.cancelled).collect();
     Ok(NotificationsPage { items, cursor })
 }
 

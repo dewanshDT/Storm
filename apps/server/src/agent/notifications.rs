@@ -1681,7 +1681,10 @@ impl AgentManager {
 
     /// A person turns a session's "Notifies you" flag on or off from
     /// Session Details (161-2 F1, AM124): "the chip at launch, and Session
-    /// Details afterwards, is the real grant".
+    /// Details afterwards, is the real grant". Bumped like `resize` and
+    /// every other per-session write, so the flip reaches every client
+    /// watching this session on `/v1/agent/events`, not only the one that
+    /// made it.
     pub fn set_notify(
         &self,
         session_id: &str,
@@ -1692,6 +1695,7 @@ impl AgentManager {
             .lock()
             .unwrap()
             .set_notify(session_id, enabled, device, &now())?;
+        self.bump(session_id);
         Ok(())
     }
 
