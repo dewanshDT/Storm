@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../router.dart';
+import '../ui/tokens.dart';
 import 'agent_events.dart';
 import 'agent_models.dart';
 import 'delete_request.dart' show shownSessionOf, showAgentToast;
@@ -88,15 +89,18 @@ const kNoticeToastedKey = 'storm.agents.notice_toasted';
 const kServerNoticeToastedKey = 'storm.agents.server_notice_toasted';
 const _toastedLimit = 200;
 
-/// The kinds a non-silent `notification` push replaces `noticeOf` for, once
-/// the server's own inbox covers them (161-3). `stoppedWorking` is never
-/// here: the draft keeps that toast client-only.
-const _kServerCoveredKinds = {'needs_you', 'finished', 'error'};
+/// Kinds a non-silent `notification` push never toasts from this path:
+/// `delete_request` has its own toast (153h), and `stopped_working` is kept
+/// client-only on purpose (the draft's `noticeOf` is always its source).
+/// Every other kind toasts once the server's inbox is [supported] —
+/// `needs_you`/`finished`/`error` replacing `noticeOf` for those three, and
+/// `usage_limit`/`host_offline`/`child_finished`/`summary`/`test` and any
+/// agent- or terminal-sourced notice having no client equivalent at all.
+const _kNeverToastKinds = {'delete_request', 'stopped_working'};
 
-/// Source kinds with no client equivalent: an agent's or a terminal's own
-/// words, always shown as Storm reporting on them, never as Storm's voice.
-const _kAgentSourcedKinds = {'agent_message', 'agent_rollup'};
-const _kTerminalSourcedKinds = {'terminal_notice'};
+/// The three kinds `noticeOf` also computes client-side; see
+/// [_AgentNoticeWatcherState._serverCovers].
+const _kOverlapsClientKinds = {'needs_you', 'finished', 'error'};
 
 /// Raises "{name} needs you · Open", "{name} finished its turn · Open",
 /// "{name} hit an error · Open" and "{name} stopped working · Open" from
@@ -132,13 +136,16 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
   /// `notification_read` for it (read from elsewhere) dismisses it here.
   String? _toastNotificationId;
 
-  /// Whether the account's inbox is connected and not falling back to an
-  /// older server (161-3): once true, `needs_you`/`finished`/`error` toasts
-  /// come from its own `notification` pushes, never from [noticeOf].
-  bool get _serverCovers {
-    final n = ref.read(notificationsStateProvider);
-    return n != null && !n.loading && !n.unsupported;
-  }
+  /// Whether the account's inbox has proven itself present (161-3): once
+  /// true, `needs_you`/`finished`/`error` toasts come from its own
+  /// `notification` pushes, never from [noticeOf]. `NotificationsState.
+  /// supported` (not `!loading && !unsupported`) is the right test — the
+  /// naive one is false while still loading, so both paths would toast at
+  /// once, and stays false forever after a transient (non-404) failure,
+  /// which would silence `noticeOf` for good on a server that in fact has
+  /// no support for this at all.
+  bool get _serverCovers =>
+      ref.read(notificationsStateProvider)?.supported ?? false;
 
   @override
   void initState() {
@@ -247,22 +254,32 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
             ids.contains(_toastNotificationId)) {
           _hideToast();
         }
+      case AgentNotificationsRemoved(:final ids):
+        if (_toastNotificationId != null &&
+            ids.contains(_toastNotificationId)) {
+          _hideToast();
+        }
       default:
         break;
     }
   }
 
-  /// A server-sourced toast (161-3): `needs_you`/`finished`/`error`, or an
-  /// agent's or a terminal's own words, reported as Storm's own notice of
-  /// them rather than in Storm's voice.
+  /// A server-sourced toast (161-3): every kind but [_kNeverToastKinds],
+  /// styled as an agent's or a terminal's own words once [n.source] says so
+  /// — never by `kind` (a roll-up is Storm's own words about an agent,
+  /// source `storm`, not an agent's).
   Future<void> _considerServer(AgentNotification n) async {
-    if (n.silent || n.cancelled) return;
-    final isAgent = _kAgentSourcedKinds.contains(n.kind);
-    final isTerminal = _kTerminalSourcedKinds.contains(n.kind);
-    if (!isAgent && !isTerminal && !_kServerCoveredKinds.contains(n.kind)) {
-      return;
-    }
+    if (n.silent || n.cancelled || _kNeverToastKinds.contains(n.kind)) return;
+    // The three kinds `noticeOf` also raises toast from here only once the
+    // inbox has proven itself present; before that, `noticeOf` alone has
+    // it (item 4 — otherwise both fire during the loading window).
+    if (_kOverlapsClientKinds.contains(n.kind) && !_serverCovers) return;
+    final isAgent = n.source == 'agent';
+    final isTerminal = n.source == 'terminal';
     if (n.sessionId != null && n.sessionId == shownSessionOf(widget.location)) {
+      // Already looking at it: never toasted, but still read, the same
+      // rule `markSessionRead` gives output otherwise seen there (item 6).
+      unawaited(ref.read(notificationsStateProvider)?.markRead([n.id]));
       return;
     }
     final toasted = await _loadServerToasted();
@@ -330,6 +347,7 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
     final router = GoRouter.maybeOf(context);
     final sessionId = n.sessionId;
     final t = Theme.of(context);
+    final tokens = context.tokens;
     final fromAgent = agent || terminal;
     final content = !fromAgent
         ? Text(n.title)
@@ -341,12 +359,12 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
                 '${n.sessionTitle ?? 'A session'} · '
                 '${n.provider == null ? 'Agent' : providerLabel(n.provider!)}'
                 '${terminal ? ' via its terminal' : ''}',
-                style: const TextStyle(
+                style: TextStyle(
                   fontWeight: FontWeight.w600,
-                  fontSize: 12,
+                  fontSize: tokens.labelSize,
                 ),
               ),
-              const SizedBox(height: 2),
+              SizedBox(height: tokens.sp * 0.25),
               Text(
                 n.title,
                 style: TextStyle(color: t.colorScheme.onInverseSurface),

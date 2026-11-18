@@ -1751,13 +1751,57 @@ class _AboutRow extends StatelessWidget {
 
 /// Decision 161-2's "Notifies you" toggle and this session's or its agent's
 /// mute, inline in About. Hides entirely on a server before decision 161.
-class _NotifySection extends ConsumerWidget {
+class _NotifySection extends ConsumerStatefulWidget {
   const _NotifySection({required this.session});
 
   final AgentSession session;
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<_NotifySection> createState() => _NotifySectionState();
+}
+
+class _NotifySectionState extends ConsumerState<_NotifySection> {
+  /// Set the moment the toggle is touched, cleared once the request lands
+  /// either way — the live session push that follows a success also
+  /// carries the new value, but this is what makes the toggle move at
+  /// once rather than waiting on that round trip. Reverted (not merely
+  /// cleared) on failure, so the toggle never shows a value the server
+  /// did not actually accept.
+  bool? _optimisticNotify;
+
+  Future<void> _guarded(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      }
+    }
+  }
+
+  Future<void> _setNotify(bool v) async {
+    setState(() => _optimisticNotify = v);
+    final api = agentApi(ref);
+    if (api == null) return;
+    try {
+      await api.setSessionNotify(widget.session.id, v);
+    } catch (e) {
+      if (mounted) {
+        setState(() => _optimisticNotify = !v);
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      }
+    } finally {
+      api.dispose();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = widget.session;
     final state = ref.watch(notificationsStateProvider);
     if (state == null) return const SizedBox.shrink();
     return ListenableBuilder(
@@ -1770,7 +1814,7 @@ class _NotifySection extends ConsumerWidget {
         final providerMute = state.mutes
             .where((m) => m.scope == 'provider' && m.target == session.provider)
             .firstOrNull;
-        final notify = session.notify;
+        final notify = _optimisticNotify ?? session.notify;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
@@ -1782,15 +1826,7 @@ class _NotifySection extends ConsumerWidget {
                   child: StormToggle(
                     key: const Key('details-notify'),
                     value: notify,
-                    onChanged: (v) async {
-                      final api = agentApi(ref);
-                      if (api == null) return;
-                      try {
-                        await api.setSessionNotify(session.id, v);
-                      } finally {
-                        api.dispose();
-                      }
-                    },
+                    onChanged: _setNotify,
                   ),
                 ),
               ),
@@ -1800,11 +1836,12 @@ class _NotifySection extends ConsumerWidget {
                 keyPrefix: 'mute-session',
                 muted: sessionMute,
                 sessionScope: true,
-                onMute: (until) =>
-                    state.createMute('session', session.id, until: until),
+                onMute: (until) => _guarded(
+                  () => state.createMute('session', session.id, until: until),
+                ),
                 onUnmute: sessionMute == null
                     ? null
-                    : () => state.deleteMute(sessionMute.id),
+                    : () => _guarded(() => state.deleteMute(sessionMute.id)),
               ),
             ),
             _AboutRow(
@@ -1812,14 +1849,16 @@ class _NotifySection extends ConsumerWidget {
               child: _MuteRow(
                 keyPrefix: 'mute-provider',
                 muted: providerMute,
-                onMute: (until) => state.createMute(
-                  'provider',
-                  session.provider,
-                  until: until,
+                onMute: (until) => _guarded(
+                  () => state.createMute(
+                    'provider',
+                    session.provider,
+                    until: until,
+                  ),
                 ),
                 onUnmute: providerMute == null
                     ? null
-                    : () => state.deleteMute(providerMute.id),
+                    : () => _guarded(() => state.deleteMute(providerMute.id)),
               ),
             ),
           ],

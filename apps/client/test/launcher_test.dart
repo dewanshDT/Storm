@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_models.dart';
@@ -344,6 +345,11 @@ void main() {
   group('More', () {
     testWidgets('switching agents never adds or removes a row', (t) async {
       final agents = FakeAgentServer(hosts: [c0()]);
+      // Decision 161: a server that answers prefs keeps the "notify" row
+      // present throughout, which is what this test's invariant is about.
+      agents.extra = (req) async => req.url.path == '/v1/notifications/prefs'
+          ? http.Response('{}', 200)
+          : null;
       final c = await launcher(t, agents);
       await tapKey(t, 'launcher-more');
       const all = {

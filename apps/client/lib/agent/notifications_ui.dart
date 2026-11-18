@@ -10,11 +10,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../router.dart';
-import '../ui/settings/settings_widgets.dart' show TextAction, confirmSetting;
+import '../ui/settings/settings_widgets.dart'
+    show TextAction, confirmSetting, settingsToast;
+import '../ui/states.dart' show describeFailure;
 import '../ui/surfaces.dart';
-import '../ui/theme.dart' show StormBubble;
 import '../ui/tokens.dart';
-import '../ui/widgets.dart' show CountBadge, SectionLabel;
+import '../ui/widgets.dart' show IconBadgeButton, SectionLabel, UnreadRow;
 import 'agent_models.dart' show providerLabel;
 import 'notifications_models.dart';
 import 'notifications_state.dart';
@@ -43,8 +44,21 @@ String notificationAgo(AgentNotification n) {
   return agoWords(created.toLocal(), DateTime.now());
 }
 
-/// A bell with an unread badge, opening the inbox — the app bar's
-/// [NotificationBellButton] and the phone's [NotifyBubble] share this.
+/// Runs [action], showing any failure rather than swallowing it.
+Future<void> _guard(
+  BuildContext context,
+  Future<void> Function() action,
+) async {
+  try {
+    await action();
+  } catch (e) {
+    if (context.mounted) settingsToast(context, describeFailure(e));
+  }
+}
+
+/// The inbox's content, shared by the desktop's [NotificationBellButton]
+/// popover and the phone's sheet (opened via [openNotificationsSheet] from
+/// the place picker).
 class NotificationsPanel extends ConsumerWidget {
   const NotificationsPanel({super.key, this.onOpened});
 
@@ -82,7 +96,7 @@ class NotificationsPanel extends ConsumerWidget {
                       TextAction(
                         key: const Key('notify-mark-all-read'),
                         label: 'Mark all read',
-                        onTap: () => state.markAllRead(),
+                        onTap: () => _guard(context, state.markAllRead),
                       ),
                   ],
                 ),
@@ -134,7 +148,9 @@ class NotificationsPanel extends ConsumerWidget {
                             'cannot be undone.',
                         action: 'Clear',
                       );
-                      if (ok) await state.clear();
+                      if (ok && context.mounted) {
+                        await _guard(context, state.clear);
+                      }
                     },
                   ),
                 ),
@@ -173,113 +189,95 @@ class _InboxRow extends ConsumerWidget {
     final held = n.silentReason == null ? null : _kHeldReasons[n.silentReason];
     final canOpen =
         n.sessionId != null || (n.noteVaultId != null && n.noteId != null);
-    return InkWell(
+    return UnreadRow(
+      unread: n.unread,
       onTap: canOpen ? () => _open(context, ref) : null,
-      child: Padding(
-        padding: EdgeInsets.symmetric(
-          horizontal: t.sp * 0.75,
-          vertical: t.sp * 0.875,
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Padding(
-              padding: EdgeInsets.only(top: t.sp * 0.375),
-              child: Container(
-                width: t.sp * 0.75,
-                height: t.sp * 0.75,
-                decoration: BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: n.unread ? t.accent : Colors.transparent,
-                ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (source != null) ...[
+            Text(
+              source,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize * 1.09,
+                fontWeight: FontWeight.w600,
+                color: t.text2,
               ),
             ),
-            SizedBox(width: t.sp * 0.75),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (source != null) ...[
-                    Row(
-                      children: [
-                        Flexible(
-                          child: Text(
-                            source,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontFamily: StormTokens.sansFamily,
-                              fontSize: t.labelSize * 1.09,
-                              fontWeight: FontWeight.w600,
-                              color: t.text2,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    SizedBox(height: t.sp * 0.25),
-                  ],
-                  Text(
-                    n.title,
-                    style: TextStyle(
-                      fontFamily: StormTokens.sansFamily,
-                      fontSize: t.codeSize,
-                      color: t.text,
-                    ),
-                  ),
-                  if (n.body != null) ...[
-                    SizedBox(height: t.sp * 0.25),
-                    Text(
-                      n.body!,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontFamily: StormTokens.sansFamily,
-                        fontSize: t.labelSize * 1.09,
-                        color: t.text3,
-                      ),
-                    ),
-                  ],
-                  SizedBox(height: t.sp * 0.25),
-                  Row(
-                    children: [
-                      Text(
-                        notificationAgo(n),
-                        style: TextStyle(
-                          fontFamily: StormTokens.monoFamily,
-                          fontSize: t.labelSize,
-                          color: t.text3,
-                        ),
-                      ),
-                      if (held != null) ...[
-                        SizedBox(width: t.sp),
-                        Text(
-                          held,
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: t.labelSize,
-                            color: t.text3,
-                          ),
-                        ),
-                      ],
-                      const Spacer(),
-                      if (n.sessionId != null)
-                        TextAction(
-                          key: Key('notify-mute-row-${n.id}'),
-                          label: 'Mute this session',
-                          onTap: () => ref
-                              .read(notificationsStateProvider)
-                              ?.createMute('session', n.sessionId!),
-                        ),
-                    ],
-                  ),
-                ],
+            SizedBox(height: t.sp * 0.25),
+          ],
+          Text(
+            n.title,
+            style: TextStyle(
+              fontFamily: StormTokens.sansFamily,
+              fontSize: t.codeSize,
+              color: t.text,
+            ),
+          ),
+          if (n.body != null) ...[
+            SizedBox(height: t.sp * 0.25),
+            Text(
+              n.body!,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: StormTokens.sansFamily,
+                fontSize: t.labelSize * 1.09,
+                color: t.text3,
               ),
             ),
           ],
-        ),
+          SizedBox(height: t.sp * 0.25),
+          Row(
+            children: [
+              Text(
+                notificationAgo(n),
+                style: TextStyle(
+                  fontFamily: StormTokens.monoFamily,
+                  fontSize: t.labelSize,
+                  color: t.text3,
+                ),
+              ),
+              if (held != null) ...[
+                SizedBox(width: t.sp),
+                Text(
+                  held,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.labelSize,
+                    color: t.text3,
+                  ),
+                ),
+              ],
+              const Spacer(),
+              if (n.sessionId != null)
+                TextAction(
+                  key: Key('notify-mute-row-${n.id}'),
+                  label: 'Mute this session',
+                  onTap: () => _mute(context, ref, n.sessionId!),
+                ),
+            ],
+          ),
+        ],
       ),
     );
+  }
+
+  Future<void> _mute(
+    BuildContext context,
+    WidgetRef ref,
+    String sessionId,
+  ) async {
+    try {
+      await ref
+          .read(notificationsStateProvider)
+          ?.createMute('session', sessionId);
+    } catch (e) {
+      if (context.mounted) settingsToast(context, describeFailure(e));
+    }
   }
 }
 
@@ -298,46 +296,19 @@ class _NotificationBellButtonState
 
   @override
   Widget build(BuildContext context) {
-    final t = context.tokens;
     final state = ref.watch(notificationsStateProvider);
     if (state == null) return const SizedBox.shrink();
     return ListenableBuilder(
       listenable: state,
       builder: (context, _) {
         if (state.unsupported) return const SizedBox.shrink();
-        final count = state.unreadCount;
-        return Semantics(
-          button: true,
-          label: count == 0 ? 'Notifications' : 'Notifications, $count unread',
+        return IconBadgeButton(
+          key: const Key('bar-notifications'),
+          anchorKey: _anchor,
+          icon: LucideIcons.bell,
+          tooltip: 'Notifications',
+          count: state.unreadCount,
           onTap: _open,
-          excludeSemantics: true,
-          child: InkWell(
-            key: const Key('bar-notifications'),
-            borderRadius: BorderRadius.circular(t.rControl),
-            onTap: _open,
-            child: SizedBox.square(
-              key: _anchor,
-              dimension: t.sp * 3.5,
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  Center(
-                    child: Icon(
-                      LucideIcons.bell,
-                      size: t.uiSize,
-                      color: t.text2,
-                    ),
-                  ),
-                  if (count > 0)
-                    Positioned(
-                      top: -t.sp * 0.25,
-                      right: -t.sp * 0.375,
-                      child: CountBadge(count: count, color: t.danger),
-                    ),
-                ],
-              ),
-            ),
-          ),
         );
       },
     );
@@ -362,52 +333,14 @@ class _NotificationBellButtonState
   }
 }
 
-/// The phone's bell: a corner bubble opening the inbox as a sheet.
-class NotifyBubble extends ConsumerWidget {
-  const NotifyBubble({super.key});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final t = context.tokens;
-    final state = ref.watch(notificationsStateProvider);
-    if (state == null) return const SizedBox.shrink();
-    return ListenableBuilder(
-      listenable: state,
-      builder: (context, _) {
-        if (state.unsupported) return const SizedBox.shrink();
-        final count = state.unreadCount;
-        return StormBubble(
-          key: const Key('notify-bubble'),
-          tooltip: count == 0
-              ? 'Notifications'
-              : 'Notifications, $count unread',
-          onTap: () => _open(context),
-          child: Stack(
-            clipBehavior: Clip.none,
-            children: [
-              Icon(LucideIcons.bell, size: t.sp * 2.5, color: t.text2),
-              if (count > 0)
-                Positioned(
-                  top: -t.sp * 0.375,
-                  right: -t.sp * 0.375,
-                  child: CountBadge(count: count, color: t.danger),
-                ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  void _open(BuildContext context) {
-    unawaited(
-      showStormSheet<void>(
-        context: context,
-        title: 'Notifications',
-        builder: (sheetContext) => NotificationsPanel(
-          onOpened: () => Navigator.maybeOf(sheetContext)?.pop(),
-        ),
+/// Opens the inbox as a sheet — the phone's way in from the place picker
+/// (161-3's review: reachable from every screen, not only a corner bubble
+/// gated on having no nav pill).
+Future<void> openNotificationsSheet(BuildContext context) =>
+    showStormSheet<void>(
+      context: context,
+      title: 'Notifications',
+      builder: (sheetContext) => NotificationsPanel(
+        onOpened: () => Navigator.maybeOf(sheetContext)?.pop(),
       ),
     );
-  }
-}

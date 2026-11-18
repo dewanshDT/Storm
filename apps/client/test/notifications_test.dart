@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -8,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import 'package:storm/agent/agent_api.dart';
 import 'package:storm/agent/agent_events.dart';
+import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/launcher.dart';
 import 'package:storm/agent/notifications_models.dart';
 import 'package:storm/agent/notifications_state.dart';
@@ -26,6 +29,14 @@ void main() {
   const primary = FakeServer.primaryVault;
 
   setUp(() => SharedPreferences.setMockInitialValues({}));
+
+  /// Flushes a chain of awaited microtasks (several sequential HTTP calls
+  /// inside a backfill), more robust than a single `Future.delayed(zero)`.
+  Future<void> settle() async {
+    for (var i = 0; i < 8; i++) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
 
   Map<String, dynamic> host() => agentHost(
     id: 'hst_1',
@@ -94,9 +105,86 @@ void main() {
         () => fakeApi((req) async => null),
         null,
       );
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
+      await settle();
       expect(state.unsupported, isTrue);
+      expect(state.supported, isFalse);
+    });
+
+    test(
+      'a transient (non-404) failure leaves support undecided, not refused',
+      () async {
+        final state = NotificationsState(
+          () => fakeApi((req) async => http.Response('', 500)),
+          null,
+        );
+        await settle();
+        expect(state.unsupported, isFalse, reason: 'not a 404');
+        expect(state.supported, isFalse, reason: 'never actually succeeded');
+      },
+    );
+
+    test('a cancelled row in the backfill is dropped, not counted unread', () {
+      final state = NotificationsState(fakeApi, null);
+      state.applyEvent(AgentNotificationPushed(notif('n1')));
+      expect(state.unreadCount, 1);
+      state.applyEvent(
+        AgentNotificationPushed(
+          AgentNotification(
+            id: 'n1',
+            seq: 2,
+            created: DateTime.now().toUtc().toIso8601String(),
+            source: 'storm',
+            kind: 'needs_you',
+            title: 't',
+            urgency: 'high',
+            cancelled: true,
+          ),
+        ),
+      );
+      expect(state.items, isEmpty);
+      expect(state.unreadCount, 0);
+    });
+
+    test('notification_removed takes ids out of the inbox', () {
+      final state = NotificationsState(fakeApi, null);
+      state.applyEvent(AgentNotificationPushed(notif('n1')));
+      state.applyEvent(AgentNotificationPushed(notif('n2')));
+      state.applyEvent(AgentNotificationsRemoved(['n1']));
+      expect(state.items.map((n) => n.id), ['n2']);
+    });
+
+    test('a snapshot (a fresh or resumed connection) re-backfills', () async {
+      var gets = 0;
+      AgentApi api() => AgentApi(
+        baseUrl: 'http://x',
+        token: 't',
+        client: MockClient((req) async {
+          if (req.url.path == '/v1/notifications') {
+            gets++;
+            return http.Response(jsonEncode({'items': [], 'cursor': 0}), 200);
+          }
+          if (req.url.path == '/v1/notifications/prefs') {
+            return http.Response(
+              jsonEncode(FakeNotifications._defaults()),
+              200,
+            );
+          }
+          if (req.url.path == '/v1/notifications/mutes') {
+            return http.Response(jsonEncode([]), 200);
+          }
+          return http.Response('', 404);
+        }),
+      );
+      final c = StreamController<AgentEvent>();
+      final events = AgentEvents(() => c.stream)..start(followLifecycle: false);
+      NotificationsState(api, events);
+      await settle();
+      expect(gets, 1, reason: 'the constructor backfills once');
+      c.add(AgentSnapshot('run_1', const []));
+      await settle();
+      expect(gets, 2, reason: 'a fresh snapshot (reconnect) backfills again');
+      events.dispose();
+      await c.close();
     });
   });
 
@@ -257,6 +345,198 @@ void main() {
         );
         await disposeShell(tester, c);
       }
+    });
+  });
+
+  group('server-sourced toasts (decision 161 review, item 10)', () {
+    late List<StreamController<AgentEvent>> opens;
+
+    Stream<AgentEvent> open() {
+      final c = StreamController<AgentEvent>();
+      opens.add(c);
+      return c.stream;
+    }
+
+    setUp(() => opens = []);
+
+    AgentSession session(String id, {String? name, String? attention}) =>
+        AgentSession.fromJson({
+          ...agentSession(id, name: name ?? id),
+          'needs_attention': ?attention,
+        });
+
+    AgentNotification notif({
+      required String id,
+      String source = 'storm',
+      String kind = 'usage_limit',
+      String title = 'out of usage',
+      String? sessionId,
+      String? sessionTitle,
+      String? provider,
+      bool silent = false,
+      String? silentReason,
+    }) => AgentNotification(
+      id: id,
+      seq: 1,
+      created: DateTime.now().toUtc().toIso8601String(),
+      source: source,
+      kind: kind,
+      title: title,
+      urgency: 'normal',
+      sessionId: sessionId,
+      sessionTitle: sessionTitle,
+      provider: provider,
+      silent: silent,
+      silentReason: silentReason,
+    );
+
+    Future<ProviderContainer> mount(
+      WidgetTester t, {
+      FakeNotifications? notif,
+      List<Map<String, dynamic>>? sessions,
+      List<AgentSession>? snapshot,
+    }) async {
+      final agents = FakeAgentServer(
+        hosts: [host()],
+        sessions: sessions ?? const [],
+      );
+      if (notif != null) agents.extra = notif.handle;
+      final c = shellContainer(agentClient: agents.client, agentEvents: open);
+      await pumpShell(t, c, size: wide);
+      c.read(routerProvider).go(Routes.agents);
+      await t.pumpAndSettle();
+      opens.last.add(AgentSnapshot('run_1', snapshot ?? const []));
+      await t.pumpAndSettle();
+      return c;
+    }
+
+    Finder toast() => find.byType(SnackBar);
+
+    testWidgets('an agent-sourced notice toasts as the agent, not Storm', (
+      t,
+    ) async {
+      final c = await mount(t, notif: FakeNotifications());
+      opens.last.add(
+        AgentNotificationPushed(
+          notif(
+            id: 'n1',
+            source: 'agent',
+            kind: 'agent_message',
+            title: 'build is ready',
+            sessionId: 'ags_1',
+            sessionTitle: 'alpha',
+            provider: 'claude-code',
+          ),
+        ),
+      );
+      await t.pumpAndSettle();
+      expect(toast(), findsOneWidget);
+      expect(find.textContaining('alpha · Claude Code'), findsOneWidget);
+      expect(find.text('build is ready'), findsOneWidget);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('a silent notice never toasts', (t) async {
+      final c = await mount(t, notif: FakeNotifications());
+      opens.last.add(
+        AgentNotificationPushed(
+          notif(id: 'n1', silent: true, silentReason: 'quiet'),
+        ),
+      );
+      await t.pumpAndSettle();
+      expect(toast(), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('the same id pushed twice toasts once', (t) async {
+      final c = await mount(t, notif: FakeNotifications());
+      final n = notif(id: 'n1');
+      opens.last.add(AgentNotificationPushed(n));
+      await t.pumpAndSettle();
+      opens.last.add(AgentNotificationPushed(n));
+      await t.pumpAndSettle();
+      expect(toast(), findsOneWidget);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('a remote notification_read dismisses the shown toast', (
+      t,
+    ) async {
+      final c = await mount(t, notif: FakeNotifications());
+      opens.last.add(AgentNotificationPushed(notif(id: 'n1')));
+      await t.pumpAndSettle();
+      expect(toast(), findsOneWidget);
+      opens.last.add(AgentNotificationsRead(['n1']));
+      await t.pumpAndSettle();
+      expect(toast(), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    testWidgets(
+      'a notice for the session already open is marked read, never toasted',
+      (t) async {
+        final notif = FakeNotifications();
+        final c = await mount(
+          t,
+          notif: notif,
+          sessions: [agentSession('ags_1', name: 'alpha')],
+          snapshot: [session('ags_1')],
+        );
+        c.read(routerProvider).go(Routes.agentSession('ags_1'));
+        await t.pumpAndSettle();
+        notif.push(
+          id: 'n1',
+          source: 'storm',
+          kind: 'finished',
+          title: 'alpha finished its turn',
+          sessionId: 'ags_1',
+          sessionTitle: 'alpha',
+        );
+        opens.last.add(
+          AgentNotificationPushed(
+            AgentNotification.fromJson(notif.items.single),
+          ),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsNothing);
+        expect(notif.items.single['read_at'], isNotNull);
+        await disposeShell(t, c);
+      },
+    );
+
+    testWidgets(
+      'noticeOf is superseded by the server once the inbox is supported',
+      (t) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          snapshot: [session('beta')],
+        );
+        await t.pumpAndSettle();
+        opens.last.add(
+          AgentSessionChanged(session('beta', attention: 'question')),
+        );
+        await t.pumpAndSettle();
+        expect(
+          find.text('beta needs you'),
+          findsNothing,
+          reason: 'only a server notification toasts needs_you once supported',
+        );
+        await disposeShell(t, c);
+      },
+    );
+
+    testWidgets('noticeOf still fires on a server before decision 161', (
+      t,
+    ) async {
+      final c = await mount(t, notif: null, snapshot: [session('beta')]);
+      await t.pumpAndSettle();
+      opens.last.add(
+        AgentSessionChanged(session('beta', attention: 'question')),
+      );
+      await t.pumpAndSettle();
+      expect(find.text('beta needs you'), findsOneWidget);
+      await disposeShell(t, c);
     });
   });
 }

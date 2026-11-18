@@ -73,6 +73,14 @@ class AgentMutesChanged extends AgentEvent {
 /// Decision 161: the inbox was cleared elsewhere.
 class AgentNotificationsCleared extends AgentEvent {}
 
+/// Decision 161 (#416): these ids were cancelled (a `notify` `key` replace,
+/// or `cancel_notify`) and must disappear from the inbox and any shown
+/// toast, not merely be marked read.
+class AgentNotificationsRemoved extends AgentEvent {
+  AgentNotificationsRemoved(this.ids);
+  final List<String> ids;
+}
+
 /// [name] and its decoded [data], or null for an event this client does not
 /// know or cannot read.
 AgentEvent? decodeAgentEvent(String name, Object? data) {
@@ -101,6 +109,9 @@ AgentEvent? decodeAgentEvent(String name, Object? data) {
           NotificationMute.fromJson(m as Map<String, dynamic>),
       ]),
       'notifications_cleared' => AgentNotificationsCleared(),
+      'notification_removed' => AgentNotificationsRemoved([
+        for (final id in (data as Map)['ids'] as List) '$id',
+      ]),
       _ => null,
     };
   } catch (_) {
@@ -592,6 +603,7 @@ class AgentEvents {
       case AgentPrefsChanged():
       case AgentMutesChanged():
       case AgentNotificationsCleared():
+      case AgentNotificationsRemoved():
         // Not session state; carried on this same stream (one connection
         // per device) so `NotificationsState` can apply it without a
         // second subscription.
@@ -683,6 +695,7 @@ final agentEventsProvider = Provider.autoDispose<AgentEvents?>((ref) {
       case AgentPrefsChanged():
       case AgentMutesChanged():
       case AgentNotificationsCleared():
+      case AgentNotificationsRemoved():
         break;
     }
   });

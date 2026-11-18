@@ -303,6 +303,128 @@ class CountBadge extends StatelessWidget {
   }
 }
 
+/// A round icon button with a [CountBadge] on its corner, none at 0 —
+/// the app bar's bell (decision 161) and anything else that is an icon
+/// opening something with an unread count.
+class IconBadgeButton extends StatelessWidget {
+  const IconBadgeButton({
+    super.key,
+    required this.icon,
+    required this.tooltip,
+    required this.onTap,
+    this.count = 0,
+    this.badgeColor,
+    this.dimension,
+    this.anchorKey,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+
+  /// A [CountBadge] on the corner; none at 0.
+  final int count;
+
+  /// `danger` by default.
+  final Color? badgeColor;
+  final double? dimension;
+
+  /// So a caller can anchor a popover to this button.
+  final Key? anchorKey;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final side = dimension ?? t.sp * 3.5;
+    final spoken = count == 0 ? tooltip : '$tooltip, $count unread';
+    return Semantics(
+      button: true,
+      label: spoken,
+      onTap: onTap,
+      excludeSemantics: true,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(t.rControl),
+        onTap: onTap,
+        child: SizedBox.square(
+          key: anchorKey,
+          dimension: side,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              Center(
+                child: Icon(icon, size: t.uiSize, color: t.text2),
+              ),
+              if (count > 0)
+                Positioned(
+                  top: -t.sp * 0.25,
+                  right: -t.sp * 0.375,
+                  child: CountBadge(
+                    count: count,
+                    color: badgeColor ?? t.danger,
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A list row with an unread dot (filled when [unread], hollow otherwise),
+/// [child] as its content, and [onTap] (none disables the row). The
+/// inbox's own rows (decision 161) are this; any list of notices or events
+/// with a read/unread state should be too, rather than a one-off
+/// `Container`-and-dot.
+class UnreadRow extends StatelessWidget {
+  const UnreadRow({
+    super.key,
+    required this.unread,
+    required this.child,
+    this.onTap,
+  });
+
+  final bool unread;
+  final Widget child;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    final row = Padding(
+      padding: EdgeInsets.symmetric(
+        horizontal: t.sp * 0.75,
+        vertical: t.sp * 0.875,
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: EdgeInsets.only(top: t.sp * 0.375),
+            child: Semantics(
+              label: unread ? 'Unread' : null,
+              child: Container(
+                width: t.sp * 0.75,
+                height: t.sp * 0.75,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: unread ? t.accent : Colors.transparent,
+                  border: unread
+                      ? null
+                      : Border.all(color: t.border, width: t.bw),
+                ),
+              ),
+            ),
+          ),
+          SizedBox(width: t.sp * 0.75),
+          Expanded(child: child),
+        ],
+      ),
+    );
+    return onTap == null ? row : InkWell(onTap: onTap, child: row);
+  }
+}
+
 /// A themed text field. Never sets a border: passing one discards the fill,
 /// stroke and `rControl` radius that `inputDecorationTheme` supplies.
 class StormInput extends StatelessWidget {

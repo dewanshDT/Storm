@@ -2,17 +2,21 @@
 /// sections only; "This device" at the top is reserved for another slice.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../agent/agent_api.dart' show AgentRefusal;
 import '../../agent/agent_models.dart' show providerLabel;
 import '../../agent/agent_state.dart' show agentApi, agentOverviewProvider;
+import '../../agent/agent_widgets.dart' show clockAt;
 import '../../agent/notifications_models.dart';
 import '../../agent/notifications_state.dart';
 import '../controls.dart';
 import '../states.dart' show describeFailure;
 import '../tokens.dart';
+import '../widgets.dart' show StormInput;
 import 'settings_widgets.dart';
 
 const _kKindLabels = {
@@ -39,6 +43,34 @@ String _thresholdLabel(int s) => switch (s) {
 
 const _kSessionLimitPresets = [5, 20, 50, 100, 200];
 const _kRetentionPresets = [7, 30, 90, 365];
+
+/// "14:02", or "3/4 14:02" for a moment not today; "you turn them back on"
+/// for [NotificationPrefs.pausedUntil]'s far-future sentinel
+/// (`PAUSE_INDEFINITELY`).
+/// Runs [action], showing any failure rather than swallowing it.
+Future<void> _guard(
+  BuildContext context,
+  Future<void> Function() action,
+) async {
+  try {
+    await action();
+  } catch (e) {
+    if (context.mounted) settingsToast(context, describeFailure(e));
+  }
+}
+
+String friendlyUntil(DateTime until) {
+  if (until.year >= 9999) return 'you turn them back on';
+  final local = until.toLocal();
+  final now = DateTime.now();
+  final sameDay =
+      local.year == now.year &&
+      local.month == now.month &&
+      local.day == now.day;
+  return sameDay
+      ? clockAt(until)
+      : '${local.month}/${local.day} ${clockAt(until)}';
+}
 
 class NotificationsPage extends ConsumerWidget {
   const NotificationsPage({super.key});
@@ -109,7 +141,7 @@ class _NotificationsPageBodyState
     return {
       'events': {
         kind: {
-          'on': on ?? current?.on ?? true,
+          'on': on ?? current?.on ?? defaultEventOn(kind),
           if ((thresholdS ?? current?.thresholdS) != null)
             'threshold_s': thresholdS ?? current?.thresholdS,
         },
@@ -128,6 +160,7 @@ class _NotificationsPageBodyState
             : 'Sessions that can already notify keep doing so unless you '
                   'turn it off for them too.',
         action: 'Turn off',
+        cancelLabel: 'Keep them on',
         confirmKey: const Key('notify-default-off-confirm'),
       );
       if (ok) {
@@ -135,7 +168,8 @@ class _NotificationsPageBodyState
         if (api != null) {
           try {
             await api.turnNotifyOff(children ? 'children' : 'all');
-          } catch (_) {
+          } catch (e) {
+            if (mounted) settingsToast(context, describeFailure(e));
           } finally {
             api.dispose();
           }
@@ -208,7 +242,7 @@ class _NotificationsPageBodyState
           divider: false,
           trailing: ChoiceChips<int>(
             options: [
-              for (final n in _kSessionLimitPresets) ChoiceOption(n, '$n'),
+              for (final n in _kSessionLimitPresets) ChoiceOption(n, '$n/hr'),
             ],
             selected: prefs.perSessionLimit,
             onSelected: (v) => _apply({'per_session_limit': v}),
@@ -244,15 +278,16 @@ class _NotificationsPageBodyState
         ),
         SettingsRow(
           label: 'Time zone',
-          sub: 'An IANA zone, e.g. "America/New_York" or "UTC".',
+          sub:
+              'An IANA zone, e.g. "America/New_York" or "UTC". Storm has no '
+              'reliable way to detect this device\'s zone, so it keeps '
+              'whatever was last saved.',
           trailing: SizedBox(
             width: t.sp * 16,
-            child: TextField(
+            child: StormInput(
               key: const Key('notify-quiet-tz'),
               controller: _tz,
-              textAlign: TextAlign.right,
               onSubmitted: (v) => _apply({'quiet_tz': v.trim()}),
-              decoration: const InputDecoration(isDense: true),
             ),
           ),
         ),
@@ -351,7 +386,7 @@ class _EventRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = context.tokens;
-    final on = pref?.on ?? true;
+    final on = pref?.on ?? defaultEventOn(kind);
     final threshold = pref?.thresholdS;
     return Padding(
       padding: EdgeInsets.only(bottom: onThreshold == null ? 0 : t.sp),
@@ -426,13 +461,22 @@ class _MutesList extends ConsumerWidget {
     final t = context.tokens;
     if (state.mutes.isEmpty) return const SizedBox.shrink();
     final overview = ref.watch(agentOverviewProvider).value;
+    String untilWords(String? until, {required String whenForever}) {
+      if (until == null) return whenForever;
+      final parsed = DateTime.tryParse(until);
+      return parsed == null
+          ? 'until it expires'
+          : 'until ${friendlyUntil(parsed)}';
+    }
+
     String label(NotificationMute m) {
-      final until = m.until == null ? 'always' : 'until it expires';
       if (m.scope == 'provider') {
+        final until = untilWords(m.until, whenForever: 'always');
         return 'All ${providerLabel(m.target)} sessions · $until';
       }
       final name = overview?.byId(m.target)?.displayName ?? m.target;
-      return '$name · ${m.until == null ? 'until the session ends' : 'until it expires'}';
+      final until = untilWords(m.until, whenForever: 'until the session ends');
+      return '$name · $until';
     }
 
     return Column(
@@ -445,7 +489,7 @@ class _MutesList extends ConsumerWidget {
             trailing: TextAction(
               key: Key('notify-unmute-${m.id}'),
               label: 'Unmute',
-              onTap: () => state.deleteMute(m.id),
+              onTap: () => _guard(context, () => state.deleteMute(m.id)),
             ),
           ),
         SizedBox(height: t.sp * 0.5),
@@ -464,17 +508,19 @@ class _PauseControl extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = context.tokens;
     final pausedUntil = prefs.pausedUntil;
-    final paused =
-        pausedUntil != null && DateTime.tryParse(pausedUntil) != null;
+    final parsed = pausedUntil == null ? null : DateTime.tryParse(pausedUntil);
+    // "Paused" means an end strictly in the future, not merely a parsable
+    // one: a past `paused_until` the server has not yet cleared is not
+    // still paused (item 7 of the review).
+    final paused = parsed != null && parsed.isAfter(DateTime.now());
     if (paused) {
-      final until = DateTime.parse(pausedUntil).toLocal();
       return SettingsRow(
-        label: 'Paused until ${_friendly(until)}',
+        label: 'Paused until ${friendlyUntil(parsed)}',
         divider: false,
         trailing: TextAction(
           key: const Key('notify-resume'),
           label: 'Resume now',
-          onTap: state.unpause,
+          onTap: () => _guard(context, state.unpause),
         ),
       );
     }
@@ -487,11 +533,14 @@ class _PauseControl extends StatelessWidget {
           TextAction(
             key: const Key('notify-pause-1h'),
             label: '1 hour',
-            onTap: () => state.pause(
-              until: DateTime.now()
-                  .toUtc()
-                  .add(const Duration(hours: 1))
-                  .toIso8601String(),
+            onTap: () => _guard(
+              context,
+              () => state.pause(
+                until: DateTime.now()
+                    .toUtc()
+                    .add(const Duration(hours: 1))
+                    .toIso8601String(),
+              ),
             ),
           ),
           TextAction(
@@ -505,20 +554,21 @@ class _PauseControl extends StatelessWidget {
                 local.day + 1,
                 8,
               );
-              state.pause(until: tomorrow.toUtc().toIso8601String());
+              unawaited(
+                _guard(
+                  context,
+                  () => state.pause(until: tomorrow.toUtc().toIso8601String()),
+                ),
+              );
             },
           ),
           TextAction(
             key: const Key('notify-pause-indefinite'),
             label: 'Until I turn them back on',
-            onTap: () => state.pause(),
+            onTap: () => _guard(context, () => state.pause()),
           ),
         ],
       ),
     );
   }
-
-  String _friendly(DateTime d) =>
-      // 9999-12-31 (PAUSE_INDEFINITELY) reads as indefinite, not a date.
-      d.year >= 9999 ? 'you turn them back on' : d.toString();
 }

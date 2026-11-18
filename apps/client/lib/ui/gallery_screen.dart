@@ -335,6 +335,48 @@ class _Column extends StatelessWidget {
             ),
 
             _Card(
+              label: 'icon badge button',
+              child: Row(
+                children: [
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 0,
+                    onTap: () {},
+                  ),
+                  SizedBox(width: t.sp * 2),
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 4,
+                    onTap: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'unread row',
+              child: Column(
+                children: [
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Text(
+                      'An unread row',
+                      style: TextStyle(color: t.text),
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: () {},
+                    child: Text('A read row', style: TextStyle(color: t.text)),
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
               label: 'states',
               child: Column(
                 children: [

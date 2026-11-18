@@ -17,6 +17,13 @@ const kNotificationEventKinds = [
   'stopped_working',
 ];
 
+/// The server's own default (`default_on` in `notifications.rs`): every
+/// kind is on except these two. A row an older server wrote, or one this
+/// client has never seen, reads as this rather than as always-on.
+const _kDefaultOffKinds = {'child_finished', 'stopped_working'};
+
+bool defaultEventOn(String kind) => !_kDefaultOffKinds.contains(kind);
+
 /// One account notice in the inbox (`GET /v1/notifications`, the
 /// `notification` stream event). Named `AgentNotification` to avoid
 /// clashing with Flutter's own `Notification`.
@@ -181,7 +188,7 @@ class NotificationPrefs {
   final int retentionDays;
   final int retentionRows;
 
-  bool eventOn(String kind) => events[kind]?.on ?? true;
+  bool eventOn(String kind) => events[kind]?.on ?? defaultEventOn(kind);
 
   factory NotificationPrefs.fromJson(Map<String, dynamic> j) =>
       NotificationPrefs(

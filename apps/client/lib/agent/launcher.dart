@@ -109,6 +109,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
   bool? _notify;
   bool _agentDefaultOn = true;
 
+  /// False only once a server before decision 161 has actually answered
+  /// (161-3's review, item 11): the chip hides rather than offering a
+  /// toggle the server has nothing to do with.
+  bool _notifySupported = true;
+
   /// [_noCrew], [_newCrew] or a crew's id (138h).
   late String _crew = widget.prefill.crewId ?? _noCrew;
   RoleNote? _role;
@@ -177,8 +182,11 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
       final prefs = await api.notificationPrefs();
       if (!mounted) return;
       setState(() => _agentDefaultOn = prefs.agentDefaultOn);
-    } catch (_) {
-      // Keeps the chip's built-in default; nothing to launch with turns on.
+    } catch (e) {
+      if (mounted && e is AgentRefusal && e.statusCode == 404) {
+        setState(() => _notifySupported = false);
+      }
+      // Any other failure keeps the chip's built-in default.
     } finally {
       api.dispose();
     }
@@ -780,14 +788,15 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
                 state: LauncherChipState.off,
                 onTap: () => _openAt(_riskAnchor),
               ),
-              LauncherChip(
-                key: const Key('launcher-chip-notify'),
-                label: 'Notifies you',
-                state: (_notify ?? _agentDefaultOn)
-                    ? LauncherChipState.on
-                    : LauncherChipState.off,
-                onTap: () => _openAt(_notifyAnchor),
-              ),
+              if (_notifySupported)
+                LauncherChip(
+                  key: const Key('launcher-chip-notify'),
+                  label: 'Notifies you',
+                  state: (_notify ?? _agentDefaultOn)
+                      ? LauncherChipState.on
+                      : LauncherChipState.off,
+                  onTap: () => _openAt(_notifyAnchor),
+                ),
             ],
           ),
           _Under(
@@ -1034,18 +1043,19 @@ class _LauncherState extends ConsumerState<NewSessionLauncher> {
               ),
             ),
           ),
-          field(
-            'notify',
-            null,
-            anchor: _notifyAnchor,
-            child: _toggleLine(
-              key: const Key('launcher-notify'),
-              text: 'Notify you',
-              value: _notify ?? _agentDefaultOn,
-              enabled: true,
-              onChanged: (v) => setState(() => _notify = v),
+          if (_notifySupported)
+            field(
+              'notify',
+              null,
+              anchor: _notifyAnchor,
+              child: _toggleLine(
+                key: const Key('launcher-notify'),
+                text: 'Notify you',
+                value: _notify ?? _agentDefaultOn,
+                enabled: true,
+                onChanged: (v) => setState(() => _notify = v),
+              ),
             ),
-          ),
           Align(
             alignment: Alignment.centerLeft,
             child: _Link(

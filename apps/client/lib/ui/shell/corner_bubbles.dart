@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -5,6 +7,8 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../../agent/agent_state.dart';
+import '../../agent/notifications_state.dart' show notificationsStateProvider;
+import '../../agent/notifications_ui.dart' show openNotificationsSheet;
 import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../router.dart';
 import '../../state/app_state.dart';
@@ -137,6 +141,10 @@ class _PlacesBubbleState extends ConsumerState<PlacesBubble> {
           // last session, which a phone would then open full screen.
           context.go(Routes.agents);
         },
+        onNotifications: () {
+          Navigator.pop(popContext);
+          unawaited(openNotificationsSheet(context));
+        },
       ),
     );
   }
@@ -148,11 +156,17 @@ class PlacePicker extends ConsumerWidget {
     required this.inAgents,
     required this.onVault,
     required this.onAgents,
+    required this.onNotifications,
   });
 
   final bool inAgents;
   final ValueChanged<String> onVault;
   final VoidCallback onAgents;
+
+  /// The place picker is reachable from every phone screen, so this is
+  /// where the bell lives (161-3's review: a corner bubble gated on having
+  /// no nav pill left the inbox unreachable while browsing notes).
+  final VoidCallback onNotifications;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -162,6 +176,7 @@ class PlacePicker extends ConsumerWidget {
     final accents = ref.watch(vaultAccentsProvider).value ?? const {};
     final live = ref.watch(agentOverviewProvider).value?.live.length ?? 0;
     final needs = ref.watch(needsYouCountProvider);
+    final notifState = ref.watch(notificationsStateProvider);
     final check = Icon(LucideIcons.check, size: t.uiSize, color: t.accent);
 
     Widget name(String label, VoidCallback? onTap) => Text(
@@ -287,6 +302,39 @@ class PlacePicker extends ConsumerWidget {
           selected: inAgents,
           onTap: onAgents,
         ),
+        if (notifState != null)
+          ListenableBuilder(
+            listenable: notifState,
+            builder: (context, _) {
+              if (notifState.unsupported) return const SizedBox.shrink();
+              final unread = notifState.unreadCount;
+              return row(
+                key: const Key('place-notifications'),
+                lead: Container(
+                  width: t.sp * 3.5,
+                  height: t.sp * 3.5,
+                  decoration: BoxDecoration(
+                    color: t.surface,
+                    borderRadius: BorderRadius.circular(t.rControl * 0.8),
+                  ),
+                  child: Icon(LucideIcons.bell, size: t.uiSize, color: t.text2),
+                ),
+                label: 'Notifications',
+                meta: unread == 0
+                    ? null
+                    : Text(
+                        unread > 99 ? '99+' : '$unread',
+                        key: const Key('place-notifications-meta'),
+                        style: TextStyle(
+                          fontFamily: StormTokens.monoFamily,
+                          fontSize: t.labelSize,
+                          color: t.danger,
+                        ),
+                      ),
+                onTap: onNotifications,
+              );
+            },
+          ),
         const PopoverDivider(),
         const SyncNowLine(),
       ],
