@@ -3053,7 +3053,12 @@ impl AgentManager {
             live: taken.live,
             extra: taken.extra,
         };
-        self.store.lock().unwrap().update_with(r, &ctx)?;
+        let just_ended = self.store.lock().unwrap().update_with(r, &ctx)?;
+        if just_ended {
+            // 161-2 F2: after the wake above, never delaying it.
+            let store = self.store.lock().unwrap();
+            notifications::forget_due_at_end(&store.conn, &r.id)?;
+        }
         Ok(())
     }
 

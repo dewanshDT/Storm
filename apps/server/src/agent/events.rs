@@ -785,7 +785,13 @@ impl AgentManager {
     /// transaction, and wakes every waiting reader when one was written.
     pub(super) fn update_record(&self, r: &SessionRecord, source: &'static str) -> Result<()> {
         let ctx = EventCtx::of(source, self.live_signals(&r.id));
-        self.store.lock().unwrap().update_with(r, &ctx)
+        let just_ended = self.store.lock().unwrap().update_with(r, &ctx)?;
+        if just_ended {
+            // 161-2 F2: after the wake above, never delaying it.
+            let store = self.store.lock().unwrap();
+            super::notifications::forget_due_at_end(&store.conn, &r.id)?;
+        }
+        Ok(())
     }
 
     /// `wait_agent`'s read (144a): `caller`'s events after `after`, else
