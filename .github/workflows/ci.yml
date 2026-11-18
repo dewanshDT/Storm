@@ -491,6 +491,9 @@ jobs:
       - name: server log on failure
         if: failure()
         run: cat .dev/live-server.log || true
+      - name: runtime host log on failure (DBG161, temporary)
+        if: failure()
+        run: cat .dev/live-host.log || true
 
   browser:
     needs: changes
