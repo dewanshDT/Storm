@@ -463,6 +463,11 @@ args = ["-i"]
         cancelled = an.answer("storm", 4)["result"]["structuredContent"]
         check("cancel_notify on an unknown key answers cancelled: false",
               cancelled == {"cancelled": False}, cancelled)
+        an.tool("storm", 5, "notify", {"title": "too long", "delay_s": 3601})
+        bad_delay = an.answer("storm", 5)
+        check("delay_s outside 0-3600 is the tool error bad_delay, not a silent clamp",
+              bad_delay.get("result", {}).get("isError") is True
+              and bad_delay["result"]["structuredContent"].get("error") == "bad_delay", bad_delay)
 
         am = Agent("nt2")
         am.initialize("storm", 1)

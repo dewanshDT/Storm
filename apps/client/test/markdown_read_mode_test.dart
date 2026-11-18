@@ -38,7 +38,10 @@ void main() {
       UncontrolledProviderScope(
         container: c,
         child: MaterialApp(
-          theme: StormTheme.from(current.theme, fontSize: fontSize),
+          theme: StormTheme.from(
+            current.theme.resolve(Brightness.dark),
+            fontSize: fontSize,
+          ),
           home: Scaffold(
             body: SingleChildScrollView(
               child: StormMarkdownView(

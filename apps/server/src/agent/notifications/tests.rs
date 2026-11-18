@@ -1294,6 +1294,102 @@ fn cancel_notify_cancels_an_already_live_notice_under_its_key() {
     assert!(rows.iter().all(|n| n.cancelled));
 }
 
+// ---------------------------------------------------------------------
+// 161-2 F2: a delayed notice whose session is gone by the time it is due,
+// and the cleanup that keeps that the rare case rather than the usual one.
+// ---------------------------------------------------------------------
+
+fn pending_count(m: &AgentManager, id: &str) -> i64 {
+    m.store_for_tests()
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM notify_pending WHERE session_id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn notify_rows(m: &AgentManager, id: &str) -> (i64, i64, i64) {
+    let one = |table: &str| -> i64 {
+        m.store_for_tests()
+            .conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE session_id = ?1"),
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    (
+        one("session_notify"),
+        one("session_notify_bucket"),
+        one("session_notify_rollup"),
+    )
+}
+
+/// Ending a session drops its queued delayed notices at once, rather than
+/// leaving them for the Notifier to find due and discard one by one.
+#[test]
+fn ending_a_session_drops_its_queued_notices() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let mut req = notify_req(&id, "later", Some("later-key"));
+    req.due = Some(crate::index::rfc3339_minus_secs(&now(), -3600));
+    m.agent_notify(req).unwrap().unwrap();
+    assert_eq!(pending_count(&m, &id), 1);
+    report(&m, &id, json!({"status": "completed"}));
+    assert_eq!(pending_count(&m, &id), 0, "dropped the moment it ended");
+}
+
+/// `fire_due_notifies` is also a defensive check at firing time: a notice
+/// due for a session that lost the capability between `notify` and now is
+/// dropped, never fired — the end-time cleanup above does not cover a
+/// flag turned off on a still-live session.
+#[test]
+fn a_due_notice_is_dropped_not_fired_once_the_capability_is_off() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let mut req = notify_req(&id, "later", Some("later-key"));
+    req.due = Some(crate::index::rfc3339_minus_secs(&now(), -3600));
+    m.agent_notify(req).unwrap().unwrap();
+    m.store_for_tests()
+        .set_notify(&id, false, None, &now())
+        .unwrap();
+    let past_due = crate::index::rfc3339_minus_secs(&now(), -7200);
+    assert!(
+        m.fire_due_notifies(&past_due).unwrap(),
+        "the row was consumed"
+    );
+    assert!(kinds(&m).is_empty(), "never fired");
+    assert_eq!(pending_count(&m, &id), 0, "and not left behind either");
+}
+
+/// Removing a session (decisions 147-150) takes its "Notifies you" flag
+/// and its rate-limit/roll-up state with it; its inbox rows are untouched
+/// (kept for provenance, like a mute's).
+#[test]
+fn removing_a_session_drops_its_notify_state() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    m.agent_notify(notify_req(&id, "hello", Some("k")))
+        .unwrap()
+        .unwrap();
+    assert_eq!(notify_rows(&m, &id), (1, 1, 0));
+    report(&m, &id, json!({"status": "completed"}));
+    assert_eq!(notify_rows(&m, &id), (1, 1, 0), "kept while only ended");
+    assert!(m.dismiss(&id).unwrap().is_none());
+    assert_eq!(notify_rows(&m, &id), (0, 0, 0));
+    assert_eq!(
+        kinds(&m),
+        vec![AGENT_MESSAGE.to_string()],
+        "the inbox row stays"
+    );
+}
+
 #[test]
 fn sanitiser_vectors() {
     assert_eq!(

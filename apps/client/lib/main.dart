@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show rootBundle;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_web_plugins/url_strategy.dart';
 
@@ -11,7 +12,7 @@ import 'router.dart';
 import 'state/app_state.dart';
 import 'ui/shell/window_buttons.dart' show initWindowChrome;
 import 'ui/theme.dart';
-import 'ui/tokens.dart';
+import 'ui/themes/theme_library.dart';
 
 Future<void> main() async {
   // Clean URLs on the web, so a link to a note looks like a path rather than
@@ -19,6 +20,11 @@ Future<void> main() async {
   usePathUrlStrategy();
   WidgetsFlutterBinding.ensureInitialized();
   await initWindowChrome();
+  try {
+    await ThemeLibrary.load(rootBundle).timeout(const Duration(seconds: 2));
+  } catch (e) {
+    debugPrint('Themes not loaded, using the built-in ones: $e');
+  }
   runApp(const ProviderScope(child: StormApp()));
 }
 
@@ -98,19 +104,27 @@ class _StormAppState extends ConsumerState<StormApp>
   Widget build(BuildContext context) {
     final settings = ref.watch(settingsProvider).value;
 
-    return MaterialApp.router(
-      title: 'Storm',
-      debugShowCheckedModeBanner: false,
-      // One resolved theme rather than a light/dark pair: there are three
-      // identities now, and which one is worn is the user's explicit choice —
-      // the OS setting must not override it. Storm dark is the default because
-      // the design is dark-first and a notes app is mostly read at night.
-      theme: StormTheme.from(
-        settings?.theme ?? StormPreset.stormDark,
-        fontSize: settings?.fontSize,
-      ),
-      routerConfig: ref.watch(routerProvider),
-      scaffoldMessengerKey: rootMessengerKey,
+    final choice = settings?.theme ?? ThemeChoice.initial;
+    final fontSize = settings?.fontSize;
+    final router = ref.watch(routerProvider);
+
+    // Both members of the chosen family, and the mode: with `system`,
+    // Flutter follows the platform's brightness live (decision 160). A
+    // family with one member gives it for both.
+    return ValueListenableBuilder(
+      valueListenable: ThemeLibrary.families,
+      builder: (context, _, _) {
+        final themes = StormTheme.forChoice(choice, fontSize: fontSize);
+        return MaterialApp.router(
+          title: 'Storm',
+          debugShowCheckedModeBanner: false,
+          theme: themes.light,
+          darkTheme: themes.dark,
+          themeMode: choice.mode,
+          routerConfig: router,
+          scaffoldMessengerKey: rootMessengerKey,
+        );
+      },
     );
   }
 }

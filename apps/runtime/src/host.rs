@@ -356,6 +356,9 @@ struct Events {
     /// every session regardless of `titles` or `program`.
     notice_parser: Mutex<NoticeObserver>,
     notice_queue: NoticeQueue,
+    /// 157g: the client's answers to its program's OSC 10/11 query, read
+    /// from its input.
+    answered: Mutex<crate::colour_answer::ColourAnswers>,
 }
 
 /// A queued [`Notice`] with its per-session sequence number (161-R1 fix 2):
@@ -512,6 +515,7 @@ impl Events {
             program: None,
             notice_parser: Mutex::new(NoticeObserver::default()),
             notice_queue: NoticeQueue::default(),
+            answered: Mutex::default(),
         }
     }
 
@@ -557,6 +561,16 @@ impl Events {
         let limit = (self.hooks.usage_limit && *self.usage_limit.lock().unwrap())
             .then_some(crate::harness::USAGE_LIMIT);
         Some(prompt.or(limit))
+    }
+
+    /// Reads a client's input for a colour answer; true when it changed
+    /// what the session was told.
+    fn saw_input(&self, bytes: &[u8]) -> bool {
+        self.answered.lock().unwrap().feed(bytes).is_some()
+    }
+
+    fn answered_now(&self) -> Option<crate::colour_answer::Brightness> {
+        self.answered.lock().unwrap().current()
     }
 
     /// Its turn as its gated idle hooks said, if they did.
@@ -665,6 +679,8 @@ struct HostSession {
     activity_sent: Mutex<Option<&'static str>>,
     /// The program's status last acknowledged by the server (decision 155).
     program_sent: Mutex<Option<crate::program_status::Report>>,
+    /// The colour answer last acknowledged by the server (157g).
+    answered_sent: Mutex<Option<crate::colour_answer::Brightness>>,
     /// Storm asked to park it (145e): its end is reported `parked` once
     /// its workspace is kept for a resume.
     parking: AtomicBool,
@@ -1775,6 +1791,9 @@ impl Host {
             if let Some(program) = s.events.program_report() {
                 entry = with_program_status(entry, &program, hook_activity.is_some());
             }
+            if let Some(answered) = s.events.answered_now() {
+                entry["terminal_answered"] = json!(answered.as_str());
+            }
             entry["id"] = json!(s.id);
             entry["output_end_offset"] = json!(s.events.ring.lock().unwrap().end());
             sessions.push(entry);
@@ -2043,7 +2062,11 @@ impl Host {
                 if let (Some(s), Ok(bytes)) =
                     (self.session(&session), BASE64.decode(data.as_bytes()))
                 {
+                    let answered = s.events.saw_input(&bytes);
                     let _ = s.input.send(bytes);
+                    if answered {
+                        s.events.wake.notify_one();
+                    }
                 }
             }
             Command::Resize {
@@ -2574,6 +2597,7 @@ impl Host {
             attention_sent: Mutex::new(None),
             activity_sent: Mutex::new(None),
             program_sent: Mutex::new(None),
+            answered_sent: Mutex::new(None),
             parking: AtomicBool::new(false),
             input,
         });
@@ -2739,15 +2763,22 @@ impl Host {
             let program_changed = program != *s.program_sent.lock().unwrap();
             let (notices, notices_dropped) = s.events.pending_notices();
             let notices_pending = !notices.is_empty() || notices_dropped > 0;
+            let answered = s.events.answered_now();
+            let answered_changed = answered != *s.answered_sent.lock().unwrap();
             if end.is_none()
                 && (title != sent
                     || harness_changed
                     || attention_changed
                     || activity_changed
                     || program_changed
-                    || notices_pending)
+                    || notices_pending
+                    || answered_changed)
             {
-                let every = if program_changed || attention_changed || notices_pending {
+                let every = if program_changed
+                    || attention_changed
+                    || notices_pending
+                    || answered_changed
+                {
                     PROGRAM_EVERY
                 } else {
                     TITLE_EVERY
@@ -2768,17 +2799,22 @@ impl Host {
                     }
                     continue;
                 }
-                // 161-R1 fix 4: nothing but the notices changed → a lean
-                // post, not a resend of title/activity/program the server
-                // already has (no needless `bump`, no title/session frame).
-                let only_notices = notices_pending
+                // 161-R1 fix 4: nothing but the notices or the answered
+                // colour changed → a lean post, not a resend of
+                // title/activity/program the server already has (no
+                // needless `bump`, no title/session frame).
+                let only_notices = (notices_pending || answered_changed)
                     && !(title != sent
                         || harness_changed
                         || attention_changed
                         || activity_changed
                         || program_changed);
                 let mut body = if only_notices {
-                    status_json(None)
+                    let mut body = status_json(None);
+                    if let Some(a) = answered.filter(|_| answered_changed) {
+                        body["terminal_answered"] = json!(a.as_str());
+                    }
+                    body
                 } else {
                     let mut body = with_hook_activity(
                         with_harness(with_title(status_json(None), &title), harness.as_deref()),
@@ -2786,6 +2822,9 @@ impl Host {
                     );
                     if let Some(attention) = attention {
                         body["attention"] = json!(attention);
+                    }
+                    if let Some(a) = answered.filter(|_| answered_changed) {
+                        body["terminal_answered"] = json!(a.as_str());
                     }
                     if let Some(p) = &program {
                         body = with_program_status(body, p, activity.is_some());
@@ -2808,6 +2847,7 @@ impl Host {
                 {
                     Ok(st) if st.is_success() => {
                         *s.program_sent.lock().unwrap() = program;
+                        *s.answered_sent.lock().unwrap() = answered;
                         *s.title_sent.lock().unwrap() = (title, Some(std::time::Instant::now()));
                         *s.harness_sent.lock().unwrap() = harness;
                         *s.attention_sent.lock().unwrap() = attention.flatten();
@@ -10040,6 +10080,73 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
                 "{p} {b}"
             );
         }
+        host.shutdown(Duration::from_millis(200)).await;
+    }
+
+    /// 157g: the client's answer to its program's OSC 11 query is read from
+    /// its input, posted as `terminal_answered` once per change and carried
+    /// by `hello`; the bytes reach the program unchanged.
+    #[tokio::test(flavor = "multi_thread")]
+    #[cfg(target_os = "linux")]
+    async fn the_answered_brightness_is_reported_once_per_change() {
+        let script = r#"stty raw -echo; exec cat > "$W/$STORM_RUNTIME_SESSION.in""#;
+        let (host, seen, _state, roots) = prober_host(script, "program_status = false").await;
+        host.clone().handle(start("ags_ANS", "shell")).await;
+        eventually("the session runs", || {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/ags_ans/status") && b["status"] == "running")
+        })
+        .await;
+        let answers = || -> Vec<serde_json::Value> {
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/ags_ans/status"))
+                .filter_map(|(_, b)| b.get("terminal_answered").cloned())
+                .collect()
+        };
+        let writes: [&[u8]; 5] = [
+            b"hi ]11;#000000\r\x1b]11;rgb:ff",
+            b"ff/ffff/ffff\x1b",
+            b"\\",
+            b"\x1b]11;rgb:fe/fe/fe\x07ok",
+            b"\x1b]11;rgb:1e1e/1e1e/1e1e\x07",
+        ];
+        let send = |bytes: &[u8]| {
+            host.clone().handle(Command::Input {
+                session: "ags_ANS".into(),
+                data: BASE64.encode(bytes),
+            })
+        };
+        for w in &writes[..4] {
+            send(w).await;
+        }
+        eventually("light", || answers() == [json!("light")]).await;
+        send(writes[4]).await;
+        eventually("dark", || answers().last() == Some(&json!("dark"))).await;
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert_eq!(answers(), [json!("light"), json!("dark")]);
+
+        let input = roots.path().join("w/ags_ANS.in");
+        let sent = writes.concat();
+        eventually("the input reached the program", || {
+            std::fs::read(&input).is_ok_and(|b| b.len() >= sent.len())
+        })
+        .await;
+        assert_eq!(std::fs::read(&input).unwrap(), sent);
+
+        host.hello().await.unwrap();
+        let hello = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(p, _)| p.ends_with("/hello"))
+            .map(|(_, b)| b.clone())
+            .unwrap();
+        assert_eq!(hello["sessions"][0]["terminal_answered"], "dark");
         host.shutdown(Duration::from_millis(200)).await;
     }
 }

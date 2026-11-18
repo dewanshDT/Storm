@@ -949,6 +949,36 @@ pub(super) fn forget_session_mutes(conn: &Connection, session_id: &str) -> Resul
     Ok(())
 }
 
+/// 161-2 F2: a session's queued delayed notices, dropped at the moment it
+/// ends rather than left for the Notifier to find due and discard one by
+/// one. Hooked where `update_with` first sees `is_ended()`.
+pub(super) fn forget_due_at_end(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM notify_pending WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
+/// 161-2 F2: the "Notifies you" flag and its rate-limit and roll-up state,
+/// removed with a session (its inbox rows are kept, as a mute's are, for
+/// provenance). Hooked where a session is forgotten.
+pub(super) fn forget_session_notify(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM session_notify WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_notify_bucket WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_notify_rollup WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
+}
+
 /// Q17: a session mute never hides a delete request (it expires in 10
 /// minutes and needs the person regardless).
 fn muted(
@@ -1638,6 +1668,33 @@ impl AgentManager {
             && store.notify_enabled(session_id).unwrap_or(false)
     }
 
+    /// The "Notifies you" flag as last set (161-2 F1), for `SessionView`:
+    /// unlike [`Self::notify_offered`] this does not require the session to
+    /// be live, so an ended session's view still shows what it was.
+    pub fn notify_enabled(&self, session_id: &str) -> bool {
+        self.store
+            .lock()
+            .unwrap()
+            .notify_enabled(session_id)
+            .unwrap_or(false)
+    }
+
+    /// A person turns a session's "Notifies you" flag on or off from
+    /// Session Details (161-2 F1, AM124): "the chip at launch, and Session
+    /// Details afterwards, is the real grant".
+    pub fn set_notify(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+    ) -> AgentResult<()> {
+        self.store
+            .lock()
+            .unwrap()
+            .set_notify(session_id, enabled, device, &now())?;
+        Ok(())
+    }
+
     /// `cancel_notify(key)`: a session cancels only its own key, pending or
     /// already live. `Ok(true)` if anything was cancelled.
     pub fn cancel_agent_notify(&self, session_id: &str, key: &str) -> AgentResult<bool> {
@@ -1840,6 +1897,13 @@ impl AgentManager {
     /// The Notifier fires a delayed notice when it is due, under the
     /// prefs/mutes/quiet/pause in force *then*, not when `notify` queued
     /// it. Returns whether anything changed (for `notifier_tick`'s poke).
+    ///
+    /// A notice whose session has since ended or been removed, or no
+    /// longer has the "Notifies you" capability, is dropped rather than
+    /// fired (161-2 F2): ended and removed sessions are also cleaned up
+    /// eagerly (`forget_due_at_end`, `forget_session_notify`), so this is
+    /// the defensive case — a flag turned off after `notify` queued the
+    /// delay, or a race between the two.
     pub(super) fn fire_due_notifies(&self, at: &str) -> AgentResult<bool> {
         let due = {
             let store = self.store.lock().unwrap();
@@ -1850,7 +1914,11 @@ impl AgentManager {
         }
         let store = self.store.lock().unwrap();
         for (pending_id, req) in &due {
-            self.write_agent_notice(&store.conn, req, at)?;
+            let offered = store.get(&req.session_id)?.is_some_and(|r| !r.is_ended())
+                && store.notify_enabled(&req.session_id)?;
+            if offered {
+                self.write_agent_notice(&store.conn, req, at)?;
+            }
             delete_pending(&store.conn, pending_id)?;
         }
         Ok(true)
