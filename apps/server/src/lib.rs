@@ -1155,9 +1155,16 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 }
                 // 161-1: the Notifier's own tick — transitions, offline
                 // hosts, child events, the quiet-hours/pause summary and
-                // inbox retention.
-                if let Err(e) = agent.notifier_tick() {
-                    tracing::warn!(error = ?e, "notifier tick failed");
+                // inbox retention. Blocking (sqlite, std Mutex), so it runs
+                // off this task's own executor thread: inline, under a
+                // runtime pinned to few cores, its sqlite round trips could
+                // otherwise delay whatever else that thread was about to
+                // poll — a session's own end-to-push push included.
+                let agent_for_tick = agent.clone();
+                match tokio::task::spawn_blocking(move || agent_for_tick.notifier_tick()).await {
+                    Ok(Err(e)) => tracing::warn!(error = ?e, "notifier tick failed"),
+                    Err(e) => tracing::warn!(error = ?e, "notifier tick panicked"),
+                    Ok(Ok(())) => {}
                 }
             }
         });

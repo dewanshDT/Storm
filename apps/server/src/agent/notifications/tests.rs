@@ -788,6 +788,40 @@ fn a_child_event_is_silent_by_default() {
     assert!(child_notice.silent, "off by default, so silent, not absent");
 }
 
+/// A latency regression (2026-11): every tick re-ran the attention and
+/// pending-delete lookups — each its own store-lock round trip — for every
+/// session the server had ever run, not only its live ones, so a tick's
+/// cost grew with the server's whole history rather than with what was
+/// actually running, long enough under load to delay an unrelated
+/// session's own end-to-push push past its budget.
+#[test]
+fn an_ended_session_is_not_reprocessed_on_later_ticks() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    report(&m, &id, json!({"status": "stopped"}));
+    m.notifier_tick().unwrap();
+    let (settled, prev) = m.notifier_memory_sizes_for_tests();
+    assert_eq!(settled, 1, "its one post-end tick ran");
+    assert_eq!(
+        prev, 0,
+        "nothing left to compare it against, so nothing is kept"
+    );
+
+    // A live session alongside it: later ticks keep tracking that one, but
+    // must never reopen the ended session's bookkeeping.
+    let live = launch(&m);
+    report(&m, &live, json!({"status": "running"}));
+    for _ in 0..3 {
+        m.notifier_tick().unwrap();
+    }
+    let (settled, prev) = m.notifier_memory_sizes_for_tests();
+    assert_eq!(
+        settled, 1,
+        "still just the one ended session, not reprocessed"
+    );
+    assert_eq!(prev, 1, "only the live session's snapshot is kept");
+}
+
 /// Q7: only once offline at least the threshold, and only with running
 /// sessions when it went down.
 #[test]

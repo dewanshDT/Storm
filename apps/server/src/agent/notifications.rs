@@ -2225,6 +2225,13 @@ fn insert_pending(
 /// Notifier never had a chance to see an earlier state for.
 pub(super) struct NotifierMemory {
     prev: HashMap<String, Snap>,
+    /// Ended sessions this Notifier has already run their one post-end
+    /// tick for. A session that has ended never changes status again
+    /// (CLAUDE.md), so once it is here there is nothing left for any later
+    /// tick to compute or compare — skipping it is what keeps a tick's cost
+    /// bounded by the *live* session count rather than by every session the
+    /// server has ever run.
+    settled: std::collections::HashSet<String>,
     /// The link generation an offline host was last notified for, so a
     /// reconnect and a fresh outage are told apart.
     host_offline_notified: HashMap<String, u64>,
@@ -2241,6 +2248,7 @@ impl NotifierMemory {
     pub(super) fn new(started_at: String) -> Self {
         Self {
             prev: HashMap::new(),
+            settled: std::collections::HashSet::new(),
             host_offline_notified: HashMap::new(),
             last_child_event_rowid: 0,
             quiet_since: None,
@@ -2500,6 +2508,13 @@ impl AgentManager {
             let mut mem = self.notify_memory.lock().unwrap();
             let started_at = mem.started_at.clone();
             for r in &sessions {
+                // Already given its one post-end tick: nothing about it can
+                // move again, so skip straight past the attention/program
+                // lookups below rather than re-querying them, forever, for
+                // every session the server has ever run.
+                if mem.settled.contains(r.id.as_str()) {
+                    continue;
+                }
                 let snap = self.snap_of(r)?;
                 let before = match mem.prev.insert(r.id.clone(), snap.clone()) {
                     Some(b) => b,
@@ -2552,10 +2567,15 @@ impl AgentManager {
                     )?
                     .is_some();
                 }
+                if r.is_ended() {
+                    mem.settled.insert(r.id.clone());
+                    mem.prev.remove(&r.id);
+                }
             }
             let live_ids: std::collections::HashSet<&str> =
                 sessions.iter().map(|r| r.id.as_str()).collect();
             mem.prev.retain(|id, _| live_ids.contains(id.as_str()));
+            mem.settled.retain(|id| live_ids.contains(id.as_str()));
         }
         wrote |= self.notify_offline_hosts(&prefs, &mutes, &at)?;
         wrote |= self.notify_child_events(&prefs, &mutes, &at)?;
@@ -2761,6 +2781,16 @@ impl AgentManager {
     #[cfg(test)]
     pub fn store_for_tests(&self) -> std::sync::MutexGuard<'_, super::store::Store> {
         self.store.lock().unwrap()
+    }
+
+    /// How many sessions `notifier_tick` has already given their one
+    /// post-end tick, and how many it still keeps a snapshot of (to catch
+    /// a transition for) — so a test can see that an ended session stops
+    /// costing later ticks anything, rather than being reprocessed forever.
+    #[cfg(test)]
+    pub fn notifier_memory_sizes_for_tests(&self) -> (usize, usize) {
+        let mem = self.notify_memory.lock().unwrap();
+        (mem.settled.len(), mem.prev.len())
     }
 
     /// A child event this test did not go through `record_in` to make, so
