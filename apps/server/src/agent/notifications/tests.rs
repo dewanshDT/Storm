@@ -1336,3 +1336,254 @@ fn notify_key_shape() {
     assert!(!valid_notify_key("has space"));
     assert!(!valid_notify_key("has/slash"));
 }
+
+// ---------------------------------------------------------------------
+// 161-5: terminal notices (OSC 9/777/99; AM126) on a host's status report.
+// ---------------------------------------------------------------------
+
+fn notice_item(seq: u64, title: Option<&str>, body: &str, source_form: &str) -> serde_json::Value {
+    json!({"seq": seq, "title": title, "body": body, "source_form": source_form})
+}
+
+#[test]
+fn without_the_capability_a_terminal_notice_is_dropped_silently() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "done", "osc777")],
+        }),
+    );
+    assert!(kinds(&m).is_empty());
+}
+
+#[test]
+fn with_the_capability_a_terminal_notice_reaches_the_inbox() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "no errors", "osc777")],
+        }),
+    );
+    let rows = m.list_notifications(0, 100).unwrap();
+    let n = rows.iter().find(|n| n.kind == TERMINAL_NOTICE).unwrap();
+    assert_eq!(n.source, "terminal");
+    assert_eq!(n.title, "Build");
+    assert_eq!(n.body, Some("no errors".to_string()));
+    assert!(!n.silent);
+}
+
+/// Point 3 of the slice's build note: no title, so the sanitised body
+/// becomes the title (cut to 80 chars) and there is no separate body.
+#[test]
+fn with_no_title_the_body_becomes_the_title_cut_to_80() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, None, &"x".repeat(200), "osc9")],
+        }),
+    );
+    let rows = m.list_notifications(0, 100).unwrap();
+    let n = rows.iter().find(|n| n.kind == TERMINAL_NOTICE).unwrap();
+    assert_eq!(n.title.chars().count(), NOTIFY_TITLE_MAX);
+    assert_eq!(n.body, None);
+}
+
+#[test]
+fn bidi_and_zero_width_only_sanitises_to_empty_and_is_dropped() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, None, "\u{202E}\u{200B}\u{FEFF}", "osc9")],
+        }),
+    );
+    assert!(kinds(&m).is_empty());
+}
+
+/// A host re-POSTs the same `seq` when a status post is retried (its
+/// response lost, or refused); the second arrival must not duplicate.
+#[test]
+fn a_repeated_seq_does_not_duplicate() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let body = json!({
+        "status": "running",
+        "terminal_notice": [notice_item(7, Some("Build"), "done", "osc777")],
+    });
+    report(&m, &id, body.clone());
+    report(&m, &id, body);
+    let rows: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == TERMINAL_NOTICE)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the retried seq must not insert a second row"
+    );
+}
+
+/// Shares `notify`'s own limits (point 4): a session's burst already spent
+/// by `notify` leaves no room for a terminal notice either, and it is
+/// dropped — not an error — with the roll-up bumped in place.
+#[test]
+fn terminal_notices_share_notifys_rate_limit() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    for i in 0..3 {
+        m.agent_notify(notify_req(&id, &format!("msg {i}"), Some(&format!("k{i}"))))
+            .unwrap()
+            .unwrap();
+    }
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "done", "osc777")],
+        }),
+    );
+    assert!(
+        !kinds(&m).contains(&TERMINAL_NOTICE.to_string()),
+        "the burst was already spent by notify()"
+    );
+    let rollups: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == AGENT_ROLLUP)
+        .collect();
+    assert_eq!(rollups.len(), 1);
+    assert!(rollups[0].title.contains("1 more notification"));
+}
+
+/// The host's own per-minute cap drops also bump the roll-up, one per
+/// dropped item.
+#[test]
+fn terminal_notice_dropped_bumps_the_rollup() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({"status": "running", "terminal_notice_dropped": 3}),
+    );
+    let rollups: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == AGENT_ROLLUP)
+        .collect();
+    assert_eq!(rollups.len(), 1);
+    assert!(
+        rollups[0].title.contains("3 more notification"),
+        "{}",
+        rollups[0].title
+    );
+}
+
+#[test]
+fn a_terminal_notice_held_under_a_mute_still_reaches_the_inbox() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    m.mute_notifications("session", &id, None, None).unwrap();
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "done", "osc777")],
+        }),
+    );
+    let rows = m.list_notifications(0, 100).unwrap();
+    let n = rows.iter().find(|n| n.kind == TERMINAL_NOTICE).unwrap();
+    assert!(n.silent);
+    assert_eq!(n.silent_reason, Some("muted".to_string()));
+}
+
+/// `notify`'s own identical-text-within-the-window rule, shared: the same
+/// text forwarded twice (two different OSC events) collapses into one
+/// notice rather than filling the inbox with repeats.
+#[test]
+fn identical_text_within_the_window_is_the_same_notice_not_a_second_row() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(1, Some("Build"), "done", "osc777")],
+        }),
+    );
+    report(
+        &m,
+        &id,
+        json!({
+            "status": "running",
+            "terminal_notice": [notice_item(2, Some("Build"), "done", "osc777")],
+        }),
+    );
+    let rows: Vec<_> = m
+        .list_notifications(0, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.kind == TERMINAL_NOTICE)
+        .collect();
+    assert_eq!(
+        rows.len(),
+        1,
+        "the second (distinct seq, same text) must not duplicate"
+    );
+}
+
+/// Audit metadata only (G-D18): `TerminalNoticeAudit` has no field that
+/// could carry the title or body, and its outcome and lengths match what
+/// was sanitised.
+#[test]
+fn audit_carries_lengths_and_outcome_only() {
+    let (m, _d, _link) = manager();
+    let id = launch(&m);
+    enable_notify(&m, &id);
+    let audits = m
+        .host_status(
+            HOST,
+            &id,
+            &serde_json::from_value(json!({
+                "status": "running",
+                "terminal_notice": [notice_item(1, Some("Build"), "no errors", "osc777")],
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+    assert_eq!(audits.len(), 1);
+    assert_eq!(audits[0].outcome, "sent");
+    assert_eq!(audits[0].source_form, "osc777");
+    assert_eq!(audits[0].title_len, "Build".len());
+    assert_eq!(audits[0].body_len, "no errors".len());
+}

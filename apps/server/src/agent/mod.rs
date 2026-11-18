@@ -697,6 +697,28 @@ pub struct StatusReport {
     /// by its first `running` report only.
     #[serde(default)]
     pub child_workspace: Option<ChildWorkspace>,
+    /// OSC 9/777/99 desktop notifications queued since the host's last
+    /// report (decision 161, AM126). Absent from an older host.
+    #[serde(default)]
+    pub terminal_notice: Option<Vec<TerminalNoticeItem>>,
+    /// How many more the host's own per-minute cap dropped since its last
+    /// report.
+    #[serde(default)]
+    pub terminal_notice_dropped: Option<u32>,
+}
+
+/// One OSC 9/777/99 notification as a host reports it (decision 161,
+/// AM126): never answered, never shown raw — `notifications::record_terminal_notices`
+/// sanitises it exactly as `notify`'s own `title`/`body`. `seq` is the
+/// host's own per-session counter, assigned once per notice, so a retried
+/// status post carries the same value every time.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TerminalNoticeItem {
+    pub seq: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub body: String,
+    pub source_form: String,
 }
 
 /// A spawned child's own workspace (decision 137): a clone of its parent's
@@ -1002,6 +1024,12 @@ struct SessionLive {
     /// start with. Not kept across a restart: a child started after one
     /// gets none.
     terminal_brightness: Option<TerminalBrightness>,
+    /// 161-5: the host link generation and highest `seq` of a terminal
+    /// notice already accepted from it, so a retried status post never
+    /// double-charges the rate limit. A host restart or reconnect gets a
+    /// new generation (`AgentManager::connect_host`), whose own counter
+    /// starts over, so a lower `seq` under it is accepted again.
+    osc_seq: Option<(u64, u64)>,
 }
 
 impl SessionLive {
@@ -1021,6 +1049,7 @@ impl SessionLive {
             idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
+            osc_seq: None,
         }
     }
 
@@ -2267,13 +2296,15 @@ impl AgentManager {
         Ok(())
     }
 
-    /// A status change from a host.
+    /// A status change from a host. Returns an audit row per terminal
+    /// notice the report carried (161-5), metadata only, for
+    /// `ops::runtime_status` to record.
     pub fn host_status(
         &self,
         host_id: &str,
         session_id: &str,
         report: &StatusReport,
-    ) -> AgentResult<()> {
+    ) -> AgentResult<Vec<notifications::TerminalNoticeAudit>> {
         let mut r = self.owned_by(host_id, session_id)?;
         self.start_acknowledged(session_id);
         if r.is_ended() {
@@ -2285,7 +2316,7 @@ impl AgentManager {
                 "running" => self.end_unwanted(host_id, &r),
                 _ => {}
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         // 145e: `parked` only answers Storm's own `park`; anything else that
         // says it is a stop.
@@ -2327,7 +2358,17 @@ impl AgentManager {
             self.record_ran_as(host_id, session_id)?;
         }
         self.bump(session_id);
-        Ok(())
+        let audits = if report.terminal_notice.is_some() || report.terminal_notice_dropped.is_some()
+        {
+            self.record_terminal_notices(
+                &r,
+                report.terminal_notice.as_deref().unwrap_or(&[]),
+                report.terminal_notice_dropped.unwrap_or(0),
+            )?
+        } else {
+            Vec::new()
+        };
+        Ok(audits)
     }
 
     /// A child's workspace as its host made it, kept once. Only a session
@@ -3956,6 +3997,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4092,6 +4135,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4722,6 +4767,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4744,6 +4791,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4771,6 +4820,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4871,6 +4922,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -5140,6 +5193,8 @@ mod tests {
                         mcp_skipped: None,
                         mcp_plugin_local: None,
                         child_workspace: None,
+                        terminal_notice: None,
+                        terminal_notice_dropped: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -5178,6 +5233,8 @@ mod tests {
             mcp_skipped: None,
             mcp_plugin_local: None,
             child_workspace: None,
+            terminal_notice: None,
+            terminal_notice_dropped: None,
             signal: None,
         }
     }
@@ -5509,6 +5566,8 @@ mod tests {
                     mcp_skipped: None,
                     mcp_plugin_local: None,
                     child_workspace: None,
+                    terminal_notice: None,
+                    terminal_notice_dropped: None,
                 },
             )
             .unwrap();
