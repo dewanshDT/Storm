@@ -1,32 +1,18 @@
-//! storm-server's half of decision 162c: installs the shared log ring
-//! (`storm_diag::Ring`) and builds this binary's `Diag` bundle — vault,
-//! relay and host *counts and states*, never a name. `storm-server diag`
-//! reads the same bundle shape from a separate process: no registry or
-//! auth db held open, so its counts come from the state directory on
-//! disk and its logs from `--log-file`, never the ring.
+//! storm-server's half of decision 162c.
 
 use std::path::Path;
 
 use anyhow::Result;
 use storm_diag::{Diag, Ring, ServerDiag};
 
-/// Builds the process-wide ring. Called once from `main`, alongside
-/// (never instead of) the stdout/`--log-file` layer; the handle it
-/// returns is `main`'s to keep — this slice installs the ring, and a
-/// later one (162-2/162-3) is what threads it into `AppState` so a live
-/// `Diag` can read from it.
 pub fn install_ring() -> Ring {
     Ring::default()
 }
 
-/// The default tail length for a `Diag` bundle (162c: "the last ~300 log
-/// lines").
 pub const DEFAULT_LOG_LINES: usize = 300;
 
-/// `storm-server diag`: a fresh process, so its counts come from the
-/// registry and auth database on disk rather than a live `Registry` and
-/// `Ring`, and its "logs" are the tail of `log_file` when one is given —
-/// there is no running daemon's ring to read from here.
+/// A fresh process, so counts come from disk rather than a live
+/// `Registry`, and logs are `log_file`'s tail rather than the ring.
 pub fn cli(state: &Path, log_file: Option<&Path>, lines: usize) -> Result<Diag> {
     let version = env!("CARGO_PKG_VERSION");
     let mut diag = Diag::new("storm-server", version);
@@ -67,9 +53,6 @@ pub fn cli(state: &Path, log_file: Option<&Path>, lines: usize) -> Result<Diag> 
     Ok(diag)
 }
 
-/// The last `n` lines of `path`. Simple over efficient: a `diag` CLI
-/// invocation is a one-off, and a log file big enough for a full read to
-/// matter is already past what `--lines 300` would show anyway.
 fn tail_lines(path: &Path, n: usize) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(path)?;
     let all: Vec<&str> = text.lines().collect();

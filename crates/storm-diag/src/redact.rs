@@ -1,10 +1,5 @@
-//! One shared redaction function for log lines and diagnostics (decision
-//! 162c). Both `storm-server` and `storm-runtime` call this — never their
-//! own copy — so a secret shape learned once is scrubbed everywhere.
-//!
-//! The rules are deliberately generous: a line redacted that held nothing
-//! sensitive costs a little readability; a secret that slips through is
-//! exactly what AC-162-2 exists to catch. Prefer the false positive.
+//! Redaction for log lines and diagnostics (decision 162c): one function,
+//! shared by `storm-server` and `storm-runtime`.
 
 use std::net::IpAddr;
 use std::sync::LazyLock;
@@ -56,43 +51,19 @@ macro_rules! regex_cell {
     };
 }
 
-// `storm-enroll:v1:<server_url>:<server_id>:<server_pubkey>:<token>`
-// (`apps/server/src/auth/hosts.rs::enrollment_string`, `apps/runtime/src/
-// identity.rs::ENROLL_PREFIX`) is a single-use secret end to end.
 regex_cell!(ENROLL, r"storm-enroll:v1:[^\s\x22']+");
-
-// The bootstrap pairing QR payload (`apps/server/src/auth/pairing.rs`):
-// `storm://pair?v=1&sid=...&pk=...&n=...&exp=...&addr=...`. The nonce and
-// key in it are exactly as sensitive as the token they mint.
 regex_cell!(PAIR_URI, r"storm://pair\?[^\s\x22']+");
-
-// `Authorization: Bearer <stk_/sht_/opaque>` and the bare `Bearer ...`
-// form error messages and client logs also print.
 regex_cell!(BEARER, r"(?i)\bBearer\s+\S+");
-
-// `Authorization: StormDevice <id>:<secret>` (`apps/server/src/api.rs`).
 regex_cell!(STORM_DEVICE, r"(?i)\bStormDevice\s+\S+");
-
-// A bare `stk_`/`sht_` key or token, outside a `Bearer`/`StormDevice`
-// header — e.g. printed by itself, or sitting in a URL or a config dump.
 regex_cell!(KEY_PREFIXED, r"\b(?:stk|sht)_[A-Za-z0-9_-]+");
-
-// JWT-like: three base64url segments joined by dots.
 regex_cell!(
     JWT_LIKE,
     r"\b[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b"
 );
 
-// A long run of base64url/hex-alphabet characters: most keys, hashes and
-// tokens that reach a log are shaped like this even without a known
-// prefix. 24 is short enough to catch a blake3 hex digest (64) and a
-// 256-bit key's base64url (43), long enough that ordinary words don't
-// trip it. **No `/`**, deliberately: standard base64's padding alphabet
-// has one, but so does every path, and this runs before path masking —
-// `/home/dewansh/projects/storm` must stay a path, not become a secret.
+// No `/`: that's also in every path, and this runs before path masking.
 regex_cell!(LONG_SECRET, r"\b[A-Za-z0-9+_=-]{24,}\b");
 
-// RFC 5322-ish, good enough for log text rather than for validating input.
 regex_cell!(EMAIL, r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b");
 
 regex_cell!(
@@ -100,15 +71,7 @@ regex_cell!(
     r"\b(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b"
 );
 
-// The common long form, covering both the full 8-group and every
-// "::"-compressed shape. It requires either 7 colons or a double colon, so
-// it does not fire on an ordinary `HH:MM:SS` timestamp.
-//
-// Deliberately no `\b` at the edges: `:` is not a word character, so a
-// leading `\b` can never match before a bare `::1` that follows a space —
-// there is no word/non-word transition there for it to anchor on. Every
-// alternative already requires its own colons or hex run, which is enough
-// to stop it bleeding into surrounding punctuation.
+// No leading `\b`: `:` isn't a word char, so it can't anchor before `::1`.
 regex_cell!(
     IPV6,
     concat!(
@@ -126,17 +89,11 @@ regex_cell!(
     )
 );
 
-// A DNS-shaped host named in a URL's authority: `scheme://host[...]`. Kept
-// to the URL form on purpose — a bare dotted word (`runtime.toml`,
-// `0.18.0`) is not masked, or every config filename and version number in
-// the log would be, which is the kind of false positive that makes a
-// bundle useless rather than merely cautious.
+// URL form only — a bare dotted word (`runtime.toml`) must not match.
 regex_cell!(
     URL_HOST,
     r"(?i)\b((?:https?|wss?|storm)://)([a-zA-Z0-9.-]+)"
 );
-
-// An mDNS name (decision 118's `_storm._tcp`), wherever it appears.
 regex_cell!(
     MDNS_HOST,
     r"\b[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.local\b"
@@ -144,6 +101,28 @@ regex_cell!(
 
 regex_cell!(HOME_UNIX, r"/(?:home|Users)/[^/\s\x22']+/");
 regex_cell!(HOME_WINDOWS, r"C:\\Users\\[^\\\s\x22']+\\");
+
+regex_cell!(
+    NOTE_OR_FILE_KV,
+    r"(?i)\b(path|note|file)=([^\s\x22']+\.(?:md|png|jpe?g|gif|webp|pdf|svg))\b"
+);
+regex_cell!(
+    NOTE_OR_FILE_SHAPE,
+    r"[^\s\x22']*/[^\s\x22']*\.(?:md|png|jpe?g|gif|webp|pdf|svg)\b"
+);
+
+regex_cell!(
+    PROJECT_DIR,
+    r"[^\s\x22']*[/\\](workspaces|worktrees)[/\\]([^/\\\s\x22']+)"
+);
+
+fn mask_for_ext(whole: &str) -> &'static str {
+    if whole.to_ascii_lowercase().ends_with(".md") {
+        "<note>"
+    } else {
+        "<file>"
+    }
+}
 
 fn ip_is_lan(ip: &IpAddr) -> bool {
     match ip {
@@ -153,32 +132,22 @@ fn ip_is_lan(ip: &IpAddr) -> bool {
                 return true;
             }
             let seg0 = v6.segments()[0];
-            // fc00::/7 (unique local) and fe80::/10 (link-local).
             (seg0 & 0xfe00) == 0xfc00 || (seg0 & 0xffc0) == 0xfe80
         }
     }
 }
 
 fn redact_addresses(input: &str) -> String {
-    let masked = IPV6.replace_all(input, |caps: &regex::Captures| {
-        let m = &caps[0];
-        match m.parse::<IpAddr>() {
-            Ok(ip) if ip_is_lan(&ip) => "<lan>".to_string(),
-            Ok(_) => "<ip>".to_string(),
-            // Not actually a valid address (the pattern is permissive) —
-            // leave it alone rather than mask ordinary text.
-            Err(_) => m.to_string(),
-        }
-    });
-    IPV4.replace_all(&masked, |caps: &regex::Captures| {
+    let mask = |caps: &regex::Captures| {
         let m = &caps[0];
         match m.parse::<IpAddr>() {
             Ok(ip) if ip_is_lan(&ip) => "<lan>".to_string(),
             Ok(_) => "<ip>".to_string(),
             Err(_) => m.to_string(),
         }
-    })
-    .into_owned()
+    };
+    let masked = IPV6.replace_all(input, mask);
+    IPV4.replace_all(&masked, mask).into_owned()
 }
 
 fn redact_hosts(input: &str) -> String {
@@ -186,7 +155,6 @@ fn redact_hosts(input: &str) -> String {
         let scheme = &caps[1];
         let host = &caps[2];
         if host.parse::<IpAddr>().is_ok() || host.eq_ignore_ascii_case("localhost") {
-            // Already masked by `redact_addresses`, or loopback by name.
             format!("{scheme}{host}")
         } else {
             format!("{scheme}<host>")
@@ -195,15 +163,33 @@ fn redact_hosts(input: &str) -> String {
     MDNS_HOST.replace_all(&with_urls, "<host>").into_owned()
 }
 
+fn redact_paths(input: &str) -> String {
+    let with_kv = NOTE_OR_FILE_KV.replace_all(input, |caps: &regex::Captures| {
+        format!("{}={}", &caps[1], mask_for_ext(&caps[2]))
+    });
+    NOTE_OR_FILE_SHAPE
+        .replace_all(&with_kv, |caps: &regex::Captures| {
+            mask_for_ext(&caps[0]).to_string()
+        })
+        .into_owned()
+}
+
+fn redact_project_dirs(input: &str) -> String {
+    PROJECT_DIR
+        .replace_all(input, |caps: &regex::Captures| {
+            format!("/{}/<ws>", &caps[1])
+        })
+        .into_owned()
+}
+
 /// Scrubs `input` of every shape decision 162c says a diagnostics bundle
 /// must never carry. `sensitive` is this call site's own list of exact
-/// strings it knows are secret — vault names, note titles and paths —
-/// which have no shape a generic rule could find.
+/// strings it knows are secret — vault names, note titles and paths.
 pub fn redact(input: &str, sensitive: &[Sensitive]) -> String {
     let mut out = input.to_string();
 
-    // Longest value first: "My Notes" must not leave "My <vault>" behind
-    // because "Notes" (a shorter, also-registered name) matched first.
+    // Longest first: a shorter registered name must not leave a partial
+    // mask inside a longer one that contains it.
     let mut ordered: Vec<&Sensitive> = sensitive.iter().collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.value.chars().count()));
     for s in ordered {
@@ -225,19 +211,19 @@ pub fn redact(input: &str, sensitive: &[Sensitive]) -> String {
         .into_owned();
     out = KEY_PREFIXED.replace_all(&out, "<redacted>").into_owned();
     out = JWT_LIKE.replace_all(&out, "<redacted>").into_owned();
+    out = redact_paths(&out);
     out = LONG_SECRET.replace_all(&out, "<redacted>").into_owned();
     out = redact_addresses(&out);
     out = redact_hosts(&out);
     out = EMAIL.replace_all(&out, "<email>").into_owned();
+    out = redact_project_dirs(&out);
     out = HOME_UNIX.replace_all(&out, "~/").into_owned();
     out = HOME_WINDOWS.replace_all(&out, r"~\").into_owned();
 
     out
 }
 
-/// [`redact`] with no caller-supplied names — the ring buffer's default,
-/// since a log line is redacted before anyone holding a vault or note name
-/// is in scope to supply one.
+/// [`redact`] with no caller-supplied names — the ring buffer's default.
 pub fn redact_default(input: &str) -> String {
     redact(input, &[])
 }
@@ -315,8 +301,8 @@ mod tests {
 
     #[test]
     fn email_is_redacted() {
-        let out = r("reply_to: dewansh.dt@gmail.com");
-        assert!(!out.contains("dewansh.dt@gmail.com"));
+        let out = r("reply_to: alice@example.com");
+        assert!(!out.contains("alice@example.com"));
         assert!(out.contains("<email>"));
     }
 
@@ -351,7 +337,6 @@ mod tests {
 
     #[test]
     fn plain_timestamp_is_not_treated_as_an_address() {
-        // Two colons, no "::": must survive untouched.
         assert_eq!(r("[14:23:05] started"), "[14:23:05] started");
     }
 
@@ -363,13 +348,12 @@ mod tests {
 
     #[test]
     fn mdns_hostname_is_masked() {
-        let out = r("advertising as Dewansh-Laptop.local");
+        let out = r("advertising as Example-Laptop.local");
         assert_eq!(out, "advertising as <host>");
     }
 
     #[test]
     fn config_filenames_are_not_mistaken_for_hostnames() {
-        // The URL/mDNS-only host rule must not eat ordinary dotted words.
         assert_eq!(r("loaded runtime.toml"), "loaded runtime.toml");
         assert_eq!(r("state/auth.db opened"), "state/auth.db opened");
     }
@@ -377,15 +361,15 @@ mod tests {
     #[test]
     fn home_paths_are_masked_on_every_platform() {
         assert_eq!(
-            r("workspace /home/dewansh/projects/storm"),
+            r("workspace /home/alice/projects/storm"),
             "workspace ~/projects/storm"
         );
         assert_eq!(
-            r("workspace /Users/dewansh/projects/storm"),
+            r("workspace /Users/alice/projects/storm"),
             "workspace ~/projects/storm"
         );
         assert_eq!(
-            r(r"workspace C:\Users\dewansh\projects\storm"),
+            r(r"workspace C:\Users\alice\projects\storm"),
             r"workspace ~\projects\storm"
         );
     }
@@ -411,5 +395,48 @@ mod tests {
     fn ordinary_text_is_left_alone() {
         let out = r("session started, 3 agents running, all idle");
         assert_eq!(out, "session started, 3 agents running, all idle");
+    }
+
+    #[test]
+    fn note_path_after_key_is_masked() {
+        assert_eq!(r("path=Projects/Ideas.md"), "path=<note>");
+        assert_eq!(r("note=Ideas.md saved"), "note=<note> saved");
+    }
+
+    #[test]
+    fn attachment_path_after_key_is_masked_as_file() {
+        assert_eq!(r("file=Storm/Feedback/x.png"), "file=<file>");
+    }
+
+    #[test]
+    fn bare_note_or_attachment_shaped_token_is_masked() {
+        assert_eq!(r("wrote to Storm/Feedback/x.png"), "wrote to <file>");
+        assert_eq!(r("opened Projects/Ideas.md"), "opened <note>");
+    }
+
+    #[test]
+    fn config_filenames_with_no_slash_are_not_masked() {
+        assert_eq!(r("loaded runtime.toml"), "loaded runtime.toml");
+        assert_eq!(r("note.md.bak ignored"), "note.md.bak ignored");
+    }
+
+    #[test]
+    fn workspace_segment_is_masked_regardless_of_the_prefix() {
+        assert_eq!(
+            r("in /var/lib/storm-runtime/workspaces/acme-app/src/main.rs"),
+            "in /workspaces/<ws>/src/main.rs"
+        );
+        assert_eq!(
+            r("in /home/alice/workspaces/acme-app"),
+            "in /workspaces/<ws>"
+        );
+    }
+
+    #[test]
+    fn worktree_segment_is_masked_regardless_of_the_prefix() {
+        assert_eq!(
+            r(".claude/worktrees/162-1/apps/server"),
+            "/worktrees/<ws>/apps/server"
+        );
     }
 }

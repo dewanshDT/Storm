@@ -72,10 +72,7 @@ rpassword = "7.5.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
-# Redaction, the log ring buffer and the `Diag` bundle shape (decision
-# 162c). Shared with apps/runtime by path, not by a workspace joining the
-# two (freeze §5.8, R6): storm-diag depends on neither and this is the
-# only crate either of them depends on in common.
+# Decision 162c. A path dependency, not a workspace (R6).
 storm-diag = { path = "../../crates/storm-diag" }
 # `TCP_NOTSENT_LOWAT` on relay trunks (decision 116b). Already in the tree
 # under tokio with the same feature.

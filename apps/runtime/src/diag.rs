@@ -1,32 +1,18 @@
-//! storm-runtime's half of decision 162c: installs the shared log ring
-//! (`storm_diag::Ring`) and builds this host's `Diag` bundle — its
-//! execution profile and whether it is enrolled, never a server address
-//! or a workspace path. `storm-runtime diag` builds the same bundle from
-//! a separate process: no running `serve` loop to ask, so its facts come
-//! from `host.json` and `runtime.toml` on disk and its logs from
-//! `--log-file`, never the ring.
+//! storm-runtime's half of decision 162c.
 
 use std::path::Path;
 
 use anyhow::Result;
 use storm_diag::{Diag, Ring, RuntimeDiag};
 
-/// Builds the process-wide ring. Called once from `main`, alongside
-/// (never instead of) the stdout/`--log-file` layer; the handle it
-/// returns is `main`'s to keep — a later slice (162-2) is what threads it
-/// into the host link so a live `Diag` can read from it.
 pub fn install_ring() -> Ring {
     Ring::default()
 }
 
-/// The default tail length for a `Diag` bundle (162c: "the last ~300 log
-/// lines").
 pub const DEFAULT_LOG_LINES: usize = 300;
 
-/// `storm-runtime diag`: a fresh process, with no live link to ask
-/// whether it is actually connected right now — `online` is always
-/// `false` here, which is also the honest answer while the service isn't
-/// running at all.
+/// A fresh process, with no live link to ask — `online` is always
+/// `false`.
 pub fn cli(
     state: &Path,
     config: Option<&Path>,
@@ -67,9 +53,6 @@ pub fn cli(
     Ok(diag)
 }
 
-/// The last `n` lines of `path`. Simple over efficient: a `diag` CLI
-/// invocation is a one-off, and a log file big enough for a full read to
-/// matter is already past what `--lines 300` would show anyway.
 fn tail_lines(path: &Path, n: usize) -> Result<Vec<String>> {
     let text = std::fs::read_to_string(path)?;
     let all: Vec<&str> = text.lines().collect();

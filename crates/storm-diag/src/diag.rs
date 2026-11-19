@@ -1,7 +1,4 @@
-//! The diagnostics bundle shape (decision 162c), shared so 162-2's host
-//! replies and 162-3's `/v1/feedback/preview` carry exactly what this
-//! slice's CLI already prints. `schema` is bumped whenever a field's
-//! meaning changes, never when one is only added.
+//! The diagnostics bundle shape (decision 162c), shared with 162-2/162-3.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,15 +15,8 @@ pub struct Diag {
     pub runtime: Option<RuntimeDiag>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub server: Option<ServerDiag>,
-    /// The ring's last N lines, already redacted on insertion and never
-    /// re-checked here — this struct trusts its callers the same way the
-    /// ring does, which is why both only ever get a `&[Sensitive]` list,
-    /// never raw text to redact themselves.
     pub logs: Vec<String>,
-    /// Set instead of populating `logs` when there is no running process
-    /// to ask — `storm-server diag` / `storm-runtime diag` fall back to
-    /// the configured log file, and say so when that isn't available
-    /// either.
+    /// Set instead of `logs` when there is no running process to ask.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logs_note: Option<String>,
 }
@@ -36,25 +26,16 @@ pub struct RuntimeDiag {
     /// `Isolation::as_str()`: `"off"` or `"per-session"`.
     pub execution_profile: String,
     pub enrolled: bool,
-    /// Whether *this* process is the connected daemon. `storm-runtime
-    /// diag`, a separate process from any running host, always reports
-    /// `false` here — it has no link to ask.
     pub online: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerDiag {
     pub vault_count: usize,
-    /// Configured relays (`Registry::relays`), never their URLs.
     pub relay_count: usize,
-    /// Currently registered with (`Registry::registered_relays`), `None`
-    /// when counted from a CLI invocation that has no live tunnel client
-    /// to ask.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub relay_registered: Option<usize>,
     pub host_count: usize,
-    /// Hosts with a live link right now, `None` from the CLI for the same
-    /// reason as `relay_registered`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hosts_online: Option<usize>,
 }
@@ -118,8 +99,8 @@ mod tests {
             "Authorization: Bearer stk_SUPERSECRETVALUE0123456789",
             "StormDevice dev_abc:verysecretdevicesecretvalue",
             "storm-enroll:v1:http://10.0.0.5:8484:srv_x:pk_y:tok_SUPERSECRET",
-            "reply_to: dewansh.dt@gmail.com",
-            "workspace /home/dewansh/Storm/Secret Vault/note.md",
+            "reply_to: alice@example.com",
+            "workspace /home/alice/Storm/Secret Vault/note.md",
         ];
         let sensitive = vec![Sensitive::vault("Secret Vault"), Sensitive::note("note.md")];
         let logs: Vec<String> = secrets.iter().map(|s| redact(s, &sensitive)).collect();
@@ -139,8 +120,8 @@ mod tests {
             "SUPERSECRETVALUE0123456789",
             "verysecretdevicesecretvalue",
             "SUPERSECRET",
-            "dewansh.dt@gmail.com",
-            "/home/dewansh",
+            "alice@example.com",
+            "/home/alice",
             "Secret Vault",
         ] {
             assert!(!json.contains(needle), "leaked {needle:?} into {json}");

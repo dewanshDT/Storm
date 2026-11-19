@@ -1567,11 +1567,8 @@ pub async fn main() -> Result<()> {
             .unwrap_or_else(|_| "storm_server=info,tower_http=warn".into())
     };
 
-    // The log ring (decision 162c): a second `fmt` layer, writing to
-    // `storm_diag::Ring` instead of stdout or `--log-file`, so a
-    // diagnostics bundle can carry this process's own recent lines.
-    // Installed alongside the layer below, never instead of it — neither
-    // existing output changes.
+    // Decision 162c: the ring layer is added alongside, never instead of,
+    // the layer below — existing output never changes.
     use tracing_subscriber::prelude::*;
     let ring = diag::install_ring();
     match &cli.log_file {

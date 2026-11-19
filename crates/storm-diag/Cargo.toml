@@ -6,11 +6,8 @@ description = "Shared diagnostics: redaction, a tracing log ring buffer, and the
 license = "MIT"
 repository = "https://github.com/dewanshDT/Storm"
 
-# A leaf crate, not a workspace joining storm-server and storm-runtime: both
-# depend on it by path, it depends on neither (decision 162c). The two keep
-# their own standalone builds (R6, decision 77) — this only factors out the
-# one thing decision 162 wants byte-identical in both: what gets redacted out
-# of a log line before it is kept or sent anywhere.
+# A path dependency of storm-server and storm-runtime, not a workspace
+# joining them (R6, decision 77).
 [dependencies]
 regex = "1.12.3"
 serde = { version = "1.0.229", features = ["derive"] }

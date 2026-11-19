@@ -1,9 +1,6 @@
-//! Shared diagnostics for decision 162: one redaction function, a
-//! `tracing` log ring buffer built on it, and the `Diag` bundle shape —
-//! used by both `storm-server` and `storm-runtime`, and by nothing else
-//! (freeze §5.8, the R6 reasoning): a leaf crate, not a workspace joining
-//! the two. It depends on neither, and holds no wire format of theirs —
-//! only what 162c says every diagnostics bundle must scrub and carry.
+//! Shared diagnostics for decision 162: redaction, a log ring buffer
+//! built on it, and the `Diag` bundle shape. A path dependency of both
+//! `storm-server` and `storm-runtime`, not a workspace joining them.
 
 pub mod diag;
 pub mod redact;
@@ -13,12 +10,8 @@ pub use diag::{Diag, RuntimeDiag, SCHEMA, ServerDiag};
 pub use redact::{Sensitive, SensitiveKind, redact, redact_default};
 pub use ring::{Ring, RingWriter};
 
-/// Builds the second `fmt` layer a binary's `main` adds to its existing
-/// subscriber: same formatting, a different writer. Call once at startup,
-/// alongside (never instead of) the stdout/`--log-file` layer, and keep
-/// the returned [`Ring`] to read from later — a CLI `diag` subcommand has
-/// no running process to ask, so it reads the log *file* instead and
-/// never calls this.
+/// A second `fmt` layer over the ring, added alongside (never instead
+/// of) a binary's existing subscriber layer.
 pub fn ring_layer<S>(ring: Ring) -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,

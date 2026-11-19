@@ -193,8 +193,11 @@ enum Command {
     /// path `serve --log-file` is writing to, or its logs are reported
     /// as unavailable.
     Diag {
+        /// The host's state: its key and `host.json`, chosen the way
+        /// `serve --state` is.
         #[arg(long, env = "STORM_RUNTIME_STATE")]
         state: Option<PathBuf>,
+        /// The host's `runtime.toml`, chosen the way `serve --config` is.
         #[arg(long, env = "STORM_RUNTIME_CONFIG")]
         config: Option<PathBuf>,
         /// The running host's `--log-file`, if it has one.
@@ -328,11 +331,8 @@ async fn main() -> Result<()> {
         } => {
             let filter = tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into());
-            // The log ring (decision 162c): a second `fmt` layer, writing
-            // to `storm_diag::Ring` instead of stdout or `--log-file`, so
-            // a diagnostics bundle can carry this host's own recent
-            // lines. Installed alongside the layer below, never instead
-            // of it — neither existing output changes.
+            // Decision 162c: the ring layer is added alongside, never
+            // instead of, the layer below — existing output never changes.
             use tracing_subscriber::prelude::*;
             let ring = storm_runtime::diag::install_ring();
             match &log_file {

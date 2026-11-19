@@ -1,11 +1,6 @@
-//! An in-process bounded ring of formatted log lines (decision 162c): the
-//! last ~2,000 lines either binary has produced, redacted as they enter it
-//! so nothing a bundle later reads out of it was ever held in the clear.
-//!
-//! Composed as a second `tracing-subscriber` `fmt` layer, writing through
-//! [`RingWriter`] instead of stdout or the log file, so it reuses the exact
-//! same event formatting as the primary layer rather than re-implementing
-//! it — the two must print the same line, and only one of them keeps it.
+//! A bounded in-process ring of formatted log lines (decision 162c),
+//! redacted on insertion. A second `tracing-subscriber` `fmt` layer over
+//! [`RingWriter`] reuses the primary layer's own formatting.
 
 use std::collections::VecDeque;
 use std::io;
@@ -23,9 +18,6 @@ struct Inner {
     sensitive: Vec<Sensitive>,
 }
 
-/// A handle to the ring. Cheap to clone — every clone shares the same
-/// buffer — so one lives in the subscriber's writer and another in
-/// whatever builds a [`crate::Diag`] bundle.
 #[derive(Clone)]
 pub struct Ring(Arc<Mutex<Inner>>);
 
@@ -38,16 +30,11 @@ impl Ring {
         })))
     }
 
-    /// Names this process has since learned are sensitive — a vault
-    /// created after boot, say — applied to every line redacted from now
-    /// on. Does not touch lines already in the ring.
     pub fn set_sensitive(&self, sensitive: Vec<Sensitive>) {
         let mut inner = self.0.lock().expect("ring lock");
         inner.sensitive = sensitive;
     }
 
-    /// Redacts `line` and pushes it, evicting the oldest line if the ring
-    /// is full. `line` is one already-formatted event, newline stripped.
     pub fn push(&self, line: &str) {
         if line.is_empty() {
             return;
@@ -60,8 +47,6 @@ impl Ring {
         inner.lines.push_back(redacted);
     }
 
-    /// The last `n` lines, oldest first — what a [`crate::Diag`] bundle
-    /// carries. `n` larger than the ring just returns everything in it.
     pub fn tail(&self, n: usize) -> Vec<String> {
         let inner = self.0.lock().expect("ring lock");
         let skip = inner.lines.len().saturating_sub(n);
@@ -83,9 +68,6 @@ impl Default for Ring {
     }
 }
 
-/// [`MakeWriter`] over a [`Ring`]: each `write` call is one formatted
-/// event (`tracing-subscriber`'s `fmt` layer writes a whole line per
-/// event), split on `\n` defensively, redacted, and pushed.
 #[derive(Clone)]
 pub struct RingWriter(Ring);
 
@@ -166,9 +148,9 @@ mod tests {
     #[test]
     fn newly_learned_sensitive_names_apply_to_later_lines_only() {
         let ring = Ring::new(10);
-        ring.push("opened My Vault/note.md");
+        ring.push("entered My Vault");
         ring.set_sensitive(vec![Sensitive::vault("My Vault")]);
-        ring.push("opened My Vault/note.md again");
+        ring.push("entered My Vault again");
         let tail = ring.tail(10);
         assert!(tail[0].contains("My Vault"));
         assert!(!tail[1].contains("My Vault"));
