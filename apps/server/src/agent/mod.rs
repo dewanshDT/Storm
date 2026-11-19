@@ -28,6 +28,7 @@ pub mod images;
 pub mod inbox;
 pub mod jobs;
 pub mod model;
+pub mod notifications;
 pub mod park;
 pub mod permission;
 pub mod program;
@@ -700,6 +701,28 @@ pub struct StatusReport {
     /// by its first `running` report only.
     #[serde(default)]
     pub child_workspace: Option<ChildWorkspace>,
+    /// OSC 9/777/99 desktop notifications queued since the host's last
+    /// report (decision 161, AM126). Absent from an older host.
+    #[serde(default)]
+    pub terminal_notice: Option<Vec<TerminalNoticeItem>>,
+    /// How many more the host's own per-minute cap dropped since its last
+    /// report.
+    #[serde(default)]
+    pub terminal_notice_dropped: Option<u32>,
+}
+
+/// One OSC 9/777/99 notification as a host reports it (decision 161,
+/// AM126): never answered, never shown raw — `notifications::record_terminal_notices`
+/// sanitises it exactly as `notify`'s own `title`/`body`. `seq` is the
+/// host's own per-session counter, assigned once per notice, so a retried
+/// status post carries the same value every time.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct TerminalNoticeItem {
+    pub seq: u64,
+    #[serde(default)]
+    pub title: Option<String>,
+    pub body: String,
+    pub source_form: String,
 }
 
 /// A spawned child's own workspace (decision 137): a clone of its parent's
@@ -803,6 +826,12 @@ pub struct Launch {
     /// resume keeps its predecessor's.
     #[serde(default)]
     pub children_write: bool,
+    /// The "Notifies you" capability (Q3): absent falls back to the
+    /// account's "New sessions can notify you" default
+    /// (`notification_prefs.agent_default_on`). A resume keeps its
+    /// predecessor's.
+    #[serde(default)]
+    pub notify: Option<bool>,
     /// The model the agent starts on (145b): checked for its agent, else
     /// `model_unavailable`. A resume keeps its predecessor's.
     #[serde(default)]
@@ -1006,6 +1035,12 @@ struct SessionLive {
     /// What its client last answered its program's colour query with, as
     /// its host said (157g). In memory: a host's `hello` says it again.
     terminal_answered: Option<TerminalBrightness>,
+    /// 161-5: the host link generation and highest `seq` of a terminal
+    /// notice already accepted from it, so a retried status post never
+    /// double-charges the rate limit. A host restart or reconnect gets a
+    /// new generation (`AgentManager::connect_host`), whose own counter
+    /// starts over, so a lower `seq` under it is accepted again.
+    osc_seq: Option<(u64, u64)>,
 }
 
 impl SessionLive {
@@ -1026,6 +1061,7 @@ impl SessionLive {
             idle_fired: false,
             version: watch::channel(0).0,
             credential: None,
+            osc_seq: None,
         }
     }
 
@@ -1055,6 +1091,10 @@ struct Live {
     /// When each host that dropped its link in this run last made a request
     /// (153a), for "host offline · last seen".
     last_seen_at: HashMap<String, String>,
+    /// The link generation each offline host went down on (161-1): the
+    /// Notifier's `host_offline` key, so a reconnect starts a fresh outage
+    /// rather than re-raising the one just cleared.
+    offline_generation: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -1106,6 +1146,22 @@ pub struct AgentManager {
     pub(crate) wake_poke: tokio::sync::Notify,
     /// Bumped whenever the delete requests a client lists change (149).
     deletes_changed: watch::Sender<u64>,
+    /// The Notifier's own memory (161-1): each session's last-seen snapshot,
+    /// so a transition is only ever read from two states this server itself
+    /// observed, and what has already been said about an outage or a child.
+    notify_memory: Mutex<notifications::NotifierMemory>,
+    /// Bumped on any inbox, prefs, mute or pause change `/v1/agent/events`
+    /// cares about (161-1).
+    notify_changed: watch::Sender<u64>,
+    /// Live `/v1/agent/events` connections and whether each is active
+    /// right now (161-4's deliver hint), keyed by connection id, not
+    /// device id. In memory only, like the session list's own live state
+    /// — a restart simply forgets who was looking, and every connection
+    /// re-reports on its next connect.
+    presence: Mutex<HashMap<(String, String), notifications::Presence>>,
+    /// One deliver hint per notice id, computed once (161-4 review item
+    /// 4).
+    deliver_cache: Mutex<notifications::DeliverCache>,
     changes: changes::Changes,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
@@ -1239,6 +1295,10 @@ impl AgentManager {
             said: Mutex::new(said::Said::default()),
             wake_poke: tokio::sync::Notify::new(),
             deletes_changed: watch::channel(0).0,
+            notify_memory: Mutex::new(notifications::NotifierMemory::new(now())),
+            notify_changed: watch::channel(0).0,
+            presence: Mutex::new(HashMap::new()),
+            deliver_cache: Mutex::new(notifications::DeliverCache::default()),
             changes: changes::Changes::new(),
             #[cfg(test)]
             record_reads: Default::default(),
@@ -1304,6 +1364,8 @@ impl AgentManager {
                     );
                     live.hosts.remove(host_id);
                     live.last_seen_at.insert(host_id.to_string(), seen);
+                    live.offline_generation
+                        .insert(host_id.to_string(), generation);
                 }
                 _ => return,
             }
@@ -1401,6 +1463,26 @@ impl AgentManager {
     /// this run of the server.
     pub fn host_last_seen(&self, host_id: &str) -> Option<String> {
         self.live.lock().unwrap().last_seen_at.get(host_id).cloned()
+    }
+
+    /// Every host offline in this run of the server, with when it was last
+    /// seen and the link generation its outage began on (161-1's
+    /// `host_offline`). A host this server has never seen connect at all
+    /// (so never disconnected either) is not here, which is right: nothing
+    /// is known of when it went offline.
+    pub(super) fn offline_hosts(&self) -> Vec<(String, String, u64)> {
+        let live = self.live.lock().unwrap();
+        live.last_seen_at
+            .iter()
+            .filter(|(id, _)| !live.hosts.contains_key(id.as_str()))
+            .map(|(id, seen)| {
+                (
+                    id.clone(),
+                    seen.clone(),
+                    live.offline_generation.get(id).copied().unwrap_or(0),
+                )
+            })
+            .collect()
     }
 
     /// The end of a session's output as the server's cache holds it: a byte
@@ -2248,13 +2330,15 @@ impl AgentManager {
         Ok(())
     }
 
-    /// A status change from a host.
+    /// A status change from a host. Returns an audit row per terminal
+    /// notice the report carried (161-5), metadata only, for
+    /// `ops::runtime_status` to record.
     pub fn host_status(
         &self,
         host_id: &str,
         session_id: &str,
         report: &StatusReport,
-    ) -> AgentResult<()> {
+    ) -> AgentResult<Vec<notifications::TerminalNoticeAudit>> {
         let mut r = self.owned_by(host_id, session_id)?;
         self.start_acknowledged(session_id);
         if r.is_ended() {
@@ -2266,7 +2350,7 @@ impl AgentManager {
                 "running" => self.end_unwanted(host_id, &r),
                 _ => {}
             }
-            return Ok(());
+            return Ok(Vec::new());
         }
         // 145e: `parked` only answers Storm's own `park`; anything else that
         // says it is a stop.
@@ -2308,7 +2392,17 @@ impl AgentManager {
             self.record_ran_as(host_id, session_id)?;
         }
         self.bump(session_id);
-        Ok(())
+        let audits = if report.terminal_notice.is_some() || report.terminal_notice_dropped.is_some()
+        {
+            self.record_terminal_notices(
+                &r,
+                report.terminal_notice.as_deref().unwrap_or(&[]),
+                report.terminal_notice_dropped.unwrap_or(0),
+            )?
+        } else {
+            Vec::new()
+        };
+        Ok(audits)
     }
 
     /// A child's workspace as its host made it, kept once. Only a session
@@ -2600,6 +2694,16 @@ impl AgentManager {
             return Err(AgentError::Conflict("spawn_unavailable".into()));
         }
         let write_vault_id = meta.write_vault_id.clone().filter(|_| reads_storm);
+        // Q3: a resume keeps its predecessor's; otherwise the launch's own
+        // flag, else the account's "New sessions can notify you" default.
+        // Never offered without Storm, same as every other agent-only tool.
+        let notify = match resume.as_ref() {
+            Some((old, _)) => self.store.lock().unwrap().notify_enabled(old)?,
+            None => req.notify.unwrap_or_else(|| {
+                self.notification_prefs()
+                    .map_or(true, |p| p.agent_default_on)
+            }),
+        } && reads_storm;
         let children_write = match resume.as_ref() {
             Some((old, _)) => {
                 self.store.lock().unwrap().children_write(old)? && spawn && write_vault_id.is_some()
@@ -2680,6 +2784,12 @@ impl AgentManager {
                 &record.created_at,
             )?;
             store.insert_launch(&launch, &record.created_at)?;
+            store.set_notify(
+                &record.id,
+                notify,
+                meta.device.as_deref(),
+                &record.created_at,
+            )?;
             if spawn {
                 store.record_spawn_launch(
                     &record.id,
@@ -2954,7 +3064,12 @@ impl AgentManager {
             live: taken.live,
             extra: taken.extra,
         };
-        self.store.lock().unwrap().update_with(r, &ctx)?;
+        let just_ended = self.store.lock().unwrap().update_with(r, &ctx)?;
+        if just_ended {
+            // 161-2 F2: after the wake above, never delaying it.
+            let store = self.store.lock().unwrap();
+            notifications::forget_due_at_end(&store.conn, &r.id)?;
+        }
         Ok(())
     }
 
@@ -3896,6 +4011,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
@@ -3925,6 +4041,7 @@ mod tests {
                 resume_of: Some(old.id.clone()),
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
@@ -3959,6 +4076,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4096,6 +4215,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4607,6 +4728,7 @@ mod tests {
                     resume_of: None,
                     crew: None,
                     role: None,
+                    notify: None,
                     spawn: false,
                     children_write: false,
                     model: None,
@@ -4727,6 +4849,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4750,6 +4874,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4778,6 +4904,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -4832,6 +4960,7 @@ mod tests {
                 resume_of: None,
                 crew: None,
                 role: None,
+                notify: None,
                 spawn: false,
                 children_write: false,
                 model: None,
@@ -4879,6 +5008,8 @@ mod tests {
                 mcp_skipped: None,
                 mcp_plugin_local: None,
                 child_workspace: None,
+                terminal_notice: None,
+                terminal_notice_dropped: None,
             },
         )
         .unwrap();
@@ -5149,6 +5280,8 @@ mod tests {
                         mcp_skipped: None,
                         mcp_plugin_local: None,
                         child_workspace: None,
+                        terminal_notice: None,
+                        terminal_notice_dropped: None,
                     },
                     output_end_offset: 500,
                 }],
@@ -5188,6 +5321,8 @@ mod tests {
             mcp_skipped: None,
             mcp_plugin_local: None,
             child_workspace: None,
+            terminal_notice: None,
+            terminal_notice_dropped: None,
             signal: None,
         }
     }
@@ -5520,6 +5655,8 @@ mod tests {
                     mcp_skipped: None,
                     mcp_plugin_local: None,
                     child_workspace: None,
+                    terminal_notice: None,
+                    terminal_notice_dropped: None,
                 },
             )
             .unwrap();

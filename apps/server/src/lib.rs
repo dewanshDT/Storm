@@ -1153,6 +1153,19 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 if let Err(e) = agent.park_idle_children() {
                     tracing::warn!(error = ?e, "could not park idle children");
                 }
+                // 161-1: the Notifier's own tick — transitions, offline
+                // hosts, child events, the quiet-hours/pause summary and
+                // inbox retention. Blocking (sqlite, std Mutex), so it runs
+                // off this task's own executor thread: inline, under a
+                // runtime pinned to few cores, its sqlite round trips could
+                // otherwise delay whatever else that thread was about to
+                // poll — a session's own end-to-push push included.
+                let agent_for_tick = agent.clone();
+                match tokio::task::spawn_blocking(move || agent_for_tick.notifier_tick()).await {
+                    Ok(Err(e)) => tracing::warn!(error = ?e, "notifier tick failed"),
+                    Err(e) => tracing::warn!(error = ?e, "notifier tick panicked"),
+                    Ok(Ok(())) => {}
+                }
             }
         });
     }
@@ -1189,6 +1202,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         );
     }
 
+    let host_names = auth_db.host_names().context("loading host names")?;
     let state = Arc::new(AppState {
         vaults: RwLock::new(vault_set),
         events,
@@ -1200,6 +1214,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
         mcp_writable: std::sync::atomic::AtomicBool::new(mcp_writable),
         agent_writes: std::sync::atomic::AtomicBool::new(agent_writes),
         auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+        host_names: Arc::new(std::sync::RwLock::new(host_names)),
         listen_addr,
         vault_policy: Arc::new(crate::auth::authz::StormPolicy),
         // One hasher for the process, so the semaphore actually bounds

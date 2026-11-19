@@ -15,19 +15,63 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        FromRequestParts, State,
+        FromRequestParts, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use super::{ApiError, Shared, wants_websocket};
+use super::{ApiError, SessionAuth, Shared, wants_websocket};
 use crate::auth::authz::Actor;
 use crate::ops::SessionView;
+
+/// `?presence=active|background[&open_session=<id>]&connection_id=<id>`
+/// on connect (161-4). Absent `presence` entirely — every client before
+/// this slice, and phones and web after it — is `active`: they close the
+/// stream the moment they are not, so a connection at all has always
+/// meant "visible". `connection_id` is the client's own, so `POST
+/// …/presence` can name *this* connection rather than overwriting
+/// whichever of a device's connections happened to answer last.
+#[derive(Debug, Default, Deserialize)]
+struct PresenceQuery {
+    presence: Option<String>,
+    open_session: Option<String>,
+    connection_id: Option<String>,
+}
+
+/// At most this many bytes of a client-given connection id — generous for
+/// a UUID, small enough that nothing abuses the presence map with it (an
+/// entry here only ever exists for a connection this handler itself
+/// opened, so the real bound is "how many sockets are actually open";
+/// this just keeps one of them from being a silly size).
+const MAX_CONNECTION_ID_LEN: usize = 128;
+
+fn clamp_connection_id(id: Option<String>) -> Option<String> {
+    id.filter(|s| !s.is_empty() && s.len() <= MAX_CONNECTION_ID_LEN)
+}
+
+/// Clears this connection's presence when it ends — the SSE task
+/// returning naturally, or the WebSocket branch's `select!` dropping this
+/// future when the socket closes first. Without it, a desktop that quit
+/// mid-session would be "active" forever. Keyed by connection, never by
+/// device alone: an old connection's drop must never clear a newer
+/// one's.
+struct PresenceGuard {
+    state: Shared,
+    ids: Option<(String, String)>, // (connection_id, device_id)
+}
+
+impl Drop for PresenceGuard {
+    fn drop(&mut self) {
+        if let Some((connection_id, device_id)) = &self.ids {
+            self.state.agent.clear_presence(connection_id, device_id);
+        }
+    }
+}
 
 /// How the stream paces itself (Q6).
 #[derive(Clone, Copy)]
@@ -97,15 +141,48 @@ pub(super) async fn agent_events(
     if !matches!(parts.extensions.get::<Actor>(), Some(Actor::Session { .. })) {
         return ApiError(StatusCode::FORBIDDEN, "owner_only".into()).into_response();
     }
+    // 161-4: presence for the deliver hint. A device with no `SessionAuth`
+    // (a key, or a test harness that bypassed the auth middleware), or no
+    // `connection_id` (an old client), is never registered and never
+    // cleared — `deliver_hint` simply never sees it, same as before this
+    // slice existed.
+    let device_id = parts
+        .extensions
+        .get::<SessionAuth>()
+        .map(|a| a.authenticated.device.id.clone());
+    let presence_query = Query::<PresenceQuery>::try_from_uri(&parts.uri)
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let connection_id = clamp_connection_id(presence_query.connection_id.clone());
+    let mut guard_ids = None;
+    if let (Some(device_id), Some(connection_id)) = (&device_id, &connection_id) {
+        let active = presence_query.presence.as_deref() != Some("background");
+        state.agent.set_presence(
+            connection_id,
+            device_id,
+            active,
+            presence_query.open_session.clone(),
+        );
+        guard_ids = Some((connection_id.clone(), device_id.clone()));
+    }
+    let presence_guard = PresenceGuard {
+        state: state.clone(),
+        ids: guard_ids,
+    };
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
+    // 161-1: the inbox, prefs and mutes share one `notification`/
+    // `notification_read`/`notification_removed`/`prefs_changed` feed on
+    // this same stream.
+    let notify_changed = state.agent.watch_notifications();
     let (tx, rx) = mpsc::channel(QUEUE);
 
     if wants_websocket(&parts) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
             Ok(ws) => ws.on_upgrade(move |socket| async move {
+                let _presence = presence_guard;
                 tokio::select! {
-                    () = feed(state, changes, tx, PACE) => {}
+                    () = feed(state, changes, notify_changed, tx, PACE) => {}
                     () = pump_ws(socket, rx) => {}
                 }
             }),
@@ -116,7 +193,10 @@ pub(super) async fn agent_events(
     if let Some(id) = parts.headers.get("last-event-id") {
         tracing::debug!(last_event_id = ?id, "ignoring Last-Event-ID: a reconnect is a new snapshot");
     }
-    tokio::spawn(feed(state, changes, tx, PACE));
+    tokio::spawn(async move {
+        let _presence = presence_guard;
+        feed(state, changes, notify_changed, tx, PACE).await;
+    });
     let body = tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(rx), |f| {
         Ok::<_, std::convert::Infallible>(f.sse())
     });
@@ -157,6 +237,7 @@ enum Stop {
 pub(super) async fn feed(
     state: Shared,
     mut changes: watch::Receiver<u64>,
+    mut notify_changed: watch::Receiver<u64>,
     tx: mpsc::Sender<Frame>,
     pace: Pace,
 ) {
@@ -169,10 +250,14 @@ pub(super) async fn feed(
                 return;
             }
         };
+        sub.init_notify(&state);
         if tx.send(snapshot).await.is_err() {
             return;
         }
-        match sub.follow(&state, &mut changes, &tx, pace).await {
+        match sub
+            .follow(&state, &mut changes, &mut notify_changed, &tx, pace)
+            .await
+        {
             Stop::Overflowed => {
                 if tx.send(Frame::resync()).await.is_err() {
                     return;
@@ -201,6 +286,15 @@ struct Subscriber {
     sent: HashMap<String, Sent>,
     /// Sessions held back by their lane, and when each may go.
     due: HashMap<String, Instant>,
+    /// 161-1: the inbox's `seq` this subscriber has already been sent past.
+    notif_cursor: i64,
+    /// Ids sent as `notification` while still unread, so a later read
+    /// (by this device or another) is sent as `notification_read` rather
+    /// than resending the whole row.
+    notif_unread_sent: std::collections::HashSet<String>,
+    prefs_version: i64,
+    mutes_version: i64,
+    cleared_version: i64,
 }
 
 #[derive(Serialize)]
@@ -260,6 +354,7 @@ impl Subscriber {
         &mut self,
         state: &Shared,
         changes: &mut watch::Receiver<u64>,
+        notify_changed: &mut watch::Receiver<u64>,
         tx: &mpsc::Sender<Frame>,
         pace: Pace,
     ) -> Stop {
@@ -267,14 +362,24 @@ impl Subscriber {
             tokio::time::interval_at(Instant::now() + pace.keepalive, pace.keepalive);
         loop {
             let due = self.due.values().min().copied();
+            let frames;
             tokio::select! {
                 changed = changes.changed() => {
                     if changed.is_err() {
                         return Stop::Gone;
                     }
                     tokio::time::sleep(pace.coalesce).await;
+                    frames = self.scan(state, changes, pace).await;
                 }
-                () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {}
+                () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                    frames = self.scan(state, changes, pace).await;
+                }
+                notified = notify_changed.changed() => {
+                    if notified.is_err() {
+                        return Stop::Gone;
+                    }
+                    frames = self.scan_notify(state).await;
+                }
                 _ = keepalive.tick() => {
                     // A full queue is already traffic.
                     if let Err(mpsc::error::TrySendError::Closed(_)) = tx.try_send(Frame::Keepalive) {
@@ -284,7 +389,7 @@ impl Subscriber {
                 }
                 () = tx.closed() => return Stop::Gone,
             }
-            for frame in self.scan(state, changes, pace).await {
+            for frame in frames {
                 match tx.try_send(frame) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => return Stop::Overflowed,
@@ -292,6 +397,125 @@ impl Subscriber {
                 }
             }
         }
+    }
+
+    /// Starts this subscriber's inbox cursor at "nothing before now", so a
+    /// reconnect does not replay the whole inbox as if it had just
+    /// happened — `GET /v1/notifications` is the backfill path for that.
+    fn init_notify(&mut self, state: &Shared) {
+        self.notif_cursor = state.agent.notifications_update_cursor().unwrap_or(0);
+        self.prefs_version = state
+            .agent
+            .notification_prefs()
+            .map(|p| p.version)
+            .unwrap_or(0);
+        self.mutes_version = state.agent.notifications_mutes_version().unwrap_or(0);
+        self.cleared_version = state.agent.notifications_cleared_version().unwrap_or(0);
+    }
+
+    async fn scan_notify(&mut self, state: &Shared) -> Vec<Frame> {
+        let mut frames = Vec::new();
+        let mut read_ids = Vec::new();
+        let mut removed_ids = Vec::new();
+        loop {
+            let rows = match state
+                .agent
+                .list_notifications_since_update(self.notif_cursor, 500)
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!(error = ?e, "agent events: listing notifications failed");
+                    break;
+                }
+            };
+            let got = rows.len();
+            for n in rows {
+                self.notif_cursor = self.notif_cursor.max(n.updated_seq);
+                // A cancelled row (a `key` replace, or `cancel_notify`) is
+                // `notification_removed`, whatever its read state: a row
+                // that is gone is gone, not merely read.
+                if n.cancelled {
+                    self.notif_unread_sent.remove(&n.id);
+                    removed_ids.push(n.id);
+                    continue;
+                }
+                // Any read row is `notification_read`, whether or not this
+                // very subscriber had sent it unread before — a row from
+                // before this connection (the backfill case) must never go
+                // out as a fresh `notification` carrying `read_at`.
+                if n.read_at.is_some() {
+                    self.notif_unread_sent.remove(&n.id);
+                    read_ids.push(n.id);
+                    continue;
+                }
+                self.notif_unread_sent.insert(n.id.clone());
+                // 161-4: the deliver hint is this stream's business, not
+                // the inbox's — `GET /v1/notifications` and the test
+                // helpers above never see it, only a *live* frame does.
+                // The key itself is always present (even as `null`): the
+                // client tells a 161-4 server's deliberate "nothing" from
+                // an older server that never had this field at all by
+                // whether the key exists, not by its value.
+                let mut data = serde_json::to_value(&n).unwrap_or_default();
+                if let Some(obj) = data.as_object_mut() {
+                    let hint = state.agent.deliver_hint_for(&n.id, n.session_id.as_deref());
+                    obj.insert(
+                        "deliver".into(),
+                        hint.map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                }
+                frames.push(Frame::event("notification", data.to_string()));
+            }
+            if got < 500 {
+                break;
+            }
+        }
+        if !read_ids.is_empty() {
+            frames.push(Frame::event(
+                "notification_read",
+                serde_json::json!({ "ids": read_ids }).to_string(),
+            ));
+        }
+        if !removed_ids.is_empty() {
+            frames.push(Frame::event(
+                "notification_removed",
+                serde_json::json!({ "ids": removed_ids }).to_string(),
+            ));
+        }
+        match state.agent.notification_prefs() {
+            Ok(p) if p.version != self.prefs_version => {
+                self.prefs_version = p.version;
+                frames.push(Frame::event(
+                    "prefs_changed",
+                    serde_json::to_string(&p).unwrap_or_default(),
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading notification prefs failed"),
+        }
+        match state.agent.notifications_mutes_version() {
+            Ok(v) if v != self.mutes_version => {
+                self.mutes_version = v;
+                match state.agent.notification_mutes() {
+                    Ok(mutes) => frames.push(Frame::event(
+                        "mutes_changed",
+                        serde_json::json!({ "mutes": mutes }).to_string(),
+                    )),
+                    Err(e) => tracing::warn!(error = ?e, "agent events: listing mutes failed"),
+                }
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading mutes version failed"),
+        }
+        match state.agent.notifications_cleared_version() {
+            Ok(v) if v != self.cleared_version => {
+                self.cleared_version = v;
+                frames.push(Frame::event("notifications_cleared", String::new()));
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = ?e, "agent events: reading cleared version failed"),
+        }
+        frames
     }
 
     /// Rebuilds the views whose session moved, or every view when the

@@ -310,6 +310,15 @@ impl Store {
                  note_id    TEXT NOT NULL,
                  set_at     TEXT NOT NULL
              );
+             -- 161-2: the Notifies-you capability (Q3). No row is off, set
+             -- at launch from the account's agent_default_on /
+             -- children_default_on default.
+             CREATE TABLE IF NOT EXISTS session_notify (
+                 session_id        TEXT PRIMARY KEY,
+                 enabled           INTEGER NOT NULL DEFAULT 0 CHECK (enabled IN (0, 1)),
+                 changed_by_device TEXT,
+                 changed_at        TEXT NOT NULL
+             );
              -- Each host's bridge identity as it last reported it (decision
              -- 135d), so a host offline or not yet back since a restart is
              -- still labelled.
@@ -391,6 +400,7 @@ impl Store {
         spawn::init(&conn)?;
         super::events::init(&conn)?;
         super::deletes::init(&conn)?;
+        super::notifications::init(&conn)?;
         conn.execute_batch(
             "-- One-time upgrades, each recorded with what it did and when the
              -- server audited it.
@@ -484,7 +494,8 @@ impl Store {
     /// state transition worth persisting in full.
     #[cfg(test)]
     pub fn update(&self, r: &SessionRecord) -> Result<()> {
-        self.update_with(r, &super::events::EventCtx::storm())
+        self.update_with(r, &super::events::EventCtx::storm())?;
+        Ok(())
     }
 
     /// [`Self::update`], with the events the change makes for a child's
@@ -493,7 +504,11 @@ impl Store {
     ///
     /// An ending refuses the session's pending requests, `requester_ended`,
     /// in the same transaction (P-4, L-7).
-    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<()> {
+    /// Returns whether this write is what just ended `r` (false → false),
+    /// so a caller can run cleanup that is not worth this transaction's time
+    /// (161-2 F2: `notifications::forget_due_at_end`) after it, never
+    /// delaying the commit or the wake it fires below.
+    pub fn update_with(&self, r: &SessionRecord, ctx: &super::events::EventCtx) -> Result<bool> {
         let tx = self.conn.unchecked_transaction()?;
         let before: Option<String> = tx
             .query_row(
@@ -525,7 +540,8 @@ impl Store {
                 r.harness_session
             ],
         )?;
-        if r.is_ended() && !was_ended {
+        let just_ended = r.is_ended() && !was_ended;
+        if just_ended {
             spawn::on_ended(&tx, r, &crate::index::now_rfc3339())?;
         }
         let now = crate::index::now_rfc3339();
@@ -558,7 +574,7 @@ impl Store {
         if wrote {
             self.notify_events();
         }
-        Ok(())
+        Ok(just_ended)
     }
 
     /// Records a session's grants and its vault-write flag, in one
@@ -1298,6 +1314,50 @@ impl Store {
             )
             .optional()?)
     }
+
+    /// 161-2: the "Notifies you" capability. No row is off.
+    pub fn notify_enabled(&self, session_id: &str) -> Result<bool> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT enabled FROM session_notify WHERE session_id = ?1",
+                params![session_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(false))
+    }
+
+    /// Sets a session's "Notifies you" flag: at launch, from the account's
+    /// default, or a child's from `children_default_on`.
+    pub fn set_notify(
+        &self,
+        session_id: &str,
+        enabled: bool,
+        device: Option<&str>,
+        now: &str,
+    ) -> Result<()> {
+        write_notify(&self.conn, session_id, enabled, device, now)
+    }
+}
+
+/// Shared with `spawn::spawn_child`, which only has a bare `&Connection`.
+fn write_notify(
+    conn: &Connection,
+    session_id: &str,
+    enabled: bool,
+    device: Option<&str>,
+    now: &str,
+) -> Result<()> {
+    conn.execute(
+        "INSERT INTO session_notify (session_id, enabled, changed_by_device, changed_at)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (session_id) DO UPDATE SET enabled = excluded.enabled,
+             changed_by_device = excluded.changed_by_device,
+             changed_at = excluded.changed_at",
+        params![session_id, enabled, device, now],
+    )?;
+    Ok(())
 }
 
 fn label_table(kind: super::HostLabel) -> &'static str {
@@ -1551,6 +1611,10 @@ fn delete_in(conn: &Connection, id: &str) -> Result<(bool, Option<Crew>)> {
     )?;
     spawn::forget(conn, id)?;
     super::events::forget_in(conn, id)?;
+    // 161-1: a session mute is removed with its session (Q17).
+    super::notifications::forget_session_mutes(conn, id)?;
+    // 161-2 F2: the "Notifies you" flag and its rate-limit state too.
+    super::notifications::forget_session_notify(conn, id)?;
     Ok((gone, crew))
 }
 
@@ -3554,6 +3618,12 @@ pub mod spawn {
         };
         let builtin = crate::gateway::connections::BUILTIN_ID;
         let reads_storm = grants.iter().any(|g| g.id == builtin);
+        // Q3: a spawned child's own default ("Agents started by agents can
+        // notify"), never the parent's — only a session the person
+        // launched themselves gets `agent_default_on`.
+        let notify =
+            reads_storm && super::super::notifications::load_prefs(conn)?.children_default_on;
+        super::write_notify(conn, &child.id, notify, None, now)?;
         let parent_vault: Option<String> = conn
             .query_row(
                 "SELECT write_vault_id FROM session_launch WHERE session_id = ?1",

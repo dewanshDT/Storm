@@ -14,10 +14,12 @@ import '../router.dart';
 import '../state/app_state.dart';
 import '../state/terminal_prefs.dart';
 import '../ui/breakpoints.dart';
+import '../ui/controls.dart' show StormToggle;
 import '../ui/markdown/storm_markdown_view.dart';
 import '../ui/note_header.dart' show DrawerToggle;
 import '../ui/panels.dart';
 import '../ui/session_status.dart';
+import '../ui/settings/settings_widgets.dart' show TextAction;
 import '../ui/shell/nav_bubble.dart' show keyboardIsOpen;
 import '../ui/shell/storm_scaffold.dart' show StormChrome;
 import '../ui/states.dart';
@@ -25,6 +27,7 @@ import '../ui/decision_strip.dart' show DecisionLayout;
 import '../ui/surfaces.dart' show showStormSheet;
 import '../ui/tokens.dart';
 import 'agent_api.dart' show AgentRefusal;
+import 'agent_events.dart' show AgentEvents, agentEventsProvider;
 import 'agent_models.dart';
 import 'agent_state.dart';
 import 'agent_widgets.dart';
@@ -33,6 +36,8 @@ import 'crew_changes.dart';
 import 'crew_sheets.dart' show CrewRoleSections;
 import 'crew_widgets.dart' show CrewChip, RoleTag;
 import 'launcher.dart' show NoteRef;
+import 'notifications_models.dart' show NotificationMute;
+import 'notifications_state.dart';
 import 'output_seen.dart';
 import 'delete_request.dart';
 import 'session_agents.dart';
@@ -90,6 +95,8 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
     _focus.addListener(() {
       if (_focus.hasFocus) ref.read(sessionControllerProvider(_id))?.focus();
     });
+    _markNotificationsRead();
+    _reportSessionOpen();
     agentSessionOpened.addListener(_onOpened);
   }
 
@@ -123,13 +130,42 @@ class _SessionScreenState extends ConsumerState<SessionScreen> {
       _reloadedAtEnd = false;
       _laterFor = null;
       _wroteNote = null;
+      _markNotificationsRead();
+      _reportSessionOpen();
     }
     if (old.tab != widget.tab) _wroteNote = null;
+  }
+
+  /// Opening a session marks its notices read everywhere (decision 161,
+  /// Q20), alongside the output watermark [seen] already keeps.
+  void _markNotificationsRead() {
+    final id = _id;
+    unawaited(ref.read(notificationsStateProvider)?.markSessionRead(id));
+  }
+
+  /// Tells the events stream this device now has [_id] open (161-4): a
+  /// desktop notice about it is skipped entirely rather than toasted, the
+  /// same as it already is while the session is simply the one on screen.
+  ///
+  /// Captured rather than `ref.read` again in [dispose] — by then this
+  /// `State`'s `ref` may no longer be usable, and calling it there was
+  /// observed to throw and corrupt the element tree mid-teardown.
+  AgentEvents? _events;
+
+  void _reportSessionOpen() {
+    _events = ref.read(agentEventsProvider);
+    _events?.setOpenSession(_id);
   }
 
   @override
   void dispose() {
     agentSessionOpened.removeListener(_onOpened);
+    // Only if nothing else just became the open one: `didUpdateWidget`
+    // already moved it forward when switching sessions in place, and
+    // clearing it here afterwards would wrongly say "nothing is open".
+    if (_events?.openSessionId == _id) {
+      _events?.setOpenSession(null);
+    }
     _focus.dispose();
     super.dispose();
   }
@@ -1762,6 +1798,195 @@ class _AboutRow extends StatelessWidget {
   }
 }
 
+/// Decision 161-2's "Notifies you" toggle and this session's or its agent's
+/// mute, inline in About. Hides entirely on a server before decision 161.
+class _NotifySection extends ConsumerStatefulWidget {
+  const _NotifySection({super.key, required this.session});
+
+  final AgentSession session;
+
+  @override
+  ConsumerState<_NotifySection> createState() => _NotifySectionState();
+}
+
+class _NotifySectionState extends ConsumerState<_NotifySection> {
+  /// Set the moment the toggle is touched, so it moves at once rather than
+  /// waiting on the round trip; always cleared once the request lands,
+  /// success or failure (item N2 of the second review) — a success's own
+  /// live push will have (or will shortly have) [AgentSession.notify]
+  /// already carrying the new value, and a failure's [AgentSession.notify]
+  /// is already the right (unchanged) value to fall back to, so clearing
+  /// rather than guessing `!v` is both simpler and correct. Left set
+  /// indefinitely, it would also shadow a *later* push from another
+  /// device.
+  bool? _optimisticNotify;
+
+  /// Which session this override belongs to — a stale `setState` arriving
+  /// after the section has moved on to a different session (unlikely, but
+  /// this widget is not itself keyed by session id by its parent) must
+  /// never touch that other session's toggle.
+  String? _optimisticFor;
+
+  Future<void> _guarded(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      }
+    }
+  }
+
+  Future<void> _setNotify(bool v) async {
+    final id = widget.session.id;
+    setState(() {
+      _optimisticNotify = v;
+      _optimisticFor = id;
+    });
+    final api = agentApi(ref);
+    if (api == null) {
+      if (mounted && _optimisticFor == id) {
+        setState(() => _optimisticNotify = null);
+      }
+      return;
+    }
+    try {
+      await api.setSessionNotify(id, v);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(describeFailure(e))));
+      }
+    } finally {
+      api.dispose();
+      if (mounted && _optimisticFor == id) {
+        setState(() => _optimisticNotify = null);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final session = widget.session;
+    final state = ref.watch(notificationsStateProvider);
+    if (state == null) return const SizedBox.shrink();
+    return ListenableBuilder(
+      listenable: state,
+      builder: (context, _) {
+        if (state.unsupported) return const SizedBox.shrink();
+        final sessionMute = state.mutes
+            .where((m) => m.scope == 'session' && m.target == session.id)
+            .firstOrNull;
+        final providerMute = state.mutes
+            .where((m) => m.scope == 'provider' && m.target == session.provider)
+            .firstOrNull;
+        final notify =
+            (_optimisticFor == session.id ? _optimisticNotify : null) ??
+            session.notify;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (notify != null)
+              _AboutRow(
+                label: 'Notifies you',
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: StormToggle(
+                    key: const Key('details-notify'),
+                    value: notify,
+                    onChanged: _setNotify,
+                  ),
+                ),
+              ),
+            _AboutRow(
+              label: 'Mute notifications',
+              child: _MuteRow(
+                keyPrefix: 'mute-session',
+                muted: sessionMute,
+                sessionScope: true,
+                onMute: (until) => _guarded(
+                  () => state.createMute('session', session.id, until: until),
+                ),
+                onUnmute: sessionMute == null
+                    ? null
+                    : () => _guarded(() => state.deleteMute(sessionMute.id)),
+              ),
+            ),
+            _AboutRow(
+              label: 'Mute all ${providerLabel(session.provider)} sessions',
+              child: _MuteRow(
+                keyPrefix: 'mute-provider',
+                muted: providerMute,
+                onMute: (until) => _guarded(
+                  () => state.createMute(
+                    'provider',
+                    session.provider,
+                    until: until,
+                  ),
+                ),
+                onUnmute: providerMute == null
+                    ? null
+                    : () => _guarded(() => state.deleteMute(providerMute.id)),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// "1 hour" / "until the session is removed" (its own scope ends with it
+/// either way, so "always" would be the same request) / "always" for an
+/// agent's, or "Unmute" once one of those is in effect.
+class _MuteRow extends StatelessWidget {
+  const _MuteRow({
+    required this.keyPrefix,
+    required this.muted,
+    required this.onMute,
+    required this.onUnmute,
+    this.sessionScope = false,
+  });
+
+  final String keyPrefix;
+  final NotificationMute? muted;
+  final ValueChanged<String?> onMute;
+  final VoidCallback? onUnmute;
+  final bool sessionScope;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    if (muted != null) {
+      return TextAction(
+        key: Key('$keyPrefix-unmute'),
+        label: 'Unmute',
+        onTap: onUnmute,
+      );
+    }
+    String hourFrom() =>
+        DateTime.now().toUtc().add(const Duration(hours: 1)).toIso8601String();
+    return Wrap(
+      spacing: t.sp * 1.5,
+      children: [
+        TextAction(
+          key: Key('$keyPrefix-1h'),
+          label: '1 hour',
+          onTap: () => onMute(hourFrom()),
+        ),
+        TextAction(
+          key: Key('$keyPrefix-forever'),
+          label: sessionScope ? 'Until it ends' : 'Always',
+          onTap: () => onMute(null),
+        ),
+      ],
+    );
+  }
+}
+
 /// About, slimmed down (153j): who and what the session is. Crew, Role,
 /// Starts agents, what it can do, Ran as, Started by, and a plugin problem in
 /// one line.
@@ -1810,6 +2035,10 @@ class AboutSections extends ConsumerWidget {
               ),
             ),
           ),
+        _NotifySection(
+          key: ValueKey('notify-section-${session.id}'),
+          session: session,
+        ),
         PluginProblem(session: session),
       ],
     );

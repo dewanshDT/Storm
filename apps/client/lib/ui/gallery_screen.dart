@@ -4,6 +4,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'accents.dart';
 import 'controls.dart';
 import 'session_status.dart';
+import 'settings/settings_widgets.dart' show SettingsDivider;
 import 'states.dart';
 import 'theme.dart';
 import 'tokens.dart';
@@ -219,6 +220,13 @@ class _Column extends StatelessWidget {
                       onPressed: () {},
                     ),
                   ),
+                  SizedBox(height: t.gap),
+                  const SettingsDivider(),
+                  SizedBox(height: t.gap),
+                  SettingsRow(
+                    label: 'Below a settings divider',
+                    divider: false,
+                  ),
                 ],
               ),
             ),
@@ -351,6 +359,91 @@ class _Column extends StatelessWidget {
                       tile: Accent.lavender.tile(t),
                       subtitle: '14 notes',
                       status: DotStatus.synced,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'count badge',
+              child: Row(
+                children: [
+                  CountBadge(count: 3, color: t.danger),
+                  SizedBox(width: t.sp * 2),
+                  CountBadge(count: 12, color: t.accent),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'icon badge button',
+              child: Row(
+                children: [
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 0,
+                    onTap: () {},
+                  ),
+                  SizedBox(width: t.sp * 2),
+                  IconBadgeButton(
+                    icon: LucideIcons.bell,
+                    tooltip: 'Notifications',
+                    count: 4,
+                    onTap: () {},
+                  ),
+                ],
+              ),
+            ),
+
+            _Card(
+              label: 'unread row',
+              child: Column(
+                children: [
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Text(
+                      'An unread row',
+                      style: TextStyle(color: t.text),
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: () {},
+                    child: Text('A read row', style: TextStyle(color: t.text)),
+                  ),
+                  UnreadRow(
+                    unread: true,
+                    onTap: () {},
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'From a session (an agent)',
+                          style: TextStyle(
+                            color: t.text2,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        Text(
+                          'With a source line and a held reason',
+                          style: TextStyle(color: t.text),
+                        ),
+                        Text(
+                          'Held: quiet hours',
+                          style: TextStyle(color: t.text3),
+                        ),
+                      ],
+                    ),
+                  ),
+                  UnreadRow(
+                    unread: false,
+                    onTap: null,
+                    child: Text(
+                      'A disabled row (no onTap)',
+                      style: TextStyle(color: t.text),
                     ),
                   ),
                 ],

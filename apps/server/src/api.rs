@@ -81,6 +81,15 @@ pub struct AppState {
     /// The auth database, held open for request-time use (device lookup,
     /// session authenticate, login, refresh, ws-ticket).
     pub auth_db: Arc<tokio::sync::Mutex<crate::auth::AuthDb>>,
+    /// Every host's display name, by id — enrolled and removed (decision
+    /// 153) — mirroring `auth_db.host_names()`. A session view needs this on
+    /// every push, which an `await` on `auth_db`'s mutex cannot be: that
+    /// mutex is also held across `check_password`'s Argon2id verify (see its
+    /// doc comment below), so a view push would otherwise queue behind a
+    /// sign-in's KDF. A `std::sync::RwLock` is never held across an `.await`.
+    /// Loaded once at boot, then kept in step by every write to a host's
+    /// name (`ops::enroll_host`, `rename_host`, `remove_host`).
+    pub host_names: Arc<std::sync::RwLock<HashMap<String, String>>>,
     /// The server's listen address, used as the `addr` hint in QR payloads.
     pub listen_addr: String,
     /// Decides whether an actor may reach a vault.
@@ -586,6 +595,12 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         )
         // The spawn switch (decision 134-2): owner only, checked in ops.
         .route("/v1/agent/sessions/{id}/spawn", put(agent_session_spawn))
+        // The "Notifies you" switch (decision 161-2 F1): owner only.
+        .route("/v1/agent/sessions/{id}/notify", put(agent_session_notify))
+        .route(
+            "/v1/agent/sessions/notify-off",
+            post(agent_sessions_notify_off),
+        )
         // An agent's deletion waits for the person (decision 149): the
         // session tier only, so no key or agent answers it.
         .route("/v1/agent/delete-requests", get(agent_delete_requests))
@@ -619,6 +634,38 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             "/v1/config/agent",
             get(agent_get_config).put(agent_put_config),
         )
+        // Decision 161, slice 161-1: the inbox and its settings. Owner
+        // only — no MCP tool reaches any of this (Q18).
+        .route(
+            "/v1/notifications",
+            get(notifications_list).delete(notifications_clear),
+        )
+        .route("/v1/notifications/read", post(notifications_read))
+        .route(
+            "/v1/notifications/prefs",
+            get(notification_prefs_get).put(notification_prefs_put),
+        )
+        .route(
+            "/v1/notifications/mutes",
+            get(notification_mutes_list).post(notification_mutes_create),
+        )
+        .route(
+            "/v1/notifications/mutes/{id}",
+            delete(notification_mutes_delete),
+        )
+        .route(
+            "/v1/notifications/pause",
+            post(notifications_pause).delete(notifications_unpause),
+        )
+        .route("/v1/notifications/test", post(notifications_test))
+        // Decision 161, slice 161-4: this device's own notification
+        // settings, and presence for the deliver hint.
+        .route(
+            "/v1/notifications/device",
+            get(notification_device_get).put(notification_device_put),
+        )
+        .route("/v1/notifications/devices", get(notification_devices_list))
+        .route("/v1/notifications/presence", post(notifications_presence))
         // MCP Gateway integrations (decision 81c) — owner only, checked in
         // ops. **Session tier**, so an `stk_` key can never manage one (§14).
         .route(
@@ -1106,6 +1153,11 @@ async fn revoke_device_handler(
     let mut auth_db = state.auth_db.lock().await;
     crate::auth::devices::revoke(&mut auth_db, &id, "user revoked", &now)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(auth_db);
+    // Decision 161 review item D: a revoked device's connections stop
+    // counting toward any deliver hint at once — not only once each own
+    // stream's `PresenceGuard` notices its socket died.
+    state.agent.clear_presence_for_device(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2385,6 +2437,31 @@ async fn agent_session_spawn(
     ))
 }
 
+async fn agent_session_notify(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Path(id): Path<String>,
+    Json(req): Json<crate::ops::SetNotify>,
+) -> ApiResult<Json<crate::ops::NotifySwitch>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::set_session_notify(&state, &actor, device, &id, req).await?,
+    ))
+}
+
+async fn agent_sessions_notify_off(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(req): Json<crate::ops::NotifyOff>,
+) -> ApiResult<Json<crate::ops::NotifyOffResult>> {
+    let device = auth.as_ref().map(|a| a.authenticated.device.id.as_str());
+    Ok(Json(
+        crate::ops::notify_off(&state, &actor, device, req).await?,
+    ))
+}
+
 #[derive(Deserialize, Default)]
 struct DeleteRequestsQuery {
     after: Option<u64>,
@@ -2770,6 +2847,195 @@ async fn agent_put_config(
     Ok(Json(
         crate::ops::set_agent_config(&state, &actor, &req.default_provider).await?,
     ))
+}
+
+// ---- Notifications (decision 161, slice 161-1) ------------------------
+
+#[derive(Debug, Deserialize)]
+struct NotificationsQuery {
+    #[serde(default)]
+    after: i64,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+async fn notifications_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Query(query): Query<NotificationsQuery>,
+) -> ApiResult<Json<crate::ops::NotificationsPage>> {
+    Ok(Json(
+        crate::ops::list_notifications(&state, &actor, query.after, query.limit).await?,
+    ))
+}
+
+fn device_of(auth: &Option<Extension<SessionAuth>>) -> Option<&str> {
+    auth.as_ref().map(|a| a.authenticated.device.id.as_str())
+}
+
+async fn notifications_read(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<crate::ops::MarkRead>,
+) -> ApiResult<Json<crate::ops::notifications::MarkReadResult>> {
+    Ok(Json(
+        crate::ops::mark_notifications_read(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn notifications_clear(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<StatusCode> {
+    crate::ops::clear_notifications(&state, &actor).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn notification_prefs_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::get_notification_prefs(&state, &actor).await?,
+    ))
+}
+
+async fn notification_prefs_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::PutPrefsBody>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::put_notification_prefs(&state, &actor, body).await?,
+    ))
+}
+
+async fn notification_mutes_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::agent::notifications::Mute>>> {
+    Ok(Json(
+        crate::ops::list_notification_mutes(&state, &actor).await?,
+    ))
+}
+
+async fn notification_mutes_create(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<crate::ops::MutePrefs>,
+) -> ApiResult<Json<crate::agent::notifications::Mute>> {
+    Ok(Json(
+        crate::ops::create_notification_mute(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn notification_mutes_delete(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Path(id): Path<String>,
+) -> ApiResult<StatusCode> {
+    crate::ops::delete_notification_mute(&state, &actor, &id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn notifications_pause(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::PausePrefs>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::pause_notifications(&state, &actor, body).await?,
+    ))
+}
+
+async fn notifications_unpause(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Prefs>> {
+    Ok(Json(
+        crate::ops::unpause_notifications(&state, &actor).await?,
+    ))
+}
+
+async fn notifications_test(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<crate::agent::notifications::Notification>> {
+    Ok(Json(
+        crate::ops::send_test_notification(&state, &actor).await?,
+    ))
+}
+
+// ---- This device, and presence (decision 161, slice 161-4) ---------------
+
+async fn notification_device_get(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Query(query): Query<crate::ops::DevicePlatform>,
+) -> ApiResult<Json<crate::auth::device_prefs::DevicePrefs>> {
+    Ok(Json(
+        crate::ops::get_device_prefs(&state, &actor, device_of(&auth), query.platform.as_deref())
+            .await?,
+    ))
+}
+
+async fn notification_device_put(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Query(query): Query<crate::ops::DevicePlatform>,
+    Json(body): Json<crate::ops::DevicePrefsPatch>,
+) -> ApiResult<Json<crate::auth::device_prefs::DevicePrefs>> {
+    Ok(Json(
+        crate::ops::put_device_prefs(
+            &state,
+            &actor,
+            device_of(&auth),
+            query.platform.as_deref(),
+            body,
+        )
+        .await?,
+    ))
+}
+
+async fn notification_devices_list(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+) -> ApiResult<Json<Vec<crate::auth::device_prefs::DeviceRow>>> {
+    Ok(Json(
+        crate::ops::list_device_notification_rows(&state, &actor).await?,
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PresenceBody {
+    /// The same id this device's own `/v1/agent/events` connection sent
+    /// as `?connection_id=`.
+    connection_id: String,
+    state: String,
+    #[serde(default)]
+    open_session: Option<String>,
+}
+
+async fn notifications_presence(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
+    Json(body): Json<PresenceBody>,
+) -> ApiResult<StatusCode> {
+    crate::ops::set_presence(
+        &state,
+        &actor,
+        device_of(&auth),
+        &body.connection_id,
+        &body.state,
+        body.open_session.as_deref(),
+    )?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Three credential tiers: `none` (unauthenticated), `device` (paired
@@ -4363,6 +4629,7 @@ pub(crate) mod tests {
         let agent = Arc::new(crate::agent::AgentManager::open(&state_dir).unwrap());
         let gateway =
             Arc::new(crate::gateway::Gateway::open(&state_dir, "2026-10-05T00:00:00Z").unwrap());
+        let host_names = auth_db.host_names().unwrap();
         let state: Shared = Arc::new(AppState {
             vaults: RwLock::new(VaultSet {
                 registry,
@@ -4377,6 +4644,7 @@ pub(crate) mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            host_names: Arc::new(std::sync::RwLock::new(host_names)),
             listen_addr: "http://127.0.0.1:8080".into(),
             vault_policy: policy,
             hasher: crate::auth::Hasher::new(),
@@ -10295,6 +10563,37 @@ pub(crate) mod tests {
             )
         }
 
+        async fn notify(&self, session: &str, enabled: bool) -> (StatusCode, serde_json::Value) {
+            self.ask(put_json_with_auth(
+                &format!("/v1/agent/sessions/{session}/notify"),
+                serde_json::json!({"enabled": enabled}),
+                &self.owner_bearer,
+            ))
+            .await
+        }
+
+        async fn notify_off(&self, scope: &str) -> (StatusCode, serde_json::Value) {
+            self.ask(post_json_with_auth(
+                "/v1/agent/sessions/notify-off",
+                serde_json::json!({"scope": scope}),
+                &self.owner_bearer,
+            ))
+            .await
+        }
+
+        async fn notify_events(&self) -> Vec<(String, serde_json::Value)> {
+            self.state
+                .auth_db
+                .lock()
+                .await
+                .all_events()
+                .unwrap()
+                .into_iter()
+                .filter(|(kind, _)| kind.starts_with("notify_"))
+                .map(|(kind, detail)| (kind, serde_json::from_str(&detail).unwrap()))
+                .collect()
+        }
+
         /// What went down the host's link since the last look.
         fn sent(&mut self) -> Vec<serde_json::Value> {
             std::iter::from_fn(|| self.link.try_recv().ok())
@@ -10580,6 +10879,139 @@ pub(crate) mod tests {
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["enabled"], true);
         assert_eq!(list_changed(&f.sent()), 1);
+    }
+
+    // ---- decision 161-2 F1: the "Notifies you" switch on a running session ---
+
+    async fn tool_call_refused(f: &GatewayFixture, session: &str, tool: &str) -> Option<String> {
+        error_code(
+            &f.mcp(
+                session,
+                "storm",
+                serde_json::json!({"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                    "params": {"name": tool, "arguments": {"title": "hi"}}}),
+            )
+            .await,
+        )
+    }
+
+    #[tokio::test]
+    async fn turning_notify_on_and_off_tells_the_agent_and_is_audited() {
+        let dir = tempdir::TempDir::new("storm-notify-flip").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.verified().await;
+        let launched = f.launch("claude-code", false).await;
+        // The account default ("New sessions can notify you") is on (Q19).
+        assert_eq!(launched["notify"], true);
+        let session = launched["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+        let on = f.storm_tools(&session).await;
+        assert!(on.iter().any(|t| t == "notify"));
+        assert!(on.iter().any(|t| t == "cancel_notify"));
+        assert!(tool_call_refused(&f, &session, "notify").await.is_none());
+        f.sent();
+
+        let (status, body) = f.notify(&session, false).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body, serde_json::json!({"enabled": false}));
+        assert_eq!(list_changed(&f.sent()), 1);
+        let off = f.storm_tools(&session).await;
+        assert!(!off.iter().any(|t| t == "notify" || t == "cancel_notify"));
+        assert_eq!(
+            tool_call_refused(&f, &session, "notify").await,
+            Some("tool_not_allowed".to_string())
+        );
+        let (_, view) = f.get(&format!("/v1/agent/sessions/{session}")).await;
+        assert_eq!(view["notify"], false);
+
+        let (status, body) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(list_changed(&f.sent()), 1);
+        assert_eq!(f.storm_tools(&session).await, on);
+
+        // Asked again: audited, but nothing flipped, so no notification.
+        let (status, _) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list_changed(&f.sent()), 0);
+
+        let detail = |was: bool| serde_json::json!({"session_id": session, "host_id": f.host_id, "was": was});
+        assert_eq!(
+            f.notify_events().await,
+            vec![
+                ("notify_disabled".to_string(), detail(true)),
+                ("notify_enabled".to_string(), detail(false)),
+                ("notify_enabled".to_string(), detail(true)),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_notify_switch_refuses_on_an_ended_session() {
+        let dir = tempdir::TempDir::new("storm-notify-ended").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let session = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.report(&session, "completed").await;
+        let (status, body) = f.notify(&session, false).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "session_not_live");
+        let (status, body) = f.notify(&session, true).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "session_not_live");
+    }
+
+    #[tokio::test]
+    async fn notify_off_turns_off_every_live_session_or_only_children() {
+        let dir = tempdir::TempDir::new("storm-notify-off").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        f.off_host().await;
+        let parent = f.launch_on("claude-code").await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let other = f.launch("claude-code", false).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        f.initialize(&parent, "storm").await;
+        let child = structured(
+            &f.tool(&parent, "start_agent", serde_json::json!({"task": "t"}))
+                .await,
+        )["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        // Off by default for a spawned child ("Agents started by agents
+        // can notify"); turned on here so this scope has something to flip.
+        assert!(!f.state.agent.notify_enabled(&child));
+        let (status, body) = f.notify(&child, true).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(f.state.agent.notify_enabled(&parent));
+        assert!(f.state.agent.notify_enabled(&other));
+        assert!(f.state.agent.notify_enabled(&child));
+
+        let (status, body) = f.notify_off("children").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], 1, "{body}: only the child");
+        assert!(f.state.agent.notify_enabled(&parent));
+        assert!(f.state.agent.notify_enabled(&other));
+        assert!(!f.state.agent.notify_enabled(&child));
+
+        let (status, body) = f.notify_off("all").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["changed"], 2,
+            "{body}: the parent and the other, the child already off"
+        );
+        assert!(!f.state.agent.notify_enabled(&parent));
+        assert!(!f.state.agent.notify_enabled(&other));
+
+        // Already off: nothing left to change.
+        let (status, body) = f.notify_off("all").await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["changed"], 0, "{body}");
     }
 
     // ---- the approval engine is gone (decision 145a): see the A-145 tests ----
@@ -16993,6 +17425,51 @@ pub(crate) mod tests {
         assert_eq!(state.agent.get("ags_C1").unwrap().owner_user_id, owner);
     }
 
+    /// A latency regression (2026-11): `name_roles` used to lock `auth_db`
+    /// for every session view, and `check_password`'s Argon2id verify holds
+    /// that same lock for its whole duration (`AppState::auth_db`'s doc
+    /// comment) — so a slow sign-in starved every concurrent push.
+    /// `host_names` is the cache that keeps a view off that lock.
+    #[tokio::test]
+    async fn a_session_view_never_waits_on_the_auth_db_lock() {
+        let dir = tempdir::TempDir::new("storm-161-auth-lock").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, _child) = f.tree().await;
+        let guard = f.state.auth_db.lock().await;
+        let view = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            crate::ops::get_session(&f.state, &parent),
+        )
+        .await;
+        drop(guard);
+        assert!(
+            view.is_ok(),
+            "a session view waited on auth_db, which a slow sign-in can hold"
+        );
+        assert!(view.unwrap().is_ok());
+    }
+
+    /// The cache stays correct: a host's rename reaches the next view.
+    #[tokio::test]
+    async fn a_host_rename_shows_in_the_next_session_view() {
+        let dir = tempdir::TempDir::new("storm-161-host-rename").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (parent, _child) = f.tree().await;
+        let host_id = f.state.agent.get(&parent).unwrap().host_id;
+        let owner = Actor::Session {
+            user_id: f.owner.clone(),
+        };
+        crate::ops::rename_host(&f.state, &owner, &host_id, "Renamed Host")
+            .await
+            .ok()
+            .unwrap();
+        let view = crate::ops::get_session(&f.state, &parent)
+            .await
+            .ok()
+            .unwrap();
+        assert_eq!(view.host_name.as_deref(), Some("Renamed Host"));
+    }
+
     /// `end_agent` through the gateway (145a): the target's `end` at once;
     /// scope as for every parent tool.
     #[tokio::test]
@@ -20975,6 +21452,129 @@ pub(crate) mod tests {
         .await
         .unwrap_err();
         assert_eq!(refused.0, StatusCode::FORBIDDEN, "{}", refused.1);
+    }
+
+    /// Decision 161-2: `notify`/`cancel_notify` are listed and callable
+    /// only with the "Notifies you" capability (Q3) — one rule for both
+    /// (mirrors A-149-1's delete-tools pattern).
+    #[tokio::test]
+    async fn notify_tools_are_offered_only_with_the_capability() {
+        let dir = tempdir::TempDir::new("storm-161-2-cap").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, with) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let with = with["id"].as_str().unwrap().to_string();
+        f.initialize(&with, "storm").await;
+        let (_, without) = f.launch_body(serde_json::json!({"notify": false})).await;
+        let without = without["id"].as_str().unwrap().to_string();
+        f.initialize(&without, "storm").await;
+
+        let tools = f.storm_tools(&with).await;
+        for t in ["notify", "cancel_notify"] {
+            assert!(tools.contains(&t.to_string()), "{t}: {tools:?}");
+        }
+        let sent = structured(
+            &f.tool(&with, "notify", serde_json::json!({"title": "hello"}))
+                .await,
+        );
+        assert_eq!(sent["state"], "sent", "{sent}");
+
+        let tools = f.storm_tools(&without).await;
+        for t in ["notify", "cancel_notify"] {
+            assert!(!tools.contains(&t.to_string()), "{t}: {tools:?}");
+            assert_eq!(
+                error_code(
+                    &f.tool(&without, t, serde_json::json!({"title": "x", "key": "k"}))
+                        .await
+                )
+                .as_deref(),
+                Some("tool_not_allowed")
+            );
+        }
+    }
+
+    /// Q3: a spawned child's own default ("Agents started by agents can
+    /// notify") is off, even though its parent's own is on.
+    #[tokio::test]
+    async fn a_spawned_childs_notify_default_is_off() {
+        let dir = tempdir::TempDir::new("storm-161-2-child").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let parent = f.spawning_parent().await;
+        assert!(
+            f.state.agent.notify_offered(&parent),
+            "the account's agent_default_on is on"
+        );
+        let child = f
+            .start_child(&parent, serde_json::json!({"task": "tidy"}))
+            .await;
+        assert!(
+            !f.state.agent.notify_offered(&child),
+            "children_default_on is off by default"
+        );
+        assert!(!f.storm_tools(&child).await.contains(&"notify".to_string()));
+    }
+
+    /// 161-2: `link` to a note is resolved and checked on the server; one
+    /// the session cannot find is `bad_link`, never silently dropped.
+    #[tokio::test]
+    async fn notify_refuses_a_link_to_a_note_that_cannot_be_found() {
+        let dir = tempdir::TempDir::new("storm-161-2-link").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let work = f.vault("Work").await;
+        let note = f.note(&work, "Todo.md", "# Todo\n").await;
+        let (_, body) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let session = body["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+
+        let ok = structured(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": "done", "link": {"kind": "note", "vault": work, "note": note["id"]}}),
+            )
+            .await,
+        );
+        assert_eq!(ok["state"], "sent", "{ok}");
+
+        let bad = tool_error(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": "done", "link": {"kind": "note", "vault": work, "note": "nte_missing"}}),
+            )
+            .await,
+        );
+        assert_eq!(bad, "bad_link");
+    }
+
+    /// 161-2, G-D18: `notify`'s audit is metadata only — never the agent's
+    /// text.
+    #[tokio::test]
+    async fn notifys_audit_carries_no_text() {
+        let dir = tempdir::TempDir::new("storm-161-2-audit").unwrap();
+        let mut f = gateway_fixture(dir.path()).await;
+        let (_, body) = f.launch_body(serde_json::json!({"notify": true})).await;
+        let session = body["id"].as_str().unwrap().to_string();
+        f.initialize(&session, "storm").await;
+        let secret_title = "the quarterly numbers are bad, don't tell anyone";
+        structured(
+            &f.tool(
+                &session,
+                "notify",
+                serde_json::json!({"title": secret_title}),
+            )
+            .await,
+        );
+        let events = f.state.auth_db.lock().await.all_events().unwrap();
+        let notify_events: Vec<_> = events.into_iter().filter(|(k, _)| k == "notify").collect();
+        assert_eq!(notify_events.len(), 1, "{notify_events:?}");
+        let (_, detail) = &notify_events[0];
+        assert!(
+            !detail.contains("quarterly"),
+            "the audit must never carry the text: {detail}"
+        );
+        let parsed: serde_json::Value = serde_json::from_str(detail).unwrap();
+        assert_eq!(parsed["outcome"], "sent", "{parsed}");
+        assert!(parsed.get("title").is_none() && parsed.get("body").is_none());
     }
 
     /// A-149-2: nothing is deleted without Approve. A note and a folder

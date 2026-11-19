@@ -351,9 +351,16 @@ impl AgentManager {
             )
             .map_err(anyhow::Error::from)?;
         let made = by_id(&store.conn, &id)?.expect("just written");
+        // 161-1: the notice is written on the same connection as the
+        // request. A failure here must not swallow the request itself
+        // (made), and must not warn with the agent's reason text.
+        if let Err(e) = super::notifications::notify_delete_request(&store.conn, &r, &made) {
+            tracing::warn!(error = ?e, session = %session_id, "could not write the delete-request notice");
+        }
         drop(store);
         self.bump(session_id);
         self.poke_deletes();
+        self.poke_notify();
         Ok(Ok((made, true)))
     }
 

@@ -152,6 +152,21 @@ class GroupLabel extends StatelessWidget {
   }
 }
 
+/// A plain hairline inside a settings page's own column — between a
+/// sub-group's rows and what follows, where [SettingsRow]'s own
+/// `divider` (one row's bottom edge) doesn't apply. Vertical spacing is
+/// the caller's (a `SizedBox` either side, as every other row-group
+/// boundary on these pages already uses).
+class SettingsDivider extends StatelessWidget {
+  const SettingsDivider({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final t = context.tokens;
+    return Container(height: t.bw, color: t.border);
+  }
+}
+
 /// 13 `text2`, or `accent` for navigation, or `danger`.
 class TextAction extends StatelessWidget {
   const TextAction({
@@ -344,6 +359,7 @@ Future<bool> confirmSetting(
   required String title,
   required String body,
   required String action,
+  String cancelLabel = 'Cancel',
   Key? confirmKey,
 }) async {
   final ok = await showDialog<bool>(
@@ -354,7 +370,7 @@ Future<bool> confirmSetting(
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(c, false),
-          child: const Text('Cancel'),
+          child: Text(cancelLabel),
         ),
         FilledButton(
           key: confirmKey,

@@ -2297,10 +2297,17 @@ pub async fn remove_host(state: &Shared, actor: &Actor, host_id: &str) -> ApiRes
     crews_owner(actor)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
+    let host = crate::auth::hosts::remove(&mut auth_db, host_id, actor.user_id(), &now)
         .map_err(internal)?
         .map_err(host_admin_refusal)?;
     drop(auth_db);
+    // Kept, not removed: a removed host's name stays in `host_names` (the
+    // `removed_hosts` table it moved to), so its ended sessions still show it.
+    state
+        .host_names
+        .write()
+        .unwrap()
+        .insert(host.id.clone(), host.name.clone());
     state.agent.forget_host(host_id).map_err(internal)?;
     Ok(())
 }
@@ -2337,10 +2344,16 @@ pub async fn rename_host(
     crate::auth::hosts::validate_name(name).map_err(bad_request)?;
     let now = crate::index::now_rfc3339();
     let mut auth_db = state.auth_db.lock().await;
-    crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
+    let host = crate::auth::hosts::rename(&mut auth_db, host_id, name, actor.user_id(), &now)
         .map_err(internal)?
-        .map(|h| host_view(state, h))
-        .ok_or_else(|| not_found("no such host"))
+        .ok_or_else(|| not_found("no such host"))?;
+    drop(auth_db);
+    state
+        .host_names
+        .write()
+        .unwrap()
+        .insert(host.id.clone(), host.name.clone());
+    Ok(host_view(state, host))
 }
 
 /// Revokes a host: its tokens die now, and it cannot authenticate again.
@@ -2424,11 +2437,18 @@ pub async fn enroll_host(
         signature: req.signature,
     };
     match crate::auth::hosts::enroll(&mut auth_db, &state.identity.server_id, &request, &now) {
-        Ok(host) => Ok(EnrolledHost {
-            host_id: host.id,
-            server_id: state.identity.server_id.clone(),
-            name: host.name,
-        }),
+        Ok(host) => {
+            state
+                .host_names
+                .write()
+                .unwrap()
+                .insert(host.id.clone(), host.name.clone());
+            Ok(EnrolledHost {
+                host_id: host.id,
+                server_id: state.identity.server_id.clone(),
+                name: host.name,
+            })
+        }
         Err(e) => Err(host_refusal(&auth_db, e, None, remote, &now)),
     }
 }
@@ -2793,6 +2813,155 @@ pub async fn set_session_spawn(
     Ok(SpawnSwitch {
         enabled: change.enabled,
     })
+}
+
+// ---- Decision 161 (161-2 F1): the "Notifies you" switch --------------------
+//
+// Session tier and owner only, mirroring the spawn switch above: the chip
+// at launch, and Session Details afterwards, is the real grant (AM124).
+
+pub const EVENT_NOTIFY_ENABLED: &str = "notify_enabled";
+pub const EVENT_NOTIFY_DISABLED: &str = "notify_disabled";
+pub const EVENT_NOTIFY_OFF: &str = "notify_off";
+
+#[derive(Debug, Deserialize)]
+pub struct SetNotify {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotifySwitch {
+    pub enabled: bool,
+}
+
+/// Tells a session's agent its tool list changed, so `notify`/
+/// `cancel_notify` appear or disappear without a reconnect.
+fn poke_tools_changed(state: &Shared, session_id: &str) {
+    if matches!(state.agent.grant(session_id, BUILTIN_ID), Ok(Some(_))) {
+        state.agent.mcp_message(
+            session_id,
+            BUILTIN_ID,
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/tools/list_changed"}),
+        );
+    }
+}
+
+/// `PUT /v1/agent/sessions/{id}/notify`. Every change is audited; a flip
+/// pokes the session's tool list the same way the spawn switch does.
+pub async fn set_session_notify(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    id: &str,
+    req: SetNotify,
+) -> ApiResult<NotifySwitch> {
+    let (owner, record) = owners_session(state, actor, id)?;
+    if record.is_ended() {
+        return Err(conflict("session_not_live"));
+    }
+    let was = state.agent.notify_enabled(id);
+    state
+        .agent
+        .set_notify(id, req.enabled, device)
+        .map_err(agent_error)?;
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            if req.enabled {
+                EVENT_NOTIFY_ENABLED
+            } else {
+                EVENT_NOTIFY_DISABLED
+            },
+            Some(&owner),
+            device,
+            &crate::index::now_rfc3339(),
+            &serde_json::json!({
+                "session_id": id,
+                "host_id": record.host_id,
+                "was": was,
+            })
+            .to_string(),
+        )
+        .map_err(internal)?;
+    if was != req.enabled {
+        poke_tools_changed(state, id);
+    }
+    Ok(NotifySwitch {
+        enabled: req.enabled,
+    })
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NotifyOffScope {
+    All,
+    Children,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct NotifyOff {
+    pub scope: NotifyOffScope,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NotifyOffResult {
+    pub changed: i64,
+}
+
+/// `POST /v1/agent/sessions/notify-off`: the client's "Also turn off for
+/// running sessions?" when an account default is switched off. Turns the
+/// flag off for every live session the owner has, or only spawned children.
+pub async fn notify_off(
+    state: &Shared,
+    actor: &Actor,
+    device: Option<&str>,
+    req: NotifyOff,
+) -> ApiResult<NotifyOffResult> {
+    let owner = crews_owner(actor)?.to_string();
+    let mut changed: i64 = 0;
+    for s in state.agent.list().map_err(agent_error)? {
+        if s.owner_user_id != owner || s.is_ended() || !state.agent.notify_enabled(&s.id) {
+            continue;
+        }
+        if matches!(req.scope, NotifyOffScope::Children)
+            && state
+                .agent
+                .lineage(&s.id)
+                .map_err(agent_error)?
+                .parent_session
+                .is_none()
+        {
+            continue;
+        }
+        state
+            .agent
+            .set_notify(&s.id, false, device)
+            .map_err(agent_error)?;
+        poke_tools_changed(state, &s.id);
+        changed += 1;
+    }
+    state
+        .auth_db
+        .lock()
+        .await
+        .record_event(
+            EVENT_NOTIFY_OFF,
+            Some(&owner),
+            device,
+            &crate::index::now_rfc3339(),
+            &serde_json::json!({
+                "scope": match req.scope {
+                    NotifyOffScope::All => "all",
+                    NotifyOffScope::Children => "children",
+                },
+                "changed": changed,
+            })
+            .to_string(),
+        )
+        .map_err(internal)?;
+    Ok(NotifyOffResult { changed })
 }
 
 // ---- Agent spawning: a parent's acts (decisions 134-3, 145a) ---------------
@@ -4887,6 +5056,9 @@ pub struct SessionView {
     /// now or the switch is on; absent everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub spawn: Option<crate::agent::SpawnView>,
+    /// The "Notifies you" capability (decision 161, AM124): the chip at
+    /// launch, and this flag afterwards, is the real grant.
+    pub notify: bool,
     /// The role it was launched with (138f), titled as it was then. Fixed:
     /// changing the label never changes it.
     pub launch_role: Option<crate::agent::store::Context>,
@@ -5062,6 +5234,7 @@ fn session_view(
         })
         .collect();
     let output_end = state.agent.output_end(&session.id);
+    let notify = state.agent.notify_enabled(&session.id);
     let (work_to_take, unapplied_commits) = state.agent.work_to_take(&session).map_err(internal)?;
     Ok(SessionView {
         session,
@@ -5085,6 +5258,7 @@ fn session_view(
         pending_events,
         recent_events,
         spawn,
+        notify,
         launch_role,
         model,
         permission_mode,
@@ -5132,9 +5306,17 @@ async fn name_host_seen(state: &Shared, views: &mut [SessionView]) -> ApiResult<
 /// Names each view's role by its note's title now, so a rename follows and a
 /// deleted note reads as `None`.
 async fn name_roles(state: &Shared, views: &mut [SessionView]) -> ApiResult<()> {
-    let hosts = state.auth_db.lock().await.host_names().map_err(internal)?;
-    for view in views.iter_mut() {
-        view.host_name = hosts.get(&view.session.host_id).cloned();
+    // Never `auth_db.lock().await` here: that mutex is also held across
+    // `check_password`'s Argon2id verify (see `AppState::auth_db`'s doc
+    // comment), so every session view would otherwise queue behind a
+    // sign-in's KDF. `host_names` is the kept-in-step cache instead, and the
+    // block scopes its (non-`Send`) read guard well clear of the `.await`s
+    // below.
+    {
+        let hosts = state.host_names.read().unwrap();
+        for view in views.iter_mut() {
+            view.host_name = hosts.get(&view.session.host_id).cloned();
+        }
     }
     for view in views.iter_mut() {
         let Some(role) = view.role.as_mut() else {
@@ -5427,6 +5609,7 @@ pub async fn launch_session(
         .host_label(HostLabel::Isolation, &session.host_id)
         .map_err(internal)?;
     let spawn = state.agent.spawn_view(&session).map_err(internal)?;
+    let notify = state.agent.notify_enabled(&session.id);
     let crew = state.agent.membership(&session.id).map_err(internal)?;
     let role = state
         .agent
@@ -5463,6 +5646,7 @@ pub async fn launch_session(
         pending_events: None,
         recent_events: None,
         spawn,
+        notify,
         launch_role: launch.role,
         model: launch.model,
         permission_mode: launch.permission_mode.clone(),
@@ -6297,12 +6481,37 @@ pub async fn runtime_status(
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
-    state
+    let audits = state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
+    for a in &audits {
+        audit_terminal_notice(state, a).await;
+    }
     sweep_gateway_sessions(state);
     Ok(())
+}
+
+/// 161-5: a terminal notice's outcome, metadata only — never its text
+/// (G-D18), the same rule `notify`'s own audit follows.
+async fn audit_terminal_notice(
+    state: &Shared,
+    a: &crate::agent::notifications::TerminalNoticeAudit,
+) {
+    let _ = state.auth_db.lock().await.record_event(
+        "terminal_notice",
+        Some(&a.owner_user_id),
+        None,
+        &crate::index::now_rfc3339(),
+        &serde_json::json!({
+            "session_id": a.session_id,
+            "source_form": a.source_form,
+            "title_chars": a.title_chars,
+            "body_chars": a.body_chars,
+            "outcome": a.outcome,
+        })
+        .to_string(),
+    );
 }
 
 /// A child's round ended with a final message (145c): audited with its
@@ -7383,6 +7592,8 @@ struct Authorized {
     /// The delete tools are offered (149a): vault writes, and not a child,
     /// which never asks the person (149d).
     deletes: bool,
+    /// The "Notifies you" capability is offered (161-2, Q3).
+    notify: bool,
     /// The host makes each child its own workspace (137-1), as its live
     /// link says: what `start_agent`'s description tells the agent.
     child_workspaces: bool,
@@ -7400,6 +7611,7 @@ impl Authorized {
                     && (self.deletes || !crate::mcp::DELETE_TOOLS.contains(&name))
                     && (self.spawn || !crate::mcp::SPAWN_TOOLS.contains(&name))
                     && (self.spawned || !crate::mcp::SPAWNED_TOOLS.contains(&name))
+                    && (self.notify || !crate::mcp::NOTIFY_TOOLS.contains(&name))
             }
         }
     }
@@ -7545,6 +7757,7 @@ async fn authorize_call(
         spawned: state.agent.spawned_offered(session_id),
         spawn_off: state.agent.spawn_turned_off(session_id),
         deletes: vault_writes && top_level,
+        notify: state.agent.notify_offered(session_id),
         child_workspaces: state
             .agent
             .host_live(host_id)
@@ -7955,6 +8168,7 @@ async fn connect_builtin(
         state.clone(),
         authorized.vault_writes,
         authorized.deletes,
+        authorized.notify,
         authorized.has_context,
         authorized.has_role,
         actor,
@@ -8037,6 +8251,18 @@ pub use agent_deletes::{
     delete_requests,
 };
 pub use provider_wire::runtime_provider_credential;
+
+pub mod notifications;
+pub use notifications::{
+    DevicePlatform, DevicePrefsPatch, MarkRead, MutePrefs, NotificationsPage, PausePrefs,
+    PutPrefsBody, clear_notifications, create_notification_mute, delete_notification_mute,
+    get_device_prefs, get_notification_prefs, list_device_notification_rows,
+    list_notification_mutes, list_notifications, mark_notifications_read, pause_notifications,
+    put_device_prefs, put_notification_prefs, send_test_notification, set_presence,
+    unpause_notifications,
+};
+
+pub mod notify;
 
 // ---- Token sync: the synced Claude subscription token (decision 124n) -------
 //
@@ -8793,6 +9019,7 @@ mod tests {
         let (events, _) = tokio::sync::broadcast::channel(8);
         let (root_changed, _) = tokio::sync::broadcast::channel(2);
         let registry = Registry::load(&state_dir, &root).unwrap();
+        let host_names = auth_db.host_names().unwrap();
 
         Arc::new(AppState {
             vaults: tokio::sync::RwLock::new(VaultSet {
@@ -8808,6 +9035,7 @@ mod tests {
             mcp_writable: std::sync::atomic::AtomicBool::new(false),
             agent_writes: std::sync::atomic::AtomicBool::new(false),
             auth_db: Arc::new(tokio::sync::Mutex::new(auth_db)),
+            host_names: Arc::new(std::sync::RwLock::new(host_names)),
             listen_addr: "127.0.0.1:8484".into(),
             vault_policy: Arc::new(crate::auth::authz::StormPolicy),
             hasher: crate::auth::Hasher::new(),
