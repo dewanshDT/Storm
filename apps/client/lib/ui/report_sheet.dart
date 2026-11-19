@@ -18,18 +18,16 @@ import '../api/feedback_models.dart';
 import '../state/app_state.dart' show rootMessengerKey;
 import '../state/client_version.dart' show clientVersionProvider;
 import '../state/feedback_state.dart';
-import 'breakpoints.dart';
-import 'clipboard_copy.dart';
 import 'controls.dart';
 import 'feedback_screenshot.dart';
 import 'settings/settings_widgets.dart' show InfoBox, TextAction;
 import 'states.dart' show describeFailure;
-import 'surfaces.dart';
+import 'surfaces.dart' show showAdaptiveSheet;
 import 'tokens.dart';
 import 'widgets.dart';
 
 /// Opens the report sheet: a dialog at desk width, a bottom sheet on a
-/// phone, mirroring how every other sheet here already splits.
+/// phone, via [showAdaptiveSheet] (decision 162a's own split, now shared).
 ///
 /// Captures the screenshot **before** the sheet is drawn — the whole point
 /// of taking one at all is a picture of what the person was looking at, not
@@ -43,36 +41,12 @@ Future<void> showReportProblemSheet(
   );
   if (!context.mounted) return;
 
-  const title = 'Report a problem';
-  if (context.isExpanded) {
-    final t = context.tokens;
-    await showDialog<void>(
-      context: context,
-      builder: (dialogContext) => Dialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(t.rCard),
-        ),
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: 480,
-            maxHeight: MediaQuery.sizeOf(dialogContext).height * 0.85,
-          ),
-          child: StormSheet(
-            title: title,
-            onClose: () => Navigator.of(dialogContext).pop(),
-            child: ReportProblemSheet(screenshot: screenshot, error: error),
-          ),
-        ),
-      ),
-    );
-  } else {
-    await showStormSheet<void>(
-      context: context,
-      title: title,
-      heightFactor: 0.92,
-      builder: (_) => ReportProblemSheet(screenshot: screenshot, error: error),
-    );
-  }
+  await showAdaptiveSheet<void>(
+    context: context,
+    title: 'Report a problem',
+    heightFactor: 0.92,
+    builder: (_) => ReportProblemSheet(screenshot: screenshot, error: error),
+  );
 }
 
 const _kindOptions = [
@@ -218,11 +192,22 @@ class _ReportProblemSheetState extends ConsumerState<ReportProblemSheet> {
     final pretty = const JsonEncoder.withIndent(
       '  ',
     ).convert({'client': preview.client, 'bundle': preview.bundle});
-    await showStormSheet<void>(
+    await showAdaptiveSheet<void>(
       context: context,
       title: "What's sent",
       heightFactor: 0.8,
-      builder: (_) => _JsonView(json: pretty),
+      builder: (sheetContext) => CodeBlock(
+        key: const Key('report-sent-json'),
+        text: pretty,
+        showCopy: true,
+        copyButtonKey: const Key('report-sent-copy'),
+        onCopied: (copied) {
+          if (!sheetContext.mounted) return;
+          ScaffoldMessenger.of(sheetContext).showSnackBar(
+            SnackBar(content: Text(copied ? 'Copied' : "Couldn't copy")),
+          );
+        },
+      ),
     );
   }
 
@@ -374,33 +359,17 @@ class _ReportProblemSheetState extends ConsumerState<ReportProblemSheet> {
         Row(
           children: [
             Expanded(
-              child: InkWell(
-                onTap: disabled
-                    ? null
-                    : () => _setIncludeDiagnostics(!_includeDiagnostics),
-                borderRadius: BorderRadius.circular(t.rControl * 0.6),
-                child: Padding(
-                  padding: EdgeInsets.symmetric(vertical: t.sp * 0.5),
-                  child: Row(
-                    children: [
-                      StormCheckbox(
-                        key: const Key('report-diagnostics'),
-                        value: _includeDiagnostics,
-                        onChanged: disabled ? null : _setIncludeDiagnostics,
-                      ),
-                      SizedBox(width: t.sp),
-                      Expanded(
-                        child: Text(
-                          'Include diagnostics',
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontFamily: StormTokens.sansFamily,
-                            fontSize: t.uiSize,
-                            color: t.text,
-                          ),
-                        ),
-                      ),
-                    ],
+              child: StormCheckboxRow(
+                value: _includeDiagnostics,
+                onChanged: disabled ? null : _setIncludeDiagnostics,
+                checkboxKey: const Key('report-diagnostics'),
+                child: Text(
+                  'Include diagnostics',
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontFamily: StormTokens.sansFamily,
+                    fontSize: t.uiSize,
+                    color: t.text,
                   ),
                 ),
               ),
@@ -435,59 +404,6 @@ class _ReportProblemSheetState extends ConsumerState<ReportProblemSheet> {
               onPressed: disabled || _busy ? null : _send,
             ),
           ],
-        ),
-      ],
-    );
-  }
-}
-
-/// Pretty, monospace, scrollable and copyable — exactly what the fields say
-/// they hold, never re-summarised.
-class _JsonView extends StatelessWidget {
-  const _JsonView({required this.json});
-
-  final String json;
-
-  @override
-  Widget build(BuildContext context) {
-    final t = context.tokens;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Align(
-          alignment: Alignment.centerRight,
-          child: TextAction(
-            key: const Key('report-sent-copy'),
-            label: 'Copy',
-            accent: true,
-            onTap: () => copyToClipboard(json).then((copied) {
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(content: Text(copied ? 'Copied' : "Couldn't copy")),
-              );
-            }),
-          ),
-        ),
-        SizedBox(height: t.sp),
-        Container(
-          padding: EdgeInsets.all(t.sp * 1.5),
-          decoration: BoxDecoration(
-            color: t.surface2,
-            borderRadius: BorderRadius.circular(t.rControl),
-            border: Border.all(color: t.border, width: t.bw),
-          ),
-          child: SingleChildScrollView(
-            child: SelectableText(
-              json,
-              key: const Key('report-sent-json'),
-              style: TextStyle(
-                fontFamily: StormTokens.monoFamily,
-                fontSize: t.labelSize * 1.09,
-                color: t.text,
-              ),
-            ),
-          ),
         ),
       ],
     );

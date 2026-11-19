@@ -190,8 +190,8 @@ void main() {
       '  ',
     ).convert({'client': client, 'bundle': bundle});
     final shown = tester
-        .widget<SelectableText>(find.byKey(const Key('report-sent-json')))
-        .data;
+        .widget<CodeBlock>(find.byKey(const Key('report-sent-json')))
+        .text;
     expect(shown, expected);
   });
 
