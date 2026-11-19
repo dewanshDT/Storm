@@ -632,6 +632,14 @@ class AgentEvents {
     _syncPresence();
   }
 
+  /// Whether a change arrived while [_pumpPresence] was already sending
+  /// an older one — picked up by the same pump once it finishes, so the
+  /// server always ends up with the *latest* presence rather than
+  /// whichever of several concurrent POSTs happened to land last
+  /// (review item B).
+  bool _presenceDirty = false;
+  Future<void>? _presencePump;
+
   /// Tells the server about [_presence] without reconnecting — the point
   /// of keeping the stream open at all. A connection not yet open carries
   /// the current [_presence] itself once it does ([_connect]); and once
@@ -639,20 +647,42 @@ class AgentEvents {
   /// a change made while still connecting, which this early return would
   /// otherwise drop for good (review item 6).
   void _syncPresence() {
-    final connectionId = _presence.connectionId;
-    if (!isOpen || connectionId == null) return;
-    final api = _apiFactory?.call();
-    if (api == null) return;
-    unawaited(
-      api
-          .setPresence(
+    if (!isOpen || _presence.connectionId == null) return;
+    _presenceDirty = true;
+    _presencePump ??= _pumpPresence();
+  }
+
+  /// One `POST` in flight at a time (review item B): each run sends
+  /// whatever [_presence] is *at that moment*, retries once on failure,
+  /// and — if another change arrived while it was sending — runs again
+  /// immediately rather than trusting the stale request that was already
+  /// in flight.
+  Future<void> _pumpPresence() async {
+    while (_presenceDirty) {
+      _presenceDirty = false;
+      final snapshot = _presence;
+      final connectionId = snapshot.connectionId;
+      if (connectionId == null) break;
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final api = _apiFactory?.call();
+        if (api == null) break;
+        try {
+          await api.setPresence(
             connectionId,
-            _presence.active ? 'active' : 'background',
-            openSessionId: _presence.openSessionId,
-          )
-          .catchError((_) {})
-          .whenComplete(api.dispose),
-    );
+            snapshot.active ? 'active' : 'background',
+            openSessionId: snapshot.openSessionId,
+          );
+          break;
+        } catch (_) {
+          // One retry; a second failure waits for the next real change
+          // (or the next connect, which always carries the latest state
+          // anyway) rather than looping forever on a dead connection.
+        } finally {
+          api.dispose();
+        }
+      }
+    }
+    _presencePump = null;
   }
 
   void _drop() {

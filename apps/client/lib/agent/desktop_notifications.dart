@@ -9,6 +9,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../state/app_state.dart' show settingsProvider;
@@ -276,6 +277,14 @@ class RealOsNotifications implements OsNotifications {
       onDidReceiveNotificationResponse: (r) => onTap(r.payload),
     );
     _initialized = true;
+    // Nit: a tap that *launched* the app never reaches
+    // `onDidReceiveNotificationResponse` — the plugin was not listening
+    // yet — so a cold launch from a notification would otherwise land on
+    // the ordinary start screen with no idea which session it was about.
+    final launch = await _plugin.getNotificationAppLaunchDetails();
+    if (launch?.didNotificationLaunchApp ?? false) {
+      onTap(launch?.notificationResponse?.payload);
+    }
   }
 
   @override
@@ -304,7 +313,12 @@ class RealOsNotifications implements OsNotifications {
             ? LinuxNotificationCategory.im
             : LinuxNotificationCategory.imReceived,
       ),
-      windows: const WindowsNotificationDetails(),
+      // Review item K: per-session grouping has no Windows equivalent in
+      // this plugin, but muting does — `.silent()` is the only way to
+      // suppress the toast's own default sound.
+      windows: WindowsNotificationDetails(
+        audio: sound ? null : WindowsNotificationAudio.silent(),
+      ),
     ),
   );
 
@@ -349,36 +363,44 @@ class RealOsNotifications implements OsNotifications {
   }
 }
 
-/// One session's live OS notification: its plugin id, and every notice id
-/// it currently represents — one while shown individually, every folded
-/// notice's id once the 60 s/≥3 fold kicks in (review item 8) — so a read
-/// or a removal of *any* of them cancels what is actually on screen.
-class _SessionNotice {
-  _SessionNotice(this.intId);
-  int intId;
+/// One session's live *fold* — only exists once its burst has actually
+/// folded (review item A: an unfolded notice never joins this; it would
+/// otherwise cancel an unrelated, still-unread sibling notice below the
+/// fold threshold). Holds every notice id the fold absorbed, so a read or
+/// removal of *any* of them cancels the one rollup they share.
+class _SessionFold {
+  _SessionFold(this.intId);
+  final int intId;
   final Set<String> noticeIds = {};
 }
+
+/// How long [DesktopNotifier] remembers that macOS permission was asked,
+/// surviving a restart (review item F) — `checkPermissions()` alone
+/// cannot tell "never asked" from "asked and denied" apart, so without
+/// this a denial looks like `notAsked` again on every launch.
+const _kPermissionRequestedKey = 'storm.notifications.macosPermissionRequested';
 
 /// Raises/cancels local OS notifications for the signed-in session's
 /// `AgentEvents`, while this device's own prefs allow it. One instance per
 /// signed-in session, alive only on desktop (161-4; amends 154 Q2 for
 /// desktop only — phones and web never see this).
-class DesktopNotifier {
+///
+/// A [ChangeNotifier] so a page showing [unavailable] (review item G)
+/// updates the moment a later `show()` fails, not only at the point it
+/// first asked.
+class DesktopNotifier extends ChangeNotifier {
+  // A private initializing formal's named argument at the call site is
+  // still its public name with the underscore stripped (`prefs:`,
+  // `soundOn:`) — Dart resolves that for us, so this reads fine from
+  // `desktop_notifications_test.dart` even though the fields are
+  // private.
   DesktopNotifier({
     required this.deviceId,
     required this.events,
-    required DeviceNotificationPrefs? Function() prefs,
-    bool Function() soundOn = _alwaysSound,
+    required this._prefs,
+    this._soundOn = _alwaysSound,
     OsNotifications? os,
-    // Not `this._prefs`/`this._soundOn` above: an initializing formal's
-    // label is the field's own name, and a private name can't be used
-    // as a named argument from another library — this constructor is
-    // called from `desktop_notifications_test.dart` too.
-    // ignore: prefer_initializing_formals
-  }) : _prefs = prefs,
-       // ignore: prefer_initializing_formals
-       _soundOn = soundOn,
-       _os = os ?? RealOsNotifications() {
+  }) : _os = os ?? RealOsNotifications() {
     _sub = events.updates.listen(_heard);
   }
 
@@ -391,24 +413,47 @@ class DesktopNotifier {
   final OsNotifications _os;
   final _bursts = <String, NotificationBurst>{};
 
-  /// Session id → its live OS entry. A notice with no session (a test,
-  /// `host_offline`) is tracked only in [_noticeIntId] below and never
-  /// folds.
-  final _bySession = <String, _SessionNotice>{};
+  /// Session id → its live fold, only once one exists (review item A).
+  final _foldBySession = <String, _SessionFold>{};
 
-  /// notice id → the plugin id it was shown under, for a sessionless
-  /// notice (1:1, never folded) or to find which session's
-  /// [_SessionNotice] a given notice id belongs to.
+  /// Session id → the notice ids currently shown *individually* (not yet
+  /// folded) for it, oldest first — exactly what a fold, the moment it
+  /// starts, needs to cancel.
+  final _recentIndividual = <String, List<String>>{};
+
+  /// notice id → the plugin id it is shown under right now, for a
+  /// sessionless notice or a still-individual one. A folded notice is
+  /// never in here — [_foldBySession] is its only record.
   final _noticeIntId = <String, int>{};
+
+  /// notice id → its session, for every notice this is still tracking in
+  /// any form (individual or folded) — the only way [_cancelForNoticeId]
+  /// knows where to look.
   final _sessionOfNotice = <String, String>{};
 
   StreamSubscription<AgentEventUpdate>? _sub;
-  bool _permissionRequested = false;
+
+  /// Null once loaded; [_permissionRequested] is the awaited value.
+  bool? _permissionRequestedCache;
+  Future<bool>? _permissionRequestedLoad;
+
+  /// Guards concurrent first calls to [_show] (review nit): two notices
+  /// arriving at once must never both call `requestPermission`.
+  Future<void>? _permissionInFlight;
+
+  bool _unavailable = false;
 
   /// The plugin failed to initialize, show, or ask permission (review
-  /// item 11): "This device" shows "No notification service" rather than
-  /// "Checking…" forever.
-  bool unavailable = false;
+  /// item 11/G): "This device" shows "No notification service" rather
+  /// than "Checking…" forever, updating live via [ChangeNotifier] the
+  /// moment a later call fails too.
+  bool get unavailable => _unavailable;
+
+  void _setUnavailable() {
+    if (_unavailable) return;
+    _unavailable = true;
+    notifyListeners();
+  }
 
   Future<void> init() => _os.init(onTap: _onTap);
 
@@ -416,20 +461,45 @@ class DesktopNotifier {
     notificationTapped.value = decodeTapPayload(payload);
   }
 
+  Future<bool> _permissionRequested() async {
+    if (_permissionRequestedCache != null) return _permissionRequestedCache!;
+    return _permissionRequestedLoad ??= () async {
+      var requested = false;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        requested = prefs.getBool(_kPermissionRequestedKey) ?? false;
+      } catch (_) {
+        // Tests and previews have no preferences store; `false` (never
+        // asked) is the safe default either way.
+      }
+      return _permissionRequestedCache = requested;
+    }();
+  }
+
+  Future<void> _markPermissionRequested() async {
+    _permissionRequestedCache = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(_kPermissionRequestedKey, true);
+    } catch (_) {}
+  }
+
   /// [DesktopPermissionStatus.unavailable] if the plugin itself failed —
   /// never thrown, so a page reading this to render a row never crashes
-  /// on it.
+  /// on it. Reads the real OS status every time (review item F) rather
+  /// than trusting any in-memory flag on its own — only "has this device
+  /// ever asked" needs to survive a restart, and that part is persisted.
   Future<DesktopPermissionStatus> permissionStatus() async {
     try {
       await init();
       final granted = await _os.checkPermission();
       if (granted == null) return DesktopPermissionStatus.notApplicable;
       if (granted) return DesktopPermissionStatus.allowed;
-      return _permissionRequested
+      return await _permissionRequested()
           ? DesktopPermissionStatus.denied
           : DesktopPermissionStatus.notAsked;
     } catch (_) {
-      unavailable = true;
+      _setUnavailable();
       return DesktopPermissionStatus.unavailable;
     }
   }
@@ -449,38 +519,58 @@ class DesktopNotifier {
           _cancelForNoticeId(id);
         }
       case AgentNotificationsCleared():
-        _bySession.clear();
+        _foldBySession.clear();
+        _recentIndividual.clear();
         _noticeIntId.clear();
         _sessionOfNotice.clear();
+        _bursts.clear();
         unawaited(_os.cancelAll().catchError((_) {}));
       default:
         return;
     }
   }
 
-  /// Review item 8: a read or removal of any notice in a fold (or the
-  /// lone notice behind an unfolded entry) cancels whatever is actually
-  /// shown for its session, and drops the bookkeeping for the rest of
-  /// that fold with it — a stale rollup never outlives every notice it
-  /// once counted.
+  /// Review item A: a read or removal only ever cancels what [noticeId]
+  /// is actually part of — the whole fold if it was folded, or just its
+  /// own still-individual entry otherwise — and never an unrelated
+  /// sibling notice for the same session.
   void _cancelForNoticeId(String noticeId) {
-    final intId = _noticeIntId.remove(noticeId);
     final sessionId = _sessionOfNotice.remove(noticeId);
     if (sessionId == null) {
+      final intId = _noticeIntId.remove(noticeId);
       if (intId != null) unawaited(_os.cancel(intId).catchError((_) {}));
       return;
     }
-    final tracked = _bySession.remove(sessionId);
-    if (tracked == null) return;
-    unawaited(_os.cancel(tracked.intId).catchError((_) {}));
-    for (final id in tracked.noticeIds) {
-      _noticeIntId.remove(id);
-      _sessionOfNotice.remove(id);
+    final fold = _foldBySession[sessionId];
+    if (fold != null && fold.noticeIds.contains(noticeId)) {
+      _foldBySession.remove(sessionId);
+      _bursts.remove(
+        sessionId,
+      ); // review item A: prune — a later notice starts fresh
+      unawaited(_os.cancel(fold.intId).catchError((_) {}));
+      for (final id in fold.noticeIds) {
+        _noticeIntId.remove(id);
+        _sessionOfNotice.remove(id);
+      }
+      return;
     }
+    final intId = _noticeIntId.remove(noticeId);
+    _recentIndividual[sessionId]?.remove(noticeId);
+    if (_recentIndividual[sessionId]?.isEmpty ?? false) {
+      _recentIndividual.remove(sessionId);
+    }
+    if (intId != null) unawaited(_os.cancel(intId).catchError((_) {}));
   }
 
   Future<void> _raise(AgentNotification n) async {
     if (n.silent) return;
+    // Review item E: a test notice is never raised from the live stream
+    // — only `forceShow`, by the device that actually asked for it,
+    // raises one. Every other device hearing the same live frame (every
+    // connected device hears every frame) must ignore it here, or it
+    // would show twice on the requester and once more on whichever
+    // device the hint happened to name.
+    if (n.kind == 'test') return;
     if (!shouldRaiseOsNotification(
       n.deliver,
       thisDeviceActive: events.isActive,
@@ -492,7 +582,7 @@ class DesktopNotifier {
     try {
       await _show(n, prefs);
     } catch (_) {
-      unavailable = true;
+      _setUnavailable();
     }
   }
 
@@ -500,44 +590,53 @@ class DesktopNotifier {
   /// [devicePrefsAllow] still applies — for "Send a test notification"
   /// (review item 13): the person is looking right at Settings, so the
   /// server's own hint for a notice with no session would normally be a
-  /// toast or nothing, neither of which proves the OS path works.
+  /// toast or nothing, neither of which proves the OS path works. Also
+  /// refreshes [permissionStatus] after (review item E), so the page's
+  /// own read of it reflects whatever the attempt just revealed.
   Future<void> forceShow(AgentNotification n) async {
     final prefs = _prefs();
-    if (prefs == null || !devicePrefsAllow(n, prefs)) return;
-    try {
-      await _show(n, prefs);
-    } catch (_) {
-      unavailable = true;
+    if (prefs != null && devicePrefsAllow(n, prefs)) {
+      try {
+        await _show(n, prefs);
+      } catch (_) {
+        _setUnavailable();
+      }
     }
+    unawaited(permissionStatus());
   }
 
   Future<void> _show(AgentNotification n, DeviceNotificationPrefs prefs) async {
     await init();
-    if (!_permissionRequested) {
-      _permissionRequested = true;
-      await _os.requestPermission();
-    }
+    await (_permissionInFlight ??= _ensurePermission().whenComplete(() {
+      _permissionInFlight = null;
+    }));
     final plan = planOsNotification(n, prefs.preview, _bursts, DateTime.now());
     final sessionId = n.sessionId;
     if (sessionId != null) {
-      // One OS entry per session, always (review item 8): a new notice
-      // replaces whatever was shown for this session rather than
-      // stacking beside it, so a fold's own arrival is just one more
-      // replacement — the individual notices it absorbs are exactly the
-      // ones already superseded on the way there, cancelled as they go
-      // rather than left behind for the rollup to join. [tracked]
-      // accumulates every notice id that is this way "covered" by
-      // whatever is currently shown, so a read or removal of *any* of
-      // them (even an already-superseded one) cancels the current entry.
-      final existing = _bySession[sessionId];
-      if (existing != null && existing.intId != plan.intId) {
-        unawaited(_os.cancel(existing.intId).catchError((_) {}));
+      if (plan.folded) {
+        final isNewFold = !_foldBySession.containsKey(sessionId);
+        final fold = _foldBySession.putIfAbsent(
+          sessionId,
+          () => _SessionFold(plan.intId),
+        );
+        if (isNewFold) {
+          // Review item A: only *now*, the moment a burst actually
+          // folds, do the individual notices it absorbed get cancelled
+          // — never on every new individual notice below the threshold.
+          final absorbed = _recentIndividual.remove(sessionId) ?? const [];
+          for (final id in absorbed) {
+            final intId = _noticeIntId.remove(id);
+            if (intId != null) unawaited(_os.cancel(intId).catchError((_) {}));
+          }
+          fold.noticeIds.addAll(absorbed);
+        }
+        fold.noticeIds.add(n.id);
+        _sessionOfNotice[n.id] = sessionId;
+      } else {
+        _noticeIntId[n.id] = plan.intId;
+        _sessionOfNotice[n.id] = sessionId;
+        _recentIndividual.putIfAbsent(sessionId, () => []).add(n.id);
       }
-      final tracked = existing ?? _SessionNotice(plan.intId);
-      tracked.intId = plan.intId;
-      tracked.noticeIds.add(n.id);
-      _bySession[sessionId] = tracked;
-      _sessionOfNotice[n.id] = sessionId;
     } else {
       _noticeIntId[n.id] = plan.intId;
     }
@@ -552,8 +651,16 @@ class DesktopNotifier {
     );
   }
 
+  Future<void> _ensurePermission() async {
+    if (await _permissionRequested()) return;
+    await _markPermissionRequested();
+    await _os.requestPermission();
+  }
+
+  @override
   void dispose() {
     unawaited(_sub?.cancel());
+    super.dispose();
   }
 }
 
@@ -565,7 +672,12 @@ class DesktopNotifier {
 final desktopNotifierProvider = Provider.autoDispose<DesktopNotifier?>((ref) {
   if (!isDesktopPlatform) return null;
   final events = ref.watch(agentEventsProvider);
-  final deviceId = ref.watch(settingsProvider).value?.deviceId ?? '';
+  // Review item C: `deviceId` only, not the whole `Settings` — watching
+  // the full provider rebuilt (and so recreated) this notifier, losing
+  // its fold/cancel bookkeeping and permission state, on an unrelated
+  // change (theme, font size, …).
+  final deviceId =
+      ref.watch(settingsProvider.select((s) => s.value?.deviceId)) ?? '';
   if (events == null || deviceId.isEmpty) return null;
   final prefsState = ref.watch(deviceNotificationPrefsProvider);
   final local = ref.watch(thisDeviceLocalPrefsProvider);

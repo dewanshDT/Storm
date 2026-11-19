@@ -36,6 +36,14 @@ const kNotificationKindLabels = {
   'host_offline': 'Host offline',
   'child_finished': 'Child finished',
   'stopped_working': 'Stopped working',
+  // Review item H: every other kind Storm can actually emit, so a
+  // preview at the `session`/`storm` level never falls back to a raw
+  // wire code.
+  'summary': 'A summary',
+  'test': 'Test notification',
+  'agent_message': 'Sent a message',
+  'agent_rollup': 'Sent more messages',
+  'terminal_notice': 'Sent a terminal notice',
 };
 
 String noticeKindLabel(String kind) => kNotificationKindLabels[kind] ?? kind;

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_events.dart';
 import 'package:storm/agent/desktop_notifications.dart';
 import 'package:storm/agent/notifications_models.dart';
@@ -172,8 +173,8 @@ void main() {
     });
 
     test('an unlabelled kind falls back to its own code, not a crash', () {
-      final r = renderPreview(_notif(kind: 'summary'), 'storm');
-      expect(r.title, 'Storm · summary');
+      final r = renderPreview(_notif(kind: 'some_future_kind'), 'storm');
+      expect(r.title, 'Storm · some_future_kind');
     });
   });
 
@@ -342,6 +343,7 @@ void main() {
     tearDownAll(() => debugDefaultTargetPlatformOverride = null);
 
     setUp(() {
+      SharedPreferences.setMockInitialValues({});
       os = _FakeOs();
       harness = _Harness();
     });
@@ -471,6 +473,141 @@ void main() {
         notifier.dispose();
       },
     );
+
+    test('review nit: two notices arriving at once still only request '
+        'permission once', () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      harness.push(_notif(id: 'n1', deliver: 'os'));
+      harness.push(_notif(id: 'n2', deliver: 'os', sessionId: 'ags_2'));
+      await pumpEventQueue();
+      expect(os.permissionRequests, 1);
+      notifier.dispose();
+    });
+
+    test(
+      'review item F: a permission request persists across a restart — a '
+      'second DesktopNotifier sees "denied", never "not asked" again',
+      () async {
+        harness.setActive(false);
+        os.permission = false;
+        final first = DesktopNotifier(
+          deviceId: 'dev_a',
+          events: harness.events,
+          prefs: allowAll,
+          os: os,
+        );
+        harness.push(_notif(id: 'n1', deliver: 'os'));
+        await pumpEventQueue();
+        expect(os.permissionRequests, 1);
+        first.dispose();
+
+        final second = DesktopNotifier(
+          deviceId: 'dev_a',
+          events: harness.events,
+          prefs: allowAll,
+          os: os,
+        );
+        expect(await second.permissionStatus(), DesktopPermissionStatus.denied);
+        second.dispose();
+      },
+    );
+
+    test(
+      'review item E: a live "test" notice is never raised here, even '
+      'with deliver: "os" — only forceShow, by whoever requested it',
+      () async {
+        harness.setActive(false);
+        final notifier = DesktopNotifier(
+          deviceId: 'dev_a',
+          events: harness.events,
+          prefs: allowAll,
+          os: os,
+        );
+        harness.push(
+          _notif(id: 'n1', kind: 'test', sessionId: null, deliver: 'os'),
+        );
+        await pumpEventQueue();
+        expect(os.shown, isEmpty);
+        notifier.dispose();
+      },
+    );
+
+    test('review item A: two individual notices for one session below the '
+        'fold threshold never cancel each other', () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      harness.push(_notif(id: 'n1', deliver: 'os'));
+      await pumpEventQueue();
+      harness.push(_notif(id: 'n2', deliver: 'os'));
+      await pumpEventQueue();
+      expect(os.shown.keys, contains(notificationIntId('n1')));
+      expect(os.shown.keys, contains(notificationIntId('n2')));
+
+      // Reading the older one leaves the newer, unrelated one alone.
+      harness.read(['n1']);
+      await pumpEventQueue();
+      expect(os.shown.keys, isNot(contains(notificationIntId('n1'))));
+      expect(
+        os.shown.keys,
+        contains(notificationIntId('n2')),
+        reason: "n1's read must never cancel n2's unrelated notification",
+      );
+      notifier.dispose();
+    });
+
+    test(
+      'review item I: notification_removed cancels, same as a read',
+      () async {
+        harness.setActive(false);
+        final notifier = DesktopNotifier(
+          deviceId: 'dev_a',
+          events: harness.events,
+          prefs: allowAll,
+          os: os,
+        );
+        harness.push(_notif(id: 'n1', deliver: 'os'));
+        await pumpEventQueue();
+        expect(os.shown.keys, contains(notificationIntId('n1')));
+
+        harness.removed(['n1']);
+        await pumpEventQueue();
+        expect(os.shown.keys, isNot(contains(notificationIntId('n1'))));
+        notifier.dispose();
+      },
+    );
+
+    test('review item G: unavailable becomes true live, via ChangeNotifier, '
+        'on a show failure after construction', () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      var notified = false;
+      notifier.addListener(() => notified = true);
+      expect(notifier.unavailable, isFalse);
+
+      os.failShow = true;
+      harness.push(_notif(id: 'n1', deliver: 'os'));
+      await pumpEventQueue();
+
+      expect(notifier.unavailable, isTrue);
+      expect(notified, isTrue);
+      notifier.dispose();
+    });
   });
 }
 
@@ -481,6 +618,7 @@ class _FakeOs implements OsNotifications {
   var cancelledAll = false;
   var permissionRequests = 0;
   var failInit = false;
+  var failShow = false;
   bool? permission = true;
 
   @override
@@ -498,6 +636,7 @@ class _FakeOs implements OsNotifications {
     required String category,
     required bool sound,
   }) async {
+    if (failShow) throw StateError('show failed');
     shown[id] = title;
   }
 
@@ -551,6 +690,8 @@ class _Harness {
 
   void push(AgentNotification n) => _controller.add(AgentNotificationPushed(n));
   void read(List<String> ids) => _controller.add(AgentNotificationsRead(ids));
+  void removed(List<String> ids) =>
+      _controller.add(AgentNotificationsRemoved(ids));
   void clearAll() => _controller.add(AgentNotificationsCleared());
 
   void dispose() {

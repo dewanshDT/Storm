@@ -1144,6 +1144,11 @@ async fn revoke_device_handler(
     let mut auth_db = state.auth_db.lock().await;
     crate::auth::devices::revoke(&mut auth_db, &id, "user revoked", &now)
         .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    drop(auth_db);
+    // Decision 161 review item D: a revoked device's connections stop
+    // counting toward any deliver hint at once — not only once each own
+    // stream's `PresenceGuard` notices its socket died.
+    state.agent.clear_presence_for_device(&id);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -1624,6 +1624,22 @@ async fn device_prefs_and_presence_ops_refuse_a_key_or_agent_actor() {
                 .is_err()
         );
         assert!(
+            crate::ops::put_device_prefs(
+                &f.state,
+                &actor,
+                Some("dev_x"),
+                None,
+                crate::ops::DevicePrefsPatch {
+                    enabled: Some(false),
+                    classes: None,
+                    preview: None,
+                },
+            )
+            .await
+            .is_err(),
+            "review item I: PUT must refuse a key or agent actor too"
+        );
+        assert!(
             crate::ops::list_device_notification_rows(&f.state, &actor)
                 .await
                 .is_err()
@@ -1651,4 +1667,52 @@ async fn a_sessionless_notice_still_carries_a_deliver_hint() {
     let event = a.expect("notification").await;
     assert_eq!(event.data["id"], n.id);
     assert_eq!(event.data["deliver"], "os");
+}
+
+/// Review item D: revoking a device clears its presence at once, so it
+/// never counts toward a deliver hint computed after — not only once its
+/// own dead stream notices and runs `PresenceGuard::drop`.
+#[tokio::test]
+async fn revoking_a_device_clears_its_presence() {
+    let dir = tempdir::TempDir::new("storm-161-4-revoke-clears-presence").unwrap();
+    let f = fixture(dir.path()).await;
+    let (device_a, bearer_a) = second_device(&f.state, &f.owner, "a").await;
+
+    let mut a = open_presence(&f.app, &bearer_a, "conn-a", true, None).await;
+    a.expect("snapshot").await;
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some(format!("toast:{device_a}")),
+        "device a is active before it is revoked"
+    );
+
+    let response = f
+        .ask(
+            axum::http::Request::builder()
+                .method("DELETE")
+                .uri(format!("/v1/auth/devices/{device_a}"))
+                .header("authorization", &f.bearer)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    assert_eq!(
+        f.state.agent.deliver_hint_uncached(None),
+        Some("os".to_string()),
+        "a's presence must not survive its own revoke"
+    );
+
+    // The device-prefs row (auth/devices.rs's own cascade) is still
+    // covered separately; this is the API-level half review item D also
+    // asks for — the device row itself is really gone.
+    let devices = json(f.ask(get("/v1/auth/devices", Some(&f.bearer))).await).await;
+    let row = devices
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == device_a)
+        .expect("the revoked device is still listed, just marked revoked");
+    assert!(row["revoked"].is_string());
 }

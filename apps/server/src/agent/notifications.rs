@@ -2237,16 +2237,16 @@ pub(super) struct NotifierMemory {
     started_at: String,
 }
 
-/// One `/v1/agent/events` connection's live state (161-4), keyed by its own
-/// connection id rather than by device — two tabs, or an old connection
-/// overlapping its replacement during a reconnect, must never let one
-/// clear the other's presence or have the stronger state (background)
-/// lose to the weaker one. A device counts as active if *any* of its
-/// connections does. Never persisted: a restart forgets it the same way
-/// it forgets which sessions are open on screen.
+/// One `/v1/agent/events` connection's live state (161-4), keyed by
+/// `(device_id, connection_id)` — connection id alone so a device's own
+/// two tabs, or an old connection overlapping its replacement during a
+/// reconnect, never let one clear the other's presence; the device id
+/// too so another device can never collide a connection id into
+/// overwriting this one's entry (review nit). A device counts as active
+/// if *any* of its connections does. Never persisted: a restart forgets
+/// it the same way it forgets which sessions are open on screen.
 #[derive(Debug, Clone)]
 pub(super) struct Presence {
-    pub device_id: String,
     pub active: bool,
     pub open_session: Option<String>,
 }
@@ -2500,10 +2500,10 @@ impl AgentManager {
     // ---- Presence and the deliver hint (161-4) --------------------------
 
     /// Registers a brand new `/v1/agent/events` connection's presence,
-    /// keyed by `connection_id` (client-generated, unique per connection —
-    /// never per device, so two tabs or a reconnect's overlap each keep
-    /// their own entry). Always succeeds: connecting is how a connection
-    /// id starts existing.
+    /// keyed by `(device_id, connection_id)` (the latter client-generated,
+    /// unique per connection — never per device, so two tabs or a
+    /// reconnect's overlap each keep their own entry). Always succeeds:
+    /// connecting is how a connection id starts existing.
     pub fn set_presence(
         &self,
         connection_id: &str,
@@ -2512,9 +2512,8 @@ impl AgentManager {
         open_session: Option<String>,
     ) {
         self.presence.lock().unwrap().insert(
-            connection_id.to_string(),
+            (device_id.to_string(), connection_id.to_string()),
             Presence {
-                device_id: device_id.to_string(),
                 active,
                 open_session,
             },
@@ -2533,21 +2532,34 @@ impl AgentManager {
         open_session: Option<String>,
     ) -> bool {
         let mut presence = self.presence.lock().unwrap();
-        match presence.get_mut(connection_id) {
-            Some(p) if p.device_id == device_id => {
+        match presence.get_mut(&(device_id.to_string(), connection_id.to_string())) {
+            Some(p) => {
                 p.active = active;
                 p.open_session = open_session;
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
     /// Forgets one connection's presence — called once it ends, so a
     /// closed app is never mistaken for a quiet one. Never touches any
     /// other connection, including another of the same device's.
-    pub fn clear_presence(&self, connection_id: &str) {
-        self.presence.lock().unwrap().remove(connection_id);
+    pub fn clear_presence(&self, connection_id: &str, device_id: &str) {
+        self.presence
+            .lock()
+            .unwrap()
+            .remove(&(device_id.to_string(), connection_id.to_string()));
+    }
+
+    /// A device was just revoked (review item D): every connection it had
+    /// open stops counting toward any deliver hint, immediately — not
+    /// only once each one's own stream notices the socket is gone.
+    pub fn clear_presence_for_device(&self, device_id: &str) {
+        self.presence
+            .lock()
+            .unwrap()
+            .retain(|(d, _), _| d != device_id);
     }
 
     /// The architecture's delivery order, for one notice about
@@ -2566,14 +2578,14 @@ impl AgentManager {
     fn compute_deliver_hint(&self, session_id: Option<&str>) -> Option<String> {
         let presence = self.presence.lock().unwrap();
         let mut active_devices: Vec<&str> = Vec::new();
-        for p in presence.values() {
+        for ((device_id, _), p) in presence.iter() {
             if !p.active {
                 continue;
             }
             if session_id.is_some() && p.open_session.as_deref() == session_id {
                 return None;
             }
-            active_devices.push(&p.device_id);
+            active_devices.push(device_id);
         }
         match active_devices.into_iter().min() {
             Some(device_id) => Some(format!("toast:{device_id}")),

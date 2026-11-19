@@ -267,8 +267,7 @@ pub async fn list_device_notification_rows(
 
 /// `POST /v1/notifications/presence`: in-memory only (161-4's deliver
 /// hint), never persisted — a restart simply forgets who was active, same
-/// as the session list's own live state.
-/// `POST /v1/notifications/presence`: updates the *named connection*'s
+/// as the session list's own live state. Updates the *named connection*'s
 /// presence — never creates one (that only ever happens on connect) — so
 /// a device whose stream has already dropped gets a 404, not a ghost
 /// entry that outlives it.

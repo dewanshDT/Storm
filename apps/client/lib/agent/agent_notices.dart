@@ -97,7 +97,9 @@ const _toastedLimit = 200;
 /// `needs_you`/`finished`/`error` replacing `noticeOf` for those three, and
 /// `usage_limit`/`host_offline`/`child_finished`/`summary`/`test` and any
 /// agent- or terminal-sourced notice having no client equivalent at all.
-const _kNeverToastKinds = {'delete_request', 'stopped_working'};
+// 'test' (review item E): a test notification is for a specific device's
+// OS-notification check, raised via forceShow — never toasted here.
+const _kNeverToastKinds = {'delete_request', 'stopped_working', 'test'};
 
 /// The three kinds `noticeOf` also computes client-side; see
 /// [_AgentNoticeWatcherState._serverCovers].

@@ -278,6 +278,40 @@ void main() {
       expect(opens, hasLength(2));
       expect(presencesSent.last.connectionId, isNot(first));
     });
+
+    test('review item I: the real OS lifecycle wiring, not just background()/'
+        'foreground() called directly — inactive goes background, resumed '
+        'comes back active', () async {
+      final liveOpens = <StreamController<AgentEvent>>[];
+      final live = AgentEvents(
+        (presence) {
+          final c = StreamController<AgentEvent>();
+          liveOpens.add(c);
+          return c.stream;
+        },
+        retryMin: const Duration(milliseconds: 5),
+        apiFactory: () => AgentApi(
+          baseUrl: 'http://s',
+          token: 't',
+          client: MockClient((req) async => http.Response('', 204)),
+        ),
+      )..start();
+      addTearDown(live.dispose);
+      await settle();
+      expect(live.isActive, isTrue);
+
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.inactive,
+      );
+      await settle();
+      expect(live.isActive, isFalse);
+
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      );
+      await settle();
+      expect(live.isActive, isTrue);
+    });
   });
 
   group('kept sessions', () {

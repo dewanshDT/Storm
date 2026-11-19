@@ -58,16 +58,17 @@ fn clamp_connection_id(id: Option<String>) -> Option<String> {
 /// returning naturally, or the WebSocket branch's `select!` dropping this
 /// future when the socket closes first. Without it, a desktop that quit
 /// mid-session would be "active" forever. Keyed by connection, never by
-/// device: an old connection's drop must never clear a newer one's.
+/// device alone: an old connection's drop must never clear a newer
+/// one's.
 struct PresenceGuard {
     state: Shared,
-    connection_id: Option<String>,
+    ids: Option<(String, String)>, // (connection_id, device_id)
 }
 
 impl Drop for PresenceGuard {
     fn drop(&mut self) {
-        if let Some(id) = &self.connection_id {
-            self.state.agent.clear_presence(id);
+        if let Some((connection_id, device_id)) = &self.ids {
+            self.state.agent.clear_presence(connection_id, device_id);
         }
     }
 }
@@ -153,6 +154,7 @@ pub(super) async fn agent_events(
         .map(|q| q.0)
         .unwrap_or_default();
     let connection_id = clamp_connection_id(presence_query.connection_id.clone());
+    let mut guard_ids = None;
     if let (Some(device_id), Some(connection_id)) = (&device_id, &connection_id) {
         let active = presence_query.presence.as_deref() != Some("background");
         state.agent.set_presence(
@@ -161,14 +163,11 @@ pub(super) async fn agent_events(
             active,
             presence_query.open_session.clone(),
         );
+        guard_ids = Some((connection_id.clone(), device_id.clone()));
     }
     let presence_guard = PresenceGuard {
         state: state.clone(),
-        connection_id: if device_id.is_some() {
-            connection_id
-        } else {
-            None
-        },
+        ids: guard_ids,
     };
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();

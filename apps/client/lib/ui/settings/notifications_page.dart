@@ -431,7 +431,7 @@ class _EventRow extends StatelessWidget {
               onSelected: onThreshold,
             ),
             SizedBox(height: t.sp),
-            Container(height: t.bw, color: t.border),
+            const SettingsDivider(),
           ],
         ],
       ),
@@ -657,20 +657,27 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
     DesktopPermissionStatus.notApplicable => 'Allowed',
   };
 
-  String get _deliveryStatus => switch (defaultTargetPlatform) {
-    TargetPlatform.macOS => 'While Storm runs',
-    _ => 'Only while Storm is open',
-  };
+  // Review item G: once a show has actually failed, the delivery row says
+  // so too — not just the OS permission row below it, which only answers
+  // once `_checkPermission` has run.
+  String _deliveryStatus(DesktopNotifier? notifier) {
+    if (notifier?.unavailable ?? false) return 'No notification service';
+    return switch (defaultTargetPlatform) {
+      TargetPlatform.macOS => 'While Storm runs',
+      _ => 'Only while Storm is open',
+    };
+  }
 
   @override
   Widget build(BuildContext context) {
     if (!isDesktopPlatform) return const SizedBox.shrink();
     final deviceState = ref.watch(deviceNotificationPrefsProvider);
     final local = ref.watch(thisDeviceLocalPrefsProvider);
+    final notifier = ref.watch(desktopNotifierProvider);
     if (deviceState == null) return const SizedBox.shrink();
     return ListenableBuilder(
-      listenable: Listenable.merge([deviceState, local]),
-      builder: (context, _) => _body(context, deviceState, local),
+      listenable: Listenable.merge([deviceState, local, ?notifier]),
+      builder: (context, _) => _body(context, deviceState, local, notifier),
     );
   }
 
@@ -678,6 +685,7 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
     BuildContext context,
     DeviceNotificationPrefsState deviceState,
     ThisDeviceLocalPrefs local,
+    DesktopNotifier? notifier,
   ) {
     final t = context.tokens;
     // Review item 12: never "Loading…" — [DeviceNotificationPrefsState]
@@ -700,7 +708,7 @@ class _ThisDeviceSectionState extends ConsumerState<_ThisDeviceSection> {
                   _guard(context, () => deviceState.setEnabled(v)),
             ),
           ),
-          SettingsRow(label: 'Delivery', sub: _deliveryStatus),
+          SettingsRow(label: 'Delivery', sub: _deliveryStatus(notifier)),
           SettingsRow(
             label: 'OS permission',
             sub: _permissionLabel,

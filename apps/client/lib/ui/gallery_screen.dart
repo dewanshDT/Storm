@@ -4,6 +4,7 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 import 'accents.dart';
 import 'controls.dart';
 import 'session_status.dart';
+import 'settings/settings_widgets.dart' show SettingsDivider;
 import 'states.dart';
 import 'theme.dart';
 import 'tokens.dart';
@@ -218,6 +219,13 @@ class _Column extends StatelessWidget {
                       label: 'Revoke',
                       onPressed: () {},
                     ),
+                  ),
+                  SizedBox(height: t.gap),
+                  const SettingsDivider(),
+                  SizedBox(height: t.gap),
+                  SettingsRow(
+                    label: 'Below a settings divider',
+                    divider: false,
                   ),
                 ],
               ),

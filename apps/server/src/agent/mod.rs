@@ -1158,7 +1158,7 @@ pub struct AgentManager {
     /// device id. In memory only, like the session list's own live state
     /// — a restart simply forgets who was looking, and every connection
     /// re-reports on its next connect.
-    presence: Mutex<HashMap<String, notifications::Presence>>,
+    presence: Mutex<HashMap<(String, String), notifications::Presence>>,
     /// One deliver hint per notice id, computed once (161-4 review item
     /// 4).
     deliver_cache: Mutex<notifications::DeliverCache>,
