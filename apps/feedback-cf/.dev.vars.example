@@ -1,0 +1,7 @@
+# Copy to .dev.vars for `wrangler dev`; it is gitignored. In production this
+# is a secret: `wrangler secret put SYNC_TOKEN`.
+
+# Bearer token the sync service (deploy/feedback/) presents to GET/DELETE
+# /v1/reports*. POST /v1/reports takes no token (decision 162d): it is the
+# intake side, reached by any user's own server.
+SYNC_TOKEN=dev-sync-token

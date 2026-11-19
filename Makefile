@@ -12,6 +12,7 @@ SERVER := apps/server
 RELAY  := apps/relay
 CONFORMANCE := tools/relay-conformance
 RELAY_CF := apps/relay-cf
+FEEDBACK_CF := apps/feedback-cf
 RUNTIME := apps/runtime
 # Per-session isolation's root helper (decision 136): its own small crate.
 ISOLATION := apps/runtime/isolation
@@ -95,7 +96,7 @@ lint:
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-relay-cf test-runtime test-diag test-client
+test: test-server test-relay test-relay-cf test-feedback-cf test-runtime test-diag test-client
 
 ## test-server: Rust unit tests
 test-server:
@@ -144,6 +145,13 @@ relay-conformance-cf:
 # suite, which runs inside workerd and reads docs/srp-vectors.json.
 test-relay-cf:
 	cd $(RELAY_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
+
+## test-feedback-cf: the feedback intake Worker's typecheck + workerd tests (needs Node 22)
+#
+# Decision 162d. `npm ci` from the committed lockfile, then tsc and the vitest
+# suite, which runs inside workerd against a local R2 + Durable Object.
+test-feedback-cf:
+	cd $(FEEDBACK_CF) && npm ci --no-audit --no-fund && npm run typecheck && npm test
 
 ## test-runtime: storm-runtime unit + provider-contract tests
 #
@@ -618,7 +626,7 @@ clean:
 	rm -rf $(WWW)/dist $(WWW)/.astro
 	rm -rf .dev
 
-.PHONY: help check lint test test-server test-relay test-relay-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
+.PHONY: help check lint test test-server test-relay test-relay-cf test-feedback-cf relay-conformance relay-conformance-local relay-conformance-cf test-client test-live test-browser test-migration test-gateway-mutations gate-bridge-identity gate-attention gate-lifecycle fmt \
         dry-run server client app-linux web serve-web www www-dev www-check www-facts formula-check codegen clean \
         deploy-web deploy-web-check installer-check \
         build-server deploy deploy-check

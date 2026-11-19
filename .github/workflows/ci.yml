@@ -25,6 +25,7 @@ jobs:
       server: ${{ steps.f.outputs.server }}
       relay: ${{ steps.f.outputs.relay }}
       relay_cf: ${{ steps.f.outputs.relay_cf }}
+      feedback_cf: ${{ steps.f.outputs.feedback_cf }}
       runtime: ${{ steps.f.outputs.runtime }}
       diag: ${{ steps.f.outputs.diag }}
       installer: ${{ steps.f.outputs.installer }}
@@ -68,6 +69,8 @@ jobs:
               - *vectors
               - apps/relay-cf/**
               - tools/relay-conformance/**
+            feedback_cf:
+              - apps/feedback-cf/**
             runtime:
               - *vectors
               - *diag_crate
@@ -248,6 +251,28 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo test
+
+  # The feedback intake Worker (decision 162d): its own TypeScript app on
+  # Workers + R2 + a Durable Object, so relay-cf's job for the same reason —
+  # its tests run inside workerd.
+  feedback-cf:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.feedback_cf == 'true'
+    name: feedback-cf (workers)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/feedback-cf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/feedback-cf/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
 
   # The Runtime Host: its own crate and its own job, for the relay's reason —
   # it never depends on apps/server and no workspace joins them (decision 77).
