@@ -304,6 +304,20 @@ void main() {
     ),
   );
 
+  /// Best-effort: [_reportsDir] exists for the coordinator's own review in
+  /// this sandbox, but is neither present nor writable on CI's runner —
+  /// which must not fail a test over a developer convenience the
+  /// `expect`s above it already proved the substance of.
+  Future<void> writePng(ui.Image image, String name) async {
+    try {
+      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+      final file = File('$_reportsDir/$name.png')..createSync(recursive: true);
+      await file.writeAsBytes(bytes!.buffer.asUint8List());
+    } on FileSystemException {
+      // Not this environment's job.
+    }
+  }
+
   Future<void> save(
     WidgetTester tester,
     String name, {
@@ -315,9 +329,7 @@ void main() {
           boundaryKey.currentContext!.findRenderObject()
               as RenderRepaintBoundary;
       final image = await boundary.toImage(pixelRatio: 2.0);
-      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-      final file = File('$_reportsDir/$name.png')..createSync(recursive: true);
-      await file.writeAsBytes(bytes!.buffer.asUint8List());
+      await writePng(image, name);
     });
   }
 
@@ -330,9 +342,7 @@ void main() {
       final image = await captureImage(
         tester.element(find.byType(MaterialApp).first),
       );
-      final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
-      final file = File('$_reportsDir/$name.png')..createSync(recursive: true);
-      await file.writeAsBytes(bytes!.buffer.asUint8List());
+      await writePng(image, name);
     });
   }
 
