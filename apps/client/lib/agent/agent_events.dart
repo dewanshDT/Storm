@@ -556,6 +556,32 @@ class AgentEvents {
   bool _disposed = false;
   AppLifecycleListener? _lifecycle;
 
+  /// Web notifications round: whether this device's own web notifier has
+  /// both permission and its "Notifications on this device" toggle on —
+  /// set only by [setWebNotificationsEnabled], which only `webNotifierProvider`
+  /// calls, and that provider is itself `kIsWeb`-gated (`web_notifications.dart`)
+  /// — so this is never true off the web build, without this class having
+  /// to know `kIsWeb` itself (and losing the ability to test it on the VM,
+  /// where the constant is always false).
+  bool _webKeepAlive = false;
+
+  /// Whether a hidden tab/window should keep its stream open rather than
+  /// drop it like a phone would — desktop always (161-4), web only once
+  /// [setWebNotificationsEnabled] has said so (the web notifications
+  /// round, amending 154 Q2 again for web). Enabling or disabling only
+  /// changes what a *later* hidden/paused transition does — the Settings
+  /// page's "Enable notifications" button only works on a click, which
+  /// means the tab was visible and active at the time, so there is
+  /// nothing already backgrounded to reconsider.
+  bool get _keepsStreamWhileHidden => isDesktopPlatform || _webKeepAlive;
+
+  /// The web notifications round's own switch (amends 154 Q2 for web):
+  /// called by `webNotifierProvider` whenever this device's web
+  /// notification permission or its device-prefs toggle changes.
+  void setWebNotificationsEnabled(bool enabled) {
+    _webKeepAlive = enabled;
+  }
+
   void start({bool followLifecycle = true}) {
     if (followLifecycle) {
       _lifecycle = AppLifecycleListener(onStateChange: _lifecycleChanged);
@@ -582,13 +608,13 @@ class AgentEvents {
   void _applyInitialLifecycleState(AppLifecycleState s) {
     switch (s) {
       case AppLifecycleState.hidden || AppLifecycleState.paused:
-        if (isDesktopPlatform) {
+        if (_keepsStreamWhileHidden) {
           _setActive(false);
         } else {
           background();
         }
       case AppLifecycleState.inactive:
-        if (isDesktopPlatform) _setActive(false);
+        if (_keepsStreamWhileHidden) _setActive(false);
       case AppLifecycleState.resumed:
       // Nothing extra: `_presence.active` already defaults true.
       case AppLifecycleState.detached:
@@ -602,30 +628,33 @@ class AgentEvents {
         background();
       case AppLifecycleState.resumed:
         foreground();
-        // Undoes a desktop `inactive`'s presence flip below even when
+        // Undoes a kept-open `inactive`'s presence flip below even when
         // `_background` was never set true by it (so `foreground()`
         // itself no-ops) — a window that only lost and regained focus,
         // never truly hidden.
-        if (isDesktopPlatform) _setActive(true);
+        if (_keepsStreamWhileHidden) _setActive(true);
       case AppLifecycleState.inactive:
-        // Desktop only (review item 5): the window lost focus without
-        // being hidden, minimized or closed. Background presence, same
-        // as `background()`'s desktop branch — but never drop the
-        // stream (`_background` stays untouched; this is milder).
-        if (isDesktopPlatform) _setActive(false);
+        // Desktop, or web with notifications enabled (review item 5):
+        // the window/tab lost focus without being hidden, minimized or
+        // closed. Background presence, same as `background()`'s own
+        // kept-open branch — but never drop the stream (`_background`
+        // stays untouched; this is milder).
+        if (_keepsStreamWhileHidden) _setActive(false);
       case AppLifecycleState.detached:
         break;
     }
   }
 
   /// No stream runs behind the person's back — except on desktop (161-4,
-  /// amends 154 Q2): there, the stream stays open so a closed-window
-  /// session still gets OS notifications, and only presence changes to
-  /// `background`. Phones and web still close it.
+  /// amends 154 Q2), or on web once notifications are enabled on this
+  /// device (the web notifications round, amends 154 Q2 again): there,
+  /// the stream stays open so a hidden tab or a closed-window session
+  /// still gets OS notifications, and only presence changes to
+  /// `background`. Phones, and web with notifications off, still close it.
   void background() {
     if (_disposed || _background) return;
     _background = true;
-    if (isDesktopPlatform) {
+    if (_keepsStreamWhileHidden) {
       _setActive(false);
       return;
     }
@@ -635,14 +664,14 @@ class AgentEvents {
     }
   }
 
-  /// Back in front. On desktop the stream never left, so this only reports
-  /// presence; everywhere else, connect now for a fresh snapshot — a
-  /// server that had no stream is asked again, in case it was upgraded
-  /// meanwhile.
+  /// Back in front. Where the stream stays open while hidden, this only
+  /// reports presence; everywhere else, connect now for a fresh snapshot
+  /// — a server that had no stream is asked again, in case it was
+  /// upgraded meanwhile.
   void foreground() {
     if (_disposed || !_background) return;
     _background = false;
-    if (isDesktopPlatform) {
+    if (_keepsStreamWhileHidden) {
       _setActive(true);
       return;
     }
