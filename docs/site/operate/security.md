@@ -45,6 +45,13 @@ an agent can do whatever its host's account can
 relays it is registered with: what a device pairing from the LAN list shows,
 and what a relay allowlist line must contain.
 
+**What leaves your server.** Storm has no telemetry: your server reports
+nothing on its own. The one thing it ever sends outbound, unasked, is a
+report you chose to send with **Report a problem** — redacted, previewed
+before it goes, and queued on your own server first. See
+[Report a problem](/docs/operate/reporting-problems/) for exactly what is
+and is not in one.
+
 ## Agents run as the host's account
 
 **Storm coordinates agents that run as you.** It starts them, shows their

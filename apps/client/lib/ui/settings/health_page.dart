@@ -13,6 +13,7 @@ import '../report_sheet.dart' show showReportProblemSheet;
 import '../shell/app_bar.dart' show healthColor;
 import '../tokens.dart';
 import 'connection_page.dart' show serverAddress;
+import 'feedback_toggle.dart' show FeedbackToggleRow;
 import 'settings_widgets.dart';
 import 'theme_picker.dart' show ThemeCredits;
 
@@ -67,10 +68,13 @@ class HealthPage extends ConsumerWidget {
               onAction: () => context.go(Routes.settingsPage('hosts')),
             ),
         ],
+        GroupLabel('Feedback', top: t.sp * 2.5),
+        const FeedbackToggleRow(),
         SettingsRow(
           key: const Key('report-problem'),
           label: 'Report a problem',
           sub: 'Send what happened, with diagnostics you can see first.',
+          divider: false,
           trailing: Icon(
             LucideIcons.chevron_right,
             size: t.codeSize,
