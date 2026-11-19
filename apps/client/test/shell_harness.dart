@@ -68,6 +68,11 @@ ProviderContainer shellContainer({
   AgentEventsOpen? agentEvents,
   OAuthLinks? oauthLinks,
   KeepAliveBudget keepAlive = harnessKeepAlive,
+  // Opt in with `fakeDeviceId`/`fakeDeviceSecret` for a test that needs a
+  // real paired device (desktopNotifierProvider and friends) — the default
+  // stays the legacy, device-less install `router_test.dart` guards.
+  String deviceId = '',
+  String deviceSecret = '',
 }) {
   final cache = CacheDb(NativeDatabase.memory());
   final server = FakeServer();
@@ -108,7 +113,12 @@ ProviderContainer shellContainer({
       ),
       settingsProvider.overrideWith(
         () => settings == null
-            ? FakeSettings(configured, nav: nav)
+            ? FakeSettings(
+                configured,
+                nav: nav,
+                deviceId: deviceId,
+                deviceSecret: deviceSecret,
+              )
             : FixedSettings(settings),
       ),
       // Widget tests have no platform package info; keep Client settings
@@ -240,15 +250,28 @@ NoteMeta noteMeta(String path) => NoteMeta(
 
 /// Settings without SharedPreferences, so the router's redirect can be driven
 /// directly.
+/// A [FakeSettings]/[shellContainer] device id/secret for a test that
+/// specifically wants a *paired* device rather than the default legacy
+/// (pre-auth, shared-token) install `router_test.dart`'s "a legacy token
+/// install" guards — `desktopNotifierProvider` and anything else keyed
+/// on "this device" need a real one to resolve at all (review item G's
+/// follow-up, decision 161).
+const fakeDeviceId = 'dev_test';
+const fakeDeviceSecret = 'sec_test';
+
 class FakeSettings extends SettingsNotifier {
   FakeSettings(
     this.configured, {
     this.activeVault = FakeServer.primaryVault,
     this.nav = const NavMemory(),
+    this.deviceId = '',
+    this.deviceSecret = '',
   });
 
   final bool configured;
   final NavMemory nav;
+  final String deviceId;
+  final String deviceSecret;
 
   /// Which vault starts active, as the real app persists it across launches.
   final String activeVault;
@@ -260,6 +283,8 @@ class FakeSettings extends SettingsNotifier {
           // Configured means *signed in* since the cutover — there is no
           // shared token that could stand in for a session any more.
           accessToken: 'sta_test',
+          deviceId: deviceId,
+          deviceSecret: deviceSecret,
           theme: ThemeChoice.initial,
           activeVault: activeVault,
           nav: nav,

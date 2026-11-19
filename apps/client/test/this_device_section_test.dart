@@ -107,6 +107,30 @@ void main() {
     }
   });
 
+  testWidgets(
+    'review item G: with no real plugin channel (this harness), both the '
+    'OS permission row and the Delivery row say "No notification service"',
+    (tester) async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      try {
+        final c = shellContainer(
+          agentClient: client(device, (_) {}),
+          // desktopNotifierProvider needs both a paired device id and a
+          // live events stream to resolve at all — see fakeDeviceId's doc.
+          deviceId: fakeDeviceId,
+          deviceSecret: fakeDeviceSecret,
+          agentEvents: (_) => const Stream.empty(),
+        );
+        await pumpShell(tester, c, size: desk);
+        await open(tester, c);
+        expect(find.text('No notification service'), findsNWidgets(2));
+        await disposeShell(tester, c);
+      } finally {
+        debugDefaultTargetPlatformOverride = null;
+      }
+    },
+  );
+
   testWidgets('toggling "Notifications on this device" PUTs enabled:false', (
     tester,
   ) async {
