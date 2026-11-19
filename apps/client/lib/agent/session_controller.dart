@@ -219,6 +219,10 @@ class SessionController extends ChangeNotifier {
       case StatusEvent(:final session):
         this.session = session;
         terminal.remembered(session.terminalAnswered);
+        terminal.rememberedSchemeReport(session.terminalSchemeReport);
+        // The theme catch-up fix: a fresh status, as a reconnect or a
+        // cold attach gets, is also "this view became visible".
+        terminal.catchUpTheme();
         _hostSize = (session.cols, session.rows);
         // Opening a session is using it. Another device may have sized the
         // PTY since, and its agent would draw for that height on this screen.
@@ -239,6 +243,9 @@ class SessionController extends ChangeNotifier {
         _quietCap?.cancel();
         _live = true;
         _viewStart = false;
+        // A catch-up asked for while still replay (gated like any other
+        // reply, decision 132 fix b) is retried now this view is live.
+        terminal.catchUpTheme();
       case OutputEvent(:final end, :final bytes):
         if (!_live) _armQuiet();
         _viewStart = false;

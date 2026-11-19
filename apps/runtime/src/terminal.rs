@@ -317,6 +317,67 @@ impl NoticeObserver {
     }
 }
 
+/// Reads a program's `CSI ? 2031 h`/`l` (DEC 2031, decision 157's
+/// colour-scheme report mode) out of a session's output, alongside
+/// [`NoticeObserver`]'s own pass (decision 157, theme catch-up). This is the
+/// host's half of the client's catch-up: a client attaching fresh learns
+/// whether the program wants a report even if the mode-set sequence already
+/// scrolled out of its own replay.
+pub struct SchemeReportObserver {
+    parser: vte::Parser,
+    sink: SchemeReportSink,
+}
+
+impl Default for SchemeReportObserver {
+    fn default() -> Self {
+        Self {
+            parser: vte::Parser::new(),
+            sink: SchemeReportSink::default(),
+        }
+    }
+}
+
+/// `None` until the program's first `h`/`l`: unlike [`current`]'s caller,
+/// which must settle on a default, this tells "never asked" apart from
+/// "asked, and said off".
+#[derive(Default)]
+struct SchemeReportSink {
+    enabled: Option<bool>,
+}
+
+impl vte::Perform for SchemeReportSink {
+    fn csi_dispatch(
+        &mut self,
+        params: &vte::Params,
+        intermediates: &[u8],
+        _ignore: bool,
+        action: char,
+    ) {
+        if intermediates != b"?" || !matches!(action, 'h' | 'l') {
+            return;
+        }
+        if params.iter().any(|p| p == [2031]) {
+            self.enabled = Some(action == 'h');
+        }
+    }
+}
+
+impl SchemeReportObserver {
+    /// Returns the new state when this output changed it.
+    pub fn feed(&mut self, bytes: &[u8]) -> Option<bool> {
+        let before = self.sink.enabled;
+        self.parser.advance(&mut self.sink, bytes);
+        (self.sink.enabled != before)
+            .then_some(self.sink.enabled)
+            .flatten()
+    }
+
+    /// `None` before the program has ever set or reset DEC 2031.
+    pub fn current(&self) -> Option<bool> {
+        self.sink.enabled
+    }
+}
+
 /// One title as an agent sets it → the name and activity it carries.
 pub fn clean(raw: &str) -> Title {
     let mut rest = raw.trim_start();
@@ -651,5 +712,47 @@ mod tests {
         let mut o = NoticeObserver::default();
         assert!(o.feed(b"\x1b]99;d=0:p=title;orphan\x07").is_empty());
         assert!(o.feed(b"\x1b]99;i=1:d=1:a=close\x07").is_empty());
+    }
+
+    #[test]
+    fn scheme_report_mode_is_unknown_until_the_program_sets_or_resets_it() {
+        let o = SchemeReportObserver::default();
+        assert_eq!(o.current(), None);
+    }
+
+    #[test]
+    fn scheme_report_mode_set_and_reset() {
+        let mut o = SchemeReportObserver::default();
+        assert_eq!(o.feed(b"\x1b[?2031h"), Some(true));
+        assert_eq!(o.current(), Some(true));
+        // Feeding the same state again reports no change.
+        assert_eq!(o.feed(b"\x1b[?2031h"), None);
+        assert_eq!(o.feed(b"\x1b[?2031l"), Some(false));
+        assert_eq!(o.current(), Some(false));
+    }
+
+    #[test]
+    fn scheme_report_mode_split_across_writes() {
+        let seq = b"\x1b[?2031h";
+        for cut in 1..seq.len() {
+            let (a, b) = seq.split_at(cut);
+            let mut o = SchemeReportObserver::default();
+            o.feed(a);
+            assert_eq!(o.feed(b), Some(true), "cut at {cut}");
+        }
+    }
+
+    #[test]
+    fn an_unrelated_private_mode_or_a_combined_set_is_never_mistaken_for_2031() {
+        let mut o = SchemeReportObserver::default();
+        assert_eq!(o.feed(b"\x1b[?25h"), None);
+        assert_eq!(o.feed(b"\x1b[?1049h"), None);
+        // 2031 alongside another mode in one sequence still sets it.
+        assert_eq!(o.feed(b"\x1b[?1004;2031h"), Some(true));
+        assert_eq!(o.current(), Some(true));
+        // A plain (non-private) CSI with 2031 is not a mode report.
+        let mut o2 = SchemeReportObserver::default();
+        assert_eq!(o2.feed(b"\x1b[2031h"), None);
+        assert_eq!(o2.current(), None);
     }
 }
