@@ -1162,6 +1162,10 @@ pub struct AgentManager {
     /// One deliver hint per notice id, computed once (161-4 review item
     /// 4).
     deliver_cache: Mutex<notifications::DeliverCache>,
+    /// Notices whose cached hint named `toast:<device>`, waiting out that
+    /// device's 15s grace (161h item 2) before a disconnect no longer
+    /// triggers the `os` fallback.
+    pending_toasts: Mutex<std::collections::VecDeque<notifications::PendingToast>>,
     changes: changes::Changes,
     #[cfg(test)]
     pub(crate) record_reads: std::sync::atomic::AtomicUsize,
@@ -1299,6 +1303,7 @@ impl AgentManager {
             notify_changed: watch::channel(0).0,
             presence: Mutex::new(HashMap::new()),
             deliver_cache: Mutex::new(notifications::DeliverCache::default()),
+            pending_toasts: Mutex::new(std::collections::VecDeque::new()),
             changes: changes::Changes::new(),
             #[cfg(test)]
             record_reads: Default::default(),
