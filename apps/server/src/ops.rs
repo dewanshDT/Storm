@@ -2777,11 +2777,18 @@ async fn live_hosts(state: &Shared) -> Vec<crate::auth::hosts::Host> {
 }
 
 /// Every name a diagnostics bundle must never carry verbatim: every vault's
-/// display name, plus this server's own identity name — which defaults to
-/// the machine's `/etc/hostname` (`default_server_name`) and is exactly the
-/// "hostname" decision 162c's `Out` list names. It has no shape a regex can
-/// find on its own, the same reason a vault's name needs this list rather
-/// than a pattern in `redact()`.
+/// display name, this server's own identity name, and every enrolled host's
+/// display name (revoked ones too — an old log line in the ring can still
+/// name one). The server's identity name defaults to the machine's
+/// `/etc/hostname` (`default_server_name`), and a host's defaults to *its*
+/// machine's hostname (`storm_runtime::platform::host_name`, enroll's
+/// `--name`) — both are exactly the "hostname" decision 162c's `Out` list
+/// names. None of them has a shape a regex can find on its own, the same
+/// reason a vault's name needs this list rather than a pattern in
+/// `redact()`. Used for the server's own ring (`server_diag`) and, applied a
+/// second time, for every host's ring too (`feedback_preview`'s host loop) —
+/// a host's own ring doesn't know any of these names, so the re-redaction
+/// here is the only place that catches one leaking into its logs.
 async fn live_sensitive_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
     let mut sensitive: Vec<storm_diag::Sensitive> = state
         .vaults
@@ -2793,6 +2800,12 @@ async fn live_sensitive_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
         .map(|v| storm_diag::Sensitive::vault(v.name.clone()))
         .collect();
     sensitive.push(storm_diag::Sensitive::host(state.identity.name.clone()));
+    {
+        let auth_db = state.auth_db.lock().await;
+        for host in auth_db.list_hosts().unwrap_or_default() {
+            sensitive.push(storm_diag::Sensitive::host(host.name));
+        }
+    }
     sensitive
 }
 
@@ -3014,7 +3027,8 @@ pub async fn feedback_preview(
     let bundle = if req.include_diagnostics {
         let server = server_diag(state).await;
         let mut hosts = gather_host_diags(state, HOST_DIAG_TIMEOUT).await;
-        // A host's ring doesn't know vault names, so re-redact here too.
+        // A host's ring knows none of these names — not the vaults', not
+        // the server's own, not even its own — so re-redact here too.
         for host in &mut hosts {
             if let Some(diag) = host.diag.as_mut() {
                 diag.logs = diag

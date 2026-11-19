@@ -14872,6 +14872,44 @@ pub(crate) mod tests {
         );
     }
 
+    /// A host's own display name — `enroll_a_host`'s fixed `"build-vm"` —
+    /// must never survive into a diag bundle either, if it ever ends up in
+    /// that host's own ring (the host has no way to know its own name is
+    /// sensitive; only the server's re-redaction, with every enrolled
+    /// host's name now in the live list, catches it). `gather_host_diags`'s
+    /// positional labels already keep a host's name out of the `host`
+    /// field (see `gather_host_diags_labels_are_positional_never_host_names`
+    /// above); this is about the `logs` a host's own ring might carry.
+    #[tokio::test]
+    async fn feedback_preview_redacts_a_hosts_own_name_from_its_bundle() {
+        let dir = tempdir::TempDir::new("storm-diag-host-name").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, host_bearer, mut link) = f.connected_host(true).await;
+        let preview = crate::ops::feedback_preview(
+            &f.state,
+            crate::ops::FeedbackPreviewRequest {
+                kind: crate::ops::FeedbackKind::Bug,
+                include_diagnostics: true,
+                client: serde_json::json!({}),
+            },
+        );
+        let answer = f.answer(&mut link, &host_bearer, vec!["connected as build-vm"]);
+        let (preview, _) = tokio::join!(preview, answer);
+        let preview = preview.unwrap_or_else(|e| panic!("preview failed: {} {}", e.0, e.1));
+        let logs = preview.bundle["hosts"][0]["diag"]["logs"]
+            .as_array()
+            .expect("the host's logs")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logs.contains("build-vm"),
+            "the host's own name leaked into its diag bundle: {logs}"
+        );
+        assert!(logs.contains("<host>"), "{logs}");
+    }
+
     // ---- in-app feedback (decision 162-3) ----------------------------------
 
     type FakeRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
