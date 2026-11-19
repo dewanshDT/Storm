@@ -11,6 +11,7 @@ import 'agent/agent_state.dart' show sessionKeepAliveProvider;
 import 'agent/desktop_notifications.dart'
     show
         NotificationTapNone,
+        NotificationTapNote,
         NotificationTapSession,
         desktopNotifierProvider,
         notificationTapped;
@@ -91,6 +92,8 @@ class _StormAppState extends ConsumerState<StormApp>
     switch (target) {
       case NotificationTapSession(:final sessionId):
         ref.read(routerProvider).go(Routes.agentSession(sessionId));
+      case NotificationTapNote(:final vaultId, :final noteId):
+        ref.read(routerProvider).go(Routes.note(vaultId, noteId));
       case NotificationTapNone():
         break; // Bringing the window forward above is all there is.
     }
