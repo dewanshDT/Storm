@@ -641,6 +641,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(notifications_list).delete(notifications_clear),
         )
         .route("/v1/notifications/read", post(notifications_read))
+        .route("/v1/notifications/unread", post(notifications_unread))
         .route(
             "/v1/notifications/prefs",
             get(notification_prefs_get).put(notification_prefs_put),
@@ -2884,6 +2885,16 @@ async fn notifications_read(
 ) -> ApiResult<Json<crate::ops::notifications::MarkReadResult>> {
     Ok(Json(
         crate::ops::mark_notifications_read(&state, &actor, device_of(&auth), body).await?,
+    ))
+}
+
+async fn notifications_unread(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::MarkUnread>,
+) -> ApiResult<Json<crate::ops::notifications::MarkUnreadResult>> {
+    Ok(Json(
+        crate::ops::mark_notifications_unread(&state, &actor, body).await?,
     ))
 }
 

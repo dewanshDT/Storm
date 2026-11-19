@@ -744,6 +744,157 @@ async fn a_read_syncs_to_a_second_subscriber() {
     assert_eq!(data_b2["ids"][0], n.id);
 }
 
+/// Mark-as-unread: a row that goes read -> unread is a live `notification`
+/// frame again (it is unread now), flagged `reopened` so the client skips
+/// the toast — reaching every subscriber, not just the one that reopened
+/// it.
+#[tokio::test]
+async fn an_unread_reaches_every_subscriber_flagged_reopened() {
+    let dir = tempdir::TempDir::new("storm-161-notify-unread-live").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut a = f.feed(QUICK, QUEUE);
+    let mut b = f.feed(QUICK, QUEUE);
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    let (_, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(
+        data_a["reopened"], false,
+        "a first-time unread row: {data_a}"
+    );
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    next_frame(&mut a, Duration::from_secs(5)).await.unwrap(); // notification_read
+    next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+
+    let changed = f
+        .state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    assert_eq!(changed.as_slice(), std::slice::from_ref(&n.id));
+
+    let (name_a, data_a) = next_frame(&mut a, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_a, "notification");
+    assert_eq!(data_a["id"], n.id);
+    assert_eq!(data_a["reopened"], true, "{data_a}");
+    assert!(data_a.get("read_at").is_none(), "{data_a}");
+
+    let (name_b, data_b) = next_frame(&mut b, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name_b, "notification");
+    assert_eq!(data_b["id"], n.id);
+    assert_eq!(data_b["reopened"], true, "{data_b}");
+}
+
+/// `POST /v1/notifications/unread`, like every other notifications op, is
+/// the signed-in owner's alone — an `stk_` key or an agent actor never
+/// reaches it.
+#[tokio::test]
+async fn mark_notifications_unread_is_owner_only() {
+    let dir = tempdir::TempDir::new("storm-161-unread-owner").unwrap();
+    let f = fixture(dir.path()).await;
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+
+    for actor in [
+        Actor::Key {
+            key_id: "key_1".into(),
+            user_id: f.owner.clone(),
+        },
+        Actor::Agent {
+            session_id: "ags_1".into(),
+            host_id: HOST.into(),
+            user_id: f.owner.clone(),
+            write_vault: None,
+        },
+    ] {
+        let err = crate::ops::mark_notifications_unread(
+            &f.state,
+            &actor,
+            crate::ops::MarkUnread {
+                ids: vec![n.id.clone()],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            (err.0, err.1.as_str()),
+            (StatusCode::FORBIDDEN, "owner_only")
+        );
+    }
+}
+
+#[tokio::test]
+async fn mark_notifications_unread_refuses_over_500_ids() {
+    let dir = tempdir::TempDir::new("storm-161-unread-max-ids").unwrap();
+    let f = fixture(dir.path()).await;
+    let err = crate::ops::mark_notifications_unread(
+        &f.state,
+        &Actor::Session {
+            user_id: f.owner.clone(),
+        },
+        crate::ops::MarkUnread {
+            ids: (0..501).map(|i| format!("ntf_{i}")).collect(),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err.0, StatusCode::BAD_REQUEST, "{}", err.1);
+}
+
+/// A row reopened and then read again must still sync that read, and the
+/// subscriber's own `notif_unread_sent` bookkeeping must be right: a
+/// *second* reopen is picked up as a fresh `notification` too.
+#[tokio::test]
+async fn a_read_after_a_reopen_still_emits_notification_read() {
+    let dir = tempdir::TempDir::new("storm-161-notify-reopen-then-read").unwrap();
+    let f = fixture(dir.path()).await;
+    let mut rx = f.feed(QUICK, QUEUE);
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+
+    let n = f.state.agent.send_test_notification(None).unwrap();
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // notification
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    next_frame(&mut rx, Duration::from_secs(5)).await.unwrap(); // notification_read
+
+    f.state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification", "{data}");
+
+    f.state
+        .agent
+        .mark_notifications_read(std::slice::from_ref(&n.id), None)
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification_read", "{data}");
+    assert_eq!(data["ids"][0], n.id);
+
+    // A second reopen is still a fresh `notification`, not swallowed by
+    // stale bookkeeping from the first.
+    f.state
+        .agent
+        .mark_notifications_unread(std::slice::from_ref(&n.id))
+        .unwrap();
+    let (name, data) = next_frame(&mut rx, Duration::from_secs(5)).await.unwrap();
+    assert_eq!(name, "notification", "{data}");
+    assert_eq!(data["reopened"], true, "{data}");
+}
+
 #[tokio::test]
 async fn a_prefs_change_is_told_to_every_subscriber() {
     let dir = tempdir::TempDir::new("storm-161-notify-prefs").unwrap();

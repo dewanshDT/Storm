@@ -636,6 +636,22 @@ class AgentApi {
     return [for (final id in json['read'] as List) '$id'];
   }
 
+  /// Mark-as-unread. Answers how many rows actually changed (unknown or
+  /// already-unread ids are silently ignored server-side, so this can be
+  /// less than `ids.length`).
+  Future<int> markNotificationsUnread(List<String> ids) async {
+    final json =
+        _decode(
+              await _client.post(
+                _uri('/v1/notifications/unread'),
+                headers: _headers,
+                body: jsonEncode({'ids': ids}),
+              ),
+            )
+            as Map;
+    return (json['changed'] as num).toInt();
+  }
+
   Future<NotificationPrefs> notificationPrefs() async =>
       NotificationPrefs.fromJson(
         _decode(

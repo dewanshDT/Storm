@@ -636,6 +636,8 @@ class DesktopNotifier extends ChangeNotifier {
 
   Future<void> _raise(AgentNotification n) async {
     if (n.silent) return;
+    // Mark-as-unread: a reopen is never a fresh OS/web notification either.
+    if (n.reopened) return;
     // Review item E: a test notice is never raised from the live stream
     // — only `forceShow`, by the device that actually asked for it,
     // raises one. Every other device hearing the same live frame (every

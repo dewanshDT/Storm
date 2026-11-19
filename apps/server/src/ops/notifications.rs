@@ -74,6 +74,40 @@ pub async fn mark_notifications_read(
     Ok(MarkReadResult { read })
 }
 
+/// `ids`' bound for `POST /v1/notifications/unread`: generous for "reopen a
+/// batch from the inbox", never a vector for one call to touch the whole
+/// inbox.
+const MAX_UNREAD_IDS: usize = 500;
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MarkUnread {
+    pub ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MarkUnreadResult {
+    pub changed: i64,
+}
+
+pub async fn mark_notifications_unread(
+    state: &Shared,
+    actor: &Actor,
+    body: MarkUnread,
+) -> ApiResult<MarkUnreadResult> {
+    crews_owner(actor)?;
+    if body.ids.len() > MAX_UNREAD_IDS {
+        return Err(bad_request(format!("at most {MAX_UNREAD_IDS} ids")));
+    }
+    let changed = state
+        .agent
+        .mark_notifications_unread(&body.ids)
+        .map_err(agent_error)?;
+    Ok(MarkUnreadResult {
+        changed: changed.len() as i64,
+    })
+}
+
 pub async fn clear_notifications(state: &Shared, actor: &Actor) -> ApiResult<()> {
     crews_owner(actor)?;
     state.agent.clear_notifications().map_err(agent_error)?;
