@@ -8,7 +8,8 @@ import 'package:flutter_lucide/flutter_lucide.dart';
 
 import '../../agent/agent_state.dart';
 import '../../agent/notifications_state.dart' show notificationsStateProvider;
-import '../../agent/notifications_ui.dart' show openNotificationsSheet;
+import '../../agent/notifications_ui.dart'
+    show notifyingUnreadCount, openNotificationsSheet;
 import '../../agent/sidebar_rules.dart' show needsYouCountProvider;
 import '../../router.dart';
 import '../../state/app_state.dart';
@@ -307,7 +308,9 @@ class PlacePicker extends ConsumerWidget {
             listenable: notifState,
             builder: (context, _) {
               if (notifState.unsupported) return const SizedBox.shrink();
-              final unread = notifState.unreadCount;
+              // Excludes silent notices (decision 161's redesign, item 10):
+              // the same rule as the bell's own badge.
+              final unread = notifyingUnreadCount(notifState);
               return row(
                 key: const Key('place-notifications'),
                 lead: Container(
