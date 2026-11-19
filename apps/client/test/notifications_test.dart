@@ -498,6 +498,8 @@ void main() {
       String? provider,
       bool silent = false,
       String? silentReason,
+      bool hasDeliverHint = false,
+      String? deliver,
     }) => AgentNotification(
       id: id,
       seq: 1,
@@ -511,6 +513,8 @@ void main() {
       provider: provider,
       silent: silent,
       silentReason: silentReason,
+      hasDeliverHint: hasDeliverHint,
+      deliver: deliver,
     );
 
     Future<ProviderContainer> mount(
@@ -518,13 +522,18 @@ void main() {
       FakeNotifications? notif,
       List<Map<String, dynamic>>? sessions,
       List<AgentSession>? snapshot,
+      String deviceId = '',
     }) async {
       final agents = FakeAgentServer(
         hosts: [host()],
         sessions: sessions ?? const [],
       );
       if (notif != null) agents.extra = notif.handle;
-      final c = shellContainer(agentClient: agents.client, agentEvents: open);
+      final c = shellContainer(
+        agentClient: agents.client,
+        agentEvents: open,
+        deviceId: deviceId,
+      );
       await pumpShell(t, c, size: wide);
       c.read(routerProvider).go(Routes.agents);
       await t.pumpAndSettle();
@@ -604,6 +613,97 @@ void main() {
       await t.pumpAndSettle();
       expect(toast(), findsNothing);
       await disposeShell(t, c);
+    });
+
+    group('decision 161-4\'s deliver hint', () {
+      testWidgets('deliver: "toast:<this device>" toasts here', (t) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          deviceId: fakeDeviceId,
+        );
+        opens.last.add(
+          AgentNotificationPushed(
+            notif(
+              id: 'n1',
+              hasDeliverHint: true,
+              deliver: 'toast:$fakeDeviceId',
+            ),
+          ),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsOneWidget);
+        await disposeShell(t, c);
+      });
+
+      testWidgets('deliver: "toast:<another device>" never toasts here', (
+        t,
+      ) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          deviceId: fakeDeviceId,
+        );
+        opens.last.add(
+          AgentNotificationPushed(
+            notif(id: 'n1', hasDeliverHint: true, deliver: 'toast:dev_other'),
+          ),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsNothing);
+        await disposeShell(t, c);
+      });
+
+      testWidgets('deliver: "os" never toasts here — that is the OS '
+          "notifier's job, not this device's in-app toast", (t) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          deviceId: fakeDeviceId,
+        );
+        opens.last.add(
+          AgentNotificationPushed(
+            notif(id: 'n1', hasDeliverHint: true, deliver: 'os'),
+          ),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsNothing);
+        await disposeShell(t, c);
+      });
+
+      testWidgets('deliver present but null (the server deliberately skipped '
+          'every device) never toasts here', (t) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          deviceId: fakeDeviceId,
+        );
+        opens.last.add(
+          AgentNotificationPushed(
+            notif(id: 'n1', hasDeliverHint: true, deliver: null),
+          ),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsNothing);
+        await disposeShell(t, c);
+      });
+
+      testWidgets('no deliver key at all (an older server) keeps today\'s '
+          'unconditional toast', (t) async {
+        final c = await mount(
+          t,
+          notif: FakeNotifications(),
+          deviceId: fakeDeviceId,
+        );
+        opens.last.add(
+          // hasDeliverHint defaults to false: the key was never in the
+          // wire frame, exactly as an older server would send it.
+          AgentNotificationPushed(notif(id: 'n1')),
+        );
+        await t.pumpAndSettle();
+        expect(toast(), findsOneWidget);
+        await disposeShell(t, c);
+      });
     });
 
     testWidgets(
