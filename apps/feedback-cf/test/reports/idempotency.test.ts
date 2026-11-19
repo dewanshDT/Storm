@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { IP_RATE_LIMIT } from "../../src/index";
+import { IP_RATE_LIMIT } from "../../src/limits";
 import { drainGlobalLimiter, listReports, postReport, reportBody, resetGlobalLimiter, uniqueInstallId } from "../harness";
 
 describe("report_id idempotency", () => {

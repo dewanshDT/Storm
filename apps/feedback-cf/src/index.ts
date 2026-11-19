@@ -3,6 +3,17 @@ import type { Env } from "./env";
 import { jsonResponse, methodNotAllowed, notFound, unauthorized } from "./http";
 import { newReportId } from "./id";
 import { RateLimiter } from "./limiter";
+import {
+  GLOBAL_DAILY_LIMIT,
+  GLOBAL_LIMITER_NAME,
+  GLOBAL_WINDOW_MS,
+  IP_LIMITER_PREFIX,
+  IP_RATE_LIMIT,
+  IP_RATE_WINDOW_MS,
+  MAX_BODY_BYTES,
+  RATE_LIMIT,
+  RATE_WINDOW_MS,
+} from "./limits";
 import { log } from "./log";
 import { decodeScreenshot, parseReportBody, ValidationError, type StoredReport } from "./report";
 import {
@@ -19,17 +30,6 @@ import {
 
 export { RateLimiter };
 
-export const MAX_BODY_BYTES = 5 * 1024 * 1024;
-export const RATE_LIMIT = 20;
-export const RATE_WINDOW_MS = 60 * 60 * 1000;
-// Backstop for an abuser rotating install_id (caller-chosen, free to rotate).
-export const IP_RATE_LIMIT = 60;
-export const IP_RATE_WINDOW_MS = 60 * 60 * 1000;
-export const IP_LIMITER_PREFIX = "ip:";
-// A cheap cap on total stored reports a day, regardless of caller.
-export const GLOBAL_DAILY_LIMIT = 2000;
-export const GLOBAL_WINDOW_MS = 24 * 60 * 60 * 1000;
-export const GLOBAL_LIMITER_NAME = "global";
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 500;
 
