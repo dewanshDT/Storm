@@ -88,8 +88,9 @@ void main() {
       return hosts.where((h) => h.name == hostName && h.online).firstOrNull;
     }, 'the runtime host to come online');
 
-    final events = AgentEvents(() => openAgentEvents(factory, connection))
-      ..start(followLifecycle: false);
+    final events = AgentEvents(
+      (presence) => openAgentEvents(factory, connection, presence),
+    )..start(followLifecycle: false);
     final arrived = <(AgentEventUpdate, DateTime)>[];
     final sub = events.updates.listen((u) => arrived.add((u, DateTime.now())));
     await until(() async => events.isOpen ? true : null, 'the snapshot');

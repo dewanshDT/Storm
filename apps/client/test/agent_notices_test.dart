@@ -228,7 +228,7 @@ void main() {
     const wide = Size(1400, 900);
     late List<StreamController<AgentEvent>> opens;
 
-    Stream<AgentEvent> open() {
+    Stream<AgentEvent> open(AgentPresence presence) {
       final c = StreamController<AgentEvent>();
       opens.add(c);
       return c.stream;

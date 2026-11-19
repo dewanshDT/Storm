@@ -15,19 +15,63 @@ use std::time::Duration;
 
 use axum::{
     extract::{
-        FromRequestParts, State,
+        FromRequestParts, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
 
-use super::{ApiError, Shared, wants_websocket};
+use super::{ApiError, SessionAuth, Shared, wants_websocket};
 use crate::auth::authz::Actor;
 use crate::ops::SessionView;
+
+/// `?presence=active|background[&open_session=<id>]&connection_id=<id>`
+/// on connect (161-4). Absent `presence` entirely — every client before
+/// this slice, and phones and web after it — is `active`: they close the
+/// stream the moment they are not, so a connection at all has always
+/// meant "visible". `connection_id` is the client's own, so `POST
+/// …/presence` can name *this* connection rather than overwriting
+/// whichever of a device's connections happened to answer last.
+#[derive(Debug, Default, Deserialize)]
+struct PresenceQuery {
+    presence: Option<String>,
+    open_session: Option<String>,
+    connection_id: Option<String>,
+}
+
+/// At most this many bytes of a client-given connection id — generous for
+/// a UUID, small enough that nothing abuses the presence map with it (an
+/// entry here only ever exists for a connection this handler itself
+/// opened, so the real bound is "how many sockets are actually open";
+/// this just keeps one of them from being a silly size).
+const MAX_CONNECTION_ID_LEN: usize = 128;
+
+fn clamp_connection_id(id: Option<String>) -> Option<String> {
+    id.filter(|s| !s.is_empty() && s.len() <= MAX_CONNECTION_ID_LEN)
+}
+
+/// Clears this connection's presence when it ends — the SSE task
+/// returning naturally, or the WebSocket branch's `select!` dropping this
+/// future when the socket closes first. Without it, a desktop that quit
+/// mid-session would be "active" forever. Keyed by connection, never by
+/// device alone: an old connection's drop must never clear a newer
+/// one's.
+struct PresenceGuard {
+    state: Shared,
+    ids: Option<(String, String)>, // (connection_id, device_id)
+}
+
+impl Drop for PresenceGuard {
+    fn drop(&mut self) {
+        if let Some((connection_id, device_id)) = &self.ids {
+            self.state.agent.clear_presence(connection_id, device_id);
+        }
+    }
+}
 
 /// How the stream paces itself (Q6).
 #[derive(Clone, Copy)]
@@ -97,6 +141,34 @@ pub(super) async fn agent_events(
     if !matches!(parts.extensions.get::<Actor>(), Some(Actor::Session { .. })) {
         return ApiError(StatusCode::FORBIDDEN, "owner_only".into()).into_response();
     }
+    // 161-4: presence for the deliver hint. A device with no `SessionAuth`
+    // (a key, or a test harness that bypassed the auth middleware), or no
+    // `connection_id` (an old client), is never registered and never
+    // cleared — `deliver_hint` simply never sees it, same as before this
+    // slice existed.
+    let device_id = parts
+        .extensions
+        .get::<SessionAuth>()
+        .map(|a| a.authenticated.device.id.clone());
+    let presence_query = Query::<PresenceQuery>::try_from_uri(&parts.uri)
+        .map(|q| q.0)
+        .unwrap_or_default();
+    let connection_id = clamp_connection_id(presence_query.connection_id.clone());
+    let mut guard_ids = None;
+    if let (Some(device_id), Some(connection_id)) = (&device_id, &connection_id) {
+        let active = presence_query.presence.as_deref() != Some("background");
+        state.agent.set_presence(
+            connection_id,
+            device_id,
+            active,
+            presence_query.open_session.clone(),
+        );
+        guard_ids = Some((connection_id.clone(), device_id.clone()));
+    }
+    let presence_guard = PresenceGuard {
+        state: state.clone(),
+        ids: guard_ids,
+    };
     // Subscribed before the snapshot is built, so no change falls between.
     let changes = state.agent.subscribe_changes();
     // 161-1: the inbox, prefs and mutes share one `notification`/
@@ -108,6 +180,7 @@ pub(super) async fn agent_events(
     if wants_websocket(&parts) {
         return match WebSocketUpgrade::from_request_parts(&mut parts, &state).await {
             Ok(ws) => ws.on_upgrade(move |socket| async move {
+                let _presence = presence_guard;
                 tokio::select! {
                     () = feed(state, changes, notify_changed, tx, PACE) => {}
                     () = pump_ws(socket, rx) => {}
@@ -120,7 +193,10 @@ pub(super) async fn agent_events(
     if let Some(id) = parts.headers.get("last-event-id") {
         tracing::debug!(last_event_id = ?id, "ignoring Last-Event-ID: a reconnect is a new snapshot");
     }
-    tokio::spawn(feed(state, changes, notify_changed, tx, PACE));
+    tokio::spawn(async move {
+        let _presence = presence_guard;
+        feed(state, changes, notify_changed, tx, PACE).await;
+    });
     let body = tokio_stream::StreamExt::map(tokio_stream::wrappers::ReceiverStream::new(rx), |f| {
         Ok::<_, std::convert::Infallible>(f.sse())
     });
@@ -373,10 +449,22 @@ impl Subscriber {
                     continue;
                 }
                 self.notif_unread_sent.insert(n.id.clone());
-                frames.push(Frame::event(
-                    "notification",
-                    serde_json::to_string(&n).unwrap_or_default(),
-                ));
+                // 161-4: the deliver hint is this stream's business, not
+                // the inbox's — `GET /v1/notifications` and the test
+                // helpers above never see it, only a *live* frame does.
+                // The key itself is always present (even as `null`): the
+                // client tells a 161-4 server's deliberate "nothing" from
+                // an older server that never had this field at all by
+                // whether the key exists, not by its value.
+                let mut data = serde_json::to_value(&n).unwrap_or_default();
+                if let Some(obj) = data.as_object_mut() {
+                    let hint = state.agent.deliver_hint_for(&n.id, n.session_id.as_deref());
+                    obj.insert(
+                        "deliver".into(),
+                        hint.map_or(serde_json::Value::Null, serde_json::Value::String),
+                    );
+                }
+                frames.push(Frame::event("notification", data.to_string()));
             }
             if got < 500 {
                 break;
