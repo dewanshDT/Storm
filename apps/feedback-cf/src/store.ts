@@ -49,8 +49,8 @@ export async function deleteReport(env: Env, id: string): Promise<boolean> {
   return true;
 }
 
-// Oldest first for free: ids are time-prefixed (src/id.ts) and R2 lists a
-// prefix in ascending key order.
+// Oldest first for free: ids are time-prefixed and R2 lists a prefix in
+// ascending key order.
 export async function listReportIds(env: Env, limit: number): Promise<string[]> {
   const ids: string[] = [];
   let cursor: string | undefined;
@@ -72,9 +72,8 @@ async function sha256Hex(text: string): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-// Hashed rather than the caller's own id verbatim: report_id is the user's
-// server's own id, arbitrary text, and must never become an R2 key segment
-// unescaped.
+// Hashed rather than used verbatim: report_id is arbitrary caller text and
+// must never become an unescaped R2 key segment.
 async function idempotencyKey(installId: string, reportId: string): Promise<string> {
   return `${IDEMPOTENCY_PREFIX}${installId}/${await sha256Hex(reportId)}.json`;
 }
@@ -91,9 +90,9 @@ export async function recordIdempotent(env: Env, installId: string, reportId: st
   await env.FEEDBACK.put(key, JSON.stringify({ id, created_at: new Date().toISOString() }));
 }
 
-// 162j: unsynced reports are dropped after 30 days. The sync service
-// (162-6) deletes a report as soon as it lands in the vault, so anything
-// still here past the cutoff was never synced.
+// Unsynced reports are dropped after 30 days; the sync service deletes a
+// report as soon as it lands in the vault, so anything still here past the
+// cutoff was never synced.
 export const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 export async function purgeExpired(env: Env, now: number = Date.now()): Promise<number> {
@@ -118,11 +117,9 @@ export async function purgeExpired(env: Env, now: number = Date.now()): Promise<
 }
 
 // Without this an idempotency marker outlives every report it dedupes and
-// `idempotency/` grows forever. 30 days matches reports' own window — ample,
-// since the user's server drops a queued send after 7 (decision 162b). R2's
-// own `uploaded` timestamp is enough: a marker has no id to decode a time
-// from, and reading every one's JSON body just to find `created_at` would
-// cost one GET per marker instead of one LIST.
+// `idempotency/` grows forever. R2's own `uploaded` timestamp is used since
+// a marker has no id to decode a time from, and reading every body just to
+// find `created_at` would cost a GET per marker instead of one LIST.
 async function purgeExpiredIdempotency(env: Env, cutoff: number): Promise<number> {
   let cursor: string | undefined;
   let deleted = 0;

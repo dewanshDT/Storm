@@ -10,10 +10,8 @@ export interface TakeResult {
   retryAfterMs: number;
 }
 
-// One per install_id (`idFromName(installId)`): a token bucket of `limit`
-// reports per `windowMs`, refilled continuously, as apps/relay-cf's
-// HelloLimiter. Persisted so eviction never resets a limit; deleted once
-// untouched for two windows, when a fresh bucket is identical.
+// A token bucket, persisted so eviction never resets a limit; deleted once
+// untouched for two windows, when a fresh bucket would be identical anyway.
 export class RateLimiter extends DurableObject {
   async take(limit: number, windowMs: number): Promise<TakeResult> {
     const now = Date.now();

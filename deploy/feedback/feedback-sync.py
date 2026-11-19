@@ -1,21 +1,5 @@
 #!/usr/bin/env python3
-"""Decision 162-6: the feedback sync service.
-
-A standalone script (not part of the product, decision 162e) that pulls
-pending reports from the `apps/feedback-cf` intake Worker and files them into
-the vault as `Storm/Feedback/Inbox/FB-####.md`, deleting each from the Worker
-once it lands. It runs as its own paired Storm device, "feedback-sync", and
-talks to the server's REST API the same way any client does — device
-pairing, a login once for a refresh token, then sessions from that.
-
-Python 3, **stdlib only**: this runs on the prod VM with no pip, so
-`urllib`/`json`/`hashlib` are the whole toolbox. The pure-Python Ed25519
-verify below exists for exactly that reason — there is no `cryptography`
-package to reach for.
-
-Never logs report text, email, tokens or the diagnostics bundle — only ids,
-counts and booleans (decision 162d/162e).
-"""
+"""The feedback sync service: pulls pending reports from the intake Worker and files them into the vault as Storm/Feedback/Inbox/FB-####.md, as its own paired Storm device. Pure stdlib Python (no pip on the prod VM)."""
 
 import argparse
 import base64
@@ -46,15 +30,9 @@ REF_RE = re.compile(r"^FB-(\d+)$")
 
 
 # ---------------------------------------------------------------------------
-# Pure-Python Ed25519 (RFC 8032), verify only.
-#
-# The pairing handshake proves the server at --server holds the private key
-# named in the pairing code, the same way the real client's challenge step
-# does (apps/server/src/auth/identity.rs, `storm-challenge:v1:`). There is no
-# `cryptography` package on the prod VM to verify it with, so this is the
-# whole algorithm, built on `pow()` and `int.to_bytes` rather than recursion —
-# a 512-bit scalar multiplication recursed naively gets uncomfortably close
-# to Python's default recursion limit.
+# Pure-Python Ed25519 (RFC 8032), verify only — no `cryptography` package on
+# the prod VM. Iterative scalar multiplication, not recursive: a 512-bit
+# multiplication recursed naively gets close to Python's recursion limit.
 # ---------------------------------------------------------------------------
 
 _ED_Q = 2**255 - 19
@@ -137,11 +115,7 @@ def _ed_decodepoint(s):
 
 
 def ed25519_verify(signature, message, public_key):
-    """Verifies a raw 64-byte Ed25519 signature over `message`.
-
-    Returns `False` on any malformed input rather than raising — this guards
-    a pairing handshake where "no" has to be as safe as "can't tell".
-    """
+    """Verifies a raw 64-byte Ed25519 signature; returns False (never raises) on malformed input."""
     try:
         if len(signature) != _ED_BITS // 4 or len(public_key) != _ED_BITS // 8:
             return False
@@ -165,12 +139,7 @@ _B64URL_RE = re.compile(r"^[A-Za-z0-9_-]*$")
 
 
 def b64url_decode(s):
-    """Strict base64url, no padding — the same spelling `data_encoding`'s
-    `BASE64URL_NOPAD` accepts server-side. `base64.urlsafe_b64decode` alone
-    is too lenient: it also accepts the standard `+`/`/` alphabet (CLAUDE.md
-    — "one key has one spelling"), which is exactly what would let a key
-    decode under two different inputs.
-    """
+    """Strict unpadded base64url; rejects the standard +/ alphabet, which `base64.urlsafe_b64decode` alone would accept and let a key decode two ways."""
     s = s.strip()
     if not _B64URL_RE.match(s):
         raise ValueError("not valid unpadded base64url")
@@ -195,8 +164,7 @@ class ApiError(Exception):
 
 
 def http_request(method, url, headers=None, data=None, timeout=20):
-    """Returns (status, headers_dict, body_bytes). Never raises on an HTTP
-    error status — only on a transport failure (DNS, connection refused)."""
+    """Returns (status, headers_dict, body_bytes); raises only on a transport failure, never an HTTP error status."""
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("User-Agent", USER_AGENT)
     for k, v in (headers or {}).items():
@@ -243,7 +211,7 @@ def _quote_path(path):
 
 
 # ---------------------------------------------------------------------------
-# Storm server REST calls (apps/server/src/api.rs)
+# Storm server REST calls
 # ---------------------------------------------------------------------------
 
 
@@ -358,7 +326,7 @@ def api_put_attachment(server_url, access_token, vault, path, data):
 
 
 # ---------------------------------------------------------------------------
-# Intake Worker calls (apps/feedback-cf/src/index.ts)
+# Intake Worker calls
 # ---------------------------------------------------------------------------
 
 
@@ -408,12 +376,7 @@ class PairingError(Exception):
 
 
 def parse_pairing_code(code):
-    """Parses `--code`: a `storm://pair?v=1&sid=...&pk=...&n=...` URI copied
-    from Settings > Devices & access > Add a device, or a bare nonce.
-
-    Whitespace is stripped first, as the client's own `PairingUri.parse`
-    does — this is typed or pasted by hand and a wrapped line is common.
-    """
+    """Parses `--code`: a `storm://pair?...` URI, or a bare nonce. Whitespace is stripped first since this is typed or pasted by hand."""
     cleaned = re.sub(r"\s+", "", code or "")
     if not cleaned:
         raise PairingError("empty pairing code")
@@ -441,14 +404,7 @@ def parse_pairing_code(code):
 
 
 def perform_pairing(server_url, code, name, platform, version, password):
-    """The full handshake a real client runs: reach the server, verify its
-    identity by challenge-response, consume the pairing nonce, then log in
-    once with the account password to get a refresh token.
-
-    Returns a `DeviceCreds` ready to save. Raises `PairingError` or
-    `ApiError` on any failure — nothing here is retried, since it is a
-    one-time manual step the operator re-runs by hand.
-    """
+    """Runs the full handshake: verify the server's identity by challenge-response, consume the pairing nonce, then log in once for a refresh token. Not retried; a one-time manual step."""
     parsed = parse_pairing_code(code)
     info = api_server_info(server_url)
     server_id = info.get("server_id")
@@ -495,7 +451,7 @@ def perform_pairing(server_url, code, name, platform, version, password):
 #
 # Both files are written atomically (temp file + rename) and mode 0600, in a
 # 0700 directory: the device secret and the refresh token are long-lived
-# credentials, same bar as apps/server/state/identity/ (CLAUDE.md, A2).
+# credentials.
 # ---------------------------------------------------------------------------
 
 
@@ -562,10 +518,7 @@ class DeviceCreds:
 
 @dataclasses.dataclass
 class State:
-    """The idempotency map (decision 162e): intake report id -> FB ref, plus
-    the next ref number to allocate. `next_ref` starts `None` so the first
-    run on a fresh state dir computes it from the vault (numbering continues
-    from existing notes) rather than assuming FB-0001."""
+    """The idempotency map: intake report id -> FB ref, plus the next ref number. `next_ref` starts None so a fresh state dir computes it from the vault rather than assuming FB-0001."""
 
     synced: dict
     next_ref: object
@@ -629,9 +582,7 @@ def load_config(env=None):
 
 
 def load_env_file(path):
-    """A minimal `KEY=VALUE` reader for `--env-file`. systemd's own
-    `EnvironmentFile=` already does this for the real service; this exists so
-    `pair` and manual runs can point at the same file."""
+    """A minimal KEY=VALUE reader for --env-file, so `pair` and manual runs can point at the same file systemd's EnvironmentFile= uses."""
     with open(path, "r") as f:
         for line in f:
             line = line.strip()
@@ -648,7 +599,7 @@ def load_env_file(path):
 
 
 # ---------------------------------------------------------------------------
-# Logging — ids and counts only, never report content (decision 162d/162e).
+# Logging — ids and counts only, never report content.
 # ---------------------------------------------------------------------------
 
 
@@ -660,9 +611,8 @@ def log(event, **fields):
 # Session lifecycle
 # ---------------------------------------------------------------------------
 
-# Access tokens last 30 days (ACCESS_LIFETIME_DAYS in sessions.rs); refresh
-# well before that so a box that is off for a few days doesn't come back to
-# a token that expired mid-run.
+# Access tokens last 30 days; refresh well before that so a box that's been
+# off for a few days doesn't come back to a token that expired mid-run.
 _REFRESH_MARGIN = datetime.timedelta(hours=12)
 
 
@@ -677,14 +627,10 @@ def _parse_rfc3339(s):
 
 
 def obtain_session(cfg, creds):
-    """Returns a valid access token, refreshing and persisting a new one
-    first if the current one is missing or close to expiry.
+    """Returns a valid access token, refreshing first if close to expiry.
 
-    The new refresh token is written to disk **immediately** on success,
-    before it is used for anything else: a refresh invalidates the old
-    refresh token (`sessions.rs`, "a replayed refresh token kills the
-    session"), so the window between receiving it and persisting it is the
-    one place a crash could strand this device.
+    A refresh invalidates the old refresh token, so the new one is persisted
+    immediately on success, before anything else uses it.
     """
     needs_refresh = True
     if creds.access_token and creds.access_expires:
@@ -709,7 +655,7 @@ def obtain_session(cfg, creds):
 
 
 # ---------------------------------------------------------------------------
-# Note templating (spec §4)
+# Note templating
 # ---------------------------------------------------------------------------
 
 
@@ -733,9 +679,7 @@ def short_title(text, limit=60):
 
 
 def fenced(text, lang=""):
-    """Wraps `text` in a fence long enough that nothing inside it can close
-    it early — the spec's "escape/handle any ``` inside by using a longer
-    fence" (§4), for diagnostics bundles that happen to quote markdown."""
+    """Wraps `text` in a fence long enough that nothing inside it can close it early."""
     longest_run = 0
     run = 0
     for ch in text:
@@ -762,9 +706,7 @@ def _stringify(value):
 
 
 def render_context(client):
-    """`client` is the caller's own free-form shape (decision 162d) — read
-    defensively, since nothing here is guaranteed to exist or to be a
-    string."""
+    """`client` is the caller's own free-form shape — read defensively, since nothing here is guaranteed to exist or to be a string."""
     client = client if isinstance(client, dict) else {}
     screen = _stringify(client.get("screen")) or "—"
     actions = _stringify(client.get("last_actions")) or "—"
@@ -777,9 +719,7 @@ def render_context(client):
 
 
 def render_note(ref, report):
-    """Builds the note body per spec §4. The server stamps `id`, `created`
-    and `modified` itself (`frontmatter::set_scalars` on `create_note`) —
-    this content carries none of them."""
+    """Builds the note body. The server stamps `id`, `created` and `modified` itself — this content carries none of them."""
     client = report.get("client") if isinstance(report.get("client"), dict) else {}
     bundle = report.get("bundle") if isinstance(report.get("bundle"), dict) else {}
     version = client.get("version") or "unknown"
@@ -828,9 +768,7 @@ def feedback_md_line(ref, folder, kind, title, version):
 
 
 def update_feedback_md_content(content, heading, ref, bullet):
-    """Inserts `bullet` under `heading`, removing a lone `_None yet._`
-    placeholder, and is a no-op if `ref` is already there — the thing that
-    makes a retried update safe."""
+    """Inserts `bullet` under `heading`, removing a lone `_None yet._` placeholder. A no-op if `ref` is already there, which is what makes a retried update safe."""
     pattern = re.compile(
         r"(^" + re.escape(heading) + r"[ \t]*\n)(.*?)(?=^#{1,6}[ \t]|\Z)",
         re.MULTILINE | re.DOTALL,
@@ -851,8 +789,7 @@ def update_feedback_md_content(content, heading, ref, bullet):
 
 
 def update_feedback_index(cfg, access_token, ref, kind, title, version, max_attempts=5):
-    """Read-modify-write `Feedback.md` under its own base version, retrying
-    on a merge conflict — the spec's "merge so concurrent edits merge" (§4)."""
+    """Read-modify-write `Feedback.md` under its own base version, retrying on a merge conflict."""
     note_path = f"{cfg.feedback_folder}/Feedback.md"
     tree = api_tree(cfg.storm_url, access_token, cfg.vault)
     note = next((n for n in tree.get("notes", []) if n.get("path") == note_path), None)
@@ -877,7 +814,7 @@ def update_feedback_index(cfg, access_token, ref, kind, title, version, max_atte
 
 
 # ---------------------------------------------------------------------------
-# Inbox scan — numbering, and the idempotency fallback (spec step a).
+# Inbox scan — numbering, and the idempotency fallback.
 # ---------------------------------------------------------------------------
 
 
@@ -898,10 +835,7 @@ def parse_frontmatter_scalar(content, key):
 
 
 def scan_inbox(cfg, access_token):
-    """Every note under `<folder>/Inbox/`, keyed by note id, with its `ref`
-    and `intake` frontmatter values. Used both to allocate the next ref
-    number and as the idempotency fallback when the local state file does
-    not (yet) know about a report."""
+    """Every note under `<folder>/Inbox/`, keyed by note id, with its `ref` and `intake` frontmatter values — used to allocate the next ref number and as the idempotency fallback."""
     tree = api_tree(cfg.storm_url, access_token, cfg.vault)
     prefix = f"{cfg.feedback_folder}/Inbox/"
     out = {}
@@ -963,12 +897,7 @@ def allocate_ref(state, inbox):
 
 
 def _finish_sync(cfg, access_token, ref, report):
-    """Steps (c) and (d): the screenshot attachment and the `Feedback.md`
-    line. Both are idempotent — the attachment PUT just overwrites the same
-    bytes, and `update_feedback_index` is a no-op once `ref` is already in
-    the section — so this runs whether the note was just created or was
-    already there from a crashed earlier run. A crash between the note and
-    `Feedback.md` must not leave that line missing forever."""
+    """The screenshot attachment and the `Feedback.md` line. Both are idempotent, so this safely runs again on a crashed earlier run's leftovers."""
     if report.get("has_screenshot"):
         report_id = report.get("id")
         png = worker_get_screenshot(cfg.intake_url, cfg.sync_token, report_id)
@@ -1006,16 +935,12 @@ def sync_report(cfg, access_token, state, inbox, report):
         api_create_note(cfg.storm_url, access_token, cfg.vault, path, content)
 
         # Recorded right away: if anything below fails, the next run finds
-        # this note (via state, or the vault scan if state is lost) and
-        # redoes only the idempotent steps that follow — never the create.
+        # this note and redoes only the idempotent steps that follow, never
+        # the create.
         state.synced[report_id] = ref
         state.save()
         log("report_note_created", id=report_id, ref=ref)
     else:
-        # Already landed in the vault (local state, or the vault-scan
-        # fallback) — a previous run must have crashed somewhere after
-        # creating the note. `_finish_sync` below redoes the screenshot and
-        # `Feedback.md` steps rather than assuming they finished too.
         log("report_already_synced", id=report_id, ref=ref)
 
     _finish_sync(cfg, access_token, ref, report)

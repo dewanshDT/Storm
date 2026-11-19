@@ -1,5 +1,5 @@
-// The whole log surface. Ids, byte counts and status only: never a report's
-// text, email, client or bundle contents (decision 162d).
+// Ids, byte counts and status only: never a report's text, email, client or
+// bundle contents.
 export type LogEvent =
   | "report_stored"
   | "report_idempotent_replay"

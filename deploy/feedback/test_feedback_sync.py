@@ -1,13 +1,4 @@
-"""Tests for deploy/feedback/feedback-sync.py (decision 162-6).
-
-Stdlib unittest only, matching the script itself. The script's filename has
-a hyphen so it cannot be `import`ed by name; it is loaded by path below, the
-same trick the script would need if it ever imported itself.
-
-Fake HTTP servers stand in for the Storm API and the intake Worker, shaped on
-the real routes (apps/server/src/api.rs, apps/feedback-cf/src/index.ts) rather
-than a full implementation of either.
-"""
+"""Tests for the feedback sync service. Fake HTTP servers stand in for the Storm API and the intake Worker, shaped on the real routes rather than a full implementation of either."""
 
 import hashlib
 import http.server
@@ -30,6 +21,7 @@ SCRIPT_PATH = os.path.join(HERE, "feedback-sync.py")
 VECTORS_PATH = os.path.join(REPO_ROOT, "docs", "srp-vectors.json")
 
 
+# The script's filename has a hyphen, so it can't be `import`ed by name.
 def _load_module():
     spec = importlib.util.spec_from_file_location("feedback_sync", SCRIPT_PATH)
     mod = importlib.util.module_from_spec(spec)
@@ -40,12 +32,9 @@ def _load_module():
 fs = _load_module()
 
 
-# ---------------------------------------------------------------------------
 # A test-only Ed25519 signer, built on the module's own verified-correct
-# primitives (_ed_scalarmult, _ED_B, _ed_encodepoint/_ed_encodeint, _ED_L).
-# The script only ever verifies; this exists so the fake Storm server can
-# produce real signatures for `perform_pairing` to check.
-# ---------------------------------------------------------------------------
+# primitives. The script only ever verifies; this exists so the fake Storm
+# server can produce real signatures for `perform_pairing` to check.
 
 
 def _test_ed25519_sign(message, seed):
@@ -65,9 +54,7 @@ def _test_ed25519_sign(message, seed):
 
 
 def _verify_vector(case):
-    # Mirrors how `perform_pairing` actually uses these two together: a
-    # decode failure (e.g. the standard-alphabet and padded-key cases, which
-    # `b64url_decode` must reject) is a refusal, same as a bad signature.
+    # A decode failure is a refusal here too, same as a bad signature.
     try:
         pk = fs.b64url_decode(case["public_key_b64"])
         sig = fs.b64url_decode(case["signature_b64"])
@@ -79,9 +66,8 @@ def _verify_vector(case):
 
 class Ed25519VerifyTests(unittest.TestCase):
     def test_against_the_repos_own_cross_implementation_vectors(self):
-        # docs/srp-vectors.json's challenge vectors were signed with
-        # ed25519-dalek (apps/server's real signer) — an independent
-        # implementation from this one, which is the whole point.
+        # Signed with an independent implementation from this one, which is
+        # the whole point.
         with open(VECTORS_PATH) as f:
             doc = json.load(f)
         cases = doc["verify_client_challenge"]
@@ -418,8 +404,7 @@ def _send_empty(handler, status):
 
 
 class FakeVault:
-    """An in-memory stand-in for one Storm vault's notes, shaped on
-    `WriteResult`/`NoteWithProvenance` (apps/server/src/index.rs, ops.rs)."""
+    """An in-memory stand-in for one Storm vault's notes."""
 
     def __init__(self):
         self.notes = {}  # id -> {id, path, title, version, content}
@@ -854,8 +839,7 @@ class PerformPairingTests(unittest.TestCase):
             )
 
     def test_tampered_challenge_signature_is_refused(self):
-        # Simulate a MITM / impersonator: the server signs with a *different*
-        # key than the one the pairing code named.
+        # The server signs with a different key than the pairing code named.
         original_sign = self.storm_state.sign
         other_seed = os.urandom(32)
 
@@ -931,7 +915,6 @@ class RunHappyPathTests(FakeServersTestCase):
         self.assertIn("Storm/Feedback/Inbox/FB-0002.md", notes)
 
     def test_feedback_md_insertion_with_an_existing_list(self):
-        # Start from a Feedback.md that already has one bullet, no placeholder.
         self.vault.notes[self.feedback_note_id]["content"] = (
             "# Feedback\n\n## Inbox (new)\n\n"
             '- [ ] [[Storm/Feedback/Inbox/FB-0000|FB-0000]] · bug · "older" · 1.0.0\n\n'
@@ -964,9 +947,7 @@ class RunHappyPathTests(FakeServersTestCase):
 
     def test_one_bad_report_does_not_stop_the_others(self):
         self.worker_state.add_report(make_report("rep-good-1", text="fine one"))
-        # Missing "kind" and malformed in a way render_note tolerates is NOT
-        # what we want here — force a real failure: no "id" at all breaks
-        # sync_report's own validation.
+        # No "id" at all forces a real failure in sync_report's validation.
         self.worker_state.reports["rep-bad"] = {"text": "no id field"}
         self.worker_state.add_report(make_report("rep-good-2", text="also fine"))
 
@@ -1009,8 +990,8 @@ class IdempotencyTests(FakeServersTestCase):
     def test_crash_after_note_create_but_before_delete_via_state_file(self):
         self.worker_state.add_report(make_report("rep-crash-1", text="about to crash"))
 
-        # Simulate the first run getting partway: create the note and record
-        # it in state, then "crash" before the Worker delete happens.
+        # Simulates a first run that got partway: note created and recorded,
+        # then "crashed" before the Worker delete.
         state = fs.State.load(self.state_dir)
         inbox = fs.InboxIndex(self.cfg, self.storm_state.access_token)
         report = dict(self.worker_state.reports["rep-crash-1"])
@@ -1023,16 +1004,13 @@ class IdempotencyTests(FakeServersTestCase):
         )
         state.synced["rep-crash-1"] = ref
         state.save()
-        # Deliberately never called worker_delete_report — that's the crash.
 
         notes_before = len(self.vault.notes)
 
         rc, _ = self._capture_run()
         self.assertEqual(rc, 0)
 
-        # No duplicate note was created.
         self.assertEqual(len(self.vault.notes), notes_before)
-        # The report was deleted from the Worker on the rerun.
         self.assertNotIn("rep-crash-1", self.worker_state.reports)
 
     def test_crash_recovered_via_vault_scan_when_state_is_lost(self):
@@ -1051,8 +1029,7 @@ class IdempotencyTests(FakeServersTestCase):
         state.synced["rep-crash-2"] = ref
         state.save()
 
-        # Now simulate the state file itself being lost (not just the delete
-        # missing) — the only thing the rerun has to go on is the note itself.
+        # The state file itself is gone; the rerun has only the note to go on.
         os.remove(fs.State._path(self.state_dir))
 
         notes_before = len(self.vault.notes)
@@ -1065,9 +1042,7 @@ class IdempotencyTests(FakeServersTestCase):
     def test_crash_after_note_create_but_before_feedback_md_insert(self):
         self.worker_state.add_report(make_report("rep-crash-3", text="crash before the bullet"))
 
-        # Simulate a first run that created the note and recorded state, but
-        # crashed before `_finish_sync` ever ran — so no screenshot step
-        # (none needed here) and, critically, no `Feedback.md` line yet.
+        # Simulates a first run that crashed before `_finish_sync` ever ran.
         state = fs.State.load(self.state_dir)
         inbox = fs.InboxIndex(self.cfg, self.storm_state.access_token)
         report = dict(self.worker_state.reports["rep-crash-3"])
@@ -1088,12 +1063,9 @@ class IdempotencyTests(FakeServersTestCase):
         rc, _ = self._capture_run()
         self.assertEqual(rc, 0)
 
-        # No duplicate note — the create was correctly skipped on rerun.
         self.assertEqual(len(self.vault.notes), notes_before)
-        # But the bullet, which the crashed run never got to, is now there —
-        # exactly once. (`ref` itself appears twice per bullet — once in the
-        # wikilink's path, once as its display text — so this counts the
-        # whole link rather than the bare ref.)
+        # Counts the whole wikilink, not the bare ref, since `ref` appears
+        # twice per bullet (path and display text).
         content_after = self._feedback_md_content()
         link = f"[[{self.cfg.feedback_folder}/Inbox/{ref}|{ref}]]"
         self.assertEqual(content_after.count(link), 1)

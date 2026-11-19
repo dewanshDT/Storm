@@ -1,10 +1,9 @@
-# Feedback sync (decision 162-6)
+# Feedback sync
 
-Pulls pending reports out of the `apps/feedback-cf` intake Worker and files
-each into the vault as `Storm/Feedback/Inbox/FB-####.md`, deleting it from
-the Worker once it lands. Not part of the Storm product (decision 162e) — a
-standalone Python 3 script plus a systemd timer, stdlib only, so it runs on
-the prod VM with no `pip install`.
+Pulls pending reports out of the intake Worker and files each into the vault
+as `Storm/Feedback/Inbox/FB-####.md`, deleting it from the Worker once it
+lands. Not part of the Storm product — a standalone Python 3 script plus a
+systemd timer, stdlib only, so it runs on the prod VM with no `pip install`.
 
 It runs as its own paired Storm device, "feedback-sync": pairing happens
 once, by hand; every run after that gets a session the same way any client
@@ -14,7 +13,7 @@ does (a stored refresh token, refreshed when it's close to expiring).
 
 - `Storm/Feedback/Feedback.md` must already exist in the target vault, with
   an `## Inbox (new)` heading — the sync only edits under that heading.
-- You need the apps/feedback-cf Worker's `SYNC_TOKEN` and base URL.
+- You need the intake Worker's `SYNC_TOKEN` and base URL.
 - You need the account's own Storm password once, for the first `pair` run
   only. It is never stored.
 
@@ -71,7 +70,7 @@ sudo journalctl -u feedback-sync.service -n 50
 ```
 
 Logs are ids, counts and booleans only — never a report's text, email,
-tokens or diagnostics bundle (decision 162d/162e).
+tokens or diagnostics bundle.
 
 ## Config (`/etc/storm-feedback-sync.env`)
 
@@ -80,7 +79,7 @@ tokens or diagnostics bundle (decision 162d/162e).
 | `STORM_URL` | yes | The Storm server's base URL. |
 | `STORM_VAULT` | yes | The vault id reports are filed into. |
 | `FEEDBACK_FOLDER` | no (default `Storm/Feedback`) | Where `Inbox/` and `Feedback.md` live, relative to the vault root. |
-| `INTAKE_URL` | yes | The `apps/feedback-cf` Worker's base URL. |
+| `INTAKE_URL` | yes | The intake Worker's base URL. |
 | `SYNC_TOKEN` | yes | The Worker's bearer secret for `GET`/`DELETE /v1/reports*`. |
 | `STATE_DIR` | no (default `/var/lib/storm-feedback-sync`) | Device credential + the synced-report map. Change only together with the unit's `StateDirectory=`. |
 

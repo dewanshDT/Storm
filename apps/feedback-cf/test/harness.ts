@@ -3,10 +3,9 @@ import { expect } from "vitest";
 import { GLOBAL_LIMITER_NAME } from "../src/index";
 import type { ReportKind } from "../src/report";
 
-// Matches vitest.config.ts's miniflare bindings.
 export const SYNC_TOKEN = "test-sync-token";
 
-// A valid 1x1 PNG, base64 (decision 162d's screenshot_png_b64).
+// A valid 1x1 PNG, base64.
 export const TINY_PNG_B64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGMAAQAABQABDQottAAAAABJRU5ErkJggg==";
 
@@ -78,11 +77,8 @@ export async function deleteReportRequest(id: string, headers: Record<string, st
   return SELF.fetch(`https://feedback.test/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE", headers });
 }
 
-// The global limiter is one singleton Durable Object (idFromName("global")),
-// so a test that drains its budget to prove the 503 must put it back —
-// sequential tests in one file share this Worker's storage, unlike the
-// per-install_id and per-IP limiters, which each test addresses by a name
-// of its own.
+// The global limiter is one singleton DO shared by every test, so a test
+// that drains its budget must put it back.
 export async function resetGlobalLimiter(): Promise<void> {
   const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(GLOBAL_LIMITER_NAME));
   await runInDurableObject(stub, async (_instance, state) => {
@@ -90,8 +86,7 @@ export async function resetGlobalLimiter(): Promise<void> {
   });
 }
 
-// Stands in for GLOBAL_DAILY_LIMIT prior reports from every install_id and
-// IP at once, without sending that many real requests.
+// Stands in for GLOBAL_DAILY_LIMIT prior reports without sending that many.
 export async function drainGlobalLimiter(): Promise<void> {
   const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(GLOBAL_LIMITER_NAME));
   await runInDurableObject(stub, async (_instance, state) => {
