@@ -5,10 +5,9 @@ import type { StoredReport } from "../../src/report";
 import { listReportIds, putReport } from "../../src/store";
 import { listReports, uniqueInstallId } from "../harness";
 
-// Writes straight to the store with a timestamp of our choosing: the two
-// requests a real client sends can land in the same millisecond, which would
-// make an order assertion over HTTP flaky for no reason the API itself cares
-// about. Here the gap is deliberately a full second.
+// Writes straight to the store with a chosen timestamp — two requests sent
+// over HTTP can land in the same millisecond, which would make an order
+// assertion flaky for no reason the API itself cares about.
 async function seed(ms: number, text: string): Promise<string> {
   const id = newReportId(ms);
   const report: StoredReport = {

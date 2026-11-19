@@ -1,7 +1,5 @@
-// Decision 162d's POST /v1/reports body, and what report.json holds in R2
-// (plus `id` and `received_at`, stamped by the Worker). `client` and
-// `bundle` are the caller's own shape — permissive on purpose, since 162c's
-// diagnostics bundle grows independently of this Worker.
+// `client` and `bundle` are the caller's own shape — deliberately permissive,
+// since the diagnostics bundle grows independently of this Worker.
 export type ReportKind = "bug" | "idea" | "other";
 
 export interface ReportBody {

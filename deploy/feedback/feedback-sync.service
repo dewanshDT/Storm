@@ -1,7 +1,5 @@
-# Decision 162-6: the feedback sync service.
-#
 # Not part of the Storm product — a standalone script that pulls reports out
-# of apps/feedback-cf and files them into the vault as its own paired Storm
+# of the intake Worker and files them into the vault as its own paired Storm
 # device, "feedback-sync". Run by feedback-sync.timer every 5 minutes; this
 # unit is also runnable directly for a one-off sync (`systemctl start
 # feedback-sync`).
@@ -31,8 +29,8 @@ DynamicUser=yes
 EnvironmentFile=/etc/storm-feedback-sync.env
 ExecStart=/usr/bin/python3 /opt/storm-feedback-sync/feedback-sync.py run
 
-# The device credential and the synced-report map (decision 162e) — created
-# 0700, owned by the transient UID.
+# The device credential and the synced-report map — created 0700, owned by
+# the transient UID.
 StateDirectory=storm-feedback-sync
 StateDirectoryMode=0700
 

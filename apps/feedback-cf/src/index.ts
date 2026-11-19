@@ -22,13 +22,11 @@ export { RateLimiter };
 export const MAX_BODY_BYTES = 5 * 1024 * 1024;
 export const RATE_LIMIT = 20;
 export const RATE_WINDOW_MS = 60 * 60 * 1000;
-// install_id is caller-chosen and free to rotate; this is the backstop a
-// UUID-rotating abuser can't dodge the way they can the per-install_id one.
+// Backstop for an abuser rotating install_id (caller-chosen, free to rotate).
 export const IP_RATE_LIMIT = 60;
 export const IP_RATE_WINDOW_MS = 60 * 60 * 1000;
 export const IP_LIMITER_PREFIX = "ip:";
-// A last, cheap cap on total stored reports a day, regardless of caller: the
-// two limits above each bound one abuser, not every abuser at once filling R2.
+// A cheap cap on total stored reports a day, regardless of caller.
 export const GLOBAL_DAILY_LIMIT = 2000;
 export const GLOBAL_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const GLOBAL_LIMITER_NAME = "global";
@@ -108,9 +106,8 @@ async function createReport(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: reason }, 400);
   }
 
-  // A bad screenshot is a 400 like any other validation failure — caught
-  // before idempotency or the rate limiter so a client's encoding bug never
-  // costs it budget or gets deduplicated away.
+  // Validated before idempotency or the rate limiter, so a bad screenshot
+  // never costs budget or gets deduplicated away.
   let screenshot: Uint8Array | undefined;
   if (body.screenshot_png_b64 !== undefined) {
     try {
@@ -122,9 +119,7 @@ async function createReport(request: Request, env: Env): Promise<Response> {
     }
   }
 
-  // Idempotent resend: the client's own report_id, already stored for this
-  // install_id, is answered with the id it got the first time — before the
-  // rate limiter ever sees it, so a retry never spends the caller's budget.
+  // Checked before the rate limiter, so a retry never spends budget.
   if (body.report_id) {
     const existing = await lookupIdempotent(env, body.install_id, body.report_id);
     if (existing) {
@@ -139,10 +134,9 @@ async function createReport(request: Request, env: Env): Promise<Response> {
     return jsonResponse({ error: "rate limited" }, 429, retryAfterHeader(installTaken.retryAfterMs));
   }
 
-  // CF-Connecting-IP, never a client-set header (Cloudflare's edge attests
-  // it, same as relay-cf's per-IP limits). Absent only off Cloudflare — local
-  // dev and these tests dial the Worker directly — where this check is
-  // simply skipped rather than refusing every request.
+  // CF-Connecting-IP is attested by Cloudflare's edge, never client-set.
+  // Absent off Cloudflare (local dev, these tests), where it's skipped
+  // rather than refusing every request.
   const ip = request.headers.get("cf-connecting-ip");
   if (ip) {
     const ipTaken = await takeLimiter(env, `${IP_LIMITER_PREFIX}${ip}`, IP_RATE_LIMIT, IP_RATE_WINDOW_MS);

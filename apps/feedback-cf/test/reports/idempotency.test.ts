@@ -3,8 +3,6 @@ import { IP_RATE_LIMIT } from "../../src/index";
 import { drainGlobalLimiter, listReports, postReport, reportBody, resetGlobalLimiter, uniqueInstallId } from "../harness";
 
 describe("report_id idempotency", () => {
-  // One test here deliberately drains the singleton global limiter; put it
-  // back so it never leaks into a later test (this file's or another's).
   afterEach(resetGlobalLimiter);
 
   it("a resend with the same install_id and report_id returns the same id, with 200", async () => {
@@ -19,7 +17,6 @@ describe("report_id idempotency", () => {
     expect(resend.status).toBe(200);
     expect(((await resend.json()) as { id: string }).id).toBe(id);
 
-    // Stored once: the original text, not whatever the retry happened to say.
     const { reports } = (await (await listReports()).json()) as { reports: Array<{ id: string; text: string }> };
     const stored = reports.filter((r) => r.id === id);
     expect(stored).toHaveLength(1);
@@ -28,7 +25,6 @@ describe("report_id idempotency", () => {
 
   it("a replay never spends the rate limiter's budget", async () => {
     const installId = uniqueInstallId();
-    // Spends 1 of the 20-per-hour budget, genuinely — the resends below must not.
     const first = await postReport(reportBody({ install_id: installId, report_id: "client-r-2" }));
     expect(first.status).toBe(201);
 
@@ -37,7 +33,6 @@ describe("report_id idempotency", () => {
       expect(resend.status, `replay ${i}`).toBe(200);
     }
 
-    // 19 more genuinely new reports exactly fill the budget the first spent 1 of.
     for (let i = 0; i < 19; i++) {
       const fresh = await postReport(reportBody({ install_id: installId, text: `fresh ${i}` }));
       expect(fresh.status, `fresh ${i}`).toBe(201);
@@ -54,8 +49,8 @@ describe("report_id idempotency", () => {
     });
     expect(first.status).toBe(201);
 
-    // Replaying well past IP_RATE_LIMIT proves the replay path never reaches
-    // the IP limiter at all, not just that it happens to stay under it.
+    // Well past IP_RATE_LIMIT, so this proves the replay path skips the IP
+    // limiter rather than just staying under it.
     for (let i = 0; i < IP_RATE_LIMIT + 10; i++) {
       const resend = await postReport(reportBody({ install_id: installId, report_id: "client-r-ip" }), {
         "cf-connecting-ip": ip,

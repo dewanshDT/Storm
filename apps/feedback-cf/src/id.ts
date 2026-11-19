@@ -1,7 +1,5 @@
-// A server-generated report id: ULID's shape (10 chars of millisecond time,
-// 16 of randomness, Crockford's base32 — ascending alphabet order, so R2's
-// lexicographic listing is oldest-first for free) and the retention cron
-// decodes the time back out without a separate index.
+// ULID-shaped: time prefix first, in Crockford base32, so R2's lexicographic
+// listing is oldest-first for free and the time can be decoded back out.
 const ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const TIME_CHARS = 10;
 const RANDOM_CHARS = 16;
@@ -34,8 +32,7 @@ export function isValidReportId(id: string): boolean {
   return true;
 }
 
-// NaN for anything not shaped like an id this Worker minted; callers must
-// check before trusting the result.
+// NaN for anything not shaped like a minted id; callers must check it.
 export function timeOfReportId(id: string): number {
   if (!isValidReportId(id)) return NaN;
   let value = 0;

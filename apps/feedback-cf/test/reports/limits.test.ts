@@ -3,9 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { GLOBAL_DAILY_LIMIT, GLOBAL_LIMITER_NAME, GLOBAL_WINDOW_MS, IP_RATE_LIMIT } from "../../src/index";
 import { drainGlobalLimiter, postReport, reportBody, resetGlobalLimiter, uniqueInstallId } from "../harness";
 
-// TEST-NET-3 (RFC 5737): never a real address, so nothing outside this
-// suite could ever collide with it. Storage is isolated per test, so two
-// tests reusing the same literal IP never see each other's budget.
+// TEST-NET-3 (RFC 5737): never a real address.
 const IP_A = "203.0.113.10";
 const IP_B = "203.0.113.20";
 
@@ -19,8 +17,7 @@ describe("413: the 5 MB body cap", () => {
   });
 
   it("refuses a body that is actually over the cap", async () => {
-    // Legal per-field sizes (text stays under 20k); the bundle is what's over
-    // 5 MB, since 162d is permissive about bundle contents.
+    // Legal per-field sizes (text stays under 20k); bundle is what's over 5 MB.
     const body = reportBody({ bundle: { pad: "x".repeat(FIVE_MIB + 1024) } });
     const res = await postReport(body);
     expect(res.status).toBe(413);
@@ -51,14 +48,11 @@ describe("429: 20 reports per rolling hour per install_id", () => {
     const b = uniqueInstallId();
     for (let i = 0; i < 20; i++) expect((await postReport(reportBody({ install_id: a, text: `a${i}` }))).status).toBe(201);
     expect((await postReport(reportBody({ install_id: a, text: "a20" }))).status).toBe(429);
-    // A different install_id has its own untouched budget.
     expect((await postReport(reportBody({ install_id: b, text: "b0" }))).status).toBe(201);
   });
 });
 
-// install_id is caller-chosen, so an abuser rotating random UUIDs would
-// otherwise never trip the 20/hour limit above; CF-Connecting-IP (attested
-// by Cloudflare's edge, never a client-set header) is the backstop.
+// Backstop for an abuser rotating install_id to dodge the limit above.
 describe(`429: ${IP_RATE_LIMIT} reports per rolling hour per IP`, () => {
   it(`allows ${IP_RATE_LIMIT} and refuses the next, even with a brand-new install_id, with a Retry-After`, async () => {
     for (let i = 0; i < IP_RATE_LIMIT; i++) {
@@ -92,8 +86,6 @@ describe(`429: ${IP_RATE_LIMIT} reports per rolling hour per IP`, () => {
 });
 
 describe(`503: a ${GLOBAL_DAILY_LIMIT}/day global cap on stored reports`, () => {
-  // The global limiter is one singleton DO; put its budget back so a later
-  // test (in this file or another) never inherits an artificially drained one.
   afterEach(resetGlobalLimiter);
 
   it("refuses with a Retry-After once the shared daily budget is spent", async () => {
@@ -109,7 +101,6 @@ describe(`503: a ${GLOBAL_DAILY_LIMIT}/day global cap on stored reports`, () => 
   it("refills over the window like any other token bucket", async () => {
     const stub = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(GLOBAL_LIMITER_NAME));
     await runInDurableObject(stub, async (_instance, state) => {
-      // A whole window ago: fully refilled by the time the request lands.
       await state.storage.put("bucket", { tokens: 0, last: Date.now() - GLOBAL_WINDOW_MS });
     });
 

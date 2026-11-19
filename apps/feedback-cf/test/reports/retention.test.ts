@@ -22,7 +22,7 @@ async function seedAt(ms: number, text: string, withScreenshot = false): Promise
   return id;
 }
 
-describe("scheduled retention (decision 162j)", () => {
+describe("scheduled retention", () => {
   it("purges a report and its screenshot past 30 days, keeps a recent one", async () => {
     const now = Date.UTC(2026, 11, 1);
     const expired = await seedAt(now - RETENTION_MS - 60_000, "too old", true);
@@ -38,8 +38,6 @@ describe("scheduled retention (decision 162j)", () => {
   });
 
   it("leaves a report with no decodable time prefix alone rather than guessing", async () => {
-    // Can't happen through the API (ids are always minted here), but a
-    // hand-edited bucket should not make the cron throw or delete blind.
     await env.FEEDBACK.put("reports/not-a-real-id-xxxxxxxxxx/report.json", JSON.stringify({ weird: true }));
 
     const ctx = createExecutionContext();
@@ -55,8 +53,6 @@ describe("scheduled retention (decision 162j)", () => {
     expect(first.status).toBe(201);
     const firstId = ((await first.json()) as { id: string }).id;
 
-    // A real object, uploaded moments ago by the POST above; a scheduled run
-    // far enough past it that both it and the marker are past the cutoff.
     const future = Date.now() + RETENTION_MS + 24 * 60 * 60 * 1000;
     const ctx = createExecutionContext();
     await worker.scheduled(createScheduledController({ scheduledTime: future }), env, ctx);
@@ -64,8 +60,6 @@ describe("scheduled retention (decision 162j)", () => {
 
     expect(await env.FEEDBACK.head(reportKey(firstId))).toBeNull();
 
-    // The marker is gone too: the same report_id now starts a new report
-    // rather than replaying the (already-deleted) original.
     const resend = await postReport(reportBody({ install_id: installId, report_id: "late-resend" }));
     expect(resend.status).toBe(201);
     expect(((await resend.json()) as { id: string }).id).not.toBe(firstId);
