@@ -1,0 +1,19 @@
+[package]
+name = "storm-diag"
+version = "0.1.0"
+edition = "2024"
+description = "Shared diagnostics: redaction, a tracing log ring buffer, and the Diag bundle shape"
+license = "MIT"
+repository = "https://github.com/dewanshDT/Storm"
+
+# A path dependency of storm-server and storm-runtime, not a workspace
+# joining them (R6, decision 77).
+[dependencies]
+regex = "1.12.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"

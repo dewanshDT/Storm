@@ -72,6 +72,8 @@ rpassword = "7.5.4"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }
+# Decision 162c. A path dependency, not a workspace (R6).
+storm-diag = { path = "../../crates/storm-diag" }
 # `TCP_NOTSENT_LOWAT` on relay trunks (decision 116b). Already in the tree
 # under tokio with the same feature.
 socket2 = { version = "0.6", features = ["all"] }

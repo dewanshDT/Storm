@@ -27,6 +27,7 @@ jobs:
       relay_cf: ${{ steps.f.outputs.relay_cf }}
       feedback_cf: ${{ steps.f.outputs.feedback_cf }}
       runtime: ${{ steps.f.outputs.runtime }}
+      diag: ${{ steps.f.outputs.diag }}
       installer: ${{ steps.f.outputs.installer }}
       client: ${{ steps.f.outputs.client }}
       live: ${{ steps.f.outputs.live }}
@@ -46,8 +47,14 @@ jobs:
               - docs/*.json
               - tools/srp-vectors/**
               - tools/runtime-vectors/**
+            # Decision 162c: a leaf crate both apps/server and apps/runtime
+            # depend on by path, so a change to it must run both their jobs
+            # too, not only its own.
+            diag_crate: &diag_crate
+              - crates/storm-diag/**
             server:
               - *vectors
+              - *diag_crate
               - apps/server/**
               - tools/www-facts/**
               - kit/**
@@ -66,12 +73,15 @@ jobs:
               - apps/feedback-cf/**
             runtime:
               - *vectors
+              - *diag_crate
               - apps/runtime/**
               - tools/www-facts/**
               - deploy/storm-runtime.service
               - deploy/storm-runtime-user.service
               - deploy/storm-runtime-isolation.*
               - deploy/runtime.toml.example
+            diag:
+              - *diag_crate
             installer:
               - deploy/install.sh
               - deploy/storm-backup.sh
@@ -84,6 +94,7 @@ jobs:
             # runtime and run the server's e2e suites against them.
             live:
               - *vectors
+              - *diag_crate
               - apps/client/**
               - apps/server/**
               - apps/relay/**
@@ -217,6 +228,29 @@ jobs:
       - name: relay logs on failure
         if: failure()
         run: cat .dev/conformance-cf.log .dev/conformance-cf-tofu.log || true
+
+  # Decision 162c: a leaf crate both apps/server and apps/runtime depend on
+  # by path. Its own job for the relay's reason — it is not in either's
+  # workspace (there is none), so its own tests only run here.
+  diag:
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.diag == 'true'
+    name: diag (rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/storm-diag
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/storm-diag
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
 
   # The feedback intake Worker (decision 162d): its own TypeScript app on
   # Workers + R2 + a Durable Object, so relay-cf's job for the same reason —
