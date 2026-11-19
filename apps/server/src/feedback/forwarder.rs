@@ -16,8 +16,12 @@ const MAX_BACKOFF: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(60 * 60)
 };
+// Comfortably past anything one attempt could take (connect_timeout below,
+// plus the real request timeout), so a single slow failure never outruns
+// the give-up clock. On Windows a connect to a closed loopback port can
+// take ~2 s (the OS retries the SYN before answering RST).
 const GIVE_UP_AFTER: Duration = if cfg!(test) {
-    Duration::from_millis(500)
+    Duration::from_secs(120)
 } else {
     Duration::from_secs(7 * 24 * 60 * 60)
 };
@@ -28,12 +32,19 @@ const POLL_INTERVAL: Duration = if cfg!(test) {
 };
 const BATCH: usize = 25;
 const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(30);
+// Bounds a dead-connection attempt client-side rather than depend on how
+// fast an OS answers a closed port (see GIVE_UP_AFTER above).
+const CONNECT_TIMEOUT: Duration = if cfg!(test) {
+    Duration::from_millis(300)
+} else {
+    Duration::from_secs(10)
+};
 
 pub fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_preconfigured_tls(crate::gateway::upstream::tls_config())
         .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(Duration::from_secs(10))
+        .connect_timeout(CONNECT_TIMEOUT)
         .timeout(ATTEMPT_TIMEOUT)
         .build()
         .expect("the feedback forwarder's HTTP client builds")
