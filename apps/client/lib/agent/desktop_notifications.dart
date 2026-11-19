@@ -370,7 +370,13 @@ class DesktopNotifier {
     required DeviceNotificationPrefs? Function() prefs,
     bool Function() soundOn = _alwaysSound,
     OsNotifications? os,
+    // Not `this._prefs`/`this._soundOn` above: an initializing formal's
+    // label is the field's own name, and a private name can't be used
+    // as a named argument from another library — this constructor is
+    // called from `desktop_notifications_test.dart` too.
+    // ignore: prefer_initializing_formals
   }) : _prefs = prefs,
+       // ignore: prefer_initializing_formals
        _soundOn = soundOn,
        _os = os ?? RealOsNotifications() {
     _sub = events.updates.listen(_heard);
