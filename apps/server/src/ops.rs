@@ -2776,8 +2776,14 @@ async fn live_hosts(state: &Shared) -> Vec<crate::auth::hosts::Host> {
         .collect()
 }
 
-async fn live_vault_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
-    state
+/// Every name a diagnostics bundle must never carry verbatim: every vault's
+/// display name, plus this server's own identity name — which defaults to
+/// the machine's `/etc/hostname` (`default_server_name`) and is exactly the
+/// "hostname" decision 162c's `Out` list names. It has no shape a regex can
+/// find on its own, the same reason a vault's name needs this list rather
+/// than a pattern in `redact()`.
+async fn live_sensitive_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
+    let mut sensitive: Vec<storm_diag::Sensitive> = state
         .vaults
         .read()
         .await
@@ -2785,7 +2791,9 @@ async fn live_vault_names(state: &Shared) -> Vec<storm_diag::Sensitive> {
         .vaults
         .iter()
         .map(|v| storm_diag::Sensitive::vault(v.name.clone()))
-        .collect()
+        .collect();
+    sensitive.push(storm_diag::Sensitive::host(state.identity.name.clone()));
+    sensitive
 }
 
 /// Asks every enrolled, non-revoked host for its live diagnostics bundle, in
@@ -2840,7 +2848,7 @@ pub async fn server_diag(state: &Shared) -> storm_diag::Diag {
             vaults.registry.registered_relays.snapshot().len(),
         )
     };
-    let sensitive = live_vault_names(state).await;
+    let sensitive = live_sensitive_names(state).await;
     let hosts = live_hosts(state).await;
     let host_count = hosts.len();
     let hosts_online = hosts
@@ -3001,7 +3009,7 @@ pub async fn feedback_preview(
     if !req.client.is_object() {
         return Err(bad_request("client must be an object"));
     }
-    let sensitive = live_vault_names(state).await;
+    let sensitive = live_sensitive_names(state).await;
     let client = redact_json(&bound_client(req.client), &sensitive);
     let bundle = if req.include_diagnostics {
         let server = server_diag(state).await;

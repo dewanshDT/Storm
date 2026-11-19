@@ -7,7 +7,11 @@ use std::sync::LazyLock;
 use regex::Regex;
 
 /// A caller-known sensitive string with no fixed shape a regex could find
-/// on its own — a vault's display name, or a note's title or path.
+/// on its own — a vault's display name, a note's title or path, or a
+/// server's or host's own identity name (which defaults to the machine's
+/// `/etc/hostname` and is exactly the "hostname" decision 162c's bundle
+/// must never carry — a bare name has no shape a regex can recognize on its
+/// own, unlike a URL's host or a `.local` mDNS name).
 #[derive(Debug, Clone)]
 pub struct Sensitive {
     pub value: String,
@@ -18,6 +22,7 @@ pub struct Sensitive {
 pub enum SensitiveKind {
     Vault,
     Note,
+    Host,
 }
 
 impl SensitiveKind {
@@ -25,6 +30,7 @@ impl SensitiveKind {
         match self {
             SensitiveKind::Vault => "<vault>",
             SensitiveKind::Note => "<note>",
+            SensitiveKind::Host => "<host>",
         }
     }
 }
@@ -41,6 +47,13 @@ impl Sensitive {
         Self {
             value: value.into(),
             kind: SensitiveKind::Note,
+        }
+    }
+
+    pub fn host(value: impl Into<String>) -> Self {
+        Self {
+            value: value.into(),
+            kind: SensitiveKind::Host,
         }
     }
 }

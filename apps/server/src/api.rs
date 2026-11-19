@@ -14850,6 +14850,28 @@ pub(crate) mod tests {
         assert!(!joined.contains(&host), "no hostname either: {joined}");
     }
 
+    /// The server's own identity name — which defaults to this machine's
+    /// `/etc/hostname` (`default_server_name`) and is logged verbatim at
+    /// boot (`server identity … name=<name>`) — must never appear in its
+    /// own bundle either: decision 162c's `Out` list says "hostnames", and
+    /// a bare name has no shape the static redaction patterns can find on
+    /// their own, the same reason a vault's name needs the live list above.
+    #[tokio::test]
+    async fn server_diag_redacts_its_own_identity_name() {
+        let dir = tempdir::TempDir::new("storm-diag-identity").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let name = f.state.identity.name.clone();
+        f.state
+            .diag_ring
+            .push(&format!("server identity name={name} key_id=key_test"));
+        let diag = crate::ops::server_diag(&f.state).await;
+        let joined = diag.logs.join("\n");
+        assert!(
+            !joined.contains(&name),
+            "the server's own identity name leaked into its diag bundle: {joined}"
+        );
+    }
+
     // ---- in-app feedback (decision 162-3) ----------------------------------
 
     type FakeRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
