@@ -673,6 +673,95 @@ fn the_counter_never_goes_backwards_across_a_read_or_a_clear() {
 }
 
 // ---------------------------------------------------------------------
+// Mark-as-unread
+// ---------------------------------------------------------------------
+
+#[test]
+fn unread_round_trip_clears_read_state_and_sets_reopened() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    assert!(!n.reopened, "a fresh row has no read/unread history yet");
+
+    let read = mark_read(&conn, std::slice::from_ref(&n.id), None, &now()).unwrap();
+    assert_eq!(read.as_slice(), std::slice::from_ref(&n.id));
+
+    let unread = mark_unread(&conn, std::slice::from_ref(&n.id)).unwrap();
+    assert_eq!(unread.as_slice(), std::slice::from_ref(&n.id));
+
+    let row = conn
+        .query_row(
+            &format!("SELECT {NOTIF_COLUMNS} FROM notifications WHERE id = ?1"),
+            params![n.id],
+            row_to_notification,
+        )
+        .unwrap();
+    assert!(row.read_at.is_none(), "{row:?}");
+    assert!(row.reopened, "{row:?}");
+}
+
+/// A row that has never been read has nothing to reopen: an unknown or
+/// still-unread id is silently ignored, the same "already in the target
+/// state" no-op `mark_read` gives a double read.
+#[test]
+fn unread_ignores_an_unknown_or_already_unread_id() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    let changed = mark_unread(&conn, &[n.id.clone(), "ntf_nope".into()]).unwrap();
+    assert!(
+        changed.is_empty(),
+        "{changed:?} — a never-read row stays unread"
+    );
+}
+
+/// A cancelled row (a `key` replace, or `cancel_notify`) is gone, not
+/// reopenable — matching the brief's "unknown/cancelled ids ignored".
+#[test]
+fn unread_ignores_a_cancelled_row() {
+    let conn = test_conn();
+    let n = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    mark_read(&conn, std::slice::from_ref(&n.id), None, &now()).unwrap();
+    conn.execute(
+        "UPDATE notifications SET cancelled = 1 WHERE id = ?1",
+        params![n.id],
+    )
+    .unwrap();
+    let changed = mark_unread(&conn, std::slice::from_ref(&n.id)).unwrap();
+    assert!(changed.is_empty(), "{changed:?}");
+}
+
+/// The unread's own bump moves `updated_seq` past whatever else has
+/// happened, the same guarantee `the_counter_never_goes_backwards_*` holds
+/// for a read — this is the same persisted counter, never reset.
+#[test]
+fn unread_bumps_updated_seq_past_a_later_insert() {
+    let conn = test_conn();
+    let a = insert_notice(&conn, plain_notice("a"), None)
+        .unwrap()
+        .unwrap();
+    mark_read(&conn, std::slice::from_ref(&a.id), None, &now()).unwrap();
+    let b = insert_notice(&conn, plain_notice("b"), None)
+        .unwrap()
+        .unwrap();
+    assert!(b.updated_seq > a.updated_seq);
+
+    mark_unread(&conn, std::slice::from_ref(&a.id)).unwrap();
+    let a_updated: i64 = conn
+        .query_row(
+            "SELECT updated_seq FROM notifications WHERE id = ?1",
+            params![a.id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(a_updated > b.updated_seq, "the unread moved past b");
+}
+
+// ---------------------------------------------------------------------
 // New events, and the Notifier end to end
 // ---------------------------------------------------------------------
 

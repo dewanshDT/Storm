@@ -19,6 +19,7 @@ AgentNotification _notif({
   String title = 'Needs you',
   String? body,
   bool silent = false,
+  bool reopened = false,
   String? deliver,
 }) => AgentNotification(
   id: id,
@@ -35,6 +36,7 @@ AgentNotification _notif({
   body: body,
   urgency: 'normal',
   silent: silent,
+  reopened: reopened,
   hasDeliverHint: true,
   deliver: deliver,
 );
@@ -405,6 +407,21 @@ void main() {
         os: os,
       );
       harness.push(_notif(id: 'n1', deliver: 'toast:dev_a'));
+      await pumpEventQueue();
+      expect(os.shown, isEmpty);
+      notifier.dispose();
+    });
+
+    test('mark-as-unread: a reopened row never raises an OS notification '
+        "either, even with an \"os\" hint", () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      harness.push(_notif(id: 'n1', deliver: 'os', reopened: true));
       await pumpEventQueue();
       expect(os.shown, isEmpty);
       notifier.dispose();

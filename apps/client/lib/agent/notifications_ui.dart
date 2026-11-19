@@ -461,7 +461,7 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
       anchorKey: anchor,
       alignRight: true,
       width: fitPopoverWidth(context, [
-        if (n.unread) 'Mark as read',
+        if (n.unread) 'Mark as read' else 'Mark as unread',
         if (n.sessionId != null) ...['Mute for 1 hour', 'Mute until it ends'],
         if (canOpen) openLabel,
       ]),
@@ -484,6 +484,27 @@ class _NotificationsPanelState extends ConsumerState<NotificationsPanel> {
                     context,
                     () async =>
                         ref.read(notificationsStateProvider)?.markRead([n.id]),
+                  ),
+                );
+              },
+            )
+          else
+            PopoverItem(
+              key: Key('notify-menu-unread-${n.id}'),
+              label: 'Mark as unread',
+              leading: Icon(
+                LucideIcons.circle_dot,
+                size: t.codeSize,
+                color: t.text2,
+              ),
+              onTap: () {
+                Navigator.pop(popContext);
+                unawaited(
+                  _guard(
+                    context,
+                    () async => ref
+                        .read(notificationsStateProvider)
+                        ?.markUnread([n.id]),
                   ),
                 );
               },

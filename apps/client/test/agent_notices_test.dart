@@ -9,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:storm/agent/agent_events.dart';
 import 'package:storm/agent/agent_models.dart';
 import 'package:storm/agent/agent_notices.dart';
+import 'package:storm/agent/notifications_models.dart';
 import 'package:storm/agent/output_seen.dart';
 import 'package:storm/router.dart';
 
@@ -533,6 +534,44 @@ void main() {
       await push(t, view('ags_1', activity: 'idle', outputEnd: 90));
       expect(toast(), findsOneWidget);
       c.read(routerProvider).go(Routes.agentSession('ags_1'));
+      await t.pumpAndSettle();
+      expect(toast(), findsNothing);
+      await disposeShell(t, c);
+    });
+
+    // Mark-as-unread (decision 161): a live `notification` frame flagged
+    // `reopened` is a row going read -> unread again, not news — never
+    // toasted — while an ordinary first-time one still is. `usage_limit`
+    // is outside `_kOverlapsClientKinds`, so this does not depend on the
+    // inbox having finished its own backfill.
+    AgentNotification serverNotif(
+      String id, {
+      String title = 'hit a usage limit',
+      bool reopened = false,
+    }) => AgentNotification(
+      id: id,
+      seq: 1,
+      created: DateTime.now().toUtc().toIso8601String(),
+      source: 'storm',
+      kind: 'usage_limit',
+      title: title,
+      urgency: 'normal',
+      reopened: reopened,
+    );
+
+    testWidgets('a server-sourced notice toasts', (t) async {
+      final c = await mount(t);
+      opens.last.add(AgentNotificationPushed(serverNotif('ntf_1')));
+      await t.pumpAndSettle();
+      expect(find.text('hit a usage limit'), findsOneWidget);
+      await disposeShell(t, c);
+    });
+
+    testWidgets('a reopened notice never toasts', (t) async {
+      final c = await mount(t);
+      opens.last.add(
+        AgentNotificationPushed(serverNotif('ntf_1', reopened: true)),
+      );
       await t.pumpAndSettle();
       expect(toast(), findsNothing);
       await disposeShell(t, c);

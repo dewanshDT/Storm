@@ -151,7 +151,11 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              read_at        TEXT,
              read_by_device TEXT,
              due            TEXT,
-             cancelled      INTEGER NOT NULL DEFAULT 0
+             cancelled      INTEGER NOT NULL DEFAULT 0,
+             -- Mark-as-unread: set once a row goes read -> unread, and never
+             -- cleared again, so `scan_notify` can tell a genuine reopen
+             -- (no toast) from a first-time unread row (a toast).
+             reopened       INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS notifications_by_seq ON notifications(seq);
          CREATE INDEX IF NOT EXISTS notifications_by_updated ON notifications(updated_seq);
@@ -250,6 +254,16 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              PRIMARY KEY (session_id, window)
          );",
     )?;
+    // Mark-as-unread, additive: a database from before it gains the column.
+    let has_reopened = conn
+        .prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name = 'reopened'")?
+        .exists([])?;
+    if !has_reopened {
+        conn.execute(
+            "ALTER TABLE notifications ADD COLUMN reopened INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1049,11 +1063,15 @@ pub struct Notification {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
     pub cancelled: bool,
+    /// Mark-as-unread: true once this row has been read, then reopened
+    /// (never cleared again). The client reads this on a live `notification`
+    /// frame to skip the toast and OS/web notification for a genuine reopen.
+    pub reopened: bool,
 }
 
 const NOTIF_COLUMNS: &str = "id, seq, updated_seq, created, source, kind, session_id, host_id, \
     provider, session_title, note_vault_id, note_id, title, body, urgency, key, silent, \
-    silent_reason, read_at, cancelled";
+    silent_reason, read_at, cancelled, reopened";
 
 fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
     Ok(Notification {
@@ -1077,6 +1095,7 @@ fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
         silent_reason: row.get(17)?,
         read_at: row.get(18)?,
         cancelled: row.get(19)?,
+        reopened: row.get(20)?,
     })
 }
 
@@ -1239,6 +1258,30 @@ fn mark_read(
             "UPDATE notifications SET read_at = ?2, read_by_device = ?3, updated_seq = ?4
              WHERE id = ?1 AND read_at IS NULL",
             params![id, at, device, seq],
+        )?;
+        if n > 0 {
+            changed.push(id.clone());
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Mark-as-unread: reopens a read, not-cancelled row — an unknown,
+/// already-unread or cancelled id is silently ignored, the same
+/// "already in the target state" no-op `mark_read` gives a double read.
+/// `reopened` is set and never cleared, so a later reopen of the same row
+/// still says "this one has a read/unread history" (see the schema note).
+fn mark_unread(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut changed = Vec::new();
+    for id in ids {
+        let seq = next_counter(&tx)?;
+        let n = tx.execute(
+            "UPDATE notifications SET read_at = NULL, read_by_device = NULL, reopened = 1,
+                 updated_seq = ?2
+             WHERE id = ?1 AND read_at IS NOT NULL AND cancelled = 0",
+            params![id, seq],
         )?;
         if n > 0 {
             changed.push(id.clone());
@@ -2424,6 +2467,21 @@ impl AgentManager {
         let changed = {
             let store = self.store.lock().unwrap();
             mark_read(&store.conn, ids, device, &now())?
+        };
+        if !changed.is_empty() {
+            self.poke_notify();
+        }
+        Ok(changed)
+    }
+
+    /// Mark-as-unread. A reopened row is picked up by the same
+    /// `notify_changed` poke that a read uses, so `scan_notify` sends it
+    /// out again as a fresh `notification` frame (it is unread now),
+    /// flagged `reopened` (see the schema note on `notifications.reopened`).
+    pub fn mark_notifications_unread(&self, ids: &[String]) -> AgentResult<Vec<String>> {
+        let changed = {
+            let store = self.store.lock().unwrap();
+            mark_unread(&store.conn, ids)?
         };
         if !changed.is_empty() {
             self.poke_notify();
