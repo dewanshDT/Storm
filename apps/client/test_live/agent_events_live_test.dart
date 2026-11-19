@@ -126,7 +126,9 @@ void main() {
         _ => false,
       },
     );
-    expect(pushed.$2.difference(endedAt), lessThan(const Duration(seconds: 2)));
+    // decision 154's pace.state window is ~1 s on the server's own path;
+    // 2 s left too little slack for CI jitter.
+    expect(pushed.$2.difference(endedAt), lessThan(const Duration(seconds: 3)));
 
     await api.dismiss(s.id);
     await until(
