@@ -488,8 +488,8 @@ jobs:
       # `make test-live` starts the server, runs both integration suites and
       # tears the server down, so CI does not need to know that dance.
       - run: make test-live
-      - name: server log on failure
-        if: failure()
+      - name: server log (DBG161, temporary, always)
+        if: always()
         run: cat .dev/live-server.log || true
 
   browser:
