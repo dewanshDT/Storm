@@ -711,6 +711,7 @@ class AgentSession {
     this.activity,
     this.programStatus,
     this.terminalAnswered,
+    this.terminalSchemeReport,
     this.harnessSession,
     this.resumedFrom,
     this.mcpSkipped = const [],
@@ -772,6 +773,11 @@ class AgentSession {
   /// host saw the answer go in (157g): `light`, `dark`, or null before any
   /// or from an older server.
   final String? terminalAnswered;
+
+  /// Whether its program has DEC 2031 (colour-scheme reports) on, as its
+  /// host last said (the theme catch-up fix); null before any or from an
+  /// older server.
+  final bool? terminalSchemeReport;
 
   /// What every surface calls the session. A child goes by the name its
   /// parent gave it (145b), never by its agent's terminal title.
@@ -985,6 +991,7 @@ class AgentSession {
     activity: activity == _keep ? this.activity : activity as String?,
     programStatus: programStatus,
     terminalAnswered: terminalAnswered,
+    terminalSchemeReport: terminalSchemeReport,
     harnessSession: harnessSession ?? this.harnessSession,
     resumedFrom: resumedFrom,
     mcpSkipped: mcpSkipped,
@@ -1046,6 +1053,7 @@ class AgentSession {
       final String a when a == 'light' || a == 'dark' => a,
       _ => null,
     },
+    terminalSchemeReport: j['terminal_scheme_report'] as bool?,
     harnessSession: j['harness_session'] as String?,
     resumedFrom: j['resumed_from'] as String?,
     mcpSkipped: [
