@@ -1,0 +1,22 @@
+[package]
+name = "storm-diag"
+version = "0.1.0"
+edition = "2024"
+description = "Shared diagnostics: redaction, a tracing log ring buffer, and the Diag bundle shape"
+license = "MIT"
+repository = "https://github.com/dewanshDT/Storm"
+
+# A leaf crate, not a workspace joining storm-server and storm-runtime: both
+# depend on it by path, it depends on neither (decision 162c). The two keep
+# their own standalone builds (R6, decision 77) — this only factors out the
+# one thing decision 162 wants byte-identical in both: what gets redacted out
+# of a log line before it is kept or sent anywhere.
+[dependencies]
+regex = "1.12.3"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["fmt"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
