@@ -14,9 +14,12 @@ AgentNotification _notif({
   String? sessionId = 'ags_1',
   String? sessionTitle = 'tidier',
   String? provider = 'claude-code',
+  String? noteVaultId,
+  String? noteId,
   String title = 'Needs you',
   String? body,
   bool silent = false,
+  bool reopened = false,
   String? deliver,
 }) => AgentNotification(
   id: id,
@@ -27,10 +30,13 @@ AgentNotification _notif({
   sessionId: sessionId,
   sessionTitle: sessionTitle,
   provider: provider,
+  noteVaultId: noteVaultId,
+  noteId: noteId,
   title: title,
   body: body,
   urgency: 'normal',
   silent: silent,
+  reopened: reopened,
   hasDeliverHint: true,
   deliver: deliver,
 );
@@ -325,6 +331,30 @@ void main() {
       expect(target, isA<NotificationTapSession>());
       expect((target as NotificationTapSession).sessionId, 'ags_1');
     });
+
+    test('review item 8: a note payload decodes to its vault and note id', () {
+      final target = decodeTapPayload('note:vault_1:note_1');
+      expect(target, isA<NotificationTapNote>());
+      expect((target as NotificationTapNote).vaultId, 'vault_1');
+      expect(target.noteId, 'note_1');
+    });
+
+    test('a note payload round-trips with real uuid-shaped ids (never '
+        'containing the ":" delimiter)', () {
+      const vaultId = 'c9b1a8e2-1f3a-4b9e-9d7a-2b6e1f0a9c3d';
+      const noteId = '7a2e1d3c-9b4f-4a2e-8c1d-3f0b6a9e2d1c';
+      final target = decodeTapPayload('note:$vaultId:$noteId');
+      expect(target, isA<NotificationTapNote>());
+      expect((target as NotificationTapNote).vaultId, vaultId);
+      expect(target.noteId, noteId);
+    });
+
+    test('a malformed note payload (no note id) still just brings the '
+        'window forward, same as review item 18', () {
+      expect(decodeTapPayload('note:vault_1:'), isA<NotificationTapNone>());
+      expect(decodeTapPayload('note:vault_1'), isA<NotificationTapNone>());
+      expect(decodeTapPayload('note:'), isA<NotificationTapNone>());
+    });
   });
 
   group('DesktopNotifier with a fake OsNotifications', () {
@@ -377,6 +407,21 @@ void main() {
         os: os,
       );
       harness.push(_notif(id: 'n1', deliver: 'toast:dev_a'));
+      await pumpEventQueue();
+      expect(os.shown, isEmpty);
+      notifier.dispose();
+    });
+
+    test('mark-as-unread: a reopened row never raises an OS notification '
+        "either, even with an \"os\" hint", () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      harness.push(_notif(id: 'n1', deliver: 'os', reopened: true));
       await pumpEventQueue();
       expect(os.shown, isEmpty);
       notifier.dispose();
@@ -608,6 +653,59 @@ void main() {
       expect(notified, isTrue);
       notifier.dispose();
     });
+
+    test('review item 8: a notice carrying both a session and a note link '
+        'is shown with the note payload, which wins', () async {
+      harness.setActive(false);
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      harness.push(
+        _notif(
+          id: 'n1',
+          deliver: 'os',
+          sessionId: 'ags_1',
+          noteVaultId: 'vault_1',
+          noteId: 'note_1',
+        ),
+      );
+      await pumpEventQueue();
+      final payload = os.payloads[notificationIntId('n1')];
+      final target = decodeTapPayload(payload);
+      expect(
+        target,
+        isA<NotificationTapNote>(),
+        reason: 'the note link wins over the session link',
+      );
+      expect((target as NotificationTapNote).vaultId, 'vault_1');
+      expect(target.noteId, 'note_1');
+      notifier.dispose();
+    });
+
+    test('review item 6: DesktopNotifier.init() consults the plugin without '
+        'waiting for a show() first', () async {
+      final notifier = DesktopNotifier(
+        deviceId: 'dev_a',
+        events: harness.events,
+        prefs: allowAll,
+        os: os,
+      );
+      expect(os.initCalls, 0, reason: 'nothing has asked for init yet');
+      await notifier.init();
+      expect(
+        os.initCalls,
+        1,
+        reason:
+            'the eager call desktopNotifierProvider now makes on build '
+            '(see desktop_notifications.dart) must not wait for a new '
+            'notification to arrive',
+      );
+      expect(os.shown, isEmpty, reason: 'no notice was ever raised');
+      notifier.dispose();
+    });
   });
 }
 
@@ -615,14 +713,17 @@ void main() {
 /// no real platform channel exists under `flutter test`.
 class _FakeOs implements OsNotifications {
   final shown = <int, String>{};
+  final payloads = <int, String?>{};
   var cancelledAll = false;
   var permissionRequests = 0;
   var failInit = false;
   var failShow = false;
+  var initCalls = 0;
   bool? permission = true;
 
   @override
   Future<void> init({required void Function(String? payload) onTap}) async {
+    initCalls++;
     if (failInit) throw StateError('no notification service');
   }
 
@@ -638,6 +739,7 @@ class _FakeOs implements OsNotifications {
   }) async {
     if (failShow) throw StateError('show failed');
     shown[id] = title;
+    payloads[id] = payload;
   }
 
   @override

@@ -11,10 +11,12 @@ import 'agent/agent_state.dart' show sessionKeepAliveProvider;
 import 'agent/desktop_notifications.dart'
     show
         NotificationTapNone,
+        NotificationTapNote,
         NotificationTapSession,
         desktopNotifierProvider,
         notificationTapped;
 import 'agent/oauth_links.dart';
+import 'agent/web_notifications.dart' show webNotifierProvider;
 import 'router.dart';
 import 'state/app_state.dart';
 import 'ui/shell/window_buttons.dart' show initWindowChrome;
@@ -97,6 +99,8 @@ class _StormAppState extends ConsumerState<StormApp>
     switch (target) {
       case NotificationTapSession(:final sessionId):
         ref.read(routerProvider).go(Routes.agentSession(sessionId));
+      case NotificationTapNote(:final vaultId, :final noteId):
+        ref.read(routerProvider).go(Routes.note(vaultId, noteId));
       case NotificationTapNone():
         break; // Bringing the window forward above is all there is.
     }
@@ -153,8 +157,11 @@ class _StormAppState extends ConsumerState<StormApp>
     final router = ref.watch(routerProvider);
     // Alive for as long as the app itself is (161-4): watched here, not
     // read, so Riverpod keeps the plugin registration and the events
-    // subscription up rather than tearing it down between frames.
+    // subscription up rather than tearing it down between frames. The web
+    // notifications round's own notifier the same way — null on every
+    // other platform, so this is harmless there.
     ref.watch(desktopNotifierProvider);
+    ref.watch(webNotifierProvider);
 
     // Both members of the chosen family, and the mode: with `system`,
     // Flutter follows the platform's brightness live (decision 160). A

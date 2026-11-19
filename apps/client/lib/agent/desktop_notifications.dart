@@ -19,6 +19,7 @@ import 'desktop_platform.dart';
 import 'device_notification_prefs_state.dart';
 import 'notifications_models.dart';
 import 'this_device_local_prefs.dart';
+import 'windows_icon_path.dart';
 
 /// Whether [deliver] (161-4's hint on a live frame) means this device
 /// should raise a local OS notification right now, given whether it is
@@ -184,6 +185,15 @@ class NotificationTapSession extends NotificationTapTarget {
   final String sessionId;
 }
 
+/// Review item 8: a notice whose `link` was a note (the `notify` tool's
+/// `link: {"kind":"note", vault, note}`), carried as `n.noteVaultId`/
+/// `n.noteId`.
+class NotificationTapNote extends NotificationTapTarget {
+  NotificationTapNote(this.vaultId, this.noteId);
+  final String vaultId;
+  final String noteId;
+}
+
 class NotificationTapNone extends NotificationTapTarget {}
 
 /// Fired when the person taps a Storm-raised OS notification from outside
@@ -193,12 +203,28 @@ class NotificationTapNone extends NotificationTapTarget {}
 final notificationTapped = ValueNotifier<NotificationTapTarget?>(null);
 
 NotificationTapTarget decodeTapPayload(String? payload) {
-  // `session:<id>` is the only shape ever written (see `_raise` below);
-  // kept this explicit, rather than `jsonDecode`, so a stray payload from
-  // a notification shown before an upgrade never throws decoding it.
-  const prefix = 'session:';
-  if (payload != null && payload.startsWith(prefix)) {
-    return NotificationTapSession(payload.substring(prefix.length));
+  // `note:<vaultId>:<noteId>` and `session:<id>` are the only shapes ever
+  // written (see `_show` below) — kept explicit, rather than `jsonDecode`,
+  // so a stray payload from a notification shown before an upgrade never
+  // throws decoding it. Vault and note ids are server-generated UUIDv4s
+  // (`Uuid::new_v4()`, `apps/server/src/index.rs`), which never contain a
+  // colon, so splitting the rest on the first one is safe.
+  if (payload == null) return NotificationTapNone();
+  const notePrefix = 'note:';
+  if (payload.startsWith(notePrefix)) {
+    final rest = payload.substring(notePrefix.length);
+    final colon = rest.indexOf(':');
+    if (colon > 0 && colon < rest.length - 1) {
+      return NotificationTapNote(
+        rest.substring(0, colon),
+        rest.substring(colon + 1),
+      );
+    }
+    return NotificationTapNone();
+  }
+  const sessionPrefix = 'session:';
+  if (payload.startsWith(sessionPrefix)) {
+    return NotificationTapSession(payload.substring(sessionPrefix.length));
   }
   return NotificationTapNone();
 }
@@ -245,42 +271,69 @@ abstract class OsNotifications {
   Future<bool> openSystemSettings();
 }
 
+/// Whether this *process* has already consulted
+/// `getNotificationAppLaunchDetails()` (review item 6) — module level, not
+/// an instance field, because [desktopNotifierProvider] can tear down and
+/// rebuild a brand-new [RealOsNotifications] (the device id changes on
+/// sign-out/sign-in) and a fresh instance must never re-fire the same
+/// stale cold-launch tap a second time. [RealOsNotifications._initialized]
+/// still guards `_plugin.initialize()` itself, which every new instance
+/// does need to do.
+bool _launchDetailsConsumed = false;
+
 class RealOsNotifications implements OsNotifications {
   final _plugin = FlutterLocalNotificationsPlugin();
   bool _initialized = false;
 
   @override
   Future<void> init({required void Function(String? payload) onTap}) async {
-    if (_initialized) return;
-    await _plugin.initialize(
-      settings: InitializationSettings(
-        // Alert/sound/badge permission is asked lazily by
-        // `requestPermission` (review item 2: at the first notification,
-        // not at launch); categories registered up front cost nothing
-        // and have no actions (138p-7).
-        macOS: const DarwinInitializationSettings(
-          requestAlertPermission: false,
-          requestBadgePermission: false,
-          requestSoundPermission: false,
-          notificationCategories: [
-            DarwinNotificationCategory(kStormNotificationCategory),
-            DarwinNotificationCategory(kAgentMessagesNotificationCategory),
-          ],
+    if (!_initialized) {
+      await _plugin.initialize(
+        settings: InitializationSettings(
+          // Alert/sound/badge permission is asked lazily by
+          // `requestPermission` (review item 2: at the first notification,
+          // not at launch); categories registered up front cost nothing
+          // and have no actions (138p-7).
+          macOS: const DarwinInitializationSettings(
+            requestAlertPermission: false,
+            requestBadgePermission: false,
+            requestSoundPermission: false,
+            notificationCategories: [
+              DarwinNotificationCategory(kStormNotificationCategory),
+              DarwinNotificationCategory(kAgentMessagesNotificationCategory),
+            ],
+          ),
+          // Review item 9: Storm's own mark, not the plugin's generic
+          // default. The asset path is exactly as declared in
+          // `pubspec.yaml` — the plugin joins it onto the Flutter assets
+          // directory itself (`flutter_local_notifications_linux`'s
+          // `platform_info.dart`).
+          linux: LinuxInitializationSettings(
+            defaultActionName: 'Open',
+            defaultIcon: AssetsLinuxIcon('assets/icon/storm_icon_full.png'),
+          ),
+          windows: WindowsInitializationSettings(
+            appName: 'Storm',
+            appUserModelId: 'dev.storm.Storm',
+            guid: '6f1b1c0e-6b7b-4a9e-9b0a-2a9b7c7a0f1a',
+            iconPath: windowsIconPath(),
+          ),
         ),
-        linux: const LinuxInitializationSettings(defaultActionName: 'Open'),
-        windows: WindowsInitializationSettings(
-          appName: 'Storm',
-          appUserModelId: 'dev.storm.Storm',
-          guid: '6f1b1c0e-6b7b-4a9e-9b0a-2a9b7c7a0f1a',
-        ),
-      ),
-      onDidReceiveNotificationResponse: (r) => onTap(r.payload),
-    );
-    _initialized = true;
+        onDidReceiveNotificationResponse: (r) => onTap(r.payload),
+      );
+      _initialized = true;
+    }
     // Nit: a tap that *launched* the app never reaches
     // `onDidReceiveNotificationResponse` — the plugin was not listening
     // yet — so a cold launch from a notification would otherwise land on
     // the ordinary start screen with no idea which session it was about.
+    // Review item 6: this must run only once a process, not once an
+    // instance — `desktopNotifierProvider` eagerly calls `init()` on
+    // build (see there), so this now runs as soon as that provider is
+    // first read, rather than waiting for the first new notification
+    // `_show()` happens to raise.
+    if (_launchDetailsConsumed) return;
+    _launchDetailsConsumed = true;
     final launch = await _plugin.getNotificationAppLaunchDetails();
     if (launch?.didNotificationLaunchApp ?? false) {
       onTap(launch?.notificationResponse?.payload);
@@ -322,6 +375,25 @@ class RealOsNotifications implements OsNotifications {
     ),
   );
 
+  /// Windows note (review item 7): a single already-delivered toast
+  /// cannot be removed from Action Center history on Storm's unpackaged
+  /// (zip-distributed, no MSIX) Windows build.
+  /// `flutter_local_notifications_windows`'s native `cancelNotification`
+  /// (`src/ffi_api.cpp`) only calls `ToastNotificationHistory.Remove`
+  /// when the process has a package identity (`hasIdentity`, from
+  /// `GetCurrentPackageFullName`), which Storm's build never has; what it
+  /// still does — cancel a *scheduled*, not-yet-shown toast — is real,
+  /// but Storm never schedules one, it only ever shows immediately.
+  /// [cancelAll] is not affected: its native implementation calls the
+  /// AUMID-overloaded `ToastNotificationHistory.Clear(appId)`, which *is*
+  /// documented for an unpackaged Win32 app that has set an explicit
+  /// AUMID (`appUserModelId` above) — "Clear notifications" genuinely
+  /// clears Action Center too. Fixing the single-id case would need
+  /// either MSIX packaging (out of scope) or a patched/vendored copy of
+  /// this plugin's native code calling the 3-argument
+  /// `Remove(tag, group, appId)` overload the WinRT API also exposes for
+  /// unpackaged apps — unverified and unbuildable from this box either
+  /// way (no Windows toolchain here).
   @override
   Future<void> cancel(int id) => _plugin.cancel(id: id);
 
@@ -564,6 +636,8 @@ class DesktopNotifier extends ChangeNotifier {
 
   Future<void> _raise(AgentNotification n) async {
     if (n.silent) return;
+    // Mark-as-unread: a reopen is never a fresh OS/web notification either.
+    if (n.reopened) return;
     // Review item E: a test notice is never raised from the live stream
     // — only `forceShow`, by the device that actually asked for it,
     // raises one. Every other device hearing the same live frame (every
@@ -640,11 +714,19 @@ class DesktopNotifier extends ChangeNotifier {
     } else {
       _noticeIntId[n.id] = plan.intId;
     }
+    final noteVaultId = n.noteVaultId;
+    final noteId = n.noteId;
+    // Review item 8: a note link wins over a session link — a notice
+    // carrying both (should one ever) is about the note, which the
+    // session link alone would drop entirely.
+    final payload = noteVaultId != null && noteId != null
+        ? 'note:$noteVaultId:$noteId'
+        : (sessionId == null ? null : 'session:$sessionId');
     await _os.show(
       id: plan.intId,
       title: plan.title,
       body: plan.body,
-      payload: sessionId == null ? null : 'session:$sessionId',
+      payload: payload,
       threadId: sessionId,
       category: osCategoryOf(n),
       sound: _soundOn(),
@@ -688,5 +770,14 @@ final desktopNotifierProvider = Provider.autoDispose<DesktopNotifier?>((ref) {
     soundOn: () => local.soundOn,
   );
   ref.onDispose(notifier.dispose);
+  // Review item 6: eager, not deferred until the first new notification's
+  // `_show()` happens to call it (also harmless there — idempotent) — a
+  // cold launch from tapping an old notification has to be detected as
+  // soon as this provider builds, which `main.dart`'s own `ref.watch`
+  // keeps alive from app start. Swallowed here the same way `_show`/
+  // `permissionStatus` swallow their own: a failure (no plugin channel at
+  // all, e.g. under test) is this notifier's own `unavailable` to surface
+  // later, never an uncaught error on a call nothing here awaits.
+  unawaited(notifier.init().catchError((_) {}));
   return notifier;
 });

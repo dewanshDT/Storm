@@ -217,6 +217,13 @@ typedef AgentEventsOpen = Stream<AgentEvent> Function(AgentPresence presence);
 /// tunnel.
 const agentEventsIdle = Duration(seconds: 45);
 
+/// How often an open, active connection re-`POST`s its own presence
+/// (review item 5): the server times a presence row out at ~45 s absent a
+/// refresh, and `_syncPresence` otherwise only fires on a real change — a
+/// long quiet stretch with nothing to change would otherwise age out even
+/// though the device is still here.
+const agentPresenceHeartbeat = Duration(seconds: 20);
+
 /// The events over [connection], however it reaches the server now: a
 /// WebSocket when direct, SSE through a relay, which tunnels HTTP and not
 /// upgrades (the way the change feed picks).
@@ -475,6 +482,7 @@ class AgentEvents {
     this._open, {
     this.retryMin = const Duration(seconds: 1),
     this.retryMax = const Duration(seconds: 60),
+    this.heartbeatInterval = agentPresenceHeartbeat,
     this._apiFactory,
     Random? random,
   }) : _random = random ?? Random();
@@ -482,6 +490,9 @@ class AgentEvents {
   final AgentEventsOpen _open;
   final Duration retryMin;
   final Duration retryMax;
+
+  /// Overridable for tests, same reason [retryMin] is.
+  final Duration heartbeatInterval;
   final Random _random;
 
   /// Used only for the lightweight `POST …/presence` while already
@@ -539,16 +550,76 @@ class AgentEvents {
   StreamSubscription<AgentEvent>? _sub;
   int _run = 0;
   Timer? _retry;
+  Timer? _heartbeat;
   Duration? _backoff;
   bool _background = false;
   bool _disposed = false;
   AppLifecycleListener? _lifecycle;
 
+  /// Web notifications round: whether this device's own web notifier has
+  /// both permission and its "Notifications on this device" toggle on —
+  /// set only by [setWebNotificationsEnabled], which only `webNotifierProvider`
+  /// calls, and that provider is itself `kIsWeb`-gated (`web_notifications.dart`)
+  /// — so this is never true off the web build, without this class having
+  /// to know `kIsWeb` itself (and losing the ability to test it on the VM,
+  /// where the constant is always false).
+  bool _webKeepAlive = false;
+
+  /// Whether a hidden tab/window should keep its stream open rather than
+  /// drop it like a phone would — desktop always (161-4), web only once
+  /// [setWebNotificationsEnabled] has said so (the web notifications
+  /// round, amending 154 Q2 again for web). Enabling or disabling only
+  /// changes what a *later* hidden/paused transition does — the Settings
+  /// page's "Enable notifications" button only works on a click, which
+  /// means the tab was visible and active at the time, so there is
+  /// nothing already backgrounded to reconsider.
+  bool get _keepsStreamWhileHidden => isDesktopPlatform || _webKeepAlive;
+
+  /// The web notifications round's own switch (amends 154 Q2 for web):
+  /// called by `webNotifierProvider` whenever this device's web
+  /// notification permission or its device-prefs toggle changes.
+  void setWebNotificationsEnabled(bool enabled) {
+    _webKeepAlive = enabled;
+  }
+
   void start({bool followLifecycle = true}) {
     if (followLifecycle) {
       _lifecycle = AppLifecycleListener(onStateChange: _lifecycleChanged);
+      // Review item 5: without this, `_presence` carries
+      // `AgentPresence.initial`'s active-by-default assumption into the
+      // very first connect, however the app actually launched (hidden,
+      // backgrounded, unfocused). `WidgetsBinding.instance.lifecycleState`
+      // is null only before the engine has ever reported one at all.
+      final initial = WidgetsBinding.instance.lifecycleState;
+      if (initial != null) _applyInitialLifecycleState(initial);
     }
     _connect();
+  }
+
+  /// What [start] applies, once, before its first [_connect] — the
+  /// equivalent of [_lifecycleChanged] for the state the app is already
+  /// in at launch, with one deliberate difference: on desktop this never
+  /// calls [background], which would set `_background` before a stream
+  /// has ever opened and so block that very `_connect` (desktop's stream
+  /// is meant to open regardless of presence; only presence itself should
+  /// start non-active). Off-desktop, `background` is exactly right — it
+  /// keeps `_connect` from running at all, the same "no stream behind the
+  /// person's back" rule a later hidden/paused transition gets.
+  void _applyInitialLifecycleState(AppLifecycleState s) {
+    switch (s) {
+      case AppLifecycleState.hidden || AppLifecycleState.paused:
+        if (_keepsStreamWhileHidden) {
+          _setActive(false);
+        } else {
+          background();
+        }
+      case AppLifecycleState.inactive:
+        if (_keepsStreamWhileHidden) _setActive(false);
+      case AppLifecycleState.resumed:
+      // Nothing extra: `_presence.active` already defaults true.
+      case AppLifecycleState.detached:
+        break;
+    }
   }
 
   void _lifecycleChanged(AppLifecycleState s) {
@@ -557,30 +628,33 @@ class AgentEvents {
         background();
       case AppLifecycleState.resumed:
         foreground();
-        // Undoes a desktop `inactive`'s presence flip below even when
+        // Undoes a kept-open `inactive`'s presence flip below even when
         // `_background` was never set true by it (so `foreground()`
         // itself no-ops) — a window that only lost and regained focus,
         // never truly hidden.
-        if (isDesktopPlatform) _setActive(true);
+        if (_keepsStreamWhileHidden) _setActive(true);
       case AppLifecycleState.inactive:
-        // Desktop only (review item 5): the window lost focus without
-        // being hidden, minimized or closed. Background presence, same
-        // as `background()`'s desktop branch — but never drop the
-        // stream (`_background` stays untouched; this is milder).
-        if (isDesktopPlatform) _setActive(false);
+        // Desktop, or web with notifications enabled (review item 5):
+        // the window/tab lost focus without being hidden, minimized or
+        // closed. Background presence, same as `background()`'s own
+        // kept-open branch — but never drop the stream (`_background`
+        // stays untouched; this is milder).
+        if (_keepsStreamWhileHidden) _setActive(false);
       case AppLifecycleState.detached:
         break;
     }
   }
 
   /// No stream runs behind the person's back — except on desktop (161-4,
-  /// amends 154 Q2): there, the stream stays open so a closed-window
-  /// session still gets OS notifications, and only presence changes to
-  /// `background`. Phones and web still close it.
+  /// amends 154 Q2), or on web once notifications are enabled on this
+  /// device (the web notifications round, amends 154 Q2 again): there,
+  /// the stream stays open so a hidden tab or a closed-window session
+  /// still gets OS notifications, and only presence changes to
+  /// `background`. Phones, and web with notifications off, still close it.
   void background() {
     if (_disposed || _background) return;
     _background = true;
-    if (isDesktopPlatform) {
+    if (_keepsStreamWhileHidden) {
       _setActive(false);
       return;
     }
@@ -590,14 +664,14 @@ class AgentEvents {
     }
   }
 
-  /// Back in front. On desktop the stream never left, so this only reports
-  /// presence; everywhere else, connect now for a fresh snapshot — a
-  /// server that had no stream is asked again, in case it was upgraded
-  /// meanwhile.
+  /// Back in front. Where the stream stays open while hidden, this only
+  /// reports presence; everywhere else, connect now for a fresh snapshot
+  /// — a server that had no stream is asked again, in case it was
+  /// upgraded meanwhile.
   void foreground() {
     if (_disposed || !_background) return;
     _background = false;
-    if (isDesktopPlatform) {
+    if (_keepsStreamWhileHidden) {
       _setActive(true);
       return;
     }
@@ -629,7 +703,28 @@ class AgentEvents {
       openSessionId: _presence.openSessionId,
       connectionId: _presence.connectionId,
     );
+    if (active) {
+      _maybeStartHeartbeat();
+    } else {
+      _stopHeartbeat();
+    }
     _syncPresence();
+  }
+
+  /// Starts the heartbeat iff the connection is actually open and presence
+  /// is active right now — idempotent, so every caller (an active flip, a
+  /// freshly opened snapshot) can call it unconditionally without first
+  /// checking whether one is already running.
+  void _maybeStartHeartbeat() {
+    if (!isOpen || !_presence.active) return;
+    _heartbeat ??= Timer.periodic(heartbeatInterval, (_) {
+      if (isOpen && _presence.active) _syncPresence();
+    });
+  }
+
+  void _stopHeartbeat() {
+    _heartbeat?.cancel();
+    _heartbeat = null;
   }
 
   /// Whether a change arrived while [_pumpPresence] was already sending
@@ -689,6 +784,7 @@ class AgentEvents {
     _run++;
     _retry?.cancel();
     _retry = null;
+    _stopHeartbeat();
     unawaited(_sub?.cancel());
     _sub = null;
   }
@@ -738,6 +834,7 @@ class AgentEvents {
   void _ended(int run) {
     if (_disposed || run != _run) return;
     _sub = null;
+    _stopHeartbeat();
     state.value = AgentEventsState.closed;
     final base = _backoff ?? retryMin;
     final next = base * 2;
@@ -770,6 +867,7 @@ class AgentEvents {
         _snapshotAt = at;
         _backoff = null;
         state.value = AgentEventsState.open;
+        _maybeStartHeartbeat();
         // Review item 6: a presence change made while this connection was
         // still `connecting` never reached `_syncPresence` (not `isOpen`
         // yet) — catch up now, the first moment a `POST` can land.

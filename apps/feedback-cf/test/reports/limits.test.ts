@@ -1,6 +1,6 @@
 import { env, runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
-import { GLOBAL_DAILY_LIMIT, GLOBAL_LIMITER_NAME, GLOBAL_WINDOW_MS, IP_RATE_LIMIT } from "../../src/index";
+import { GLOBAL_DAILY_LIMIT, GLOBAL_LIMITER_NAME, GLOBAL_WINDOW_MS, IP_RATE_LIMIT } from "../../src/limits";
 import { drainGlobalLimiter, postReport, reportBody, resetGlobalLimiter, uniqueInstallId } from "../harness";
 
 // TEST-NET-3 (RFC 5737): never a real address.

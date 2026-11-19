@@ -6,7 +6,15 @@ plugins {
 
 android {
     namespace = "dev.storm.storm"
-    compileSdk = flutter.compileSdkVersion
+    // flutter_local_notifications (decision 161) needs compileSdk 37
+    // (its own android/build.gradle.kts), one past Flutter 3.44.8's own
+    // default of 36 (`flutter.compileSdkVersion`) — pinned past it here
+    // literally, since Flutter's own default lags a plugin's own
+    // requirement rather than tracking it. targetSdk stays
+    // `flutter.targetSdkVersion` (36): nothing requires it to move too,
+    // and AGP only needs targetSdk <= compileSdk, which 36 <= 37 already
+    // satisfies.
+    compileSdk = 37
     ndkVersion = flutter.ndkVersion
 
     compileOptions {

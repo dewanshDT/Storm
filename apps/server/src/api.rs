@@ -667,6 +667,7 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
             get(notifications_list).delete(notifications_clear),
         )
         .route("/v1/notifications/read", post(notifications_read))
+        .route("/v1/notifications/unread", post(notifications_unread))
         .route(
             "/v1/notifications/prefs",
             get(notification_prefs_get).put(notification_prefs_put),
@@ -2930,6 +2931,16 @@ async fn notifications_read(
     ))
 }
 
+async fn notifications_unread(
+    State(state): State<Shared>,
+    Extension(actor): Extension<Actor>,
+    Json(body): Json<crate::ops::MarkUnread>,
+) -> ApiResult<Json<crate::ops::notifications::MarkUnreadResult>> {
+    Ok(Json(
+        crate::ops::mark_notifications_unread(&state, &actor, body).await?,
+    ))
+}
+
 async fn notifications_clear(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
@@ -3008,9 +3019,10 @@ async fn notifications_unpause(
 async fn notifications_test(
     State(state): State<Shared>,
     Extension(actor): Extension<Actor>,
+    auth: Option<Extension<SessionAuth>>,
 ) -> ApiResult<Json<crate::agent::notifications::Notification>> {
     Ok(Json(
-        crate::ops::send_test_notification(&state, &actor).await?,
+        crate::ops::send_test_notification(&state, &actor, device_of(&auth)).await?,
     ))
 }
 
@@ -14838,6 +14850,66 @@ pub(crate) mod tests {
         assert!(!joined.contains(&host), "no hostname either: {joined}");
     }
 
+    /// The server's own identity name — which defaults to this machine's
+    /// `/etc/hostname` (`default_server_name`) and is logged verbatim at
+    /// boot (`server identity … name=<name>`) — must never appear in its
+    /// own bundle either: decision 162c's `Out` list says "hostnames", and
+    /// a bare name has no shape the static redaction patterns can find on
+    /// their own, the same reason a vault's name needs the live list above.
+    #[tokio::test]
+    async fn server_diag_redacts_its_own_identity_name() {
+        let dir = tempdir::TempDir::new("storm-diag-identity").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let name = f.state.identity.name.clone();
+        f.state
+            .diag_ring
+            .push(&format!("server identity name={name} key_id=key_test"));
+        let diag = crate::ops::server_diag(&f.state).await;
+        let joined = diag.logs.join("\n");
+        assert!(
+            !joined.contains(&name),
+            "the server's own identity name leaked into its diag bundle: {joined}"
+        );
+    }
+
+    /// A host's own display name — `enroll_a_host`'s fixed `"build-vm"` —
+    /// must never survive into a diag bundle either, if it ever ends up in
+    /// that host's own ring (the host has no way to know its own name is
+    /// sensitive; only the server's re-redaction, with every enrolled
+    /// host's name now in the live list, catches it). `gather_host_diags`'s
+    /// positional labels already keep a host's name out of the `host`
+    /// field (see `gather_host_diags_labels_are_positional_never_host_names`
+    /// above); this is about the `logs` a host's own ring might carry.
+    #[tokio::test]
+    async fn feedback_preview_redacts_a_hosts_own_name_from_its_bundle() {
+        let dir = tempdir::TempDir::new("storm-diag-host-name").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, host_bearer, mut link) = f.connected_host(true).await;
+        let preview = crate::ops::feedback_preview(
+            &f.state,
+            crate::ops::FeedbackPreviewRequest {
+                kind: crate::ops::FeedbackKind::Bug,
+                include_diagnostics: true,
+                client: serde_json::json!({}),
+            },
+        );
+        let answer = f.answer(&mut link, &host_bearer, vec!["connected as build-vm"]);
+        let (preview, _) = tokio::join!(preview, answer);
+        let preview = preview.unwrap_or_else(|e| panic!("preview failed: {} {}", e.0, e.1));
+        let logs = preview.bundle["hosts"][0]["diag"]["logs"]
+            .as_array()
+            .expect("the host's logs")
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !logs.contains("build-vm"),
+            "the host's own name leaked into its diag bundle: {logs}"
+        );
+        assert!(logs.contains("<host>"), "{logs}");
+    }
+
     // ---- in-app feedback (decision 162-3) ----------------------------------
 
     type FakeRequests = Arc<std::sync::Mutex<Vec<serde_json::Value>>>;
@@ -21821,12 +21893,26 @@ pub(crate) mod tests {
             .filter(|(kind, _)| kind == crate::ops::EVENT_AGENT_MIGRATION)
             .map(|(_, d)| serde_json::from_str(&d).unwrap())
             .collect();
-        assert_eq!(audited.len(), 1);
-        assert_eq!(
-            audited[0]["migration"],
-            crate::agent::store::CREW_TREES_MIGRATION
-        );
-        assert_eq!(audited[0]["detail"]["moved"], serde_json::json!([]));
+        // A fresh db also has 161h's own migration pending (nothing to
+        // delete, but never run before either), audited alongside this
+        // one by the same generic sweep — find this one by name rather
+        // than assume it is the only audited migration, and check that
+        // each is audited exactly once rather than asserting a total.
+        for migration in [
+            crate::agent::store::CREW_TREES_MIGRATION,
+            crate::agent::store::DELETE_OFF_NOTICES_MIGRATION,
+        ] {
+            let mine: Vec<&serde_json::Value> = audited
+                .iter()
+                .filter(|a| a["migration"] == migration)
+                .collect();
+            assert_eq!(mine.len(), 1, "{migration} audited once: {audited:?}");
+        }
+        let crew_tree = audited
+            .iter()
+            .find(|a| a["migration"] == crate::agent::store::CREW_TREES_MIGRATION)
+            .unwrap();
+        assert_eq!(crew_tree["detail"]["moved"], serde_json::json!([]));
     }
 
     // ---- the spawning client's reads (decision 134-10, 145a) ----

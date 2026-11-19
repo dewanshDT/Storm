@@ -285,6 +285,9 @@ class _AgentNoticeWatcherState extends ConsumerState<AgentNoticeWatcher> {
       }
       return;
     }
+    // Mark-as-unread: a row going read -> unread again is a live
+    // `notification` frame, but it is a reopen, not news — never toasted.
+    if (n.reopened) return;
     if (n.silent || _kNeverToastKinds.contains(n.kind)) return;
     // The three kinds `noticeOf` also raises toast from here only once the
     // inbox has proven itself present; before that, `noticeOf` alone has

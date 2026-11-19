@@ -312,6 +312,287 @@ void main() {
       await settle();
       expect(live.isActive, isTrue);
     });
+
+    test('review item 5: a periodic heartbeat refreshes presence while open '
+        'and active, and stops once backgrounded', () async {
+      final localPosts = <Map<String, dynamic>>[];
+      final heartbeatOpens = <StreamController<AgentEvent>>[];
+      final heartbeatEvents = AgentEvents(
+        (presence) {
+          final c = StreamController<AgentEvent>();
+          heartbeatOpens.add(c);
+          return c.stream;
+        },
+        retryMin: const Duration(milliseconds: 5),
+        heartbeatInterval: const Duration(milliseconds: 30),
+        apiFactory: () => AgentApi(
+          baseUrl: 'http://s',
+          token: 't',
+          client: MockClient((req) async {
+            if (req.url.path == '/v1/notifications/presence') {
+              localPosts.add(jsonDecode(req.body) as Map<String, dynamic>);
+            }
+            return http.Response('', 204);
+          }),
+        ),
+      )..start(followLifecycle: false);
+      addTearDown(heartbeatEvents.dispose);
+
+      heartbeatOpens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      expect(
+        localPosts,
+        isEmpty,
+        reason: 'nothing changed, so review item 6 has nothing to catch up',
+      );
+
+      await Future<void>.delayed(const Duration(milliseconds: 200));
+      expect(localPosts.length, greaterThanOrEqualTo(3));
+      expect(localPosts.every((p) => p['state'] == 'active'), isTrue);
+
+      heartbeatEvents.background();
+      await settle();
+      final afterBackground = localPosts.length;
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      expect(
+        localPosts.length,
+        afterBackground,
+        reason: 'no heartbeat while backgrounded — only the one change POST',
+      );
+    });
+  });
+
+  group('initial lifecycle state at launch (review item 5)', () {
+    tearDown(() {
+      // Other groups' tests assume a fresh `AgentEvents` starts active —
+      // never leave the real binding's lifecycle on something else.
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      );
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    test('desktop: launching hidden reports background presence from the '
+        'very first connection, but the stream still opens', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.hidden,
+      );
+      final opens = <StreamController<AgentEvent>>[];
+      final presencesSent = <AgentPresence>[];
+      final events = AgentEvents((presence) {
+        presencesSent.add(presence);
+        final c = StreamController<AgentEvent>();
+        opens.add(c);
+        return c.stream;
+      }, retryMin: const Duration(milliseconds: 5))..start();
+      addTearDown(events.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        opens,
+        hasLength(1),
+        reason: "desktop's stream always opens (decision 161-4)",
+      );
+      expect(presencesSent.single.active, isFalse);
+      expect(events.isActive, isFalse);
+    });
+
+    test('non-desktop: launching hidden never connects until the app comes '
+        'forward', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.hidden,
+      );
+      final opens = <StreamController<AgentEvent>>[];
+      final events = AgentEvents((presence) {
+        final c = StreamController<AgentEvent>();
+        opens.add(c);
+        return c.stream;
+      }, retryMin: const Duration(milliseconds: 5))..start();
+      addTearDown(events.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        opens,
+        isEmpty,
+        reason: "no stream runs behind the person's back (decision 154)",
+      );
+
+      // `AppLifecycleListener` only allows resumed to follow `inactive` or
+      // `detached` (its own internal transition-sequence assert) — a real
+      // OS reports the same intermediate step, so this is realistic, not a
+      // workaround.
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.inactive,
+      );
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      );
+      await Future<void>.delayed(Duration.zero);
+      expect(opens, hasLength(1));
+      expect(events.isActive, isTrue);
+    });
+
+    test('resumed at launch is unchanged: already active, as '
+        '`AgentPresence.initial` already assumes', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.linux;
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      );
+      final opens = <StreamController<AgentEvent>>[];
+      final events = AgentEvents((presence) {
+        final c = StreamController<AgentEvent>();
+        opens.add(c);
+        return c.stream;
+      }, retryMin: const Duration(milliseconds: 5))..start();
+      addTearDown(events.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(opens, hasLength(1));
+      expect(events.isActive, isTrue);
+    });
+
+    test('web notifications round: enabled before launch, launching hidden '
+        'reports background presence from the very first connection, but '
+        'the stream still opens — exactly like desktop', () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.hidden,
+      );
+      final opens = <StreamController<AgentEvent>>[];
+      final presencesSent = <AgentPresence>[];
+      final events = AgentEvents((presence) {
+        presencesSent.add(presence);
+        final c = StreamController<AgentEvent>();
+        opens.add(c);
+        return c.stream;
+      }, retryMin: const Duration(milliseconds: 5));
+      events.setWebNotificationsEnabled(true);
+      events.start();
+      addTearDown(events.dispose);
+      await Future<void>.delayed(Duration.zero);
+      expect(
+        opens,
+        hasLength(1),
+        reason: 'a web tab with notifications enabled opens its stream too',
+      );
+      expect(presencesSent.single.active, isFalse);
+      expect(events.isActive, isFalse);
+    });
+  });
+
+  group('web notifications round: setWebNotificationsEnabled', () {
+    late List<StreamController<AgentEvent>> opens;
+    late List<Map<String, dynamic>> presencePosts;
+    late AgentEvents events;
+
+    setUp(() {
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      opens = [];
+      presencePosts = [];
+      events = AgentEvents(
+        (presence) {
+          final c = StreamController<AgentEvent>();
+          opens.add(c);
+          return c.stream;
+        },
+        retryMin: const Duration(milliseconds: 5),
+        apiFactory: () => AgentApi(
+          baseUrl: 'http://s',
+          token: 't',
+          client: MockClient((req) async {
+            if (req.url.path == '/v1/notifications/presence') {
+              presencePosts.add(jsonDecode(req.body) as Map<String, dynamic>);
+            }
+            return http.Response('', 204);
+          }),
+        ),
+      )..start(followLifecycle: false);
+    });
+
+    tearDown(() {
+      events.dispose();
+      debugDefaultTargetPlatformOverride = null;
+    });
+
+    Future<void> settle() => Future<void>.delayed(Duration.zero);
+
+    test('before being told it is enabled, a web tab is exactly like a '
+        'phone: background() drops the stream', () async {
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      expect(events.isOpen, isTrue);
+
+      events.background();
+      await settle();
+      expect(events.isOpen, isFalse);
+    });
+
+    test('once enabled, background() keeps the stream open and POSTs '
+        'background presence instead — the same as desktop', () async {
+      events.setWebNotificationsEnabled(true);
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+
+      events.background();
+      await settle();
+      expect(
+        events.isOpen,
+        isTrue,
+        reason: 'the stream itself never drops once enabled',
+      );
+      expect(opens, hasLength(1), reason: 'no reconnect happened');
+      expect(presencePosts, isNotEmpty);
+      expect(presencePosts.last['state'], 'background');
+    });
+
+    test('disabling again reverts to dropping the stream on the next '
+        'background()', () async {
+      events.setWebNotificationsEnabled(true);
+      opens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      events.setWebNotificationsEnabled(false);
+
+      events.background();
+      await settle();
+      expect(
+        events.isOpen,
+        isFalse,
+        reason: 'disabling only changes what a *later* transition does',
+      );
+    });
+
+    test('the real OS lifecycle wiring also keeps the stream once enabled: '
+        'inactive goes background, resumed comes back active', () async {
+      // Its own instance, not `setUp`'s — this is the one test here that
+      // needs the real `AppLifecycleListener` wired up
+      // (`start(followLifecycle: false)` above never creates one).
+      final liveOpens = <StreamController<AgentEvent>>[];
+      final live = AgentEvents((presence) {
+        final c = StreamController<AgentEvent>();
+        liveOpens.add(c);
+        return c.stream;
+      }, retryMin: const Duration(milliseconds: 5));
+      live.setWebNotificationsEnabled(true);
+      live.start();
+      addTearDown(live.dispose);
+      await settle();
+      liveOpens.last.add(AgentSnapshot('run_1', const []));
+      await settle();
+      expect(live.isActive, isTrue);
+      expect(live.isOpen, isTrue);
+
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.inactive,
+      );
+      await settle();
+      expect(live.isActive, isFalse);
+      expect(live.isOpen, isTrue, reason: 'never dropped while enabled');
+
+      TestWidgetsFlutterBinding.instance.handleAppLifecycleStateChanged(
+        AppLifecycleState.resumed,
+      );
+      await settle();
+      expect(live.isActive, isTrue);
+    });
   });
 
   group('kept sessions', () {

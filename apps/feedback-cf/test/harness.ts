@@ -1,6 +1,6 @@
 import { env, runInDurableObject, SELF } from "cloudflare:test";
 import { expect } from "vitest";
-import { GLOBAL_LIMITER_NAME } from "../src/index";
+import { GLOBAL_LIMITER_NAME } from "../src/limits";
 import type { ReportKind } from "../src/report";
 
 export const SYNC_TOKEN = "test-sync-token";

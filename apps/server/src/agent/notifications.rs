@@ -15,10 +15,12 @@
 //! slices (161-2 onward); this one only builds the pipe and the inbox.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::Result;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use tokio::time::Instant;
 
 use super::attention::{PERMISSION_PROMPT, QUESTION, SIGN_IN};
 use super::program::ProgramStatus;
@@ -149,7 +151,11 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              read_at        TEXT,
              read_by_device TEXT,
              due            TEXT,
-             cancelled      INTEGER NOT NULL DEFAULT 0
+             cancelled      INTEGER NOT NULL DEFAULT 0,
+             -- Mark-as-unread: set once a row goes read -> unread, and never
+             -- cleared again, so `scan_notify` can tell a genuine reopen
+             -- (no toast) from a first-time unread row (a toast).
+             reopened       INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS notifications_by_seq ON notifications(seq);
          CREATE INDEX IF NOT EXISTS notifications_by_updated ON notifications(updated_seq);
@@ -248,6 +254,16 @@ pub(super) fn init(conn: &Connection) -> Result<()> {
              PRIMARY KEY (session_id, window)
          );",
     )?;
+    // Mark-as-unread, additive: a database from before it gains the column.
+    let has_reopened = conn
+        .prepare("SELECT 1 FROM pragma_table_info('notifications') WHERE name = 'reopened'")?
+        .exists([])?;
+    if !has_reopened {
+        conn.execute(
+            "ALTER TABLE notifications ADD COLUMN reopened INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1047,11 +1063,15 @@ pub struct Notification {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub read_at: Option<String>,
     pub cancelled: bool,
+    /// Mark-as-unread: true once this row has been read, then reopened
+    /// (never cleared again). The client reads this on a live `notification`
+    /// frame to skip the toast and OS/web notification for a genuine reopen.
+    pub reopened: bool,
 }
 
 const NOTIF_COLUMNS: &str = "id, seq, updated_seq, created, source, kind, session_id, host_id, \
     provider, session_title, note_vault_id, note_id, title, body, urgency, key, silent, \
-    silent_reason, read_at, cancelled";
+    silent_reason, read_at, cancelled, reopened";
 
 fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
     Ok(Notification {
@@ -1075,6 +1095,7 @@ fn row_to_notification(row: &rusqlite::Row) -> rusqlite::Result<Notification> {
         silent_reason: row.get(17)?,
         read_at: row.get(18)?,
         cancelled: row.get(19)?,
+        reopened: row.get(20)?,
     })
 }
 
@@ -1125,14 +1146,20 @@ impl<'a> NewNotice<'a> {
 }
 
 /// Inserts a notice, unless its key has already fired (the dedupe rule: a
-/// transition seen twice never notifies twice). `Ok(None)` is the dedupe
-/// case, not an error. `silence` is `None` when the notice interrupts, or
+/// transition seen twice never notifies twice) or its event is toggled off
+/// entirely (161h item 3: "off" means "I don't want these", so unlike
+/// quiet hours or a pause — which still write a silent row the person can
+/// catch up on — it is never written at all). `Ok(None)` covers both
+/// cases, not an error. `silence` is `None` when the notice interrupts, or
 /// the reason it does not.
 fn insert_notice(
     conn: &Connection,
     n: NewNotice<'_>,
     silence: Option<&'static str>,
 ) -> Result<Option<Notification>> {
+    if silence == Some("off") {
+        return Ok(None);
+    }
     let id = crate::auth::identity::random_id("ntf_");
     let created = now();
     let tx = conn.unchecked_transaction()?;
@@ -1202,6 +1229,21 @@ fn list_notifications_by_update(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// 161h item 2: bumps `updated_seq` on one still-unread, not-cancelled
+/// notice — the same trick [`mark_read`] uses — so `scan_notify` re-emits
+/// it with its now-overridden deliver hint. `false` if the row is already
+/// read or cancelled: nothing to re-show.
+fn bump_if_unread(conn: &Connection, notice_id: &str) -> Result<bool> {
+    let tx = conn.unchecked_transaction()?;
+    let seq = next_counter(&tx)?;
+    let changed = tx.execute(
+        "UPDATE notifications SET updated_seq = ?2 WHERE id = ?1 AND read_at IS NULL AND cancelled = 0",
+        params![notice_id, seq],
+    )?;
+    tx.commit()?;
+    Ok(changed > 0)
+}
+
 fn mark_read(
     conn: &Connection,
     ids: &[String],
@@ -1216,6 +1258,30 @@ fn mark_read(
             "UPDATE notifications SET read_at = ?2, read_by_device = ?3, updated_seq = ?4
              WHERE id = ?1 AND read_at IS NULL",
             params![id, at, device, seq],
+        )?;
+        if n > 0 {
+            changed.push(id.clone());
+        }
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+/// Mark-as-unread: reopens a read, not-cancelled row — an unknown,
+/// already-unread or cancelled id is silently ignored, the same
+/// "already in the target state" no-op `mark_read` gives a double read.
+/// `reopened` is set and never cleared, so a later reopen of the same row
+/// still says "this one has a read/unread history" (see the schema note).
+fn mark_unread(conn: &Connection, ids: &[String]) -> Result<Vec<String>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut changed = Vec::new();
+    for id in ids {
+        let seq = next_counter(&tx)?;
+        let n = tx.execute(
+            "UPDATE notifications SET read_at = NULL, read_by_device = NULL, reopened = 1,
+                 updated_seq = ?2
+             WHERE id = ?1 AND read_at IS NOT NULL AND cancelled = 0",
+            params![id, seq],
         )?;
         if n > 0 {
             changed.push(id.clone());
@@ -2256,7 +2322,41 @@ pub(super) struct NotifierMemory {
 pub(super) struct Presence {
     pub active: bool,
     pub open_session: Option<String>,
+    /// 161h item 1: when this connection was last heard from — a WS's
+    /// inbound frame or an SSE heartbeat's `POST …/presence`. A WebSocket
+    /// times itself out and is dropped on its own connection, which clears
+    /// presence through the usual drop path; SSE has no inbound channel to
+    /// time out at all, so [`AgentManager::compute_deliver_hint`] treats an
+    /// entry whose `last_seen` has gone past [`PRESENCE_IDLE_TIMEOUT`] as
+    /// inactive itself, whatever `active` says.
+    pub last_seen: Instant,
 }
+
+/// 161h item 1: how stale a presence entry may be before
+/// [`AgentManager::compute_deliver_hint`] stops trusting it. Matches the
+/// WS side's own bound — one 15s heartbeat/keepalive round trip missed is
+/// tolerated, two is not.
+pub(super) const PRESENCE_IDLE_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// 161h item 2: how long a `toast:<device>` hint gets to prove itself
+/// before a device going away no longer triggers the `os` fallback — the
+/// matrix's own 15s window.
+const TOAST_FALLBACK_GRACE: Duration = Duration::from_secs(15);
+
+/// One notice a [`DeliverCache`] hint named `toast:<device_id>` for,
+/// waiting to see whether that device is still around by `until`. Bounded
+/// like [`DeliverCache`] (161h item 2): an entry this old is long past its
+/// grace and costs nothing to lose.
+pub(super) struct PendingToast {
+    notice_id: String,
+    device_id: String,
+    until: Instant,
+}
+
+/// [`PendingToast`]'s own bound — generous for how many notices could be
+/// mid-grace at once, small enough that losing the oldest under load means
+/// nothing (the grace window is 15s; anything this far back has resolved).
+const PENDING_TOASTS_CAP: usize = 4096;
 
 /// Caches [`AgentManager::deliver_hint_for`]'s answer per notice id,
 /// computed once at the first subscriber's fan-out and reused by every
@@ -2374,6 +2474,21 @@ impl AgentManager {
         Ok(changed)
     }
 
+    /// Mark-as-unread. A reopened row is picked up by the same
+    /// `notify_changed` poke that a read uses, so `scan_notify` sends it
+    /// out again as a fresh `notification` frame (it is unread now),
+    /// flagged `reopened` (see the schema note on `notifications.reopened`).
+    pub fn mark_notifications_unread(&self, ids: &[String]) -> AgentResult<Vec<String>> {
+        let changed = {
+            let store = self.store.lock().unwrap();
+            mark_unread(&store.conn, ids)?
+        };
+        if !changed.is_empty() {
+            self.poke_notify();
+        }
+        Ok(changed)
+    }
+
     /// Opening a session marks its notices read everywhere (Q20).
     pub fn mark_session_notifications_read(
         &self,
@@ -2478,7 +2593,14 @@ impl AgentManager {
 
     /// Sends a real notice through the inbox, so the page proves delivery
     /// rather than only permission. Never deduped: it carries no key.
-    pub fn send_test_notification(&self) -> AgentResult<Notification> {
+    /// `device_id` is the device whose own "Send a test notification"
+    /// button this answers (161h item 4): when known, its deliver hint is
+    /// pinned to `toast:<device_id>` directly, bypassing
+    /// [`AgentManager::compute_deliver_hint`]'s arbitrary lowest-id pick and
+    /// item 2's toast-grace bookkeeping — a test notice needs neither.
+    /// `None` (an `stk_`/agent key with no device) keeps today's behaviour:
+    /// [`AgentManager::deliver_hint_for`] computes it normally.
+    pub fn send_test_notification(&self, device_id: Option<&str>) -> AgentResult<Notification> {
         let n = {
             let store = self.store.lock().unwrap();
             insert_notice(
@@ -2501,6 +2623,18 @@ impl AgentManager {
             )?
             .expect("no key: never deduped")
         };
+        if let Some(device_id) = device_id {
+            let mut cache = self.deliver_cache.lock().unwrap();
+            cache
+                .hints
+                .insert(n.id.clone(), Some(format!("toast:{device_id}")));
+            cache.order.push_back(n.id.clone());
+            if cache.order.len() > DELIVER_CACHE_CAP
+                && let Some(oldest) = cache.order.pop_front()
+            {
+                cache.hints.remove(&oldest);
+            }
+        }
         self.poke_notify();
         Ok(n)
     }
@@ -2524,6 +2658,7 @@ impl AgentManager {
             Presence {
                 active,
                 open_session,
+                last_seen: Instant::now(),
             },
         );
     }
@@ -2531,7 +2666,10 @@ impl AgentManager {
     /// `POST …/presence`: updates an *existing* connection of the calling
     /// device. `false` (404 to the caller) if that connection is not
     /// live — it may have just disconnected, and a stale POST must never
-    /// resurrect a presence row for a connection that is really gone.
+    /// resurrect a presence row for a connection that is really gone. Also
+    /// this connection's SSE heartbeat (161h item 1): refreshes `last_seen`
+    /// whatever `active` says, since a background SSE connection must stay
+    /// known-alive the same as an active one.
     pub fn update_presence(
         &self,
         connection_id: &str,
@@ -2539,15 +2677,24 @@ impl AgentManager {
         active: bool,
         open_session: Option<String>,
     ) -> bool {
-        let mut presence = self.presence.lock().unwrap();
-        match presence.get_mut(&(device_id.to_string(), connection_id.to_string())) {
-            Some(p) => {
-                p.active = active;
-                p.open_session = open_session;
-                true
+        let updated = {
+            let mut presence = self.presence.lock().unwrap();
+            match presence.get_mut(&(device_id.to_string(), connection_id.to_string())) {
+                Some(p) => {
+                    p.active = active;
+                    p.open_session = open_session;
+                    p.last_seen = Instant::now();
+                    true
+                }
+                None => false,
             }
-            None => false,
+        };
+        // 161h item 2: a device that just went background may still be
+        // owed its toasted notices' `os` fallback.
+        if updated && !active {
+            self.resolve_toast_fallback(device_id);
         }
+        updated
     }
 
     /// Forgets one connection's presence — called once it ends, so a
@@ -2558,6 +2705,7 @@ impl AgentManager {
             .lock()
             .unwrap()
             .remove(&(device_id.to_string(), connection_id.to_string()));
+        self.resolve_toast_fallback(device_id);
     }
 
     /// A device was just revoked (review item D): every connection it had
@@ -2568,6 +2716,71 @@ impl AgentManager {
             .lock()
             .unwrap()
             .retain(|(d, _), _| d != device_id);
+        self.resolve_toast_fallback(device_id);
+    }
+
+    /// Whether any connection of `device_id` is active right now — the
+    /// "active anywhere" test item 2's fallback needs, so a device with
+    /// two tabs never triggers it just because one of them dropped.
+    fn device_active_anywhere(&self, device_id: &str) -> bool {
+        self.presence
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|((d, _), p)| d == device_id && p.active)
+    }
+
+    /// 161h item 2: if `device_id` has gone inactive on every connection,
+    /// re-delivers every notice still waiting out its `toast:<device_id>`
+    /// grace and still unread as `os` instead — so a device that goes
+    /// background or disconnects within the 15s window no longer leaves
+    /// its notice unheard everywhere else. A no-op once the grace has
+    /// passed, or while the device is still active on another connection.
+    fn resolve_toast_fallback(&self, device_id: &str) {
+        if self.device_active_anywhere(device_id) {
+            return;
+        }
+        let now = Instant::now();
+        let due: Vec<String> = {
+            let mut pending = self.pending_toasts.lock().unwrap();
+            let mut due = Vec::new();
+            pending.retain(|t| {
+                if t.device_id != device_id {
+                    return true;
+                }
+                if t.until > now {
+                    due.push(t.notice_id.clone());
+                }
+                false
+            });
+            due
+        };
+        let mut changed = false;
+        for notice_id in &due {
+            let bumped = {
+                let store = self.store.lock().unwrap();
+                bump_if_unread(&store.conn, notice_id)
+            };
+            match bumped {
+                Ok(true) => {
+                    self.deliver_cache
+                        .lock()
+                        .unwrap()
+                        .hints
+                        .insert(notice_id.clone(), Some("os".to_string()));
+                    changed = true;
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = ?e,
+                    notice = %notice_id,
+                    "161h: resolving a toast's os fallback failed"
+                ),
+            }
+        }
+        if changed {
+            self.poke_notify();
+        }
     }
 
     /// The architecture's delivery order, for one notice about
@@ -2578,16 +2791,22 @@ impl AgentManager {
     /// 2. Any other device active: `toast:<device_id>`, that device alone.
     /// 3. Otherwise: `os`, every background desktop.
     ///
-    /// A device counts as active if *any* of its connections does. With
-    /// more than one device active and none showing the session, the
-    /// lowest device id by sort order is picked — the matrix does not say
-    /// which wins, and ties are rare enough that determinism matters more
-    /// than the choice.
+    /// A device counts as active if *any* of its connections does, and
+    /// only while that connection's `last_seen` is within
+    /// [`PRESENCE_IDLE_TIMEOUT`] (161h item 1) — a WebSocket times itself
+    /// out and clears its own entry on disconnect, but SSE has nothing to
+    /// notice a dead connection *but* this staleness check, so without it
+    /// a socket gone quiet (phone off Wi-Fi, a sleeping laptop) would keep
+    /// answering `toast:<dead device>` until something else happened to
+    /// touch its presence. With more than one device active and none
+    /// showing the session, the lowest device id by sort order is picked —
+    /// the matrix does not say which wins, and ties are rare enough that
+    /// determinism matters more than the choice.
     fn compute_deliver_hint(&self, session_id: Option<&str>) -> Option<String> {
         let presence = self.presence.lock().unwrap();
         let mut active_devices: Vec<&str> = Vec::new();
         for ((device_id, _), p) in presence.iter() {
-            if !p.active {
+            if !p.active || p.last_seen.elapsed() > PRESENCE_IDLE_TIMEOUT {
                 continue;
             }
             if session_id.is_some() && p.open_session.as_deref() == session_id {
@@ -2602,13 +2821,28 @@ impl AgentManager {
     }
 
     /// [`compute_deliver_hint`], computed once per `notice_id` and cached
-    /// for every later caller (review item 4) — see [`DeliverCache`].
+    /// for every later caller (review item 4) — see [`DeliverCache`]. The
+    /// very first computation that names a `toast:<device>` hint also
+    /// opens that device's 15s grace (161h item 2, [`PendingToast`]): a
+    /// later cache hit never re-opens it, since the hint — and the
+    /// decision to toast this one device — was already made.
     pub fn deliver_hint_for(&self, notice_id: &str, session_id: Option<&str>) -> Option<String> {
-        let mut cache = self.deliver_cache.lock().unwrap();
-        if let Some(hint) = cache.hints.get(notice_id) {
+        if let Some(hint) = self.deliver_cache.lock().unwrap().hints.get(notice_id) {
             return hint.clone();
         }
         let hint = self.compute_deliver_hint(session_id);
+        if let Some(device_id) = hint.as_deref().and_then(|h| h.strip_prefix("toast:")) {
+            let mut pending = self.pending_toasts.lock().unwrap();
+            pending.push_back(PendingToast {
+                notice_id: notice_id.to_string(),
+                device_id: device_id.to_string(),
+                until: Instant::now() + TOAST_FALLBACK_GRACE,
+            });
+            if pending.len() > PENDING_TOASTS_CAP {
+                pending.pop_front();
+            }
+        }
+        let mut cache = self.deliver_cache.lock().unwrap();
         cache.hints.insert(notice_id.to_string(), hint.clone());
         cache.order.push_back(notice_id.to_string());
         if cache.order.len() > DELIVER_CACHE_CAP
