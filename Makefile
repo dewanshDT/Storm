@@ -89,11 +89,16 @@ lint:
 	cd $(CLIENT) && flutter analyze
 
 ## test: every unit suite (no server needed)
-test: test-server test-relay test-relay-cf test-runtime test-client
+test: test-server test-relay test-relay-cf test-runtime test-client test-feedback-sync
 
 ## test-server: Rust unit tests
 test-server:
 	cd $(SERVER) && cargo test
+
+## test-feedback-sync: the feedback sync service's unit tests (decision 162-6, stdlib only)
+test-feedback-sync:
+	python3 -m py_compile deploy/feedback/feedback-sync.py deploy/feedback/test_feedback_sync.py
+	python3 -m unittest deploy.feedback.test_feedback_sync -v
 
 ## test-relay: storm-relay unit + registration tests
 #
