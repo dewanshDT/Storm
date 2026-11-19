@@ -1161,11 +1161,14 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
                 // otherwise delay whatever else that thread was about to
                 // poll — a session's own end-to-push push included.
                 let agent_for_tick = agent.clone();
+                let __dbg_t0 = std::time::Instant::now();
+                tracing::info!("DBG161 housekeeping tick start");
                 match tokio::task::spawn_blocking(move || agent_for_tick.notifier_tick()).await {
                     Ok(Err(e)) => tracing::warn!(error = ?e, "notifier tick failed"),
                     Err(e) => tracing::warn!(error = ?e, "notifier tick panicked"),
                     Ok(Ok(())) => {}
                 }
+                tracing::info!(elapsed = ?__dbg_t0.elapsed(), "DBG161 housekeeping tick end");
             }
         });
     }

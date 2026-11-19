@@ -2339,6 +2339,7 @@ impl AgentManager {
         session_id: &str,
         report: &StatusReport,
     ) -> AgentResult<Vec<notifications::TerminalNoticeAudit>> {
+        let __dbg_t0 = std::time::Instant::now();
         let mut r = self.owned_by(host_id, session_id)?;
         self.start_acknowledged(session_id);
         if r.is_ended() {
@@ -2380,7 +2381,9 @@ impl AgentManager {
                 "session status"
             );
         }
+        tracing::info!(session = session_id, elapsed = ?__dbg_t0.elapsed(), "DBG161 host_status before record_report");
         self.record_report(&r, report)?;
+        tracing::info!(session = session_id, elapsed = ?__dbg_t0.elapsed(), "DBG161 host_status after record_report");
         self.forget_stop(&r);
         if report.mcp_skipped.is_some() || report.mcp_plugin_local.is_some() {
             self.record_mcp_notice(session_id, report)?;
@@ -2391,7 +2394,9 @@ impl AgentManager {
         if r.status == "running" && before != "running" {
             self.record_ran_as(host_id, session_id)?;
         }
+        tracing::info!(session = session_id, elapsed = ?__dbg_t0.elapsed(), "DBG161 host_status before bump");
         self.bump(session_id);
+        tracing::info!(session = session_id, elapsed = ?__dbg_t0.elapsed(), "DBG161 host_status after bump");
         let audits = if report.terminal_notice.is_some() || report.terminal_notice_dropped.is_some()
         {
             self.record_terminal_notices(
@@ -2402,6 +2407,7 @@ impl AgentManager {
         } else {
             Vec::new()
         };
+        tracing::info!(session = session_id, elapsed = ?__dbg_t0.elapsed(), "DBG161 host_status total");
         Ok(audits)
     }
 

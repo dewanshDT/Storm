@@ -6481,14 +6481,17 @@ pub async fn runtime_status(
     session: &str,
     report: &crate::agent::StatusReport,
 ) -> ApiResult<()> {
+    let __dbg_t0 = std::time::Instant::now();
     let audits = state
         .agent
         .host_status(host_id, session, report)
         .map_err(agent_error)?;
+    tracing::info!(session, elapsed = ?__dbg_t0.elapsed(), "DBG161 runtime_status after host_status");
     for a in &audits {
         audit_terminal_notice(state, a).await;
     }
     sweep_gateway_sessions(state);
+    tracing::info!(session, elapsed = ?__dbg_t0.elapsed(), "DBG161 runtime_status total");
     Ok(())
 }
 

@@ -368,17 +368,28 @@ impl Subscriber {
                     if changed.is_err() {
                         return Stop::Gone;
                     }
+                    tracing::info!("DBG161 follow: changes.changed fired");
+                    let __dbg_sleep0 = std::time::Instant::now();
                     tokio::time::sleep(pace.coalesce).await;
+                    tracing::info!(elapsed = ?__dbg_sleep0.elapsed(), "DBG161 follow: coalesce sleep done");
+                    let __dbg_t0 = std::time::Instant::now();
                     frames = self.scan(state, changes, pace).await;
+                    tracing::info!(elapsed = ?__dbg_t0.elapsed(), n = frames.len(), "DBG161 follow: scan() done (changes arm)");
                 }
                 () = tokio::time::sleep_until(due.unwrap_or_else(Instant::now)), if due.is_some() => {
+                    tracing::info!("DBG161 follow: due timer fired");
+                    let __dbg_t0 = std::time::Instant::now();
                     frames = self.scan(state, changes, pace).await;
+                    tracing::info!(elapsed = ?__dbg_t0.elapsed(), n = frames.len(), "DBG161 follow: scan() done (due arm)");
                 }
                 notified = notify_changed.changed() => {
                     if notified.is_err() {
                         return Stop::Gone;
                     }
+                    tracing::info!("DBG161 follow: notify_changed fired");
+                    let __dbg_t0 = std::time::Instant::now();
                     frames = self.scan_notify(state).await;
+                    tracing::info!(elapsed = ?__dbg_t0.elapsed(), n = frames.len(), "DBG161 follow: scan_notify() done");
                 }
                 _ = keepalive.tick() => {
                     // A full queue is already traffic.
@@ -390,6 +401,11 @@ impl Subscriber {
                 () = tx.closed() => return Stop::Gone,
             }
             for frame in frames {
+                if let Frame::Event { name: "session", data } = &frame {
+                    if data.contains("\"ended\":true") {
+                        tracing::info!("DBG161 follow: queueing an ended session frame");
+                    }
+                }
                 match tx.try_send(frame) {
                     Ok(()) => {}
                     Err(mpsc::error::TrySendError::Full(_)) => return Stop::Overflowed,
@@ -570,7 +586,10 @@ impl Subscriber {
                 .into_iter()
                 .collect();
             for id in moved {
-                match crate::ops::get_session(state, &id).await {
+                let __dbg_t0 = std::time::Instant::now();
+                let result = crate::ops::get_session(state, &id).await;
+                tracing::info!(session = %id, elapsed = ?__dbg_t0.elapsed(), "DBG161 get_session");
+                match result {
                     Ok(view) => frames.extend(self.offer(&view, now, pace)),
                     Err(ApiError(StatusCode::NOT_FOUND, _)) => {
                         if self.forget(&id) {
@@ -623,6 +642,15 @@ impl Subscriber {
         } else {
             sent.any_at + pace.output
         };
+        if state_moved {
+            tracing::info!(
+                session = %id,
+                status = %view.session.status,
+                held = at > now,
+                due_in = ?at.checked_duration_since(now),
+                "DBG161 offer: a state-moved view"
+            );
+        }
         if at > now {
             self.due.insert(id.clone(), at);
             return None;
