@@ -3392,10 +3392,6 @@ impl AgentManager {
     /// old host is never asked, and this returns the same error a timeout
     /// would, so a caller gathering several hosts in parallel treats both as
     /// `no_reply`.
-    ///
-    /// Its first production caller is decision 162-3's feedback preview,
-    /// stacked on this slice; exercised here by this module's own tests.
-    #[allow(dead_code)]
     pub async fn host_diag(
         &self,
         host_id: &str,
