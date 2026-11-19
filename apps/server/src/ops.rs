@@ -2735,6 +2735,145 @@ pub fn runtime_workspace_created(
         .map_err(agent_error)
 }
 
+// ---- Decision 162-2/162c: host diagnostics over the runtime link ----------
+
+/// How long the server waits for each host's diagnostics bundle (the
+/// feedback API contract's `gather_host_diags(timeout=5s)`).
+///
+/// Its first production use is decision 162-3's feedback preview, stacked
+/// on this slice; exercised here by this module's own tests.
+#[allow(dead_code)]
+pub const HOST_DIAG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A host's answer to its own `diag` request.
+pub fn runtime_diag_answered(
+    state: &Shared,
+    host_id: &str,
+    request_id: &str,
+    diag: serde_json::Value,
+) -> ApiResult<()> {
+    state
+        .agent
+        .diag_answered(host_id, request_id, diag)
+        .map_err(agent_error)
+}
+
+/// One host's slot in a gathered diagnostics bundle: positional (`host-1`,
+/// `host-2`, …), never the host's own name (decision 162c: no hostnames in
+/// a bundle).
+///
+/// Its first production use is decision 162-3's feedback preview, stacked
+/// on this slice; exercised here by this module's own tests.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
+pub struct HostDiagEntry {
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diag: Option<storm_diag::Diag>,
+    /// `ok`, `no_reply` or `offline` (the feedback API contract).
+    pub status: &'static str,
+}
+
+/// Asks every enrolled, non-revoked host for its live diagnostics bundle, in
+/// parallel, each bounded by `timeout`. A host with no live link is
+/// `offline` without being asked; one that is asked and does not answer in
+/// time — or cannot, because it is an old host, or any other refusal — is
+/// `no_reply`. Unknown or late answers never reach here: a request this
+/// function has already given up waiting on is removed from the pending map
+/// before it returns, so the host's eventual post finds nothing to resolve
+/// and is ignored (`AgentManager::diag_answered`'s `NotFound`).
+///
+/// Its first production caller is decision 162-3's feedback preview,
+/// stacked on this slice; exercised here by this module's own tests.
+#[allow(dead_code)]
+pub async fn gather_host_diags(state: &Shared, timeout: std::time::Duration) -> Vec<HostDiagEntry> {
+    let hosts = {
+        let auth_db = state.auth_db.lock().await;
+        auth_db.list_hosts().unwrap_or_default()
+    };
+    let hosts: Vec<_> = hosts.into_iter().filter(|h| !h.is_revoked()).collect();
+    let asks = hosts.iter().enumerate().map(|(i, h)| {
+        let label = format!("host-{}", i + 1);
+        let host_id = h.id.clone();
+        async move {
+            if !state.agent.host_live(&host_id).online {
+                return HostDiagEntry {
+                    host: label,
+                    diag: None,
+                    status: "offline",
+                };
+            }
+            match state.agent.host_diag(&host_id, timeout).await {
+                Ok(diag) => HostDiagEntry {
+                    host: label,
+                    diag: Some(diag),
+                    status: "ok",
+                },
+                Err(_) => HostDiagEntry {
+                    host: label,
+                    diag: None,
+                    status: "no_reply",
+                },
+            }
+        }
+    });
+    futures_util::future::join_all(asks).await
+}
+
+/// The server's own live diagnostics bundle (decision 162-2/162c): the
+/// counts the CLI path already gathers, read live instead of from disk, and
+/// the ring's last 300 lines re-redacted with every vault's current
+/// display name — a vault renamed since a line was logged must not leave
+/// its old name in a bundle built today.
+///
+/// Its first production caller is decision 162-3's feedback preview,
+/// stacked on this slice; exercised here by this module's own tests.
+#[allow(dead_code)]
+pub async fn server_diag(state: &Shared) -> storm_diag::Diag {
+    let (vault_count, relay_count, relay_registered, sensitive) = {
+        let vaults = state.vaults.read().await;
+        let sensitive: Vec<storm_diag::Sensitive> = vaults
+            .registry
+            .vaults
+            .iter()
+            .map(|v| storm_diag::Sensitive::vault(v.name.clone()))
+            .collect();
+        (
+            vaults.registry.vaults.len(),
+            vaults.registry.relays.len(),
+            vaults.registry.registered_relays.snapshot().len(),
+            sensitive,
+        )
+    };
+    let hosts = {
+        let auth_db = state.auth_db.lock().await;
+        auth_db.list_hosts().unwrap_or_default()
+    };
+    let hosts: Vec<_> = hosts.into_iter().filter(|h| !h.is_revoked()).collect();
+    let host_count = hosts.len();
+    let hosts_online = hosts
+        .iter()
+        .filter(|h| state.agent.host_live(&h.id).online)
+        .count();
+
+    let logs: Vec<String> = state
+        .diag_ring
+        .tail(crate::diag::DEFAULT_LOG_LINES)
+        .iter()
+        .map(|l| storm_diag::redact(l, &sensitive))
+        .collect();
+
+    storm_diag::Diag::new("storm-server", env!("CARGO_PKG_VERSION"))
+        .with_server(storm_diag::ServerDiag {
+            vault_count,
+            relay_count,
+            relay_registered: Some(relay_registered),
+            host_count,
+            hosts_online: Some(hosts_online),
+        })
+        .with_logs(logs)
+}
+
 // ---- Agent spawning: the spawn switch (decision 134-2) ---------------------
 //
 // Session tier and owner only: no `stk_` key and no agent turns it on (B1).
@@ -9052,6 +9191,7 @@ mod tests {
             discovery: crate::discovery::Discovery::new(false, true),
             agent: Arc::new(crate::agent::AgentManager::open(dir).unwrap()),
             gateway: Arc::new(crate::gateway::Gateway::open(dir, "2026-10-05T00:00:00Z").unwrap()),
+            diag_ring: storm_diag::Ring::default(),
         })
     }
 

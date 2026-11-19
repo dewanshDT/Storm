@@ -142,6 +142,14 @@ pub struct AppState {
     /// LAN discovery's switch (decision 118): the advertisement follows it, and
     /// password pairing is refused while it is off.
     pub discovery: crate::discovery::Discovery,
+    /// This process's log ring (decision 162c): the same `Ring` the tracing
+    /// layer installed at startup writes into, so a diagnostics bundle reads
+    /// what actually happened, not a second, unwritten copy.
+    ///
+    /// Read only by [`crate::ops::server_diag`], whose own first production
+    /// caller is decision 162-3's feedback preview.
+    #[allow(dead_code)]
+    pub diag_ring: storm_diag::Ring,
 }
 
 pub type Shared = Arc<AppState>;
@@ -422,6 +430,13 @@ pub fn router(state: Shared, mcp: crate::mcp::McpOptions) -> Router {
         .route(
             "/v1/runtime/workspaces/{request}",
             post(runtime_workspace_created),
+        )
+        // Host diagnostics (decision 162-2): a host's answer to `diag`, its
+        // request id in the body rather than the path — one host answers
+        // one ask, there is no per-request sub-resource to address.
+        .route(
+            "/v1/runtime/diag",
+            post(runtime_diag_answered).layer(axum::extract::DefaultBodyLimit::max(512 * 1024)),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
@@ -2252,6 +2267,23 @@ async fn runtime_workspace_created(
     Json(body): Json<serde_json::Value>,
 ) -> ApiResult<StatusCode> {
     crate::ops::runtime_workspace_created(&state, &auth.host.id, &request, body)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Deserialize)]
+struct DiagAnswer {
+    request_id: String,
+    diag: serde_json::Value,
+}
+
+/// `POST /v1/runtime/diag` (decision 162-2): a host's answer to `diag`,
+/// never another host's request.
+async fn runtime_diag_answered(
+    State(state): State<Shared>,
+    Extension(auth): Extension<HostAuth>,
+    Json(body): Json<DiagAnswer>,
+) -> ApiResult<StatusCode> {
+    crate::ops::runtime_diag_answered(&state, &auth.host.id, &body.request_id, body.diag)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -4656,6 +4688,7 @@ pub(crate) mod tests {
             discovery: crate::discovery::Discovery::new(false, true),
             agent,
             gateway,
+            diag_ring: storm_diag::Ring::default(),
         });
         (
             router(state.clone(), crate::mcp::McpOptions { allowed_hosts }),
@@ -14545,6 +14578,223 @@ pub(crate) mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ---- host diagnostics (decision 162-2) ---------------------------------
+
+    struct DiagFixture {
+        app: Router,
+        state: Shared,
+        owner_bearer: String,
+    }
+
+    async fn diag_fixture(dir: &FsPath) -> DiagFixture {
+        let (app, _, state) = test_router_with_state(dir);
+        let owner = seed_owner(&state).await;
+        let owner_bearer = format!("Bearer {}", session_token(&state, &owner).await);
+        DiagFixture {
+            app,
+            state,
+            owner_bearer,
+        }
+    }
+
+    impl DiagFixture {
+        /// Enrolls, connects and says `hello` for a host that answers
+        /// `diag` (or not, if `diag` is false) — a stand-in for an old
+        /// host.
+        async fn connected_host(
+            &self,
+            diag: bool,
+        ) -> (
+            String,
+            String,
+            tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+        ) {
+            let (host, token) = enroll_a_host(&self.app, &self.owner_bearer).await;
+            let (_, link) = self.state.agent.connect_host(&host);
+            let mut caps = install_caps(false);
+            caps["diag"] = serde_json::json!(diag);
+            self.state
+                .agent
+                .hello(&host, serde_json::from_value(caps).unwrap())
+                .unwrap();
+            (host, format!("Bearer {token}"), link)
+        }
+
+        /// Enrolls a host and leaves it unconnected: offline.
+        async fn offline_host(&self) -> String {
+            enroll_a_host(&self.app, &self.owner_bearer).await.0
+        }
+
+        /// Answers one `diag` sent down `link` as a real host would.
+        async fn answer(
+            &self,
+            link: &mut tokio::sync::mpsc::UnboundedReceiver<crate::agent::Envelope>,
+            host_bearer: &str,
+            logs: Vec<&str>,
+        ) -> String {
+            let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+            assert_eq!(sent["type"], "diag");
+            let request_id = sent["request_id"].as_str().unwrap().to_string();
+            let diag = serde_json::json!({
+                "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+                "os": "linux", "arch": "x86_64",
+                "runtime": {"execution_profile": "off", "enrolled": true, "online": true},
+                "logs": logs,
+            });
+            let (status, _) = send(
+                &self.app,
+                post_json_with_auth(
+                    "/v1/runtime/diag",
+                    serde_json::json!({"request_id": request_id, "diag": diag}),
+                    host_bearer,
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NO_CONTENT);
+            request_id
+        }
+    }
+
+    /// 162-2: a host that says `diag` answers within the timeout, and its
+    /// bundle comes back `ok`, labelled positionally, never by its name.
+    #[tokio::test]
+    async fn gather_host_diags_reports_an_online_hosts_answer() {
+        let dir = tempdir::TempDir::new("storm-diag-ok").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (host, host_bearer, mut link) = f.connected_host(true).await;
+        let gather = crate::ops::gather_host_diags(&f.state, crate::ops::HOST_DIAG_TIMEOUT);
+        let answer = f.answer(&mut link, &host_bearer, vec!["session started"]);
+        let (entries, _) = tokio::join!(gather, answer);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host, "host-1");
+        assert_ne!(entries[0].host, host, "never the host's own name");
+        assert_eq!(entries[0].status, "ok");
+        let diag = entries[0].diag.as_ref().expect("a diag");
+        assert_eq!(diag.logs, vec!["session started".to_string()]);
+    }
+
+    /// A host with no live link at all is `offline` without being asked.
+    #[tokio::test]
+    async fn gather_host_diags_marks_an_unconnected_host_offline() {
+        let dir = tempdir::TempDir::new("storm-diag-offline").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let _host = f.offline_host().await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].host, "host-1");
+        assert_eq!(entries[0].status, "offline");
+        assert!(entries[0].diag.is_none());
+    }
+
+    /// A connected host that never answers (or an old host that does not
+    /// say `diag`, so it is never even asked) is `no_reply`, not an error
+    /// that fails the whole gather.
+    #[tokio::test]
+    async fn gather_host_diags_times_out_a_silent_host_as_no_reply() {
+        let dir = tempdir::TempDir::new("storm-diag-no-reply").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, _bearer, _link) = f.connected_host(true).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].status, "no_reply");
+        assert!(entries[0].diag.is_none());
+
+        // An old host, connected but never offering `diag`, is never even
+        // asked — the same `no_reply` result, with nothing sent down its
+        // link.
+        let (_old, _old_bearer, mut old_link) = f.connected_host(false).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        let old = entries.iter().find(|e| e.status == "no_reply").unwrap();
+        assert!(old.diag.is_none());
+        assert!(old_link.try_recv().is_err(), "an old host is never asked");
+    }
+
+    /// A host's answer that arrives after the gather already gave up is
+    /// ignored: it resolves nothing, and the HTTP call it rides in on is a
+    /// plain 404, not a panic or a state change.
+    #[tokio::test]
+    async fn a_late_diag_answer_after_the_timeout_is_ignored() {
+        let dir = tempdir::TempDir::new("storm-diag-late").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (_host, host_bearer, mut link) = f.connected_host(true).await;
+        let entries =
+            crate::ops::gather_host_diags(&f.state, std::time::Duration::from_millis(50)).await;
+        assert_eq!(entries[0].status, "no_reply");
+
+        let sent = serde_json::to_value(link.recv().await.unwrap()).unwrap();
+        let request_id = sent["request_id"].as_str().unwrap().to_string();
+        let diag = serde_json::json!({
+            "schema": 1, "component": "storm-runtime", "version": "0.19.0",
+            "os": "linux", "arch": "x86_64", "logs": [],
+        });
+        let (status, _) = send(
+            &f.app,
+            post_json_with_auth(
+                "/v1/runtime/diag",
+                serde_json::json!({"request_id": request_id, "diag": diag}),
+                &host_bearer,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "a late answer is ignored");
+    }
+
+    /// Two hosts gather in positional order, and the labels never carry
+    /// either host's own name.
+    #[tokio::test]
+    async fn gather_host_diags_labels_are_positional_never_host_names() {
+        let dir = tempdir::TempDir::new("storm-diag-positional").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        let (host_a, bearer_a, mut link_a) = f.connected_host(true).await;
+        let (host_b, bearer_b, mut link_b) = f.connected_host(true).await;
+        let gather = crate::ops::gather_host_diags(&f.state, crate::ops::HOST_DIAG_TIMEOUT);
+        let answers = async {
+            tokio::join!(
+                f.answer(&mut link_a, &bearer_a, vec![]),
+                f.answer(&mut link_b, &bearer_b, vec![]),
+            )
+        };
+        let (entries, _) = tokio::join!(gather, answers);
+        assert_eq!(entries.len(), 2);
+        let labels: Vec<&str> = entries.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(labels, vec!["host-1", "host-2"]);
+        for entry in &entries {
+            assert_ne!(entry.host, host_a);
+            assert_ne!(entry.host, host_b);
+            assert_eq!(entry.status, "ok");
+        }
+    }
+
+    /// The server's own live bundle re-redacts its ring with every vault's
+    /// *current* display name, and never carries a host's name either.
+    #[tokio::test]
+    async fn server_diag_redacts_logs_with_live_vault_names() {
+        let dir = tempdir::TempDir::new("storm-diag-server").unwrap();
+        let f = diag_fixture(dir.path()).await;
+        {
+            let mut vaults = f.state.vaults.write().await;
+            vaults
+                .registry
+                .create("Secret Vault", &crate::index::now_rfc3339())
+                .unwrap();
+        }
+        f.state
+            .diag_ring
+            .push("opened Secret Vault/Plan.md for editing");
+        let (host, _token) = enroll_a_host(&f.app, &f.owner_bearer).await;
+        let diag = crate::ops::server_diag(&f.state).await;
+        let server = diag.server.expect("server diag");
+        assert_eq!(server.vault_count, 1);
+        assert_eq!(server.host_count, 1);
+        assert_eq!(server.hosts_online, Some(0));
+        let joined = diag.logs.join("\n");
+        assert!(!joined.contains("Secret Vault"), "{joined}");
+        assert!(!joined.contains(&host), "no hostname either: {joined}");
     }
 
     fn child_listing(mode: &str) -> serde_json::Value {

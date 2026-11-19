@@ -31,6 +31,7 @@ pub async fn run(
     config: &Path,
     exclusive_account: bool,
     stop: impl Future<Output = ()>,
+    diag_ring: storm_diag::Ring,
 ) -> Result<Outcome> {
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -47,7 +48,7 @@ pub async fn run(
     if !crate::platform::is_service_context() {
         config.person = Some(crate::login_env::for_host(&config.import_env));
     }
-    let host = crate::host::Host::new(state, config)?;
+    let host = crate::host::Host::new_with_ring(state, config, diag_ring)?;
     host.log_inventory();
     if exclusive_account {
         // Whatever a previous host left behind — after a SIGKILL or a crash

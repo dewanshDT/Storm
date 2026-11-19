@@ -237,6 +237,11 @@ pub enum Command {
         kind: String,
         mark: i64,
     },
+    /// Decision 162-2: the server asks for this host's live diagnostics
+    /// bundle. Answered once, posting `request_id` and the bundle to
+    /// `/v1/runtime/diag`.
+    #[serde(rename = "diag")]
+    Diag { request_id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -265,6 +270,7 @@ impl Command {
             Self::WorkspaceCreate { .. } => "workspace.create",
             Self::Park { .. } => "park",
             Self::Wake { .. } => "wake",
+            Self::Diag { .. } => "diag",
         }
     }
 
@@ -283,7 +289,8 @@ impl Command {
             Self::Refresh
             | Self::AgentInstall { .. }
             | Self::ChildWorkspace { .. }
-            | Self::WorkspaceCreate { .. } => None,
+            | Self::WorkspaceCreate { .. }
+            | Self::Diag { .. } => None,
         }
     }
 }
@@ -799,6 +806,10 @@ pub struct Host {
     /// OSC 7501 parse failures across this process's sessions (decision
     /// 155): once open, new sessions are not answered until a restart.
     program_breaker: Arc<crate::program_status::Breaker>,
+    /// This process's log ring (decision 162c): the same `Ring` the tracing
+    /// layer installed at startup writes into, so `diag` reads what
+    /// actually happened, not a second, unwritten copy.
+    ring: storm_diag::Ring,
 }
 
 /// At most this many remote plugin servers in one inventory.
@@ -811,7 +822,19 @@ const PLUGIN_REMOTE_MAX: usize = 200;
 const SHUTDOWN_DRAIN: Duration = Duration::from_secs(3);
 
 impl Host {
+    /// As [`Host::new_with_ring`], with a ring of its own rather than the
+    /// one the running process's tracing layer writes into — right for a
+    /// test, wrong for `serve`, which must thread through the real one
+    /// (decision 162c: no second, unwritten ring).
     pub fn new(state_dir: &Path, config: RuntimeConfig) -> Result<Arc<Self>> {
+        Self::new_with_ring(state_dir, config, storm_diag::Ring::default())
+    }
+
+    pub fn new_with_ring(
+        state_dir: &Path,
+        config: RuntimeConfig,
+        ring: storm_diag::Ring,
+    ) -> Result<Arc<Self>> {
         let managed = crate::agents::managed_bin(state_dir);
         for recipe in &crate::install::RECIPES {
             crate::install::link_aliases(state_dir, recipe);
@@ -828,7 +851,7 @@ impl Host {
             Some(link) => config.providers_isolated(&managed, link.clone())?,
             None => config.providers_with(&managed)?,
         };
-        Self::with_providers(state_dir, config, providers, link)
+        Self::with_providers(state_dir, config, providers, link, ring)
     }
 
     fn with_providers(
@@ -836,6 +859,7 @@ impl Host {
         config: RuntimeConfig,
         providers: Vec<Arc<dyn Provider>>,
         isolation: Option<crate::isolation::Link>,
+        ring: storm_diag::Ring,
     ) -> Result<Arc<Self>> {
         let identity = HostConfig::load(state_dir)?;
         let key = HostKey::load(state_dir, &identity.key_id)?;
@@ -899,6 +923,7 @@ impl Host {
             agent_jobs: Mutex::default(),
             isolation,
             program_breaker: Arc::default(),
+            ring,
         }))
     }
 
@@ -1007,6 +1032,9 @@ impl Host {
             // It types a Shell's `typed_input` once the shell is ready
             // (153-S3).
             "typed_input": true,
+            // It answers `diag` with its live ring (decision 162-2). An
+            // old host does not say, and is never asked.
+            "diag": true,
             // The providers whose sessions it can resume (decision 89). A
             // host without this would start a resume as a new conversation.
             "resume": self
@@ -1142,6 +1170,29 @@ impl Host {
         let report = format!("/v1/runtime/workspaces/{request}");
         if let Err(e) = self.post(&report, &body).await {
             tracing::warn!(error = %e, "new workspace: could not post the answer");
+        }
+    }
+
+    /// One `diag` (decision 162-2, 162c): this host's live bundle, from its
+    /// own ring, never the CLI's disk-tail path. Answered once.
+    async fn diag(self: Arc<Self>, request_id: String) {
+        let request_ok = request_id.len() <= 64
+            && request_id.starts_with("dgr_")
+            && request_id[4..].chars().all(|c| c.is_ascii_alphanumeric());
+        if !request_ok {
+            tracing::warn!(request_id = %request_id, "diag: a malformed request id, ignored");
+            return;
+        }
+        let diag = storm_diag::Diag::new("storm-runtime", env!("CARGO_PKG_VERSION"))
+            .with_runtime(storm_diag::RuntimeDiag {
+                execution_profile: self.config.isolation.as_str().to_string(),
+                enrolled: true,
+                online: true,
+            })
+            .with_logs(self.ring.tail(crate::diag::DEFAULT_LOG_LINES));
+        let body = json!({ "request_id": request_id, "diag": diag });
+        if let Err(e) = self.post("/v1/runtime/diag", &body).await {
+            tracing::warn!(error = %e, "diag: could not post the bundle");
         }
     }
 
@@ -1906,7 +1957,8 @@ impl Host {
             | Command::TerminalImage { .. }
             | Command::AgentInstall { .. }
             | Command::ChildWorkspace { .. }
-            | Command::WorkspaceCreate { .. } => {
+            | Command::WorkspaceCreate { .. }
+            | Command::Diag { .. } => {
                 tokio::spawn(self.clone().handle(command));
             }
             command => {
@@ -1997,6 +2049,7 @@ impl Host {
             Command::WorkspaceCreate { request, name, git } => {
                 self.create_workspace(request, name, git).await
             }
+            Command::Diag { request_id } => self.diag(request_id).await,
             command => self.handle_now(command),
         }
     }
@@ -2011,7 +2064,8 @@ impl Host {
             | Command::TerminalImage { .. }
             | Command::AgentInstall { .. }
             | Command::ChildWorkspace { .. }
-            | Command::WorkspaceCreate { .. } => {
+            | Command::WorkspaceCreate { .. }
+            | Command::Diag { .. } => {
                 debug_assert!(false, "{} handled inline", command.kind());
             }
             Command::McpMessage {
@@ -6095,6 +6149,57 @@ echo '[{"id":"slack@m","enabled":true,"installPath":"/nowhere","version":"1.0.0"
         host.shutdown(Duration::from_millis(200)).await;
     }
 
+    /// Decision 162-2: `diag` answers with this host's own ring, never the
+    /// CLI's disk-tail path, and a malformed request id is never answered.
+    #[tokio::test]
+    async fn diag_answers_with_the_live_ring() {
+        let (host, seen, _state, _roots) = test_host(vec![]).await;
+        assert_eq!(host.capabilities()["diag"], json!(true));
+        host.ring.push("line one");
+        host.ring
+            .push("Authorization: Bearer stk_SUPERSECRETVALUE0123456789");
+
+        host.clone()
+            .handle(Command::Diag {
+                request_id: "dgr_1".into(),
+            })
+            .await;
+
+        let posts: Vec<serde_json::Value> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(p, _)| p.ends_with("/v1/runtime/diag"))
+            .map(|(_, b)| b.clone())
+            .collect();
+        assert_eq!(posts.len(), 1);
+        assert_eq!(posts[0]["request_id"], "dgr_1");
+        let diag = &posts[0]["diag"];
+        assert_eq!(diag["component"], "storm-runtime");
+        assert_eq!(diag["runtime"]["online"], true);
+        assert_eq!(diag["runtime"]["enrolled"], true);
+        let logs = diag["logs"].as_array().unwrap();
+        assert!(logs.contains(&json!("line one")));
+        for log in logs {
+            assert!(!log.as_str().unwrap().contains("SUPERSECRETVALUE0123456789"));
+        }
+
+        host.clone()
+            .handle(Command::Diag {
+                request_id: "../evil".into(),
+            })
+            .await;
+        assert_eq!(
+            seen.lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/v1/runtime/diag"))
+                .count(),
+            1,
+            "a malformed request id is never answered"
+        );
+    }
+
     /// A host whose agents are the given scripts, linked to a recording
     /// server.
     #[cfg(unix)]
@@ -6886,7 +6991,14 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             roots.path().display().to_string()
         ))
         .unwrap();
-        let host = Host::with_providers(state.path(), config, providers, None).unwrap();
+        let host = Host::with_providers(
+            state.path(),
+            config,
+            providers,
+            None,
+            storm_diag::Ring::default(),
+        )
+        .unwrap();
         *host.token.write().await = Some("sht_test".into());
         host.link_up.send_replace(true);
         (host, seen, state, roots)
@@ -7001,6 +7113,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             config,
             vec![Arc::new(shell)],
             Some(helper.link(state.path())),
+            storm_diag::Ring::default(),
         )
         .unwrap();
         // As if its self-test had passed (136j); `run` reports changes.
@@ -7076,6 +7189,7 @@ args = ["-c", "(trap '' HUP; exec sleep 1000) & echo bg:$!; wait"]
             config,
             vec![Arc::new(provider)],
             Some(helper.link(state.path())),
+            storm_diag::Ring::default(),
         )
         .unwrap();
         // As if its self-test had passed (136j); `run` reports changes.

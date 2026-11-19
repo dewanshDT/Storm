@@ -1004,7 +1004,7 @@ fn pair_summary(uri: &str, expires: &str, session_id: &str, drew_qr: bool) -> St
     out
 }
 
-async fn run_serve(args: ServeArgs) -> Result<()> {
+async fn run_serve(args: ServeArgs, diag_ring: storm_diag::Ring) -> Result<()> {
     let prepared = prepare_vaults(&args.vault)?;
     let mut registry = prepared.registry;
     let state_dir = prepared.state_dir;
@@ -1252,6 +1252,7 @@ async fn run_serve(args: ServeArgs) -> Result<()> {
             discoverable,
             nettrust::NetTrust::new(args.test_untrusted_interfaces.clone()),
         ),
+        diag_ring,
     });
 
     ops::reconcile_single_user(&state)
@@ -1585,20 +1586,20 @@ pub async fn main() -> Result<()> {
                         .with_ansi(false)
                         .with_writer(std::sync::Mutex::new(file)),
                 )
-                .with(storm_diag::ring_layer(ring))
+                .with(storm_diag::ring_layer(ring.clone()))
                 .init();
         }
         None => {
             tracing_subscriber::registry()
                 .with(filter())
                 .with(tracing_subscriber::fmt::layer())
-                .with(storm_diag::ring_layer(ring))
+                .with(storm_diag::ring_layer(ring.clone()))
                 .init();
         }
     }
 
     match cli.command {
-        Commands::Serve(args) => run_serve(args).await,
+        Commands::Serve(args) => run_serve(args, ring).await,
         #[cfg(unix)]
         Commands::Up(args) if cfg!(target_os = "macos") => {
             install_macos::up(install_macos::UpOptions {

@@ -346,14 +346,14 @@ async fn main() -> Result<()> {
                                 .with_ansi(false)
                                 .with_writer(std::sync::Mutex::new(log)),
                         )
-                        .with(storm_diag::ring_layer(ring))
+                        .with(storm_diag::ring_layer(ring.clone()))
                         .init();
                 }
                 None => {
                     tracing_subscriber::registry()
                         .with(filter)
                         .with(tracing_subscriber::fmt::layer())
-                        .with(storm_diag::ring_layer(ring))
+                        .with(storm_diag::ring_layer(ring.clone()))
                         .init();
                 }
             }
@@ -374,7 +374,8 @@ async fn main() -> Result<()> {
                     )
                 }
             };
-            let outcome = storm_runtime::serve::run(&state, &config, exclusive_account, stop).await;
+            let outcome =
+                storm_runtime::serve::run(&state, &config, exclusive_account, stop, ring).await;
             if let Err(e) | Ok(storm_runtime::serve::Outcome::Failed(e)) = &outcome {
                 tracing::error!(error = %format!("{e:#}"), "the host stopped");
             }

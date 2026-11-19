@@ -605,14 +605,22 @@ fn service_entry(_arguments: Vec<OsString>) {
 
 fn run_service() -> Result<()> {
     let layout = layout();
+    // Decision 162c: the ring layer is added alongside, never instead of,
+    // the layer below — existing output never changes.
+    let ring = crate::diag::install_ring();
     if let Ok(log) = super::open_log(Path::new(&layout.log_file)) {
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(
+        use tracing_subscriber::prelude::*;
+        let _ = tracing_subscriber::registry()
+            .with(
                 tracing_subscriber::EnvFilter::try_from_default_env()
                     .unwrap_or_else(|_| "info".into()),
             )
-            .with_ansi(false)
-            .with_writer(Mutex::new(log))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_ansi(false)
+                    .with_writer(Mutex::new(log)),
+            )
+            .with(storm_diag::ring_layer(ring.clone()))
             .try_init();
     }
 
@@ -687,7 +695,7 @@ fn run_service() -> Result<()> {
     };
     let config = PathBuf::from(&layout.config);
     let outcome = runtime.block_on(async {
-        let outcome = crate::serve::run(&state, &config, true, stop);
+        let outcome = crate::serve::run(&state, &config, true, stop, ring);
         tokio::pin!(outcome);
         outcome.await
     });
